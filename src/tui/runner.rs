@@ -316,6 +316,23 @@ impl DashboardRunner {
     }
 }
 
+/// Map common series slugs to their numeric IDs
+fn resolve_series_id(series: &str) -> &str {
+    match series.to_lowercase().as_str() {
+        // SOL series
+        "sol-15m" | "sol-updown-15m" | "sol" => "10423",
+        "sol-4h" | "sol-updown-4h" => "10333",
+        // ETH series
+        "eth-15m" | "eth-updown-15m" | "eth" => "10191",
+        "eth-1h" | "eth-hourly" | "eth-updown-hourly" => "10117",
+        "eth-4h" | "eth-updown-4h" => "10332",
+        // BTC series (daily markets use different structure)
+        "btc-daily" | "btc" => "41", // BTC daily series
+        // If already a numeric ID or unknown, pass through
+        _ => series,
+    }
+}
+
 /// Run dashboard with auto-discovery of active markets
 pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<()> {
     info!("Initializing dashboard with auto-discovery...");
@@ -323,9 +340,10 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
     // Create client for market discovery
     let client = PolymarketClient::new("https://clob.polymarket.com", true)?;
 
-    // Determine which series to monitor
-    let series_id = series.unwrap_or("btc-15m");
-    info!("Looking for active markets in series: {}", series_id);
+    // Determine which series to monitor - resolve slug to numeric ID
+    let series_input = series.unwrap_or("sol-15m");
+    let series_id = resolve_series_id(series_input);
+    info!("Looking for active markets in series: {} (resolved from '{}')", series_id, series_input);
 
     // Get tokens for the series
     let token_ids = match client.get_series_all_tokens(series_id).await {
@@ -347,9 +365,18 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
         warn!("No active markets found. Dashboard will show empty state.");
     }
 
+    // Determine which Binance symbol to track based on series
+    let binance_symbol = if series_id.starts_with("104") {
+        "SOLUSDT"  // SOL series
+    } else if series_id.starts_with("101") || series_id.starts_with("103") {
+        "ETHUSDT"  // ETH series
+    } else {
+        "BTCUSDT"  // Default to BTC
+    };
+
     let config = DashboardConfig {
         series: Some(series_id.to_string()),
-        symbols: vec!["BTCUSDT".to_string()],
+        symbols: vec![binance_symbol.to_string()],
         token_ids,
         dry_run,
     };
