@@ -1,0 +1,62 @@
+# Ploy Trading Bot - systemd Service File
+# Install to: /etc/systemd/system/ploy.service
+# Enable: sudo systemctl enable ploy
+# Start: sudo systemctl start ploy
+# Logs: journalctl -u ploy -f
+
+[Unit]
+Description=Ploy Polymarket Trading Bot
+Documentation=https://github.com/your-org/ploy
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ploy
+Group=ploy
+WorkingDirectory=/opt/ploy
+ExecStart=/opt/ploy/ploy run
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStartSec=30
+TimeoutStopSec=60
+
+# Environment
+Environment=RUST_LOG=info,ploy=debug,sqlx=warn
+Environment=DATABASE_URL=postgres://ploy:password@localhost/ploy
+EnvironmentFile=-/opt/ploy/.env
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/ploy/data /var/log/ploy
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=200%
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Watchdog (health check)
+WatchdogSec=300
+NotifyAccess=main
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ploy
+
+[Install]
+WantedBy=multi-user.target

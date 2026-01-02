@@ -1,0 +1,85 @@
+[package]
+name = "ploy"
+version = "0.1.0"
+edition = "2021"
+description = "Polymarket two-leg arbitrage trading bot"
+authors = ["Your Name"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "rust_decimal", "uuid"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration
+config = "0.14"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Numeric types
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Async traits
+async-trait = "0.1"
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Crypto for signing (Polymarket requires EIP-712 signatures)
+ethers = { version = "2", features = ["rustls"] }
+
+# HMAC authentication
+hmac = "0.12"
+sha2 = "0.10"
+
+# Encoding
+hex = "0.4"
+base64 = "0.21"
+
+# Random number generation
+rand = "0.8"
+
+# URL parsing
+url = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Terminal UI
+crossterm = { version = "0.27", features = ["event-stream"] }
+ratatui = "0.29"
+
+# Health check server
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

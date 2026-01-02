@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ploy.trading</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ploy</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/ploy</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info,ploy=debug,sqlx=warn</string>
+        <key>DATABASE_URL</key>
+        <string>postgres://ploy:password@localhost/ploy</string>
+    </dict>
+
+    <!-- Run on load and keep alive -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>NetworkState</key>
+        <true/>
+    </dict>
+
+    <!-- Restart policy -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/var/log/ploy/ploy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/ploy/ploy-error.log</string>
+
+    <!-- Resource limits -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+        <key>NumberOfProcesses</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+        <key>NumberOfProcesses</key>
+        <integer>4096</integer>
+    </dict>
+
+    <!-- Start time constraints (optional: trading hours only) -->
+    <!--
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    -->
+
+    <!-- Nice value for process priority -->
+    <key>Nice</key>
+    <integer>-5</integer>
+
+    <!-- Prevent process from being killed during memory pressure -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+</dict>
+</plist>
