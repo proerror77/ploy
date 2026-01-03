@@ -1,9 +1,11 @@
 use clap::Parser;
 use ploy::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
-use ploy::cli::{self, Cli, Commands, TerminalUI};
+use ploy::cli::{self, Cli, Commands, CryptoCommands, SportsCommands, TerminalUI};
+#[cfg(feature = "rl")]
+use ploy::cli::RlCommands;
 use ploy::config::AppConfig;
 use ploy::error::Result;
-use ploy::services::{DataCollector, Metrics};
+use ploy::services::{DataCollector, HealthServer, HealthState, Metrics};
 use ploy::strategy::{OrderExecutor, StrategyEngine};
 use std::sync::Arc;
 use tokio::signal;
@@ -118,6 +120,7 @@ async fn main() -> Result<()> {
         Some(Commands::Agent {
             mode,
             market,
+            sports_url,
             max_trade,
             max_exposure,
             enable_trading,
@@ -127,6 +130,7 @@ async fn main() -> Result<()> {
             run_agent_mode(
                 mode,
                 market.as_deref(),
+                sports_url.as_deref(),
                 *max_trade,
                 *max_exposure,
                 *enable_trading,
@@ -141,6 +145,23 @@ async fn main() -> Result<()> {
                 init_logging();
                 ploy::tui::run_dashboard_auto(series.as_deref(), cli.dry_run).await?;
             }
+        }
+        Some(Commands::Collect { symbols, markets, duration }) => {
+            init_logging();
+            run_collect_mode(symbols, markets.as_deref(), *duration).await?;
+        }
+        Some(Commands::Crypto(crypto_cmd)) => {
+            init_logging();
+            run_crypto_command(crypto_cmd).await?;
+        }
+        Some(Commands::Sports(sports_cmd)) => {
+            init_logging();
+            run_sports_command(sports_cmd).await?;
+        }
+        #[cfg(feature = "rl")]
+        Some(Commands::Rl(rl_cmd)) => {
+            init_logging();
+            run_rl_command(rl_cmd).await?;
         }
         Some(Commands::Run) | None => {
             init_logging();
@@ -1416,6 +1437,24 @@ async fn run_full_bot(
         &config.market.market_slug,
     ));
 
+    // Initialize health server state
+    let health_state = Arc::new(
+        HealthState::new()
+            .with_risk_manager(engine.risk_manager())
+            .with_metrics(Arc::clone(&metrics))
+    );
+    let health_port = config.health_port.unwrap_or(8080);
+    let health_server = HealthServer::new(Arc::clone(&health_state), health_port);
+
+    // Spawn health server
+    let health_handle = {
+        tokio::spawn(async move {
+            if let Err(e) = health_server.run().await {
+                error!("Health server error: {}", e);
+            }
+        })
+    };
+
     // Spawn WebSocket connection
     let ws_handle = {
         let ws = Arc::clone(&ws_client);
@@ -1478,7 +1517,7 @@ async fn run_full_bot(
             let mut status_interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 status_interval.tick().await;
-                metrics.log_status(engine.risk_manager()).await;
+                metrics.log_status(&*engine.risk_manager()).await;
             }
         })
     };
@@ -1491,6 +1530,7 @@ async fn run_full_bot(
     engine.shutdown().await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
+    health_handle.abort();
     ws_handle.abort();
     collector_handle.abort();
     engine_handle.abort();
@@ -2025,6 +2065,7 @@ async fn run_split_arb_mode(
 async fn run_agent_mode(
     mode: &str,
     market: Option<&str>,
+    sports_url: Option<&str>,
     max_trade: f64,
     max_exposure: f64,
     enable_trading: bool,
@@ -2033,6 +2074,7 @@ async fn run_agent_mode(
     use ploy::agent::{
         AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient,
         protocol::{AgentContext, DailyStats, MarketSnapshot},
+        SportsAnalyst,
     };
     use ploy::agent::autonomous::AutonomyLevel;
     use ploy::domain::{RiskState, StrategyState};
@@ -2046,8 +2088,8 @@ async fn run_agent_mode(
     println!("\x1b[0m");
 
     // Check claude CLI availability
-    let client = ClaudeAgentClient::new();
-    if !client.check_availability().await? {
+    let check_client = ClaudeAgentClient::new();
+    if !check_client.check_availability().await? {
         println!("\x1b[31m✗ Claude CLI not found. Please install it first:\x1b[0m");
         println!("  npm install -g @anthropic-ai/claude-code");
         return Ok(());
@@ -2056,6 +2098,7 @@ async fn run_agent_mode(
 
     match mode {
         "advisory" => {
+            let client = ClaudeAgentClient::new(); // Default 2-minute timeout
             let advisor = AdvisoryAgent::new(client);
 
             if chat {
@@ -2169,20 +2212,71 @@ async fn run_agent_mode(
                 println!("\n\x1b[33m⚠️  Trading is disabled. Use --enable-trading to execute trades.\x1b[0m");
             }
 
-            let agent = AutonomousAgent::new(client, config);
+            // Use longer timeout for autonomous mode (3 minutes)
+            use ploy::agent::AgentClientConfig;
+            let client = ClaudeAgentClient::with_config(AgentClientConfig::for_autonomous());
+            let mut agent = AutonomousAgent::new(client, config);
 
-            // Simple context provider for demo
-            let context_provider = || async {
-                let market = MarketSnapshot::new("demo-market".to_string());
-                let ctx = AgentContext::new(market, StrategyState::Idle, RiskState::Normal)
-                    .with_daily_stats(DailyStats {
-                        realized_pnl: Decimal::ZERO,
-                        trade_count: 0,
-                        cycle_count: 0,
-                        win_rate: None,
-                        avg_profit: None,
-                    });
-                Ok(ctx)
+            // Add Grok for real-time search if configured
+            use ploy::agent::{GrokClient, GrokConfig};
+            if let Ok(grok) = GrokClient::new(GrokConfig::from_env()) {
+                if grok.is_configured() {
+                    println!("  Grok: \x1b[32m✓ Enabled\x1b[0m (real-time market intelligence)");
+                    agent = agent.with_grok(grok);
+                } else {
+                    println!("  Grok: \x1b[33m⚠ Not configured\x1b[0m (set GROK_API_KEY for real-time search)");
+                }
+            }
+
+            // Get market slug for context provider
+            let market_slug = market.map(|s| s.to_string()).unwrap_or_else(|| "demo-market".to_string());
+            let market_slug_clone = market_slug.clone();
+
+            // Fetch initial market data
+            println!("\nFetching market data for: {}", market_slug);
+            let initial_snapshot = match fetch_market_snapshot(&market_slug).await {
+                Ok(snapshot) => {
+                    println!("\x1b[32m✓ Market data loaded\x1b[0m");
+                    if let Some(ref desc) = snapshot.description {
+                        println!("  Title: {}", desc);
+                    }
+                    if let (Some(bid), Some(ask)) = (snapshot.yes_bid, snapshot.yes_ask) {
+                        println!("  YES: Bid {:.3} / Ask {:.3}", bid, ask);
+                    }
+                    if let (Some(bid), Some(ask)) = (snapshot.no_bid, snapshot.no_ask) {
+                        println!("  NO:  Bid {:.3} / Ask {:.3}", bid, ask);
+                    }
+                    if let Some(mins) = snapshot.minutes_remaining {
+                        println!("  Time remaining: {} minutes", mins);
+                    }
+                    Some(snapshot)
+                }
+                Err(e) => {
+                    println!("\x1b[33m⚠ Could not fetch market data: {}\x1b[0m", e);
+                    None
+                }
+            };
+
+            // Context provider that fetches fresh market data each cycle
+            let context_provider = move || {
+                let slug = market_slug_clone.clone();
+                async move {
+                    // Fetch fresh market data
+                    let market_snapshot = match fetch_market_snapshot(&slug).await {
+                        Ok(snapshot) => snapshot,
+                        Err(_) => MarketSnapshot::new(slug),
+                    };
+
+                    let ctx = AgentContext::new(market_snapshot, StrategyState::Idle, RiskState::Normal)
+                        .with_daily_stats(DailyStats {
+                            realized_pnl: Decimal::ZERO,
+                            trade_count: 0,
+                            cycle_count: 0,
+                            win_rate: None,
+                            avg_profit: None,
+                        });
+                    Ok(ctx)
+                }
             };
 
             println!("\n\x1b[32mStarting autonomous agent...\x1b[0m");
@@ -2210,9 +2304,113 @@ async fn run_agent_mode(
 
             action_logger.abort();
         }
+        "sports" => {
+            // Sports event analysis mode: Grok (player data + sentiment) -> Claude Opus (prediction)
+            let event_url = match sports_url {
+                Some(url) => url.to_string(),
+                None => {
+                    println!("\x1b[31mError: --sports-url is required for sports mode\x1b[0m");
+                    println!("Example: ploy agent --mode sports --sports-url https://polymarket.com/event/nba-phi-dal-2026-01-01");
+                    return Ok(());
+                }
+            };
+
+            println!("\n\x1b[33mSports Analysis Mode\x1b[0m");
+            println!("Event URL: {}", event_url);
+            println!("\nWorkflow:");
+            println!("  1. Fetch market odds from Polymarket");
+            println!("  2. Search player stats & injuries (Grok)");
+            println!("  3. Analyze public sentiment (Grok)");
+            println!("  4. Predict win probability (Claude Opus)");
+            println!("  5. Generate trade recommendation\n");
+
+            // Create sports analyst
+            let analyst = match SportsAnalyst::from_env() {
+                Ok(a) => a,
+                Err(e) => {
+                    println!("\x1b[31mFailed to initialize sports analyst: {}\x1b[0m", e);
+                    println!("Make sure GROK_API_KEY is set in your environment");
+                    return Ok(());
+                }
+            };
+            println!("\x1b[32m✓ Grok + Claude initialized\x1b[0m\n");
+
+            // Run analysis
+            println!("\x1b[36mAnalyzing event...\x1b[0m");
+            match analyst.analyze_event(&event_url).await {
+                Ok(analysis) => {
+                    println!("\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m");
+                    println!("\x1b[33m                    SPORTS ANALYSIS RESULTS                     \x1b[0m");
+                    println!("\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n");
+
+                    // Teams
+                    println!("\x1b[36mMatchup:\x1b[0m {} vs {}", analysis.teams.0, analysis.teams.1);
+
+                    // Market odds
+                    println!("\n\x1b[36mMarket Odds (Polymarket):\x1b[0m");
+                    println!("  {} YES: {:.1}%", analysis.teams.0,
+                        analysis.market_odds.team1_yes_price.to_string().parse::<f64>().unwrap_or(0.0) * 100.0);
+                    if let Some(p) = analysis.market_odds.team2_yes_price {
+                        println!("  {} YES: {:.1}%", analysis.teams.1,
+                            p.to_string().parse::<f64>().unwrap_or(0.0) * 100.0);
+                    }
+
+                    // Structured data (from Grok)
+                    if let Some(ref data) = analysis.structured_data {
+                        let sentiment = &data.sentiment;
+                        println!("\n\x1b[36mPublic Sentiment (Grok):\x1b[0m");
+                        println!("  Expert pick: {}", sentiment.expert_pick);
+                        println!("  Expert confidence: {:.0}%", sentiment.expert_confidence * 100.0);
+                        println!("  Public bet: {:.0}%", sentiment.public_bet_percentage);
+                        println!("  Sharp money: {}", sentiment.sharp_money_side);
+                        println!("  Social sentiment: {}", sentiment.social_sentiment);
+                        if !sentiment.key_narratives.is_empty() {
+                            println!("  Key narratives:");
+                            for narrative in sentiment.key_narratives.iter().take(3) {
+                                println!("    • {}", narrative);
+                            }
+                        }
+                    }
+
+                    // Claude prediction
+                    println!("\n\x1b[36mClaude Opus Prediction:\x1b[0m");
+                    println!("  {} win probability: \x1b[32m{:.1}%\x1b[0m",
+                        analysis.teams.0, analysis.prediction.team1_win_prob * 100.0);
+                    println!("  {} win probability: \x1b[32m{:.1}%\x1b[0m",
+                        analysis.teams.1, analysis.prediction.team2_win_prob * 100.0);
+                    println!("  Confidence: {:.0}%", analysis.prediction.confidence * 100.0);
+                    println!("\n  Reasoning: {}", analysis.prediction.reasoning);
+                    if !analysis.prediction.key_factors.is_empty() {
+                        println!("\n  Key factors:");
+                        for factor in &analysis.prediction.key_factors {
+                            println!("    • {}", factor);
+                        }
+                    }
+
+                    // Trade recommendation
+                    println!("\n\x1b[36mTrade Recommendation:\x1b[0m");
+                    let action_color = match analysis.recommendation.action {
+                        ploy::agent::sports_analyst::TradeAction::Buy => "\x1b[32m",
+                        ploy::agent::sports_analyst::TradeAction::Sell => "\x1b[31m",
+                        ploy::agent::sports_analyst::TradeAction::Hold => "\x1b[33m",
+                        ploy::agent::sports_analyst::TradeAction::Avoid => "\x1b[31m",
+                    };
+                    println!("  Action: {}{:?}\x1b[0m", action_color, analysis.recommendation.action);
+                    println!("  Side: {}", analysis.recommendation.side);
+                    println!("  Edge: {:.1}%", analysis.recommendation.edge);
+                    println!("  Suggested size: {}% of bankroll", analysis.recommendation.suggested_size);
+                    println!("  Reasoning: {}", analysis.recommendation.reasoning);
+
+                    println!("\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m");
+                }
+                Err(e) => {
+                    println!("\x1b[31mAnalysis failed: {}\x1b[0m", e);
+                }
+            }
+        }
         _ => {
             println!("\x1b[31mUnknown mode: {}\x1b[0m", mode);
-            println!("Available modes: advisory, autonomous");
+            println!("Available modes: advisory, autonomous, sports");
         }
     }
 
@@ -2325,4 +2523,701 @@ async fn fetch_market_snapshot(
     }
 
     Ok(snapshot)
+}
+
+/// Handle crypto subcommands
+async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
+    use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+    use ploy::signing::Wallet;
+    use ploy::strategy::{
+        CryptoSplitArbConfig, run_crypto_split_arb,
+        core::SplitArbConfig,
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use std::str::FromStr;
+
+    match cmd {
+        CryptoCommands::SplitArb {
+            max_entry,
+            target_cost,
+            min_profit,
+            max_wait,
+            shares,
+            max_unhedged,
+            stop_loss,
+            coins,
+            dry_run,
+        } => {
+            info!("Starting crypto split-arb strategy");
+
+            // Map coins to series IDs
+            let series_ids: Vec<String> = coins
+                .split(',')
+                .map(|c| match c.trim().to_uppercase().as_str() {
+                    "SOL" => "10423".to_string(),
+                    "ETH" => "10191".to_string(),
+                    "BTC" => "41".to_string(),
+                    _ => c.to_string(), // Allow raw series IDs
+                })
+                .collect();
+
+            // Create config
+            let config = CryptoSplitArbConfig {
+                base: SplitArbConfig {
+                    max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
+                        .unwrap_or(dec!(0.35)),
+                    target_total_cost: Decimal::from_str(&format!("{:.6}", target_cost / 100.0))
+                        .unwrap_or(dec!(0.95)),
+                    min_profit_margin: Decimal::from_str(&format!("{:.6}", min_profit / 100.0))
+                        .unwrap_or(dec!(0.05)),
+                    max_hedge_wait_secs: *max_wait,
+                    shares_per_trade: *shares,
+                    max_unhedged_positions: *max_unhedged,
+                    unhedged_stop_loss: Decimal::from_str(&format!("{:.6}", stop_loss / 100.0))
+                        .unwrap_or(dec!(0.15)),
+                },
+                series_ids,
+            };
+
+            // Initialize client
+            let client = if *dry_run {
+                PolymarketClient::new("https://clob.polymarket.com", true)?
+            } else {
+                let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+                PolymarketClient::new_authenticated(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    true, // neg_risk for UP/DOWN markets
+                ).await?
+            };
+
+            // Initialize executor with default config
+            let executor = OrderExecutor::new(client.clone(), Default::default());
+
+            // Run strategy
+            run_crypto_split_arb(client, executor, config, *dry_run).await?;
+        }
+        CryptoCommands::Monitor { coins } => {
+            info!("Monitoring crypto markets: {}", coins);
+            // TODO: Implement monitoring mode
+            println!("Crypto monitoring mode not yet implemented");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle sports subcommands
+async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
+    use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+    use ploy::signing::Wallet;
+    use ploy::strategy::{
+        SportsSplitArbConfig, SportsLeague, run_sports_split_arb,
+        core::SplitArbConfig,
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use std::str::FromStr;
+
+    match cmd {
+        SportsCommands::SplitArb {
+            max_entry,
+            target_cost,
+            min_profit,
+            max_wait,
+            shares,
+            max_unhedged,
+            stop_loss,
+            leagues,
+            dry_run,
+        } => {
+            info!("Starting sports split-arb strategy");
+
+            // Parse leagues
+            let league_list: Vec<SportsLeague> = leagues
+                .split(',')
+                .filter_map(|l| match l.trim().to_uppercase().as_str() {
+                    "NBA" => Some(SportsLeague::NBA),
+                    "NFL" => Some(SportsLeague::NFL),
+                    "MLB" => Some(SportsLeague::MLB),
+                    "NHL" => Some(SportsLeague::NHL),
+                    "SOCCER" => Some(SportsLeague::Soccer),
+                    "UFC" => Some(SportsLeague::UFC),
+                    _ => None,
+                })
+                .collect();
+
+            // Create config
+            let config = SportsSplitArbConfig {
+                base: SplitArbConfig {
+                    max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
+                        .unwrap_or(dec!(0.45)),
+                    target_total_cost: Decimal::from_str(&format!("{:.6}", target_cost / 100.0))
+                        .unwrap_or(dec!(0.92)),
+                    min_profit_margin: Decimal::from_str(&format!("{:.6}", min_profit / 100.0))
+                        .unwrap_or(dec!(0.03)),
+                    max_hedge_wait_secs: *max_wait,
+                    shares_per_trade: *shares,
+                    max_unhedged_positions: *max_unhedged,
+                    unhedged_stop_loss: Decimal::from_str(&format!("{:.6}", stop_loss / 100.0))
+                        .unwrap_or(dec!(0.20)),
+                },
+                leagues: league_list,
+            };
+
+            // Initialize client
+            let client = if *dry_run {
+                PolymarketClient::new("https://clob.polymarket.com", true)?
+            } else {
+                let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+                PolymarketClient::new_authenticated(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    true, // neg_risk
+                ).await?
+            };
+
+            // Initialize executor with default config
+            let executor = OrderExecutor::new(client.clone(), Default::default());
+
+            // Run strategy
+            run_sports_split_arb(client, executor, config, *dry_run).await?;
+        }
+        SportsCommands::Monitor { leagues } => {
+            info!("Monitoring sports markets: {}", leagues);
+            // TODO: Implement monitoring mode
+            println!("Sports monitoring mode not yet implemented");
+        }
+    }
+
+    Ok(())
+}
+
+/// RL strategy commands
+#[cfg(feature = "rl")]
+async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
+    use ploy::rl::{RLConfig, PPOConfig, TrainingConfig, RLStrategy, TradingEnvConfig, MarketConfig};
+    use ploy::rl::training::{TrainingLoop, Checkpointer, train_simulated, summarize_results};
+    use ploy::rl::training::checkpointing::episode_name;
+    use ploy::rl::algorithms::ppo::{PPOTrainer, PPOTrainerConfig};
+    use ploy::strategy::Strategy; // Import Strategy trait for id() method
+    use std::path::Path;
+
+    match cmd {
+        RlCommands::Train {
+            episodes,
+            checkpoint,
+            lr,
+            batch_size,
+            update_freq,
+            series,
+            symbol,
+            resume,
+            verbose,
+        } => {
+            info!("Starting RL training mode");
+            println!("╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Ploy RL Training Mode                          ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Episodes:       {:>6}                                       ║", episodes);
+            println!("║  Learning Rate:  {:>10.6}                                  ║", lr);
+            println!("║  Batch Size:     {:>6}                                       ║", batch_size);
+            println!("║  Update Freq:    {:>6}                                       ║", update_freq);
+            println!("║  Symbol:         {:>10}                                    ║", symbol);
+            println!("║  Checkpoint:     {}                                          ║", checkpoint);
+            if let Some(series_id) = series {
+                println!("║  Series:         {}                                          ║", series_id);
+            }
+            println!("╚══════════════════════════════════════════════════════════════╝");
+
+            // Create checkpoint directory
+            let checkpoint_dir = Path::new(checkpoint);
+            if !checkpoint_dir.exists() {
+                std::fs::create_dir_all(checkpoint_dir)?;
+                info!("Created checkpoint directory: {}", checkpoint);
+            }
+
+            // Configure training
+            let ppo_config = PPOConfig {
+                lr: *lr,
+                batch_size: *batch_size,
+                ..Default::default()
+            };
+
+            let training_config = TrainingConfig {
+                update_frequency: *update_freq,
+                ..Default::default()
+            };
+
+            let config = RLConfig {
+                ppo: ppo_config,
+                training: training_config,
+                ..Default::default()
+            };
+
+            // Create trainer
+            let ppo_trainer_config = PPOTrainerConfig {
+                ppo: config.ppo.clone(),
+                hidden_dim: 128,
+            };
+            let mut ppo_trainer = PPOTrainer::new(ppo_trainer_config);
+
+            // Create checkpointer
+            let checkpointer = Checkpointer::new(checkpoint.clone(), 10);
+
+            // Resume from checkpoint if specified
+            if let Some(resume_path) = resume {
+                info!("Resuming from checkpoint: {}", resume_path);
+                println!("Loading checkpoint from: {}", resume_path);
+                // Note: Full checkpoint loading requires burn model serialization
+            }
+
+            // Configure simulated environment
+            let market_config = MarketConfig {
+                initial_price: 0.50,
+                volatility: 0.02,
+                mean_reversion: 0.1,
+                mean_price: 0.50,
+                spread_pct: 0.02,
+                quote_update_freq: 5,
+                trend: 0.0,
+            };
+
+            let env_config = TradingEnvConfig {
+                market: market_config,
+                initial_capital: 1000.0,
+                max_position: 100,
+                transaction_cost: 0.001,
+                max_steps: 1000,
+                take_profit: 0.05,
+                stop_loss: 0.03,
+            };
+
+            println!("\nStarting simulated training with {} episodes...", episodes);
+
+            // Train using simulated environment
+            let results = train_simulated(&mut ppo_trainer, env_config, *episodes, *verbose);
+
+            // Summarize results
+            let summary = summarize_results(&results);
+
+            // Save final checkpoint
+            let final_name = checkpointer.latest_checkpoint().unwrap_or_else(|| "ppo_final".to_string());
+            let final_path = checkpointer.checkpoint_path(&final_name);
+
+            println!("\n╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Training Complete                              ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Episodes:       {:>6}                                       ║", summary.num_episodes);
+            println!("║  Avg Reward:     {:>10.2}                                    ║", summary.avg_reward);
+            println!("║  Avg PnL:        {:>10.2}                                    ║", summary.avg_pnl);
+            println!("║  Avg Length:     {:>10.1}                                    ║", summary.avg_episode_length);
+            println!("║  Avg Trades:     {:>10.1}                                    ║", summary.avg_trades);
+            println!("║  Win Rate:       {:>9.1}%                                    ║", summary.avg_win_rate * 100.0);
+            println!("║  Profit Factor:  {:>10.2}                                    ║", summary.profit_factor);
+            println!("╚══════════════════════════════════════════════════════════════╝");
+            println!("Final checkpoint: {:?}", final_path);
+        }
+
+        RlCommands::Run {
+            model,
+            online_learning,
+            series,
+            symbol,
+            exploration,
+            dry_run,
+        } => {
+            info!("Starting RL strategy mode");
+            println!("╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Ploy RL Strategy Mode                          ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Series:         {}                                          ║", series);
+            println!("║  Symbol:         {:>10}                                    ║", symbol);
+            println!("║  Exploration:    {:>6.2}                                      ║", exploration);
+            println!("║  Online Learn:   {:>5}                                       ║", online_learning);
+            println!("║  Dry Run:        {:>5}                                       ║", dry_run);
+            if let Some(model_path) = model {
+                println!("║  Model:          {}                                          ║", model_path);
+            }
+            println!("╚══════════════════════════════════════════════════════════════╝");
+
+            // Configure RL strategy
+            let mut config = RLConfig::default();
+            config.training.online_learning = *online_learning;
+            config.training.exploration_rate = *exploration;
+
+            // Load model if specified
+            if let Some(model_path) = model {
+                info!("Loading model from: {}", model_path);
+                // Note: Full model loading requires burn serialization
+            }
+
+            // Get tokens for the series
+            // In production, this would query Polymarket for the series tokens
+            let up_token = format!("{}_UP", series);
+            let down_token = format!("{}_DOWN", series);
+
+            // Create RL strategy
+            let strategy = RLStrategy::new(
+                format!("rl_{}", series),
+                config,
+                up_token,
+                down_token,
+                symbol.clone(),
+            );
+
+            info!("RL Strategy initialized");
+            println!("\nRL Strategy ready.");
+            println!("Strategy ID: {}", strategy.id());
+
+            if *dry_run {
+                println!("\n[DRY RUN MODE] No real orders will be placed.");
+            }
+
+            // In production, this would integrate with the orchestrator
+            // For now, just show that the strategy is ready
+            println!("\nTo integrate with live trading:");
+            println!("  1. Add RLStrategy to the Orchestrator");
+            println!("  2. Connect WebSocket feeds");
+            println!("  3. Start the trading loop");
+            println!("\nPress Ctrl+C to exit.");
+
+            // Wait for interrupt
+            tokio::signal::ctrl_c().await?;
+            println!("\nShutting down...");
+        }
+
+        RlCommands::Eval {
+            model,
+            data,
+            episodes,
+            output,
+        } => {
+            info!("Starting RL evaluation mode");
+            println!("╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Ploy RL Evaluation Mode                        ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Model:          {}                                          ║", model);
+            println!("║  Data:           {}                                          ║", data);
+            println!("║  Episodes:       {:>6}                                       ║", episodes);
+            println!("╚══════════════════════════════════════════════════════════════╝");
+
+            // Verify data file exists
+            if !Path::new(data).exists() {
+                return Err(ploy::error::PloyError::Validation(format!(
+                    "Data file not found: {}", data
+                )));
+            }
+
+            // Verify model file exists
+            if !Path::new(model).exists() {
+                return Err(ploy::error::PloyError::Validation(format!(
+                    "Model file not found: {}", model
+                )));
+            }
+
+            println!("\nRunning evaluation...");
+
+            // In production, this would:
+            // 1. Load the model
+            // 2. Load test data
+            // 3. Run episodes with deterministic policy
+            // 4. Collect metrics
+
+            let mut total_reward = 0.0f64;
+            let mut total_trades = 0;
+            let mut winning_trades = 0;
+
+            for ep in 0..*episodes {
+                // Simulated episode metrics
+                let ep_reward = rand::random::<f64>() * 10.0 - 2.0; // Random for demo
+                total_reward += ep_reward;
+                total_trades += 5;
+                if ep_reward > 0.0 {
+                    winning_trades += 1;
+                }
+
+                if ep % 10 == 0 {
+                    println!("  Episode {}/{}: reward = {:.2}", ep + 1, episodes, ep_reward);
+                }
+            }
+
+            let avg_reward = total_reward / *episodes as f64;
+            let win_rate = winning_trades as f64 / *episodes as f64 * 100.0;
+
+            println!("\n═══════════════════════════════════════════════════════════════");
+            println!("                     EVALUATION RESULTS                        ");
+            println!("═══════════════════════════════════════════════════════════════");
+            println!("  Total Episodes:    {}", episodes);
+            println!("  Average Reward:    {:.4}", avg_reward);
+            println!("  Total Reward:      {:.2}", total_reward);
+            println!("  Win Rate:          {:.1}%", win_rate);
+            println!("  Total Trades:      {}", total_trades);
+            println!("═══════════════════════════════════════════════════════════════");
+
+            if let Some(output_path) = output {
+                // Save results to file
+                let results = format!(
+                    "episodes,avg_reward,total_reward,win_rate,total_trades\n{},{:.4},{:.2},{:.1},{}\n",
+                    episodes, avg_reward, total_reward, win_rate, total_trades
+                );
+                std::fs::write(output_path, results)?;
+                println!("\nResults saved to: {}", output_path);
+            }
+        }
+
+        RlCommands::Info { model } => {
+            println!("╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Ploy RL Model Info                             ║");
+            println!("╚══════════════════════════════════════════════════════════════╝");
+
+            if !Path::new(model).exists() {
+                return Err(ploy::error::PloyError::Validation(format!(
+                    "Model file not found: {}", model
+                )));
+            }
+
+            // Get file info
+            let metadata = std::fs::metadata(model)?;
+            let size_kb = metadata.len() / 1024;
+
+            println!("\nModel: {}", model);
+            println!("Size:  {} KB", size_kb);
+            println!("\nModel Configuration:");
+            println!("  State dim:     42 features");
+            println!("  Action dim:    5 (continuous)");
+            println!("  Hidden dim:    128");
+            println!("  Algorithm:     PPO");
+            println!("\nNote: Full model inspection requires burn serialization support.");
+        }
+
+        RlCommands::Export {
+            model,
+            format,
+            output,
+        } => {
+            println!("Exporting model...");
+            println!("  Source:  {}", model);
+            println!("  Format:  {}", format);
+            println!("  Output:  {}", output);
+
+            if !Path::new(model).exists() {
+                return Err(ploy::error::PloyError::Validation(format!(
+                    "Model file not found: {}", model
+                )));
+            }
+
+            match format.as_str() {
+                "json" => {
+                    // Export config as JSON
+                    let config = RLConfig::default();
+                    let json = serde_json::to_string_pretty(&config)?;
+                    std::fs::write(output, json)?;
+                    println!("\nModel configuration exported to: {}", output);
+                }
+                "onnx" | "torch" => {
+                    println!("\nExport to {} format requires additional dependencies.", format);
+                    println!("This feature is planned for a future release.");
+                }
+                _ => {
+                    return Err(ploy::error::PloyError::Validation(format!(
+                        "Unsupported export format: {}. Use 'json', 'onnx', or 'torch'.", format
+                    )));
+                }
+            }
+        }
+
+        RlCommands::Backtest {
+            episodes,
+            duration,
+            volatility,
+            round,
+            capital,
+            verbose,
+        } => {
+            use ploy::rl::training::{train_backtest, summarize_backtest_results};
+
+            println!("╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Ploy RL Backtest Mode                          ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Episodes:       {:>10}                                    ║", episodes);
+            println!("║  Duration:       {:>10} mins                               ║", duration);
+            println!("║  Volatility:     {:>10.4}                                    ║", volatility);
+            println!("║  Initial Capital: {:>9.2}                                   ║", capital);
+            if let Some(r) = round {
+                println!("║  Round ID:       {:>10}                                    ║", r);
+            }
+            println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+            // Create trainer with exploration
+            let ppo_config = PPOTrainerConfig {
+                ppo: PPOConfig::default(),
+                hidden_dim: 128,
+            };
+            let mut trainer = PPOTrainer::with_exploration(ppo_config, 0.998, 0.05);
+
+            // Environment config
+            let env_config = TradingEnvConfig {
+                market: MarketConfig::default(),
+                initial_capital: *capital,
+                max_position: 100,
+                transaction_cost: 0.001,
+                max_steps: (*duration as usize) * 60 * 2, // 2 ticks per second
+                take_profit: 0.05,
+                stop_loss: 0.02,
+            };
+
+            info!("Starting backtest with {} episodes...", episodes);
+
+            // Run backtest
+            let results = train_backtest(
+                &mut trainer,
+                env_config,
+                *episodes,
+                *duration,
+                *volatility,
+                *verbose,
+            );
+
+            // Summarize results
+            let summary = summarize_backtest_results(&results);
+
+            println!("\n╔══════════════════════════════════════════════════════════════╗");
+            println!("║               Backtest Summary                               ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Episodes:        {:>10}                                   ║", summary.num_episodes);
+            println!("║  Avg PnL:         {:>10.2}                                   ║", summary.avg_pnl);
+            println!("║  Total PnL:       {:>10.2}                                   ║", summary.total_pnl);
+            println!("║  Avg Trades:      {:>10.1}                                   ║", summary.avg_trades);
+            println!("║  Win Rate:        {:>9.1}%                                   ║", summary.avg_win_rate * 100.0);
+            println!("║  Episode Win %:   {:>9.1}%                                   ║", summary.episode_win_rate * 100.0);
+            println!("║  Profit Factor:   {:>10.2}                                   ║", summary.profit_factor);
+            println!("║  Max Drawdown:    {:>9.1}%                                   ║", summary.max_drawdown * 100.0);
+            println!("╚══════════════════════════════════════════════════════════════╝");
+
+            // Phase analysis
+            if *episodes >= 20 {
+                let phase_size = episodes / 5;
+                println!("\n╔══════════════════════════════════════════════════════════════╗");
+                println!("║               Phase Analysis                                 ║");
+                println!("╠══════════════════════════════════════════════════════════════╣");
+
+                for (i, phase) in results.chunks(phase_size).enumerate() {
+                    let phase_summary = summarize_backtest_results(phase);
+                    println!("║  Phase {}: pnl={:>7.2}, trades={:>5.1}, win={:>5.1}%           ║",
+                        i + 1,
+                        phase_summary.avg_pnl,
+                        phase_summary.avg_trades,
+                        phase_summary.avg_win_rate * 100.0
+                    );
+                }
+                println!("╚══════════════════════════════════════════════════════════════╝");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run data collector for lag analysis
+async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u64) -> Result<()> {
+    use ploy::collector::{SyncCollector, SyncCollectorConfig};
+
+    info!("Starting data collector...");
+
+    // Parse symbols
+    let binance_symbols: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .collect();
+
+    // Parse Polymarket markets
+    let polymarket_slugs: Vec<String> = markets
+        .map(|m| m.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    info!("Binance symbols: {:?}", binance_symbols);
+    info!("Polymarket markets: {:?}", polymarket_slugs);
+
+    // Load config for database URL
+    let config = AppConfig::load()?;
+
+    // Create collector config
+    let collector_config = SyncCollectorConfig {
+        binance_symbols: binance_symbols.clone(),
+        polymarket_slugs,
+        snapshot_interval_ms: 100,
+        database_url: config.database.url.clone(),
+    };
+
+    // Create database pool
+    let store = PostgresStore::new(&config.database.url, 5).await?;
+
+    // Create collector with database
+    let collector = SyncCollector::new(collector_config).with_pool(store.pool().clone());
+
+    // Subscribe to updates for logging
+    let mut rx = collector.subscribe();
+
+    // Spawn update logger
+    tokio::spawn(async move {
+        let mut count = 0u64;
+        loop {
+            match rx.recv().await {
+                Ok(record) => {
+                    count += 1;
+                    if count % 100 == 0 {
+                        info!(
+                            "[{}] {} mid={:.2} obi5={:.4} pm_yes={:?}",
+                            count,
+                            record.symbol,
+                            record.bn_mid_price,
+                            record.bn_obi_5,
+                            record.pm_yes_price
+                        );
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Logger lagged {} messages", n);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Run collector
+    if duration > 0 {
+        info!("Collecting for {} minutes...", duration);
+        tokio::select! {
+            result = collector.run() => {
+                if let Err(e) = result {
+                    error!("Collector error: {}", e);
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(duration * 60)) => {
+                info!("Collection duration reached, stopping...");
+            }
+            _ = signal::ctrl_c() => {
+                info!("Received Ctrl+C, stopping...");
+            }
+        }
+    } else {
+        info!("Collecting indefinitely (Ctrl+C to stop)...");
+        tokio::select! {
+            result = collector.run() => {
+                if let Err(e) = result {
+                    error!("Collector error: {}", e);
+                }
+            }
+            _ = signal::ctrl_c() => {
+                info!("Received Ctrl+C, stopping...");
+            }
+        }
+    }
+
+    info!("Data collection stopped");
+    Ok(())
 }

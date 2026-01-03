@@ -203,12 +203,16 @@ pub enum Commands {
     },
     /// Claude AI agent for trading assistance
     Agent {
-        /// Agent mode: advisory, autonomous
+        /// Agent mode: advisory, autonomous, sports
         #[arg(short = 'M', long, default_value = "advisory")]
         mode: String,
         /// Market/event to analyze (optional)
         #[arg(short = 'e', long)]
         market: Option<String>,
+        /// Sports event URL (for sports mode)
+        /// Example: https://polymarket.com/event/nba-phi-dal-2026-01-01
+        #[arg(long)]
+        sports_url: Option<String>,
         /// Maximum trade size in USDC (for autonomous mode)
         #[arg(long, default_value = "50")]
         max_trade: f64,
@@ -230,6 +234,225 @@ pub enum Commands {
         /// Run with demo data
         #[arg(long)]
         demo: bool,
+    },
+
+    /// Collect synchronized data for lag analysis
+    Collect {
+        /// Binance symbols to track (comma-separated: BTCUSDT,ETHUSDT,SOLUSDT)
+        #[arg(short, long, default_value = "BTCUSDT")]
+        symbols: String,
+        /// Polymarket market slugs to track (comma-separated)
+        #[arg(short, long)]
+        markets: Option<String>,
+        /// Duration to collect in minutes (0 = indefinite)
+        #[arg(short, long, default_value = "0")]
+        duration: u64,
+    },
+
+    /// Crypto market strategies (BTC, ETH, SOL UP/DOWN)
+    #[command(subcommand)]
+    Crypto(CryptoCommands),
+
+    /// Sports market strategies (NBA, NFL, etc.)
+    #[command(subcommand)]
+    Sports(SportsCommands),
+
+    /// Reinforcement learning strategies (requires 'rl' feature)
+    #[cfg(feature = "rl")]
+    #[command(subcommand)]
+    Rl(RlCommands),
+}
+
+/// Crypto market subcommands
+#[derive(Subcommand, Debug)]
+pub enum CryptoCommands {
+    /// Split arbitrage on crypto UP/DOWN markets
+    SplitArb {
+        /// Maximum entry price in cents (e.g., 35 = 35¢)
+        #[arg(long, default_value = "35")]
+        max_entry: f64,
+        /// Target total cost in cents (e.g., 70 = 70¢)
+        #[arg(long, default_value = "70")]
+        target_cost: f64,
+        /// Minimum profit margin in cents
+        #[arg(long, default_value = "5")]
+        min_profit: f64,
+        /// Maximum wait for hedge in seconds
+        #[arg(long, default_value = "900")]
+        max_wait: u64,
+        /// Shares per trade
+        #[arg(long, default_value = "100")]
+        shares: u64,
+        /// Maximum unhedged positions
+        #[arg(long, default_value = "3")]
+        max_unhedged: usize,
+        /// Stop loss percentage for unhedged exit
+        #[arg(long, default_value = "15")]
+        stop_loss: f64,
+        /// Coins to monitor (comma-separated: BTC,ETH,SOL)
+        #[arg(long, default_value = "SOL,ETH,BTC")]
+        coins: String,
+        /// Dry run mode
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Monitor crypto markets for opportunities
+    Monitor {
+        /// Coins to monitor (comma-separated)
+        #[arg(long, default_value = "SOL,ETH,BTC")]
+        coins: String,
+    },
+}
+
+/// Sports market subcommands
+#[derive(Subcommand, Debug)]
+pub enum SportsCommands {
+    /// Split arbitrage on sports markets
+    SplitArb {
+        /// Maximum entry price in cents
+        #[arg(long, default_value = "45")]
+        max_entry: f64,
+        /// Target total cost in cents
+        #[arg(long, default_value = "92")]
+        target_cost: f64,
+        /// Minimum profit margin in cents
+        #[arg(long, default_value = "3")]
+        min_profit: f64,
+        /// Maximum wait for hedge in seconds
+        #[arg(long, default_value = "3600")]
+        max_wait: u64,
+        /// Shares per trade
+        #[arg(long, default_value = "100")]
+        shares: u64,
+        /// Maximum unhedged positions
+        #[arg(long, default_value = "5")]
+        max_unhedged: usize,
+        /// Stop loss percentage
+        #[arg(long, default_value = "20")]
+        stop_loss: f64,
+        /// Leagues to monitor (comma-separated: NBA,NFL)
+        #[arg(long, default_value = "NBA,NFL")]
+        leagues: String,
+        /// Dry run mode
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Monitor sports markets for opportunities
+    Monitor {
+        /// Leagues to monitor (comma-separated)
+        #[arg(long, default_value = "NBA,NFL")]
+        leagues: String,
+    },
+}
+
+/// Reinforcement Learning subcommands
+#[cfg(feature = "rl")]
+#[derive(Subcommand, Debug)]
+pub enum RlCommands {
+    /// Train RL model on historical or simulated data
+    Train {
+        /// Number of training episodes
+        #[arg(short, long, default_value = "1000")]
+        episodes: usize,
+        /// Checkpoint directory for saving models
+        #[arg(short, long, default_value = "./models")]
+        checkpoint: String,
+        /// Learning rate
+        #[arg(long, default_value = "0.0003")]
+        lr: f64,
+        /// Batch size for training
+        #[arg(long, default_value = "64")]
+        batch_size: usize,
+        /// Update frequency (steps between updates)
+        #[arg(long, default_value = "2048")]
+        update_freq: usize,
+        /// Series ID to train on (for historical data)
+        #[arg(short, long)]
+        series: Option<String>,
+        /// Binance symbol to track
+        #[arg(long, default_value = "BTCUSDT")]
+        symbol: String,
+        /// Resume from checkpoint
+        #[arg(long)]
+        resume: Option<String>,
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Run with RL strategy (live or paper trading)
+    Run {
+        /// Model checkpoint to load
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Enable online learning during trading
+        #[arg(long)]
+        online_learning: bool,
+        /// Series ID to trade
+        #[arg(short, long)]
+        series: String,
+        /// Binance symbol to track
+        #[arg(long, default_value = "BTCUSDT")]
+        symbol: String,
+        /// Initial exploration rate
+        #[arg(long, default_value = "0.1")]
+        exploration: f32,
+        /// Dry run mode (no real orders)
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Evaluate model performance on test data
+    Eval {
+        /// Model checkpoint to evaluate
+        #[arg(short, long)]
+        model: String,
+        /// Test data file (CSV format)
+        #[arg(short, long)]
+        data: String,
+        /// Number of evaluation episodes
+        #[arg(short, long, default_value = "100")]
+        episodes: usize,
+        /// Output results to file
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Show RL model info and statistics
+    Info {
+        /// Model checkpoint to inspect
+        #[arg(short, long)]
+        model: String,
+    },
+    /// Export model for deployment
+    Export {
+        /// Model checkpoint to export
+        #[arg(short, long)]
+        model: String,
+        /// Output format (onnx, torch, json)
+        #[arg(short, long, default_value = "json")]
+        format: String,
+        /// Output file path
+        #[arg(short, long)]
+        output: String,
+    },
+    /// Backtest RL strategy on historical or sample data
+    Backtest {
+        /// Number of backtest episodes
+        #[arg(short, long, default_value = "100")]
+        episodes: usize,
+        /// Duration of each episode in minutes (for sample data)
+        #[arg(short, long, default_value = "60")]
+        duration: u64,
+        /// Market volatility (for sample data)
+        #[arg(long, default_value = "0.02")]
+        volatility: f64,
+        /// Round ID to backtest (uses real data from DB)
+        #[arg(short, long)]
+        round: Option<i32>,
+        /// Initial capital
+        #[arg(long, default_value = "1000.0")]
+        capital: f64,
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
