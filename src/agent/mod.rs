@@ -13,6 +13,7 @@ pub mod advisor;
 pub mod autonomous;
 pub mod client;
 pub mod grok;
+pub mod odds_provider;
 pub mod protocol;
 pub mod sports_analyst;
 pub mod sports_data;
@@ -25,5 +26,6 @@ pub use protocol::{
     AgentAction, AgentContext, AgentResponse, MarketSnapshot,
     PositionInfo, RiskAssessment, TradeRecord,
 };
-pub use sports_analyst::{SportsAnalyst, SportsAnalysis};
+pub use odds_provider::{OddsProvider, OddsProviderConfig, GameEvent, Sport, Market, EdgeAnalysis};
+pub use sports_analyst::{SportsAnalyst, SportsAnalysis, SportsAnalysisWithDK};
 pub use sports_data::{SportsDataFetcher, StructuredGameData};

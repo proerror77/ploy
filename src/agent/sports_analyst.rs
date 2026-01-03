@@ -733,6 +733,99 @@ IMPORTANT:
             reasoning,
         }
     }
+
+    /// Analyze with DraftKings odds comparison
+    pub async fn analyze_with_draftkings(&self, event_url: &str) -> Result<SportsAnalysisWithDK> {
+        use crate::agent::odds_provider::{OddsProvider, Sport, EdgeAnalysis};
+
+        // Get base analysis first
+        let analysis = self.analyze_event(event_url).await?;
+
+        // Try to get DraftKings odds for comparison
+        let dk_comparison = match OddsProvider::from_env() {
+            Ok(provider) => {
+                let sport = match analysis.league.to_uppercase().as_str() {
+                    "NBA" => Sport::NBA,
+                    "NFL" => Sport::NFL,
+                    "NHL" => Sport::NHL,
+                    "MLB" => Sport::MLB,
+                    _ => Sport::NBA, // Default to NBA
+                };
+
+                // Get predicted probability from Claude
+                let predicted_home_prob = Decimal::from_f64_retain(analysis.prediction.team1_win_prob)
+                    .unwrap_or(Decimal::new(50, 2));
+
+                match provider.compare_with_prediction(
+                    sport,
+                    &analysis.teams.0,
+                    &analysis.teams.1,
+                    predicted_home_prob,
+                ).await {
+                    Ok(Some(edge)) => Some(edge),
+                    Ok(None) => {
+                        warn!("No DraftKings odds found for {} vs {}", analysis.teams.0, analysis.teams.1);
+                        None
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch DraftKings odds: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("DraftKings odds provider not configured: {}", e);
+                None
+            }
+        };
+
+        Ok(SportsAnalysisWithDK {
+            base: analysis,
+            draftkings: dk_comparison,
+        })
+    }
+}
+
+/// Sports analysis with DraftKings odds comparison
+#[derive(Debug, Clone)]
+pub struct SportsAnalysisWithDK {
+    pub base: SportsAnalysis,
+    pub draftkings: Option<crate::agent::odds_provider::EdgeAnalysis>,
+}
+
+impl SportsAnalysisWithDK {
+    /// Get the best edge across all sources
+    pub fn best_edge(&self) -> (String, f64) {
+        let pm_edge = self.base.recommendation.edge;
+
+        if let Some(ref dk) = self.draftkings {
+            let dk_edge = dk.edge.to_string().parse::<f64>().unwrap_or(0.0) * 100.0;
+
+            if dk_edge.abs() > pm_edge.abs() {
+                return (format!("DraftKings - {}", dk.recommended_side), dk_edge);
+            }
+        }
+
+        (self.base.recommendation.side.clone(), pm_edge)
+    }
+
+    /// Check if there's arbitrage opportunity between PM and DK
+    pub fn has_arbitrage(&self) -> bool {
+        if let Some(ref dk) = self.draftkings {
+            // Check if PM and DK have opposite signals
+            let pm_favors_team1 = self.base.recommendation.edge > 0.0;
+            let dk_favors_team1 = dk.home_edge > dk.away_edge;
+
+            // If they disagree and both have significant edge, potential arb
+            if pm_favors_team1 != dk_favors_team1 {
+                let pm_edge = self.base.recommendation.edge.abs();
+                let dk_edge = dk.edge.to_string().parse::<f64>().unwrap_or(0.0).abs() * 100.0;
+
+                return pm_edge > 3.0 && dk_edge > 3.0;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]

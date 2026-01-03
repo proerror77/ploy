@@ -343,6 +343,30 @@ pub enum SportsCommands {
         #[arg(long, default_value = "NBA,NFL")]
         leagues: String,
     },
+    /// DraftKings odds comparison and arbitrage
+    Draftkings {
+        /// Sport to analyze (nba, nfl, nhl, mlb)
+        #[arg(long, default_value = "nba")]
+        sport: String,
+        /// Minimum edge threshold (percentage)
+        #[arg(long, default_value = "5.0")]
+        min_edge: f64,
+        /// Show all games (not just those with edge)
+        #[arg(long)]
+        all: bool,
+    },
+    /// Analyze a specific game with DraftKings comparison
+    Analyze {
+        /// Polymarket event URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Team 1 name (if not using URL)
+        #[arg(long)]
+        team1: Option<String>,
+        /// Team 2 name (if not using URL)
+        #[arg(long)]
+        team2: Option<String>,
+    },
 }
 
 /// Reinforcement Learning subcommands
@@ -453,6 +477,54 @@ pub enum RlCommands {
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// Train lead-lag RL strategy using LOB data
+    LeadLag {
+        /// Number of training episodes
+        #[arg(short, long, default_value = "1000")]
+        episodes: usize,
+        /// Trade size in USD
+        #[arg(long, default_value = "1.0")]
+        trade_size: f64,
+        /// Maximum total position in USD
+        #[arg(long, default_value = "50.0")]
+        max_position: f64,
+        /// Binance symbol to train on
+        #[arg(short, long, default_value = "BTCUSDT")]
+        symbol: String,
+        /// Learning rate
+        #[arg(long, default_value = "0.0003")]
+        lr: f64,
+        /// Checkpoint directory
+        #[arg(short, long, default_value = "./models/leadlag")]
+        checkpoint: String,
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Run live trading with trained lead-lag model
+    LeadLagLive {
+        /// Binance symbol to trade
+        #[arg(short, long, default_value = "BTCUSDT")]
+        symbol: String,
+        /// Trade size in USD
+        #[arg(long, default_value = "1.0")]
+        trade_size: f64,
+        /// Maximum total position in USD
+        #[arg(long, default_value = "50.0")]
+        max_position: f64,
+        /// Polymarket market slug (e.g., "will-btc-go-up-15m")
+        #[arg(short, long)]
+        market: String,
+        /// Checkpoint directory to load model from
+        #[arg(short, long, default_value = "./models/leadlag")]
+        checkpoint: String,
+        /// Dry run mode (no real orders)
+        #[arg(long)]
+        dry_run: bool,
+        /// Minimum confidence to trade (0.0-1.0)
+        #[arg(long, default_value = "0.6")]
+        min_confidence: f64,
     },
 }
 
