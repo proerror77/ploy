@@ -26,7 +26,8 @@ RUN mkdir -p src && \
     echo "pub fn lib() {}" > src/lib.rs
 
 # Build dependencies (this layer is cached)
-RUN cargo build --release --features rl && \
+# Note: Don't use --features here since dummy source doesn't define them
+RUN cargo build --release 2>/dev/null || true && \
     rm -rf src target/release/deps/ploy* target/release/libploy* target/release/ploy*
 
 # Copy actual source code
