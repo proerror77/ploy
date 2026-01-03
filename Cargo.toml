@@ -61,6 +61,9 @@ base64 = "0.21"
 # Random number generation
 rand = "0.8"
 
+# Ordered floats for BTreeMap keys
+ordered-float = "4"
+
 # URL parsing
 url = "2"
 
@@ -74,6 +77,17 @@ ratatui = "0.29"
 # Health check server
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
+
+# Reinforcement Learning (optional)
+# Using ndarray backend for CPU-based RL training
+burn = { version = "0.14", default-features = false, features = ["train", "autodiff", "std", "ndarray"], optional = true }
+burn-ndarray = { version = "0.14", optional = true }
+# Pin bincode to version compatible with burn (rc.3 has decode_borrowed_from_slice)
+bincode = { version = "=2.0.0-rc.3", optional = true }
+
+[features]
+default = []
+rl = ["burn", "burn-ndarray", "bincode"]
 
 [dev-dependencies]
 tokio-test = "0.4"
