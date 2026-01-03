@@ -1802,20 +1802,24 @@ async fn run_momentum_mode(
     let symbols_vec: Vec<String> = symbols.split(',').map(|s| s.trim().to_uppercase()).collect();
     info!("Trading symbols: {:?}", symbols_vec);
 
-    // Build momentum config
+    // Build momentum config - CRYINGLITTLEBABY confirmatory mode enabled by default
     let momentum_config = MomentumConfig {
         min_move_pct: Decimal::from_str(&format!("{:.6}", min_move / 100.0))
-            .unwrap_or(dec!(0.005)),
+            .unwrap_or(dec!(0.003)),
         max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
-            .unwrap_or(dec!(0.55)),
+            .unwrap_or(dec!(0.35)),
         min_edge: Decimal::from_str(&format!("{:.6}", min_edge / 100.0))
-            .unwrap_or(dec!(0.05)),
+            .unwrap_or(dec!(0.03)),
         lookback_secs: 5,
         shares_per_trade: shares,
         max_positions,
-        cooldown_secs: 30,
-        max_daily_trades: 20,  // Max 20 trades per day
+        cooldown_secs: 60,
+        max_daily_trades: 20,
         symbols: symbols_vec.clone(),
+        // CRYINGLITTLEBABY confirmatory mode
+        hold_to_resolution: true,       // Hold to collect $1 at resolution
+        min_time_remaining_secs: 60,    // Min 1 min before resolution
+        max_time_remaining_secs: 300,   // Max 5 min before resolution
     };
 
     // Build exit config
@@ -1830,7 +1834,8 @@ async fn run_momentum_mode(
 
     // Print config
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║           MOMENTUM STRATEGY (gabagool22 style)               ║\x1b[0m");
+    println!("\x1b[36m║       CRYINGLITTLEBABY CONFIRMATORY MODE 🎯                  ║\x1b[0m");
+    println!("\x1b[36m║   (Buy confirmed winners near resolution → collect $1)       ║\x1b[0m");
     println!("\x1b[36m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
     println!(
         "\x1b[36m║\x1b[0m  Symbols: {:42}\x1b[36m║\x1b[0m",
@@ -3719,13 +3724,16 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             use ploy::platform::{
                 RLCryptoAgent, RLCryptoAgentConfig, EventRouter, AgentSubscription,
                 Domain, DomainEvent, CryptoEvent, QuoteData, DomainAgent,
+                OrderPlatform, PlatformConfig,
             };
             use ploy::rl::config::RLConfig;
-            use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket};
+            use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket, PolymarketClient, polymarket_clob::POLYGON_CHAIN_ID};
+            use ploy::signing::Wallet;
             use ploy::domain::Side;
             use rust_decimal::Decimal;
             use rust_decimal::prelude::ToPrimitive;
             use std::sync::Arc;
+            use tokio::sync::RwLock;
             use tracing::debug;
 
             println!("╔══════════════════════════════════════════════════════════════╗");
@@ -3812,6 +3820,25 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
             println!("🚀 Agent started. Listening for market data...\n");
             println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
+
+            // Create OrderPlatform for live execution (when not dry-run)
+            let platform: Option<Arc<RwLock<OrderPlatform>>> = if !*dry_run {
+                info!("Setting up live order execution...");
+                let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+                info!("Wallet loaded: {:?}", wallet.address());
+
+                let client = PolymarketClient::new_authenticated(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    true, // neg_risk for UP/DOWN markets
+                ).await?;
+                info!("✅ Authenticated with Polymarket CLOB");
+
+                let platform_config = PlatformConfig::default();
+                Some(Arc::new(RwLock::new(OrderPlatform::new(client, platform_config))))
+            } else {
+                None
+            };
 
             // Main loop
             let tick_duration = std::time::Duration::from_millis(*tick_interval);
@@ -3908,7 +3935,7 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                         // Dispatch to agent
                         match router.dispatch(event).await {
                             Ok(intents) => {
-                                for intent in &intents {
+                                for intent in intents {
                                     if *dry_run {
                                         println!("📝 [DRY] Intent: {} {} {} @ {} ({})",
                                             if intent.is_buy { "BUY" } else { "SELL" },
@@ -3917,15 +3944,25 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                                             intent.limit_price,
                                             intent.market_slug,
                                         );
-                                    } else {
-                                        println!("🔴 [LIVE] Intent: {} {} {} @ {} ({})",
+                                    } else if let Some(ref p) = platform {
+                                        // Live execution via OrderPlatform
+                                        println!("🔴 [LIVE] Executing: {} {} {} @ {} ({})",
                                             if intent.is_buy { "BUY" } else { "SELL" },
                                             intent.shares,
                                             intent.side,
                                             intent.limit_price,
                                             intent.market_slug,
                                         );
-                                        warn!("Live execution not yet implemented - printing intent only");
+                                        let platform_guard = p.write().await;
+                                        if let Err(e) = platform_guard.enqueue_intent(intent.clone()).await {
+                                            error!("Failed to enqueue intent: {}", e);
+                                        }
+                                        if let Err(e) = platform_guard.process_queue().await {
+                                            error!("Failed to process queue: {}", e);
+                                        }
+                                        drop(platform_guard);
+                                    } else {
+                                        warn!("Live mode but no platform initialized");
                                     }
                                 }
                             }

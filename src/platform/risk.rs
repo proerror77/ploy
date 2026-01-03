@@ -1,0 +1,642 @@
+//! Risk Gate - 訂單風控閘門
+//!
+//! 負責在訂單執行前進行多層風控檢查：
+//! - Agent 級別風控 (單筆限額、市場限制)
+//! - 平台級別風控 (總暴露、熔斷機制)
+//! - 組合級別風控 (每日損失、連續失敗)
+
+use chrono::{DateTime, NaiveDate, Utc};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
+
+use super::traits::AgentRiskParams;
+use super::types::{OrderIntent, OrderPriority};
+
+/// 風控配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskConfig {
+    /// 平台最大總暴露 (USD)
+    pub max_platform_exposure: Decimal,
+    /// 最大連續失敗次數 (熔斷)
+    pub max_consecutive_failures: u32,
+    /// 每日最大損失 (USD)
+    pub daily_loss_limit: Decimal,
+    /// 最大點差 (basis points)
+    pub max_spread_bps: u32,
+    /// 緊急訂單是否跳過部分檢查
+    pub critical_bypass_exposure: bool,
+}
+
+impl Default for RiskConfig {
+    fn default() -> Self {
+        Self {
+            max_platform_exposure: Decimal::from(5000),
+            max_consecutive_failures: 5,
+            daily_loss_limit: Decimal::from(1000),
+            max_spread_bps: 500, // 5%
+            critical_bypass_exposure: true,
+        }
+    }
+}
+
+/// 風控檢查結果
+#[derive(Debug, Clone)]
+pub enum RiskCheckResult {
+    /// 通過
+    Passed,
+    /// 被攔截
+    Blocked(BlockReason),
+    /// 需要調整 (例如減少數量)
+    Adjusted(AdjustmentSuggestion),
+}
+
+impl RiskCheckResult {
+    pub fn is_passed(&self) -> bool {
+        matches!(self, RiskCheckResult::Passed)
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, RiskCheckResult::Blocked(_))
+    }
+}
+
+/// 攔截原因
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BlockReason {
+    /// 熔斷觸發
+    CircuitBreakerTripped { reason: String },
+    /// 超過單筆限額
+    ExceedsSingleLimit { limit: Decimal, requested: Decimal },
+    /// 超過總暴露
+    ExceedsTotalExposure { limit: Decimal, current: Decimal, requested: Decimal },
+    /// 每日損失超限
+    DailyLossExceeded { limit: Decimal, current: Decimal },
+    /// 市場不允許
+    MarketNotAllowed { market: String, agent: String },
+    /// Agent 狀態不允許交易
+    AgentNotActive { agent: String, status: String },
+    /// 訂單已過期
+    OrderExpired,
+    /// 未對沖倉位過多
+    TooManyUnhedgedPositions { limit: u32, current: u32 },
+}
+
+impl std::fmt::Display for BlockReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockReason::CircuitBreakerTripped { reason } => {
+                write!(f, "Circuit breaker: {}", reason)
+            }
+            BlockReason::ExceedsSingleLimit { limit, requested } => {
+                write!(f, "Single order ${} exceeds limit ${}", requested, limit)
+            }
+            BlockReason::ExceedsTotalExposure { limit, current, requested } => {
+                write!(f, "Total exposure ${} + ${} exceeds ${}", current, requested, limit)
+            }
+            BlockReason::DailyLossExceeded { limit, current } => {
+                write!(f, "Daily loss ${} exceeds limit ${}", current, limit)
+            }
+            BlockReason::MarketNotAllowed { market, agent } => {
+                write!(f, "Agent {} not allowed in market {}", agent, market)
+            }
+            BlockReason::AgentNotActive { agent, status } => {
+                write!(f, "Agent {} is {} (not active)", agent, status)
+            }
+            BlockReason::OrderExpired => write!(f, "Order has expired"),
+            BlockReason::TooManyUnhedgedPositions { limit, current } => {
+                write!(f, "Unhedged positions {} exceeds limit {}", current, limit)
+            }
+        }
+    }
+}
+
+/// 調整建議
+#[derive(Debug, Clone)]
+pub struct AdjustmentSuggestion {
+    /// 建議的最大數量
+    pub max_shares: u64,
+    /// 原因
+    pub reason: String,
+}
+
+/// 平台風控狀態
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlatformRiskState {
+    /// 正常
+    Normal,
+    /// 警戒 (減少新開倉)
+    Elevated,
+    /// 熔斷 (停止交易)
+    Halted,
+}
+
+impl Default for PlatformRiskState {
+    fn default() -> Self {
+        PlatformRiskState::Normal
+    }
+}
+
+impl PlatformRiskState {
+    pub fn can_trade(&self) -> bool {
+        !matches!(self, PlatformRiskState::Halted)
+    }
+
+    pub fn can_open_new(&self) -> bool {
+        matches!(self, PlatformRiskState::Normal)
+    }
+}
+
+/// Agent 風控統計
+#[derive(Debug, Clone, Default)]
+struct AgentRiskStats {
+    /// 當前暴露
+    exposure: Decimal,
+    /// 未實現損益
+    unrealized_pnl: Decimal,
+    /// 今日已實現損益
+    realized_pnl: Decimal,
+    /// 持倉數量
+    position_count: usize,
+    /// 未對沖倉位數量
+    unhedged_count: u32,
+    /// 連續失敗
+    consecutive_failures: u32,
+    /// 最後更新
+    last_update: Option<DateTime<Utc>>,
+}
+
+/// 每日統計
+#[derive(Debug, Clone, Default)]
+struct DailyStats {
+    date: Option<NaiveDate>,
+    total_pnl: Decimal,
+    order_count: u32,
+    success_count: u32,
+    failure_count: u32,
+}
+
+/// 風控閘門
+///
+/// 所有訂單在執行前都必須通過這個閘門的檢查。
+pub struct RiskGate {
+    config: RiskConfig,
+    /// 平台風控狀態
+    state: Arc<RwLock<PlatformRiskState>>,
+    /// 每個 Agent 的風控統計
+    agent_stats: Arc<RwLock<HashMap<String, AgentRiskStats>>>,
+    /// 每個 Agent 的風控參數
+    agent_params: Arc<RwLock<HashMap<String, AgentRiskParams>>>,
+    /// 平台總暴露
+    total_exposure: Arc<RwLock<Decimal>>,
+    /// 全局連續失敗計數
+    consecutive_failures: AtomicU32,
+    /// 每日統計
+    daily_stats: Arc<RwLock<DailyStats>>,
+}
+
+impl RiskGate {
+    /// 創建新的風控閘門
+    pub fn new(config: RiskConfig) -> Self {
+        Self {
+            config,
+            state: Arc::new(RwLock::new(PlatformRiskState::Normal)),
+            agent_stats: Arc::new(RwLock::new(HashMap::new())),
+            agent_params: Arc::new(RwLock::new(HashMap::new())),
+            total_exposure: Arc::new(RwLock::new(Decimal::ZERO)),
+            consecutive_failures: AtomicU32::new(0),
+            daily_stats: Arc::new(RwLock::new(DailyStats::default())),
+        }
+    }
+
+    /// 註冊 Agent 的風控參數
+    pub async fn register_agent(&self, agent_id: &str, params: AgentRiskParams) {
+        let mut params_map = self.agent_params.write().await;
+        params_map.insert(agent_id.to_string(), params);
+        debug!("Registered risk params for agent {}", agent_id);
+    }
+
+    /// 取消註冊 Agent
+    pub async fn unregister_agent(&self, agent_id: &str) {
+        self.agent_params.write().await.remove(agent_id);
+        self.agent_stats.write().await.remove(agent_id);
+        debug!("Unregistered agent {}", agent_id);
+    }
+
+    // ==================== 核心風控檢查 ====================
+
+    /// 檢查訂單是否可以執行
+    ///
+    /// 這是主要的風控入口點，會依序執行多層檢查。
+    pub async fn check_order(&self, intent: &OrderIntent) -> RiskCheckResult {
+        // 1. 檢查平台狀態
+        let platform_state = *self.state.read().await;
+        if !platform_state.can_trade() {
+            return RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped {
+                reason: "Platform trading halted".to_string(),
+            });
+        }
+
+        // 2. 檢查訂單是否過期
+        if intent.is_expired() {
+            return RiskCheckResult::Blocked(BlockReason::OrderExpired);
+        }
+
+        // 3. Critical 優先級可以跳過部分檢查
+        let is_critical = intent.priority == OrderPriority::Critical;
+        if is_critical && self.config.critical_bypass_exposure {
+            debug!(
+                "Critical order {} bypassing exposure checks",
+                intent.intent_id
+            );
+            // 只檢查基本有效性，跳過暴露限制
+            return RiskCheckResult::Passed;
+        }
+
+        // 4. 獲取 Agent 風控參數
+        let params = {
+            let params_map = self.agent_params.read().await;
+            match params_map.get(&intent.agent_id) {
+                Some(p) => p.clone(),
+                None => {
+                    warn!("No risk params for agent {}, using defaults", intent.agent_id);
+                    AgentRiskParams::default()
+                }
+            }
+        };
+
+        // 5. 檢查市場是否允許
+        if !params.is_market_allowed(&intent.market_slug) {
+            return RiskCheckResult::Blocked(BlockReason::MarketNotAllowed {
+                market: intent.market_slug.clone(),
+                agent: intent.agent_id.clone(),
+            });
+        }
+
+        // 6. 計算訂單價值
+        let order_value = intent.notional_value();
+
+        // 7. 檢查單筆限額
+        if order_value > params.max_order_value {
+            // 可以建議調整數量
+            let max_shares = (params.max_order_value / intent.limit_price)
+                .to_u64()
+                .unwrap_or(0);
+
+            if max_shares > 0 {
+                return RiskCheckResult::Adjusted(AdjustmentSuggestion {
+                    max_shares,
+                    reason: format!(
+                        "Order value ${} exceeds agent limit ${}",
+                        order_value, params.max_order_value
+                    ),
+                });
+            } else {
+                return RiskCheckResult::Blocked(BlockReason::ExceedsSingleLimit {
+                    limit: params.max_order_value,
+                    requested: order_value,
+                });
+            }
+        }
+
+        // 8. 檢查 Agent 總暴露
+        let agent_stats = self.agent_stats.read().await;
+        let current_agent_exposure = agent_stats
+            .get(&intent.agent_id)
+            .map(|s| s.exposure)
+            .unwrap_or(Decimal::ZERO);
+        drop(agent_stats);
+
+        if current_agent_exposure + order_value > params.max_total_exposure {
+            return RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
+                limit: params.max_total_exposure,
+                current: current_agent_exposure,
+                requested: order_value,
+            });
+        }
+
+        // 9. 檢查平台總暴露
+        let current_platform_exposure = *self.total_exposure.read().await;
+        if current_platform_exposure + order_value > self.config.max_platform_exposure {
+            return RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
+                limit: self.config.max_platform_exposure,
+                current: current_platform_exposure,
+                requested: order_value,
+            });
+        }
+
+        // 10. 新開倉時的額外檢查
+        if intent.is_buy && !platform_state.can_open_new() {
+            // 警戒狀態下可能需要更嚴格的檢查
+            debug!(
+                "Elevated state: allowing buy order {} with extra scrutiny",
+                intent.intent_id
+            );
+        }
+
+        // 11. 檢查每日損失
+        let daily = self.daily_stats.read().await;
+        if daily.total_pnl < Decimal::ZERO && daily.total_pnl.abs() >= self.config.daily_loss_limit {
+            return RiskCheckResult::Blocked(BlockReason::DailyLossExceeded {
+                limit: self.config.daily_loss_limit,
+                current: daily.total_pnl.abs(),
+            });
+        }
+
+        RiskCheckResult::Passed
+    }
+
+    // ==================== 狀態更新 ====================
+
+    /// 更新 Agent 暴露
+    pub async fn update_agent_exposure(
+        &self,
+        agent_id: &str,
+        exposure: Decimal,
+        unrealized_pnl: Decimal,
+        position_count: usize,
+        unhedged_count: u32,
+    ) {
+        let mut stats_map = self.agent_stats.write().await;
+        let stats = stats_map.entry(agent_id.to_string()).or_default();
+
+        let old_exposure = stats.exposure;
+        stats.exposure = exposure;
+        stats.unrealized_pnl = unrealized_pnl;
+        stats.position_count = position_count;
+        stats.unhedged_count = unhedged_count;
+        stats.last_update = Some(Utc::now());
+
+        drop(stats_map);
+
+        // 更新平台總暴露
+        let mut total = self.total_exposure.write().await;
+        *total = *total - old_exposure + exposure;
+    }
+
+    /// 記錄成功執行
+    pub async fn record_success(&self, agent_id: &str, pnl: Decimal) {
+        // 重置連續失敗
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+
+        // 更新 Agent 統計
+        {
+            let mut stats_map = self.agent_stats.write().await;
+            let stats = stats_map.entry(agent_id.to_string()).or_default();
+            stats.consecutive_failures = 0;
+            stats.realized_pnl += pnl;
+        }
+
+        // 更新每日統計
+        {
+            let mut daily = self.daily_stats.write().await;
+            self.ensure_daily_reset(&mut daily);
+            daily.total_pnl += pnl;
+            daily.order_count += 1;
+            daily.success_count += 1;
+        }
+
+        // 如果處於警戒狀態，考慮恢復正常
+        if *self.state.read().await == PlatformRiskState::Elevated {
+            *self.state.write().await = PlatformRiskState::Normal;
+            info!("Risk state normalized after successful execution");
+        }
+    }
+
+    /// 記錄失敗
+    pub async fn record_failure(&self, agent_id: &str, reason: &str) {
+        let global_failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // 更新 Agent 統計
+        let agent_failures = {
+            let mut stats_map = self.agent_stats.write().await;
+            let stats = stats_map.entry(agent_id.to_string()).or_default();
+            stats.consecutive_failures += 1;
+            stats.consecutive_failures
+        };
+
+        // 更新每日統計
+        {
+            let mut daily = self.daily_stats.write().await;
+            self.ensure_daily_reset(&mut daily);
+            daily.order_count += 1;
+            daily.failure_count += 1;
+        }
+
+        warn!(
+            "Agent {} failed: {}. Failures: agent={}, global={}",
+            agent_id, reason, agent_failures, global_failures
+        );
+
+        // 檢查熔斷
+        if global_failures >= self.config.max_consecutive_failures {
+            self.trigger_circuit_breaker("Too many consecutive failures").await;
+        } else if global_failures >= self.config.max_consecutive_failures / 2 {
+            *self.state.write().await = PlatformRiskState::Elevated;
+            warn!("Platform risk elevated due to failures");
+        }
+    }
+
+    /// 記錄損失
+    pub async fn record_loss(&self, agent_id: &str, loss: Decimal) {
+        // 更新 Agent 統計
+        {
+            let mut stats_map = self.agent_stats.write().await;
+            let stats = stats_map.entry(agent_id.to_string()).or_default();
+            stats.realized_pnl -= loss.abs();
+        }
+
+        // 更新每日損益
+        let should_halt = {
+            let mut daily = self.daily_stats.write().await;
+            self.ensure_daily_reset(&mut daily);
+            daily.total_pnl -= loss.abs();
+            daily.total_pnl.abs() >= self.config.daily_loss_limit
+        };
+
+        if should_halt {
+            self.trigger_circuit_breaker("Daily loss limit exceeded").await;
+        }
+    }
+
+    /// 觸發熔斷
+    pub async fn trigger_circuit_breaker(&self, reason: &str) {
+        error!("CIRCUIT BREAKER TRIGGERED: {}", reason);
+        *self.state.write().await = PlatformRiskState::Halted;
+    }
+
+    /// 重置熔斷
+    pub async fn reset_circuit_breaker(&self) {
+        info!("Circuit breaker reset");
+        *self.state.write().await = PlatformRiskState::Normal;
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+
+        // 重置所有 Agent 失敗計數
+        let mut stats_map = self.agent_stats.write().await;
+        for stats in stats_map.values_mut() {
+            stats.consecutive_failures = 0;
+        }
+    }
+
+    // ==================== 查詢方法 ====================
+
+    /// 當前平台狀態
+    pub async fn state(&self) -> PlatformRiskState {
+        *self.state.read().await
+    }
+
+    /// 是否可以交易
+    pub async fn can_trade(&self) -> bool {
+        self.state.read().await.can_trade()
+    }
+
+    /// 當前平台總暴露
+    pub async fn total_exposure(&self) -> Decimal {
+        *self.total_exposure.read().await
+    }
+
+    /// Agent 統計
+    pub async fn agent_stats(&self, agent_id: &str) -> Option<(Decimal, Decimal, usize, u32)> {
+        let stats_map = self.agent_stats.read().await;
+        stats_map.get(agent_id).map(|s| {
+            (s.exposure, s.realized_pnl, s.position_count, s.consecutive_failures)
+        })
+    }
+
+    /// 每日統計
+    pub async fn daily_stats(&self) -> (Decimal, u32, u32) {
+        let daily = self.daily_stats.read().await;
+        (daily.total_pnl, daily.success_count, daily.failure_count)
+    }
+
+    /// 連續失敗數
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures.load(Ordering::SeqCst)
+    }
+
+    // ==================== 輔助方法 ====================
+
+    fn ensure_daily_reset(&self, daily: &mut DailyStats) {
+        let today = Utc::now().date_naive();
+        if daily.date != Some(today) {
+            *daily = DailyStats {
+                date: Some(today),
+                ..Default::default()
+            };
+        }
+    }
+
+    /// 清理 (測試用)
+    pub async fn clear(&self) {
+        *self.state.write().await = PlatformRiskState::Normal;
+        self.agent_stats.write().await.clear();
+        self.agent_params.write().await.clear();
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+        *self.total_exposure.write().await = Decimal::ZERO;
+        *self.daily_stats.write().await = DailyStats::default();
+    }
+}
+
+impl Default for RiskGate {
+    fn default() -> Self {
+        Self::new(RiskConfig::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Side;
+    use super::super::types::Domain;
+
+    fn make_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {
+        OrderIntent::new(
+            agent,
+            Domain::Crypto,
+            "btc-15m",
+            "token-123",
+            Side::Up,
+            true,
+            shares,
+            price,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_basic_check() {
+        let gate = RiskGate::new(RiskConfig::default());
+
+        // 註冊 Agent
+        gate.register_agent("agent1", AgentRiskParams::default()).await;
+
+        // 正常訂單應該通過
+        let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
+        let result = gate.check_order(&intent).await;
+        assert!(result.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_single_limit() {
+        let gate = RiskGate::new(RiskConfig::default());
+
+        let mut params = AgentRiskParams::default();
+        params.max_order_value = Decimal::from(10); // 很低的限額
+        gate.register_agent("agent1", params).await;
+
+        // 超過限額
+        let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
+        let result = gate.check_order(&intent).await;
+
+        match result {
+            RiskCheckResult::Adjusted(adj) => {
+                assert!(adj.max_shares < 100);
+            }
+            _ => panic!("Expected Adjusted result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 3;
+        let gate = RiskGate::new(config);
+
+        // 記錄失敗
+        for i in 0..3 {
+            gate.record_failure("agent1", &format!("Failure {}", i)).await;
+        }
+
+        // 應該觸發熔斷
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+        assert!(!gate.can_trade().await);
+
+        // 重置
+        gate.reset_circuit_breaker().await;
+        assert!(gate.can_trade().await);
+    }
+
+    #[tokio::test]
+    async fn test_critical_bypass() {
+        let mut config = RiskConfig::default();
+        config.max_platform_exposure = Decimal::from(10); // 很低
+        config.critical_bypass_exposure = true;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default()).await;
+
+        // 普通訂單被攔截
+        let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
+        let result = gate.check_order(&intent).await;
+        assert!(result.is_blocked());
+
+        // Critical 訂單繞過檢查
+        let critical_intent = intent.with_priority(OrderPriority::Critical);
+        let result = gate.check_order(&critical_intent).await;
+        assert!(result.is_passed());
+    }
+}

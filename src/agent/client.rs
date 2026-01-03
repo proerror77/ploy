@@ -33,11 +33,30 @@ impl Default for AgentClientConfig {
     fn default() -> Self {
         Self {
             cli_path: "claude".to_string(),
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_secs(120), // 2 minutes default
             max_retries: 2,
             model: None,
             system_prompt: Some(DEFAULT_TRADING_SYSTEM_PROMPT.to_string()),
         }
+    }
+}
+
+impl AgentClientConfig {
+    /// Create config for autonomous mode with longer timeout
+    pub fn for_autonomous() -> Self {
+        Self {
+            cli_path: "claude".to_string(),
+            timeout: Duration::from_secs(180), // 3 minutes for complex analysis
+            max_retries: 3,
+            model: None,
+            system_prompt: Some(DEFAULT_TRADING_SYSTEM_PROMPT.to_string()),
+        }
+    }
+
+    /// Set custom timeout
+    pub fn with_timeout(mut self, secs: u64) -> Self {
+        self.timeout = Duration::from_secs(secs);
+        self
     }
 }
 

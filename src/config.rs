@@ -14,6 +14,9 @@ pub struct AppConfig {
     pub dry_run: DryRunConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Health server port (default: 8080)
+    #[serde(default)]
+    pub health_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -204,6 +207,7 @@ impl AppConfig {
             },
             dry_run: DryRunConfig { enabled: dry_run },
             logging: LoggingConfig::default(),
+            health_port: Some(8080),
         }
     }
 

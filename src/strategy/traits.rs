@@ -319,8 +319,9 @@ impl PositionInfo {
 // ============================================================================
 
 /// Risk level for strategy risk updates
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RiskLevel {
+    #[default]
     Normal,
     Elevated,
     Critical,

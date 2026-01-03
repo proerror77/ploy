@@ -1083,6 +1083,59 @@ impl PolymarketClient {
         Ok(active_events)
     }
 
+    /// Get active sports events by keyword search
+    /// Searches for events containing the keyword in the title
+    #[instrument(skip(self))]
+    pub async fn get_active_sports_events(&self, keyword: &str) -> Result<Vec<GammaEventInfo>> {
+        let url = format!("{}/events", GAMMA_API_URL);
+        debug!("Fetching sports events with keyword: {}", keyword);
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[
+                ("active", "true"),
+                ("closed", "false"),
+                ("limit", "500"),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(PloyError::MarketDataUnavailable(format!(
+                "HTTP {}: {}",
+                status, text
+            )));
+        }
+
+        let events: Vec<GammaEventInfo> = resp.json().await?;
+        let now = Utc::now();
+        let keyword_lower = keyword.to_lowercase();
+
+        // Filter events by keyword and active status
+        let filtered: Vec<GammaEventInfo> = events
+            .into_iter()
+            .filter(|e| {
+                // Must contain keyword in title
+                let title_match = e.title.as_ref()
+                    .map_or(false, |t| t.to_lowercase().contains(&keyword_lower));
+
+                // Must not be closed and end date must be in future
+                let is_active = !e.closed && e.end_date.as_ref().map_or(false, |end| {
+                    chrono::DateTime::parse_from_rfc3339(end)
+                        .map_or(false, |dt| dt > now)
+                });
+
+                title_match && is_active
+            })
+            .collect();
+
+        info!("Found {} active events matching '{}'", filtered.len(), keyword);
+        Ok(filtered)
+    }
+
     /// Get all token pairs from all active events in a series
     /// Returns: Vec<(event_info, up_token_id, down_token_id)>
     #[instrument(skip(self))]

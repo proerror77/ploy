@@ -1,14 +1,16 @@
-//! Core shared components for all strategies
+//! Core strategy components shared across market types
 //!
-//! This module contains the infrastructure that all strategies share:
-//! - Order execution
-//! - Risk management
-//! - Position tracking
+//! This module contains the fundamental abstractions for split arbitrage
+//! that work across crypto, sports, and other binary markets.
 
-pub mod executor;
-pub mod position;
-pub mod risk;
+mod position;
+mod price_cache;
+mod split_engine;
+mod traits;
 
-pub use executor::{OrderExecutor, ExecutionResult, ExecutionConfig};
-pub use position::{PositionManager, Position, PositionUpdate};
-pub use risk::{RiskManager, RiskConfig, RiskState, RiskCheck};
+pub use position::{
+    ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
+};
+pub use price_cache::PriceCache;
+pub use split_engine::{SplitArbConfig, SplitArbEngine};
+pub use traits::{BinaryMarket, MarketDiscovery, MarketType};

@@ -173,6 +173,95 @@ impl PostgresStore {
         Ok(())
     }
 
+    /// Get historical ticks for a round
+    pub async fn get_ticks_for_round(&self, round_id: i32) -> Result<Vec<Tick>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, round_id, timestamp, side, best_bid, best_ask, bid_size, ask_size
+            FROM ticks
+            WHERE round_id = $1
+            ORDER BY timestamp ASC
+            "#,
+        )
+        .bind(round_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let ticks = rows
+            .iter()
+            .map(|row| {
+                let side_str: String = row.get("side");
+                let side = match side_str.to_uppercase().as_str() {
+                    "UP" => Side::Up,
+                    "DOWN" => Side::Down,
+                    _ => Side::Up, // Default to Up if unknown
+                };
+                Tick {
+                    id: Some(row.get("id")),
+                    round_id: row.get("round_id"),
+                    timestamp: row.get("timestamp"),
+                    side,
+                    best_bid: row.get("best_bid"),
+                    best_ask: row.get("best_ask"),
+                    bid_size: row.get("bid_size"),
+                    ask_size: row.get("ask_size"),
+                }
+            })
+            .collect();
+
+        Ok(ticks)
+    }
+
+    /// Get all rounds with tick data
+    pub async fn get_rounds_with_ticks(&self) -> Result<Vec<Round>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT r.id, r.slug, r.up_token_id, r.down_token_id,
+                   r.start_time, r.end_time, r.outcome
+            FROM rounds r
+            INNER JOIN ticks t ON t.round_id = r.id
+            ORDER BY r.start_time DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let rounds = rows
+            .iter()
+            .map(|row| {
+                let outcome_str: Option<String> = row.get("outcome");
+                let outcome = outcome_str.map(|s| match s.to_uppercase().as_str() {
+                    "UP" => Side::Up,
+                    "DOWN" => Side::Down,
+                    _ => Side::Up,
+                });
+                Round {
+                    id: Some(row.get("id")),
+                    slug: row.get("slug"),
+                    up_token_id: row.get("up_token_id"),
+                    down_token_id: row.get("down_token_id"),
+                    start_time: row.get("start_time"),
+                    end_time: row.get("end_time"),
+                    outcome,
+                }
+            })
+            .collect();
+
+        Ok(rounds)
+    }
+
+    /// Get tick count for a round
+    pub async fn get_tick_count(&self, round_id: i32) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) as count FROM ticks WHERE round_id = $1"#,
+        )
+        .bind(round_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.get("count"))
+    }
+
     // ==================== Cycles ====================
 
     /// Create a new cycle

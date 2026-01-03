@@ -4,6 +4,7 @@
 //! from fully autonomous to requiring human confirmation for trades.
 
 use crate::agent::client::ClaudeAgentClient;
+use crate::agent::grok::{GrokClient, SearchResult};
 use crate::agent::protocol::{
     AgentAction, AgentContext, AgentResponse, DailyStats, MarketSnapshot,
     PositionInfo, RiskAssessment,
@@ -118,6 +119,8 @@ pub struct AutonomousAgent {
     shutdown: Arc<RwLock<bool>>,
     /// Action broadcast channel for external monitoring
     action_tx: broadcast::Sender<AgentAction>,
+    /// Optional Grok client for real-time search
+    grok: Option<GrokClient>,
 }
 
 impl AutonomousAgent {
@@ -131,7 +134,37 @@ impl AutonomousAgent {
             positions: Arc::new(RwLock::new(Vec::new())),
             shutdown: Arc::new(RwLock::new(false)),
             action_tx,
+            grok: None,
         }
+    }
+
+    /// Add Grok client for real-time search capabilities
+    pub fn with_grok(mut self, grok: GrokClient) -> Self {
+        self.grok = Some(grok);
+        self
+    }
+
+    /// Check if Grok is available
+    pub fn has_grok(&self) -> bool {
+        self.grok.as_ref().map(|g| g.is_configured()).unwrap_or(false)
+    }
+
+    /// Fetch real-time context from Grok
+    pub async fn fetch_realtime_context(&self, market_slug: &str) -> Option<SearchResult> {
+        if let Some(ref grok) = self.grok {
+            if grok.is_configured() {
+                match grok.search_market(market_slug, "15 minutes").await {
+                    Ok(result) => {
+                        info!("Grok search: sentiment={:?}", result.sentiment);
+                        return Some(result);
+                    }
+                    Err(e) => {
+                        warn!("Grok search failed: {}", e);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Get a receiver for action notifications
@@ -204,7 +237,10 @@ impl AutonomousAgent {
 
     /// Analyze current state and determine actions
     async fn analyze_and_act(&self, context: &AgentContext) -> Result<Vec<AgentAction>> {
-        let prompt = self.build_analysis_prompt(context);
+        // Fetch real-time context from Grok if available
+        let grok_context = self.fetch_realtime_context(&context.market_state.market_id).await;
+
+        let prompt = self.build_analysis_prompt(context, grok_context.as_ref());
 
         let response = self.client.query(&prompt, context).await?;
 
@@ -235,8 +271,34 @@ impl AutonomousAgent {
     }
 
     /// Build analysis prompt based on current state
-    fn build_analysis_prompt(&self, context: &AgentContext) -> String {
+    fn build_analysis_prompt(&self, _context: &AgentContext, grok_context: Option<&SearchResult>) -> String {
         let strategies = self.config.allowed_strategies.join(", ");
+
+        let realtime_info = if let Some(search) = grok_context {
+            let sentiment = search.sentiment
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let key_points = if search.key_points.is_empty() {
+                "None available".to_string()
+            } else {
+                search.key_points.iter()
+                    .take(5)
+                    .map(|p| format!("  - {}", p))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            format!(
+                r#"
+## Real-Time Market Intelligence (from Grok)
+Sentiment: {}
+Key Points:
+{}
+"#,
+                sentiment, key_points
+            )
+        } else {
+            String::new()
+        };
 
         format!(
             r#"Analyze the current market state and recommend trading actions.
@@ -245,17 +307,19 @@ Allowed Strategies: {}
 Maximum Trade Size: ${}
 Current Exposure: Check positions in context
 Minimum Confidence Required: {}%
-
+{}
 Your analysis should:
 1. Identify opportunities matching allowed strategies
 2. Assess risk for each opportunity
 3. Recommend specific actions with reasoning
 4. Consider current positions and exposure limits
+5. Factor in real-time sentiment if available
 
 Prioritize capital preservation while seeking profitable opportunities."#,
             strategies,
             self.config.max_trade_size,
             (self.config.min_confidence * 100.0) as u32,
+            realtime_info,
         )
     }
 

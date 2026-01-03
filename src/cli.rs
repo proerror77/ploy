@@ -2490,9 +2490,12 @@ pub async fn run_live_edge_scanner(
 
                 // Determine market type
                 let is_spread = question.contains("Spread:");
-                let is_moneyline = !is_spread && !question.contains("Over") &&
+                let is_first_half = question.contains("1H ") || question.contains("1st Half");
+                let is_moneyline = !is_spread && !is_first_half &&
+                                   !question.contains("Over") &&
                                    !question.contains("Points") && !question.contains("Rebounds") &&
-                                   !question.contains("Assists") && !question.contains("O/U");
+                                   !question.contains("Assists") && !question.contains("O/U") &&
+                                   !question.contains("Total");
                 let is_prop = question.contains("Points Over") || question.contains("Rebounds Over") ||
                               question.contains("Assists Over");
 
@@ -2587,10 +2590,15 @@ pub async fn run_live_edge_scanner(
                 println!("│ Market: {} │", opp.market_question);
                 println!("│ Type: {} │", opp.market_type);
                 println!("├────────────────────────────────────────────────────────────────┤");
-                println!("│ PM Price: \x1b[33m{:.1}¢\x1b[0m │ DK Fair: \x1b[36m{:.1}%\x1b[0m │ Edge: \x1b[32m{:+.1}%\x1b[0m │",
-                    opp.pm_price * 100.0, opp.dk_fair_prob * 100.0, opp.edge);
+                let (action, action_price, edge_color) = if opp.edge > 0.0 {
+                    ("BUY YES", opp.pm_price * 100.0, "\x1b[32m") // Green for positive edge
+                } else {
+                    ("BUY NO", (1.0 - opp.pm_price) * 100.0, "\x1b[33m") // Yellow for negative (inverse)
+                };
+                println!("│ PM Price: \x1b[33m{:.1}¢\x1b[0m │ DK Fair: \x1b[36m{:.1}%\x1b[0m │ Edge: {}{}%\x1b[0m │",
+                    opp.pm_price * 100.0, opp.dk_fair_prob * 100.0, edge_color, format!("{:+.1}", opp.edge.abs()));
                 println!("├────────────────────────────────────────────────────────────────┤");
-                println!("│ Action: \x1b[1;32mBUY YES @ {:.1}¢\x1b[0m │", opp.pm_price * 100.0);
+                println!("│ Action: \x1b[1;32m{} @ {:.1}¢\x1b[0m │", action, action_price);
                 println!("│ Token: {}... │", &opp.token_id[..20.min(opp.token_id.len())]);
                 println!("└────────────────────────────────────────────────────────────────┘\n");
 

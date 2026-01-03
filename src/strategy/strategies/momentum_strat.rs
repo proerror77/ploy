@@ -30,11 +30,11 @@ pub struct MomentumConfig {
     pub id: String,
     /// Is strategy enabled
     pub enabled: bool,
-    /// Minimum CEX price move to trigger (e.g., 0.005 = 0.5%)
+    /// Minimum CEX price move to trigger (e.g., 0.003 = 0.3%)
     pub min_move_pct: Decimal,
-    /// Maximum Polymarket odds for entry (e.g., 0.55 = 55¢)
+    /// Maximum Polymarket odds for entry (e.g., 0.40 = 40¢)
     pub max_entry_price: Decimal,
-    /// Minimum estimated edge to enter (e.g., 0.05 = 5%)
+    /// Minimum estimated edge to enter (e.g., 0.03 = 3%)
     pub min_edge: Decimal,
     /// Shares per trade
     pub shares_per_trade: u64,
@@ -42,6 +42,8 @@ pub struct MomentumConfig {
     pub max_positions: usize,
     /// Cooldown between trades on same symbol (seconds)
     pub cooldown_secs: u64,
+    /// Maximum trades per day (0 = unlimited)
+    pub max_daily_trades: u32,
     /// Symbols to track (e.g., BTCUSDT, ETHUSDT, SOLUSDT)
     pub symbols: Vec<String>,
     /// Take profit percentage
@@ -63,12 +65,15 @@ impl Default for MomentumConfig {
         Self {
             id: "momentum".to_string(),
             enabled: true,
-            min_move_pct: dec!(0.005),
-            max_entry_price: dec!(0.55),
-            min_edge: dec!(0.05),
+            // === AGGRESSIVE ENTRY (CRYINGLITTLEBABY style) ===
+            min_move_pct: dec!(0.003),      // 0.3% minimum move (was 0.5%)
+            max_entry_price: dec!(0.40),    // Max 40¢ entry (was 55¢)
+            min_edge: dec!(0.03),           // 3% minimum edge (was 5%)
             shares_per_trade: 100,
-            max_positions: 5,
-            cooldown_secs: 30,
+            // === ANTI-OVERTRADING CONTROLS ===
+            max_positions: 3,               // Max 3 concurrent (was 5)
+            cooldown_secs: 60,              // 60s between same symbol (was 30)
+            max_daily_trades: 20,           // Max 20 trades/day
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
             take_profit_pct: dec!(0.20),
             stop_loss_pct: dec!(0.15),

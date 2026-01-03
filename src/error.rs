@@ -68,6 +68,10 @@ pub enum PloyError {
     #[error("Daily loss limit reached: {0}")]
     DailyLossLimit(String),
 
+    // Validation errors
+    #[error("Validation failed: {0}")]
+    Validation(String),
+
     // Crypto/signing errors
     #[error("Wallet error: {0}")]
     Wallet(String),

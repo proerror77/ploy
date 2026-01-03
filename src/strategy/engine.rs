@@ -2,7 +2,7 @@ use crate::adapters::{PolymarketWebSocket, PostgresStore, QuoteCache, QuoteUpdat
 use crate::config::AppConfig;
 use crate::domain::{Cycle, MarketSnapshot, Order, Quote, Round, Side, StrategyState};
 use crate::error::{PloyError, Result};
-use crate::strategy::{OrderExecutor, RiskManager, SignalDetector};
+use crate::strategy::{OrderExecutor, RiskManager, SignalDetector, TradingCalculator};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -14,10 +14,11 @@ pub struct StrategyEngine {
     config: AppConfig,
     store: PostgresStore,
     executor: OrderExecutor,
-    risk_manager: RiskManager,
+    risk_manager: Arc<RiskManager>,
     signal_detector: Arc<RwLock<SignalDetector>>,
     quote_cache: QuoteCache,
     state: Arc<RwLock<EngineState>>,
+    calculator: TradingCalculator,
 }
 
 /// Internal engine state
@@ -63,8 +64,15 @@ impl StrategyEngine {
         executor: OrderExecutor,
         quote_cache: QuoteCache,
     ) -> Result<Self> {
-        let risk_manager = RiskManager::new(config.risk.clone());
+        let risk_manager = Arc::new(RiskManager::new(config.risk.clone()));
         let signal_detector = SignalDetector::new(config.strategy.clone());
+
+        // Create calculator from config buffers
+        let calculator = TradingCalculator::with_buffers(
+            config.strategy.fee_buffer,
+            config.strategy.slippage_buffer,
+            config.strategy.profit_buffer,
+        );
 
         Ok(Self {
             config,
@@ -74,6 +82,7 @@ impl StrategyEngine {
             signal_detector: Arc::new(RwLock::new(signal_detector)),
             quote_cache,
             state: Arc::new(RwLock::new(EngineState::default())),
+            calculator,
         })
     }
 
@@ -398,13 +407,12 @@ impl StrategyEngine {
         if result.filled_shares > 0 {
             let fill_price = result.avg_fill_price.unwrap_or(price);
 
-            // Calculate PnL
-            // PnL = shares * (1 - leg1_price - leg2_price) - fees
-            let gross_pnl =
-                Decimal::from(result.filled_shares) * (Decimal::ONE - ctx.leg1_price - fill_price);
-            let fee_rate = self.config.strategy.fee_buffer;
-            let fees = Decimal::from(result.filled_shares) * (ctx.leg1_price + fill_price) * fee_rate;
-            let net_pnl = gross_pnl - fees;
+            // Calculate PnL using centralized calculator
+            let net_pnl = self.calculator.expected_pnl(
+                result.filled_shares,
+                ctx.leg1_price,
+                fill_price,
+            );
 
             // Update database
             self.store
@@ -512,8 +520,8 @@ impl StrategyEngine {
     }
 
     /// Get risk manager for external queries
-    pub fn risk_manager(&self) -> &RiskManager {
-        &self.risk_manager
+    pub fn risk_manager(&self) -> Arc<RiskManager> {
+        Arc::clone(&self.risk_manager)
     }
 
     /// Check if dry run mode is enabled

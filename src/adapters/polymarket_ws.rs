@@ -633,4 +633,72 @@ mod tests {
         assert!(quote.best_bid.is_some());
         assert!(quote.best_ask.is_some());
     }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_initial_state() {
+        let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
+        assert!(cb.should_allow().await);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_opens_after_failures() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            open_timeout_secs: 60,
+            success_threshold: 2,
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // Record failures up to threshold
+        cb.record_failure().await;
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
+
+        cb.record_failure().await;
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
+
+        cb.record_failure().await;
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Open);
+        assert!(!cb.should_allow().await);
+        assert_eq!(cb.open_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_success_resets_failures() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            open_timeout_secs: 60,
+            success_threshold: 2,
+        };
+        let cb = CircuitBreaker::new(config);
+
+        cb.record_failure().await;
+        cb.record_failure().await;
+        assert_eq!(cb.consecutive_failures(), 2);
+
+        // Success should reset failures
+        cb.record_success().await;
+        assert_eq!(cb.consecutive_failures(), 0);
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_manual_reset() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            open_timeout_secs: 60,
+            success_threshold: 1,
+        };
+        let cb = CircuitBreaker::new(config);
+
+        // Trip the circuit
+        cb.record_failure().await;
+        cb.record_failure().await;
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Open);
+
+        // Manual reset
+        cb.reset().await;
+        assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
+        assert!(cb.should_allow().await);
+    }
 }
