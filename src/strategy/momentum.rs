@@ -176,11 +176,11 @@ impl EventMatcher {
         // Map each symbol to its series IDs (from Gamma API)
         // === 15-MINUTE MARKETS ONLY (CRYINGLITTLEBABY style) ===
 
-        // BTC: No 15m market available - use daily as fallback
+        // BTC: 10192 = 15m (btc-up-or-down-15m)
         symbol_to_series.insert(
             "BTCUSDT".into(),
             vec![
-                "41".into(), // btc-up-or-down-daily (no 15m exists)
+                "10192".into(), // btc-up-or-down-15m
             ],
         );
 
@@ -200,11 +200,11 @@ impl EventMatcher {
             ],
         );
 
-        // XRP: 10545 = 15m
+        // XRP: 10422 = 15m (xrp-up-or-down-15m)
         symbol_to_series.insert(
             "XRPUSDT".into(),
             vec![
-                "10545".into(), // xrp-up-or-down-15m
+                "10422".into(), // xrp-up-or-down-15m
             ],
         );
 
