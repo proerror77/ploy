@@ -1,6 +1,6 @@
 use clap::Parser;
 use ploy::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
-use ploy::cli::{self, Cli, Commands, CryptoCommands, SportsCommands, TerminalUI};
+use ploy::cli::{self, Cli, Commands, CryptoCommands, SportsCommands, PoliticsCommands, TerminalUI};
 #[cfg(feature = "rl")]
 use ploy::cli::RlCommands;
 use ploy::config::AppConfig;
@@ -157,6 +157,10 @@ async fn main() -> Result<()> {
         Some(Commands::Sports(sports_cmd)) => {
             init_logging();
             run_sports_command(sports_cmd).await?;
+        }
+        Some(Commands::Politics(politics_cmd)) => {
+            init_logging();
+            run_politics_command(politics_cmd).await?;
         }
         #[cfg(feature = "rl")]
         Some(Commands::Rl(rl_cmd)) => {
@@ -1810,6 +1814,7 @@ async fn run_momentum_mode(
         shares_per_trade: shares,
         max_positions,
         cooldown_secs: 30,
+        max_daily_trades: 20,  // Max 20 trades per day
         symbols: symbols_vec.clone(),
     };
 
@@ -2850,6 +2855,38 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                 }
             }
         }
+        SportsCommands::Polymarket { league, search, compare_dk, min_edge, live } => {
+            cli::show_polymarket_sports(league, search.as_deref(), *compare_dk, *min_edge, *live).await?;
+        }
+        SportsCommands::Chain { team1, team2, sport, execute, amount } => {
+            cli::run_sports_chain(team1, team2, sport, *execute, *amount).await?;
+        }
+        SportsCommands::LiveScan { sport, min_edge, interval, spreads, moneyline, props, alert } => {
+            cli::run_live_edge_scanner(sport, *min_edge, *interval, *spreads, *moneyline, *props, *alert).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle politics subcommands
+async fn run_politics_command(cmd: &PoliticsCommands) -> Result<()> {
+    match cmd {
+        PoliticsCommands::Markets { category, search, high_volume } => {
+            cli::show_polymarket_politics(category, search.as_deref(), *high_volume).await?;
+        }
+        PoliticsCommands::Search { query } => {
+            cli::search_politics_markets(query).await?;
+        }
+        PoliticsCommands::Analyze { event, candidate } => {
+            cli::analyze_politics_market(event.as_deref(), candidate.as_deref()).await?;
+        }
+        PoliticsCommands::Trump { market_type } => {
+            cli::show_trump_markets(market_type).await?;
+        }
+        PoliticsCommands::Elections { year } => {
+            cli::show_election_markets(year.as_deref()).await?;
+        }
     }
 
     Ok(())
@@ -3665,6 +3702,272 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             }
 
             collector_handle.abort();
+        }
+
+        RlCommands::Agent {
+            symbol,
+            market,
+            up_token,
+            down_token,
+            shares,
+            max_exposure,
+            exploration,
+            online_learning,
+            dry_run,
+            tick_interval,
+        } => {
+            use ploy::platform::{
+                RLCryptoAgent, RLCryptoAgentConfig, EventRouter, AgentSubscription,
+                Domain, DomainEvent, CryptoEvent, QuoteData, DomainAgent,
+            };
+            use ploy::rl::config::RLConfig;
+            use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket};
+            use ploy::domain::Side;
+            use rust_decimal::Decimal;
+            use rust_decimal::prelude::ToPrimitive;
+            use std::sync::Arc;
+            use tracing::debug;
+
+            println!("╔══════════════════════════════════════════════════════════════╗");
+            println!("║           Ploy RL Agent - Order Platform                     ║");
+            println!("╠══════════════════════════════════════════════════════════════╣");
+            println!("║  Symbol:         {:>10}                                    ║", symbol);
+            println!("║  Market:         {:>10}                                    ║", market);
+            println!("║  UP Token:       {}...                                    ", &up_token[..up_token.len().min(20)]);
+            println!("║  DOWN Token:     {}...                                    ", &down_token[..down_token.len().min(20)]);
+            println!("║  Shares:         {:>10}                                    ║", shares);
+            println!("║  Max Exposure:   ${:>9.2}                                   ║", max_exposure);
+            println!("║  Exploration:    {:>10.2}                                   ║", exploration);
+            println!("║  Online Learn:   {:>10}                                    ║", online_learning);
+            println!("║  Dry Run:        {:>10}                                    ║", dry_run);
+            println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+            // Create RL config
+            let mut rl_config = RLConfig::default();
+            rl_config.training.online_learning = *online_learning;
+            rl_config.training.exploration_rate = *exploration;
+
+            // Create agent config
+            let agent_config = RLCryptoAgentConfig {
+                id: "rl-crypto-agent".to_string(),
+                name: format!("RL Agent - {}", symbol),
+                coins: vec![symbol.replace("USDT", "")],
+                up_token_id: up_token.clone(),
+                down_token_id: down_token.clone(),
+                binance_symbol: symbol.clone(),
+                market_slug: market.clone(),
+                default_shares: *shares,
+                risk_params: ploy::platform::AgentRiskParams {
+                    max_order_value: Decimal::try_from(*max_exposure / 2.0).unwrap_or(Decimal::new(50, 0)),
+                    max_total_exposure: Decimal::try_from(*max_exposure).unwrap_or(Decimal::new(100, 0)),
+                    ..Default::default()
+                },
+                rl_config,
+                online_learning: *online_learning,
+                exploration_rate: *exploration,
+            };
+
+            // Create agent
+            let mut agent = RLCryptoAgent::new(agent_config);
+            agent.start().await?;
+
+            // Create event router
+            let router = Arc::new(EventRouter::new());
+            router.register_agent(
+                Box::new(agent),
+                AgentSubscription::for_domain("rl-crypto-agent", Domain::Crypto),
+            ).await;
+
+            // Create Binance WebSocket for spot prices
+            let symbol_upper = symbol.to_uppercase();
+            let bn_ws = BinanceWebSocket::new(vec![symbol_upper.clone()]);
+            let price_cache = bn_ws.price_cache().clone();
+
+            let bn_ws_handle = tokio::spawn(async move {
+                if let Err(e) = bn_ws.run().await {
+                    error!("Binance WS error: {}", e);
+                }
+            });
+
+            // Create Polymarket WebSocket for real quotes
+            let pm_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+            let pm_ws = Arc::new(PolymarketWebSocket::new(pm_ws_url));
+
+            // Register token IDs with their sides
+            pm_ws.register_token(up_token.as_str(), Side::Up).await;
+            pm_ws.register_token(down_token.as_str(), Side::Down).await;
+
+            let quote_cache = pm_ws.quote_cache().clone();
+            let up_token_ws = up_token.clone();
+            let down_token_ws = down_token.clone();
+
+            let pm_ws_clone = Arc::clone(&pm_ws);
+            let pm_ws_handle = tokio::spawn(async move {
+                let token_ids = vec![up_token_ws, down_token_ws];
+                info!("Connecting to Polymarket WebSocket for tokens: {:?}", token_ids);
+                if let Err(e) = pm_ws_clone.run(token_ids).await {
+                    error!("Polymarket WS error: {}", e);
+                }
+            });
+
+            println!("🚀 Agent started. Listening for market data...\n");
+            println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
+
+            // Main loop
+            let tick_duration = std::time::Duration::from_millis(*tick_interval);
+            let mut interval = tokio::time::interval(tick_duration);
+            let mut step_count = 0u64;
+            let mut quotes_received = false;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        step_count += 1;
+
+                        // Get current price from Binance cache
+                        let spot_price = match price_cache.get(&symbol_upper).await {
+                            Some(sp) => sp.price,
+                            None => continue,
+                        };
+
+                        // Get momentum values (1s, 5s, 15s, 60s) and convert to f64 array
+                        let momentum = {
+                            let m1 = price_cache.momentum(&symbol_upper, 1).await;
+                            let m5 = price_cache.momentum(&symbol_upper, 5).await;
+                            let m15 = price_cache.momentum(&symbol_upper, 15).await;
+                            let m60 = price_cache.momentum(&symbol_upper, 60).await;
+
+                            match (m1, m5, m15, m60) {
+                                (Some(a), Some(b), Some(c), Some(d)) => Some([
+                                    a.to_f64().unwrap_or(0.0),
+                                    b.to_f64().unwrap_or(0.0),
+                                    c.to_f64().unwrap_or(0.0),
+                                    d.to_f64().unwrap_or(0.0),
+                                ]),
+                                _ => None,
+                            }
+                        };
+
+                        // Get real quotes from Polymarket WebSocket
+                        let up_quote = quote_cache.get(up_token.as_str()).await;
+                        let down_quote = quote_cache.get(down_token.as_str()).await;
+
+                        // Build QuoteData from real quotes
+                        let quotes = match (&up_quote, &down_quote) {
+                            (Some(uq), Some(dq)) => {
+                                if !quotes_received {
+                                    println!("✅ Receiving live Polymarket quotes!");
+                                    quotes_received = true;
+                                }
+                                Some(QuoteData {
+                                    up_bid: uq.best_bid.unwrap_or(Decimal::ZERO),
+                                    up_ask: uq.best_ask.unwrap_or(Decimal::ONE),
+                                    down_bid: dq.best_bid.unwrap_or(Decimal::ZERO),
+                                    down_ask: dq.best_ask.unwrap_or(Decimal::ONE),
+                                    timestamp: chrono::Utc::now(),
+                                })
+                            }
+                            (Some(uq), None) => {
+                                // Only UP quote available
+                                Some(QuoteData {
+                                    up_bid: uq.best_bid.unwrap_or(Decimal::ZERO),
+                                    up_ask: uq.best_ask.unwrap_or(Decimal::ONE),
+                                    down_bid: Decimal::ZERO,
+                                    down_ask: Decimal::ONE,
+                                    timestamp: chrono::Utc::now(),
+                                })
+                            }
+                            (None, Some(dq)) => {
+                                // Only DOWN quote available
+                                Some(QuoteData {
+                                    up_bid: Decimal::ZERO,
+                                    up_ask: Decimal::ONE,
+                                    down_bid: dq.best_bid.unwrap_or(Decimal::ZERO),
+                                    down_ask: dq.best_ask.unwrap_or(Decimal::ONE),
+                                    timestamp: chrono::Utc::now(),
+                                })
+                            }
+                            (None, None) => {
+                                // No quotes yet - skip this tick
+                                if step_count % 30 == 0 {
+                                    debug!("Waiting for Polymarket quotes...");
+                                }
+                                continue;
+                            }
+                        };
+
+                        // Create crypto event with real data
+                        let event = DomainEvent::Crypto(CryptoEvent {
+                            symbol: symbol.clone(),
+                            spot_price,
+                            round_slug: Some(market.clone()),
+                            quotes,
+                            momentum,
+                        });
+
+                        // Dispatch to agent
+                        match router.dispatch(event).await {
+                            Ok(intents) => {
+                                for intent in &intents {
+                                    if *dry_run {
+                                        println!("📝 [DRY] Intent: {} {} {} @ {} ({})",
+                                            if intent.is_buy { "BUY" } else { "SELL" },
+                                            intent.shares,
+                                            intent.side,
+                                            intent.limit_price,
+                                            intent.market_slug,
+                                        );
+                                    } else {
+                                        println!("🔴 [LIVE] Intent: {} {} {} @ {} ({})",
+                                            if intent.is_buy { "BUY" } else { "SELL" },
+                                            intent.shares,
+                                            intent.side,
+                                            intent.limit_price,
+                                            intent.market_slug,
+                                        );
+                                        warn!("Live execution not yet implemented - printing intent only");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Dispatch error: {}", e);
+                            }
+                        }
+
+                        // Status update every 30 ticks
+                        if step_count % 30 == 0 {
+                            let _stats = router.stats().await;
+                            let up_ask = up_quote.as_ref().and_then(|q| q.best_ask).unwrap_or(Decimal::ZERO);
+                            let down_ask = down_quote.as_ref().and_then(|q| q.best_ask).unwrap_or(Decimal::ZERO);
+                            let sum_asks = up_ask + down_ask;
+                            println!("📊 Step {}: spot={} | UP={}/{} DOWN={}/{} | sum_asks={}",
+                                step_count,
+                                spot_price,
+                                up_quote.as_ref().and_then(|q| q.best_bid).unwrap_or(Decimal::ZERO),
+                                up_ask,
+                                down_quote.as_ref().and_then(|q| q.best_bid).unwrap_or(Decimal::ZERO),
+                                down_ask,
+                                sum_asks,
+                            );
+                        }
+                    }
+                    _ = signal::ctrl_c() => {
+                        println!("\n\n╔══════════════════════════════════════════════════════════════╗");
+                        println!("║               Session Summary                                ║");
+                        println!("╠══════════════════════════════════════════════════════════════╣");
+                        let stats = router.stats().await;
+                        println!("║  Total Steps:     {:>10}                                   ║", step_count);
+                        println!("║  Events Received: {:>10}                                   ║", stats.events_received);
+                        println!("║  Intents Gen:     {:>10}                                   ║", stats.intents_generated);
+                        println!("╚══════════════════════════════════════════════════════════════╝");
+                        break;
+                    }
+                }
+            }
+
+            bn_ws_handle.abort();
+            pm_ws_handle.abort();
+            router.stop_all_agents().await?;
         }
     }
 

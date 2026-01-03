@@ -257,6 +257,10 @@ pub enum Commands {
     #[command(subcommand)]
     Sports(SportsCommands),
 
+    /// Political prediction markets (elections, approval ratings)
+    #[command(subcommand)]
+    Politics(PoliticsCommands),
+
     /// Reinforcement learning strategies (requires 'rl' feature)
     #[cfg(feature = "rl")]
     #[command(subcommand)]
@@ -366,6 +370,109 @@ pub enum SportsCommands {
         /// Team 2 name (if not using URL)
         #[arg(long)]
         team2: Option<String>,
+    },
+    /// Polymarket sports markets (live NBA, NFL betting)
+    Polymarket {
+        /// League to filter (nba, nfl, all)
+        #[arg(long, default_value = "all")]
+        league: String,
+        /// Search for specific team or matchup
+        #[arg(long)]
+        search: Option<String>,
+        /// Compare with DraftKings odds for edge detection
+        #[arg(long)]
+        compare_dk: bool,
+        /// Minimum edge percentage for alerts
+        #[arg(long, default_value = "5.0")]
+        min_edge: f64,
+        /// Show live in-play games with real-time scores
+        #[arg(long)]
+        live: bool,
+    },
+    /// Full decision chain: Grok -> Claude -> DraftKings -> Polymarket
+    Chain {
+        /// Team 1 name
+        #[arg(long)]
+        team1: String,
+        /// Team 2 name
+        #[arg(long)]
+        team2: String,
+        /// Sport (nba, nfl)
+        #[arg(long, default_value = "nba")]
+        sport: String,
+        /// Execute bet on Polymarket (requires wallet)
+        #[arg(long)]
+        execute: bool,
+        /// Bet amount in USDC
+        #[arg(long, default_value = "10")]
+        amount: f64,
+    },
+    /// Live edge scanner - continuously monitor live games for arbitrage
+    LiveScan {
+        /// Sport to scan (nba, nfl)
+        #[arg(long, default_value = "nba")]
+        sport: String,
+        /// Minimum edge percentage to alert
+        #[arg(long, default_value = "3.0")]
+        min_edge: f64,
+        /// Scan interval in seconds
+        #[arg(long, default_value = "30")]
+        interval: u64,
+        /// Include spreads in scan
+        #[arg(long)]
+        spreads: bool,
+        /// Include moneyline in scan
+        #[arg(long)]
+        moneyline: bool,
+        /// Include player props in scan
+        #[arg(long)]
+        props: bool,
+        /// Alert sound on edge detection
+        #[arg(long)]
+        alert: bool,
+    },
+}
+
+/// Political market subcommands
+#[derive(Subcommand, Debug)]
+pub enum PoliticsCommands {
+    /// Show political prediction markets
+    Markets {
+        /// Category filter (all, presidential, congressional, approval, geopolitical, executive)
+        #[arg(long, default_value = "all")]
+        category: String,
+        /// Search for specific keyword
+        #[arg(long)]
+        search: Option<String>,
+        /// Show only markets with high volume
+        #[arg(long)]
+        high_volume: bool,
+    },
+    /// Search for specific candidate or topic
+    Search {
+        /// Search query (e.g., "trump", "election", "approval")
+        query: String,
+    },
+    /// Analyze a specific political market
+    Analyze {
+        /// Event ID to analyze
+        #[arg(long)]
+        event: Option<String>,
+        /// Candidate name to search
+        #[arg(long)]
+        candidate: Option<String>,
+    },
+    /// Fetch Trump-related markets
+    Trump {
+        /// Market type (all, favorability, approval, cabinet)
+        #[arg(long, default_value = "all")]
+        market_type: String,
+    },
+    /// Show election markets
+    Elections {
+        /// Year filter (e.g., 2024, 2025, 2026)
+        #[arg(long)]
+        year: Option<String>,
     },
 }
 
@@ -525,6 +632,39 @@ pub enum RlCommands {
         /// Minimum confidence to trade (0.0-1.0)
         #[arg(long, default_value = "0.6")]
         min_confidence: f64,
+    },
+    /// Run RL-powered agent with Order Platform (full integration)
+    Agent {
+        /// Binance symbol to trade
+        #[arg(short, long, default_value = "BTCUSDT")]
+        symbol: String,
+        /// Polymarket market slug (e.g., "will-btc-go-up-15m")
+        #[arg(short, long)]
+        market: String,
+        /// UP token ID
+        #[arg(long)]
+        up_token: String,
+        /// DOWN token ID
+        #[arg(long)]
+        down_token: String,
+        /// Trade size in shares
+        #[arg(long, default_value = "100")]
+        shares: u64,
+        /// Maximum total exposure in USD
+        #[arg(long, default_value = "100.0")]
+        max_exposure: f64,
+        /// Exploration rate (0.0-1.0)
+        #[arg(long, default_value = "0.1")]
+        exploration: f32,
+        /// Enable online learning
+        #[arg(long)]
+        online_learning: bool,
+        /// Dry run mode (no real orders)
+        #[arg(long)]
+        dry_run: bool,
+        /// Tick interval in milliseconds
+        #[arg(long, default_value = "1000")]
+        tick_interval: u64,
     },
 }
 
@@ -1379,4 +1519,1099 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
 
     println!("\n\x1b[90mTip: Use --detail for full strategy guide\x1b[0m\n");
     Ok(())
+}
+
+/// Show Polymarket sports markets
+pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_dk: bool, min_edge: f64, live: bool) -> Result<()> {
+    use crate::agent::{PolymarketSportsClient, OddsProvider, Sport, Market, NBA_SERIES_ID};
+    use rust_decimal::prelude::FromPrimitive;
+
+    let client = PolymarketSportsClient::new()?;
+
+    // If live flag, show live games with scores
+    if live {
+        println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+        println!("\x1b[36m║           LIVE SPORTS - In-Play Betting                      ║\x1b[0m");
+        println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+        println!("Fetching live {} games...\n", league.to_uppercase());
+
+        let series_id = match league.to_lowercase().as_str() {
+            "nba" => NBA_SERIES_ID,
+            _ => NBA_SERIES_ID, // Default to NBA for now
+        };
+
+        let events = client.fetch_series_events(series_id).await?;
+
+        // Get live games first, then today's scheduled games
+        let mut live_games = Vec::new();
+        let mut scheduled_games = Vec::new();
+
+        for event in events {
+            let details = client.get_event_details(&event.id).await?;
+            if details.live && !details.ended {
+                live_games.push(details);
+            } else if !details.ended {
+                // Check if it's today's game
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                if event.slug.contains(&today) {
+                    scheduled_games.push(details);
+                }
+            }
+        }
+
+        if live_games.is_empty() && scheduled_games.is_empty() {
+            println!("\x1b[33m⚠ No live or upcoming games found.\x1b[0m\n");
+            return Ok(());
+        }
+
+        // Display live games
+        if !live_games.is_empty() {
+            println!("\x1b[31m● LIVE NOW\x1b[0m ({} games)\n", live_games.len());
+            println!("┌──────────────────────────────────────────────────────────────────┐");
+
+            for game in &live_games {
+                let status = game.live_status();
+                let score = game.score.as_deref().unwrap_or("--");
+
+                println!("│ \x1b[31m{}\x1b[0m  \x1b[1m{}\x1b[0m", status, game.title);
+                println!("│ Score: \x1b[1;33m{}\x1b[0m  Vol: ${:.0}k",
+                    score,
+                    game.volume.unwrap_or(0.0) / 1000.0);
+
+                // Show moneyline
+                if let Some(ml) = game.moneyline() {
+                    if let Some((p1, p2)) = ml.get_prices() {
+                        println!("│ Moneyline: \x1b[32m{}¢\x1b[0m / \x1b[31m{}¢\x1b[0m",
+                            (p1 * dec!(100)).round_dp(1),
+                            (p2 * dec!(100)).round_dp(1));
+                    }
+                }
+
+                // Show main spread
+                let spreads = game.spreads();
+                if let Some(spread) = spreads.first() {
+                    if let Some((p1, p2)) = spread.get_prices() {
+                        println!("│ {}: {}¢ / {}¢", spread.question,
+                            (p1 * dec!(100)).round_dp(0),
+                            (p2 * dec!(100)).round_dp(0));
+                    }
+                }
+
+                println!("├──────────────────────────────────────────────────────────────────┤");
+            }
+            println!("└──────────────────────────────────────────────────────────────────┘\n");
+        }
+
+        // Display scheduled games
+        if !scheduled_games.is_empty() {
+            println!("\x1b[34m○ TODAY'S GAMES\x1b[0m ({} games)\n", scheduled_games.len());
+
+            for game in &scheduled_games {
+                if let Some(ml) = game.moneyline() {
+                    if let Some((p1, p2)) = ml.get_prices() {
+                        println!("  {} - \x1b[32m{}¢\x1b[0m / \x1b[31m{}¢\x1b[0m",
+                            game.title,
+                            (p1 * dec!(100)).round_dp(1),
+                            (p2 * dec!(100)).round_dp(1));
+                    }
+                } else {
+                    println!("  {}", game.title);
+                }
+            }
+            println!();
+        }
+
+        println!("\x1b[90mTip: Prices auto-refresh. Use --search \"lakers\" to filter.\x1b[0m\n");
+        return Ok(());
+    }
+
+    // Original futures markets display
+    println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[36m║             Polymarket Sports Markets                        ║\x1b[0m");
+    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    // Fetch markets based on league
+    let markets = match league.to_lowercase().as_str() {
+        "nba" => {
+            println!("Fetching NBA markets from Polymarket...\n");
+            client.fetch_nba_markets().await?
+        }
+        "nfl" => {
+            println!("Fetching NFL markets from Polymarket...\n");
+            client.fetch_nfl_markets().await?
+        }
+        _ => {
+            println!("Fetching all sports markets from Polymarket...\n");
+            client.fetch_sports_markets().await?
+        }
+    };
+
+    // Filter by search term if provided
+    let markets = if let Some(term) = search {
+        let term_lower = term.to_lowercase();
+        markets.into_iter()
+            .filter(|m| {
+                m.question.as_ref()
+                    .map(|q| q.to_lowercase().contains(&term_lower))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        markets
+    };
+
+    if markets.is_empty() {
+        println!("\x1b[33m⚠ No sports markets found matching criteria.\x1b[0m\n");
+        return Ok(());
+    }
+
+    println!("Found {} markets:\n", markets.len());
+
+    // Get DraftKings odds if comparison requested
+    let dk_odds = if compare_dk {
+        println!("Fetching DraftKings odds for comparison...\n");
+        let provider = OddsProvider::from_env().ok();
+        if let Some(ref p) = provider {
+            let sport = match league.to_lowercase().as_str() {
+                "nba" => Sport::NBA,
+                "nfl" => Sport::NFL,
+                _ => Sport::NBA,
+            };
+            p.get_odds(sport, Market::Moneyline).await.ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Display markets
+    println!("┌────────────────────────────────────────────────────────────────┐");
+    println!("│ {:^62} │", "POLYMARKET SPORTS MARKETS");
+    println!("├────────────────────────────────────────────────────────────────┤");
+
+    for market in &markets {
+        let question = market.question.as_deref().unwrap_or("Unknown");
+        let truncated = if question.len() > 55 {
+            format!("{}...", &question[..52])
+        } else {
+            question.to_string()
+        };
+
+        println!("│ {:<62} │", truncated);
+
+        // Get prices if available
+        if let Some((yes_price, no_price)) = market.get_prices() {
+            println!("│   Yes: \x1b[32m{:.1}¢\x1b[0m  No: \x1b[31m{:.1}¢\x1b[0m                                        │",
+                yes_price * dec!(100), no_price * dec!(100));
+        }
+
+        // Compare with DraftKings if we have odds
+        if compare_dk {
+            if let Some(ref events) = dk_odds {
+                if let Some((team1, team2)) = market.extract_teams() {
+                    let matching_event = events.iter().find(|e| {
+                        let q = format!("{} {}", e.home_team, e.away_team).to_lowercase();
+                        q.contains(&team1.to_lowercase()) || q.contains(&team2.to_lowercase())
+                    });
+
+                    if let Some(event) = matching_event {
+                        if let Some(best) = event.best_odds() {
+                            let dk_prob = best.home_implied_prob;
+                            if let Some((poly_yes, _)) = market.get_prices() {
+                                let edge = dk_prob - poly_yes;
+                                let edge_pct = edge * dec!(100);
+                                if edge_pct.abs() >= Decimal::from_f64(min_edge).unwrap_or(dec!(5)) {
+                                    if edge > Decimal::ZERO {
+                                        println!("│   \x1b[32m✓ EDGE: +{:.1}% (DK favors YES)\x1b[0m                            │", edge_pct);
+                                    } else {
+                                        println!("│   \x1b[31m✓ EDGE: {:.1}% (DK favors NO)\x1b[0m                             │", edge_pct);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Show token IDs
+        if let Some((yes_token, no_token)) = market.get_token_ids() {
+            println!("│   Yes Token: {}... │", &yes_token[..40.min(yes_token.len())]);
+        }
+
+        println!("├────────────────────────────────────────────────────────────────┤");
+    }
+    println!("└────────────────────────────────────────────────────────────────┘\n");
+
+    if compare_dk && dk_odds.is_none() {
+        println!("\x1b[33m⚠ DraftKings comparison unavailable. Set THE_ODDS_API_KEY.\x1b[0m\n");
+    }
+
+    println!("\x1b[90mTip: Use --search \"lakers\" to find specific matchups\x1b[0m");
+    println!("\x1b[90m     Use --compare-dk to see edges vs sportsbook odds\x1b[0m\n");
+
+    Ok(())
+}
+
+/// Execute full decision chain: Grok -> Claude -> DraftKings -> Polymarket
+pub async fn run_sports_chain(
+    team1: &str,
+    team2: &str,
+    sport: &str,
+    execute: bool,
+    amount: f64,
+) -> Result<()> {
+    use crate::agent::{
+        PolymarketSportsClient, OddsProvider, Sport, Market,
+        GrokClient, GrokConfig, PolymarketEdgeAnalysis,
+    };
+
+    println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[36m║         Sports Betting Decision Chain                        ║\x1b[0m");
+    println!("\x1b[36m║   Grok → Claude → DraftKings → Polymarket                   ║\x1b[0m");
+    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    println!("🏀 Analyzing: {} vs {}\n", team1, team2);
+
+    // Step 1: Grok - Get real-time data
+    println!("\x1b[33m[Step 1/4] Fetching real-time data via Grok...\x1b[0m");
+    let grok_config = GrokConfig::from_env();
+    let grok_data = if grok_config.is_configured() {
+        match GrokClient::new(grok_config) {
+            Ok(client) => {
+                let query = format!("{} vs {} latest news injuries lineup", team1, team2);
+                match client.search(&query).await {
+                    Ok(result) => {
+                        println!("   ✓ Grok analysis complete");
+                        println!("   Summary: {}", &result.summary[..100.min(result.summary.len())]);
+                        if let Some(sentiment) = result.sentiment {
+                            println!("   Sentiment: {}", sentiment);
+                        }
+                        for (i, point) in result.key_points.iter().take(3).enumerate() {
+                            println!("   {}. {}", i + 1, point);
+                        }
+                        Some(result)
+                    }
+                    Err(e) => {
+                        println!("   ⚠ Grok search failed: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ Grok client error: {}", e);
+                None
+            }
+        }
+    } else {
+        println!("   ⚠ GROK_API_KEY not set, skipping real-time data");
+        None
+    };
+
+    // Step 2: DraftKings - Get sportsbook odds
+    println!("\n\x1b[33m[Step 2/4] Fetching DraftKings odds...\x1b[0m");
+    let sport_enum = match sport.to_lowercase().as_str() {
+        "nba" => Sport::NBA,
+        "nfl" => Sport::NFL,
+        "nhl" => Sport::NHL,
+        "mlb" => Sport::MLB,
+        _ => Sport::NBA,
+    };
+
+    let dk_odds = OddsProvider::from_env().ok();
+    let sportsbook_prob = if let Some(ref provider) = dk_odds {
+        match provider.get_odds(sport_enum, Market::Moneyline).await {
+            Ok(events) => {
+                let matching = events.iter().find(|e| {
+                    let matchup = format!("{} {}", e.home_team, e.away_team).to_lowercase();
+                    matchup.contains(&team1.to_lowercase()) || matchup.contains(&team2.to_lowercase())
+                });
+
+                if let Some(event) = matching {
+                    if let Some(best) = event.best_odds() {
+                        println!("   ✓ {} vs {}", event.home_team, event.away_team);
+                        println!("   Home ({}) odds: {} ({:.1}%)",
+                            best.home_bookmaker, best.home_american_odds, best.home_implied_prob * dec!(100));
+                        println!("   Away ({}) odds: {} ({:.1}%)",
+                            best.away_bookmaker, best.away_american_odds, best.away_implied_prob * dec!(100));
+                        Some(best.home_implied_prob)
+                    } else {
+                        println!("   ⚠ No odds available for this matchup");
+                        None
+                    }
+                } else {
+                    println!("   ⚠ Game not found in DraftKings odds");
+                    None
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ DraftKings error: {}", e);
+                None
+            }
+        }
+    } else {
+        println!("   ⚠ THE_ODDS_API_KEY not set");
+        None
+    };
+
+    // Step 3: Polymarket - Find market and get prices
+    println!("\n\x1b[33m[Step 3/4] Finding Polymarket market...\x1b[0m");
+    let poly_client = PolymarketSportsClient::new()?;
+
+    let market_details = poly_client.find_game_market(team1, team2).await?;
+
+    let (edge_analysis, yes_token, no_token) = if let Some(ref details) = market_details {
+        println!("   ✓ Found: {}", details.market.question.as_deref().unwrap_or("Unknown"));
+        if let Some(yes_price) = details.yes_price() {
+            println!("   Current Polymarket: Yes={:.1}¢ No={:.1}¢",
+                yes_price * dec!(100),
+                details.no_price().unwrap_or(dec!(0)) * dec!(100));
+        }
+
+        let edge = if let Some(sb_prob) = sportsbook_prob {
+            PolymarketEdgeAnalysis::calculate(details, sb_prob)
+        } else {
+            None
+        };
+
+        (edge, Some(details.yes_token_id.clone()), Some(details.no_token_id.clone()))
+    } else {
+        println!("   ⚠ No Polymarket market found for {} vs {}", team1, team2);
+        (None, None, None)
+    };
+
+    // Step 4: Decision
+    println!("\n\x1b[33m[Step 4/4] Decision Analysis...\x1b[0m");
+    println!("\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m");
+
+    if let Some(ref edge) = edge_analysis {
+        println!("\n   \x1b[32m📊 Edge Analysis:\x1b[0m");
+        println!("   Polymarket: Yes={:.1}% No={:.1}%",
+            edge.polymarket_yes_prob * dec!(100), edge.polymarket_no_prob * dec!(100));
+        println!("   DraftKings:  Yes={:.1}% No={:.1}%",
+            edge.sportsbook_yes_prob * dec!(100), edge.sportsbook_no_prob * dec!(100));
+        println!("   Edge on YES: {}{:.1}%",
+            if edge.yes_edge > Decimal::ZERO { "+" } else { "" }, edge.yes_edge * dec!(100));
+        println!("   Edge on NO:  {}{:.1}%",
+            if edge.no_edge > Decimal::ZERO { "+" } else { "" }, edge.no_edge * dec!(100));
+
+        if edge.is_significant() {
+            println!("\n   \x1b[32m✓ RECOMMENDATION: Bet {} on {}\x1b[0m",
+                edge.recommended_side, edge.market);
+            println!("   Kelly fraction: {:.1}% of bankroll", edge.kelly_fraction() * dec!(100));
+
+            if execute {
+                println!("\n   \x1b[33m⚠ Order execution not yet implemented.\x1b[0m");
+                println!("   Token to bet: {}", edge.recommended_token());
+                println!("   Amount: ${}", amount);
+            }
+        } else {
+            println!("\n   \x1b[33m⚠ No significant edge detected (need >5%)\x1b[0m");
+        }
+    } else {
+        println!("\n   \x1b[33m⚠ Unable to calculate edge.\x1b[0m");
+        println!("   Missing: {}", if sportsbook_prob.is_none() { "DraftKings odds" } else { "Polymarket market" });
+    }
+
+    println!("\n\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m");
+    println!("\x1b[90mDecision chain complete.\x1b[0m\n");
+
+    Ok(())
+}
+
+/// Show Polymarket political markets
+pub async fn show_polymarket_politics(category: &str, search: Option<&str>, high_volume: bool) -> Result<()> {
+    use crate::agent::{PolymarketPoliticsClient, PoliticalCategory};
+
+    let client = PolymarketPoliticsClient::new()?;
+
+    println!("\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[35m║           POLITICAL PREDICTION MARKETS                       ║\x1b[0m");
+    println!("\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    // Fetch markets based on category
+    let cat = PoliticalCategory::from_str(category);
+    let markets = match cat {
+        PoliticalCategory::All => {
+            println!("Fetching all political markets...\n");
+            client.fetch_politics_markets().await?
+        }
+        _ => {
+            println!("Fetching {:?} markets...\n", cat);
+            client.fetch_by_category(cat).await?
+        }
+    };
+
+    // Filter by search term if provided
+    let markets = if let Some(term) = search {
+        let term_lower = term.to_lowercase();
+        markets.into_iter()
+            .filter(|m| {
+                m.question.as_ref()
+                    .map(|q| q.to_lowercase().contains(&term_lower))
+                    .unwrap_or(false) ||
+                m.description.as_ref()
+                    .map(|d| d.to_lowercase().contains(&term_lower))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        markets
+    };
+
+    // Filter by volume if requested
+    let markets: Vec<_> = if high_volume {
+        markets.into_iter()
+            .filter(|m| m.volume.unwrap_or(0.0) > 100000.0)
+            .collect()
+    } else {
+        markets
+    };
+
+    if markets.is_empty() {
+        println!("\x1b[33m⚠ No political markets found matching criteria.\x1b[0m\n");
+        return Ok(());
+    }
+
+    println!("Found {} markets:\n", markets.len());
+
+    // Display markets
+    println!("┌────────────────────────────────────────────────────────────────┐");
+    println!("│ {:^62} │", "POLITICAL MARKETS");
+    println!("├────────────────────────────────────────────────────────────────┤");
+
+    for market in &markets {
+        let question = market.question.as_deref().unwrap_or("Unknown");
+        let truncated = if question.len() > 55 {
+            format!("{}...", &question[..52])
+        } else {
+            question.to_string()
+        };
+
+        println!("│ {:<62} │", truncated);
+
+        // Get prices if available
+        if let Some((yes_price, no_price)) = market.get_prices() {
+            let vol_str = match market.volume {
+                Some(v) if v >= 1_000_000.0 => format!("${:.1}M", v / 1_000_000.0),
+                Some(v) if v >= 1_000.0 => format!("${:.0}K", v / 1_000.0),
+                Some(v) => format!("${:.0}", v),
+                None => "N/A".to_string(),
+            };
+
+            println!("│   \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Vol: {}                │",
+                yes_price * dec!(100), no_price * dec!(100), vol_str);
+        }
+
+        // Show end date if available
+        if let Some(end_date) = &market.end_date {
+            if let Some(date_part) = end_date.split('T').next() {
+                println!("│   Ends: {}                                            │", date_part);
+            }
+        }
+
+        // Show token IDs
+        if let Some((yes_token, _)) = market.get_token_ids() {
+            let truncated_token = if yes_token.len() > 40 {
+                format!("{}...", &yes_token[..37])
+            } else {
+                yes_token.clone()
+            };
+            println!("│   Token: {}                   │", truncated_token);
+        }
+
+        println!("├────────────────────────────────────────────────────────────────┤");
+    }
+    println!("└────────────────────────────────────────────────────────────────┘\n");
+
+    println!("\x1b[90mTip: Use --search \"trump\" to find specific topics\x1b[0m");
+    println!("\x1b[90m     Use --category approval for approval ratings\x1b[0m");
+    println!("\x1b[90m     Categories: all, presidential, congressional, approval, geopolitical, executive\x1b[0m\n");
+
+    Ok(())
+}
+
+/// Search political markets
+pub async fn search_politics_markets(query: &str) -> Result<()> {
+    use crate::agent::PolymarketPoliticsClient;
+
+    let client = PolymarketPoliticsClient::new()?;
+
+    println!("\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[35m║           POLITICAL MARKET SEARCH                            ║\x1b[0m");
+    println!("\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    println!("Searching for: \"{}\"\n", query);
+
+    let markets = client.search_markets(query).await?;
+
+    if markets.is_empty() {
+        println!("\x1b[33m⚠ No markets found matching \"{}\".\x1b[0m\n", query);
+        return Ok(());
+    }
+
+    println!("Found {} matching markets:\n", markets.len());
+
+    for (i, market) in markets.iter().enumerate().take(20) {
+        let question = market.question.as_deref().unwrap_or("Unknown");
+
+        print!("{}. ", i + 1);
+        println!("\x1b[1m{}\x1b[0m", question);
+
+        if let Some((yes_price, no_price)) = market.get_prices() {
+            let vol_str = match market.volume {
+                Some(v) if v >= 1_000_000.0 => format!("${:.1}M", v / 1_000_000.0),
+                Some(v) if v >= 1_000.0 => format!("${:.0}K", v / 1_000.0),
+                Some(v) => format!("${:.0}", v),
+                None => "N/A".to_string(),
+            };
+
+            println!("   \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
+                yes_price * dec!(100), no_price * dec!(100), vol_str);
+        }
+
+        if let Some(end_date) = &market.end_date {
+            if let Some(date_part) = end_date.split('T').next() {
+                println!("   \x1b[90mEnds: {}\x1b[0m", date_part);
+            }
+        }
+        println!();
+    }
+
+    if markets.len() > 20 {
+        println!("\x1b[90m... and {} more markets\x1b[0m\n", markets.len() - 20);
+    }
+
+    Ok(())
+}
+
+/// Analyze specific political market or candidate
+pub async fn analyze_politics_market(event_id: Option<&str>, candidate: Option<&str>) -> Result<()> {
+    use crate::agent::PolymarketPoliticsClient;
+
+    let client = PolymarketPoliticsClient::new()?;
+
+    println!("\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[35m║           POLITICAL MARKET ANALYSIS                          ║\x1b[0m");
+    println!("\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    if let Some(eid) = event_id {
+        println!("Fetching event {}...\n", eid);
+
+        let event = client.get_event_details(eid).await?;
+
+        println!("\x1b[1m{}\x1b[0m\n", event.title);
+
+        if let Some(desc) = &event.description {
+            let truncated = if desc.len() > 200 {
+                format!("{}...", &desc[..197])
+            } else {
+                desc.clone()
+            };
+            println!("{}\n", truncated);
+        }
+
+        println!("End Date: {}", event.end_date_formatted());
+
+        if let Some(vol) = event.volume {
+            println!("Volume: ${:.0}", vol);
+        }
+
+        println!("\nMarkets:");
+        for (i, market) in event.markets.iter().enumerate() {
+            println!("  {}. {}", i + 1, market.question);
+            if let Some((p1, p2)) = market.get_prices() {
+                println!("     \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m",
+                    p1 * dec!(100), p2 * dec!(100));
+            }
+        }
+    } else if let Some(name) = candidate {
+        println!("Searching for {} markets...\n", name);
+
+        let markets = client.search_candidate(name).await?;
+
+        if markets.is_empty() {
+            println!("\x1b[33m⚠ No markets found for \"{}\".\x1b[0m\n", name);
+            return Ok(());
+        }
+
+        println!("Found {} markets for {}:\n", markets.len(), name);
+
+        for market in markets.iter().take(10) {
+            println!("\x1b[1m{}\x1b[0m", market.question.as_deref().unwrap_or("Unknown"));
+            if let Some((p1, p2)) = market.get_prices() {
+                println!("  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m",
+                    p1 * dec!(100), p2 * dec!(100));
+            }
+            println!();
+        }
+    } else {
+        println!("\x1b[33m⚠ Please specify --event or --candidate\x1b[0m\n");
+    }
+
+    Ok(())
+}
+
+/// Show Trump-related markets
+pub async fn show_trump_markets(market_type: &str) -> Result<()> {
+    use crate::agent::PolymarketPoliticsClient;
+
+    let client = PolymarketPoliticsClient::new()?;
+
+    println!("\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[35m║              TRUMP PREDICTION MARKETS                        ║\x1b[0m");
+    println!("\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    let markets = match market_type.to_lowercase().as_str() {
+        "favorability" => {
+            println!("Fetching Trump favorability markets...\n");
+            let events = client.fetch_trump_favorability_events().await?;
+            // Convert events to markets for display
+            let mut markets = Vec::new();
+            for event in events {
+                for market in event.markets {
+                    if let Some(cid) = market.condition_id {
+                        markets.push(crate::agent::PolymarketPoliticsMarket {
+                            condition_id: cid,
+                            question: Some(market.question),
+                            slug: Some(event.slug.clone()),
+                            active: true,
+                            closed: event.closed,
+                            end_date: None,
+                            clob_token_ids: market.clob_token_ids,
+                            outcome_prices: market.outcome_prices,
+                            volume: market.volume,
+                            liquidity: None,
+                            description: None,
+                            tags: vec![],
+                        });
+                    }
+                }
+            }
+            markets
+        }
+        "approval" => {
+            println!("Fetching Trump approval markets...\n");
+            let events = client.fetch_trump_approval_events().await?;
+            let mut markets = Vec::new();
+            for event in events {
+                for market in event.markets {
+                    if let Some(cid) = market.condition_id {
+                        markets.push(crate::agent::PolymarketPoliticsMarket {
+                            condition_id: cid,
+                            question: Some(market.question),
+                            slug: Some(event.slug.clone()),
+                            active: true,
+                            closed: event.closed,
+                            end_date: None,
+                            clob_token_ids: market.clob_token_ids,
+                            outcome_prices: market.outcome_prices,
+                            volume: market.volume,
+                            liquidity: None,
+                            description: None,
+                            tags: vec![],
+                        });
+                    }
+                }
+            }
+            markets
+        }
+        _ => {
+            println!("Fetching all Trump-related markets...\n");
+            client.fetch_trump_markets().await?
+        }
+    };
+
+    if markets.is_empty() {
+        println!("\x1b[33m⚠ No Trump markets found.\x1b[0m\n");
+        return Ok(());
+    }
+
+    println!("Found {} Trump markets:\n", markets.len());
+
+    for market in markets.iter().take(15) {
+        println!("\x1b[1m{}\x1b[0m", market.question.as_deref().unwrap_or("Unknown"));
+
+        if let Some((yes_price, no_price)) = market.get_prices() {
+            let vol_str = match market.volume {
+                Some(v) if v >= 1_000_000.0 => format!("${:.1}M", v / 1_000_000.0),
+                Some(v) if v >= 1_000.0 => format!("${:.0}K", v / 1_000.0),
+                Some(v) => format!("${:.0}", v),
+                None => "N/A".to_string(),
+            };
+
+            println!("  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
+                yes_price * dec!(100), no_price * dec!(100), vol_str);
+        }
+        println!();
+    }
+
+    if markets.len() > 15 {
+        println!("\x1b[90m... and {} more markets\x1b[0m\n", markets.len() - 15);
+    }
+
+    Ok(())
+}
+
+/// Show election markets
+pub async fn show_election_markets(year: Option<&str>) -> Result<()> {
+    use crate::agent::PolymarketPoliticsClient;
+
+    let client = PolymarketPoliticsClient::new()?;
+
+    println!("\x1b[35m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[35m║              ELECTION PREDICTION MARKETS                     ║\x1b[0m");
+    println!("\x1b[35m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    let markets = client.fetch_election_markets().await?;
+
+    // Filter by year if provided
+    let markets: Vec<_> = if let Some(y) = year {
+        markets.into_iter()
+            .filter(|m| {
+                m.question.as_ref()
+                    .map(|q| q.contains(y))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        markets
+    };
+
+    if markets.is_empty() {
+        println!("\x1b[33m⚠ No election markets found.\x1b[0m\n");
+        return Ok(());
+    }
+
+    println!("Found {} election markets:\n", markets.len());
+
+    for market in markets.iter().take(20) {
+        println!("\x1b[1m{}\x1b[0m", market.question.as_deref().unwrap_or("Unknown"));
+
+        if let Some((yes_price, no_price)) = market.get_prices() {
+            let vol_str = match market.volume {
+                Some(v) if v >= 1_000_000.0 => format!("${:.1}M", v / 1_000_000.0),
+                Some(v) if v >= 1_000.0 => format!("${:.0}K", v / 1_000.0),
+                Some(v) => format!("${:.0}", v),
+                None => "N/A".to_string(),
+            };
+
+            println!("  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
+                yes_price * dec!(100), no_price * dec!(100), vol_str);
+        }
+
+        if let Some(end_date) = &market.end_date {
+            if let Some(date_part) = end_date.split('T').next() {
+                println!("  \x1b[90mEnds: {}\x1b[0m", date_part);
+            }
+        }
+        println!();
+    }
+
+    if markets.len() > 20 {
+        println!("\x1b[90m... and {} more markets\x1b[0m\n", markets.len() - 20);
+    }
+
+    Ok(())
+}
+
+/// Edge opportunity found by the scanner
+#[derive(Debug, Clone)]
+pub struct EdgeOpportunity {
+    pub game: String,
+    pub market_type: String,
+    pub market_question: String,
+    pub pm_price: f64,
+    pub dk_fair_prob: f64,
+    pub edge: f64,
+    pub token_id: String,
+    pub condition_id: String,
+    pub event_id: String,
+    pub is_live: bool,
+    pub score: Option<String>,
+    pub period: Option<String>,
+}
+
+/// Live edge scanner - continuously monitors live games for arbitrage opportunities
+pub async fn run_live_edge_scanner(
+    sport: &str,
+    min_edge: f64,
+    interval: u64,
+    scan_spreads: bool,
+    scan_moneyline: bool,
+    scan_props: bool,
+    alert_sound: bool,
+) -> Result<()> {
+    use crate::agent::{
+        PolymarketSportsClient, OddsProvider, Sport, Market,
+        EventDetails, NBA_SERIES_ID,
+    };
+    use std::collections::HashMap;
+
+    println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[36m║         🎯 LIVE EDGE SCANNER                                 ║\x1b[0m");
+    println!("\x1b[36m║   Monitoring {} | Min Edge: {}% | Interval: {}s             ║\x1b[0m",
+        sport.to_uppercase(), min_edge, interval);
+    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+
+    let pm_client = PolymarketSportsClient::new()?;
+
+    // Check for DK API key
+    let dk_provider = OddsProvider::from_env().ok();
+    if dk_provider.is_none() {
+        println!("\x1b[33m⚠ THE_ODDS_API_KEY not set. Using Polymarket-only mode.\x1b[0m\n");
+    }
+
+    let sport_enum = match sport.to_lowercase().as_str() {
+        "nba" => Sport::NBA,
+        "nfl" => Sport::NFL,
+        _ => Sport::NBA,
+    };
+
+    let series_id = match sport.to_lowercase().as_str() {
+        "nba" => NBA_SERIES_ID,
+        _ => NBA_SERIES_ID,
+    };
+
+    let scan_all = !scan_spreads && !scan_moneyline && !scan_props;
+
+    println!("Scanning: {}{}{}",
+        if scan_spreads || scan_all { "Spreads " } else { "" },
+        if scan_moneyline || scan_all { "Moneyline " } else { "" },
+        if scan_props || scan_all { "Props " } else { "" });
+    println!("Press Ctrl+C to stop\n");
+
+    let mut scan_count = 0u64;
+    let mut found_opportunities: Vec<EdgeOpportunity> = Vec::new();
+
+    loop {
+        scan_count += 1;
+        let now = chrono::Utc::now().format("%H:%M:%S");
+        println!("\x1b[90m[{}] Scan #{} starting...\x1b[0m", now, scan_count);
+
+        // Fetch all today's games from Polymarket (including scheduled and live)
+        let live_games = match pm_client.fetch_todays_games_with_details(series_id).await {
+            Ok(games) => games,
+            Err(e) => {
+                println!("\x1b[31m  Error fetching PM games: {}\x1b[0m", e);
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                continue;
+            }
+        };
+
+        // Helper function to extract team nickname from full name (e.g., "Miami Heat" -> "heat")
+        fn extract_nickname(full_name: &str) -> &str {
+            full_name.split_whitespace().last().unwrap_or(full_name)
+        }
+
+        // Fetch DraftKings odds if available
+        let dk_odds: HashMap<String, (f64, f64)> = if let Some(ref provider) = dk_provider {
+            let mut odds_map = HashMap::new();
+
+            // Fetch moneyline
+            match provider.get_odds(sport_enum, Market::Moneyline).await {
+                Ok(events) => {
+                    for event in events {
+                        if let Some(best) = event.best_odds() {
+                            let home_prob: f64 = best.home_implied_prob.try_into().unwrap_or(0.5);
+                            let away_prob: f64 = best.away_implied_prob.try_into().unwrap_or(0.5);
+                            // Remove vig to get fair probability
+                            let total = home_prob + away_prob;
+                            let fair_home = home_prob / total;
+                            let fair_away = away_prob / total;
+
+                            // Store both full name key and nickname key
+                            let key = format!("{} {}", event.home_team, event.away_team).to_lowercase();
+                            odds_map.insert(key, (fair_home, fair_away));
+
+                            // Also store with nicknames for PM matching (PM uses "Timberwolves vs. Heat" format)
+                            let home_nick = extract_nickname(&event.home_team).to_lowercase();
+                            let away_nick = extract_nickname(&event.away_team).to_lowercase();
+                            let nick_key = format!("{} vs. {}", away_nick, home_nick); // PM format: Away vs. Home
+                            odds_map.insert(nick_key, (fair_home, fair_away));
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  \x1b[31mDK moneyline fetch error: {}\x1b[0m", e);
+                }
+            }
+
+            // Fetch spreads
+            if scan_spreads || scan_all {
+                if let Ok(events) = provider.get_odds(sport_enum, Market::Spread).await {
+                    for event in events {
+                        if let Some(best) = event.best_odds() {
+                            let home_prob: f64 = best.home_implied_prob.try_into().unwrap_or(0.5);
+                            let away_prob: f64 = best.away_implied_prob.try_into().unwrap_or(0.5);
+                            let total = home_prob + away_prob;
+                            let fair_home = home_prob / total;
+                            let fair_away = away_prob / total;
+
+                            let key = format!("{} {} spread", event.home_team, event.away_team).to_lowercase();
+                            odds_map.insert(key, (fair_home, fair_away));
+
+                            // Also store with nicknames for PM matching
+                            let home_nick = extract_nickname(&event.home_team).to_lowercase();
+                            let away_nick = extract_nickname(&event.away_team).to_lowercase();
+                            let nick_key = format!("{} vs. {} spread", away_nick, home_nick);
+                            odds_map.insert(nick_key, (fair_home, fair_away));
+                        }
+                    }
+                }
+            }
+
+            odds_map
+        } else {
+            HashMap::new()
+        };
+
+        let live_count = live_games.iter().filter(|g| g.live).count();
+        let scheduled_count = live_games.len() - live_count;
+
+        println!("  Found {} games ({} LIVE, {} scheduled)",
+            live_games.len(), live_count, scheduled_count);
+
+        // Warn if DK comparison unavailable
+        if dk_odds.is_empty() && dk_provider.is_some() {
+            println!("  \x1b[33m⚠ DK odds empty - edge comparison unavailable\x1b[0m");
+        } else if !dk_odds.is_empty() {
+            println!("  \x1b[32m✓ DK odds loaded ({} markets)\x1b[0m", dk_odds.len());
+        }
+
+        let mut new_opportunities: Vec<EdgeOpportunity> = Vec::new();
+
+        for game in &live_games {
+            // Process each market in the game
+            for market in &game.markets {
+                let question = &market.question;
+
+                // Determine market type
+                let is_spread = question.contains("Spread:");
+                let is_moneyline = !is_spread && !question.contains("Over") &&
+                                   !question.contains("Points") && !question.contains("Rebounds") &&
+                                   !question.contains("Assists") && !question.contains("O/U");
+                let is_prop = question.contains("Points Over") || question.contains("Rebounds Over") ||
+                              question.contains("Assists Over");
+
+                // Skip if not scanning this type
+                if !scan_all {
+                    if is_spread && !scan_spreads { continue; }
+                    if is_moneyline && !scan_moneyline { continue; }
+                    if is_prop && !scan_props { continue; }
+                }
+
+                // Parse Polymarket prices (stored as JSON string like "[\"0.5\", \"0.5\"]")
+                let pm_yes_price: f64 = market.outcome_prices.as_ref()
+                    .and_then(|p| {
+                        serde_json::from_str::<Vec<String>>(p).ok()
+                    })
+                    .and_then(|prices| prices.get(0).cloned())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.5);
+
+                // Try to find matching DK odds
+                let game_key = game.title.to_lowercase();
+                let dk_fair = if is_moneyline {
+                    dk_odds.get(&game_key).map(|(home, away)| {
+                        // Determine which side this market represents
+                        let parts: Vec<&str> = game.title.split(" vs. ").collect();
+                        if parts.len() == 2 {
+                            // First team in title is typically away team on Polymarket
+                            *away
+                        } else {
+                            0.5
+                        }
+                    })
+                } else if is_spread {
+                    let spread_key = format!("{} spread", game_key);
+                    dk_odds.get(&spread_key).map(|(home, _)| *home)
+                } else {
+                    None
+                };
+
+                // Calculate edge
+                if let Some(dk_prob) = dk_fair {
+                    let edge = (dk_prob - pm_yes_price) * 100.0;
+
+                    if edge.abs() >= min_edge {
+                        // Parse token IDs (stored as JSON string like "[\"123...\", \"456...\"]")
+                        let token_id = market.clob_token_ids.as_ref()
+                            .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
+                            .and_then(|ids| ids.get(0).cloned())
+                            .unwrap_or_default();
+
+                        let opp = EdgeOpportunity {
+                            game: game.title.clone(),
+                            market_type: if is_spread { "Spread".to_string() }
+                                        else if is_moneyline { "Moneyline".to_string() }
+                                        else { "Prop".to_string() },
+                            market_question: question.clone(),
+                            pm_price: pm_yes_price,
+                            dk_fair_prob: dk_prob,
+                            edge,
+                            token_id,
+                            condition_id: market.condition_id.clone().unwrap_or_default(),
+                            event_id: game.id.clone(),
+                            is_live: game.live,
+                            score: game.score.clone(),
+                            period: game.period.clone(),
+                        };
+
+                        new_opportunities.push(opp);
+                    }
+                }
+            }
+        }
+
+        // Display new opportunities
+        if !new_opportunities.is_empty() {
+            println!("\n\x1b[32m🎯 Found {} opportunities with edge >= {}%:\x1b[0m\n",
+                new_opportunities.len(), min_edge);
+
+            for opp in &new_opportunities {
+                let live_tag = if opp.is_live {
+                    format!("\x1b[31m🔴 LIVE {}\x1b[0m", opp.period.as_deref().unwrap_or(""))
+                } else {
+                    "\x1b[34m○ SCHEDULED\x1b[0m".to_string()
+                };
+
+                println!("┌────────────────────────────────────────────────────────────────┐");
+                println!("│ {} {} │", live_tag, opp.game);
+                if let Some(ref score) = opp.score {
+                    println!("│ Score: \x1b[1;33m{}\x1b[0m │", score);
+                }
+                println!("├────────────────────────────────────────────────────────────────┤");
+                println!("│ Market: {} │", opp.market_question);
+                println!("│ Type: {} │", opp.market_type);
+                println!("├────────────────────────────────────────────────────────────────┤");
+                println!("│ PM Price: \x1b[33m{:.1}¢\x1b[0m │ DK Fair: \x1b[36m{:.1}%\x1b[0m │ Edge: \x1b[32m{:+.1}%\x1b[0m │",
+                    opp.pm_price * 100.0, opp.dk_fair_prob * 100.0, opp.edge);
+                println!("├────────────────────────────────────────────────────────────────┤");
+                println!("│ Action: \x1b[1;32mBUY YES @ {:.1}¢\x1b[0m │", opp.pm_price * 100.0);
+                println!("│ Token: {}... │", &opp.token_id[..20.min(opp.token_id.len())]);
+                println!("└────────────────────────────────────────────────────────────────┘\n");
+
+                // Play alert sound if enabled
+                if alert_sound {
+                    print!("\x07"); // Bell character
+                    std::io::stdout().flush().ok();
+                }
+            }
+
+            found_opportunities.extend(new_opportunities);
+        } else {
+            println!("  No opportunities found with edge >= {}%", min_edge);
+        }
+
+        // Summary
+        println!("\n\x1b[90m  Total opportunities found this session: {}\x1b[0m",
+            found_opportunities.len());
+        println!("\x1b[90m  Next scan in {} seconds...\x1b[0m\n", interval);
+
+        // Wait for next scan
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+    }
 }

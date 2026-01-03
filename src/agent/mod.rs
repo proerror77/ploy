@@ -14,6 +14,8 @@ pub mod autonomous;
 pub mod client;
 pub mod grok;
 pub mod odds_provider;
+pub mod polymarket_politics;
+pub mod polymarket_sports;
 pub mod protocol;
 pub mod sports_analyst;
 pub mod sports_data;
@@ -29,3 +31,11 @@ pub use protocol::{
 pub use odds_provider::{OddsProvider, OddsProviderConfig, GameEvent, Sport, Market, EdgeAnalysis};
 pub use sports_analyst::{SportsAnalyst, SportsAnalysis, SportsAnalysisWithDK};
 pub use sports_data::{SportsDataFetcher, StructuredGameData};
+pub use polymarket_sports::{
+    PolymarketSportsClient, PolymarketSportsMarket, SportsMarketDetails, PolymarketEdgeAnalysis,
+    EventDetails, LiveGameEvent, LiveGameMarket, NBA_SERIES_ID,
+};
+pub use polymarket_politics::{
+    PolymarketPoliticsClient, PolymarketPoliticsMarket, PoliticsMarketDetails,
+    PoliticsEdgeAnalysis, PoliticalEventDetails, PoliticalCategory, POLITICS_KEYWORDS,
+};
