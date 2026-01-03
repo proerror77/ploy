@@ -31,13 +31,14 @@ use crate::strategy::OrderExecutor;
 /// Momentum strategy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MomentumConfig {
-    /// Minimum CEX price move to trigger (e.g., 0.005 = 0.5%)
+    /// Minimum CEX price move to trigger (e.g., 0.003 = 0.3%)
     pub min_move_pct: Decimal,
 
-    /// Maximum Polymarket odds for entry (e.g., 0.55 = 55¢)
+    /// Maximum Polymarket odds for entry (e.g., 0.40 = 40¢)
+    /// Lower = better entry like CRYINGLITTLEBABY style (20-30¢)
     pub max_entry_price: Decimal,
 
-    /// Minimum estimated edge to enter (e.g., 0.05 = 5%)
+    /// Minimum estimated edge to enter (e.g., 0.03 = 3%)
     pub min_edge: Decimal,
 
     /// Lookback window for momentum calculation (seconds)
@@ -52,25 +53,54 @@ pub struct MomentumConfig {
     /// Cooldown between trades on same symbol (seconds)
     pub cooldown_secs: u64,
 
+    /// Maximum trades per day (0 = unlimited)
+    pub max_daily_trades: u32,
+
     /// Symbols to track
     pub symbols: Vec<String>,
+
+    // === CRYINGLITTLEBABY CONFIRMATORY MODE ===
+    /// Hold positions to resolution (don't exit early)
+    /// When true: buy confirmed winners, collect $1 at resolution
+    /// When false: use take-profit/stop-loss exits
+    pub hold_to_resolution: bool,
+
+    /// Minimum time remaining to enter (seconds)
+    /// CRYINGLITTLEBABY style: 60s (1 min minimum)
+    pub min_time_remaining_secs: u64,
+
+    /// Maximum time remaining to enter (seconds)
+    /// CRYINGLITTLEBABY style: 300s (5 min maximum)
+    /// This ensures we only enter when outcome is nearly decided
+    pub max_time_remaining_secs: u64,
 }
 
 impl Default for MomentumConfig {
     fn default() -> Self {
         Self {
-            min_move_pct: dec!(0.005),      // 0.5% minimum move
-            max_entry_price: dec!(0.55),    // Max 55¢ entry
-            min_edge: dec!(0.05),           // 5% minimum edge
+            // === AGGRESSIVE ENTRY (CRYINGLITTLEBABY style) ===
+            min_move_pct: dec!(0.003),      // 0.3% minimum move
+            max_entry_price: dec!(0.35),    // Max 35¢ entry (confirmed winner should be cheap)
+            min_edge: dec!(0.03),           // 3% minimum edge
             lookback_secs: 5,               // 5-second momentum window
-            shares_per_trade: 100,          // ~$50-60 per trade
-            max_positions: 5,               // Max 5 concurrent
-            cooldown_secs: 30,              // 30s between same symbol
+            shares_per_trade: 100,          // ~$35 per trade at 35¢
+
+            // === ANTI-OVERTRADING CONTROLS ===
+            max_positions: 3,               // Max 3 concurrent
+            cooldown_secs: 60,              // 60s between same symbol
+            max_daily_trades: 20,           // Max 20 trades/day
+
             symbols: vec![
                 "BTCUSDT".into(),
                 "ETHUSDT".into(),
                 "SOLUSDT".into(),
+                "XRPUSDT".into(),
             ],
+
+            // === CRYINGLITTLEBABY CONFIRMATORY MODE (DEFAULT: ON) ===
+            hold_to_resolution: true,       // Hold to collect $1
+            min_time_remaining_secs: 60,    // Min 1 min left
+            max_time_remaining_secs: 300,   // Max 5 min left (outcome should be decided)
         }
     }
 }
@@ -144,28 +174,37 @@ impl EventMatcher {
         let mut symbol_to_series = HashMap::new();
 
         // Map each symbol to its series IDs (from Gamma API)
-        // BTC: 41 = btc-up-or-down-daily (no 15m available)
+        // === 15-MINUTE MARKETS ONLY (CRYINGLITTLEBABY style) ===
+
+        // BTC: No 15m market available - use daily as fallback
         symbol_to_series.insert(
             "BTCUSDT".into(),
             vec![
-                "41".into(), // btc-up-or-down-daily
+                "41".into(), // btc-up-or-down-daily (no 15m exists)
             ],
         );
-        // ETH: 10191 = 15m, 10117 = hourly, 10332 = 4h
+
+        // ETH: 10191 = 15m ONLY
         symbol_to_series.insert(
             "ETHUSDT".into(),
             vec![
                 "10191".into(), // eth-up-or-down-15m
-                "10117".into(), // eth-up-or-down-hourly
-                "10332".into(), // eth-up-or-down-4h
             ],
         );
-        // SOL: 10423 = 15m, 10333 = 4h
+
+        // SOL: 10423 = 15m ONLY
         symbol_to_series.insert(
             "SOLUSDT".into(),
             vec![
                 "10423".into(), // sol-up-or-down-15m
-                "10333".into(), // sol-up-or-down-4h
+            ],
+        );
+
+        // XRP: 10545 = 15m
+        symbol_to_series.insert(
+            "XRPUSDT".into(),
+            vec![
+                "10545".into(), // xrp-up-or-down-15m
             ],
         );
 
@@ -176,21 +215,56 @@ impl EventMatcher {
         }
     }
 
-    /// Find the best event for a symbol (prefers more time remaining)
+    /// Find the best event for a symbol
+    /// In confirmatory mode (CRYINGLITTLEBABY): prefers events CLOSE to ending
+    /// In predictive mode: prefers events with more time remaining
     pub async fn find_event(&self, symbol: &str) -> Option<EventInfo> {
+        // Default: predictive mode (more time = better)
+        self.find_event_with_timing(symbol, 60, i64::MAX, false).await
+    }
+
+    /// Find event with timing constraints (CRYINGLITTLEBABY confirmatory mode)
+    ///
+    /// # Arguments
+    /// * `min_secs` - Minimum time remaining (default: 60s)
+    /// * `max_secs` - Maximum time remaining (default: 300s for confirmatory mode)
+    /// * `prefer_close_to_end` - If true, prefer events closest to ending (confirmatory mode)
+    pub async fn find_event_with_timing(
+        &self,
+        symbol: &str,
+        min_secs: u64,
+        max_secs: i64,
+        prefer_close_to_end: bool,
+    ) -> Option<EventInfo> {
         let series_ids = self.symbol_to_series.get(symbol)?;
         let events = self.active_events.read().await;
 
         // Search through all series for this symbol
         for series_id in series_ids {
             if let Some(series_events) = events.get(series_id) {
-                // Find event with most time remaining (but at least 60s)
-                if let Some(best) = series_events
+                // Filter to events within time window
+                let filtered: Vec<_> = series_events
                     .iter()
-                    .filter(|e| e.is_tradeable(60))
-                    .max_by_key(|e| e.time_remaining().num_seconds())
-                {
-                    return Some(best.clone());
+                    .filter(|e| {
+                        let remaining = e.time_remaining().num_seconds();
+                        remaining >= min_secs as i64 && remaining <= max_secs
+                    })
+                    .collect();
+
+                if filtered.is_empty() {
+                    continue;
+                }
+
+                // CRYINGLITTLEBABY: prefer events CLOSEST to ending (less time = better)
+                // Predictive: prefer events with MORE time remaining
+                let best = if prefer_close_to_end {
+                    filtered.into_iter().min_by_key(|e| e.time_remaining().num_seconds())
+                } else {
+                    filtered.into_iter().max_by_key(|e| e.time_remaining().num_seconds())
+                };
+
+                if let Some(event) = best {
+                    return Some(event.clone());
                 }
             }
         }
@@ -670,6 +744,34 @@ impl ExitManager {
 // Momentum Engine
 // ============================================================================
 
+/// Daily trade counter for rate limiting
+#[derive(Debug, Default)]
+struct DailyTradeCounter {
+    count: u32,
+    reset_date: Option<chrono::NaiveDate>,
+}
+
+impl DailyTradeCounter {
+    fn increment(&mut self) -> u32 {
+        let today = Utc::now().date_naive();
+        if self.reset_date != Some(today) {
+            self.count = 0;
+            self.reset_date = Some(today);
+        }
+        self.count += 1;
+        self.count
+    }
+
+    fn current(&mut self) -> u32 {
+        let today = Utc::now().date_naive();
+        if self.reset_date != Some(today) {
+            self.count = 0;
+            self.reset_date = Some(today);
+        }
+        self.count
+    }
+}
+
 /// Main engine orchestrating the momentum strategy
 pub struct MomentumEngine {
     config: MomentumConfig,
@@ -680,6 +782,7 @@ pub struct MomentumEngine {
     executor: OrderExecutor,
     positions: Arc<RwLock<HashMap<String, Position>>>,
     last_trade_time: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
+    daily_trades: Arc<RwLock<DailyTradeCounter>>,
     dry_run: bool,
 }
 
@@ -705,8 +808,24 @@ impl MomentumEngine {
             executor,
             positions: Arc::new(RwLock::new(HashMap::new())),
             last_trade_time: Arc::new(RwLock::new(HashMap::new())),
+            daily_trades: Arc::new(RwLock::new(DailyTradeCounter::default())),
             dry_run,
         }
+    }
+
+    /// Check if daily trade limit reached
+    async fn daily_limit_reached(&self) -> bool {
+        if self.config.max_daily_trades == 0 {
+            return false; // No limit
+        }
+        let mut counter = self.daily_trades.write().await;
+        counter.current() >= self.config.max_daily_trades
+    }
+
+    /// Record a trade and return new count
+    async fn record_trade(&self) -> u32 {
+        let mut counter = self.daily_trades.write().await;
+        counter.increment()
     }
 
     /// Get event matcher reference
@@ -728,10 +847,24 @@ impl MomentumEngine {
         pm_cache: &QuoteCache,
     ) -> Result<()> {
         info!("Starting momentum engine (dry_run={})", self.dry_run);
-        info!("Config: min_move={:.2}%, max_entry={:.0}¢, min_edge={:.1}%",
-            self.config.min_move_pct * dec!(100),
-            self.config.max_entry_price * dec!(100),
-            self.config.min_edge * dec!(100));
+
+        // Log mode-specific configuration
+        if self.config.hold_to_resolution {
+            info!("=== CRYINGLITTLEBABY CONFIRMATORY MODE ===");
+            info!("• Entry window: {}-{}s before resolution",
+                self.config.min_time_remaining_secs,
+                self.config.max_time_remaining_secs);
+            info!("• Hold to resolution: YES (collect $1)");
+            info!("• Min CEX move: {:.2}%, Max entry: {:.0}¢",
+                self.config.min_move_pct * dec!(100),
+                self.config.max_entry_price * dec!(100));
+        } else {
+            info!("=== PREDICTIVE MODE (early entry) ===");
+            info!("Config: min_move={:.2}%, max_entry={:.0}¢, min_edge={:.1}%",
+                self.config.min_move_pct * dec!(100),
+                self.config.max_entry_price * dec!(100),
+                self.config.min_edge * dec!(100));
+        }
 
         // Refresh events initially
         if let Err(e) = self.event_matcher.refresh().await {
@@ -789,14 +922,43 @@ impl MomentumEngine {
             None => return Ok(()),
         };
 
-        // Find matching event
-        let event = match self.event_matcher.find_event(symbol).await {
-            Some(e) => e,
-            None => {
-                debug!("No active event for {}", symbol);
-                return Ok(());
+        // Find matching event using appropriate timing mode
+        // CRYINGLITTLEBABY: prefer events CLOSE to ending (1-5 min left)
+        // Predictive: prefer events with more time remaining
+        let event = if self.config.hold_to_resolution {
+            // Confirmatory mode: find events within 1-5 min window
+            match self.event_matcher.find_event_with_timing(
+                symbol,
+                self.config.min_time_remaining_secs,
+                self.config.max_time_remaining_secs as i64,
+                true, // prefer_close_to_end
+            ).await {
+                Some(e) => e,
+                None => {
+                    debug!("{} no event in confirmatory window ({}-{}s)",
+                        symbol,
+                        self.config.min_time_remaining_secs,
+                        self.config.max_time_remaining_secs);
+                    return Ok(());
+                }
+            }
+        } else {
+            // Predictive mode: find events with more time remaining
+            match self.event_matcher.find_event(symbol).await {
+                Some(e) => e,
+                None => {
+                    debug!("No active event for {}", symbol);
+                    return Ok(());
+                }
             }
         };
+
+        // Log timing info in confirmatory mode
+        if self.config.hold_to_resolution {
+            let remaining = event.time_remaining().num_seconds();
+            debug!("{} found event {} with {}s remaining (confirmatory mode)",
+                symbol, event.title, remaining);
+        }
 
         // Get PM quotes for this event
         let (up_ask, down_ask) = self.get_pm_prices(pm_cache, &event).await;
@@ -826,6 +988,11 @@ impl MomentumEngine {
 
     /// Handle Polymarket quote update - check exit conditions
     async fn on_pm_update(&self, update: &QuoteUpdate) -> Result<()> {
+        // CRYINGLITTLEBABY mode: skip exit checks, hold to resolution for $1
+        if self.config.hold_to_resolution {
+            return Ok(()); // No early exits - positions resolve automatically
+        }
+
         let mut positions = self.positions.write().await;
 
         // Find position matching this token
@@ -854,6 +1021,12 @@ impl MomentumEngine {
 
     /// Maybe enter a position based on signal
     async fn maybe_enter(&self, signal: MomentumSignal, event: &EventInfo) -> Result<()> {
+        // Check daily trade limit
+        if self.daily_limit_reached().await {
+            debug!("Daily trade limit reached ({}), skipping", self.config.max_daily_trades);
+            return Ok(());
+        }
+
         // Check position limit
         let positions = self.positions.read().await;
         if positions.len() >= self.config.max_positions {
@@ -880,19 +1053,40 @@ impl MomentumEngine {
             Direction::Down => &event.down_token_id,
         };
 
-        info!(
-            "ENTRY SIGNAL: {} {} @ {:.2}¢ (CEX move: {:.2}%, edge: {:.2}%, conf: {:.0}%)",
-            signal.symbol,
-            signal.direction,
-            signal.pm_price * dec!(100),
-            signal.cex_move_pct * dec!(100),
-            signal.edge * dec!(100),
-            signal.confidence * 100.0,
-        );
+        // Log entry signal with mode-specific info
+        let time_remaining = event.time_remaining().num_seconds();
+        if self.config.hold_to_resolution {
+            info!(
+                "🎯 CONFIRMATORY ENTRY: {} {} @ {:.2}¢ | {}s to resolution | CEX: {:.2}%",
+                signal.symbol,
+                signal.direction,
+                signal.pm_price * dec!(100),
+                time_remaining,
+                signal.cex_move_pct * dec!(100),
+            );
+            info!("   → Expected payout: $1.00 (profit: {:.0}¢ per share)",
+                (dec!(1) - signal.pm_price) * dec!(100));
+        } else {
+            info!(
+                "ENTRY SIGNAL: {} {} @ {:.2}¢ (CEX move: {:.2}%, edge: {:.2}%, conf: {:.0}%)",
+                signal.symbol,
+                signal.direction,
+                signal.pm_price * dec!(100),
+                signal.cex_move_pct * dec!(100),
+                signal.edge * dec!(100),
+                signal.confidence * 100.0,
+            );
+        }
 
         if self.dry_run {
-            info!("[DRY RUN] Would buy {} shares of {} {}",
-                self.config.shares_per_trade, signal.symbol, signal.direction);
+            let expected_profit = if self.config.hold_to_resolution {
+                let profit_per_share = dec!(1) - signal.pm_price;
+                format!(" → Expected: ${:.2}", profit_per_share * Decimal::from(self.config.shares_per_trade))
+            } else {
+                String::new()
+            };
+            info!("[DRY RUN] Would buy {} shares of {} {}{}",
+                self.config.shares_per_trade, signal.symbol, signal.direction, expected_profit);
         } else {
             // Create and execute order
             let order = OrderRequest::buy_limit(
@@ -905,10 +1099,12 @@ impl MomentumEngine {
             match self.executor.execute(&order).await {
                 Ok(result) => {
                     let fill_price = result.avg_fill_price.unwrap_or(signal.pm_price);
+                    let trade_count = self.record_trade().await;
                     info!(
-                        "Order filled: {} shares @ {:.2}¢",
+                        "Order filled: {} shares @ {:.2}¢ (trade #{} today)",
                         result.filled_shares,
-                        fill_price * dec!(100)
+                        fill_price * dec!(100),
+                        trade_count
                     );
 
                     // Track position

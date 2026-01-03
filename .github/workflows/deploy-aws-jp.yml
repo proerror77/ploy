@@ -1,0 +1,102 @@
+name: Deploy to AWS Japan
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Trading symbols (comma-separated)'
+        required: true
+        default: 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT'
+      min_move:
+        description: 'Minimum CEX move %'
+        required: true
+        default: '0.2'
+      max_entry:
+        description: 'Max entry price (cents)'
+        required: true
+        default: '35'
+      shares:
+        description: 'Shares per trade'
+        required: true
+        default: '100'
+
+env:
+  AWS_REGION: ap-northeast-1
+  ECR_REPOSITORY: ploy-trading
+  ECS_CLUSTER: ploy-cluster
+  ECS_SERVICE: ploy-momentum
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build and push Docker image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+    - name: Deploy to EC2
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        PRIVATE_KEY: ${{ secrets.AWS_EC2_PRIVATE_KEY }}
+        HOST: ${{ secrets.AWS_EC2_HOST }}
+      run: |
+        echo "$PRIVATE_KEY" > private_key.pem
+        chmod 600 private_key.pem
+
+        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$HOST << 'ENDSSH'
+          # Login to ECR
+          aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+          # Stop existing container
+          docker stop ploy-trading 2>/dev/null || true
+          docker rm ploy-trading 2>/dev/null || true
+
+          # Pull and run new image
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+
+          docker run -d \
+            --name ploy-trading \
+            --restart unless-stopped \
+            -e POLYMARKET_PRIVATE_KEY="${{ secrets.POLYMARKET_PRIVATE_KEY }}" \
+            -e RUST_LOG=info,ploy=debug \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
+            momentum \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --min-move ${{ github.event.inputs.min_move }} \
+            --max-entry ${{ github.event.inputs.max_entry }} \
+            --shares ${{ github.event.inputs.shares }}
+
+          echo "Deployment complete!"
+          docker logs ploy-trading --tail 20
+        ENDSSH
+
+        rm private_key.pem
+
+    - name: Verify deployment
+      run: |
+        echo "✅ Deployed to AWS Japan (ap-northeast-1)"
+        echo "Symbols: ${{ github.event.inputs.symbols }}"
+        echo "Min Move: ${{ github.event.inputs.min_move }}%"
+        echo "Max Entry: ${{ github.event.inputs.max_entry }}¢"
+        echo "Shares: ${{ github.event.inputs.shares }}"
