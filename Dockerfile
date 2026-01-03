@@ -27,7 +27,7 @@ RUN mkdir -p src && \
 
 # Build dependencies (this layer is cached)
 RUN cargo build --release --features rl && \
-    rm -rf src target/release/deps/ploy*
+    rm -rf src target/release/deps/ploy* target/release/libploy* target/release/ploy*
 
 # Copy actual source code
 COPY src ./src
