@@ -50,6 +50,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Crypto for signing (Polymarket requires EIP-712 signatures)
 ethers = { version = "2", features = ["rustls"] }
 
+# Official Polymarket CLOB client SDK
+polymarket-client-sdk = { version = "0.3", features = ["ws", "gamma", "data", "tracing"] }
+
+# Alloy for signing (used by polymarket-client-sdk)
+alloy = { version = "1", features = ["signers", "signer-local"] }
+
 # HMAC authentication
 hmac = "0.12"
 sha2 = "0.10"

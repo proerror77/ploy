@@ -169,6 +169,16 @@ pub enum Commands {
         /// Dry run mode (no real orders)
         #[arg(long)]
         dry_run: bool,
+        /// Predictive mode: enter early (5-15 min before resolution) with take-profit/stop-loss exits
+        /// Default is confirmatory mode (1-5 min, hold to resolution)
+        #[arg(long)]
+        predictive: bool,
+        /// Minimum time remaining to enter (seconds) - for predictive mode
+        #[arg(long, default_value = "300")]
+        min_time: u64,
+        /// Maximum time remaining to enter (seconds) - for predictive mode
+        #[arg(long, default_value = "900")]
+        max_time: u64,
     },
     /// Split arbitrage strategy (gabagool22 分时套利)
     /// Buy UP when cheap, wait for DOWN to be cheap, lock profit

@@ -1,5 +1,6 @@
 pub mod binance_ws;
 pub mod polymarket_clob;
+pub mod polymarket_official;
 pub mod polymarket_ws;
 pub mod postgres;
 
@@ -15,3 +16,6 @@ pub use postgres::{
     DailyMetrics, IncompleteCycle, OrphanedOrder, PersistedState, PostgresStore, RecoverySummary,
 };
 pub use binance_ws::{BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice};
+
+// Official Polymarket SDK re-export
+pub use polymarket_official::sdk as polymarket_sdk;

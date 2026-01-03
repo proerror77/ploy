@@ -79,6 +79,10 @@ pub enum PloyError {
     #[error("Signature error: {0}")]
     Signature(String),
 
+    // Authentication errors
+    #[error("Authentication error: {0}")]
+    Auth(String),
+
     // IO errors
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

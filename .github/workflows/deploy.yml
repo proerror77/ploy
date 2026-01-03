@@ -1,0 +1,190 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build Release Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libpq-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: |
+          cargo build --release --features rl
+          strip target/release/ploy
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ploy-linux-x86_64
+          path: target/release/ploy
+          retention-days: 7
+
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ploy-linux-x86_64
+          path: ./dist
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            echo "Deploying Ploy trading bot..."
+
+            # Stop service
+            sudo systemctl stop ploy || true
+
+            # Backup current binary
+            if [ -f /opt/ploy/bin/ploy ]; then
+              sudo cp /opt/ploy/bin/ploy /opt/ploy/bin/ploy.bak
+            fi
+
+            # Wait for binary upload
+            sleep 2
+
+      - name: Upload binary to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "./dist/ploy"
+          target: "/tmp/"
+          strip_components: 1
+
+      - name: Install and start service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            # Install new binary
+            sudo cp /tmp/ploy /opt/ploy/bin/ploy
+            sudo chmod +x /opt/ploy/bin/ploy
+            sudo chown ploy:ploy /opt/ploy/bin/ploy
+            rm /tmp/ploy
+
+            # Start service
+            sudo systemctl start ploy
+
+            # Wait for startup
+            sleep 5
+
+            # Check status
+            sudo systemctl status ploy --no-pager
+
+            # Check health endpoint
+            curl -f http://localhost:8080/health || echo "Health check pending..."
+
+            echo "Deployment complete!"
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Wait for full startup
+            sleep 10
+
+            # Check if service is running
+            if ! systemctl is-active --quiet ploy; then
+              echo "ERROR: Service is not running!"
+              sudo journalctl -u ploy -n 50 --no-pager
+              exit 1
+            fi
+
+            # Check health endpoint
+            if ! curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "WARNING: Health endpoint not responding yet"
+            else
+              echo "Health check passed!"
+            fi
+
+            echo "Deployment verified successfully!"
+
+  rollback:
+    name: Rollback (Manual)
+    runs-on: ubuntu-latest
+    if: failure() && github.event_name == 'workflow_dispatch'
+    needs: deploy
+    environment: production
+
+    steps:
+      - name: Rollback to previous version
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "Rolling back to previous version..."
+
+            sudo systemctl stop ploy || true
+
+            if [ -f /opt/ploy/bin/ploy.bak ]; then
+              sudo cp /opt/ploy/bin/ploy.bak /opt/ploy/bin/ploy
+              sudo systemctl start ploy
+              echo "Rollback complete!"
+            else
+              echo "ERROR: No backup binary found!"
+              exit 1
+            fi

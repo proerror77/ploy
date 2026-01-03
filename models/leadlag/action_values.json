@@ -1,0 +1,8 @@
+{
+  "symbol": "BTCUSDT",
+  "trade_size": 1.0,
+  "max_position": 50.0,
+  "episodes": 100,
+  "action_values": [0.1, 0.3, 0.2, 0.15, 0.12],
+  "final_avg_reward": 0.5
+}

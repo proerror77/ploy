@@ -10,15 +10,36 @@ on:
       min_move:
         description: 'Minimum CEX move %'
         required: true
-        default: '0.2'
+        default: '0.5'
       max_entry:
         description: 'Max entry price (cents)'
         required: true
-        default: '35'
+        default: '45'
       shares:
         description: 'Shares per trade'
         required: true
         default: '100'
+      predictive:
+        description: 'Predictive mode (early entry with TP/SL)'
+        required: true
+        type: boolean
+        default: true
+      take_profit:
+        description: 'Take profit % (predictive mode)'
+        required: true
+        default: '20'
+      stop_loss:
+        description: 'Stop loss % (predictive mode)'
+        required: true
+        default: '12'
+      min_time:
+        description: 'Min time remaining (seconds)'
+        required: true
+        default: '300'
+      max_time:
+        description: 'Max time remaining (seconds)'
+        required: true
+        default: '900'
 
 env:
   AWS_REGION: ap-northeast-1
@@ -75,6 +96,12 @@ jobs:
           # Pull and run new image
           docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
 
+          # Build command with predictive flag if enabled
+          PREDICTIVE_FLAG=""
+          if [ "${{ github.event.inputs.predictive }}" = "true" ]; then
+            PREDICTIVE_FLAG="--predictive --take-profit ${{ github.event.inputs.take_profit }} --stop-loss ${{ github.event.inputs.stop_loss }} --min-time ${{ github.event.inputs.min_time }} --max-time ${{ github.event.inputs.max_time }}"
+          fi
+
           docker run -d \
             --name ploy-trading \
             --restart unless-stopped \
@@ -85,7 +112,8 @@ jobs:
             --symbols "${{ github.event.inputs.symbols }}" \
             --min-move ${{ github.event.inputs.min_move }} \
             --max-entry ${{ github.event.inputs.max_entry }} \
-            --shares ${{ github.event.inputs.shares }}
+            --shares ${{ github.event.inputs.shares }} \
+            $PREDICTIVE_FLAG
 
           echo "Deployment complete!"
           docker logs ploy-trading --tail 20
@@ -100,3 +128,9 @@ jobs:
         echo "Min Move: ${{ github.event.inputs.min_move }}%"
         echo "Max Entry: ${{ github.event.inputs.max_entry }}¢"
         echo "Shares: ${{ github.event.inputs.shares }}"
+        echo "Predictive Mode: ${{ github.event.inputs.predictive }}"
+        if [ "${{ github.event.inputs.predictive }}" = "true" ]; then
+          echo "Take Profit: ${{ github.event.inputs.take_profit }}%"
+          echo "Stop Loss: ${{ github.event.inputs.stop_loss }}%"
+          echo "Time Window: ${{ github.event.inputs.min_time }}-${{ github.event.inputs.max_time }}s"
+        fi

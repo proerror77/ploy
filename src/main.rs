@@ -77,6 +77,9 @@ async fn main() -> Result<()> {
             take_profit,
             stop_loss,
             dry_run,
+            predictive,
+            min_time,
+            max_time,
         }) => {
             init_logging();
             run_momentum_mode(
@@ -89,6 +92,9 @@ async fn main() -> Result<()> {
                 *take_profit,
                 *stop_loss,
                 *dry_run,
+                *predictive,
+                *min_time,
+                *max_time,
             )
             .await?;
         }
@@ -1787,6 +1793,9 @@ async fn run_momentum_mode(
     take_profit: f64,
     stop_loss: f64,
     dry_run: bool,
+    predictive: bool,
+    min_time: u64,
+    max_time: u64,
 ) -> Result<()> {
     use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket};
     use ploy::signing::Wallet;
@@ -1802,7 +1811,16 @@ async fn run_momentum_mode(
     let symbols_vec: Vec<String> = symbols.split(',').map(|s| s.trim().to_uppercase()).collect();
     info!("Trading symbols: {:?}", symbols_vec);
 
-    // Build momentum config - CRYINGLITTLEBABY confirmatory mode enabled by default
+    // Determine mode settings
+    let (hold_to_resolution, min_time_remaining, max_time_remaining) = if predictive {
+        // Predictive mode: enter early, use take-profit/stop-loss exits
+        (false, min_time, max_time)
+    } else {
+        // Confirmatory mode (CRYINGLITTLEBABY): enter late, hold to resolution
+        (true, 60, 300)
+    };
+
+    // Build momentum config
     let momentum_config = MomentumConfig {
         min_move_pct: Decimal::from_str(&format!("{:.6}", min_move / 100.0))
             .unwrap_or(dec!(0.003)),
@@ -1816,10 +1834,10 @@ async fn run_momentum_mode(
         cooldown_secs: 60,
         max_daily_trades: 20,
         symbols: symbols_vec.clone(),
-        // CRYINGLITTLEBABY confirmatory mode
-        hold_to_resolution: true,       // Hold to collect $1 at resolution
-        min_time_remaining_secs: 60,    // Min 1 min before resolution
-        max_time_remaining_secs: 300,   // Max 5 min before resolution
+        // Mode selection
+        hold_to_resolution,
+        min_time_remaining_secs: min_time_remaining,
+        max_time_remaining_secs: max_time_remaining,
     };
 
     // Build exit config
@@ -1832,10 +1850,16 @@ async fn run_momentum_mode(
         exit_before_resolution_secs: 30,
     };
 
-    // Print config
+    // Print config - different banner for each mode
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║       CRYINGLITTLEBABY CONFIRMATORY MODE 🎯                  ║\x1b[0m");
-    println!("\x1b[36m║   (Buy confirmed winners near resolution → collect $1)       ║\x1b[0m");
+    if predictive {
+        println!("\x1b[33m║       PREDICTIVE MODE 📈 (Early Entry + TP/SL)              ║\x1b[0m");
+        println!("\x1b[33m║   Entry: {}-{}s before resolution | Exit: TP/SL           ║\x1b[0m",
+            min_time_remaining, max_time_remaining);
+    } else {
+        println!("\x1b[36m║       CRYINGLITTLEBABY CONFIRMATORY MODE 🎯                  ║\x1b[0m");
+        println!("\x1b[36m║   (Buy confirmed winners near resolution → collect $1)       ║\x1b[0m");
+    }
     println!("\x1b[36m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
     println!(
         "\x1b[36m║\x1b[0m  Symbols: {:42}\x1b[36m║\x1b[0m",
@@ -1861,10 +1885,16 @@ async fn run_momentum_mode(
         "\x1b[36m║\x1b[0m  Max Positions: {}                                          \x1b[36m║\x1b[0m",
         max_positions
     );
-    println!(
-        "\x1b[36m║\x1b[0m  Take Profit: {:.0}%  |  Stop Loss: {:.0}%                    \x1b[36m║\x1b[0m",
-        take_profit, stop_loss
-    );
+    if predictive {
+        println!(
+            "\x1b[36m║\x1b[0m  Take Profit: {:.0}%  |  Stop Loss: {:.0}%                    \x1b[36m║\x1b[0m",
+            take_profit, stop_loss
+        );
+    } else {
+        println!(
+            "\x1b[36m║\x1b[0m  Exit: Hold to resolution ($1 payout)                       \x1b[36m║\x1b[0m"
+        );
+    }
     println!(
         "\x1b[36m║\x1b[0m  Dry Run: {:44}\x1b[36m║\x1b[0m",
         if dry_run { "YES" } else { "NO" }
