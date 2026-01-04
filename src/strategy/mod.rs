@@ -24,12 +24,15 @@
 // =============================================================================
 
 pub mod traits;
+pub mod manager;
 
 pub use traits::{
     Strategy, DataFeed, MarketUpdate, OrderUpdate, StrategyAction,
     StrategyStateInfo, PositionInfo, RiskLevel, AlertLevel,
-    StrategyEvent, StrategyEventType,
+    StrategyEvent, StrategyEventType, StrategyConfig,
 };
+
+pub use manager::{StrategyManager, StrategyStatus, StrategyFactory, StrategyInfo};
 
 // =============================================================================
 // New modular architecture

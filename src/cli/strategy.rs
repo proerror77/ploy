@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 use std::fs;
 use tracing::info;
 
+use crate::strategy::{StrategyFactory, StrategyManager};
+
 /// Strategy-related commands
 #[derive(Subcommand, Debug)]
 pub enum StrategyCommands {
@@ -115,29 +117,24 @@ fn log_dir() -> PathBuf {
 async fn list_strategies() -> Result<()> {
     let strategies_dir = config_dir().join("strategies");
 
-    println!("\n{}", "=".repeat(60));
-    println!("  AVAILABLE STRATEGIES");
-    println!("{}\n", "=".repeat(60));
+    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[36m║  Available Strategies                                         ║\x1b[0m");
+    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
-    // Built-in strategies
-    let builtin = vec![
-        ("momentum", "CEX momentum → Polymarket arbitrage"),
-        ("split_arb", "Binary market split arbitrage"),
-        ("sports", "Sports betting with odds comparison"),
-        ("politics", "Political event trading"),
-    ];
+    // Get strategies from factory
+    let available = StrategyFactory::available_strategies();
 
-    println!("  {:<15} {:<10} {}", "NAME", "STATUS", "DESCRIPTION");
+    println!("  {:<15} {:<12} {}", "NAME", "STATUS", "DESCRIPTION");
     println!("  {}", "-".repeat(55));
 
-    for (name, desc) in &builtin {
-        let status = get_strategy_status(name);
+    for strategy_info in &available {
+        let status = get_strategy_status(&strategy_info.name);
         let status_str = match status {
             StrategyStatus::Running(_) => "\x1b[32m● running\x1b[0m",
             StrategyStatus::Stopped => "\x1b[90m○ stopped\x1b[0m",
             StrategyStatus::Error(_) => "\x1b[31m✗ error\x1b[0m",
         };
-        println!("  {:<15} {:<18} {}", name, status_str, desc);
+        println!("  {:<15} {:<20} {}", strategy_info.name, status_str, strategy_info.description);
     }
 
     // Check for custom strategy configs
@@ -146,19 +143,30 @@ async fn list_strategies() -> Result<()> {
         println!("  {}", "-".repeat(55));
 
         if let Ok(entries) = fs::read_dir(&strategies_dir) {
+            let mut found = false;
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map(|e| e == "toml").unwrap_or(false) {
                     let name = path.file_stem().unwrap().to_string_lossy();
-                    println!("  {:<15} (config: {})", name, path.display());
+                    // Skip default configs
+                    if !name.ends_with("_default") {
+                        println!("  {:<15} (config: {})", name, path.display());
+                        found = true;
+                    }
                 }
+            }
+            if !found {
+                println!("  \x1b[90m(no custom configs found)\x1b[0m");
             }
         }
     }
 
-    println!("\n{}", "=".repeat(60));
-    println!("  Use 'ploy strategy start <name>' to start a strategy");
-    println!("{}\n", "=".repeat(60));
+    println!("\n  Commands:");
+    println!("  {}", "-".repeat(55));
+    println!("  ploy strategy start <name>     Start a strategy");
+    println!("  ploy strategy stop <name>      Stop a running strategy");
+    println!("  ploy strategy status           Show all strategy status");
+    println!("  ploy strategy logs <name>      View strategy logs\n");
 
     Ok(())
 }
