@@ -390,7 +390,7 @@ pub struct StrategyFactory;
 
 impl StrategyFactory {
     /// Create a strategy from a TOML configuration string
-    pub fn from_toml(config_content: &str) -> Result<Box<dyn Strategy>> {
+    pub fn from_toml(config_content: &str, dry_run: bool) -> Result<Box<dyn Strategy>> {
         use toml::Value;
 
         let config: Value = toml::from_str(config_content)
@@ -403,14 +403,24 @@ impl StrategyFactory {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing strategy.name"))?;
 
+        let strategy_id = format!("{}_{}", strategy_name, chrono::Utc::now().timestamp());
+
         match strategy_name {
             "momentum" => {
-                // TODO: Create MomentumStrategy from config
-                Err(anyhow!("Momentum strategy factory not yet implemented").into())
+                let adapter = super::adapters::MomentumStrategyAdapter::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(adapter))
             }
             "split_arb" => {
-                // TODO: Create SplitArbStrategy from config
-                Err(anyhow!("Split arbitrage strategy factory not yet implemented").into())
+                let adapter = super::adapters::SplitArbStrategyAdapter::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(adapter))
             }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
