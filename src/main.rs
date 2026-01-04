@@ -1,8 +1,9 @@
 use clap::Parser;
 use ploy::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
-use ploy::cli::{self, Cli, Commands, CryptoCommands, SportsCommands, PoliticsCommands, TerminalUI};
+// Use legacy CLI module for backward compatibility
+use ploy::cli::legacy::{self as cli, Cli, Commands, CryptoCommands, SportsCommands, PoliticsCommands, TerminalUI};
 #[cfg(feature = "rl")]
-use ploy::cli::RlCommands;
+use ploy::cli::legacy::RlCommands;
 use ploy::config::AppConfig;
 use ploy::error::Result;
 use ploy::services::{DataCollector, HealthServer, HealthState, Metrics};

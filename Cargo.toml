@@ -75,6 +75,11 @@ url = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+
+# Unix process management (for strategy daemon control)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", features = ["signal", "process"] }
 
 # Terminal UI
 crossterm = { version = "0.27", features = ["event-stream"] }

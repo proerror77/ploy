@@ -1207,7 +1207,7 @@ mod tests {
 
     #[test]
     fn test_parse_order_status() {
-        assert!(matches!(PolymarketClient::parse_order_status("LIVE"), OrderStatus::Open));
+        assert!(matches!(PolymarketClient::parse_order_status("LIVE"), OrderStatus::Submitted));
         assert!(matches!(PolymarketClient::parse_order_status("MATCHED"), OrderStatus::Filled));
         assert!(matches!(PolymarketClient::parse_order_status("CANCELED"), OrderStatus::Cancelled));
     }

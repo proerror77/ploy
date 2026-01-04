@@ -1,0 +1,42 @@
+# Momentum Strategy Default Configuration
+# Copy and customize for your trading setup
+
+[strategy]
+name = "momentum"
+enabled = true
+mode = "predictive"  # "predictive" or "confirmatory"
+
+[entry]
+# Symbols to track (Binance tickers)
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+
+# Minimum CEX price move to trigger entry (%)
+min_move = 0.5
+
+# Maximum entry price on Polymarket (cents)
+max_entry = 45
+
+# Minimum edge required (%)
+min_edge = 5
+
+[exit]
+# Take profit percentage (predictive mode)
+take_profit = 20
+
+# Stop loss percentage (predictive mode)
+stop_loss = 12
+
+# Hold to resolution (confirmatory mode only)
+hold_to_resolution = false
+
+[timing]
+# Entry window before resolution (seconds)
+min_time_remaining = 300  # 5 minutes
+max_time_remaining = 900  # 15 minutes
+
+[risk]
+# Shares per trade
+shares = 100
+
+# Maximum concurrent positions
+max_positions = 5
