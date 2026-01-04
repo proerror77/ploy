@@ -10,6 +10,7 @@ use tracing::info;
 pub struct Wallet {
     inner: LocalWallet,
     chain_id: u64,
+    private_key_hex: String,
 }
 
 impl Wallet {
@@ -28,6 +29,7 @@ impl Wallet {
         Ok(Self {
             inner: wallet,
             chain_id,
+            private_key_hex: format!("0x{}", key_hex),
         })
     }
 
@@ -53,6 +55,11 @@ impl Wallet {
     /// Get the chain ID
     pub fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    /// Get the private key as hex string (with 0x prefix)
+    pub fn private_key_hex(&self) -> &str {
+        &self.private_key_hex
     }
 
     /// Sign a message hash (32 bytes)

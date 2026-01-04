@@ -10,6 +10,7 @@ use crate::domain::OrderStatus;
 use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -298,12 +299,13 @@ impl OrderMonitor {
                                 if new_status == OrderStatus::Filled {
                                     let (filled_shares, avg_price) =
                                         PolymarketClient::calculate_fill(&response);
-                                    if let Some(price) = avg_price {
+                                    if avg_price > Decimal::ZERO {
+                                        let filled_u64 = filled_shares.to_u64().unwrap_or(0);
                                         let _ = store
                                             .update_order_fill(
                                                 &order.client_order_id,
-                                                filled_shares,
-                                                price,
+                                                filled_u64,
+                                                avg_price,
                                                 OrderStatus::Filled,
                                             )
                                             .await;

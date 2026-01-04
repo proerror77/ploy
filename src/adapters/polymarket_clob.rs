@@ -505,7 +505,7 @@ impl PolymarketClient {
     #[instrument(skip(self))]
     pub async fn search_markets(&self, query: &str) -> Result<Vec<MarketSummary>> {
         let req = SearchRequest::builder()
-            .query(query)
+            .q(query)
             .build();
 
         let results = self.gamma_client
@@ -513,16 +513,20 @@ impl PolymarketClient {
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to search markets: {}", e)))?;
 
-        // Convert SDK SearchResults to our MarketSummary
-        let summaries = results.markets.unwrap_or_default()
-            .into_iter()
-            .map(|m| MarketSummary {
-                condition_id: m.condition_id.unwrap_or_default(),
-                question: m.question,
-                slug: m.slug,
-                active: m.active.unwrap_or(true),
-            })
-            .collect();
+        // Extract markets from events in search results
+        let mut summaries = Vec::new();
+        for event in results.events.unwrap_or_default() {
+            if let Some(markets) = event.markets {
+                for m in markets {
+                    summaries.push(MarketSummary {
+                        condition_id: m.condition_id.unwrap_or_default(),
+                        question: m.question,
+                        slug: m.slug,
+                        active: m.active.unwrap_or(true),
+                    });
+                }
+            }
+        }
 
         Ok(summaries)
     }
@@ -554,8 +558,9 @@ impl PolymarketClient {
     /// Get current (active, not closed) event from a series
     #[instrument(skip(self))]
     pub async fn get_current_event(&self, series_id: &str) -> Result<Option<GammaEventInfo>> {
+        // Fetch active events and filter by series
         let req = EventsRequest::builder()
-            .series_id(series_id)
+            .active(true)
             .closed(false)
             .build();
 
@@ -564,10 +569,14 @@ impl PolymarketClient {
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get events: {}", e)))?;
 
-        // Find the first active event
+        // Find the first event that belongs to this series
         let event = events.into_iter()
             .filter(|e| !e.closed.unwrap_or(false))
-            .next();
+            .find(|e| {
+                e.series.as_ref().map_or(false, |series| {
+                    series.iter().any(|s| s.id == series_id)
+                })
+            });
 
         match event {
             Some(e) => Ok(Some(self.convert_sdk_event(&e))),
@@ -612,8 +621,9 @@ impl PolymarketClient {
     /// Get all active events from a series
     #[instrument(skip(self))]
     pub async fn get_all_active_events(&self, series_id: &str) -> Result<Vec<GammaEventInfo>> {
+        // Fetch active events and filter by series
         let req = EventsRequest::builder()
-            .series_id(series_id)
+            .active(true)
             .closed(false)
             .build();
 
@@ -622,8 +632,14 @@ impl PolymarketClient {
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get events: {}", e)))?;
 
+        // Filter to events belonging to this series
         Ok(events.into_iter()
             .filter(|e| !e.closed.unwrap_or(false))
+            .filter(|e| {
+                e.series.as_ref().map_or(false, |series| {
+                    series.iter().any(|s| s.id == series_id)
+                })
+            })
             .map(|e| self.convert_sdk_event(&e))
             .collect())
     }
@@ -632,7 +648,7 @@ impl PolymarketClient {
     #[instrument(skip(self))]
     pub async fn get_active_sports_events(&self, keyword: &str) -> Result<Vec<GammaEventInfo>> {
         let req = SearchRequest::builder()
-            .query(keyword)
+            .q(keyword)
             .build();
 
         let results = self.gamma_client
@@ -649,32 +665,35 @@ impl PolymarketClient {
     }
 
     /// Get all tokens from all active events in a series
+    /// Returns (event, up_token_id, down_token_id) for each event
     #[instrument(skip(self))]
     pub async fn get_series_all_tokens(&self, series_id: &str)
-        -> Result<Vec<(String, String, String)>>
+        -> Result<Vec<(GammaEventInfo, String, String)>>
     {
         let events = self.get_all_active_events(series_id).await?;
-        let mut tokens = Vec::new();
+        let mut result = Vec::new();
 
         for event in events {
+            // Find the first market with clob token IDs
             for market in &event.markets {
                 if let Some(clob_ids) = &market.clob_token_ids {
                     // Parse JSON array of token IDs
                     if let Ok(ids) = serde_json::from_str::<Vec<String>>(clob_ids) {
-                        for (i, token_id) in ids.iter().enumerate() {
-                            let outcome = if i == 0 { "Yes" } else { "No" };
-                            tokens.push((
-                                event.id.clone(),
-                                token_id.clone(),
-                                outcome.to_string(),
+                        if ids.len() >= 2 {
+                            // First token is "Yes", second is "No"
+                            result.push((
+                                event.clone(),
+                                ids[0].clone(),
+                                ids[1].clone(),
                             ));
+                            break; // Only take first market per event
                         }
                     }
                 }
             }
         }
 
-        Ok(tokens)
+        Ok(result)
     }
 
     // ==================== Trading Methods ====================
@@ -784,9 +803,9 @@ impl PolymarketClient {
         Ok(OrderResponse {
             id: order.id,
             status: format!("{:?}", order.status),
-            owner: order.owner,
-            market: order.market,
-            asset_id: order.asset_id,
+            owner: Some(order.owner.to_string()),
+            market: Some(order.market),
+            asset_id: Some(order.asset_id),
             side: Some(format!("{:?}", order.side)),
             original_size: Some(order.original_size.to_string()),
             size_matched: Some(order.size_matched.to_string()),
@@ -921,7 +940,7 @@ impl PolymarketClient {
         let req = OrdersRequest::builder().build();
 
         let orders = auth_client
-            .orders(req)
+            .orders(&req, None)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get open orders: {}", e)))?;
 
@@ -932,11 +951,11 @@ impl PolymarketClient {
                 status.contains("Live") || status.contains("Open")
             })
             .map(|o| OrderResponse {
-                id: o.id,
+                id: o.id.clone(),
                 status: format!("{:?}", o.status),
-                owner: o.owner,
-                market: o.market,
-                asset_id: o.asset_id,
+                owner: Some(o.owner.to_string()),
+                market: Some(o.market.clone()),
+                asset_id: Some(o.asset_id.clone()),
                 side: Some(format!("{:?}", o.side)),
                 original_size: Some(o.original_size.to_string()),
                 size_matched: Some(o.size_matched.to_string()),
@@ -970,16 +989,16 @@ impl PolymarketClient {
             .build();
 
         let orders = auth_client
-            .orders(req)
+            .orders(&req, None)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get orders: {}", e)))?;
 
         Ok(orders.data.into_iter().map(|o| OrderResponse {
-            id: o.id,
+            id: o.id.clone(),
             status: format!("{:?}", o.status),
-            owner: o.owner,
-            market: o.market,
-            asset_id: o.asset_id,
+            owner: Some(o.owner.to_string()),
+            market: Some(o.market.clone()),
+            asset_id: Some(o.asset_id.clone()),
             side: Some(format!("{:?}", o.side)),
             original_size: Some(o.original_size.to_string()),
             size_matched: Some(o.size_matched.to_string()),
@@ -1011,7 +1030,7 @@ impl PolymarketClient {
         let req = OrdersRequest::builder().build();
 
         let orders = auth_client
-            .orders(req)
+            .orders(&req, None)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get order history: {}", e)))?;
 
@@ -1023,11 +1042,11 @@ impl PolymarketClient {
         };
 
         Ok(orders_data.into_iter().map(|o| OrderResponse {
-            id: o.id,
+            id: o.id.clone(),
             status: format!("{:?}", o.status),
-            owner: o.owner,
-            market: o.market,
-            asset_id: o.asset_id,
+            owner: Some(o.owner.to_string()),
+            market: Some(o.market.clone()),
+            asset_id: Some(o.asset_id.clone()),
             side: Some(format!("{:?}", o.side)),
             original_size: Some(o.original_size.to_string()),
             size_matched: Some(o.size_matched.to_string()),
@@ -1069,25 +1088,27 @@ impl PolymarketClient {
             .await
             .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
 
-        let mut builder = TradesRequest::builder();
-        if let Some(l) = limit {
-            builder = builder.limit(l as i64);
-        }
-        let req = builder.build();
+        let req = TradesRequest::builder().build();
 
         let trades = auth_client
-            .trades(req)
+            .trades(&req, None)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get trades: {}", e)))?;
 
-        Ok(trades.data.into_iter().map(|t| TradeResponse {
-            id: Some(t.id),
-            order_id: t.order_id,
-            asset_id: t.asset_id,
+        // Apply limit if specified (SDK doesn't support limit parameter)
+        let trades_iter: Box<dyn Iterator<Item = _>> = match limit {
+            Some(l) => Box::new(trades.data.into_iter().take(l as usize)),
+            None => Box::new(trades.data.into_iter()),
+        };
+
+        Ok(trades_iter.map(|t| TradeResponse {
+            id: Some(t.id.clone()),
+            order_id: Some(t.taker_order_id.clone()),
+            asset_id: t.asset_id.clone(),
             side: format!("{:?}", t.side),
             price: t.price.to_string(),
             size: t.size.to_string(),
-            fee: Some(t.fee.to_string()),
+            fee: Some(t.fee_rate_bps.to_string()),
             timestamp: Some(t.match_time.to_rfc3339()),
             extra: HashMap::new(),
         }).collect())
@@ -1160,11 +1181,16 @@ impl PolymarketClient {
         }
     }
 
-    /// Calculate fill amount from an order
-    pub fn calculate_fill(order: &OrderResponse) -> Option<Decimal> {
-        let size_matched = order.size_matched.as_ref()?.parse::<Decimal>().ok()?;
-        let price = order.price.as_ref()?.parse::<Decimal>().ok()?;
-        Some(size_matched * price)
+    /// Calculate fill amount and average price from an order
+    /// Returns (filled_shares, avg_price)
+    pub fn calculate_fill(order: &OrderResponse) -> (Decimal, Decimal) {
+        let size_matched = order.size_matched.as_ref()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .unwrap_or(Decimal::ZERO);
+        let price = order.price.as_ref()
+            .and_then(|p| p.parse::<Decimal>().ok())
+            .unwrap_or(Decimal::ZERO);
+        (size_matched, price)
     }
 }
 

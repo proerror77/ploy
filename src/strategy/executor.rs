@@ -3,6 +3,7 @@ use crate::config::ExecutionConfig;
 use crate::domain::{Order, OrderRequest, OrderStatus, Side};
 use crate::error::{OrderError, PloyError, Result};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, error, info, warn};
@@ -113,16 +114,17 @@ impl OrderExecutor {
                 // Get final state
                 let final_order = self.client.get_order(&order_id).await?;
                 let (filled, price) = PolymarketClient::calculate_fill(&final_order);
+                let filled_u64 = filled.to_u64().unwrap_or(0);
 
                 Ok(ExecutionResult {
                     order_id: order_id.clone(),
-                    status: if filled > 0 {
+                    status: if filled > Decimal::ZERO {
                         OrderStatus::PartiallyFilled
                     } else {
                         OrderStatus::Cancelled
                     },
-                    filled_shares: filled,
-                    avg_fill_price: price,
+                    filled_shares: filled_u64,
+                    avg_fill_price: Some(price),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                 })
             }
@@ -139,14 +141,15 @@ impl OrderExecutor {
             let order = self.client.get_order(order_id).await?;
             let status = PolymarketClient::parse_order_status(&order.status);
             let (filled, price) = PolymarketClient::calculate_fill(&order);
+            let filled_u64 = filled.to_u64().unwrap_or(0);
 
             match status {
                 OrderStatus::Filled => {
                     return Ok(ExecutionResult {
                         order_id: order_id.to_string(),
                         status,
-                        filled_shares: filled,
-                        avg_fill_price: price,
+                        filled_shares: filled_u64,
+                        avg_fill_price: Some(price),
                         elapsed_ms: 0, // Will be updated by caller
                     });
                 }
@@ -154,8 +157,8 @@ impl OrderExecutor {
                     return Ok(ExecutionResult {
                         order_id: order_id.to_string(),
                         status,
-                        filled_shares: filled,
-                        avg_fill_price: price,
+                        filled_shares: filled_u64,
+                        avg_fill_price: Some(price),
                         elapsed_ms: 0,
                     });
                 }
