@@ -1218,9 +1218,9 @@ mod tests {
         let signal = MomentumSignal {
             symbol: "BTCUSDT".into(),
             direction: Direction::Up,
-            cex_move_pct: dec!(0.01),  // 1%
-            pm_price: dec!(0.50),       // 50¢
-            edge: dec!(0.10),           // 10%
+            cex_move_pct: dec!(0.01),  // 1% (>= min_move_pct of 0.3%)
+            pm_price: dec!(0.30),       // 30¢ (<= max_entry_price of 35¢)
+            edge: dec!(0.10),           // 10% (>= min_edge of 3%)
             confidence: 0.8,
             timestamp: Utc::now(),
         };
