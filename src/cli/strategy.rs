@@ -221,6 +221,9 @@ async fn start_strategy(
 
 /// Run strategy in foreground using StrategyManager
 async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: bool) -> Result<()> {
+    use std::sync::Arc;
+    use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PolymarketClient};
+    use crate::strategy::DataFeedManager;
 
     // Load config
     let config_content = fs::read_to_string(config_path)
@@ -233,25 +236,69 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
         .context("Failed to create strategy from config")?;
 
     let strategy_id = strategy.id().to_string();
+    let required_feeds = strategy.required_feeds();
 
     println!("  Strategy ID: {}", strategy_id);
     println!("  Strategy: {}", strategy.name());
     println!("  Description: {}", strategy.description());
     println!("  Dry Run: {}", dry_run);
+    println!("  Required Feeds: {:?}", required_feeds);
     println!();
 
     // Create strategy manager
-    let manager = StrategyManager::new(1000); // 1 second tick interval
+    let manager = Arc::new(StrategyManager::new(1000)); // 1 second tick interval
 
     // Take the action receiver before starting strategy
     let action_rx = manager.take_action_receiver().await
         .expect("Action receiver should be available");
 
+    // Extract symbols from feeds for Binance
+    let binance_symbols: Vec<String> = required_feeds.iter()
+        .filter_map(|f| match f {
+            crate::strategy::DataFeed::BinanceSpot { symbols } => Some(symbols.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    // Create data feed manager with required feeds
+    let mut feed_manager = DataFeedManager::new(manager.clone());
+
+    if !binance_symbols.is_empty() {
+        println!("  \x1b[36mConfiguring Binance feed: {:?}\x1b[0m", binance_symbols);
+        feed_manager = feed_manager.with_binance(binance_symbols);
+    }
+
+    // Configure Polymarket if needed
+    let has_polymarket_feed = required_feeds.iter().any(|f| {
+        matches!(f, crate::strategy::DataFeed::PolymarketEvents { .. }
+            | crate::strategy::DataFeed::PolymarketQuotes { .. })
+    });
+
+    if has_polymarket_feed {
+        println!("  \x1b[36mConfiguring Polymarket feed\x1b[0m");
+        let pm_client = PolymarketClient::new("https://clob.polymarket.com", dry_run)?;
+        let pm_ws = PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+        feed_manager = feed_manager.with_polymarket(pm_ws, pm_client);
+    }
+
     // Start the strategy
     manager.start_strategy(strategy, Some(config_path.display().to_string())).await
         .context("Failed to start strategy")?;
 
-    println!("\x1b[32m✓ Strategy started successfully\x1b[0m\n");
+    println!("\x1b[32m✓ Strategy started\x1b[0m");
+
+    // Start data feeds
+    println!("  \x1b[36mStarting data feeds...\x1b[0m");
+    feed_manager.start().await?;
+
+    // Discover and subscribe to events based on strategy feeds
+    let tokens = feed_manager.start_for_feeds(required_feeds).await?;
+    if !tokens.is_empty() {
+        println!("  \x1b[36mSubscribed to {} tokens\x1b[0m", tokens.len());
+    }
+
+    println!("\x1b[32m✓ Data feeds started\x1b[0m\n");
 
     // Spawn action handler task
     let action_handle = tokio::spawn(handle_strategy_actions(action_rx));

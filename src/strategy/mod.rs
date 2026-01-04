@@ -26,6 +26,7 @@
 pub mod traits;
 pub mod manager;
 pub mod adapters;
+pub mod feeds;
 
 pub use traits::{
     Strategy, DataFeed, MarketUpdate, OrderUpdate, StrategyAction,
@@ -35,6 +36,7 @@ pub use traits::{
 
 pub use manager::{StrategyManager, StrategyStatus, StrategyFactory, StrategyInfo};
 pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};
+pub use feeds::{DataFeedManager, DataFeedBuilder};
 
 // =============================================================================
 // New modular architecture
