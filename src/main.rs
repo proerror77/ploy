@@ -169,6 +169,10 @@ async fn main() -> Result<()> {
             init_logging();
             run_politics_command(politics_cmd).await?;
         }
+        Some(Commands::Strategy(strategy_cmd)) => {
+            init_logging();
+            strategy_cmd.clone().run().await?;
+        }
         #[cfg(feature = "rl")]
         Some(Commands::Rl(rl_cmd)) => {
             init_logging();

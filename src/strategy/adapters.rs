@@ -673,25 +673,50 @@ impl SplitArbStrategyAdapter {
             .map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
 
         let empty_table = Value::Table(Default::default());
-        let strategy = config.get("strategy").unwrap_or(&empty_table);
+        let _strategy = config.get("strategy").unwrap_or(&empty_table);
         let entry = config.get("entry").unwrap_or(&empty_table);
+        let position = config.get("position").unwrap_or(&empty_table);
         let risk = config.get("risk").unwrap_or(&empty_table);
 
+        // Support both config field naming conventions
+        // Legacy: max_combined_price = total for YES+NO (e.g., 98 cents)
+        // New: target_sum = same meaning, max_entry = single side max
+
+        // Get target total cost (YES + NO combined)
+        let target_sum = entry.get("target_sum")
+            .or_else(|| entry.get("max_combined_price"))
+            .and_then(|v| v.as_float())
+            .map(|v| if v > 1.0 { v / 100.0 } else { v }) // Handle both cents and decimal
+            .unwrap_or(0.98);
+
+        // Max entry for single side (default to half of target_sum)
+        let max_entry = entry.get("max_entry")
+            .and_then(|v| v.as_float())
+            .map(|v| if v > 1.0 { v / 100.0 } else { v })
+            .unwrap_or(target_sum / 2.0);
+
+        // min_profit (new) or min_spread (legacy)
+        let min_profit = entry.get("min_profit")
+            .or_else(|| entry.get("min_spread"))
+            .and_then(|v| v.as_float())
+            .map(|v| if v > 1.0 { v / 100.0 } else { v })
+            .unwrap_or(0.02);
+
+        // shares: risk.shares (new) or position.shares_per_side (legacy)
+        let shares = risk.get("shares")
+            .or_else(|| position.get("shares_per_side"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(50) as u64;
+
         let split_config = CoreSplitArbConfig {
-            max_entry_price: Decimal::try_from(
-                entry.get("max_entry").and_then(|v| v.as_float()).unwrap_or(35.0) / 100.0
-            ).unwrap_or(dec!(0.35)),
-            target_total_cost: Decimal::try_from(
-                entry.get("target_sum").and_then(|v| v.as_float()).unwrap_or(70.0) / 100.0
-            ).unwrap_or(dec!(0.70)),
-            min_profit_margin: Decimal::try_from(
-                entry.get("min_profit").and_then(|v| v.as_float()).unwrap_or(5.0) / 100.0
-            ).unwrap_or(dec!(0.05)),
+            max_entry_price: Decimal::try_from(max_entry).unwrap_or(dec!(0.49)),
+            target_total_cost: Decimal::try_from(target_sum).unwrap_or(dec!(0.98)),
+            min_profit_margin: Decimal::try_from(min_profit).unwrap_or(dec!(0.02)),
             max_hedge_wait_secs: risk.get("max_hedge_wait")
                 .and_then(|v| v.as_integer()).unwrap_or(30) as u64,
-            shares_per_trade: risk.get("shares")
-                .and_then(|v| v.as_integer()).unwrap_or(100) as u64,
+            shares_per_trade: shares,
             max_unhedged_positions: risk.get("max_unhedged")
+                .or_else(|| position.get("max_positions"))
                 .and_then(|v| v.as_integer()).unwrap_or(3) as usize,
             unhedged_stop_loss: Decimal::try_from(
                 risk.get("unhedged_stop").and_then(|v| v.as_float()).unwrap_or(10.0) / 100.0
@@ -1076,9 +1101,9 @@ max_positions = 5
 name = "split_arb"
 
 [entry]
-max_entry = 35
-target_sum = 70
-min_profit = 5
+max_entry = 0.35
+target_sum = 0.70
+min_profit = 0.05
 
 [risk]
 shares = 100
@@ -1096,5 +1121,35 @@ unhedged_stop = 10
         assert_eq!(adapter.config.max_entry_price, dec!(0.35));
         assert_eq!(adapter.config.target_total_cost, dec!(0.70));
         assert_eq!(adapter.config.shares_per_trade, 100);
+    }
+
+    #[test]
+    fn test_split_arb_from_legacy_toml() {
+        // Test with legacy config format (using cents and max_combined_price)
+        let toml = r#"
+[strategy]
+name = "split_arb"
+
+[entry]
+max_combined_price = 98
+min_spread = 2
+
+[position]
+shares_per_side = 50
+max_positions = 10
+"#;
+
+        let adapter = SplitArbStrategyAdapter::from_toml(
+            "test".into(),
+            toml,
+            true,
+        ).unwrap();
+
+        // max_combined_price maps to target_total_cost
+        assert_eq!(adapter.config.target_total_cost, dec!(0.98));
+        // max_entry defaults to half of target_sum
+        assert_eq!(adapter.config.max_entry_price, dec!(0.49));
+        assert_eq!(adapter.config.shares_per_trade, 50);
+        assert_eq!(adapter.config.max_unhedged_positions, 10);
     }
 }

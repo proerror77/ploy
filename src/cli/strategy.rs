@@ -17,7 +17,7 @@ use tracing::info;
 use crate::strategy::{StrategyFactory, StrategyManager};
 
 /// Strategy-related commands
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum StrategyCommands {
     /// List all available strategies
     List,
@@ -219,32 +219,109 @@ async fn start_strategy(
     }
 }
 
-/// Run strategy in foreground
+/// Run strategy in foreground using StrategyManager
 async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: bool) -> Result<()> {
-    // Load config and run the appropriate strategy
+
+    // Load config
     let config_content = fs::read_to_string(config_path)
         .context(format!("Failed to read config: {}", config_path.display()))?;
 
     println!("\x1b[32m▶ Running {} in foreground (Ctrl+C to stop)\x1b[0m\n", name);
 
-    // Parse config and run strategy based on name
-    match name {
-        "momentum" => {
-            run_momentum_from_config(&config_content, dry_run).await
-        }
-        "split_arb" => {
-            println!("Split arbitrage strategy starting...");
-            // TODO: Implement split_arb runner
-            Ok(())
-        }
-        "sports" => {
-            println!("Sports betting strategy starting...");
-            // TODO: Implement sports runner
-            Ok(())
-        }
-        _ => {
-            println!("\x1b[31m✗ Unknown strategy: {}\x1b[0m", name);
-            anyhow::bail!("Unknown strategy: {}", name)
+    // Create strategy via factory
+    let strategy = StrategyFactory::from_toml(&config_content, dry_run)
+        .context("Failed to create strategy from config")?;
+
+    let strategy_id = strategy.id().to_string();
+
+    println!("  Strategy ID: {}", strategy_id);
+    println!("  Strategy: {}", strategy.name());
+    println!("  Description: {}", strategy.description());
+    println!("  Dry Run: {}", dry_run);
+    println!();
+
+    // Create strategy manager
+    let manager = StrategyManager::new(1000); // 1 second tick interval
+
+    // Take the action receiver before starting strategy
+    let action_rx = manager.take_action_receiver().await
+        .expect("Action receiver should be available");
+
+    // Start the strategy
+    manager.start_strategy(strategy, Some(config_path.display().to_string())).await
+        .context("Failed to start strategy")?;
+
+    println!("\x1b[32m✓ Strategy started successfully\x1b[0m\n");
+
+    // Spawn action handler task
+    let action_handle = tokio::spawn(handle_strategy_actions(action_rx));
+
+    // Wait for shutdown signal
+    println!("Press Ctrl+C to stop...\n");
+    tokio::signal::ctrl_c().await?;
+
+    println!("\n\x1b[33m⚠ Shutdown signal received\x1b[0m");
+
+    // Graceful shutdown
+    println!("Stopping strategy gracefully...");
+    manager.stop_strategy(&strategy_id, true).await
+        .context("Failed to stop strategy")?;
+
+    // Cancel action handler
+    action_handle.abort();
+
+    println!("\x1b[32m✓ Strategy stopped\x1b[0m");
+
+    Ok(())
+}
+
+/// Handle actions emitted by strategies
+async fn handle_strategy_actions(mut rx: tokio::sync::mpsc::Receiver<(String, crate::strategy::StrategyAction)>) {
+    use crate::strategy::StrategyAction;
+
+    while let Some((strategy_id, action)) = rx.recv().await {
+        match action {
+            StrategyAction::SubmitOrder { client_order_id, order, priority } => {
+                println!("  \x1b[36m[{}]\x1b[0m Order: {} (priority: {})",
+                    strategy_id, client_order_id, priority);
+                println!("         Token: {}", order.token_id);
+                println!("         Side: {:?}, Shares: {}, Price: {:.2}¢",
+                    order.market_side, order.shares, order.limit_price * rust_decimal::Decimal::from(100));
+                // In production, this would submit to the order executor
+            }
+            StrategyAction::CancelOrder { order_id } => {
+                println!("  \x1b[33m[{}]\x1b[0m Cancel: {}",
+                    strategy_id, order_id);
+            }
+            StrategyAction::ModifyOrder { order_id, new_price, new_size } => {
+                println!("  \x1b[33m[{}]\x1b[0m Modify: {} price={:?} size={:?}",
+                    strategy_id, order_id, new_price, new_size);
+            }
+            StrategyAction::Alert { level, message } => {
+                let color = match level {
+                    crate::strategy::AlertLevel::Info => "\x1b[36m",
+                    crate::strategy::AlertLevel::Warning => "\x1b[33m",
+                    crate::strategy::AlertLevel::Error => "\x1b[31m",
+                    crate::strategy::AlertLevel::Critical => "\x1b[31;1m",
+                };
+                println!("  {}[{}] {:?}: {}\x1b[0m", color, strategy_id, level, message);
+            }
+            StrategyAction::LogEvent { event } => {
+                println!("  \x1b[90m[{}] {:?}: {}\x1b[0m",
+                    strategy_id, event.event_type, event.message);
+            }
+            StrategyAction::UpdateRisk { level, reason } => {
+                println!("  \x1b[35m[{}]\x1b[0m Risk: {:?} - {}",
+                    strategy_id, level, reason);
+            }
+            StrategyAction::SubscribeFeed { feed } => {
+                println!("  \x1b[90m[{}]\x1b[0m Subscribe: {:?}",
+                    strategy_id, feed);
+            }
+            StrategyAction::UnsubscribeFeed { feed } => {
+                println!("  \x1b[90m[{}]\x1b[0m Unsubscribe: {:?}",
+                    strategy_id, feed);
+            }
         }
     }
 }
@@ -527,67 +604,3 @@ fn create_default_config(name: &str, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Run momentum strategy from TOML config
-async fn run_momentum_from_config(config_content: &str, dry_run: bool) -> Result<()> {
-    use toml::Value;
-
-    let config: Value = toml::from_str(config_content)?;
-
-    // Extract config values with default empty tables
-    let empty_table = Value::Table(Default::default());
-    let strategy = config.get("strategy").unwrap_or(&empty_table);
-    let entry = config.get("entry").unwrap_or(&empty_table);
-    let exit = config.get("exit").unwrap_or(&empty_table);
-    let timing = config.get("timing").unwrap_or(&empty_table);
-    let risk = config.get("risk").unwrap_or(&empty_table);
-
-    let mode = strategy.get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("predictive");
-
-    let symbols = entry.get("symbols")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
-        .unwrap_or_else(|| "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT".into());
-
-    let min_move = entry.get("min_move_pct").and_then(|v| v.as_float()).unwrap_or(0.5);
-    let max_entry = entry.get("max_entry_cents").and_then(|v| v.as_float()).unwrap_or(45.0);
-    let min_edge = entry.get("min_edge_pct").and_then(|v| v.as_float()).unwrap_or(5.0);
-
-    let take_profit = exit.get("take_profit_pct").and_then(|v| v.as_float()).unwrap_or(20.0);
-    let stop_loss = exit.get("stop_loss_pct").and_then(|v| v.as_float()).unwrap_or(12.0);
-
-    let min_time = timing.get("min_time_remaining_secs").and_then(|v| v.as_integer()).unwrap_or(300) as u64;
-    let max_time = timing.get("max_time_remaining_secs").and_then(|v| v.as_integer()).unwrap_or(900) as u64;
-
-    let shares = risk.get("shares_per_trade").and_then(|v| v.as_integer()).unwrap_or(100) as u64;
-    let max_positions = risk.get("max_positions").and_then(|v| v.as_integer()).unwrap_or(5) as usize;
-
-    let predictive = mode == "predictive";
-
-    println!("Config loaded:");
-    println!("  Mode: {}", mode);
-    println!("  Symbols: {}", symbols);
-    println!("  Min Move: {}%", min_move);
-    println!("  Max Entry: {}¢", max_entry);
-    if predictive {
-        println!("  Take Profit: {}%", take_profit);
-        println!("  Stop Loss: {}%", stop_loss);
-        println!("  Time Window: {}-{}s", min_time, max_time);
-    }
-    println!("  Shares: {}", shares);
-    println!("  Max Positions: {}", max_positions);
-    println!("  Dry Run: {}", dry_run);
-    println!();
-
-    // TODO: Actually call the momentum engine here
-    // For now, just print that we would start
-    println!("\x1b[32m▶ Momentum strategy running...\x1b[0m");
-    println!("  (Integration with MomentumEngine pending)");
-
-    // Keep running
-    tokio::signal::ctrl_c().await?;
-    println!("\n\x1b[33mShutting down...\x1b[0m");
-
-    Ok(())
-}

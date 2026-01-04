@@ -271,6 +271,10 @@ pub enum Commands {
     #[command(subcommand)]
     Politics(PoliticsCommands),
 
+    /// Manage trading strategies
+    #[command(subcommand)]
+    Strategy(super::strategy::StrategyCommands),
+
     /// Reinforcement learning strategies (requires 'rl' feature)
     #[cfg(feature = "rl")]
     #[command(subcommand)]
