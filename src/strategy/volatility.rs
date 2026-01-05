@@ -1,0 +1,579 @@
+//! Volatility-based trading strategy for 15-minute prediction markets
+//!
+//! Uses event start price tracking, OBI signals, and volatility prediction
+//! to identify trading opportunities.
+
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use tracing::{debug, info};
+
+use crate::domain::Side;
+
+/// Configuration for volatility strategy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolatilityConfig {
+    /// Maximum entry price for tokens (e.g., 0.30 = 30¢)
+    pub max_entry_price: Decimal,
+    /// Minimum edge required (fair_value - entry_price)
+    pub min_edge: Decimal,
+    /// Minimum absolute deviation from start price to trigger signal
+    pub min_deviation_pct: Decimal,
+    /// OBI threshold for directional confidence (e.g., 0.1 = 10% imbalance)
+    pub obi_threshold: Decimal,
+    /// OBI levels to use for calculation
+    pub obi_levels: usize,
+    /// Minimum time remaining to enter (seconds)
+    pub min_time_remaining_secs: u64,
+    /// Maximum time remaining to enter (seconds)
+    pub max_time_remaining_secs: u64,
+    /// Number of historical events to track for volatility estimation
+    pub history_window: usize,
+    /// Shares per trade
+    pub shares_per_trade: u64,
+}
+
+impl Default for VolatilityConfig {
+    fn default() -> Self {
+        Self {
+            max_entry_price: dec!(0.30),      // Max 30¢ entry
+            min_edge: dec!(0.05),             // 5% minimum edge
+            min_deviation_pct: dec!(0.0005),  // 0.05% minimum deviation from start
+            obi_threshold: dec!(0.05),        // 5% OBI imbalance threshold
+            obi_levels: 5,                    // Use top 5 levels
+            min_time_remaining_secs: 60,      // Min 1 minute left
+            max_time_remaining_secs: 600,     // Max 10 minutes left
+            history_window: 20,               // Track last 20 events
+            shares_per_trade: 100,
+        }
+    }
+}
+
+/// Record of a completed 15-minute event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub symbol: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub start_price: Decimal,
+    pub end_price: Decimal,
+    pub high_price: Decimal,
+    pub low_price: Decimal,
+    pub outcome: Side,           // UP or DOWN
+    pub deviation_pct: Decimal,  // (end - start) / start
+    pub range_pct: Decimal,      // (high - low) / start
+}
+
+/// Active event being tracked
+#[derive(Debug, Clone)]
+pub struct ActiveEvent {
+    pub symbol: String,
+    pub event_id: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub start_price: Decimal,
+    pub current_price: Decimal,
+    pub high_price: Decimal,
+    pub low_price: Decimal,
+    pub last_update: DateTime<Utc>,
+}
+
+impl ActiveEvent {
+    pub fn new(
+        symbol: String,
+        event_id: String,
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+        start_price: Decimal,
+    ) -> Self {
+        Self {
+            symbol,
+            event_id,
+            start_time,
+            end_time,
+            start_price,
+            current_price: start_price,
+            high_price: start_price,
+            low_price: start_price,
+            last_update: start_time,
+        }
+    }
+
+    /// Update with new price
+    pub fn update_price(&mut self, price: Decimal, timestamp: DateTime<Utc>) {
+        self.current_price = price;
+        self.last_update = timestamp;
+        if price > self.high_price {
+            self.high_price = price;
+        }
+        if price < self.low_price {
+            self.low_price = price;
+        }
+    }
+
+    /// Get deviation from start price as percentage
+    pub fn deviation_pct(&self) -> Decimal {
+        if self.start_price.is_zero() {
+            return Decimal::ZERO;
+        }
+        (self.current_price - self.start_price) / self.start_price
+    }
+
+    /// Get range as percentage of start price
+    pub fn range_pct(&self) -> Decimal {
+        if self.start_price.is_zero() {
+            return Decimal::ZERO;
+        }
+        (self.high_price - self.low_price) / self.start_price
+    }
+
+    /// Get time remaining in seconds
+    pub fn time_remaining_secs(&self) -> i64 {
+        (self.end_time - Utc::now()).num_seconds().max(0)
+    }
+
+    /// Check if event is still active
+    pub fn is_active(&self) -> bool {
+        Utc::now() < self.end_time
+    }
+
+    /// Predicted outcome based on current position
+    pub fn predicted_outcome(&self) -> Side {
+        if self.current_price >= self.start_price {
+            Side::Up
+        } else {
+            Side::Down
+        }
+    }
+}
+
+/// Tracks events and maintains historical data
+#[derive(Debug)]
+pub struct EventTracker {
+    /// Active events by (symbol, event_id)
+    active_events: HashMap<String, ActiveEvent>,
+    /// Historical event records by symbol
+    history: HashMap<String, VecDeque<EventRecord>>,
+    /// Maximum history to keep per symbol
+    max_history: usize,
+}
+
+impl EventTracker {
+    pub fn new(max_history: usize) -> Self {
+        Self {
+            active_events: HashMap::new(),
+            history: HashMap::new(),
+            max_history,
+        }
+    }
+
+    /// Register a new event
+    pub fn register_event(
+        &mut self,
+        symbol: &str,
+        event_id: &str,
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+        start_price: Decimal,
+    ) {
+        let key = format!("{}:{}", symbol, event_id);
+
+        if self.active_events.contains_key(&key) {
+            return; // Already tracking
+        }
+
+        info!(
+            "Tracking new event: {} {} start_price=${:.2}",
+            symbol, event_id, start_price
+        );
+
+        let event = ActiveEvent::new(
+            symbol.to_string(),
+            event_id.to_string(),
+            start_time,
+            end_time,
+            start_price,
+        );
+
+        self.active_events.insert(key, event);
+    }
+
+    /// Update price for active events
+    pub fn update_price(&mut self, symbol: &str, price: Decimal, timestamp: DateTime<Utc>) {
+        for (key, event) in self.active_events.iter_mut() {
+            if key.starts_with(&format!("{}:", symbol)) && event.is_active() {
+                event.update_price(price, timestamp);
+            }
+        }
+    }
+
+    /// Get active event for a symbol
+    pub fn get_active_event(&self, symbol: &str, event_id: &str) -> Option<&ActiveEvent> {
+        let key = format!("{}:{}", symbol, event_id);
+        self.active_events.get(&key)
+    }
+
+    /// Finalize completed events and move to history
+    pub fn finalize_completed_events(&mut self) {
+        let now = Utc::now();
+        let completed: Vec<String> = self
+            .active_events
+            .iter()
+            .filter(|(_, e)| e.end_time <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in completed {
+            if let Some(event) = self.active_events.remove(&key) {
+                let record = EventRecord {
+                    symbol: event.symbol.clone(),
+                    start_time: event.start_time,
+                    end_time: event.end_time,
+                    start_price: event.start_price,
+                    end_price: event.current_price,
+                    high_price: event.high_price,
+                    low_price: event.low_price,
+                    outcome: event.predicted_outcome(),
+                    deviation_pct: event.deviation_pct(),
+                    range_pct: event.range_pct(),
+                };
+
+                info!(
+                    "Event completed: {} outcome={:?} deviation={:.3}% range={:.3}%",
+                    key,
+                    record.outcome,
+                    record.deviation_pct * dec!(100),
+                    record.range_pct * dec!(100)
+                );
+
+                let history = self.history.entry(event.symbol).or_default();
+                history.push_back(record);
+                while history.len() > self.max_history {
+                    history.pop_front();
+                }
+            }
+        }
+    }
+
+    /// Get historical volatility (average range) for a symbol
+    pub fn historical_volatility(&self, symbol: &str) -> Option<Decimal> {
+        let history = self.history.get(symbol)?;
+        if history.is_empty() {
+            return None;
+        }
+
+        let sum: Decimal = history.iter().map(|r| r.range_pct).sum();
+        Some(sum / Decimal::from(history.len()))
+    }
+
+    /// Get historical win rate for UP outcomes
+    pub fn up_win_rate(&self, symbol: &str) -> Option<Decimal> {
+        let history = self.history.get(symbol)?;
+        if history.is_empty() {
+            return None;
+        }
+
+        let up_count = history.iter().filter(|r| r.outcome == Side::Up).count();
+        Some(Decimal::from(up_count) / Decimal::from(history.len()))
+    }
+
+    /// Get average deviation for a symbol
+    pub fn average_deviation(&self, symbol: &str) -> Option<Decimal> {
+        let history = self.history.get(symbol)?;
+        if history.is_empty() {
+            return None;
+        }
+
+        let sum: Decimal = history.iter().map(|r| r.deviation_pct.abs()).sum();
+        Some(sum / Decimal::from(history.len()))
+    }
+}
+
+/// Trading signal from volatility strategy
+#[derive(Debug, Clone)]
+pub struct VolatilitySignal {
+    pub symbol: String,
+    pub event_id: String,
+    pub side: Side,
+    pub entry_price: Decimal,     // Token price to pay
+    pub fair_value: Decimal,      // Estimated fair value
+    pub edge: Decimal,            // fair_value - entry_price
+    pub deviation_pct: Decimal,   // Current deviation from start
+    pub obi: Decimal,             // Order book imbalance
+    pub time_remaining_secs: i64,
+    pub confidence: f64,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Volatility-based signal detector
+pub struct VolatilityDetector {
+    config: VolatilityConfig,
+    event_tracker: EventTracker,
+}
+
+impl VolatilityDetector {
+    pub fn new(config: VolatilityConfig) -> Self {
+        Self {
+            event_tracker: EventTracker::new(config.history_window),
+            config,
+        }
+    }
+
+    /// Get mutable reference to event tracker
+    pub fn event_tracker_mut(&mut self) -> &mut EventTracker {
+        &mut self.event_tracker
+    }
+
+    /// Get reference to event tracker
+    pub fn event_tracker(&self) -> &EventTracker {
+        &self.event_tracker
+    }
+
+    /// Check for trading signal
+    pub fn check_signal(
+        &self,
+        symbol: &str,
+        event_id: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        obi: Option<Decimal>,
+    ) -> Option<VolatilitySignal> {
+        let event = self.event_tracker.get_active_event(symbol, event_id)?;
+
+        let time_remaining = event.time_remaining_secs();
+
+        // Check time window
+        if time_remaining < self.config.min_time_remaining_secs as i64 {
+            debug!("{} time remaining {}s < min {}s", symbol, time_remaining, self.config.min_time_remaining_secs);
+            return None;
+        }
+        if time_remaining > self.config.max_time_remaining_secs as i64 {
+            debug!("{} time remaining {}s > max {}s", symbol, time_remaining, self.config.max_time_remaining_secs);
+            return None;
+        }
+
+        let deviation = event.deviation_pct();
+        let obi_value = obi.unwrap_or(Decimal::ZERO);
+
+        // Determine direction based on deviation and OBI
+        let (predicted_side, token_price) = if deviation > Decimal::ZERO {
+            // Price is UP from start
+            (Side::Up, up_ask?)
+        } else {
+            // Price is DOWN from start
+            (Side::Down, down_ask?)
+        };
+
+        // Check minimum deviation
+        if deviation.abs() < self.config.min_deviation_pct {
+            debug!(
+                "{} deviation {:.4}% < min {:.4}%",
+                symbol,
+                deviation * dec!(100),
+                self.config.min_deviation_pct * dec!(100)
+            );
+            return None;
+        }
+
+        // Check OBI confirmation (optional but increases confidence)
+        let obi_confirms = match predicted_side {
+            Side::Up => obi_value > self.config.obi_threshold,
+            Side::Down => obi_value < -self.config.obi_threshold,
+        };
+
+        // Check entry price
+        if token_price > self.config.max_entry_price {
+            debug!(
+                "{} {:?} token price {:.1}¢ > max {:.1}¢",
+                symbol,
+                predicted_side,
+                token_price * dec!(100),
+                self.config.max_entry_price * dec!(100)
+            );
+            return None;
+        }
+
+        // Calculate fair value based on deviation and time remaining
+        let fair_value = self.estimate_fair_value(deviation, time_remaining, obi_value);
+        let edge = fair_value - token_price;
+
+        if edge < self.config.min_edge {
+            debug!(
+                "{} {:?} edge {:.1}% < min {:.1}%",
+                symbol,
+                predicted_side,
+                edge * dec!(100),
+                self.config.min_edge * dec!(100)
+            );
+            return None;
+        }
+
+        // Calculate confidence
+        let confidence = self.calculate_confidence(deviation, obi_confirms, time_remaining, edge);
+
+        info!(
+            "🎯 SIGNAL: {} {:?} | dev={:.3}% obi={:.2} | price={:.1}¢ fair={:.1}¢ edge={:.1}% | {}s left",
+            symbol,
+            predicted_side,
+            deviation * dec!(100),
+            obi_value,
+            token_price * dec!(100),
+            fair_value * dec!(100),
+            edge * dec!(100),
+            time_remaining
+        );
+
+        Some(VolatilitySignal {
+            symbol: symbol.to_string(),
+            event_id: event_id.to_string(),
+            side: predicted_side,
+            entry_price: token_price,
+            fair_value,
+            edge,
+            deviation_pct: deviation,
+            obi: obi_value,
+            time_remaining_secs: time_remaining,
+            confidence,
+            timestamp: Utc::now(),
+        })
+    }
+
+    /// Estimate fair value based on current state
+    fn estimate_fair_value(
+        &self,
+        deviation: Decimal,
+        time_remaining_secs: i64,
+        obi: Decimal,
+    ) -> Decimal {
+        let base = dec!(0.50);
+
+        // Deviation factor: larger deviation = higher probability of that outcome
+        // 0.1% deviation → ~60% probability
+        // 0.5% deviation → ~80% probability
+        // 1.0% deviation → ~90% probability
+        let deviation_factor = if deviation.abs() < dec!(0.001) {
+            deviation.abs() * dec!(100)  // 0.1% → 10%
+        } else if deviation.abs() < dec!(0.005) {
+            dec!(0.10) + (deviation.abs() - dec!(0.001)) * dec!(50)  // 0.5% → 30%
+        } else {
+            dec!(0.30) + (deviation.abs() - dec!(0.005)) * dec!(20)  // 1% → 40%
+        };
+
+        // Time factor: less time = more certain (less time to reverse)
+        // 10 min left → 1.0x
+        // 5 min left → 1.1x
+        // 2 min left → 1.2x
+        // 1 min left → 1.3x
+        let time_factor = if time_remaining_secs > 300 {
+            dec!(1.0)
+        } else if time_remaining_secs > 120 {
+            dec!(1.1)
+        } else if time_remaining_secs > 60 {
+            dec!(1.2)
+        } else {
+            dec!(1.3)
+        };
+
+        // OBI factor: confirming OBI adds confidence
+        let obi_factor = if obi.abs() > dec!(0.1) {
+            dec!(1.05)
+        } else {
+            dec!(1.0)
+        };
+
+        let fair_value = base + deviation_factor * time_factor * obi_factor;
+        fair_value.min(dec!(0.95))  // Cap at 95%
+    }
+
+    /// Calculate confidence score (0.0 to 1.0)
+    fn calculate_confidence(
+        &self,
+        deviation: Decimal,
+        obi_confirms: bool,
+        time_remaining_secs: i64,
+        edge: Decimal,
+    ) -> f64 {
+        let mut score: f64 = 0.0;
+
+        // Deviation score (0-0.3)
+        let dev_abs = deviation.abs();
+        if dev_abs > dec!(0.005) {
+            score += 0.3;
+        } else if dev_abs > dec!(0.002) {
+            score += 0.2;
+        } else if dev_abs > dec!(0.001) {
+            score += 0.1;
+        }
+
+        // OBI confirmation (0-0.2)
+        if obi_confirms {
+            score += 0.2;
+        }
+
+        // Time remaining score (0-0.3)
+        if time_remaining_secs < 120 {
+            score += 0.3;
+        } else if time_remaining_secs < 300 {
+            score += 0.2;
+        } else {
+            score += 0.1;
+        }
+
+        // Edge score (0-0.2)
+        if edge > dec!(0.15) {
+            score += 0.2;
+        } else if edge > dec!(0.10) {
+            score += 0.15;
+        } else if edge > dec!(0.05) {
+            score += 0.1;
+        }
+
+        score.min(1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_active_event() {
+        let start = Utc::now();
+        let end = start + Duration::minutes(15);
+        let mut event = ActiveEvent::new(
+            "BTCUSDT".to_string(),
+            "event1".to_string(),
+            start,
+            end,
+            dec!(100000),
+        );
+
+        // Update price up
+        event.update_price(dec!(100100), start + Duration::seconds(60));
+        assert_eq!(event.deviation_pct(), dec!(0.001)); // 0.1%
+        assert_eq!(event.predicted_outcome(), Side::Up);
+
+        // Update price down
+        event.update_price(dec!(99900), start + Duration::seconds(120));
+        assert_eq!(event.deviation_pct(), dec!(-0.001)); // -0.1%
+        assert_eq!(event.predicted_outcome(), Side::Down);
+
+        // Check range
+        assert_eq!(event.range_pct(), dec!(0.002)); // 0.2%
+    }
+
+    #[test]
+    fn test_event_tracker() {
+        let mut tracker = EventTracker::new(10);
+        let start = Utc::now();
+        let end = start + Duration::minutes(15);
+
+        tracker.register_event("BTCUSDT", "event1", start, end, dec!(100000));
+        tracker.update_price("BTCUSDT", dec!(100100), start + Duration::seconds(60));
+
+        let event = tracker.get_active_event("BTCUSDT", "event1").unwrap();
+        assert_eq!(event.current_price, dec!(100100));
+    }
+}

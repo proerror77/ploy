@@ -60,6 +60,7 @@ pub mod risk;
 pub mod signal;
 pub mod split_arb;
 pub mod validation;
+pub mod volatility;
 
 // Legacy re-exports
 pub use engine::StrategyEngine;
@@ -86,6 +87,10 @@ pub use momentum::{
 };
 pub use risk::RiskManager;
 pub use signal::SignalDetector;
+pub use volatility::{
+    VolatilityConfig, VolatilityDetector, VolatilitySignal,
+    EventTracker as VolatilityEventTracker, ActiveEvent, EventRecord,
+};
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition,
     PositionStatus, SplitArbConfig, SplitArbEngine,
