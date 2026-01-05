@@ -33,6 +33,7 @@ RUN cargo build --release 2>/dev/null || true && \
 # Copy actual source code
 COPY src ./src
 COPY migrations ./migrations
+COPY config ./config
 
 # Build the actual binary
 RUN cargo build --release --features rl
