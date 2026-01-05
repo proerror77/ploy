@@ -621,27 +621,35 @@ impl PolymarketClient {
     /// Get all active events from a series
     #[instrument(skip(self))]
     pub async fn get_all_active_events(&self, series_id: &str) -> Result<Vec<GammaEventInfo>> {
-        // Fetch active events and filter by series
-        let req = EventsRequest::builder()
-            .active(true)
-            .closed(false)
-            .build();
+        // Use direct HTTP call to /series/{id} which returns events array
+        let url = format!("{}/series/{}", GAMMA_API_URL, series_id);
 
-        let events = self.gamma_client
-            .events(&req)
+        let client = reqwest::Client::new();
+        let response = client.get(&url)
+            .send()
             .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get events: {}", e)))?;
+            .map_err(|e| PloyError::Internal(format!("Failed to fetch series: {}", e)))?;
 
-        // Filter to events belonging to this series
-        Ok(events.into_iter()
-            .filter(|e| !e.closed.unwrap_or(false))
-            .filter(|e| {
-                e.series.as_ref().map_or(false, |series| {
-                    series.iter().any(|s| s.id == series_id)
-                })
-            })
-            .map(|e| self.convert_sdk_event(&e))
-            .collect())
+        if !response.status().is_success() {
+            return Err(PloyError::Internal(format!(
+                "Gamma API error: {} for series {}",
+                response.status(),
+                series_id
+            )));
+        }
+
+        let series: GammaSeriesResponse = response.json()
+            .await
+            .map_err(|e| PloyError::Internal(format!("Failed to parse series response: {}", e)))?;
+
+        // Filter for active (not closed) events
+        let active_events: Vec<GammaEventInfo> = series.events
+            .into_iter()
+            .filter(|e| !e.closed)
+            .collect();
+
+        debug!("Found {} active events in series {}", active_events.len(), series_id);
+        Ok(active_events)
     }
 
     /// Get active sports events matching a keyword
