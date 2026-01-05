@@ -107,6 +107,7 @@ jobs:
             --restart unless-stopped \
             -e POLYMARKET_PRIVATE_KEY="${{ secrets.POLYMARKET_PRIVATE_KEY }}" \
             -e POLYMARKET_FUNDER="${{ secrets.POLYMARKET_FUNDER }}" \
+            -e FEISHU_WEBHOOK_URL="${{ secrets.FEISHU_WEBHOOK_URL }}" \
             -e RUST_LOG=info,ploy=debug \
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
             momentum \

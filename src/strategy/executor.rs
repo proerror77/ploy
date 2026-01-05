@@ -1,9 +1,10 @@
-use crate::adapters::PolymarketClient;
+use crate::adapters::{FeishuNotifier, PolymarketClient};
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::{OrderError, Result};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, error, info, warn};
@@ -12,6 +13,7 @@ use tracing::{debug, error, info, warn};
 pub struct OrderExecutor {
     client: PolymarketClient,
     config: ExecutionConfig,
+    feishu: Option<Arc<FeishuNotifier>>,
 }
 
 /// Execution result with fill details
@@ -27,7 +29,17 @@ pub struct ExecutionResult {
 impl OrderExecutor {
     /// Create a new order executor
     pub fn new(client: PolymarketClient, config: ExecutionConfig) -> Self {
-        Self { client, config }
+        Self {
+            client,
+            config,
+            feishu: FeishuNotifier::from_env(),
+        }
+    }
+
+    /// Set the Feishu notifier
+    pub fn with_feishu(mut self, feishu: Option<Arc<FeishuNotifier>>) -> Self {
+        self.feishu = feishu;
+        self
     }
 
     /// Check if in dry run mode
@@ -52,6 +64,31 @@ impl OrderExecutor {
                         result.avg_fill_price,
                         result.elapsed_ms
                     );
+
+                    // Send Feishu notification
+                    if let Some(ref feishu) = self.feishu {
+                        let action = match request.order_side {
+                            crate::domain::OrderSide::Buy => "BUY",
+                            crate::domain::OrderSide::Sell => "SELL",
+                        };
+                        let side = match request.market_side {
+                            Side::Up => "UP",
+                            Side::Down => "DOWN",
+                        };
+                        let price = result.avg_fill_price
+                            .map(|p| p.to_f64().unwrap_or(0.0))
+                            .unwrap_or(request.limit_price.to_f64().unwrap_or(0.0));
+
+                        feishu.notify_trade(
+                            action,
+                            &request.token_id[..16.min(request.token_id.len())],
+                            side,
+                            price,
+                            result.filled_shares as f64,
+                            Some(&result.order_id),
+                        ).await;
+                    }
+
                     return Ok(result);
                 }
                 Err(e) => {
