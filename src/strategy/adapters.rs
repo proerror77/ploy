@@ -15,12 +15,12 @@ use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use super::traits::{
-    Strategy, DataFeed, MarketUpdate, OrderUpdate, StrategyAction,
+    Strategy, MarketUpdate, OrderUpdate, StrategyAction,
     StrategyStateInfo, PositionInfo, StrategyEvent, StrategyEventType,
-    RiskLevel, AlertLevel,
+    AlertLevel, DataFeed,
 };
 use super::momentum::{MomentumConfig, ExitConfig, Direction};
-use crate::domain::{Side, OrderRequest, OrderSide, OrderType, TimeInForce};
+use crate::domain::{Side, OrderRequest};
 
 // ============================================================================
 // Momentum Strategy Adapter
@@ -464,7 +464,7 @@ impl Strategy for MomentumStrategyAdapter {
                     token_id: token_id.clone(),
                     best_bid: quote.best_bid,
                     best_ask: quote.best_ask,
-                    timestamp: *timestamp,
+                    timestamp: timestamp.clone(),
                 });
                 drop(quotes);
 
@@ -643,7 +643,7 @@ impl Strategy for MomentumStrategyAdapter {
 // Split Arbitrage Strategy Adapter
 // ============================================================================
 
-use super::core::{SplitArbConfig as CoreSplitArbConfig, BinaryMarket};
+use super::core::SplitArbConfig as CoreSplitArbConfig;
 
 /// Adapter that wraps split arbitrage strategy logic to implement the Strategy trait.
 ///
@@ -800,8 +800,8 @@ impl SplitArbStrategyAdapter {
         let market = markets.get(market_id)?;
 
         let prices = self.prices.read().await;
-        let (yes_bid, yes_ask) = prices.get(&market.yes_token_id)?;
-        let (no_bid, no_ask) = prices.get(&market.no_token_id)?;
+        let (_yes_bid, yes_ask) = prices.get(&market.yes_token_id)?;
+        let (_no_bid, no_ask) = prices.get(&market.no_token_id)?;
 
         let yes_ask = (*yes_ask)?;
         let no_ask = (*no_ask)?;
@@ -828,7 +828,6 @@ impl SplitArbStrategyAdapter {
         let token_id = match side {
             Side::Up => market.yes_token_id.clone(),
             Side::Down => market.no_token_id.clone(),
-            _ => return None,
         };
 
         let client_order_id = format!("{}_leg1_{}_{}",
@@ -885,7 +884,7 @@ impl Strategy for SplitArbStrategyAdapter {
         let mut actions = Vec::new();
 
         match update {
-            MarketUpdate::PolymarketQuote { token_id, quote, timestamp, .. } => {
+            MarketUpdate::PolymarketQuote { token_id, quote, .. } => {
                 // Update price cache
                 let mut prices = self.prices.write().await;
                 prices.insert(token_id.clone(), (quote.best_bid, quote.best_ask));

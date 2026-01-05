@@ -35,8 +35,8 @@ min_time_remaining = 300  # 5 minutes
 max_time_remaining = 900  # 15 minutes
 
 [risk]
-# Shares per trade
-shares = 100
+# Shares per trade (~$1 at 30-35¢ per share)
+shares = 3
 
 # Maximum concurrent positions
 max_positions = 5

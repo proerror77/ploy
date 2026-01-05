@@ -12,9 +12,15 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::fs;
-use tracing::info;
+use std::sync::Arc;
+use tracing::{info, error, warn};
 
+use crate::adapters::PolymarketClient;
+use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+use crate::config::ExecutionConfig;
+use crate::signing::Wallet;
 use crate::strategy::{StrategyFactory, StrategyManager};
+use crate::strategy::executor::OrderExecutor;
 
 /// Strategy-related commands
 #[derive(Subcommand, Debug, Clone)]
@@ -221,8 +227,7 @@ async fn start_strategy(
 
 /// Run strategy in foreground using StrategyManager
 async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: bool) -> Result<()> {
-    use std::sync::Arc;
-    use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PolymarketClient};
+    use crate::adapters::PolymarketWebSocket;
     use crate::strategy::DataFeedManager;
 
     // Load config
@@ -244,6 +249,43 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
     println!("  Dry Run: {}", dry_run);
     println!("  Required Feeds: {:?}", required_feeds);
     println!();
+
+    // Create order executor (authenticated client for live trading)
+    let executor = if dry_run {
+        println!("  \x1b[33m⚠ DRY RUN MODE - Orders will be simulated\x1b[0m");
+        let client = PolymarketClient::new("https://clob.polymarket.com", true)?;
+        Some(Arc::new(OrderExecutor::new(client, ExecutionConfig::default())))
+    } else {
+        // For live trading, need authenticated client
+        match Wallet::from_env(POLYGON_CHAIN_ID) {
+            Ok(wallet) => {
+                println!("  \x1b[32m✓ Wallet loaded: {:?}\x1b[0m", wallet.address());
+                match PolymarketClient::new_authenticated(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    false,  // neg_risk: use standard risk settings
+                ).await {
+                    Ok(client) => {
+                        println!("  \x1b[32m✓ Authenticated with Polymarket CLOB\x1b[0m");
+                        Some(Arc::new(OrderExecutor::new(client, ExecutionConfig::default())))
+                    }
+                    Err(e) => {
+                        error!("Failed to authenticate: {}", e);
+                        println!("  \x1b[31m✗ Authentication failed: {}\x1b[0m", e);
+                        println!("  \x1b[33m⚠ Falling back to dry-run mode\x1b[0m");
+                        let client = PolymarketClient::new("https://clob.polymarket.com", true)?;
+                        Some(Arc::new(OrderExecutor::new(client, ExecutionConfig::default())))
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("No wallet configured: {}", e);
+                println!("  \x1b[33m⚠ POLYMARKET_PRIVATE_KEY not set\x1b[0m");
+                println!("  \x1b[33m⚠ Running in observation mode (no orders)\x1b[0m");
+                None
+            }
+        }
+    };
 
     // Create strategy manager
     let manager = Arc::new(StrategyManager::new(1000)); // 1 second tick interval
@@ -300,8 +342,8 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
 
     println!("\x1b[32m✓ Data feeds started\x1b[0m\n");
 
-    // Spawn action handler task
-    let action_handle = tokio::spawn(handle_strategy_actions(action_rx));
+    // Spawn action handler task with executor
+    let action_handle = tokio::spawn(handle_strategy_actions(action_rx, executor));
 
     // Wait for shutdown signal
     println!("Press Ctrl+C to stop...\n");
@@ -323,26 +365,66 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
 }
 
 /// Handle actions emitted by strategies
-async fn handle_strategy_actions(mut rx: tokio::sync::mpsc::Receiver<(String, crate::strategy::StrategyAction)>) {
+async fn handle_strategy_actions(
+    mut rx: tokio::sync::mpsc::Receiver<(String, crate::strategy::StrategyAction)>,
+    executor: Option<Arc<OrderExecutor>>,
+) {
     use crate::strategy::StrategyAction;
 
     while let Some((strategy_id, action)) = rx.recv().await {
         match action {
             StrategyAction::SubmitOrder { client_order_id, order, priority } => {
-                println!("  \x1b[36m[{}]\x1b[0m Order: {} (priority: {})",
-                    strategy_id, client_order_id, priority);
-                println!("         Token: {}", order.token_id);
-                println!("         Side: {:?}, Shares: {}, Price: {:.2}¢",
-                    order.market_side, order.shares, order.limit_price * rust_decimal::Decimal::from(100));
-                // In production, this would submit to the order executor
+                let price_cents = order.limit_price * rust_decimal::Decimal::from(100);
+                println!("\n  \x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+                println!("  \x1b[36m║\x1b[0m  📤 ORDER SUBMISSION                                          \x1b[36m║\x1b[0m");
+                println!("  \x1b[36m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
+                println!("  \x1b[36m║\x1b[0m  Strategy: {:<47}\x1b[36m║\x1b[0m", strategy_id);
+                println!("  \x1b[36m║\x1b[0m  Order ID: {:<47}\x1b[36m║\x1b[0m", client_order_id);
+                println!("  \x1b[36m║\x1b[0m  Token: {:<50}\x1b[36m║\x1b[0m", &order.token_id[..order.token_id.len().min(50)]);
+                println!("  \x1b[36m║\x1b[0m  Side: {:?}, Shares: {}, Price: {:.2}¢{:<20}\x1b[36m║\x1b[0m",
+                    order.market_side, order.shares, price_cents, "");
+                println!("  \x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m");
+
+                // Execute order if executor is available
+                if let Some(ref exec) = executor {
+                    info!("Executing order: {} @ {:.2}¢", client_order_id, price_cents);
+                    match exec.execute(&order).await {
+                        Ok(result) => {
+                            println!("  \x1b[32m✓ Order executed!\x1b[0m");
+                            println!("    Order ID: {}", result.order_id);
+                            println!("    Status: {:?}", result.status);
+                            println!("    Filled: {} shares", result.filled_shares);
+                            if let Some(avg_price) = result.avg_fill_price {
+                                println!("    Avg Price: {:.2}¢", avg_price * rust_decimal::Decimal::from(100));
+                            }
+                            println!("    Time: {}ms\n", result.elapsed_ms);
+                            info!("Order {} filled: {} shares @ {:?}",
+                                result.order_id, result.filled_shares, result.avg_fill_price);
+                        }
+                        Err(e) => {
+                            println!("  \x1b[31m✗ Order failed: {}\x1b[0m\n", e);
+                            error!("Order execution failed: {}", e);
+                        }
+                    }
+                } else {
+                    println!("  \x1b[33m⚠ No executor - order logged but not submitted\x1b[0m\n");
+                    warn!("Order {} not executed - no executor configured", client_order_id);
+                }
             }
             StrategyAction::CancelOrder { order_id } => {
-                println!("  \x1b[33m[{}]\x1b[0m Cancel: {}",
-                    strategy_id, order_id);
+                println!("  \x1b[33m[{}]\x1b[0m Cancel: {}", strategy_id, order_id);
+                if let Some(ref exec) = executor {
+                    match exec.cancel(&order_id).await {
+                        Ok(true) => println!("  \x1b[32m✓ Order cancelled\x1b[0m"),
+                        Ok(false) => println!("  \x1b[33m⚠ Order not found or already cancelled\x1b[0m"),
+                        Err(e) => println!("  \x1b[31m✗ Cancel failed: {}\x1b[0m", e),
+                    }
+                }
             }
             StrategyAction::ModifyOrder { order_id, new_price, new_size } => {
                 println!("  \x1b[33m[{}]\x1b[0m Modify: {} price={:?} size={:?}",
                     strategy_id, order_id, new_price, new_size);
+                warn!("Order modification not yet implemented");
             }
             StrategyAction::Alert { level, message } => {
                 let color = match level {
