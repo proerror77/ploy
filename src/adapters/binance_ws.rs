@@ -29,8 +29,8 @@ const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 /// Price update broadcast channel capacity
 const CHANNEL_CAPACITY: usize = 1000;
 
-/// How many price samples to keep per symbol
-const MAX_PRICE_HISTORY: usize = 60;
+/// How many price samples to keep per symbol (need 120+ for volatility calculation)
+const MAX_PRICE_HISTORY: usize = 300;
 
 /// Binance trade message structure
 #[derive(Debug, Deserialize)]
@@ -144,6 +144,145 @@ impl SpotPrice {
     pub fn price_15s_ago(&self) -> Option<Decimal> {
         self.price_secs_ago(15)
     }
+
+    /// Calculate weighted momentum across multiple timeframes
+    /// Formula: 0.2 * mom_10s + 0.3 * mom_30s + 0.5 * mom_60s
+    /// Returns None if insufficient history for all timeframes
+    pub fn weighted_momentum(&self) -> Option<Decimal> {
+        let mom_10s = self.momentum(10)?;
+        let mom_30s = self.momentum(30)?;
+        let mom_60s = self.momentum(60)?;
+
+        // Weights: short-term 20%, mid-term 30%, longer-term 50%
+        let weighted = mom_10s * Decimal::new(2, 1)  // 0.2
+            + mom_30s * Decimal::new(3, 1)           // 0.3
+            + mom_60s * Decimal::new(5, 1);          // 0.5
+
+        Some(weighted)
+    }
+
+    /// Calculate weighted momentum with custom weights
+    /// weights: (w_10s, w_30s, w_60s) should sum to 1.0
+    pub fn weighted_momentum_custom(
+        &self,
+        w_10s: Decimal,
+        w_30s: Decimal,
+        w_60s: Decimal,
+    ) -> Option<Decimal> {
+        let mom_10s = self.momentum(10)?;
+        let mom_30s = self.momentum(30)?;
+        let mom_60s = self.momentum(60)?;
+
+        Some(mom_10s * w_10s + mom_30s * w_30s + mom_60s * w_60s)
+    }
+
+    /// Calculate rolling volatility (standard deviation of returns) over N seconds
+    /// Returns the volatility as a percentage (e.g., 0.01 = 1%)
+    pub fn volatility(&self, lookback_secs: u64) -> Option<Decimal> {
+        if self.history.len() < 10 {
+            return None; // Need sufficient data
+        }
+
+        let cutoff_time = self.timestamp - chrono::Duration::seconds(lookback_secs as i64);
+
+        // Collect prices within the lookback window
+        let prices: Vec<Decimal> = self
+            .history
+            .iter()
+            .filter(|(_, ts)| *ts >= cutoff_time)
+            .map(|(p, _)| *p)
+            .collect();
+
+        if prices.len() < 5 {
+            return None; // Need at least 5 data points
+        }
+
+        // Calculate returns (percentage changes between consecutive prices)
+        let mut returns = Vec::with_capacity(prices.len() - 1);
+        for i in 0..prices.len() - 1 {
+            if !prices[i + 1].is_zero() {
+                let ret = (prices[i] - prices[i + 1]) / prices[i + 1];
+                returns.push(ret);
+            }
+        }
+
+        if returns.is_empty() {
+            return None;
+        }
+
+        // Calculate mean return
+        let sum: Decimal = returns.iter().copied().sum();
+        let mean = sum / Decimal::from(returns.len());
+
+        // Calculate variance
+        let variance_sum: Decimal = returns
+            .iter()
+            .map(|r| {
+                let diff = *r - mean;
+                diff * diff
+            })
+            .sum();
+        let variance = variance_sum / Decimal::from(returns.len());
+
+        // Standard deviation (approximate sqrt using Newton's method)
+        let std_dev = decimal_sqrt(variance)?;
+
+        Some(std_dev)
+    }
+
+    /// Get the number of price samples in history
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Check if we have enough history for weighted momentum calculation
+    pub fn has_sufficient_history(&self) -> bool {
+        // Need at least 60 seconds of data
+        if self.history.len() < 60 {
+            return false;
+        }
+
+        // Check if oldest entry is at least 60 seconds old
+        if let Some((_, oldest_ts)) = self.history.back() {
+            let age = self.timestamp - *oldest_ts;
+            return age.num_seconds() >= 60;
+        }
+
+        false
+    }
+}
+
+/// Approximate square root for Decimal using Newton's method
+fn decimal_sqrt(x: Decimal) -> Option<Decimal> {
+    if x < Decimal::ZERO {
+        return None;
+    }
+    if x.is_zero() {
+        return Some(Decimal::ZERO);
+    }
+
+    // Initial guess
+    let mut guess = x / Decimal::TWO;
+    let tolerance = Decimal::new(1, 10); // 0.0000000001
+
+    // Newton's method iterations
+    for _ in 0..50 {
+        if guess.is_zero() {
+            return Some(Decimal::ZERO);
+        }
+        let next_guess = (guess + x / guess) / Decimal::TWO;
+        let diff = if next_guess > guess {
+            next_guess - guess
+        } else {
+            guess - next_guess
+        };
+        if diff < tolerance {
+            return Some(next_guess);
+        }
+        guess = next_guess;
+    }
+
+    Some(guess)
 }
 
 /// Thread-safe cache for spot prices
@@ -186,6 +325,27 @@ impl PriceCache {
     pub async fn momentum(&self, symbol: &str, lookback_secs: u64) -> Option<Decimal> {
         let prices = self.prices.read().await;
         prices.get(symbol)?.momentum(lookback_secs)
+    }
+
+    /// Calculate weighted momentum for a symbol
+    pub async fn weighted_momentum(&self, symbol: &str) -> Option<Decimal> {
+        let prices = self.prices.read().await;
+        prices.get(symbol)?.weighted_momentum()
+    }
+
+    /// Calculate volatility for a symbol
+    pub async fn volatility(&self, symbol: &str, lookback_secs: u64) -> Option<Decimal> {
+        let prices = self.prices.read().await;
+        prices.get(symbol)?.volatility(lookback_secs)
+    }
+
+    /// Check if symbol has sufficient history for weighted momentum
+    pub async fn has_sufficient_history(&self, symbol: &str) -> bool {
+        let prices = self.prices.read().await;
+        prices
+            .get(symbol)
+            .map(|s| s.has_sufficient_history())
+            .unwrap_or(false)
     }
 
     /// Get number of tracked symbols

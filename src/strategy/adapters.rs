@@ -188,10 +188,17 @@ impl MomentumStrategyAdapter {
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_else(|| vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into(), "XRPUSDT".into()]);
 
+        // Build baseline volatility map
+        let mut baseline_volatility = std::collections::HashMap::new();
+        baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005));  // 0.05%
+        baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008));  // 0.08%
+        baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015));  // 0.15%
+        baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012));  // 0.12%
+
         let momentum_config = MomentumConfig {
             min_move_pct: Decimal::try_from(
-                entry.get("min_move").and_then(|v| v.as_float()).unwrap_or(0.5) / 100.0
-            ).unwrap_or(dec!(0.005)),
+                entry.get("min_move").and_then(|v| v.as_float()).unwrap_or(0.15) / 100.0
+            ).unwrap_or(dec!(0.0015)),
             max_entry_price: Decimal::try_from(
                 entry.get("max_entry").and_then(|v| v.as_float()).unwrap_or(45.0) / 100.0
             ).unwrap_or(dec!(0.45)),
@@ -199,6 +206,14 @@ impl MomentumStrategyAdapter {
                 entry.get("min_edge").and_then(|v| v.as_float()).unwrap_or(5.0) / 100.0
             ).unwrap_or(dec!(0.05)),
             lookback_secs: 5,
+            // NEW: Multi-timeframe momentum and volatility adjustment
+            use_weighted_momentum: entry.get("use_weighted_momentum")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            use_volatility_adjustment: entry.get("use_volatility_adjustment")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            baseline_volatility,
+            volatility_lookback_secs: entry.get("volatility_lookback")
+                .and_then(|v| v.as_integer()).unwrap_or(60) as u64,
             shares_per_trade: risk.get("shares").and_then(|v| v.as_integer()).unwrap_or(100) as u64,
             max_positions: risk.get("max_positions").and_then(|v| v.as_integer()).unwrap_or(5) as usize,
             cooldown_secs: 60,

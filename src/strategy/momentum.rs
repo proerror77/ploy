@@ -32,6 +32,7 @@ use crate::strategy::OrderExecutor;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MomentumConfig {
     /// Minimum CEX price move to trigger (e.g., 0.003 = 0.3%)
+    /// This is the BASE threshold, adjusted by volatility
     pub min_move_pct: Decimal,
 
     /// Maximum Polymarket odds for entry (e.g., 0.40 = 40¢)
@@ -42,7 +43,23 @@ pub struct MomentumConfig {
     pub min_edge: Decimal,
 
     /// Lookback window for momentum calculation (seconds)
+    /// DEPRECATED: Use weighted momentum instead (10s, 30s, 60s combined)
     pub lookback_secs: u64,
+
+    /// Use weighted multi-timeframe momentum instead of single lookback
+    /// Formula: 0.2 * mom_10s + 0.3 * mom_30s + 0.5 * mom_60s
+    pub use_weighted_momentum: bool,
+
+    /// Use volatility-adjusted thresholds
+    /// threshold = min_move_pct * (current_vol / baseline_vol)
+    pub use_volatility_adjustment: bool,
+
+    /// Baseline volatility for threshold adjustment (60s rolling std dev)
+    /// BTC: ~0.0005 (0.05%), ETH: ~0.0008 (0.08%), SOL: ~0.0015 (0.15%)
+    pub baseline_volatility: HashMap<String, Decimal>,
+
+    /// Volatility lookback window in seconds
+    pub volatility_lookback_secs: u64,
 
     /// Shares per trade
     pub shares_per_trade: u64,
@@ -77,12 +94,26 @@ pub struct MomentumConfig {
 
 impl Default for MomentumConfig {
     fn default() -> Self {
+        // Default baseline volatility (60s rolling std dev)
+        let mut baseline_volatility = HashMap::new();
+        baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005));  // 0.05%
+        baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008));  // 0.08%
+        baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015));  // 0.15%
+        baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012));  // 0.12%
+
         Self {
             // === AGGRESSIVE ENTRY (CRYINGLITTLEBABY style) ===
-            min_move_pct: dec!(0.003),      // 0.3% minimum move
+            min_move_pct: dec!(0.0015),     // 0.15% base minimum move (adjusted by volatility)
             max_entry_price: dec!(0.35),    // Max 35¢ entry (confirmed winner should be cheap)
             min_edge: dec!(0.03),           // 3% minimum edge
-            lookback_secs: 5,               // 5-second momentum window
+            lookback_secs: 5,               // 5-second momentum window (deprecated)
+
+            // === NEW: Multi-timeframe momentum ===
+            use_weighted_momentum: true,    // Use 10s/30s/60s weighted combination
+            use_volatility_adjustment: true, // Adjust threshold by current volatility
+            baseline_volatility,
+            volatility_lookback_secs: 60,   // 60-second rolling volatility
+
             shares_per_trade: 100,          // ~$35 per trade at 35¢
 
             // === ANTI-OVERTRADING CONTROLS ===
@@ -544,6 +575,7 @@ impl MomentumDetector {
     }
 
     /// Check for momentum signal given CEX and PM prices
+    /// Uses weighted momentum (10s/30s/60s) and volatility-adjusted thresholds
     pub fn check(
         &self,
         symbol: &str,
@@ -551,11 +583,34 @@ impl MomentumDetector {
         up_ask: Option<Decimal>,
         down_ask: Option<Decimal>,
     ) -> Option<MomentumSignal> {
-        // Calculate CEX momentum
-        let momentum = spot.momentum(self.config.lookback_secs)?;
+        // Calculate CEX momentum (weighted or single timeframe)
+        let momentum = if self.config.use_weighted_momentum {
+            match spot.weighted_momentum() {
+                Some(m) => m,
+                None => {
+                    // Fall back to single timeframe if not enough history
+                    debug!("{} insufficient history for weighted momentum, using single timeframe", symbol);
+                    spot.momentum(self.config.lookback_secs)?
+                }
+            }
+        } else {
+            spot.momentum(self.config.lookback_secs)?
+        };
+
+        // Calculate volatility-adjusted threshold
+        let effective_threshold = self.calculate_effective_threshold(symbol, spot);
+
+        // Log momentum and threshold for debugging
+        debug!(
+            "{} weighted_momentum={:.4}% threshold={:.4}% (vol_adjusted={})",
+            symbol,
+            momentum * dec!(100),
+            effective_threshold * dec!(100),
+            self.config.use_volatility_adjustment
+        );
 
         // Check minimum move threshold
-        if momentum.abs() < self.config.min_move_pct {
+        if momentum.abs() < effective_threshold {
             return None;
         }
 
@@ -596,6 +651,16 @@ impl MomentumDetector {
         // Calculate confidence based on momentum strength and edge
         let confidence = self.calculate_confidence(momentum, edge);
 
+        info!(
+            "🎯 SIGNAL: {} {} | momentum={:.3}% threshold={:.3}% | PM={:.1}¢ edge={:.1}%",
+            symbol,
+            direction,
+            momentum * dec!(100),
+            effective_threshold * dec!(100),
+            pm_price * dec!(100),
+            edge * dec!(100)
+        );
+
         Some(MomentumSignal {
             symbol: symbol.to_string(),
             direction,
@@ -607,14 +672,70 @@ impl MomentumDetector {
         })
     }
 
+    /// Calculate effective threshold based on current volatility
+    /// threshold = base_threshold * (current_vol / baseline_vol)
+    fn calculate_effective_threshold(&self, symbol: &str, spot: &SpotPrice) -> Decimal {
+        if !self.config.use_volatility_adjustment {
+            return self.config.min_move_pct;
+        }
+
+        // Get baseline volatility for this symbol
+        let baseline_vol = self
+            .config
+            .baseline_volatility
+            .get(symbol)
+            .copied()
+            .unwrap_or(dec!(0.001)); // Default 0.1% if not configured
+
+        // Calculate current volatility
+        let current_vol = spot
+            .volatility(self.config.volatility_lookback_secs)
+            .unwrap_or(baseline_vol);
+
+        // Avoid division by zero
+        if baseline_vol.is_zero() {
+            return self.config.min_move_pct;
+        }
+
+        // Adjust threshold: higher vol = higher threshold, lower vol = lower threshold
+        // But clamp to reasonable range (0.5x to 2x base threshold)
+        let vol_ratio = current_vol / baseline_vol;
+        let clamped_ratio = vol_ratio.max(dec!(0.5)).min(dec!(2.0));
+
+        let adjusted = self.config.min_move_pct * clamped_ratio;
+
+        debug!(
+            "{} vol_adjust: current={:.4}% baseline={:.4}% ratio={:.2} threshold={:.4}%",
+            symbol,
+            current_vol * dec!(100),
+            baseline_vol * dec!(100),
+            clamped_ratio,
+            adjusted * dec!(100)
+        );
+
+        adjusted
+    }
+
     /// Estimate fair value based on CEX momentum
     fn estimate_fair_value(&self, momentum: Decimal) -> Decimal {
-        // Simple model: larger moves correlate with higher probability
-        // This should ideally be calibrated with historical data
+        // Improved model: uses sigmoid-like scaling
+        // Small moves have modest impact, large moves have bigger impact
         let base_prob = dec!(0.50);
 
-        // Scale: 1% move adds ~10% to probability
-        let momentum_factor = momentum.abs() * dec!(10);
+        // Scale: 0.1% move → ~5% probability shift
+        //        0.5% move → ~20% probability shift
+        //        1.0% move → ~35% probability shift
+        let abs_momentum = momentum.abs();
+        let momentum_factor = if abs_momentum < dec!(0.001) {
+            // Very small moves: linear scaling
+            abs_momentum * dec!(50) // 0.1% → 5%
+        } else if abs_momentum < dec!(0.005) {
+            // Medium moves: moderate scaling
+            dec!(0.05) + (abs_momentum - dec!(0.001)) * dec!(40) // 0.5% → ~21%
+        } else {
+            // Large moves: diminishing returns
+            dec!(0.21) + (abs_momentum - dec!(0.005)) * dec!(30) // 1% → ~36%
+        };
 
         // Cap at 90% probability
         (base_prob + momentum_factor).min(dec!(0.90))
@@ -623,7 +744,7 @@ impl MomentumDetector {
     /// Calculate confidence score (0.0 to 1.0)
     fn calculate_confidence(&self, momentum: Decimal, edge: Decimal) -> f64 {
         // Higher momentum and edge = higher confidence
-        let momentum_score = (momentum.abs() / dec!(0.02)).min(Decimal::ONE);
+        let momentum_score = (momentum.abs() / dec!(0.005)).min(Decimal::ONE); // 0.5% = max score
         let edge_score = (edge / dec!(0.15)).min(Decimal::ONE);
 
         // Weighted average

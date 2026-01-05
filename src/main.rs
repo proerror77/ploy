@@ -1844,15 +1844,27 @@ async fn run_momentum_mode(
         (true, 60, 300)
     };
 
+    // Build baseline volatility map for each symbol
+    let mut baseline_volatility = std::collections::HashMap::new();
+    baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005));  // 0.05%
+    baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008));  // 0.08%
+    baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015));  // 0.15%
+    baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012));  // 0.12%
+
     // Build momentum config
     let momentum_config = MomentumConfig {
         min_move_pct: Decimal::from_str(&format!("{:.6}", min_move / 100.0))
-            .unwrap_or(dec!(0.003)),
+            .unwrap_or(dec!(0.0015)),
         max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
             .unwrap_or(dec!(0.35)),
         min_edge: Decimal::from_str(&format!("{:.6}", min_edge / 100.0))
             .unwrap_or(dec!(0.03)),
         lookback_secs: 5,
+        // NEW: Multi-timeframe momentum and volatility adjustment
+        use_weighted_momentum: true,    // Use 10s/30s/60s weighted combination
+        use_volatility_adjustment: true, // Adjust threshold by current volatility
+        baseline_volatility,
+        volatility_lookback_secs: 60,   // 60-second rolling volatility
         shares_per_trade: shares,
         max_positions,
         cooldown_secs: 60,
