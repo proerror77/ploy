@@ -331,64 +331,56 @@ impl EventMatcher {
                 }
             };
 
-            // Get condition_id from event details
+            // Get market from event details
             let market = match event_details.markets.first() {
                 Some(m) => m,
                 None => continue,
             };
-            let condition_id = match &market.condition_id {
-                Some(cid) => cid.clone(),
+            let condition_id = market.condition_id.clone().unwrap_or_default();
+
+            // Parse token IDs from clobTokenIds field (JSON string array)
+            // Format: ["token_id_for_up", "token_id_for_down"]
+            let tokens: Vec<String> = market.clob_token_ids
+                .as_ref()
+                .and_then(|ids_str| serde_json::from_str::<Vec<String>>(ids_str).ok())
+                .unwrap_or_default();
+
+            if tokens.len() < 2 {
+                debug!("Market {} has insufficient tokens: {:?}", condition_id, tokens);
+                continue;
+            }
+
+            // First token is UP, second is DOWN (Polymarket convention)
+            let up_token_id = tokens[0].clone();
+            let down_token_id = tokens[1].clone();
+
+            // Parse end time
+            let end_time = match event_details.end_date.as_ref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .ok()
+            }) {
+                Some(t) => t,
                 None => continue,
             };
 
-            // Fetch market from CLOB API to get actual token IDs
-            let clob_market = match self.client.get_market(&condition_id).await {
-                Ok(m) => m,
-                Err(e) => {
-                    debug!("Failed to get CLOB market for {}: {}", condition_id, e);
-                    continue;
-                }
+            let event_info = EventInfo {
+                slug: event_details.slug.clone().unwrap_or_default(),
+                title: event_details.title.clone().unwrap_or_default(),
+                up_token_id,
+                down_token_id,
+                end_time,
+                condition_id,
             };
 
-            // Find UP and DOWN tokens from CLOB market
-            let up_token = clob_market.tokens.iter().find(|t| {
-                let outcome = t.outcome.to_lowercase();
-                outcome.contains("up") || outcome == "yes"
-            });
-            let down_token = clob_market.tokens.iter().find(|t| {
-                let outcome = t.outcome.to_lowercase();
-                outcome.contains("down") || outcome == "no"
-            });
+            debug!(
+                "Found event: {} (UP={}, DOWN={})",
+                event_info.title,
+                &event_info.up_token_id[..20.min(event_info.up_token_id.len())],
+                &event_info.down_token_id[..20.min(event_info.down_token_id.len())]
+            );
 
-            if let (Some(up), Some(down)) = (up_token, down_token) {
-                // Parse end time
-                let end_time = match event_details.end_date.as_ref().and_then(|s| {
-                    DateTime::parse_from_rfc3339(s)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .ok()
-                }) {
-                    Some(t) => t,
-                    None => continue,
-                };
-
-                let event_info = EventInfo {
-                    slug: event_details.slug.clone().unwrap_or_default(),
-                    title: event_details.title.clone().unwrap_or_default(),
-                    up_token_id: up.token_id.clone(),
-                    down_token_id: down.token_id.clone(),
-                    end_time,
-                    condition_id,
-                };
-
-                debug!(
-                    "Found event: {} (UP={}, DOWN={})",
-                    event_info.title,
-                    &event_info.up_token_id[..20.min(event_info.up_token_id.len())],
-                    &event_info.down_token_id[..20.min(event_info.down_token_id.len())]
-                );
-
-                events.push(event_info);
-            }
+            events.push(event_info);
         }
 
         Ok(events)
@@ -456,6 +448,21 @@ impl EventMatcher {
         }
 
         token_ids
+    }
+
+    /// Get token IDs with their corresponding sides for WebSocket registration
+    pub async fn get_token_mappings(&self) -> Vec<(String, Side)> {
+        let events = self.active_events.read().await;
+        let mut mappings = vec![];
+
+        for series_events in events.values() {
+            for event in series_events {
+                mappings.push((event.up_token_id.clone(), Side::Up));
+                mappings.push((event.down_token_id.clone(), Side::Down));
+            }
+        }
+
+        mappings
     }
 }
 

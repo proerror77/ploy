@@ -1937,7 +1937,8 @@ async fn run_momentum_mode(
         error!("Failed to fetch events: {}", e);
     }
 
-    let token_ids = engine.event_matcher().get_all_token_ids().await;
+    let token_mappings = engine.event_matcher().get_token_mappings().await;
+    let token_ids: Vec<String> = token_mappings.iter().map(|(id, _)| id.clone()).collect();
     info!("Found {} tokens to subscribe", token_ids.len());
 
     if token_ids.is_empty() {
@@ -1956,9 +1957,11 @@ async fn run_momentum_mode(
     let pm_ws = Arc::new(PolymarketWebSocket::new(
         "wss://ws-subscriptions-clob.polymarket.com/ws/market",
     ));
-    for token_id in &token_ids {
-        pm_ws.register_token(token_id, ploy::domain::Side::Up).await;
+    // Register tokens with their correct sides (UP or DOWN)
+    for (token_id, side) in &token_mappings {
+        pm_ws.register_token(token_id, *side).await;
     }
+    info!("Registered {} tokens with UP/DOWN mappings", token_mappings.len());
     let pm_cache = pm_ws.quote_cache().clone();
 
     // Running flag for graceful shutdown
