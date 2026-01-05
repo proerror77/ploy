@@ -137,21 +137,34 @@ impl DataFeedManager {
     }
 
     /// Discover events from a series and notify strategies
+    /// Only fetches details for the next few upcoming events to minimize API calls
     pub async fn discover_series_events(&self, series_id: &str) -> Result<Vec<String>> {
         let mut token_ids = Vec::new();
 
         if let Some(ref client) = self.pm_client {
             match client.get_all_active_events(series_id).await {
-                Ok(events) => {
-                    let event_count = events.len();
-                    for event in events {
+                Ok(mut events) => {
+                    let total_events = events.len();
+
+                    // Sort by end_date to get soonest events first
+                    events.sort_by(|a, b| {
+                        let a_time = a.end_date.as_ref().unwrap_or(&String::new()).clone();
+                        let b_time = b.end_date.as_ref().unwrap_or(&String::new()).clone();
+                        a_time.cmp(&b_time)
+                    });
+
+                    // Only fetch details for the next 3 events (current + upcoming)
+                    // This reduces 97 API calls to just 3
+                    let events_to_fetch = events.into_iter().take(3);
+
+                    for event in events_to_fetch {
                         // Get tokens for this event
                         if let Ok(event_details) = client.get_event_details(&event.id).await {
                             for market in event_details.markets {
-                                // Get token IDs from tokens field
-                                let tokens: Vec<String> = market.tokens
+                                // Get token IDs from clobTokenIds field (JSON string array)
+                                let tokens: Vec<String> = market.clob_token_ids
                                     .as_ref()
-                                    .map(|t| t.iter().map(|tok| tok.token_id.clone()).collect())
+                                    .and_then(|ids_str| serde_json::from_str::<Vec<String>>(ids_str).ok())
                                     .unwrap_or_default();
 
                                 if tokens.len() >= 2 {
@@ -160,6 +173,12 @@ impl DataFeedManager {
                                         .as_ref()
                                         .and_then(|d| d.parse().ok())
                                         .unwrap_or_else(Utc::now);
+
+                                    info!(
+                                        "Event discovered: {} (ends {})",
+                                        event.title.as_ref().unwrap_or(&event.id),
+                                        end_time.format("%H:%M:%S")
+                                    );
 
                                     let update = MarketUpdate::EventDiscovered {
                                         event_id: event.id.clone(),
@@ -176,7 +195,8 @@ impl DataFeedManager {
                             }
                         }
                     }
-                    info!("Discovered {} events from series {}", event_count, series_id);
+                    info!("Discovered {} active events in series {}, fetched details for {} nearest",
+                        total_events, series_id, token_ids.len() / 2);
                 }
                 Err(e) => {
                     warn!("Failed to fetch events for series {}: {}", series_id, e);
