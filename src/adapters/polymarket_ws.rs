@@ -598,7 +598,10 @@ impl PolymarketWebSocket {
                     side,
                     quote,
                 };
-                let _ = self.update_tx.send(update);
+                match self.update_tx.send(update) {
+                    Ok(n) => debug!("Quote broadcast to {} receivers", n),
+                    Err(_) => debug!("No receivers for quote update"),
+                }
             }
 
             debug!(

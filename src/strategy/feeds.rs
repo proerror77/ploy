@@ -104,14 +104,26 @@ impl DataFeedManager {
 
             tokio::spawn(async move {
                 info!("Polymarket quote feed started");
-                while let Ok(update) = rx.recv().await {
-                    let market_update = MarketUpdate::PolymarketQuote {
-                        token_id: update.token_id,
-                        side: update.side,
-                        quote: update.quote,
-                        timestamp: Utc::now(),
-                    };
-                    manager.send_market_update(market_update);
+                loop {
+                    match rx.recv().await {
+                        Ok(update) => {
+                            debug!("Feed received quote for token {}", &update.token_id[..8]);
+                            let market_update = MarketUpdate::PolymarketQuote {
+                                token_id: update.token_id,
+                                side: update.side,
+                                quote: update.quote,
+                                timestamp: Utc::now(),
+                            };
+                            manager.send_market_update(market_update);
+                        }
+                        Err(e) => {
+                            warn!("Quote feed recv error: {:?}", e);
+                            // Continue on lagged, break on closed
+                            if matches!(e, tokio::sync::broadcast::error::RecvError::Closed) {
+                                break;
+                            }
+                        }
+                    }
                 }
                 warn!("Polymarket quote feed ended");
             });
