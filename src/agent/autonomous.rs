@@ -6,11 +6,11 @@
 use crate::agent::client::ClaudeAgentClient;
 use crate::agent::grok::{GrokClient, SearchResult};
 use crate::agent::protocol::{
-    AgentAction, AgentContext, AgentResponse, DailyStats, MarketSnapshot,
-    PositionInfo, RiskAssessment,
+    AgentAction, AgentContext, AgentResponse,
+    PositionInfo,
 };
-use crate::domain::{RiskState, Side, StrategyState};
-use crate::error::{PloyError, Result};
+use crate::domain::RiskState;
+use crate::error::Result;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -384,7 +384,7 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                 | AgentAction::NoAction { .. } => {
                     valid_actions.push(action.clone());
                 }
-                AgentAction::AdjustRisk { new_state, reasoning } => {
+                AgentAction::AdjustRisk { new_state, reasoning: _ } => {
                     // Only allow risk increases (more conservative)
                     if *new_state == RiskState::Halted
                         || (*new_state == RiskState::Elevated

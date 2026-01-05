@@ -20,8 +20,6 @@ fn deserialize_optional_number<'de, D>(deserializer: D) -> std::result::Result<O
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
-
     let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
     match value {
         None => Ok(None),
@@ -330,7 +328,7 @@ impl PolymarketSportsMarket {
         let question = self.question.as_ref()?;
 
         // Try patterns like "Team A vs Team B" or "Team A to beat Team B"
-        if let Some(vs_pos) = question.to_lowercase().find(" vs ") {
+        if question.to_lowercase().find(" vs ").is_some() {
             let parts: Vec<&str> = question.splitn(2, " vs ").collect();
             if parts.len() == 2 {
                 return Some((

@@ -1,5 +1,5 @@
 use crate::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::domain::{Quote, Round, Side, Tick};
+use crate::domain::{Round, Tick};
 use crate::error::Result;
 use chrono::{Duration, Utc};
 use std::sync::Arc;

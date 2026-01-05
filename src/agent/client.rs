@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};

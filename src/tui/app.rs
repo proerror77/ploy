@@ -5,7 +5,6 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::VecDeque;
 
 use crate::domain::Side;
 use crate::tui::data::{DashboardStats, DisplayPosition, DisplayTransaction, MarketState};

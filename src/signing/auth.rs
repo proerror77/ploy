@@ -1,6 +1,6 @@
-use crate::error::{PloyError, Result};
+use crate::error::Result;
 use crate::signing::Wallet;
-use ethers::types::{Address, Signature, U256};
+use ethers::types::{Address, U256};
 use ethers::utils::keccak256;
 use serde::{Deserialize, Serialize};
 

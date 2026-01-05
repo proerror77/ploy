@@ -7,7 +7,6 @@ use crate::adapters::{PolymarketClient, PolymarketWebSocket};
 use crate::error::Result;
 use crate::strategy::core::{MarketDiscovery, SplitArbConfig, SplitArbEngine};
 use crate::strategy::OrderExecutor;
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

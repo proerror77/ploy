@@ -373,7 +373,7 @@ async fn handle_strategy_actions(
 
     while let Some((strategy_id, action)) = rx.recv().await {
         match action {
-            StrategyAction::SubmitOrder { client_order_id, order, priority } => {
+            StrategyAction::SubmitOrder { client_order_id, order, priority: _ } => {
                 let price_cents = order.limit_price * rust_decimal::Decimal::from(100);
                 println!("\n  \x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
                 println!("  \x1b[36m║\x1b[0m  📤 ORDER SUBMISSION                                          \x1b[36m║\x1b[0m");

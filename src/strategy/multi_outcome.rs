@@ -11,14 +11,13 @@
 //! - Near-settlement opportunity scanning
 
 use crate::adapters::PolymarketClient;
-use crate::error::{PloyError, Result};
+use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use tracing::{debug, info, warn};
 
 /// Polymarket fee rate (approximately 2%)
 pub const POLYMARKET_FEE_RATE: Decimal = dec!(0.02);

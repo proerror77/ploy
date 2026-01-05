@@ -736,7 +736,7 @@ IMPORTANT:
 
     /// Analyze with DraftKings odds comparison
     pub async fn analyze_with_draftkings(&self, event_url: &str) -> Result<SportsAnalysisWithDK> {
-        use crate::agent::odds_provider::{OddsProvider, Sport, EdgeAnalysis};
+        use crate::agent::odds_provider::{OddsProvider, Sport};
 
         // Get base analysis first
         let analysis = self.analyze_event(event_url).await?;

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::adapters::{DisplayQuote, PolymarketClient, QuoteCache};
+use crate::adapters::{PolymarketClient, QuoteCache};
 use crate::error::Result;
 
 #[derive(Parser)]
@@ -1329,7 +1329,7 @@ pub async fn show_account(client: &PolymarketClient, show_orders: bool, show_pos
 
 /// Calculate expected value for near-settlement betting
 pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, show_table: bool) -> Result<()> {
-    use crate::strategy::{ExpectedValue, analyze_near_settlement, generate_ev_table, POLYMARKET_FEE_RATE};
+    use crate::strategy::{ExpectedValue, analyze_near_settlement, POLYMARKET_FEE_RATE};
     use rust_decimal::prelude::FromPrimitive;
 
     let price = Decimal::from_f64(price_cents / 100.0).unwrap_or(dec!(0.95));
@@ -1751,7 +1751,7 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
         }
 
         // Show token IDs
-        if let Some((yes_token, no_token)) = market.get_token_ids() {
+        if let Some((yes_token, _no_token)) = market.get_token_ids() {
             println!("│   Yes Token: {}... │", &yes_token[..40.min(yes_token.len())]);
         }
 
@@ -1792,7 +1792,7 @@ pub async fn run_sports_chain(
     // Step 1: Grok - Get real-time data
     println!("\x1b[33m[Step 1/4] Fetching real-time data via Grok...\x1b[0m");
     let grok_config = GrokConfig::from_env();
-    let grok_data = if grok_config.is_configured() {
+    let _grok_data = if grok_config.is_configured() {
         match GrokClient::new(grok_config) {
             Ok(client) => {
                 let query = format!("{} vs {} latest news injuries lineup", team1, team2);
@@ -1876,7 +1876,7 @@ pub async fn run_sports_chain(
 
     let market_details = poly_client.find_game_market(team1, team2).await?;
 
-    let (edge_analysis, yes_token, no_token) = if let Some(ref details) = market_details {
+    let (edge_analysis, _yes_token, _no_token) = if let Some(ref details) = market_details {
         println!("   ✓ Found: {}", details.market.question.as_deref().unwrap_or("Unknown"));
         if let Some(yes_price) = details.yes_price() {
             println!("   Current Polymarket: Yes={:.1}¢ No={:.1}¢",
@@ -2360,7 +2360,7 @@ pub async fn run_live_edge_scanner(
 ) -> Result<()> {
     use crate::agent::{
         PolymarketSportsClient, OddsProvider, Sport, Market,
-        EventDetails, NBA_SERIES_ID,
+        NBA_SERIES_ID,
     };
     use std::collections::HashMap;
 
@@ -2532,7 +2532,7 @@ pub async fn run_live_edge_scanner(
                 // Try to find matching DK odds
                 let game_key = game.title.to_lowercase();
                 let dk_fair = if is_moneyline {
-                    dk_odds.get(&game_key).map(|(home, away)| {
+                    dk_odds.get(&game_key).map(|(_home, away)| {
                         // Determine which side this market represents
                         let parts: Vec<&str> = game.title.split(" vs. ").collect();
                         if parts.len() == 2 {

@@ -9,7 +9,7 @@ use crate::error::{PloyError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Grok API client configuration
 #[derive(Debug, Clone)]

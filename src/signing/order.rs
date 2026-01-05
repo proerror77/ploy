@@ -1,6 +1,6 @@
 use crate::error::{PloyError, Result};
 use crate::signing::Wallet;
-use ethers::types::{Address, Signature, U256};
+use ethers::types::{Address, U256};
 use ethers::utils::keccak256;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

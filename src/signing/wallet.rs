@@ -1,8 +1,6 @@
 use crate::error::{PloyError, Result};
-use ethers::core::k256::ecdsa::SigningKey;
 use ethers::signers::{LocalWallet, Signer as EthersSigner};
 use ethers::types::{Address, Signature, H256};
-use std::str::FromStr;
 use tracing::info;
 
 /// Wallet for signing Polymarket orders and authentication messages

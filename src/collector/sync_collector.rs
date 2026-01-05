@@ -11,8 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
-use super::binance_depth::{BinanceDepthStream, LobSnapshot, LobUpdate};
-use crate::adapters::BinanceWebSocket;
+use super::binance_depth::{BinanceDepthStream, LobUpdate};
 use crate::error::Result;
 
 /// Synchronized price record for lag analysis

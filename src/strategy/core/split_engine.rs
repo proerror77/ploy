@@ -3,17 +3,16 @@
 //! Generic split arbitrage logic that works across market types.
 
 use super::{ArbSide, ArbStats, BinaryMarket, HedgedPosition, PartialPosition, PositionStatus, PriceCache};
-use crate::adapters::{PolymarketClient, PolymarketWebSocket, QuoteUpdate};
-use crate::error::Result;
+use crate::adapters::PolymarketClient;
 use crate::strategy::OrderExecutor;
-use chrono::{DateTime, Duration, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Configuration for split arbitrage strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]

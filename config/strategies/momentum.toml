@@ -11,13 +11,13 @@ mode = "predictive"  # "predictive" or "confirmatory"
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 # Minimum CEX price move to trigger entry (%)
-min_move = 0.5
+min_move = 0.5  # Production: 0.5% minimum momentum
 
 # Maximum entry price on Polymarket (cents)
-max_entry = 45
+max_entry = 55.0  # Production: max 55 cents (must be float)
 
 # Minimum edge required (%)
-min_edge = 5
+min_edge = 5.0  # Production: 5% minimum edge
 
 [exit]
 # Take profit percentage (predictive mode)

@@ -106,7 +106,6 @@ fn deserialize_price<'de, D>(deserializer: D) -> std::result::Result<Option<Stri
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
     let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
     match value {
         None => Ok(None),

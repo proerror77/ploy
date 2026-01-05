@@ -11,12 +11,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, broadcast};
 use tokio::task::JoinHandle;
 use chrono::{DateTime, Utc};
-use tracing::{info, warn, error, debug};
+use tracing::{debug, info, error};
 
 use crate::error::Result;
 use anyhow::anyhow;
 use super::traits::{
-    Strategy, DataFeed, MarketUpdate, OrderUpdate, StrategyAction,
+    Strategy, MarketUpdate, OrderUpdate, StrategyAction,
     StrategyStateInfo, PositionInfo,
 };
 

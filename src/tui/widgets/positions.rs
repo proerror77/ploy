@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use rust_decimal::Decimal;

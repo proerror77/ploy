@@ -69,7 +69,7 @@ impl EventHandler {
     }
 
     /// Start the event handler loop
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         let tick_rate = self.tick_rate;
         let tx = self.tx.clone();
 

@@ -17,11 +17,11 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{
-    BinanceWebSocket, GammaEventInfo, PolymarketClient, PriceCache, PriceUpdate, QuoteCache,
+    GammaEventInfo, PolymarketClient, PriceCache, PriceUpdate, QuoteCache,
     QuoteUpdate, SpotPrice,
 };
 use crate::domain::{OrderRequest, Side};
-use crate::error::{PloyError, Result};
+use crate::error::Result;
 use crate::strategy::OrderExecutor;
 
 // ============================================================================

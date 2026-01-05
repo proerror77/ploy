@@ -104,7 +104,7 @@ async fn show_status() -> Result<()> {
     println!("  {:<15} {:<12} {}", "SERVICE", "STATUS", "DESCRIPTION");
     println!("  {}", "-".repeat(55));
 
-    for (id, name, desc) in services {
+    for (id, _name, desc) in services {
         // TODO: Check actual status
         let status = "\x1b[32m● running\x1b[0m";
         println!("  {:<15} {:<20} {}", id, status, desc);

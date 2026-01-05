@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use url::Url;
 
 use crate::error::{PloyError, Result};

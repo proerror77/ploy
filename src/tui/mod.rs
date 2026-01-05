@@ -47,34 +47,34 @@ pub async fn run_tui(mut app: TuiApp) -> io::Result<()> {
     let mut terminal = init_terminal()?;
 
     // Create event handler with 100ms tick rate
-    let mut events = EventHandler::new(Duration::from_millis(100));
+    let events = EventHandler::new(Duration::from_millis(100));
 
     // Start event loop in background
-    let event_tx = events.sender();
+    let _event_tx = events.sender();
     tokio::spawn(async move {
         events.run().await;
     });
 
     // Create a new receiver since we moved events
-    let (_tx, mut _rx): (tokio::sync::mpsc::UnboundedSender<AppEvent>, _) = tokio::sync::mpsc::unbounded_channel();
+    let (_tx, _rx): (tokio::sync::mpsc::UnboundedSender<AppEvent>, _) = tokio::sync::mpsc::unbounded_channel();
 
     // Main loop - simplified version that handles basic events
-    let mut event_handler = EventHandler::new(Duration::from_millis(100));
+    let event_handler = EventHandler::new(Duration::from_millis(100));
 
     // Run event handler
-    let event_sender = event_handler.sender();
+    let _event_sender = event_handler.sender();
     tokio::spawn(async move {
         event_handler.run().await;
     });
 
     // Create another receiver for the main loop
-    let (main_tx, mut main_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let (main_tx, _main_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
     // Spawn event forwarder
-    let forward_tx = main_tx.clone();
+    let _forward_tx = main_tx.clone();
     tokio::spawn(async move {
-        let mut handler = EventHandler::new(Duration::from_millis(100));
-        let sender = handler.sender();
+        let handler = EventHandler::new(Duration::from_millis(100));
+        let _sender = handler.sender();
 
         // Run handler
         tokio::spawn(async move {

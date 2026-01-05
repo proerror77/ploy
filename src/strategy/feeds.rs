@@ -139,6 +139,8 @@ impl DataFeedManager {
     /// Discover events from a series and notify strategies
     /// Only fetches details for the next few upcoming events to minimize API calls
     pub async fn discover_series_events(&self, series_id: &str) -> Result<Vec<String>> {
+        use crate::domain::Side;
+
         let mut token_ids = Vec::new();
 
         if let Some(ref client) = self.pm_client {
@@ -168,6 +170,17 @@ impl DataFeedManager {
                                     .unwrap_or_default();
 
                                 if tokens.len() >= 2 {
+                                    let up_token = tokens.get(0).cloned().unwrap_or_default();
+                                    let down_token = tokens.get(1).cloned().unwrap_or_default();
+
+                                    // Register tokens with WebSocket for side mapping
+                                    // This is CRITICAL - without registration, quotes won't be forwarded
+                                    if let Some(ref pm_ws) = self.polymarket_ws {
+                                        pm_ws.register_token(&up_token, Side::Up).await;
+                                        pm_ws.register_token(&down_token, Side::Down).await;
+                                        debug!("Registered tokens: UP={}, DOWN={}", up_token, down_token);
+                                    }
+
                                     // Notify strategies of event discovery
                                     let end_time = event.end_date
                                         .as_ref()
@@ -183,14 +196,15 @@ impl DataFeedManager {
                                     let update = MarketUpdate::EventDiscovered {
                                         event_id: event.id.clone(),
                                         series_id: series_id.to_string(),
-                                        up_token: tokens.get(0).cloned().unwrap_or_default(),
-                                        down_token: tokens.get(1).cloned().unwrap_or_default(),
+                                        up_token: up_token.clone(),
+                                        down_token: down_token.clone(),
                                         end_time,
                                     };
                                     self.manager.send_market_update(update);
 
                                     // Collect token IDs
-                                    token_ids.extend(tokens);
+                                    token_ids.push(up_token);
+                                    token_ids.push(down_token);
                                 }
                             }
                         }

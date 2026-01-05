@@ -9,7 +9,7 @@ use crate::strategy::SignalDetector;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Tracks a single event within a series
 #[derive(Debug)]

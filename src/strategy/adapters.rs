@@ -432,24 +432,49 @@ impl Strategy for MomentumStrategyAdapter {
                 // Check for momentum signal
                 if let Some((direction, move_pct)) = self.check_momentum(symbol).await {
                     // Get entry price
-                    if let Some(entry_price) = self.get_entry_price(symbol, direction).await {
-                        // Check entry conditions
-                        if entry_price <= self.config.max_entry_price {
-                            if let Some(action) = self.generate_entry(symbol, direction, entry_price).await {
-                                // Update cooldown
-                                let mut cooldowns = self.cooldowns.write().await;
-                                cooldowns.insert(symbol.clone(), Utc::now());
+                    match self.get_entry_price(symbol, direction).await {
+                        Some(entry_price) => {
+                            // Check entry conditions
+                            if entry_price <= self.config.max_entry_price {
+                                if let Some(action) = self.generate_entry(symbol, direction, entry_price).await {
+                                    // Update cooldown
+                                    let mut cooldowns = self.cooldowns.write().await;
+                                    cooldowns.insert(symbol.clone(), Utc::now());
 
-                                // Log event
-                                actions.push(StrategyAction::LogEvent {
-                                    event: StrategyEvent::new(
-                                        StrategyEventType::SignalDetected,
-                                        format!("{} {} signal: {:.2}% move, entry {:.0}¢",
-                                            symbol, direction, move_pct * dec!(100), entry_price * dec!(100))
-                                    ),
-                                });
+                                    // Log event
+                                    actions.push(StrategyAction::LogEvent {
+                                        event: StrategyEvent::new(
+                                            StrategyEventType::SignalDetected,
+                                            format!("{} {} signal: {:.2}% move, entry {:.0}¢",
+                                                symbol, direction, move_pct * dec!(100), entry_price * dec!(100))
+                                        ),
+                                    });
 
-                                actions.push(action);
+                                    actions.push(action);
+                                }
+                            } else {
+                                debug!("[{}] Entry price {:.0}¢ > max {:.0}¢ for {}",
+                                    self.id, entry_price * dec!(100), self.config.max_entry_price * dec!(100), symbol);
+                            }
+                        }
+                        None => {
+                            // Log why we can't get entry price
+                            let events = self.events.read().await;
+                            let quotes = self.pm_quotes.read().await;
+                            if !events.contains_key(symbol) {
+                                debug!("[{}] No event mapped for symbol {}", self.id, symbol);
+                            } else {
+                                let event = events.get(symbol).unwrap();
+                                let token_id = match direction {
+                                    Direction::Up => &event.up_token_id,
+                                    Direction::Down => &event.down_token_id,
+                                };
+                                if !quotes.contains_key(token_id) {
+                                    debug!("[{}] No quote for token {} ({})", self.id, &token_id[..8], direction);
+                                } else {
+                                    let q = quotes.get(token_id).unwrap();
+                                    debug!("[{}] Quote has no best_ask for {} (bid={:?})", self.id, direction, q.best_bid);
+                                }
                             }
                         }
                     }

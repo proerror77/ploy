@@ -14,13 +14,12 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::info;
 
 /// Health status for a component
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

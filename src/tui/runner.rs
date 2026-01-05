@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{
-    BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PriceCache, PriceUpdate,
-    QuoteCache, QuoteUpdate,
+    BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PriceCache,
+    QuoteCache,
 };
 use crate::domain::Side;
 use crate::error::Result;

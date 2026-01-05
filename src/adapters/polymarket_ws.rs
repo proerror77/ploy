@@ -200,14 +200,19 @@ pub struct PriceChangeEntry {
     pub change: String,
 }
 
-/// Subscription request
+/// Initial subscription request
 #[derive(Debug, Clone, Serialize)]
 struct SubscribeRequest {
     #[serde(rename = "type")]
     msg_type: String,
     assets_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    market: Option<String>,
+}
+
+/// Dynamic subscription/unsubscription request
+#[derive(Debug, Clone, Serialize)]
+struct DynamicSubscribeRequest {
+    assets_ids: Vec<String>,
+    operation: String,
 }
 
 /// Simplified quote for display
@@ -479,11 +484,11 @@ impl PolymarketWebSocket {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Subscribe to book updates for all tokens
+        // Subscribe to MARKET channel for order book updates
+        // Polymarket WebSocket expects "type": "MARKET" not "subscribe"
         let subscribe_msg = SubscribeRequest {
-            msg_type: "subscribe".to_string(),
+            msg_type: "MARKET".to_string(),
             assets_ids: token_ids.to_vec(),
-            market: None,
         };
 
         let msg_json = serde_json::to_string(&subscribe_msg)?;
@@ -530,8 +535,13 @@ impl PolymarketWebSocket {
 
     /// Handle an incoming WebSocket message
     async fn handle_message(&self, text: &str) {
+        // Log first few chars for debugging
+        let preview = &text[..text.len().min(200)];
+        debug!("WS message received: {}", preview);
+
         // Try to parse as array of book messages (order book snapshots)
         if let Ok(books) = serde_json::from_str::<Vec<BookMessage>>(text) {
+            info!("Received {} book updates", books.len());
             for book in books {
                 self.process_book_message(book).await;
             }
@@ -540,18 +550,20 @@ impl PolymarketWebSocket {
 
         // Try to parse as price changes message
         if let Ok(price_msg) = serde_json::from_str::<PriceChangesMessage>(text) {
+            debug!("Received price changes for market: {}", price_msg.market);
             self.process_price_changes(price_msg).await;
             return;
         }
 
         // Try to parse as single book message
         if let Ok(book) = serde_json::from_str::<BookMessage>(text) {
+            debug!("Received single book update for: {}", book.asset_id);
             self.process_book_message(book).await;
             return;
         }
 
-        // Unknown format - log for debugging
-        debug!("Unknown WS message format: {}", &text[..text.len().min(100)]);
+        // Unknown format - log for debugging (include more of message)
+        warn!("Unknown WS message format: {}", preview);
     }
 
     /// Process an order book message

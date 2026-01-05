@@ -1,9 +1,7 @@
 use crate::domain::StrategyState;
 use crate::strategy::RiskManager;
 use chrono::Utc;
-use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 

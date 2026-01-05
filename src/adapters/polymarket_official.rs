@@ -17,8 +17,7 @@ use polymarket_client_sdk::clob::types::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tracing::{debug, info, instrument, warn};
+use tracing::{info, instrument};
 
 /// Chain IDs
 pub const POLYGON_CHAIN_ID: u64 = 137;

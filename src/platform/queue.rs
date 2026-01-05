@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use chrono::Utc;
 use tracing::{debug, warn};
 
-use super::types::{OrderIntent, OrderPriority};
+use super::types::OrderIntent;
 
 /// 包裝 OrderIntent 以支持優先級排序
 #[derive(Debug)]

@@ -1,7 +1,7 @@
 use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
-use crate::domain::{Order, OrderRequest, OrderStatus, Side};
-use crate::error::{OrderError, PloyError, Result};
+use crate::domain::{OrderRequest, OrderStatus, Side};
+use crate::error::{OrderError, Result};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::time::Duration;
