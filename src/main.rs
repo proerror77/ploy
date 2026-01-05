@@ -908,12 +908,31 @@ async fn run_account_mode(show_orders: bool, show_positions: bool) -> Result<()>
             let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
             println!("  Wallet loaded: {:?}", wallet.address());
 
+            // Check if funder address is set (for proxy/Magic wallets)
+            let funder = std::env::var("POLYMARKET_FUNDER").ok();
+            if let Some(ref funder_addr) = funder {
+                println!("  Funder (proxy wallet): {}", funder_addr);
+            }
+
             println!("  Authenticating with Polymarket CLOB...");
-            match PolymarketClient::new_authenticated(
-                "https://clob.polymarket.com",
-                wallet,
-                true,
-            ).await {
+            let auth_result = if let Some(funder_addr) = funder {
+                // Use proxy wallet authentication
+                PolymarketClient::new_authenticated_proxy(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    &funder_addr,
+                    true,
+                ).await
+            } else {
+                // Use regular EOA authentication
+                PolymarketClient::new_authenticated(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    true,
+                ).await
+            };
+
+            match auth_result {
                 Ok(client) => {
                     println!("  \x1b[32m✓ Authentication successful\x1b[0m");
                     println!("  Has HMAC auth: {}\n", client.has_hmac_auth());
@@ -1911,12 +1930,26 @@ async fn run_momentum_mode(
         PolymarketClient::new("https://clob.polymarket.com", true)?
     } else {
         let wallet = Wallet::from_env(ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID)?;
-        PolymarketClient::new_authenticated(
-            "https://clob.polymarket.com",
-            wallet,
-            true, // neg_risk for UP/DOWN markets
-        )
-        .await?
+
+        // Check for proxy wallet funder address
+        let funder = std::env::var("POLYMARKET_FUNDER").ok();
+        if let Some(ref funder_addr) = funder {
+            info!("Using proxy wallet authentication, funder: {}", funder_addr);
+            PolymarketClient::new_authenticated_proxy(
+                "https://clob.polymarket.com",
+                wallet,
+                funder_addr,
+                true, // neg_risk for UP/DOWN markets
+            )
+            .await?
+        } else {
+            PolymarketClient::new_authenticated(
+                "https://clob.polymarket.com",
+                wallet,
+                true, // neg_risk for UP/DOWN markets
+            )
+            .await?
+        }
     };
 
     // Create executor
@@ -1949,8 +1982,10 @@ async fn run_momentum_mode(
 
     // Create Binance WebSocket
     info!("Connecting to Binance WebSocket...");
-    let binance_ws = BinanceWebSocket::new(symbols_vec);
+    let binance_ws = Arc::new(BinanceWebSocket::new(symbols_vec));
     let binance_cache = binance_ws.price_cache().clone();
+    // Subscribe BEFORE spawning the task (must happen before run() consumes messages)
+    let binance_rx = binance_ws.subscribe();
 
     // Create Polymarket WebSocket
     info!("Connecting to Polymarket WebSocket...");
@@ -1963,15 +1998,18 @@ async fn run_momentum_mode(
     }
     info!("Registered {} tokens with UP/DOWN mappings", token_mappings.len());
     let pm_cache = pm_ws.quote_cache().clone();
+    // Subscribe BEFORE spawning the task
+    let pm_rx = pm_ws.subscribe_updates();
 
     // Running flag for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
-    let running_ws = Arc::clone(&running);
-    let running_engine = Arc::clone(&running);
+    let _running_ws = Arc::clone(&running);
+    let _running_engine = Arc::clone(&running);
 
     // Spawn Binance WebSocket task
+    let binance_ws_clone = Arc::clone(&binance_ws);
     let binance_handle = tokio::spawn(async move {
-        if let Err(e) = binance_ws.run().await {
+        if let Err(e) = binance_ws_clone.run().await {
             error!("Binance WebSocket error: {}", e);
         }
     });
@@ -1979,13 +2017,8 @@ async fn run_momentum_mode(
     // Spawn Polymarket WebSocket task
     let pm_ws_clone = Arc::clone(&pm_ws);
     let pm_handle = tokio::spawn(async move {
-        pm_ws_clone.run(token_ids).await;
+        let _ = pm_ws_clone.run(token_ids).await;
     });
-
-    // Subscribe to updates
-    let binance_rx = BinanceWebSocket::new(symbols.split(',').map(|s| s.to_string()).collect())
-        .subscribe();
-    let pm_rx = pm_ws.subscribe_updates();
 
     // Spawn engine task
     let engine_handle = tokio::spawn(async move {

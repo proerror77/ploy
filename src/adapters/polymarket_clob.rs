@@ -13,7 +13,7 @@ use polymarket_client_sdk::clob::types::{
     request::{
         OrderBookSummaryRequest, BalanceAllowanceRequest, OrdersRequest, TradesRequest,
     },
-    AssetType, Side as SdkSide, OrderType as SdkOrderType,
+    AssetType, Side as SdkSide, OrderType as SdkOrderType, SignatureType as SdkSignatureType,
 };
 use polymarket_client_sdk::gamma::{Client as GammaClient};
 use polymarket_client_sdk::gamma::types::request::{
@@ -43,6 +43,8 @@ pub struct PolymarketClient {
     signer: Option<PrivateKeySigner>,
     /// Legacy wallet for backward compatibility
     wallet: Option<Arc<Wallet>>,
+    /// Funder address (proxy wallet that holds funds)
+    funder: Option<alloy::primitives::Address>,
     /// Base URL
     base_url: String,
     /// Dry run mode
@@ -58,6 +60,7 @@ impl Clone for PolymarketClient {
             gamma_client: self.gamma_client.clone(),
             signer: self.signer.clone(),
             wallet: self.wallet.clone(),
+            funder: self.funder,
             base_url: self.base_url.clone(),
             dry_run: self.dry_run,
             neg_risk: self.neg_risk,
@@ -374,6 +377,7 @@ impl PolymarketClient {
             gamma_client,
             signer: None,
             wallet: None,
+            funder: None,
             base_url: base_url.trim_end_matches('/').to_string(),
             dry_run,
             neg_risk: false,
@@ -381,6 +385,7 @@ impl PolymarketClient {
     }
 
     /// Create an authenticated CLOB client with wallet
+    /// For proxy wallets (Magic/email), use new_authenticated_proxy instead
     pub async fn new_authenticated(
         base_url: &str,
         wallet: Wallet,
@@ -406,10 +411,65 @@ impl PolymarketClient {
             gamma_client,
             signer: Some(signer),
             wallet: Some(Arc::new(wallet)),
+            funder: None,
             base_url: base_url.trim_end_matches('/').to_string(),
             dry_run: false,
             neg_risk,
         })
+    }
+
+    /// Create an authenticated CLOB client with proxy wallet (Magic/email wallet)
+    /// funder_address is the proxy wallet address that holds the funds
+    pub async fn new_authenticated_proxy(
+        base_url: &str,
+        wallet: Wallet,
+        funder_address: &str,
+        neg_risk: bool,
+    ) -> Result<Self> {
+        let config = ClobConfig::default();
+        let clob_client = ClobClient::new(base_url, config)
+            .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
+
+        let gamma_client = GammaClient::new(GAMMA_API_URL)
+            .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
+
+        // Convert wallet private key to alloy signer
+        let private_key_hex = wallet.private_key_hex();
+        let signer: PrivateKeySigner = private_key_hex
+            .parse()
+            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?;
+
+        // Parse funder address
+        let funder: alloy::primitives::Address = funder_address
+            .parse()
+            .map_err(|e| PloyError::Wallet(format!("Invalid funder address: {}", e)))?;
+
+        info!(
+            "Created authenticated Polymarket SDK client (proxy mode), signer: {:?}, funder: {:?}",
+            signer.address(),
+            funder
+        );
+
+        Ok(Self {
+            clob_client,
+            gamma_client,
+            signer: Some(signer),
+            wallet: Some(Arc::new(wallet)),
+            funder: Some(funder),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            dry_run: false,
+            neg_risk,
+        })
+    }
+
+    /// Set the funder address for proxy wallets
+    pub fn set_funder(&mut self, funder_address: &str) -> Result<()> {
+        let funder: alloy::primitives::Address = funder_address
+            .parse()
+            .map_err(|e| PloyError::Wallet(format!("Invalid funder address: {}", e)))?;
+        self.funder = Some(funder);
+        info!("Set funder address: {:?}", funder);
+        Ok(())
     }
 
     /// Check if in dry run mode
@@ -735,12 +795,26 @@ impl PolymarketClient {
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
         // Authenticate for this operation
-        let auth_client = self.clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        // If funder is set, use proxy wallet authentication
+        let auth_client = if let Some(funder) = self.funder {
+            debug!("Using proxy wallet authentication, funder: {:?}", funder);
+            self.clob_client
+                .clone()
+                .authentication_builder(signer)
+                .funder(funder)
+                .signature_type(SdkSignatureType::Proxy)
+                .authenticate()
+                .await
+                .map_err(|e| PloyError::Auth(format!("Proxy authentication failed: {}", e)))?
+        } else {
+            debug!("Using EOA wallet authentication");
+            self.clob_client
+                .clone()
+                .authentication_builder(signer)
+                .authenticate()
+                .await
+                .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?
+        };
 
         // Build the order
         let sdk_side = match request.order_side {
