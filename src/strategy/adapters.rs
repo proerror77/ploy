@@ -57,13 +57,53 @@ pub struct MomentumStrategyAdapter {
     enabled: bool,
 }
 
-/// CEX price state for momentum detection
+/// Price history entry for momentum calculation
+#[derive(Debug, Clone)]
+struct PriceEntry {
+    price: Decimal,
+    timestamp: DateTime<Utc>,
+}
+
+/// CEX price state with history for momentum detection
 #[derive(Debug, Clone)]
 struct CexPriceState {
     symbol: String,
     price: Decimal,
-    prev_price: Option<Decimal>,
+    /// Price history for lookback window (stores last N seconds of prices)
+    history: Vec<PriceEntry>,
     timestamp: DateTime<Utc>,
+}
+
+impl CexPriceState {
+    fn new(symbol: String, price: Decimal, timestamp: DateTime<Utc>) -> Self {
+        Self {
+            symbol,
+            price,
+            history: vec![PriceEntry { price, timestamp }],
+            timestamp,
+        }
+    }
+
+    /// Add a new price and maintain lookback window
+    fn update(&mut self, price: Decimal, timestamp: DateTime<Utc>, lookback_secs: u64) {
+        self.price = price;
+        self.timestamp = timestamp;
+        self.history.push(PriceEntry { price, timestamp });
+
+        // Keep only prices within lookback window + buffer
+        let cutoff = timestamp - chrono::Duration::seconds((lookback_secs + 2) as i64);
+        self.history.retain(|e| e.timestamp >= cutoff);
+    }
+
+    /// Get price from N seconds ago
+    fn get_price_at(&self, seconds_ago: u64) -> Option<Decimal> {
+        let target_time = self.timestamp - chrono::Duration::seconds(seconds_ago as i64);
+        // Find the closest price at or before target_time
+        self.history.iter()
+            .filter(|e| e.timestamp <= target_time)
+            .last()
+            .map(|e| e.price)
+    }
 }
 
 /// Polymarket quote state
@@ -218,17 +258,29 @@ impl MomentumStrategyAdapter {
         }
     }
 
-    /// Check for momentum signal based on CEX price move
+    /// Check for momentum signal based on CEX price move over lookback window
     async fn check_momentum(&self, symbol: &str) -> Option<(Direction, Decimal)> {
         let prices = self.cex_prices.read().await;
         let state = prices.get(symbol)?;
-        let prev = state.prev_price?;
 
-        if prev.is_zero() {
+        // Get price from lookback_secs ago
+        let base_price = state.get_price_at(self.config.lookback_secs)?;
+
+        if base_price.is_zero() {
             return None;
         }
 
-        let move_pct = (state.price - prev) / prev;
+        let move_pct = (state.price - base_price) / base_price;
+
+        // Log momentum check periodically (every ~100 updates to avoid spam)
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count % 100 == 0 {
+            debug!(
+                "[{}] {} momentum: {:.4}% (base: ${:.2}, now: ${:.2}, lookback: {}s)",
+                self.id, symbol, move_pct * dec!(100), base_price, state.price, self.config.lookback_secs
+            );
+        }
 
         if move_pct.abs() >= self.config.min_move_pct {
             let direction = if move_pct > Decimal::ZERO {
@@ -236,6 +288,10 @@ impl MomentumStrategyAdapter {
             } else {
                 Direction::Down
             };
+            info!(
+                "[{}] 🚀 MOMENTUM SIGNAL: {} {} {:.2}% (${:.2} → ${:.2})",
+                self.id, symbol, direction, move_pct.abs() * dec!(100), base_price, state.price
+            );
             Some((direction, move_pct.abs()))
         } else {
             None
@@ -336,15 +392,15 @@ impl Strategy for MomentumStrategyAdapter {
 
         match update {
             MarketUpdate::BinancePrice { symbol, price, timestamp } => {
-                // Update CEX price state
+                // Update CEX price state with history
                 let mut prices = self.cex_prices.write().await;
-                let prev_price = prices.get(symbol).map(|s| s.price);
-                prices.insert(symbol.clone(), CexPriceState {
-                    symbol: symbol.clone(),
-                    price: *price,
-                    prev_price,
-                    timestamp: *timestamp,
-                });
+                if let Some(state) = prices.get_mut(symbol) {
+                    state.update(*price, *timestamp, self.config.lookback_secs);
+                } else {
+                    prices.insert(symbol.clone(), CexPriceState::new(
+                        symbol.clone(), *price, *timestamp
+                    ));
+                }
                 drop(prices);
 
                 // Check for momentum signal
@@ -403,6 +459,7 @@ impl Strategy for MomentumStrategyAdapter {
             MarketUpdate::PolymarketQuote { token_id, quote, timestamp, .. } => {
                 // Update quote state
                 let mut quotes = self.pm_quotes.write().await;
+                let is_new = !quotes.contains_key(token_id);
                 quotes.insert(token_id.clone(), PmQuoteState {
                     token_id: token_id.clone(),
                     best_bid: quote.best_bid,
@@ -410,6 +467,17 @@ impl Strategy for MomentumStrategyAdapter {
                     timestamp: *timestamp,
                 });
                 drop(quotes);
+
+                // Log LOB updates (first update or significant changes)
+                if is_new {
+                    info!(
+                        "[{}] 📊 LOB: token {} bid: {}¢ ask: {}¢",
+                        self.id,
+                        &token_id[..8],
+                        quote.best_bid.map(|b| (b * dec!(100)).to_string()).unwrap_or("-".into()),
+                        quote.best_ask.map(|a| (a * dec!(100)).to_string()).unwrap_or("-".into())
+                    );
+                }
 
                 // Check exit conditions for positions
                 if !self.config.hold_to_resolution {
