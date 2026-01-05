@@ -215,6 +215,33 @@ impl EventTracker {
         self.active_events.get(&key)
     }
 
+    /// Check if an event is already being tracked (by event_id only)
+    pub fn has_active_event(&self, event_id: &str) -> bool {
+        self.active_events.keys().any(|k| k.ends_with(&format!(":{}", event_id)))
+    }
+
+    /// Start tracking a new event (convenience wrapper)
+    pub fn start_event(
+        &mut self,
+        symbol: String,
+        event_id: String,
+        end_time: DateTime<Utc>,
+        start_price: Decimal,
+    ) {
+        self.register_event(&symbol, &event_id, Utc::now(), end_time, start_price);
+    }
+
+    /// Update price for an event by event_id only (searches by event_id)
+    pub fn update_price_by_event_id(&mut self, event_id: &str, price: Decimal) {
+        let now = Utc::now();
+        for (key, event) in self.active_events.iter_mut() {
+            if key.ends_with(&format!(":{}", event_id)) && event.is_active() {
+                event.update_price(price, now);
+                return;
+            }
+        }
+    }
+
     /// Finalize completed events and move to history
     pub fn finalize_completed_events(&mut self) {
         let now = Utc::now();
@@ -331,8 +358,8 @@ impl VolatilityDetector {
         &self.event_tracker
     }
 
-    /// Check for trading signal
-    pub fn check_signal(
+    /// Check for trading signal using internal event tracker
+    pub fn check_signal_internal(
         &self,
         symbol: &str,
         event_id: &str,
@@ -340,7 +367,20 @@ impl VolatilityDetector {
         down_ask: Option<Decimal>,
         obi: Option<Decimal>,
     ) -> Option<VolatilitySignal> {
-        let event = self.event_tracker.get_active_event(symbol, event_id)?;
+        self.check_signal(symbol, event_id, &self.event_tracker, up_ask, down_ask, obi)
+    }
+
+    /// Check for trading signal using external event tracker
+    pub fn check_signal(
+        &self,
+        symbol: &str,
+        event_id: &str,
+        tracker: &EventTracker,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        obi: Option<Decimal>,
+    ) -> Option<VolatilitySignal> {
+        let event = tracker.get_active_event(symbol, event_id)?;
 
         let time_remaining = event.time_remaining_secs();
 

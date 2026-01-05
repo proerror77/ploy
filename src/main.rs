@@ -1854,7 +1854,7 @@ async fn run_momentum_mode(
     // Build momentum config
     let momentum_config = MomentumConfig {
         min_move_pct: Decimal::from_str(&format!("{:.6}", min_move / 100.0))
-            .unwrap_or(dec!(0.0015)),
+            .unwrap_or(dec!(0.0005)),
         max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
             .unwrap_or(dec!(0.35)),
         min_edge: Decimal::from_str(&format!("{:.6}", min_edge / 100.0))

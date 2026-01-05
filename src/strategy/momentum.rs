@@ -23,6 +23,7 @@ use crate::adapters::{
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::strategy::OrderExecutor;
+use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
 
 // ============================================================================
 // Configuration
@@ -103,7 +104,7 @@ impl Default for MomentumConfig {
 
         Self {
             // === AGGRESSIVE ENTRY (CRYINGLITTLEBABY style) ===
-            min_move_pct: dec!(0.0015),     // 0.15% base minimum move (adjusted by volatility)
+            min_move_pct: dec!(0.0005),     // 0.05% base minimum move (adjusted by volatility)
             max_entry_price: dec!(0.35),    // Max 35¢ entry (confirmed winner should be cheap)
             min_edge: dec!(0.03),           // 3% minimum edge
             lookback_secs: 5,               // 5-second momentum window (deprecated)
@@ -912,6 +913,9 @@ pub struct MomentumEngine {
     last_trade_time: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
     daily_trades: Arc<RwLock<DailyTradeCounter>>,
     dry_run: bool,
+    // Volatility-based event tracking
+    volatility_detector: VolatilityDetector,
+    event_tracker: Arc<RwLock<EventTracker>>,
 }
 
 impl MomentumEngine {
@@ -927,6 +931,19 @@ impl MomentumEngine {
         let exit_manager = ExitManager::new(exit_config.clone());
         let event_matcher = EventMatcher::new(client);
 
+        // Initialize volatility detector with config matching momentum settings
+        let volatility_config = VolatilityConfig {
+            max_entry_price: config.max_entry_price,
+            min_edge: config.min_edge,
+            min_deviation_pct: config.min_move_pct, // Use same threshold
+            shares_per_trade: config.shares_per_trade,
+            min_time_remaining_secs: config.min_time_remaining_secs,
+            max_time_remaining_secs: config.max_time_remaining_secs,
+            ..Default::default()
+        };
+        let volatility_detector = VolatilityDetector::new(volatility_config);
+        let event_tracker = EventTracker::new(20); // Keep 20 historical events
+
         Self {
             config,
             exit_config,
@@ -938,6 +955,8 @@ impl MomentumEngine {
             last_trade_time: Arc::new(RwLock::new(HashMap::new())),
             daily_trades: Arc::new(RwLock::new(DailyTradeCounter::default())),
             dry_run,
+            volatility_detector,
+            event_tracker: Arc::new(RwLock::new(event_tracker)),
         }
     }
 
@@ -1088,12 +1107,73 @@ impl MomentumEngine {
                 symbol, event.title, remaining);
         }
 
+        // Track event start price for volatility detection
+        {
+            let mut tracker = self.event_tracker.write().await;
+            // Start or update event tracking
+            if !tracker.has_active_event(&event.condition_id) {
+                // New event - record start price
+                tracker.start_event(
+                    symbol.clone(),
+                    event.condition_id.clone(),
+                    event.end_time,
+                    spot.price,
+                );
+                info!(
+                    "📊 {} new event {} started at {:.2}, ends {}",
+                    symbol,
+                    &event.condition_id[..8],
+                    spot.price,
+                    event.end_time.format("%H:%M:%S")
+                );
+            } else {
+                // Update existing event with current price
+                tracker.update_price_by_event_id(&event.condition_id, spot.price);
+            }
+        }
+
         // Get PM quotes for this event
         let (up_ask, down_ask) = self.get_pm_prices(pm_cache, &event).await;
 
-        // Check for momentum signal
+        // Check for momentum signal (CEX momentum-based)
         if let Some(signal) = self.detector.check(symbol, &spot, up_ask, down_ask) {
             self.maybe_enter(signal, &event).await?;
+        }
+
+        // Also check for volatility signal (deviation from start price)
+        {
+            let tracker = self.event_tracker.read().await;
+            if let Some(vol_signal) = self.volatility_detector.check_signal(
+                symbol,
+                &event.condition_id,
+                &tracker,
+                up_ask,
+                down_ask,
+                None, // TODO: Add OBI from LOB cache
+            ) {
+                // Convert volatility signal to momentum signal for unified execution
+                let momentum_signal = MomentumSignal {
+                    symbol: symbol.clone(),
+                    direction: match vol_signal.side {
+                        Side::Up => Direction::Up,
+                        Side::Down => Direction::Down,
+                    },
+                    cex_move_pct: vol_signal.deviation_pct,
+                    pm_price: vol_signal.entry_price,
+                    edge: vol_signal.edge,
+                    confidence: vol_signal.confidence,
+                    timestamp: Utc::now(),
+                };
+                info!(
+                    "📈 {} VOLATILITY signal: {} deviation={:.3}% fair={:.2}¢ edge={:.1}%",
+                    symbol,
+                    vol_signal.side,
+                    vol_signal.deviation_pct * dec!(100),
+                    vol_signal.fair_value * dec!(100),
+                    vol_signal.edge * dec!(100)
+                );
+                self.maybe_enter(momentum_signal, &event).await?;
+            }
         }
 
         Ok(())
