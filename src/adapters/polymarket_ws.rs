@@ -599,14 +599,22 @@ impl PolymarketWebSocket {
                     quote,
                 };
                 match self.update_tx.send(update) {
-                    Ok(n) => debug!("Quote broadcast to {} receivers", n),
-                    Err(_) => debug!("No receivers for quote update"),
+                    Ok(n) => info!("Quote broadcast to {} receivers: {} {:?} bid={:?} ask={:?}",
+                        n, side, &asset_id[..8.min(asset_id.len())], best_bid, best_ask),
+                    Err(_) => warn!("No receivers for quote update - channel closed"),
                 }
             }
 
             debug!(
                 "Book update {}: bid={:?} ask={:?}",
                 side, best_bid, best_ask
+            );
+        } else {
+            // Token not registered - this is a critical issue for debugging
+            let registered_count = self.token_to_side.read().await.len();
+            warn!(
+                "Unregistered token in book update: {} (registered tokens: {})",
+                &asset_id[..16.min(asset_id.len())], registered_count
             );
         }
     }

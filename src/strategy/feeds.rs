@@ -103,11 +103,18 @@ impl DataFeedManager {
             let mut rx = pm_ws.subscribe_updates();
 
             tokio::spawn(async move {
-                info!("Polymarket quote feed started");
+                info!("Polymarket quote feed started - waiting for quotes");
+                let mut quote_count = 0u64;
                 loop {
                     match rx.recv().await {
                         Ok(update) => {
-                            debug!("Feed received quote for token {}", &update.token_id[..8]);
+                            quote_count += 1;
+                            info!("Feed forwarding quote #{}: {} {:?} bid={:?} ask={:?}",
+                                quote_count,
+                                &update.token_id[..8.min(update.token_id.len())],
+                                update.side,
+                                update.quote.best_bid,
+                                update.quote.best_ask);
                             let market_update = MarketUpdate::PolymarketQuote {
                                 token_id: update.token_id,
                                 side: update.side,
