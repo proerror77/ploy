@@ -350,10 +350,43 @@ impl EventMatcher {
     /// Fetch events for a specific series
     async fn fetch_series_events(&self, series_id: &str) -> Result<Vec<EventInfo>> {
         let gamma_events = self.client.get_all_active_events(series_id).await?;
+        let now = Utc::now();
+
+        // Filter to events ending within the next 20 minutes (for 15-min markets)
+        // This ensures we get the current/next 15-minute events, not 1-hour or longer ones
+        let max_end_time = now + ChronoDuration::minutes(20);
+        let min_end_time = now + ChronoDuration::seconds(30); // At least 30s remaining
+
+        let mut sorted_events: Vec<_> = gamma_events
+            .into_iter()
+            .filter(|e| {
+                // Parse end_date from gamma event to filter by time
+                if let Some(end_str) = &e.end_date {
+                    if let Ok(end) = DateTime::parse_from_rfc3339(end_str) {
+                        let end_utc = end.with_timezone(&Utc);
+                        // Only keep events ending within our window
+                        return end_utc > min_end_time && end_utc <= max_end_time;
+                    }
+                }
+                false
+            })
+            .collect();
+
+        // Sort by end_time (soonest first)
+        sorted_events.sort_by(|a, b| {
+            let a_end = a.end_date.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            let b_end = b.end_date.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            a_end.cmp(&b_end)
+        });
+
+        info!(
+            "Series {}: {} events ending in next 20 minutes",
+            series_id, sorted_events.len()
+        );
 
         let mut events = vec![];
-        // Limit to first 5 events to avoid too many API calls
-        for gamma_event in gamma_events.into_iter().take(5) {
+        // Take up to 5 events that end soonest
+        for gamma_event in sorted_events.into_iter().take(5) {
             // Get full event details to access market condition_id
             let event_details = match self.client.get_event_details(&gamma_event.id).await {
                 Ok(details) => details,
