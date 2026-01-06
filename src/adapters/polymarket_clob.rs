@@ -7,6 +7,7 @@ use crate::domain::{OrderRequest, OrderSide, OrderStatus};
 use crate::error::{PloyError, Result};
 use crate::signing::Wallet;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
 use chrono::Utc;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::clob::types::{
@@ -403,11 +404,12 @@ impl PolymarketClient {
         let gamma_client = GammaClient::new(GAMMA_API_URL)
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
-        // Convert wallet private key to alloy signer
+        // Convert wallet private key to alloy signer with Polygon chain ID
         let private_key_hex = wallet.private_key_hex();
         let signer: PrivateKeySigner = private_key_hex
-            .parse()
-            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?;
+            .parse::<PrivateKeySigner>()
+            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
+            .with_chain_id(Some(POLYGON_CHAIN_ID));
 
         info!("Created authenticated Polymarket SDK client, address: {:?}", signer.address());
 
@@ -439,11 +441,12 @@ impl PolymarketClient {
         let gamma_client = GammaClient::new(GAMMA_API_URL)
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
-        // Convert wallet private key to alloy signer
+        // Convert wallet private key to alloy signer with Polygon chain ID
         let private_key_hex = wallet.private_key_hex();
         let signer: PrivateKeySigner = private_key_hex
-            .parse()
-            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?;
+            .parse::<PrivateKeySigner>()
+            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
+            .with_chain_id(Some(POLYGON_CHAIN_ID));
 
         // Parse funder address
         let funder: alloy::primitives::Address = funder_address
