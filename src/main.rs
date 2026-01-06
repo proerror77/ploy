@@ -1968,7 +1968,7 @@ async fn run_momentum_mode(
     let executor = OrderExecutor::new(pm_client.clone(), Default::default());
 
     // Create risk config with fund management
-    let risk_config = crate::config::RiskConfig {
+    let risk_config = ploy::config::RiskConfig {
         max_single_exposure_usd: dec!(100),
         min_remaining_seconds: 30,
         max_consecutive_failures: 3,
