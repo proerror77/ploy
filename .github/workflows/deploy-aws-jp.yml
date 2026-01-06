@@ -10,7 +10,7 @@ on:
       min_move:
         description: 'Minimum CEX move %'
         required: true
-        default: '0.5'
+        default: '0.15'
       max_entry:
         description: 'Max entry price (cents)'
         required: true
