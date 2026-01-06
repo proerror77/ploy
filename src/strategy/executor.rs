@@ -134,38 +134,18 @@ impl OrderExecutor {
             });
         }
 
-        // Wait for fill with timeout
-        let timeout_duration = Duration::from_millis(self.config.order_timeout_ms);
-        let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
+        // For 15-minute prediction markets, return immediately after submission
+        // to avoid auth errors during polling that cause duplicate order submissions.
+        // The order is already on the book - market resolution will handle the rest.
+        info!("Order {} submitted to market, status: {}", order_id, order_resp.status);
 
-        match timeout(timeout_duration, self.wait_for_fill(&order_id, poll_interval)).await {
-            Ok(result) => result.map(|r| ExecutionResult {
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                ..r
-            }),
-            Err(_) => {
-                // Timeout - try to cancel and return partial fill
-                warn!("Order {} timed out, attempting cancel", order_id);
-                let _ = self.client.cancel_order(&order_id).await;
-
-                // Get final state
-                let final_order = self.client.get_order(&order_id).await?;
-                let (filled, price) = PolymarketClient::calculate_fill(&final_order);
-                let filled_u64 = filled.to_u64().unwrap_or(0);
-
-                Ok(ExecutionResult {
-                    order_id: order_id.clone(),
-                    status: if filled > Decimal::ZERO {
-                        OrderStatus::PartiallyFilled
-                    } else {
-                        OrderStatus::Cancelled
-                    },
-                    filled_shares: filled_u64,
-                    avg_fill_price: Some(price),
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                })
-            }
-        }
+        Ok(ExecutionResult {
+            order_id,
+            status: OrderStatus::Submitted, // Order is live on the book
+            filled_shares: 0, // Will be determined at market resolution
+            avg_fill_price: Some(request.limit_price),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        })
     }
 
     /// Poll for order fill
