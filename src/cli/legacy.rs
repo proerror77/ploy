@@ -145,14 +145,14 @@ pub enum Commands {
         /// Symbols to trade (comma-separated: BTCUSDT,ETHUSDT,SOLUSDT)
         #[arg(short, long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT")]
         symbols: String,
-        /// Minimum CEX move percentage to trigger (e.g., 0.5 = 0.5%)
-        #[arg(long, default_value = "0.5")]
+        /// Minimum CEX move percentage to trigger (e.g., 0.15 = 0.15%)
+        #[arg(long, default_value = "0.15")]
         min_move: f64,
         /// Maximum entry price in cents (e.g., 55 = 55¢)
         #[arg(long, default_value = "55")]
         max_entry: f64,
-        /// Minimum edge percentage (e.g., 5 = 5%)
-        #[arg(long, default_value = "5")]
+        /// Minimum edge percentage (e.g., 3 = 3%)
+        #[arg(long, default_value = "3")]
         min_edge: f64,
         /// Shares per trade
         #[arg(long, default_value = "100")]
