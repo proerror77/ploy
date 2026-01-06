@@ -1967,12 +1967,27 @@ async fn run_momentum_mode(
     // Create executor
     let executor = OrderExecutor::new(pm_client.clone(), Default::default());
 
-    // Create momentum engine
-    let engine = MomentumEngine::new(
+    // Create risk config with fund management
+    let risk_config = crate::config::RiskConfig {
+        max_single_exposure_usd: dec!(100),
+        min_remaining_seconds: 30,
+        max_consecutive_failures: 3,
+        daily_loss_limit_usd: dec!(500),
+        leg2_force_close_seconds: 20,
+        // Fund management settings
+        max_positions: max_positions as u32,  // Limit concurrent positions
+        position_size_pct: None,               // Not using percentage-based sizing
+        fixed_amount_usd: Some(dec!(1)),       // $1 per trade
+        min_balance_usd: dec!(2),              // Keep $2 minimum reserve
+    };
+
+    // Create momentum engine with fund management
+    let engine = MomentumEngine::new_with_fund_manager(
         momentum_config,
         exit_config,
         pm_client.clone(),
         executor,
+        risk_config,
         dry_run,
     );
 
