@@ -1,0 +1,41 @@
+name: Get Container Logs
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  get-logs:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Get container logs
+      env:
+        PRIVATE_KEY: ${{ secrets.AWS_EC2_PRIVATE_KEY }}
+        HOST: ${{ secrets.AWS_EC2_HOST }}
+      run: |
+        echo "$PRIVATE_KEY" > private_key.pem
+        chmod 600 private_key.pem
+
+        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$HOST << 'ENDSSH'
+          echo "=== Container Status ==="
+          docker ps -a --filter name=ploy-trading
+
+          echo ""
+          echo "=== Last 200 lines of logs ==="
+          docker logs ploy-trading --tail 200 2>&1
+
+          echo ""
+          echo "=== Order-related logs ==="
+          docker logs ploy-trading 2>&1 | grep -iE 'ENTRY|Order|submit|filled|auth|mutex|error' | tail -50
+        ENDSSH
+
+        rm private_key.pem
