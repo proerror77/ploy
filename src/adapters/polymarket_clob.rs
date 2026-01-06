@@ -805,18 +805,14 @@ impl PolymarketClient {
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
         // Acquire mutex to serialize order submissions and prevent auth race condition
-        // The SDK's authentication has internal state that conflicts when called concurrently
         let _guard = self.order_mutex.lock().await;
         debug!("Acquired order mutex for submission");
 
-        // Create a FRESH ClobClient for each order - the SDK fails if there are multiple
-        // strong references to a client when authenticating (see SDK test:
-        // authenticate_with_multiple_strong_references_should_fail)
+        // Create a fresh ClobClient for each order to avoid SDK reference issues
         let fresh_client = ClobClient::new(&self.base_url, ClobConfig::default())
             .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
 
         // Authenticate for this operation
-        // If funder is set, use proxy wallet authentication
         let auth_client = if let Some(funder) = self.funder {
             debug!("Using proxy wallet authentication, funder: {:?}", funder);
             fresh_client
