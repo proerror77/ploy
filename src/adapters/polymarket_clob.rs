@@ -806,12 +806,17 @@ impl PolymarketClient {
         let _guard = self.order_mutex.lock().await;
         debug!("Acquired order mutex for submission");
 
+        // Create a FRESH ClobClient for each order - the SDK fails if there are multiple
+        // strong references to a client when authenticating (see SDK test:
+        // authenticate_with_multiple_strong_references_should_fail)
+        let fresh_client = ClobClient::new(&self.base_url, ClobConfig::default())
+            .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
+
         // Authenticate for this operation
         // If funder is set, use proxy wallet authentication
         let auth_client = if let Some(funder) = self.funder {
             debug!("Using proxy wallet authentication, funder: {:?}", funder);
-            self.clob_client
-                .clone()
+            fresh_client
                 .authentication_builder(signer)
                 .funder(funder)
                 .signature_type(SdkSignatureType::Proxy)
@@ -820,8 +825,7 @@ impl PolymarketClient {
                 .map_err(|e| PloyError::Auth(format!("Proxy authentication failed: {}", e)))?
         } else {
             debug!("Using EOA wallet authentication");
-            self.clob_client
-                .clone()
+            fresh_client
                 .authentication_builder(signer)
                 .authenticate()
                 .await
