@@ -20,8 +20,10 @@ use crate::adapters::{
     GammaEventInfo, PolymarketClient, PriceCache, PriceUpdate, QuoteCache,
     QuoteUpdate, SpotPrice,
 };
+use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
+use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::OrderExecutor;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
 
@@ -949,6 +951,8 @@ pub struct MomentumEngine {
     // Volatility-based event tracking
     volatility_detector: VolatilityDetector,
     event_tracker: Arc<RwLock<EventTracker>>,
+    // Fund management
+    fund_manager: Option<Arc<FundManager>>,
 }
 
 impl MomentumEngine {
@@ -990,7 +994,29 @@ impl MomentumEngine {
             dry_run,
             volatility_detector,
             event_tracker: Arc::new(RwLock::new(event_tracker)),
+            fund_manager: None,
         }
+    }
+
+    /// Create a new momentum engine with fund management
+    pub fn new_with_fund_manager(
+        config: MomentumConfig,
+        exit_config: ExitConfig,
+        client: PolymarketClient,
+        executor: OrderExecutor,
+        risk_config: RiskConfig,
+        dry_run: bool,
+    ) -> Self {
+        let fund_manager = FundManager::new(client.clone(), risk_config);
+        let mut engine = Self::new(config, exit_config, client, executor, dry_run);
+        engine.fund_manager = Some(Arc::new(fund_manager));
+        engine
+    }
+
+    /// Set fund manager
+    pub fn with_fund_manager(mut self, fund_manager: FundManager) -> Self {
+        self.fund_manager = Some(Arc::new(fund_manager));
+        self
     }
 
     /// Check if daily trade limit reached
@@ -1268,25 +1294,48 @@ impl MomentumEngine {
             return Ok(());
         }
 
-        // Check position limit
-        let positions = self.positions.read().await;
-        if positions.len() >= self.config.max_positions {
-            debug!("Max positions reached ({}), skipping", self.config.max_positions);
-            return Ok(());
-        }
-
-        // Check if already have position in this symbol
-        if positions.values().any(|p| p.symbol == signal.symbol) {
-            debug!("Already have position in {}, skipping", signal.symbol);
-            return Ok(());
-        }
-        drop(positions);
-
-        // Check cooldown
+        // Check cooldown first (fast check)
         if self.in_cooldown(&signal.symbol).await {
             debug!("{} in cooldown, skipping", signal.symbol);
             return Ok(());
         }
+
+        // Determine shares to trade - use fund manager if available
+        let shares_to_trade = if let Some(ref fm) = self.fund_manager {
+            // Use fund manager for balance check and position sizing
+            match fm.can_open_position(&event.condition_id, signal.pm_price).await {
+                Ok(PositionSizeResult::Approved { shares, amount_usd }) => {
+                    info!(
+                        "💰 Fund manager approved: {} shares @ {:.2}¢ = ${:.2}",
+                        shares,
+                        signal.pm_price * dec!(100),
+                        amount_usd
+                    );
+                    shares
+                }
+                Ok(PositionSizeResult::Rejected(reason)) => {
+                    debug!("Fund manager rejected: {}", reason);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Fund manager error: {}, falling back to config", e);
+                    self.config.shares_per_trade
+                }
+            }
+        } else {
+            // No fund manager - use legacy position checks
+            let positions = self.positions.read().await;
+            if positions.len() >= self.config.max_positions {
+                debug!("Max positions reached ({}), skipping", self.config.max_positions);
+                return Ok(());
+            }
+            if positions.values().any(|p| p.symbol == signal.symbol) {
+                debug!("Already have position in {}, skipping", signal.symbol);
+                return Ok(());
+            }
+            drop(positions);
+            self.config.shares_per_trade
+        };
 
         // Execute entry
         let token_id = match signal.direction {
@@ -1322,18 +1371,18 @@ impl MomentumEngine {
         if self.dry_run {
             let expected_profit = if self.config.hold_to_resolution {
                 let profit_per_share = dec!(1) - signal.pm_price;
-                format!(" → Expected: ${:.2}", profit_per_share * Decimal::from(self.config.shares_per_trade))
+                format!(" → Expected: ${:.2}", profit_per_share * Decimal::from(shares_to_trade))
             } else {
                 String::new()
             };
             info!("[DRY RUN] Would buy {} shares of {} {}{}",
-                self.config.shares_per_trade, signal.symbol, signal.direction, expected_profit);
+                shares_to_trade, signal.symbol, signal.direction, expected_profit);
         } else {
-            // Create and execute order
+            // Create and execute order with calculated shares
             let order = OrderRequest::buy_limit(
                 token_id.clone(),
                 signal.direction.into(),
-                self.config.shares_per_trade,
+                shares_to_trade,
                 signal.pm_price,
             );
 
@@ -1348,7 +1397,12 @@ impl MomentumEngine {
                         trade_count
                     );
 
-                    // Track position
+                    // Record position with fund manager
+                    if let Some(ref fm) = self.fund_manager {
+                        fm.record_position_opened(&event.condition_id).await;
+                    }
+
+                    // Track position in local state
                     let position = Position {
                         token_id: token_id.clone(),
                         symbol: signal.symbol.clone(),

@@ -98,6 +98,20 @@ pub struct RiskConfig {
     pub daily_loss_limit_usd: Decimal,
     /// Seconds before round end to force Leg2 action
     pub leg2_force_close_seconds: u64,
+
+    // === Fund Management ===
+    /// Maximum concurrent positions (0 = unlimited)
+    #[serde(default)]
+    pub max_positions: u32,
+    /// Percentage of available balance per trade (e.g., 0.10 = 10%)
+    #[serde(default)]
+    pub position_size_pct: Option<Decimal>,
+    /// Fixed USD amount per trade (overrides position_size_pct if set)
+    #[serde(default)]
+    pub fixed_amount_usd: Option<Decimal>,
+    /// Minimum balance to maintain (won't trade if balance below this)
+    #[serde(default)]
+    pub min_balance_usd: Decimal,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,6 +214,11 @@ impl AppConfig {
                 max_consecutive_failures: 3,
                 daily_loss_limit_usd: dec!(500),
                 leg2_force_close_seconds: 20,
+                // Fund management defaults
+                max_positions: 3,              // Max 3 concurrent positions
+                position_size_pct: None,       // Not using percentage-based sizing
+                fixed_amount_usd: Some(dec!(1)), // $1 per trade
+                min_balance_usd: dec!(2),      // Keep $2 minimum balance
             },
             database: DatabaseConfig {
                 url: "postgres://localhost/ploy".to_string(),

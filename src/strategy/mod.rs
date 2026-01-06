@@ -53,6 +53,7 @@ pub mod sports;
 pub mod calculations;
 pub mod engine;
 pub mod executor;
+pub mod fund_manager;
 pub mod momentum;
 pub mod multi_event;
 pub mod multi_outcome;
@@ -65,6 +66,7 @@ pub mod volatility;
 // Legacy re-exports
 pub use engine::StrategyEngine;
 pub use executor::OrderExecutor;
+pub use fund_manager::{FundManager, FundStatus, PositionSizeResult};
 pub use multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use multi_outcome::{
     // Core types
