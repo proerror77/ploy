@@ -25,6 +25,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 
 /// Chain ID for Polygon Mainnet
@@ -51,6 +52,8 @@ pub struct PolymarketClient {
     dry_run: bool,
     /// Whether to use negative risk exchange
     neg_risk: bool,
+    /// Mutex to serialize order submissions (prevents auth race condition)
+    order_mutex: Arc<Mutex<()>>,
 }
 
 impl Clone for PolymarketClient {
@@ -64,6 +67,7 @@ impl Clone for PolymarketClient {
             base_url: self.base_url.clone(),
             dry_run: self.dry_run,
             neg_risk: self.neg_risk,
+            order_mutex: self.order_mutex.clone(), // Share mutex across clones
         }
     }
 }
@@ -381,6 +385,7 @@ impl PolymarketClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             dry_run,
             neg_risk: false,
+            order_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -415,6 +420,7 @@ impl PolymarketClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             dry_run: false,
             neg_risk,
+            order_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -459,6 +465,7 @@ impl PolymarketClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             dry_run: false,
             neg_risk,
+            order_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -794,6 +801,11 @@ impl PolymarketClient {
         let signer = self.signer.as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
+        // Acquire mutex to serialize order submissions and prevent auth race condition
+        // The SDK's authentication has internal state that conflicts when called concurrently
+        let _guard = self.order_mutex.lock().await;
+        debug!("Acquired order mutex for submission");
+
         // Authenticate for this operation
         // If funder is set, use proxy wallet authentication
         let auth_client = if let Some(funder) = self.funder {
@@ -845,6 +857,7 @@ impl PolymarketClient {
             .map_err(|e| PloyError::OrderSubmission(format!("Failed to post order: {}", e)))?;
 
         info!("Order submitted successfully: {:?}", resp);
+        // Mutex guard dropped here, releasing lock for next order
 
         Ok(OrderResponse {
             id: resp.order_id,
