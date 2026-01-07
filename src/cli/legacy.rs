@@ -151,8 +151,8 @@ pub enum Commands {
         /// Maximum entry price in cents (e.g., 55 = 55¢)
         #[arg(long, default_value = "55")]
         max_entry: f64,
-        /// Minimum edge percentage (e.g., 3 = 3%)
-        #[arg(long, default_value = "3")]
+        /// Minimum edge percentage (e.g., 2 = 2%)
+        #[arg(long, default_value = "2")]
         min_edge: f64,
         /// Shares per trade
         #[arg(long, default_value = "100")]
