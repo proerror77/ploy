@@ -64,6 +64,7 @@ pub mod split_arb;
 pub mod trade_logger;
 pub mod validation;
 pub mod volatility;
+pub mod dump_hedge;
 
 // Legacy re-exports
 pub use engine::StrategyEngine;
@@ -99,6 +100,9 @@ pub use signal::SignalDetector;
 pub use volatility::{
     VolatilityConfig, VolatilityDetector, VolatilitySignal,
     EventTracker as VolatilityEventTracker, ActiveEvent, EventRecord,
+};
+pub use dump_hedge::{
+    DumpHedgeConfig, DumpHedgeEngine, DumpSignal, HedgeSignal, PendingHedge,
 };
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition,

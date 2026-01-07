@@ -11,6 +11,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
@@ -26,6 +27,7 @@ use crate::error::Result;
 use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::OrderExecutor;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
+use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
 
 // ============================================================================
 // Configuration
@@ -206,6 +208,9 @@ pub struct EventInfo {
     pub down_token_id: String,
     pub end_time: DateTime<Utc>,
     pub condition_id: String,
+    /// The price threshold that determines UP/DOWN outcome
+    /// Parsed from market question like "Will BTC be above $94,000?"
+    pub price_to_beat: Option<Decimal>,
 }
 
 impl EventInfo {
@@ -217,6 +222,29 @@ impl EventInfo {
     /// Check if event is still tradeable (has enough time remaining)
     pub fn is_tradeable(&self, min_seconds: i64) -> bool {
         self.time_remaining().num_seconds() > min_seconds
+    }
+
+    /// Parse price threshold from market question
+    /// Examples:
+    /// - "Will BTC be above $94,000 at 9:15 PM?" → 94000
+    /// - "Will ETH be above $3,500.50 at 10:00 AM?" → 3500.50
+    /// - "↑ 94,000" → 94000
+    pub fn parse_price_from_question(question: &str) -> Option<Decimal> {
+        // Try to find price pattern: $X,XXX or $X,XXX.XX or just numbers with commas
+        // Pattern: optional $ followed by digits with optional commas and decimal
+        let cleaned: String = question
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit() && *c != '$')
+            .skip_while(|c| *c == '$')
+            .take_while(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+            .filter(|c| *c != ',')
+            .collect();
+
+        if cleaned.is_empty() {
+            return None;
+        }
+
+        Decimal::from_str(&cleaned).ok()
     }
 }
 
@@ -450,6 +478,11 @@ impl EventMatcher {
                 None => continue,
             };
 
+            // Parse price_to_beat from market title (e.g., "Will BTC be above $94,000?")
+            let price_to_beat = EventInfo::parse_price_from_question(
+                &event_details.title.clone().unwrap_or_default()
+            );
+
             let event_info = EventInfo {
                 slug: event_details.slug.clone().unwrap_or_default(),
                 title: event_details.title.clone().unwrap_or_default(),
@@ -457,6 +490,7 @@ impl EventMatcher {
                 down_token_id,
                 end_time,
                 condition_id,
+                price_to_beat,
             };
 
             debug!(
@@ -511,13 +545,17 @@ impl EventMatcher {
                 .ok()
         })?;
 
+        let title = gamma.title.clone().unwrap_or_default();
+        let price_to_beat = EventInfo::parse_price_from_question(&title);
+        
         Some(EventInfo {
             slug: gamma.slug.clone().unwrap_or_default(),
-            title: gamma.title.clone().unwrap_or_default(),
+            title,
             up_token_id: up_token.token_id.clone(),
             down_token_id: down_token.token_id.clone(),
             end_time,
             condition_id: market.condition_id.clone().unwrap_or_default(),
+            price_to_beat,
         })
     }
 
@@ -1094,6 +1132,12 @@ pub struct MomentumEngine {
     trade_logger: Option<Arc<super::trade_logger::TradeLogger>>,
     // Window risk tracker for cross-symbol exposure limits
     window_tracker: Arc<RwLock<WindowRiskTracker>>,
+    // Binance LOB cache for OBI signals
+    lob_cache: Option<Arc<crate::collector::LobCache>>,
+    // K-line client for historical volatility
+    kline_client: Option<Arc<crate::collector::BinanceKlineClient>>,
+    // Dump & Hedge strategy engine
+    dump_hedge: Option<Arc<DumpHedgeEngine>>,
 }
 
 impl MomentumEngine {
@@ -1139,7 +1183,28 @@ impl MomentumEngine {
             claimer: None,
             trade_logger: None,
             window_tracker: Arc::new(RwLock::new(WindowRiskTracker::default())),
+            lob_cache: None,
+            kline_client: None,
+            dump_hedge: None,
         }
+    }
+
+    /// Set Binance LOB cache for OBI signals
+    pub fn with_lob_cache(mut self, cache: crate::collector::LobCache) -> Self {
+        self.lob_cache = Some(Arc::new(cache));
+        self
+    }
+
+    /// Set K-line client for historical volatility
+    pub fn with_kline_client(mut self, client: crate::collector::BinanceKlineClient) -> Self {
+        self.kline_client = Some(Arc::new(client));
+        self
+    }
+
+    /// Enable Dump & Hedge strategy
+    pub fn with_dump_hedge(mut self, config: DumpHedgeConfig) -> Self {
+        self.dump_hedge = Some(Arc::new(DumpHedgeEngine::new(config)));
+        self
     }
 
     /// Create a new momentum engine with fund management
@@ -1568,6 +1633,13 @@ impl MomentumEngine {
 
         // Also check for volatility signal (deviation from start price)
         {
+            // Get OBI from Binance LOB cache if available
+            let obi = if let Some(ref lob) = self.lob_cache {
+                lob.get_obi(symbol, 5).await // Use top 5 levels
+            } else {
+                None
+            };
+
             let tracker = self.event_tracker.read().await;
             if let Some(vol_signal) = self.volatility_detector.check_signal(
                 symbol,
@@ -1575,7 +1647,7 @@ impl MomentumEngine {
                 &tracker,
                 up_ask,
                 down_ask,
-                None, // TODO: Add OBI from LOB cache
+                obi,
             ) {
                 // Convert volatility signal to momentum signal for unified execution
                 let momentum_signal = MomentumSignal {
@@ -1620,8 +1692,15 @@ impl MomentumEngine {
         (up_ask, down_ask)
     }
 
-    /// Handle Polymarket quote update - check exit conditions
+    /// Handle Polymarket quote update - check exit conditions and dump signals
     async fn on_pm_update(&self, update: &QuoteUpdate) -> Result<()> {
+        // Update dump hedge price tracker if enabled
+        if let Some(ref dump_hedge) = self.dump_hedge {
+            if let Some(ask) = update.quote.best_ask {
+                dump_hedge.on_price_update(&update.token_id, ask).await;
+            }
+        }
+
         // CRYINGLITTLEBABY mode: skip exit checks, hold to resolution for $1
         if self.config.hold_to_resolution {
             return Ok(()); // No early exits - positions resolve automatically
