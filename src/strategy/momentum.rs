@@ -1755,8 +1755,9 @@ impl MomentumEngine {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("Fund manager error: {}, falling back to config", e);
-                    self.config.shares_per_trade
+                    // Don't fall back to CLI shares - this bypasses risk management!
+                    warn!("Fund manager error: {}, skipping trade for safety", e);
+                    return Ok(());
                 }
             }
         } else {
@@ -2052,8 +2053,9 @@ impl MomentumEngine {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!("Fund manager error: {}, using default", e);
-                    self.config.shares_per_trade
+                    // Don't fall back to CLI shares - this bypasses risk management!
+                    warn!("Fund manager error: {}, skipping trade for safety", e);
+                    return Ok(());
                 }
             }
         } else {

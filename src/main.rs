@@ -2150,18 +2150,20 @@ async fn run_momentum_mode(
     let executor = OrderExecutor::new(pm_client.clone(), Default::default());
 
     // Create risk config with fund management
+    // Position sizing: use percentage of available balance per trade
+    // With 4 symbols and max 1 position each, 20% = up to 80% deployed
     let risk_config = ploy::config::RiskConfig {
-        max_single_exposure_usd: dec!(100),
+        max_single_exposure_usd: dec!(50),     // Max $50 per single trade
         min_remaining_seconds: 30,
         max_consecutive_failures: 3,
-        daily_loss_limit_usd: dec!(500),
+        daily_loss_limit_usd: dec!(100),       // Stop trading after $100 daily loss
         leg2_force_close_seconds: 20,
         // Fund management settings
-        max_positions: max_positions as u32,  // Limit concurrent positions
+        max_positions: max_positions as u32,   // Limit concurrent positions
         max_positions_per_symbol: 1,           // Only 1 position per symbol (BTC, ETH, etc.)
-        position_size_pct: None,               // Not using percentage-based sizing
-        fixed_amount_usd: Some(dec!(1)),       // $1 per trade
-        min_balance_usd: dec!(2),              // Keep $2 minimum reserve
+        position_size_pct: Some(dec!(0.20)),   // 20% of available balance per trade
+        fixed_amount_usd: None,                // Use percentage-based sizing instead
+        min_balance_usd: dec!(5),              // Keep $5 minimum reserve
     };
 
     // Create momentum engine with fund management
