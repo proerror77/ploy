@@ -108,6 +108,35 @@ pub struct MomentumConfig {
     /// Delay before selecting best edge (milliseconds)
     /// Allow signals from all symbols to arrive before deciding
     pub signal_collection_delay_ms: u64,
+
+    // === ENHANCED MOMENTUM DETECTION ===
+    /// Require all timeframes (10s, 30s, 60s) to agree on direction
+    /// When false: use weighted average (original behavior)
+    /// When true: all must be same direction
+    pub require_mtf_agreement: bool,
+
+    /// Minimum OBI (Order Book Imbalance) for confirmation
+    /// 0.0 = disabled, 0.1 = require 10% imbalance in signal direction
+    pub min_obi_confirmation: Decimal,
+
+    /// Use K-line historical volatility instead of tick-based
+    /// More stable but less responsive
+    pub use_kline_volatility: bool,
+
+    /// Time decay factor: reduce signal strength as event progresses
+    /// 0.0 = no decay, 1.0 = full decay (signal_strength * time_remaining/900)
+    pub time_decay_factor: Decimal,
+
+    /// Consider price-to-beat in fair value calculation
+    /// When true: adjust fair value based on how close CEX price is to threshold
+    pub use_price_to_beat: bool,
+
+    /// Dynamic position sizing based on signal confidence
+    /// When true: shares = base_shares * confidence
+    pub dynamic_position_sizing: bool,
+
+    /// Minimum confidence for entry (0.0 - 1.0)
+    pub min_confidence: f64,
 }
 
 impl Default for MomentumConfig {
@@ -155,6 +184,15 @@ impl Default for MomentumConfig {
             max_window_exposure_usd: dec!(25), // Max $25 total per 15-min window
             best_edge_only: true,              // Only take highest edge signal
             signal_collection_delay_ms: 2000,  // 2 second delay to collect signals
+
+            // === ENHANCED MOMENTUM DETECTION ===
+            require_mtf_agreement: true,       // Require all timeframes to agree
+            min_obi_confirmation: dec!(0.05),  // 5% OBI confirmation
+            use_kline_volatility: true,        // Use K-line historical volatility
+            time_decay_factor: dec!(0.3),      // 30% time decay
+            use_price_to_beat: true,           // Consider price-to-beat
+            dynamic_position_sizing: true,     // Scale by confidence
+            min_confidence: 0.5,               // Min 50% confidence
         }
     }
 }
@@ -665,11 +703,21 @@ impl MomentumSignal {
 /// Detects momentum opportunities by comparing CEX prices to Polymarket odds
 pub struct MomentumDetector {
     config: MomentumConfig,
+    /// Cached K-line volatility per symbol
+    kline_volatility: HashMap<String, Decimal>,
 }
 
 impl MomentumDetector {
     pub fn new(config: MomentumConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            kline_volatility: HashMap::new(),
+        }
+    }
+
+    /// Update K-line volatility for a symbol
+    pub fn update_kline_volatility(&mut self, symbol: &str, volatility: Decimal) {
+        self.kline_volatility.insert(symbol.to_string(), volatility);
     }
 
     /// Check for momentum signal given CEX and PM prices
@@ -2262,6 +2310,7 @@ mod tests {
             highest_price: dec!(0.50),
             event_end_time: Utc::now() + ChronoDuration::minutes(10),
             event_slug: "test".into(),
+            condition_id: "test_condition".into(),
         };
 
         // 10% profit
@@ -2292,6 +2341,7 @@ mod tests {
             highest_price: dec!(0.50),
             event_end_time: Utc::now() + ChronoDuration::minutes(10),
             event_slug: "test".into(),
+            condition_id: "test_condition".into(),
         };
 
         // 25% profit should trigger take profit
@@ -2314,10 +2364,64 @@ mod tests {
             highest_price: dec!(0.50),
             event_end_time: Utc::now() + ChronoDuration::minutes(10),
             event_slug: "test".into(),
+            condition_id: "test_condition".into(),
         };
 
         // 20% loss should trigger stop loss
         let exit = manager.check_exit(&pos, dec!(0.40));
         assert!(matches!(exit, Some(ExitReason::StopLoss { .. })));
+    }
+
+    #[test]
+    fn test_parse_price_from_question() {
+        // Test various Polymarket question formats
+        
+        // Standard format with dollar sign and commas
+        assert_eq!(
+            EventInfo::parse_price_from_question("Will BTC be above $94,000 at 9:15 PM?"),
+            Some(dec!(94000))
+        );
+        
+        // With decimals
+        assert_eq!(
+            EventInfo::parse_price_from_question("Will ETH be above $3,500.50 at 10:00 AM?"),
+            Some(dec!(3500.50))
+        );
+        
+        // Without dollar sign (outcome format like "↑ 94,000")
+        assert_eq!(
+            EventInfo::parse_price_from_question("↑ 94,000"),
+            Some(dec!(94000))
+        );
+        
+        // Down arrow format
+        assert_eq!(
+            EventInfo::parse_price_from_question("↓ 86,000"),
+            Some(dec!(86000))
+        );
+        
+        // Large numbers
+        assert_eq!(
+            EventInfo::parse_price_from_question("Will BTC be above $100,000?"),
+            Some(dec!(100000))
+        );
+        
+        // Small numbers (SOL)
+        assert_eq!(
+            EventInfo::parse_price_from_question("Will SOL be above $150.25?"),
+            Some(dec!(150.25))
+        );
+        
+        // No price in question
+        assert_eq!(
+            EventInfo::parse_price_from_question("Will it rain tomorrow?"),
+            None
+        );
+        
+        // Empty string
+        assert_eq!(
+            EventInfo::parse_price_from_question(""),
+            None
+        );
     }
 }

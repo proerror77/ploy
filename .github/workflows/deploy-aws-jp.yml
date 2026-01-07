@@ -102,9 +102,14 @@ jobs:
             PREDICTIVE_FLAG="--predictive --take-profit ${{ github.event.inputs.take_profit }} --stop-loss ${{ github.event.inputs.stop_loss }} --min-time ${{ github.event.inputs.min_time }} --max-time ${{ github.event.inputs.max_time }}"
           fi
 
+          # Create host log directory if not exists
+          sudo mkdir -p /var/log/ploy
+          sudo chown 1000:1000 /var/log/ploy
+
           docker run -d \
             --name ploy-trading \
             --restart unless-stopped \
+            -v /var/log/ploy:/opt/ploy/logs \
             -e POLYMARKET_PRIVATE_KEY="${{ secrets.POLYMARKET_PRIVATE_KEY }}" \
             -e POLYMARKET_FUNDER="${{ secrets.POLYMARKET_FUNDER }}" \
             -e FEISHU_WEBHOOK_URL="${{ secrets.FEISHU_WEBHOOK_URL }}" \

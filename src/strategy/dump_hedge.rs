@@ -148,10 +148,16 @@ impl TokenPriceTracker {
         let now = Utc::now();
         let cutoff = now - Duration::seconds(self.window_secs * 3);
 
-        let snapshots = self.recent_prices.entry(token_id.to_string()).or_default();
+        // Detect volume spike BEFORE getting mutable entry (to avoid borrow conflict)
+        let volume_spike = {
+            let snapshots = self.recent_prices.get(token_id);
+            match snapshots {
+                Some(s) => self.detect_volume_spike(s, bid_depth),
+                None => false,
+            }
+        };
 
-        // Detect volume spike (compare to recent activity)
-        let volume_spike = self.detect_volume_spike(snapshots, bid_depth);
+        let snapshots = self.recent_prices.entry(token_id.to_string()).or_default();
 
         // Update baseline depth
         if let Some(depth) = bid_depth {

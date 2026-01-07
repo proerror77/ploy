@@ -1830,16 +1830,53 @@ async fn run_simple_bot(
 }
 
 fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,ploy=debug,sqlx=warn"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    // Check if we should write to file (LOG_DIR env var or /var/log/ploy exists)
+    let log_dir = std::env::var("LOG_DIR")
+        .unwrap_or_else(|_| "/var/log/ploy".to_string());
+
+    // Try to create log directory
+    let file_layer = if std::fs::create_dir_all(&log_dir).is_ok() {
+        // Daily rotating file appender
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "ploy.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        // Keep the guard alive by leaking it (acceptable for long-running process)
+        Box::leak(Box::new(_guard));
+
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)  // No color codes in file
+                .with_target(true)
+        )
+    } else {
+        eprintln!("Warning: Could not create log directory {}, file logging disabled", log_dir);
+        None
+    };
+
+    // Console layer
+    let console_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_thread_ids(false)
         .with_file(false)
-        .with_line_number(false)
+        .with_line_number(false);
+
+    // Combine layers
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer)
         .init();
+
+    if std::path::Path::new(&log_dir).exists() {
+        eprintln!("Logging to: {}/ploy.log", log_dir);
+    }
 }
 
 fn init_logging_simple() {

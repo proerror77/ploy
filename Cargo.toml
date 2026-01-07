@@ -30,7 +30,8 @@ config = "0.14"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+tracing-appender = "0.2"
 
 # Numeric types
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }

@@ -30,12 +30,25 @@ jobs:
           docker ps -a --filter name=ploy-trading
 
           echo ""
-          echo "=== Last 200 lines of logs ==="
-          docker logs ploy-trading --tail 200 2>&1
+          echo "=== Persistent Log Files ==="
+          ls -la /var/log/ploy/ 2>/dev/null || echo "No persistent logs directory"
 
           echo ""
-          echo "=== Order-related logs ==="
-          docker logs ploy-trading 2>&1 | grep -iE 'ENTRY|Order|submit|filled|auth|mutex|error' | tail -50
+          echo "=== Last 200 lines from persistent log ==="
+          if [ -f /var/log/ploy/ploy.log ]; then
+            tail -200 /var/log/ploy/ploy.log
+          else
+            echo "No persistent log file yet, falling back to docker logs..."
+            docker logs ploy-trading --tail 200 2>&1
+          fi
+
+          echo ""
+          echo "=== Order/Signal related logs ==="
+          if [ -f /var/log/ploy/ploy.log ]; then
+            grep -iE 'SIGNAL|ENTRY|Order|submit|filled|edge|price_to_beat' /var/log/ploy/ploy.log | tail -50
+          else
+            docker logs ploy-trading 2>&1 | grep -iE 'SIGNAL|ENTRY|Order|submit|filled|edge' | tail -50
+          fi
         ENDSSH
 
         rm private_key.pem

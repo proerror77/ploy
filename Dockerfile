@@ -65,6 +65,10 @@ COPY config/default.toml /opt/ploy/config/default.toml
 # Set working directory
 WORKDIR /opt/ploy
 
+# Environment variables for logging
+ENV LOG_DIR=/opt/ploy/logs
+ENV RUST_LOG=info,ploy=debug,sqlx=warn
+
 # Switch to non-root user
 USER ploy
 
