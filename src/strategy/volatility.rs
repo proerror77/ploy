@@ -4,6 +4,7 @@
 //! to identify trading opportunities.
 
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,25 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{debug, info};
 
 use crate::domain::Side;
+
+/// Standard normal CDF approximation (Abramowitz-Stegun)
+/// Accurate to ~4 decimal places
+fn normal_cdf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
+
+    0.5 * (1.0 + sign * y)
+}
 
 /// Configuration for volatility strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,8 +455,12 @@ impl VolatilityDetector {
             return None;
         }
 
-        // Calculate fair value based on deviation and time remaining
-        let fair_value = self.estimate_fair_value(deviation, time_remaining, obi_value);
+        // Get historical volatility for proper Z-score calculation
+        let volatility = tracker.historical_volatility(symbol)
+            .unwrap_or(dec!(0.003)); // Default 0.3% if no history
+
+        // Calculate fair value based on Z-score model
+        let fair_value = self.estimate_fair_value(deviation, time_remaining, obi_value, volatility);
         let edge = fair_value - token_price;
 
         if edge < self.config.min_edge {
@@ -480,51 +504,66 @@ impl VolatilityDetector {
         })
     }
 
-    /// Estimate fair value based on current state
+    /// Estimate fair value using Z-score model with proper statistical foundations
+    ///
+    /// The model calculates probability that price stays above/below start price:
+    /// 1. Z-score = deviation / (volatility × √(time_remaining / 900))
+    /// 2. Fair value = Φ(z_score) where Φ is standard normal CDF
+    /// 3. Apply OBI confirmation bonus
+    ///
+    /// This properly accounts for:
+    /// - Larger deviations = higher probability (non-linear via normal CDF)
+    /// - Less time remaining = higher probability (√time scaling from Brownian motion)
+    /// - Higher volatility = lower probability for same deviation
     fn estimate_fair_value(
         &self,
         deviation: Decimal,
         time_remaining_secs: i64,
         obi: Decimal,
+        historical_volatility: Decimal,
     ) -> Decimal {
-        let base = dec!(0.50);
+        // Convert to f64 for math operations
+        let dev = deviation.abs().to_f64().unwrap_or(0.0);
+        let vol = historical_volatility.abs().to_f64().unwrap_or(0.003);
+        let time_remaining = time_remaining_secs.max(1) as f64;
 
-        // Deviation factor: larger deviation = higher probability of that outcome
-        // 0.1% deviation → ~60% probability
-        // 0.5% deviation → ~80% probability
-        // 1.0% deviation → ~90% probability
-        let deviation_factor = if deviation.abs() < dec!(0.001) {
-            deviation.abs() * dec!(100)  // 0.1% → 10%
-        } else if deviation.abs() < dec!(0.005) {
-            dec!(0.10) + (deviation.abs() - dec!(0.001)) * dec!(50)  // 0.5% → 30%
-        } else {
-            dec!(0.30) + (deviation.abs() - dec!(0.005)) * dec!(20)  // 1% → 40%
-        };
+        // Total window is 900 seconds (15 minutes)
+        const TOTAL_WINDOW_SECS: f64 = 900.0;
 
-        // Time factor: less time = more certain (less time to reverse)
-        // 10 min left → 1.0x
-        // 5 min left → 1.1x
-        // 2 min left → 1.2x
-        // 1 min left → 1.3x
-        let time_factor = if time_remaining_secs > 300 {
-            dec!(1.0)
-        } else if time_remaining_secs > 120 {
-            dec!(1.1)
-        } else if time_remaining_secs > 60 {
-            dec!(1.2)
-        } else {
-            dec!(1.3)
-        };
+        // Calculate expected volatility for remaining time using √time scaling
+        // If 5 min (300s) remaining, expected move = vol × √(300/900) = vol × 0.577
+        let time_factor = (time_remaining / TOTAL_WINDOW_SECS).sqrt();
+        let expected_vol = vol * time_factor;
 
-        // OBI factor: confirming OBI adds confidence
-        let obi_factor = if obi.abs() > dec!(0.1) {
-            dec!(1.05)
-        } else {
-            dec!(1.0)
-        };
+        // Avoid division by zero
+        let expected_vol = expected_vol.max(0.0001);
 
-        let fair_value = base + deviation_factor * time_factor * obi_factor;
-        fair_value.min(dec!(0.95))  // Cap at 95%
+        // Z-score: how many standard deviations away from mean (0) is current deviation?
+        // Higher z-score = current deviation is more significant relative to expected movement
+        let z_score = dev / expected_vol;
+
+        // Convert z-score to probability using normal CDF
+        // Φ(1.0) ≈ 0.84, Φ(2.0) ≈ 0.98, Φ(3.0) ≈ 0.999
+        let base_probability = normal_cdf(z_score);
+
+        // OBI confirmation bonus: +3% if strong OBI confirms direction
+        let obi_val = obi.to_f64().unwrap_or(0.0);
+        let obi_bonus = if obi_val.abs() > 0.1 { 0.03 } else { 0.0 };
+
+        // Calculate fair value with OBI bonus, cap at 95%
+        let fair_value = (base_probability + obi_bonus).min(0.95);
+
+        // Log the calculation for debugging
+        debug!(
+            "Z-score calc: dev={:.4}% vol={:.4}% time={}s => z={:.2} => p={:.1}%",
+            dev * 100.0,
+            vol * 100.0,
+            time_remaining_secs,
+            z_score,
+            fair_value * 100.0
+        );
+
+        Decimal::try_from(fair_value).unwrap_or(dec!(0.50))
     }
 
     /// Calculate confidence score (0.0 to 1.0)
