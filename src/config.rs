@@ -103,6 +103,10 @@ pub struct RiskConfig {
     /// Maximum concurrent positions (0 = unlimited)
     #[serde(default)]
     pub max_positions: u32,
+    /// Maximum positions per symbol (e.g., 1 = only 1 BTC position at a time)
+    /// Default: 1 to prevent one symbol from consuming all funds
+    #[serde(default = "default_max_positions_per_symbol")]
+    pub max_positions_per_symbol: u32,
     /// Percentage of available balance per trade (e.g., 0.10 = 10%)
     #[serde(default)]
     pub position_size_pct: Option<Decimal>,
@@ -112,6 +116,10 @@ pub struct RiskConfig {
     /// Minimum balance to maintain (won't trade if balance below this)
     #[serde(default)]
     pub min_balance_usd: Decimal,
+}
+
+fn default_max_positions_per_symbol() -> u32 {
+    1 // Default: only 1 position per symbol
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +224,7 @@ impl AppConfig {
                 leg2_force_close_seconds: 20,
                 // Fund management defaults
                 max_positions: 3,              // Max 3 concurrent positions
+                max_positions_per_symbol: 1,   // Only 1 position per symbol
                 position_size_pct: None,       // Not using percentage-based sizing
                 fixed_amount_usd: Some(dec!(1)), // $1 per trade
                 min_balance_usd: dec!(2),      // Keep $2 minimum balance

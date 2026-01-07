@@ -51,6 +51,7 @@ pub mod sports;
 // =============================================================================
 
 pub mod calculations;
+pub mod claimer;
 pub mod engine;
 pub mod executor;
 pub mod fund_manager;
@@ -60,13 +61,19 @@ pub mod multi_outcome;
 pub mod risk;
 pub mod signal;
 pub mod split_arb;
+pub mod trade_logger;
 pub mod validation;
 pub mod volatility;
 
 // Legacy re-exports
 pub use engine::StrategyEngine;
 pub use executor::OrderExecutor;
+pub use claimer::{AutoClaimer, ClaimerConfig, ClaimResult, RedeemablePosition};
 pub use fund_manager::{FundManager, FundStatus, PositionSizeResult};
+pub use trade_logger::{
+    TradeLogger, TradeRecord, TradeOutcome, TradingStats, SymbolStats,
+    TradeContext, BucketStats,
+};
 pub use multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use multi_outcome::{
     // Core types

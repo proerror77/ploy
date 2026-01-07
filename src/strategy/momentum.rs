@@ -93,6 +93,19 @@ pub struct MomentumConfig {
     /// CRYINGLITTLEBABY style: 300s (5 min maximum)
     /// This ensures we only enter when outcome is nearly decided
     pub max_time_remaining_secs: u64,
+
+    // === CROSS-SYMBOL RISK CONTROL ===
+    /// Maximum total exposure across all symbols per 15-min window (USD)
+    /// Set to 0 for unlimited
+    pub max_window_exposure_usd: Decimal,
+
+    /// Only enter the highest edge signal per 15-min window
+    /// When true: queues signals and selects best edge after delay
+    pub best_edge_only: bool,
+
+    /// Delay before selecting best edge (milliseconds)
+    /// Allow signals from all symbols to arrive before deciding
+    pub signal_collection_delay_ms: u64,
 }
 
 impl Default for MomentumConfig {
@@ -135,6 +148,11 @@ impl Default for MomentumConfig {
             hold_to_resolution: true,       // Hold to collect $1
             min_time_remaining_secs: 60,    // Min 1 min left
             max_time_remaining_secs: 300,   // Max 5 min left (outcome should be decided)
+
+            // === CROSS-SYMBOL RISK CONTROL ===
+            max_window_exposure_usd: dec!(25), // Max $25 total per 15-min window
+            best_edge_only: true,              // Only take highest edge signal
+            signal_collection_delay_ms: 2000,  // 2 second delay to collect signals
         }
     }
 }
@@ -531,6 +549,11 @@ impl EventMatcher {
 
         mappings
     }
+
+    /// Get reference to the Polymarket client
+    pub fn client(&self) -> &PolymarketClient {
+        &self.client
+    }
 }
 
 // ============================================================================
@@ -807,6 +830,7 @@ pub struct Position {
     pub highest_price: Decimal,
     pub event_end_time: DateTime<Utc>,
     pub event_slug: String,
+    pub condition_id: String,
 }
 
 impl Position {
@@ -936,6 +960,116 @@ impl DailyTradeCounter {
     }
 }
 
+/// Pending signal for best-edge selection
+#[derive(Debug, Clone)]
+struct PendingSignal {
+    signal: MomentumSignal,
+    event: EventInfo,
+    edge: Decimal,
+    cost_usd: Decimal,
+    timestamp: DateTime<Utc>,
+}
+
+/// Window risk tracker for cross-symbol exposure limits
+/// Tracks exposure per 15-min window (grouped by event end time)
+#[derive(Debug, Default)]
+struct WindowRiskTracker {
+    /// Exposure by window ID (event end time as string)
+    window_exposure: HashMap<String, Decimal>,
+    /// Pending signals per window (for best-edge selection)
+    pending_signals: HashMap<String, Vec<PendingSignal>>,
+    /// Windows that have been executed (to prevent duplicates)
+    executed_windows: HashMap<String, bool>,
+}
+
+impl WindowRiskTracker {
+    /// Get window ID from event end time (rounded to 15-min)
+    fn window_id(event_end: &DateTime<Utc>) -> String {
+        // Format: YYYY-MM-DD HH:MM where MM is rounded to 15-min boundary
+        let ts = event_end.timestamp();
+        let rounded = (ts / 900) * 900; // Round down to 15-min boundary
+        DateTime::from_timestamp(rounded, 0)
+            .unwrap_or(*event_end)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    }
+
+    /// Check if window already has an executed trade
+    fn has_executed(&self, window_id: &str) -> bool {
+        self.executed_windows.get(window_id).copied().unwrap_or(false)
+    }
+
+    /// Mark window as executed
+    fn mark_executed(&mut self, window_id: &str) {
+        self.executed_windows.insert(window_id.to_string(), true);
+    }
+
+    /// Get current exposure for a window
+    fn get_exposure(&self, window_id: &str) -> Decimal {
+        self.window_exposure.get(window_id).copied().unwrap_or(Decimal::ZERO)
+    }
+
+    /// Add exposure to a window
+    fn add_exposure(&mut self, window_id: &str, amount: Decimal) {
+        let current = self.get_exposure(window_id);
+        self.window_exposure.insert(window_id.to_string(), current + amount);
+    }
+
+    /// Add pending signal for a window
+    fn add_pending_signal(&mut self, window_id: &str, signal: PendingSignal) {
+        self.pending_signals
+            .entry(window_id.to_string())
+            .or_default()
+            .push(signal);
+    }
+
+    /// Get best signal for a window (highest edge)
+    fn get_best_signal(&self, window_id: &str) -> Option<PendingSignal> {
+        self.pending_signals
+            .get(window_id)
+            .and_then(|signals| {
+                signals.iter()
+                    .max_by(|a, b| a.edge.cmp(&b.edge))
+                    .cloned()
+            })
+    }
+
+    /// Clear pending signals for a window
+    fn clear_pending(&mut self, window_id: &str) {
+        self.pending_signals.remove(window_id);
+    }
+
+    /// Check if there are pending signals ready for execution (past delay threshold)
+    fn get_ready_windows(&self, delay_ms: u64) -> Vec<String> {
+        let now = Utc::now();
+        let threshold = ChronoDuration::milliseconds(delay_ms as i64);
+
+        self.pending_signals.keys()
+            .filter(|window_id| {
+                // Check if window has signals and oldest is past threshold
+                if let Some(signals) = self.pending_signals.get(*window_id) {
+                    if let Some(oldest) = signals.iter().min_by_key(|s| s.timestamp) {
+                        return now.signed_duration_since(oldest.timestamp) >= threshold;
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Cleanup old windows (older than 30 min)
+    fn cleanup_old(&mut self) {
+        let now = Utc::now();
+        let cutoff = now - ChronoDuration::minutes(30);
+        let cutoff_str = Self::window_id(&cutoff);
+
+        self.window_exposure.retain(|k, _| k >= &cutoff_str);
+        self.executed_windows.retain(|k, _| k >= &cutoff_str);
+        self.pending_signals.retain(|k, _| k >= &cutoff_str);
+    }
+}
+
 /// Main engine orchestrating the momentum strategy
 pub struct MomentumEngine {
     config: MomentumConfig,
@@ -953,6 +1087,12 @@ pub struct MomentumEngine {
     event_tracker: Arc<RwLock<EventTracker>>,
     // Fund management
     fund_manager: Option<Arc<FundManager>>,
+    // Auto-claimer for winning positions
+    claimer: Option<Arc<super::claimer::AutoClaimer>>,
+    // Trade logger for persistent records
+    trade_logger: Option<Arc<super::trade_logger::TradeLogger>>,
+    // Window risk tracker for cross-symbol exposure limits
+    window_tracker: Arc<RwLock<WindowRiskTracker>>,
 }
 
 impl MomentumEngine {
@@ -995,6 +1135,9 @@ impl MomentumEngine {
             volatility_detector,
             event_tracker: Arc::new(RwLock::new(event_tracker)),
             fund_manager: None,
+            claimer: None,
+            trade_logger: None,
+            window_tracker: Arc::new(RwLock::new(WindowRiskTracker::default())),
         }
     }
 
@@ -1017,6 +1160,23 @@ impl MomentumEngine {
     pub fn with_fund_manager(mut self, fund_manager: FundManager) -> Self {
         self.fund_manager = Some(Arc::new(fund_manager));
         self
+    }
+
+    /// Set auto-claimer for winning positions
+    pub fn with_claimer(mut self, claimer: super::claimer::AutoClaimer) -> Self {
+        self.claimer = Some(Arc::new(claimer));
+        self
+    }
+
+    /// Set trade logger for persistent records
+    pub fn with_trade_logger(mut self, logger: super::trade_logger::TradeLogger) -> Self {
+        self.trade_logger = Some(Arc::new(logger));
+        self
+    }
+
+    /// Get trade logger reference
+    pub fn trade_logger(&self) -> Option<&Arc<super::trade_logger::TradeLogger>> {
+        self.trade_logger.as_ref()
     }
 
     /// Check if daily trade limit reached
@@ -1042,6 +1202,180 @@ impl MomentumEngine {
     /// Get positions count
     pub async fn positions_count(&self) -> usize {
         self.positions.read().await.len()
+    }
+
+    /// Check for resolved positions and handle them
+    /// Returns (won_count, lost_count, total_payout)
+    pub async fn check_resolved_positions(&self) -> (u32, u32, Decimal) {
+        let now = Utc::now();
+        let mut won_count = 0u32;
+        let mut lost_count = 0u32;
+        let mut total_payout = Decimal::ZERO;
+
+        // Find positions that have passed their end time
+        let resolved_symbols: Vec<String> = {
+            let positions = self.positions.read().await;
+            positions
+                .iter()
+                .filter(|(_, pos)| pos.event_end_time < now)
+                .map(|(symbol, _)| symbol.clone())
+                .collect()
+        };
+
+        if resolved_symbols.is_empty() {
+            return (0, 0, Decimal::ZERO);
+        }
+
+        info!("🔍 Checking {} resolved positions...", resolved_symbols.len());
+
+        for symbol in resolved_symbols {
+            // Get position details
+            let pos_opt = {
+                let positions = self.positions.read().await;
+                positions.get(&symbol).cloned()
+            };
+
+            let pos = match pos_opt {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Check market status via API
+            let market_result = self.event_matcher.client().get_market(&pos.condition_id).await;
+
+            match market_result {
+                Ok(market) => {
+                    if !market.closed {
+                        // Market not yet closed, wait
+                        debug!("{} market not closed yet, waiting...", symbol);
+                        continue;
+                    }
+
+                    // Determine win/loss by checking token prices
+                    // Winner token price = 1.0, loser = 0.0
+                    let won = self.check_if_won(&pos, &market);
+
+                    if won {
+                        let payout = Decimal::from(pos.shares); // Each winning share = $1
+                        let profit = payout - (pos.entry_price * Decimal::from(pos.shares));
+
+                        info!(
+                            "🎉 {} WON! {} {} | {} shares @ {:.2}¢ → ${:.2} payout (+${:.2} profit)",
+                            symbol,
+                            pos.direction,
+                            pos.event_slug,
+                            pos.shares,
+                            pos.entry_price * dec!(100),
+                            payout,
+                            profit
+                        );
+
+                        won_count += 1;
+                        total_payout += payout;
+
+                        // Trigger claimer to redeem winning position
+                        if let Some(ref claimer) = self.claimer {
+                            info!(
+                                "📋 Triggering claimer for {}: condition_id={}, shares={}",
+                                symbol,
+                                &pos.condition_id[..16.min(pos.condition_id.len())],
+                                pos.shares
+                            );
+                            match claimer.check_and_claim().await {
+                                Ok(results) => {
+                                    for result in results {
+                                        if result.success {
+                                            info!(
+                                                "✅ Claimed ${:.2} from {}: tx={}",
+                                                result.amount_claimed,
+                                                &result.condition_id[..16.min(result.condition_id.len())],
+                                                result.tx_hash
+                                            );
+                                        } else if let Some(err) = result.error {
+                                            warn!("❌ Failed to claim {}: {}", result.condition_id, err);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to trigger claimer: {}", e);
+                                }
+                            }
+                        } else {
+                            // No claimer configured - just log
+                            info!(
+                                "📋 Position {} needs claiming (no claimer configured): condition_id={}, shares={}",
+                                symbol,
+                                &pos.condition_id[..16.min(pos.condition_id.len())],
+                                pos.shares
+                            );
+                        }
+                    } else {
+                        let loss = pos.entry_price * Decimal::from(pos.shares);
+                        info!(
+                            "❌ {} LOST: {} {} | {} shares @ {:.2}¢ → -${:.2}",
+                            symbol,
+                            pos.direction,
+                            pos.event_slug,
+                            pos.shares,
+                            pos.entry_price * dec!(100),
+                            loss
+                        );
+                        lost_count += 1;
+                    }
+
+                    // Log trade resolution
+                    if let Some(ref logger) = self.trade_logger {
+                        logger.record_resolution(&pos.condition_id, won).await;
+                    }
+
+                    // Remove from positions
+                    {
+                        let mut positions = self.positions.write().await;
+                        positions.remove(&symbol);
+                    }
+
+                    // Update fund manager
+                    if let Some(ref fm) = self.fund_manager {
+                        fm.record_position_closed(&pos.condition_id, &pos.symbol).await;
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to get market status for {}: {}", symbol, e);
+                }
+            }
+        }
+
+        if won_count > 0 || lost_count > 0 {
+            info!(
+                "📊 Resolution summary: {} won, {} lost, ${:.2} payout pending claim",
+                won_count, lost_count, total_payout
+            );
+        }
+
+        (won_count, lost_count, total_payout)
+    }
+
+    /// Check if we won based on market outcome prices
+    fn check_if_won(&self, pos: &Position, market: &crate::adapters::MarketResponse) -> bool {
+        // Find our token in the market tokens
+        for token in &market.tokens {
+            if token.token_id == pos.token_id {
+                // Parse the price - winner has price = 1.0
+                if let Some(ref price_str) = token.price {
+                    if let Ok(price) = price_str.parse::<f64>() {
+                        return price > 0.5; // Winner = 1.0, Loser = 0.0
+                    }
+                }
+            }
+        }
+
+        // Fallback: if we bought Up and price went up, we likely won
+        // This is a heuristic in case outcome_prices not available
+        warn!(
+            "Could not determine outcome from market data for {}, using heuristic",
+            pos.symbol
+        );
+        false
     }
 
     /// Run the momentum strategy
@@ -1082,6 +1416,22 @@ impl MomentumEngine {
         let refresh_interval = tokio::time::interval(Duration::from_secs(60));
         tokio::pin!(refresh_interval);
 
+        // Resolution check interval (every 30 seconds)
+        let resolution_interval = tokio::time::interval(Duration::from_secs(30));
+        tokio::pin!(resolution_interval);
+
+        // Pending signal processing interval (every 500ms when best_edge_only is enabled)
+        let signal_process_interval = tokio::time::interval(Duration::from_millis(500));
+        tokio::pin!(signal_process_interval);
+
+        // Log cross-symbol risk settings
+        if self.config.best_edge_only {
+            info!("=== CROSS-SYMBOL RISK CONTROL ===");
+            info!("• Best edge only: YES (queue signals, select highest edge)");
+            info!("• Signal collection delay: {}ms", self.config.signal_collection_delay_ms);
+            info!("• Max window exposure: ${:.2}", self.config.max_window_exposure_usd);
+        }
+
         loop {
             tokio::select! {
                 // CEX price update - check for entry signals
@@ -1102,6 +1452,22 @@ impl MomentumEngine {
                 _ = refresh_interval.tick() => {
                     if let Err(e) = event_matcher.refresh().await {
                         warn!("Failed to refresh events: {}", e);
+                    }
+                }
+
+                // Check for resolved positions (hold_to_resolution mode)
+                _ = resolution_interval.tick() => {
+                    if self.config.hold_to_resolution {
+                        let (_won, _lost, _payout) = self.check_resolved_positions().await;
+                    }
+                }
+
+                // Process pending signals (best_edge_only mode)
+                _ = signal_process_interval.tick() => {
+                    if self.config.best_edge_only {
+                        if let Err(e) = self.process_pending_signals().await {
+                            error!("Error processing pending signals: {}", e);
+                        }
                     }
                 }
             }
@@ -1300,10 +1666,80 @@ impl MomentumEngine {
             return Ok(());
         }
 
+        // CRITICAL: Check if we already have a position in this symbol or event
+        // This prevents duplicate orders from momentum + volatility signals
+        {
+            let positions = self.positions.read().await;
+
+            // Check by symbol
+            if positions.values().any(|p| p.symbol == signal.symbol) {
+                debug!("Already have position in {}, skipping duplicate entry", signal.symbol);
+                return Ok(());
+            }
+
+            // Check by condition_id (same event)
+            if positions.contains_key(&event.condition_id) {
+                debug!("Already have position in event {}, skipping", event.condition_id);
+                return Ok(());
+            }
+        }
+
+        // Calculate window ID for this event
+        let window_id = WindowRiskTracker::window_id(&event.end_time);
+
+        // Check window exposure limit (cross-symbol risk control)
+        let estimated_cost = signal.pm_price * Decimal::from(self.config.shares_per_trade);
+        {
+            let tracker = self.window_tracker.read().await;
+
+            // Check if window already has an executed trade (best_edge_only mode)
+            if self.config.best_edge_only && tracker.has_executed(&window_id) {
+                debug!("Window {} already has trade, skipping {}", window_id, signal.symbol);
+                return Ok(());
+            }
+
+            // Check exposure limit
+            if self.config.max_window_exposure_usd > Decimal::ZERO {
+                let current_exposure = tracker.get_exposure(&window_id);
+                if current_exposure + estimated_cost > self.config.max_window_exposure_usd {
+                    debug!(
+                        "Window {} exposure ${:.2} + ${:.2} would exceed limit ${:.2}",
+                        window_id, current_exposure, estimated_cost,
+                        self.config.max_window_exposure_usd
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        // If best_edge_only mode, queue signal for later selection
+        if self.config.best_edge_only {
+            let pending = PendingSignal {
+                signal: signal.clone(),
+                event: event.clone(),
+                edge: signal.edge,
+                cost_usd: estimated_cost,
+                timestamp: Utc::now(),
+            };
+
+            {
+                let mut tracker = self.window_tracker.write().await;
+                tracker.add_pending_signal(&window_id, pending);
+            }
+
+            info!(
+                "📋 Queued: {} {} edge={:.2}% (window {})",
+                signal.symbol, signal.direction,
+                signal.edge * dec!(100), window_id
+            );
+
+            return Ok(());
+        }
+
         // Determine shares to trade - use fund manager if available
         let shares_to_trade = if let Some(ref fm) = self.fund_manager {
             // Use fund manager for balance check and position sizing
-            match fm.can_open_position(&event.condition_id, signal.pm_price).await {
+            match fm.can_open_position(&event.condition_id, &signal.symbol, signal.pm_price).await {
                 Ok(PositionSizeResult::Approved { shares, amount_usd }) => {
                     info!(
                         "💰 Fund manager approved: {} shares @ {:.2}¢ = ${:.2}",
@@ -1323,16 +1759,13 @@ impl MomentumEngine {
                 }
             }
         } else {
-            // No fund manager - use legacy position checks
+            // No fund manager - check max positions limit
             let positions = self.positions.read().await;
             if positions.len() >= self.config.max_positions {
                 debug!("Max positions reached ({}), skipping", self.config.max_positions);
                 return Ok(());
             }
-            if positions.values().any(|p| p.symbol == signal.symbol) {
-                debug!("Already have position in {}, skipping", signal.symbol);
-                return Ok(());
-            }
+            // Position duplicate check already done above
             drop(positions);
             self.config.shares_per_trade
         };
@@ -1399,7 +1832,7 @@ impl MomentumEngine {
 
                     // Record position with fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_opened(&event.condition_id).await;
+                        fm.record_position_opened(&event.condition_id, &signal.symbol).await;
                     }
 
                     // Track position in local state
@@ -1413,10 +1846,25 @@ impl MomentumEngine {
                         highest_price: fill_price,
                         event_end_time: event.end_time,
                         event_slug: event.slug.clone(),
+                        condition_id: event.condition_id.clone(),
                     };
 
                     let mut positions = self.positions.write().await;
                     positions.insert(signal.symbol.clone(), position);
+
+                    // Log trade entry
+                    if let Some(ref logger) = self.trade_logger {
+                        logger.record_entry(
+                            &signal.symbol,
+                            &event.slug,
+                            &event.condition_id,
+                            &format!("{}", signal.direction),
+                            fill_price,
+                            result.filled_shares,
+                            signal.cex_move_pct,
+                            signal.edge,
+                        ).await;
+                    }
                 }
                 Err(e) => {
                     error!("Order failed: {}", e);
@@ -1494,6 +1942,202 @@ impl MomentumEngine {
         }
 
         false
+    }
+
+    /// Process pending signals and execute best edge (if ready)
+    async fn process_pending_signals(&self) -> Result<()> {
+        if !self.config.best_edge_only {
+            return Ok(());
+        }
+
+        let ready_windows = {
+            let tracker = self.window_tracker.read().await;
+            tracker.get_ready_windows(self.config.signal_collection_delay_ms)
+        };
+
+        for window_id in ready_windows {
+            // Get the best signal for this window
+            let best_signal = {
+                let tracker = self.window_tracker.read().await;
+
+                // Skip if already executed
+                if tracker.has_executed(&window_id) {
+                    continue;
+                }
+
+                tracker.get_best_signal(&window_id)
+            };
+
+            if let Some(pending) = best_signal {
+                // Check window exposure limit
+                let can_execute = {
+                    let tracker = self.window_tracker.read().await;
+                    let current_exposure = tracker.get_exposure(&window_id);
+                    let max_exposure = self.config.max_window_exposure_usd;
+
+                    max_exposure == Decimal::ZERO ||
+                    current_exposure + pending.cost_usd <= max_exposure
+                };
+
+                if can_execute {
+                    info!(
+                        "🏆 Best edge selected: {} {} edge={:.2}% (window {})",
+                        pending.signal.symbol,
+                        pending.signal.direction,
+                        pending.edge * dec!(100),
+                        window_id
+                    );
+
+                    // Execute the trade directly
+                    self.execute_pending_trade(pending.clone()).await?;
+
+                    // Mark window as executed and add exposure
+                    {
+                        let mut tracker = self.window_tracker.write().await;
+                        tracker.mark_executed(&window_id);
+                        tracker.add_exposure(&window_id, pending.cost_usd);
+                        tracker.clear_pending(&window_id);
+                    }
+                } else {
+                    info!(
+                        "⚠️ Window {} at exposure limit, skipping {}",
+                        window_id, pending.signal.symbol
+                    );
+
+                    // Clear pending signals for this window
+                    let mut tracker = self.window_tracker.write().await;
+                    tracker.clear_pending(&window_id);
+                }
+            }
+        }
+
+        // Periodic cleanup
+        {
+            let mut tracker = self.window_tracker.write().await;
+            tracker.cleanup_old();
+        }
+
+        Ok(())
+    }
+
+    /// Execute a pending trade
+    async fn execute_pending_trade(&self, pending: PendingSignal) -> Result<()> {
+        let signal = &pending.signal;
+        let event = &pending.event;
+
+        // Re-check if we already have position (might have changed since queueing)
+        {
+            let positions = self.positions.read().await;
+            if positions.values().any(|p| p.symbol == signal.symbol) {
+                debug!("Already have position in {}, skipping", signal.symbol);
+                return Ok(());
+            }
+        }
+
+        // Get position size
+        let shares_to_trade = if let Some(ref fm) = self.fund_manager {
+            match fm.can_open_position(&event.condition_id, &signal.symbol, signal.pm_price).await {
+                Ok(PositionSizeResult::Approved { shares, amount_usd }) => {
+                    info!(
+                        "💰 Fund manager approved: {} shares @ {:.2}¢ = ${:.2}",
+                        shares,
+                        signal.pm_price * dec!(100),
+                        amount_usd
+                    );
+                    shares
+                }
+                Ok(PositionSizeResult::Rejected(reason)) => {
+                    debug!("Fund manager rejected: {}", reason);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Fund manager error: {}, using default", e);
+                    self.config.shares_per_trade
+                }
+            }
+        } else {
+            self.config.shares_per_trade
+        };
+
+        // Execute entry
+        let token_id = match signal.direction {
+            Direction::Up => &event.up_token_id,
+            Direction::Down => &event.down_token_id,
+        };
+
+        if self.dry_run {
+            info!(
+                "[DRY RUN] Best edge trade: {} {} {} shares @ {:.2}¢",
+                signal.symbol, signal.direction, shares_to_trade,
+                signal.pm_price * dec!(100)
+            );
+        } else {
+            let order = OrderRequest::buy_limit(
+                token_id.clone(),
+                signal.direction.into(),
+                shares_to_trade,
+                signal.pm_price,
+            );
+
+            match self.executor.execute(&order).await {
+                Ok(result) => {
+                    let fill_price = result.avg_fill_price.unwrap_or(signal.pm_price);
+                    let trade_count = self.record_trade().await;
+
+                    info!(
+                        "Order filled: {} shares @ {:.2}¢ (trade #{} today)",
+                        result.filled_shares,
+                        fill_price * dec!(100),
+                        trade_count
+                    );
+
+                    // Record with fund manager
+                    if let Some(ref fm) = self.fund_manager {
+                        fm.record_position_opened(&event.condition_id, &signal.symbol).await;
+                    }
+
+                    // Track position
+                    let position = Position {
+                        token_id: token_id.clone(),
+                        symbol: signal.symbol.clone(),
+                        direction: signal.direction,
+                        entry_price: fill_price,
+                        shares: result.filled_shares,
+                        entry_time: Utc::now(),
+                        highest_price: fill_price,
+                        event_end_time: event.end_time,
+                        event_slug: event.slug.clone(),
+                        condition_id: event.condition_id.clone(),
+                    };
+
+                    let mut positions = self.positions.write().await;
+                    positions.insert(signal.symbol.clone(), position);
+
+                    // Log trade
+                    if let Some(ref logger) = self.trade_logger {
+                        logger.record_entry(
+                            &signal.symbol,
+                            &event.slug,
+                            &event.condition_id,
+                            &format!("{}", signal.direction),
+                            fill_price,
+                            result.filled_shares,
+                            signal.cex_move_pct,
+                            signal.edge,
+                        ).await;
+                    }
+                }
+                Err(e) => {
+                    error!("Order failed: {}", e);
+                }
+            }
+        }
+
+        // Update cooldown
+        let mut last_trade = self.last_trade_time.write().await;
+        last_trade.insert(signal.symbol.clone(), Utc::now());
+
+        Ok(())
     }
 }
 

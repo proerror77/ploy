@@ -224,6 +224,14 @@ impl MomentumStrategyAdapter {
                 .and_then(|v| v.as_integer()).unwrap_or(300) as u64,
             max_time_remaining_secs: timing.get("max_time_remaining")
                 .and_then(|v| v.as_integer()).unwrap_or(900) as u64,
+            // Cross-symbol risk control
+            max_window_exposure_usd: Decimal::try_from(
+                risk.get("max_window_exposure").and_then(|v| v.as_float()).unwrap_or(25.0)
+            ).unwrap_or(dec!(25)),
+            best_edge_only: risk.get("best_edge_only")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            signal_collection_delay_ms: risk.get("signal_delay_ms")
+                .and_then(|v| v.as_integer()).unwrap_or(2000) as u64,
         };
 
         let exit_config = ExitConfig {

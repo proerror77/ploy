@@ -54,7 +54,7 @@ ethers = { version = "2", features = ["rustls"] }
 polymarket-client-sdk = { version = "0.3", features = ["ws", "gamma", "data", "tracing"] }
 
 # Alloy for signing (used by polymarket-client-sdk)
-alloy = { version = "1", features = ["signers", "signer-local"] }
+alloy = { version = "1", features = ["signers", "signer-local", "provider-http", "network", "contract", "sol-types"] }
 
 # HMAC authentication
 hmac = "0.12"

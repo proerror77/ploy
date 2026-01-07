@@ -275,6 +275,35 @@ pub enum Commands {
     #[command(subcommand)]
     Strategy(super::strategy::StrategyCommands),
 
+    /// Claim/redeem winning positions from resolved markets
+    Claim {
+        /// Check only (don't actually claim)
+        #[arg(long)]
+        check_only: bool,
+        /// Minimum position size to claim (in USDC)
+        #[arg(long, default_value = "1")]
+        min_size: f64,
+        /// Poll interval in seconds (0 = one-shot)
+        #[arg(long, default_value = "0")]
+        interval: u64,
+    },
+
+    /// View trading history and statistics
+    History {
+        /// Number of recent trades to show
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+        /// Filter by symbol (e.g., BTCUSDT)
+        #[arg(short, long)]
+        symbol: Option<String>,
+        /// Show statistics only (no trade list)
+        #[arg(long)]
+        stats_only: bool,
+        /// Show open trades only
+        #[arg(long)]
+        open_only: bool,
+    },
+
     /// Reinforcement learning strategies (requires 'rl' feature)
     #[cfg(feature = "rl")]
     #[command(subcommand)]

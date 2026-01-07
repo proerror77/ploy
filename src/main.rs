@@ -178,12 +178,190 @@ async fn main() -> Result<()> {
             init_logging();
             run_rl_command(rl_cmd).await?;
         }
+        Some(Commands::Claim { check_only, min_size, interval }) => {
+            init_logging();
+            run_claimer(*check_only, *min_size, *interval).await?;
+        }
+        Some(Commands::History { limit, symbol, stats_only, open_only }) => {
+            run_history(*limit, symbol.clone(), *stats_only, *open_only).await?;
+        }
         Some(Commands::Run) | None => {
             init_logging();
             run_bot(&cli).await?;
         }
     }
 
+    Ok(())
+}
+
+/// Run the auto-claimer to redeem winning positions
+async fn run_claimer(check_only: bool, min_size: f64, interval: u64) -> Result<()> {
+    use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+    use ploy::adapters::PolymarketClient;
+    use ploy::signing::Wallet;
+    use ploy::strategy::{AutoClaimer, ClaimerConfig};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    info!("Starting auto-claimer (check_only={}, min_size={}, interval={}s)", check_only, min_size, interval);
+
+    // Get private key from environment
+    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
+        .or_else(|_| std::env::var("PRIVATE_KEY"))
+        .ok();
+
+    if private_key.is_none() && !check_only {
+        warn!("No POLYMARKET_PRIVATE_KEY found - running in check-only mode");
+    }
+
+    // Create authenticated client
+    let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+
+    // Check for proxy wallet (funder address)
+    let funder = std::env::var("POLYMARKET_FUNDER").ok();
+    let client = if let Some(ref funder_addr) = funder {
+        info!("Using proxy wallet, funder: {}", funder_addr);
+        PolymarketClient::new_authenticated_proxy(
+            "https://clob.polymarket.com",
+            wallet,
+            funder_addr,
+            false, // neg_risk
+        ).await?
+    } else {
+        PolymarketClient::new_authenticated(
+            "https://clob.polymarket.com",
+            wallet,
+            false, // neg_risk
+        ).await?
+    };
+
+    // Configure claimer
+    let config = ClaimerConfig {
+        check_interval_secs: if interval > 0 { interval } else { 60 },
+        min_claim_size: Decimal::from_str(&min_size.to_string()).unwrap_or(Decimal::ONE),
+        auto_claim: !check_only && private_key.is_some(),
+        private_key,
+    };
+
+    let claimer = AutoClaimer::new(client, config);
+
+    if interval == 0 {
+        // One-shot mode: check once and exit
+        info!("One-shot mode: checking for redeemable positions...");
+        let positions = claimer.check_once().await?;
+
+        if positions.is_empty() {
+            info!("No redeemable positions found");
+        } else {
+            info!("Found {} redeemable positions:", positions.len());
+            for pos in &positions {
+                info!(
+                    "  • {} {} shares = ${:.2} | condition={}",
+                    pos.outcome,
+                    pos.size,
+                    pos.payout,
+                    &pos.condition_id[..16.min(pos.condition_id.len())]
+                );
+            }
+
+            if !check_only {
+                info!("Claiming positions...");
+                let results = claimer.check_and_claim().await?;
+                for result in results {
+                    if result.success {
+                        info!("✅ Claimed ${:.2} from {} | tx: {}", result.amount_claimed, result.condition_id, result.tx_hash);
+                    } else {
+                        error!("❌ Failed to claim {}: {:?}", result.condition_id, result.error);
+                    }
+                }
+            }
+        }
+    } else {
+        // Continuous mode: run as background service
+        info!("Starting continuous claiming service (interval: {}s)...", interval);
+        claimer.start().await?;
+    }
+
+    Ok(())
+}
+
+/// View trading history and statistics
+async fn run_history(limit: usize, symbol: Option<String>, stats_only: bool, open_only: bool) -> Result<()> {
+    use ploy::strategy::TradeLogger;
+    use std::path::PathBuf;
+
+    let logger = TradeLogger::new(PathBuf::from("data/trades.json"));
+
+    // Load existing trades
+    if let Err(e) = logger.load().await {
+        eprintln!("Warning: Could not load trades: {}", e);
+    }
+
+    // Show statistics
+    let stats = logger.get_stats().await;
+
+    if stats.total_trades == 0 {
+        println!("\n  No trading history found.");
+        println!("  Trade data will be saved to: data/trades.json\n");
+        return Ok(());
+    }
+
+    // Format and print stats
+    println!("{}", logger.format_stats().await);
+
+    if stats_only {
+        return Ok(());
+    }
+
+    // Show trades
+    let trades = if open_only {
+        logger.get_open_trades().await
+    } else if let Some(ref sym) = symbol {
+        logger.get_trades_by_symbol(sym).await
+    } else {
+        logger.get_recent_trades(limit).await
+    };
+
+    if trades.is_empty() {
+        if open_only {
+            println!("\n  No open trades.\n");
+        } else if symbol.is_some() {
+            println!("\n  No trades for symbol: {}\n", symbol.unwrap());
+        }
+        return Ok(());
+    }
+
+    println!("\n  ── Recent Trades ───────────────────────────────────────────\n");
+    println!("  Time                Symbol     Dir   Price   Shares  PnL      Status");
+    println!("  ──────────────────  ─────────  ────  ──────  ──────  ───────  ──────");
+
+    for trade in trades {
+        let outcome_str = match &trade.outcome {
+            ploy::strategy::TradeOutcome::Open => "OPEN",
+            ploy::strategy::TradeOutcome::Won => "WON",
+            ploy::strategy::TradeOutcome::Lost => "LOST",
+            ploy::strategy::TradeOutcome::ExitedEarly { .. } => "EXIT",
+            ploy::strategy::TradeOutcome::Cancelled => "CANCEL",
+        };
+
+        let pnl_str = match trade.pnl_usd {
+            Some(pnl) => format!("${:+.2}", pnl),
+            None => "-".to_string(),
+        };
+
+        println!(
+            "  {}  {:10} {:4}  {:5.1}¢  {:6}  {:>7}  {}",
+            trade.timestamp.format("%Y-%m-%d %H:%M"),
+            trade.symbol,
+            trade.direction,
+            trade.entry_price * rust_decimal_macros::dec!(100),
+            trade.shares,
+            pnl_str,
+            outcome_str
+        );
+    }
+
+    println!();
     Ok(())
 }
 
@@ -1874,6 +2052,10 @@ async fn run_momentum_mode(
         hold_to_resolution,
         min_time_remaining_secs: min_time_remaining,
         max_time_remaining_secs: max_time_remaining,
+        // Cross-symbol risk control
+        max_window_exposure_usd: dec!(25),   // Max $25 total per 15-min window
+        best_edge_only: true,                // Only take highest edge signal
+        signal_collection_delay_ms: 2000,    // 2 second delay to collect signals
     };
 
     // Build exit config
@@ -1976,6 +2158,7 @@ async fn run_momentum_mode(
         leg2_force_close_seconds: 20,
         // Fund management settings
         max_positions: max_positions as u32,  // Limit concurrent positions
+        max_positions_per_symbol: 1,           // Only 1 position per symbol (BTC, ETH, etc.)
         position_size_pct: None,               // Not using percentage-based sizing
         fixed_amount_usd: Some(dec!(1)),       // $1 per trade
         min_balance_usd: dec!(2),              // Keep $2 minimum reserve

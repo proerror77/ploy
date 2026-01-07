@@ -231,6 +231,10 @@ pub struct PositionResponse {
     #[serde(default, alias = "token_id")]
     pub token_id: Option<String>,
     #[serde(default)]
+    pub condition_id: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
     pub size: String,
     #[serde(default)]
     pub avg_price: Option<String>,
@@ -240,6 +244,8 @@ pub struct PositionResponse {
     pub unrealized_pnl: Option<String>,
     #[serde(default)]
     pub cur_price: Option<String>,
+    #[serde(default)]
+    pub redeemable: Option<bool>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -255,6 +261,17 @@ impl PositionResponse {
         let size = self.size.parse::<Decimal>().ok()?;
         let price = self.cur_price.as_ref()?.parse::<Decimal>().ok()?;
         Some(size * price)
+    }
+
+    /// Calculate payout if this position wins (size * $1)
+    pub fn payout_if_win(&self) -> Option<Decimal> {
+        let size = self.size.parse::<Decimal>().ok()?;
+        Some(size) // Each winning share pays $1
+    }
+
+    /// Check if this position is redeemable
+    pub fn is_redeemable(&self) -> bool {
+        self.redeemable.unwrap_or(false)
     }
 }
 
