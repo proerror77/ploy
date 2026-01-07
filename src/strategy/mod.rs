@@ -65,6 +65,7 @@ pub mod trade_logger;
 pub mod validation;
 pub mod volatility;
 pub mod dump_hedge;
+pub mod volatility_arb;
 
 // Legacy re-exports
 pub use engine::StrategyEngine;
@@ -105,6 +106,11 @@ pub use dump_hedge::{
     DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats,
     EnhancedDumpSignal, ProgressiveHedgeSignal, HedgeResult,
     PendingHedge, StopLossSignal, StopLossReason,
+};
+pub use volatility_arb::{
+    VolatilityArbConfig, VolatilityArbEngine, VolArbSignal,
+    VolArbStats, VolArbTrade, VolatilityEstimate, MarketPricing,
+    calculate_fair_yes_price, calculate_implied_volatility, calculate_kelly_fraction,
 };
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition,
