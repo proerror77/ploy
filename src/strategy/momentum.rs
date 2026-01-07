@@ -372,9 +372,10 @@ impl EventMatcher {
         let gamma_events = self.client.get_all_active_events(series_id).await?;
         let now = Utc::now();
 
-        // Filter to events ending within the next 15 minutes (for 15-min markets)
-        // This ensures we get current 15-minute events, matching max_time_remaining_secs=900
-        let max_end_time = now + ChronoDuration::minutes(15);
+        // Filter to events ending within the next 60 minutes
+        // This gives us a buffer to catch upcoming 15-minute windows
+        // The trading logic will filter based on max_time_remaining_secs for entry timing
+        let max_end_time = now + ChronoDuration::minutes(60);
         let min_end_time = now + ChronoDuration::seconds(30); // At least 30s remaining
 
         let mut sorted_events: Vec<_> = gamma_events
@@ -400,7 +401,7 @@ impl EventMatcher {
         });
 
         info!(
-            "Series {}: {} events ending in next 15 minutes",
+            "Series {}: {} events ending in next 60 minutes",
             series_id, sorted_events.len()
         );
 

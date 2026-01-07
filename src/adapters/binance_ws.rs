@@ -9,9 +9,12 @@ use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::interval;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -19,6 +22,10 @@ use crate::error::{PloyError, Result};
 
 /// Binance WebSocket URL for spot market streams
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
+
+/// Binance WebSocket host for proxy CONNECT
+const BINANCE_WS_HOST: &str = "stream.binance.com";
+const BINANCE_WS_PORT: u16 = 9443;
 
 /// How often to send ping frames
 const PING_INTERVAL_SECS: u64 = 30;
@@ -31,6 +38,148 @@ const CHANNEL_CAPACITY: usize = 1000;
 
 /// How many price samples to keep per symbol (need 120+ for volatility calculation)
 const MAX_PRICE_HISTORY: usize = 300;
+
+/// Get proxy URL from environment variables
+fn get_proxy_url() -> Option<String> {
+    std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("ALL_PROXY"))
+        .or_else(|_| std::env::var("all_proxy"))
+        .ok()
+}
+
+/// Parse proxy URL into host and port
+fn parse_proxy_url(proxy_url: &str) -> Option<(String, u16)> {
+    // Handle URLs like "http://127.0.0.1:7897" or "127.0.0.1:7897"
+    let url = if proxy_url.contains("://") {
+        Url::parse(proxy_url).ok()?
+    } else {
+        Url::parse(&format!("http://{}", proxy_url)).ok()?
+    };
+
+    let host = url.host_str()?.to_string();
+    let port = url.port().unwrap_or(8080);
+    Some((host, port))
+}
+
+/// Connect to target host through HTTP CONNECT proxy
+async fn connect_via_proxy(
+    proxy_host: &str,
+    proxy_port: u16,
+    target_host: &str,
+    target_port: u16,
+) -> Result<TcpStream> {
+    debug!(
+        "Connecting to {}:{} via proxy {}:{}",
+        target_host, target_port, proxy_host, proxy_port
+    );
+
+    // Connect to proxy
+    let proxy_addr = format!("{}:{}", proxy_host, proxy_port);
+    let stream = tokio::time::timeout(
+        Duration::from_secs(10),
+        TcpStream::connect(&proxy_addr),
+    )
+    .await
+    .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
+    .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
+
+    // Send HTTP CONNECT request
+    let connect_request = format!(
+        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
+        target_host, target_port, target_host, target_port
+    );
+
+    let (reader, mut writer) = stream.into_split();
+    writer
+        .write_all(connect_request.as_bytes())
+        .await
+        .map_err(|e| PloyError::Internal(format!("Failed to send CONNECT: {}", e)))?;
+
+    // Read response
+    let mut buf_reader = BufReader::new(reader);
+    let mut response_line = String::new();
+    buf_reader
+        .read_line(&mut response_line)
+        .await
+        .map_err(|e| PloyError::Internal(format!("Failed to read proxy response: {}", e)))?;
+
+    // Check for 200 Connection Established
+    if !response_line.contains("200") {
+        return Err(PloyError::Internal(format!(
+            "Proxy CONNECT failed: {}",
+            response_line.trim()
+        )));
+    }
+
+    // Read remaining headers until empty line
+    loop {
+        let mut line = String::new();
+        buf_reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| PloyError::Internal(format!("Failed to read proxy headers: {}", e)))?;
+        if line.trim().is_empty() {
+            break;
+        }
+    }
+
+    // Reunite the stream
+    let reader = buf_reader.into_inner();
+    let stream = reader
+        .reunite(writer)
+        .map_err(|e| PloyError::Internal(format!("Failed to reunite stream: {}", e)))?;
+
+    debug!("Proxy tunnel established to {}:{}", target_host, target_port);
+    Ok(stream)
+}
+
+/// Connect WebSocket, using proxy if available
+async fn connect_websocket_with_proxy(
+    url: &Url,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+    let host = url.host_str().unwrap_or(BINANCE_WS_HOST);
+    let port = url.port().unwrap_or(BINANCE_WS_PORT);
+
+    if let Some(proxy_url) = get_proxy_url() {
+        if let Some((proxy_host, proxy_port)) = parse_proxy_url(&proxy_url) {
+            info!("Using proxy {}:{} for WebSocket connection", proxy_host, proxy_port);
+
+            // Connect through proxy
+            let tcp_stream = connect_via_proxy(&proxy_host, proxy_port, host, port).await?;
+
+            // Establish TLS over the tunnel
+            let connector = native_tls::TlsConnector::new()
+                .map_err(|e| PloyError::Internal(format!("TLS connector error: {}", e)))?;
+            let connector = tokio_native_tls::TlsConnector::from(connector);
+
+            let tls_stream = connector
+                .connect(host, tcp_stream)
+                .await
+                .map_err(|e| PloyError::Internal(format!("TLS handshake failed: {}", e)))?;
+
+            // Wrap in MaybeTlsStream for consistent type
+            let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
+
+            // Upgrade to WebSocket using client_async
+            let (ws_stream, _response) = tokio_tungstenite::client_async(url.as_str(), maybe_tls)
+                .await
+                .map_err(|e| PloyError::Internal(format!("WebSocket handshake failed: {}", e)))?;
+
+            return Ok(ws_stream);
+        }
+    }
+
+    // No proxy or invalid proxy URL - connect directly
+    let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(url))
+        .await
+        .map_err(|_| PloyError::Internal("WebSocket connection timeout".to_string()))?
+        .map_err(PloyError::WebSocket)?;
+
+    Ok(ws_stream)
+}
 
 /// Binance trade message structure
 #[derive(Debug, Deserialize)]
@@ -460,13 +609,7 @@ impl BinanceWebSocket {
 
         info!("Connecting to Binance WebSocket: {}", url);
 
-        let (ws_stream, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            connect_async(&url),
-        )
-        .await
-        .map_err(|_| PloyError::Internal("Binance WebSocket connection timeout".to_string()))?
-        .map_err(PloyError::WebSocket)?;
+        let ws_stream = connect_websocket_with_proxy(&url).await?;
 
         info!("Connected to Binance WebSocket");
 
