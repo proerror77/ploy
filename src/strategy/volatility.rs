@@ -386,11 +386,16 @@ impl VolatilityDetector {
         up_ask: Option<Decimal>,
         down_ask: Option<Decimal>,
         obi: Option<Decimal>,
+        price_to_beat: Option<Decimal>,
     ) -> Option<VolatilitySignal> {
-        self.check_signal(symbol, event_id, &self.event_tracker, up_ask, down_ask, obi)
+        self.check_signal(symbol, event_id, &self.event_tracker, up_ask, down_ask, obi, price_to_beat)
     }
 
     /// Check for trading signal using external event tracker
+    /// 
+    /// # Arguments
+    /// * `price_to_beat` - The threshold price from Polymarket (e.g., $94,000 for "Will BTC be above $94,000?")
+    ///                     If None, falls back to using start_price (legacy behavior)
     pub fn check_signal(
         &self,
         symbol: &str,
@@ -399,6 +404,7 @@ impl VolatilityDetector {
         up_ask: Option<Decimal>,
         down_ask: Option<Decimal>,
         obi: Option<Decimal>,
+        price_to_beat: Option<Decimal>,
     ) -> Option<VolatilitySignal> {
         let event = tracker.get_active_event(symbol, event_id)?;
 
@@ -414,17 +420,35 @@ impl VolatilityDetector {
             return None;
         }
 
-        let deviation = event.deviation_pct();
+        // Use price_to_beat if available, otherwise fall back to start_price
+        let reference_price = price_to_beat.unwrap_or(event.start_price);
+        let current_price = event.current_price;
+        
+        // Calculate deviation from the reference price (price_to_beat or start_price)
+        let deviation = if reference_price.is_zero() {
+            Decimal::ZERO
+        } else {
+            (current_price - reference_price) / reference_price
+        };
+        
         let obi_value = obi.unwrap_or(Decimal::ZERO);
 
-        // Determine direction based on deviation and OBI
+        // Determine direction: if current > price_to_beat, UP wins; otherwise DOWN wins
         let (predicted_side, token_price) = if deviation > Decimal::ZERO {
-            // Price is UP from start
+            // Current price is ABOVE price_to_beat → UP wins
             (Side::Up, up_ask?)
         } else {
-            // Price is DOWN from start
+            // Current price is BELOW price_to_beat → DOWN wins
             (Side::Down, down_ask?)
         };
+        
+        // Log which reference we're using
+        if price_to_beat.is_some() {
+            debug!(
+                "{} using price_to_beat={:.2} current={:.2} deviation={:.4}%",
+                symbol, reference_price, current_price, deviation * dec!(100)
+            );
+        }
 
         // Check minimum deviation
         if deviation.abs() < self.config.min_deviation_pct {

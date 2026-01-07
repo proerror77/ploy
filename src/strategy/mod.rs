@@ -102,7 +102,9 @@ pub use volatility::{
     EventTracker as VolatilityEventTracker, ActiveEvent, EventRecord,
 };
 pub use dump_hedge::{
-    DumpHedgeConfig, DumpHedgeEngine, DumpSignal, HedgeSignal, PendingHedge,
+    DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats,
+    EnhancedDumpSignal, ProgressiveHedgeSignal, HedgeResult,
+    PendingHedge, StopLossSignal, StopLossReason,
 };
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition,

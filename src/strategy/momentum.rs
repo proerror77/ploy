@@ -1648,6 +1648,7 @@ impl MomentumEngine {
                 up_ask,
                 down_ask,
                 obi,
+                event.price_to_beat,  // Pass price_to_beat from EventInfo
             ) {
                 // Convert volatility signal to momentum signal for unified execution
                 let momentum_signal = MomentumSignal {
@@ -1697,7 +1698,7 @@ impl MomentumEngine {
         // Update dump hedge price tracker if enabled
         if let Some(ref dump_hedge) = self.dump_hedge {
             if let Some(ask) = update.quote.best_ask {
-                dump_hedge.on_price_update(&update.token_id, ask).await;
+                dump_hedge.on_simple_price_update(&update.token_id, ask).await;
             }
         }
 
