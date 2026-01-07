@@ -79,12 +79,18 @@ impl OrderExecutor {
                             .map(|p| p.to_f64().unwrap_or(0.0))
                             .unwrap_or(request.limit_price.to_f64().unwrap_or(0.0));
 
+                        // Use request.shares since filled_shares may be 0 for submitted orders
+                        let shares = if result.filled_shares > 0 {
+                            result.filled_shares
+                        } else {
+                            request.shares
+                        };
                         feishu.notify_trade(
                             action,
                             &request.token_id[..16.min(request.token_id.len())],
                             side,
                             price,
-                            result.filled_shares as f64,
+                            shares as f64,
                             Some(&result.order_id),
                         ).await;
                     }
