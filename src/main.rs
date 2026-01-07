@@ -2093,6 +2093,14 @@ async fn run_momentum_mode(
         max_window_exposure_usd: dec!(25),   // Max $25 total per 15-min window
         best_edge_only: true,                // Only take highest edge signal
         signal_collection_delay_ms: 2000,    // 2 second delay to collect signals
+        // === ENHANCED MOMENTUM DETECTION ===
+        require_mtf_agreement: true,         // Require all timeframes to agree on direction
+        min_obi_confirmation: dec!(0.05),    // 5% OBI confirmation
+        use_kline_volatility: true,          // Use K-line historical volatility
+        time_decay_factor: dec!(0.30),       // 30% decay in later window
+        use_price_to_beat: true,             // Consider price-to-beat from market question
+        dynamic_position_sizing: true,       // Scale position by confidence
+        min_confidence: 0.5,                 // Minimum 50% confidence
     };
 
     // Build exit config

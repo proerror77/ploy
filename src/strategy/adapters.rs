@@ -232,6 +232,23 @@ impl MomentumStrategyAdapter {
                 .and_then(|v| v.as_bool()).unwrap_or(true),
             signal_collection_delay_ms: risk.get("signal_delay_ms")
                 .and_then(|v| v.as_integer()).unwrap_or(2000) as u64,
+            // === ENHANCED MOMENTUM DETECTION ===
+            require_mtf_agreement: entry.get("require_mtf_agreement")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            min_obi_confirmation: Decimal::try_from(
+                entry.get("min_obi_confirmation").and_then(|v| v.as_float()).unwrap_or(5.0) / 100.0
+            ).unwrap_or(dec!(0.05)),
+            use_kline_volatility: entry.get("use_kline_volatility")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            time_decay_factor: Decimal::try_from(
+                entry.get("time_decay_factor").and_then(|v| v.as_float()).unwrap_or(30.0) / 100.0
+            ).unwrap_or(dec!(0.30)),
+            use_price_to_beat: entry.get("use_price_to_beat")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            dynamic_position_sizing: risk.get("dynamic_position_sizing")
+                .and_then(|v| v.as_bool()).unwrap_or(true),
+            min_confidence: entry.get("min_confidence")
+                .and_then(|v| v.as_float()).unwrap_or(0.5),
         };
 
         let exit_config = ExitConfig {

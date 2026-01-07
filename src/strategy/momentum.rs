@@ -899,6 +899,311 @@ impl MomentumDetector {
         // Convert to f64, clamp to [0, 1]
         score.to_string().parse::<f64>().unwrap_or(0.5).clamp(0.0, 1.0)
     }
+
+    // ========================================================================
+    // ENHANCED CHECK METHOD
+    // ========================================================================
+
+    /// Enhanced momentum check with all optimizations
+    ///
+    /// Includes:
+    /// - Multi-timeframe agreement check
+    /// - OBI confirmation
+    /// - K-line volatility
+    /// - Time decay
+    /// - Price-to-beat consideration
+    pub fn check_enhanced(
+        &self,
+        symbol: &str,
+        spot: &SpotPrice,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        obi: Option<Decimal>,
+        time_remaining_secs: i64,
+        price_to_beat: Option<Decimal>,
+    ) -> Option<MomentumSignal> {
+        // 1. Multi-timeframe momentum check
+        let (momentum, mtf_agrees) = self.check_multi_timeframe(spot);
+
+        // If MTF agreement required but not met, skip
+        if self.config.require_mtf_agreement && !mtf_agrees {
+            debug!(
+                "{} MTF disagreement: timeframes not aligned",
+                symbol
+            );
+            return None;
+        }
+
+        // 2. Calculate volatility-adjusted threshold
+        let effective_threshold = if self.config.use_kline_volatility {
+            self.calculate_kline_threshold(symbol, spot)
+        } else {
+            self.calculate_effective_threshold(symbol, spot)
+        };
+
+        // Check minimum move
+        if momentum.abs() < effective_threshold {
+            return None;
+        }
+
+        // 3. Determine direction
+        let direction = if momentum > Decimal::ZERO {
+            Direction::Up
+        } else {
+            Direction::Down
+        };
+
+        // 4. OBI confirmation check
+        if self.config.min_obi_confirmation > Decimal::ZERO {
+            if let Some(obi_val) = obi {
+                let obi_confirms = match direction {
+                    Direction::Up => obi_val >= self.config.min_obi_confirmation,
+                    Direction::Down => obi_val <= -self.config.min_obi_confirmation,
+                };
+
+                if !obi_confirms {
+                    debug!(
+                        "{} OBI {:.2} does not confirm {} direction",
+                        symbol, obi_val, direction
+                    );
+                    return None;
+                }
+            }
+        }
+
+        // 5. Get PM price
+        let pm_price = match direction {
+            Direction::Up => up_ask?,
+            Direction::Down => down_ask?,
+        };
+
+        // Check max entry price
+        if pm_price > self.config.max_entry_price {
+            return None;
+        }
+
+        // 6. Calculate enhanced fair value with price-to-beat
+        let fair_value = if self.config.use_price_to_beat {
+            self.estimate_fair_value_with_price_to_beat(
+                momentum,
+                spot.price,
+                price_to_beat,
+                time_remaining_secs,
+            )
+        } else {
+            self.estimate_fair_value(momentum)
+        };
+
+        // 7. Apply time decay
+        let time_adjusted_fair_value = if self.config.time_decay_factor > Decimal::ZERO {
+            let time_factor = Decimal::from(time_remaining_secs.max(0)) / dec!(900);
+            let decay = dec!(1) - (self.config.time_decay_factor * (dec!(1) - time_factor));
+            // Interpolate between base (0.5) and fair_value
+            let base = dec!(0.5);
+            base + (fair_value - base) * decay
+        } else {
+            fair_value
+        };
+
+        let edge = time_adjusted_fair_value - pm_price;
+
+        if edge < self.config.min_edge {
+            debug!(
+                "{} {} edge {:.2}% < min {:.2}%",
+                symbol, direction,
+                edge * dec!(100),
+                self.config.min_edge * dec!(100)
+            );
+            return None;
+        }
+
+        // 8. Enhanced confidence calculation
+        let confidence = self.calculate_enhanced_confidence(
+            momentum,
+            edge,
+            obi,
+            mtf_agrees,
+            time_remaining_secs,
+        );
+
+        // Check minimum confidence
+        if confidence < self.config.min_confidence {
+            debug!(
+                "{} {} confidence {:.0}% < min {:.0}%",
+                symbol, direction,
+                confidence * 100.0,
+                self.config.min_confidence * 100.0
+            );
+            return None;
+        }
+
+        info!(
+            "🎯 ENHANCED SIGNAL: {} {} | mom={:.3}% thr={:.3}% | PM={:.1}¢ FV={:.1}¢ edge={:.1}% | conf={:.0}% | {}s left{}",
+            symbol,
+            direction,
+            momentum * dec!(100),
+            effective_threshold * dec!(100),
+            pm_price * dec!(100),
+            time_adjusted_fair_value * dec!(100),
+            edge * dec!(100),
+            confidence * 100.0,
+            time_remaining_secs,
+            if mtf_agrees { " [MTF✓]" } else { "" }
+        );
+
+        Some(MomentumSignal {
+            symbol: symbol.to_string(),
+            direction,
+            cex_move_pct: momentum,
+            pm_price,
+            edge,
+            confidence,
+            timestamp: Utc::now(),
+        })
+    }
+
+    /// Check multi-timeframe momentum agreement
+    /// Returns (weighted_momentum, all_agree)
+    fn check_multi_timeframe(&self, spot: &SpotPrice) -> (Decimal, bool) {
+        let mom_10s = spot.momentum(10);
+        let mom_30s = spot.momentum(30);
+        let mom_60s = spot.momentum(60);
+
+        // Calculate weighted momentum
+        let weighted = match (mom_10s, mom_30s, mom_60s) {
+            (Some(m10), Some(m30), Some(m60)) => {
+                m10 * dec!(0.2) + m30 * dec!(0.3) + m60 * dec!(0.5)
+            }
+            (Some(m10), Some(m30), None) => {
+                m10 * dec!(0.4) + m30 * dec!(0.6)
+            }
+            (Some(m), _, _) | (_, Some(m), _) | (_, _, Some(m)) => m,
+            _ => return (Decimal::ZERO, false),
+        };
+
+        // Check agreement (all same sign)
+        let all_agree = match (mom_10s, mom_30s, mom_60s) {
+            (Some(m10), Some(m30), Some(m60)) => {
+                (m10 > Decimal::ZERO && m30 > Decimal::ZERO && m60 > Decimal::ZERO)
+                    || (m10 < Decimal::ZERO && m30 < Decimal::ZERO && m60 < Decimal::ZERO)
+            }
+            (Some(m10), Some(m30), None) => {
+                (m10 > Decimal::ZERO && m30 > Decimal::ZERO)
+                    || (m10 < Decimal::ZERO && m30 < Decimal::ZERO)
+            }
+            _ => false,
+        };
+
+        (weighted, all_agree)
+    }
+
+    /// Calculate threshold using K-line historical volatility
+    fn calculate_kline_threshold(&self, symbol: &str, spot: &SpotPrice) -> Decimal {
+        // Try K-line volatility first
+        let kline_vol = self.kline_volatility.get(symbol).copied();
+
+        let current_vol = if let Some(vol) = kline_vol {
+            vol
+        } else {
+            // Fall back to tick-based volatility
+            spot.volatility(self.config.volatility_lookback_secs)
+                .unwrap_or(dec!(0.001))
+        };
+
+        let baseline_vol = self
+            .config
+            .baseline_volatility
+            .get(symbol)
+            .copied()
+            .unwrap_or(dec!(0.001));
+
+        if baseline_vol.is_zero() {
+            return self.config.min_move_pct;
+        }
+
+        let vol_ratio = (current_vol / baseline_vol).max(dec!(0.5)).min(dec!(2.0));
+        self.config.min_move_pct * vol_ratio
+    }
+
+    /// Estimate fair value considering price-to-beat
+    fn estimate_fair_value_with_price_to_beat(
+        &self,
+        momentum: Decimal,
+        current_price: Decimal,
+        price_to_beat: Option<Decimal>,
+        time_remaining_secs: i64,
+    ) -> Decimal {
+        let base_fv = self.estimate_fair_value(momentum);
+
+        let price_threshold = match price_to_beat {
+            Some(p) => p,
+            None => return base_fv,
+        };
+
+        // Calculate how far current price is from threshold
+        let distance_pct = if price_threshold > Decimal::ZERO {
+            (current_price - price_threshold) / price_threshold
+        } else {
+            return base_fv;
+        };
+
+        // Time factor: more confident as time runs out
+        let time_factor = dec!(1) - (Decimal::from(time_remaining_secs.max(0)) / dec!(900));
+
+        // If price is above threshold (UP likely):
+        //   distance > 0 → boost fair value
+        // If price is below threshold (DOWN likely):
+        //   distance < 0 → boost fair value for DOWN
+        let direction_matches = (momentum > Decimal::ZERO && distance_pct > Decimal::ZERO)
+            || (momentum < Decimal::ZERO && distance_pct < Decimal::ZERO);
+
+        if direction_matches {
+            // Boost fair value: larger distance + less time = more confident
+            let boost = distance_pct.abs() * time_factor * dec!(0.5);
+            (base_fv + boost).min(dec!(0.95))
+        } else {
+            // Direction doesn't match price-to-beat, reduce fair value
+            let reduction = distance_pct.abs() * dec!(0.3);
+            (base_fv - reduction).max(dec!(0.35))
+        }
+    }
+
+    /// Enhanced confidence calculation
+    fn calculate_enhanced_confidence(
+        &self,
+        momentum: Decimal,
+        edge: Decimal,
+        obi: Option<Decimal>,
+        mtf_agrees: bool,
+        time_remaining_secs: i64,
+    ) -> f64 {
+        let mut score: f64 = 0.0;
+
+        // Momentum contribution (0 - 0.25)
+        let mom_score = (momentum.abs() / dec!(0.005)).min(Decimal::ONE);
+        score += mom_score.to_string().parse::<f64>().unwrap_or(0.0) * 0.25;
+
+        // Edge contribution (0 - 0.25)
+        let edge_score = (edge / dec!(0.15)).min(Decimal::ONE);
+        score += edge_score.to_string().parse::<f64>().unwrap_or(0.0) * 0.25;
+
+        // OBI confirmation (0 - 0.15)
+        if let Some(obi_val) = obi {
+            let obi_strength = (obi_val.abs() / dec!(0.2)).min(Decimal::ONE);
+            score += obi_strength.to_string().parse::<f64>().unwrap_or(0.0) * 0.15;
+        }
+
+        // MTF agreement (0 - 0.15)
+        if mtf_agrees {
+            score += 0.15;
+        }
+
+        // Time bonus (0 - 0.20): more confident with less time remaining
+        let time_factor = 1.0 - (time_remaining_secs.max(0) as f64 / 900.0);
+        score += time_factor * 0.20;
+
+        score.clamp(0.0, 1.0)
+    }
 }
 
 // ============================================================================
