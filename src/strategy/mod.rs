@@ -66,6 +66,7 @@ pub mod validation;
 pub mod volatility;
 pub mod dump_hedge;
 pub mod volatility_arb;
+pub mod backtest;
 
 // Legacy re-exports
 pub use engine::StrategyEngine;
@@ -111,6 +112,12 @@ pub use volatility_arb::{
     VolatilityArbConfig, VolatilityArbEngine, VolArbSignal,
     VolArbStats, VolArbTrade, VolatilityEstimate, MarketPricing,
     calculate_fair_yes_price, calculate_implied_volatility, calculate_kelly_fraction,
+};
+pub use backtest::{
+    BacktestEngine, BacktestResults, BacktestTrade,
+    PaperTrader, PaperSignal, PaperTradingStats,
+    KlineRecord, PMPriceRecord, MarketSnapshot,
+    load_klines_from_csv, load_pm_prices_from_csv, calculate_kline_volatility,
 };
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition,
