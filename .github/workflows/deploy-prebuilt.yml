@@ -1,0 +1,254 @@
+name: Build and Deploy (Pre-built Binary)
+
+on:
+  workflow_dispatch:  # 手動觸發
+
+env:
+  AWS_REGION: ap-northeast-1
+  EC2_IP: 13.231.209.90
+  S3_BUCKET: ploy-prebuilt-${{ github.run_number }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Cache Rust dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build backend
+      run: |
+        echo "🔨 Building Rust backend..."
+        cargo build --release --features rl
+        echo "✅ Build complete"
+        ls -lh target/release/ploy
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ploy-frontend/package-lock.json
+
+    - name: Build frontend
+      run: |
+        cd ploy-frontend
+        npm ci
+        npm run build
+        echo "✅ Frontend built"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Create S3 bucket and upload files
+      run: |
+        echo "📦 Creating S3 bucket..."
+        aws s3 mb s3://${{ env.S3_BUCKET }} || echo "Bucket exists"
+
+        echo "📤 Uploading frontend..."
+        aws s3 cp ploy-frontend/dist/ s3://${{ env.S3_BUCKET }}/frontend/ --recursive
+
+        echo "📤 Uploading backend binary..."
+        aws s3 cp target/release/ploy s3://${{ env.S3_BUCKET }}/ploy-binary
+
+        echo "📤 Uploading migrations..."
+        tar czf migrations.tar.gz migrations/
+        aws s3 cp migrations.tar.gz s3://${{ env.S3_BUCKET }}/
+
+        echo "📤 Uploading config..."
+        tar czf config.tar.gz config/
+        aws s3 cp config.tar.gz s3://${{ env.S3_BUCKET }}/
+
+        echo "✅ All files uploaded"
+
+    - name: Create deployment script
+      run: |
+        cat > deploy-prebuilt.sh << 'DEPLOY_SCRIPT'
+        #!/bin/bash
+        set -e
+
+        echo "🚀 Deploying pre-built Ploy Trading System..."
+
+        S3_BUCKET="${{ env.S3_BUCKET }}"
+        REGION="${{ env.AWS_REGION }}"
+
+        # Backup existing
+        if [ -d ~/ploy ]; then
+          mv ~/ploy ~/ploy.backup.$(date +%Y%m%d_%H%M%S)
+        fi
+
+        # Create directories
+        mkdir -p ~/ploy/{bin,frontend,migrations,config,logs}
+
+        # Download files
+        echo "📥 Downloading files from S3..."
+        aws s3 cp s3://$S3_BUCKET/frontend/ ~/ploy/frontend/ --recursive --region $REGION
+        aws s3 cp s3://$S3_BUCKET/ploy-binary ~/ploy/bin/ploy --region $REGION
+        aws s3 cp s3://$S3_BUCKET/migrations.tar.gz ~/ploy/ --region $REGION
+        aws s3 cp s3://$S3_BUCKET/config.tar.gz ~/ploy/ --region $REGION
+
+        # Extract
+        cd ~/ploy
+        tar xzf migrations.tar.gz
+        tar xzf config.tar.gz
+        rm migrations.tar.gz config.tar.gz
+
+        # Set permissions
+        chmod +x ~/ploy/bin/ploy
+
+        # Install dependencies
+        echo "📦 Installing system dependencies..."
+        sudo apt-get update -qq
+        sudo apt-get install -y nginx postgresql postgresql-contrib libssl3 libpq5 -qq
+
+        # Setup PostgreSQL
+        echo "🗄️  Setting up PostgreSQL..."
+        sudo systemctl start postgresql
+        sudo systemctl enable postgresql
+
+        sudo -u postgres psql << EOF || echo "Database may already exist"
+        CREATE DATABASE ploy;
+        CREATE USER ploy WITH PASSWORD 'ploy';
+        GRANT ALL PRIVILEGES ON DATABASE ploy TO ploy;
+        ALTER DATABASE ploy OWNER TO ploy;
+        EOF
+
+        # Run migrations
+        echo "🔄 Running migrations..."
+        export DATABASE_URL="postgresql://ploy:ploy@localhost:5432/ploy"
+        for file in ~/ploy/migrations/*.sql; do
+          psql -U ploy -d ploy -f "$file" || echo "Migration may have already run"
+        done
+
+        # Configure Nginx
+        echo "⚙️  Configuring Nginx..."
+        sudo tee /etc/nginx/sites-available/ploy > /dev/null << 'EOF'
+        server {
+            listen 80;
+            server_name _;
+            location / {
+                root /home/ubuntu/ploy/frontend;
+                try_files $uri $uri/ /index.html;
+            }
+            location /api {
+                proxy_pass http://localhost:8080;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_cache_bypass $http_upgrade;
+            }
+            location /ws {
+                proxy_pass http://localhost:8080;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "Upgrade";
+                proxy_set_header Host $host;
+            }
+        }
+        EOF
+
+        sudo ln -sf /etc/nginx/sites-available/ploy /etc/nginx/sites-enabled/
+        sudo rm -f /etc/nginx/sites-enabled/default
+        sudo nginx -t
+        sudo systemctl restart nginx
+        sudo systemctl enable nginx
+
+        # Create systemd service
+        echo "⚙️  Creating systemd service..."
+        sudo tee /etc/systemd/system/ploy-backend.service > /dev/null << 'EOF'
+        [Unit]
+        Description=Ploy Trading Backend
+        After=network.target postgresql.service
+
+        [Service]
+        Type=simple
+        User=ubuntu
+        WorkingDirectory=/home/ubuntu/ploy
+        ExecStart=/home/ubuntu/ploy/bin/ploy
+        Restart=always
+        RestartSec=10
+        Environment="RUST_LOG=info,ploy=debug"
+        Environment="DATABASE_URL=postgresql://ploy:ploy@localhost:5432/ploy"
+        Environment="POLYMARKET_PRIVATE_KEY=${{ secrets.POLYMARKET_PRIVATE_KEY }}"
+        Environment="THE_ODDS_API_KEY=${{ secrets.THE_ODDS_API_KEY }}"
+        Environment="GROK_API_KEY=${{ secrets.GROK_API_KEY }}"
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+        # Start services
+        echo "🚀 Starting services..."
+        sudo systemctl daemon-reload
+        sudo systemctl enable ploy-backend
+        sudo systemctl start ploy-backend
+
+        # Check status
+        echo ""
+        echo "📊 Service Status:"
+        sudo systemctl status nginx --no-pager | head -5
+        sudo systemctl status ploy-backend --no-pager | head -5
+
+        echo ""
+        echo "✅ Deployment complete!"
+        echo "🌐 Access at: http://${{ env.EC2_IP }}"
+        DEPLOY_SCRIPT
+
+        aws s3 cp deploy-prebuilt.sh s3://${{ env.S3_BUCKET }}/
+
+    - name: Deploy to EC2
+      run: |
+        echo "🚀 Triggering deployment on EC2..."
+        echo ""
+        echo "Since SSM is not available, please run the following command on EC2:"
+        echo ""
+        echo "ssh ubuntu@${{ env.EC2_IP }} << 'ENDSSH'"
+        echo "aws s3 cp s3://${{ env.S3_BUCKET }}/deploy-prebuilt.sh /tmp/"
+        echo "chmod +x /tmp/deploy-prebuilt.sh"
+        echo "sudo /tmp/deploy-prebuilt.sh"
+        echo "ENDSSH"
+        echo ""
+        echo "Or use AWS Console Session Manager to run:"
+        echo "aws s3 cp s3://${{ env.S3_BUCKET }}/deploy-prebuilt.sh /tmp/ --region ${{ env.AWS_REGION }}"
+        echo "chmod +x /tmp/deploy-prebuilt.sh"
+        echo "sudo /tmp/deploy-prebuilt.sh"
+
+    - name: Deployment summary
+      if: always()
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **S3 Bucket**: ${{ env.S3_BUCKET }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **EC2 IP**: ${{ env.EC2_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: Build completed, ready for deployment" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. SSH to EC2 or use Session Manager" >> $GITHUB_STEP_SUMMARY
+        echo "2. Run: \`aws s3 cp s3://${{ env.S3_BUCKET }}/deploy-prebuilt.sh /tmp/ --region ${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "3. Run: \`chmod +x /tmp/deploy-prebuilt.sh && sudo /tmp/deploy-prebuilt.sh\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Access URLs" >> $GITHUB_STEP_SUMMARY
+        echo "- [Frontend](http://${{ env.EC2_IP }})" >> $GITHUB_STEP_SUMMARY
+        echo "- [NBA Swing](http://${{ env.EC2_IP }}/nba-swing)" >> $GITHUB_STEP_SUMMARY
