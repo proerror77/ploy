@@ -5,8 +5,6 @@ use axum::{
 };
 use chrono::Utc;
 use rust_decimal::Decimal;
-use std::str::FromStr;
-use chrono::Timelike;
 
 use crate::api::{
     state::AppState,
@@ -263,7 +261,7 @@ pub async fn get_positions(
     let position_responses: Vec<PositionResponse> = positions
         .into_iter()
         .map(|row| {
-            let duration = (Utc::now().timestamp() - row.created_at.timestamp());
+            let duration = Utc::now().timestamp() - row.created_at.timestamp();
             // TODO: Get current price from market data
             let current_price = row.leg1_price; // Placeholder
             let unrealized_pnl = Decimal::ZERO; // Placeholder

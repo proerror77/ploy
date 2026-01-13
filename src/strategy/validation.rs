@@ -568,7 +568,6 @@ mod tests {
 
     fn test_round(seconds_remaining: i64) -> Round {
         use chrono::{Duration, Utc};
-        use crate::domain::Side;
         Round {
             id: None,
             slug: "test-round".to_string(),

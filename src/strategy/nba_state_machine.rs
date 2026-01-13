@@ -146,7 +146,7 @@ impl StateMachine {
             
             // Any → Halt
             (_, StateEvent::EmergencyHalt(reason)) => {
-                self.halt_reasons.push(reason);
+                self.halt_reasons.push(reason.to_string());
                 StrategyState::Halt
             },
             

@@ -16,7 +16,7 @@ use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use super::nba_winprob::{WinProbPrediction, GameFeatures};
-use super::nba_filters::{FilterResult, MarketContext};
+use super::nba_filters::FilterResult;
 
 /// Entry logic configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,7 +302,6 @@ impl EntryDecision {
 mod tests {
     use super::*;
     use crate::strategy::nba_winprob::{LiveWinProbModel, GameFeatures};
-    use crate::strategy::nba_filters::{MarketFilters, FilterConfig, MarketContext};
     
     fn create_good_prediction() -> WinProbPrediction {
         let model = LiveWinProbModel::default_untrained();

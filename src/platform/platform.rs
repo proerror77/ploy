@@ -570,7 +570,6 @@ impl OrderPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::Decimal;
 
     // 需要 mock PolymarketClient 進行測試
     // 這裡只測試基本的結構和配置

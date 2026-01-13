@@ -515,8 +515,8 @@ mod tests {
         let prediction = create_prediction(-3.0, 3, 8.0);
         let market_price = Decimal::new(28, 2); // Edge reduced but still positive
         let market = create_good_market_context();
-        
-        let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
+
+        let _decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
         
         // Might trigger partial exit if edge is small but positive
         // (depends on model prediction)

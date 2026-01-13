@@ -354,7 +354,7 @@ impl Watchdog {
                 interval.tick().await;
 
                 let now = Utc::now();
-                let timeout = chrono::Duration::seconds(30); // Use default timeout
+                let _timeout = chrono::Duration::seconds(30); // Use default timeout
                 let window_start = now - chrono::Duration::seconds(window_secs as i64);
 
                 // Collect components needing restart

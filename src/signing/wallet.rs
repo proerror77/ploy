@@ -2,7 +2,7 @@ use crate::error::{PloyError, Result};
 use ethers::signers::{LocalWallet, Signer as EthersSigner};
 use ethers::types::{Address, Signature, H256};
 use tracing::{info, warn};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroize;
 
 /// Wallet for signing Polymarket orders and authentication messages
 ///

@@ -176,11 +176,11 @@ impl PaperTradingRunner {
             .map(|s| s.to_lowercase())
             .collect();
         let binance_ws = Arc::new(BinanceWebSocket::new(binance_symbols.clone()));
-        
+
         // Get update channels
         let mut pm_update_rx = pm_ws.subscribe_updates();
         let mut binance_update_rx = binance_ws.subscribe();
-        let pm_quote_cache = pm_ws.quote_cache();
+        let _pm_quote_cache = pm_ws.quote_cache();
         let binance_price_cache = binance_ws.price_cache().clone();
         
         // Clone for background tasks

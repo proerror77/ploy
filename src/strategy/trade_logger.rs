@@ -451,7 +451,6 @@ impl TradeLogger {
             trade.resolved_at = Some(Utc::now());
 
             let symbol = trade.symbol.clone();
-            let cost = trade.cost_usd;
 
             info!(
                 "📊 Trade resolved: {} {} {} | {} | PnL: ${:.2}",

@@ -76,8 +76,8 @@ impl DashboardRunner {
         })?;
 
         // Set up data sources
-        let quote_cache = Arc::new(QuoteCache::new());
-        let price_cache = Arc::new(PriceCache::default());
+        let _quote_cache = Arc::new(QuoteCache::new());
+        let _price_cache = Arc::new(PriceCache::default());
 
         // Create event channel for data updates
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -208,7 +208,7 @@ impl DashboardRunner {
     /// Run Binance price feed
     async fn run_binance_feed(
         symbols: Vec<String>,
-        event_tx: mpsc::UnboundedSender<AppEvent>,
+        _event_tx: mpsc::UnboundedSender<AppEvent>,
         running: Arc<AtomicBool>,
     ) {
         info!("Connecting to Binance WebSocket...");
@@ -263,7 +263,7 @@ impl DashboardRunner {
         }
 
         let mut rx = pm_ws.subscribe_updates();
-        let quote_cache = pm_ws.quote_cache().clone();
+        let _quote_cache = pm_ws.quote_cache().clone();
 
         // Spawn WebSocket runner
         let pm_ws_clone = Arc::clone(&pm_ws);

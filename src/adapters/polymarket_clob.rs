@@ -421,9 +421,12 @@ impl PolymarketClient {
         let gamma_client = GammaClient::new(GAMMA_API_URL)
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
-        // Convert wallet private key to alloy signer with Polygon chain ID
-        let private_key_hex = wallet.private_key_hex();
-        let signer: PrivateKeySigner = private_key_hex
+        // Read private key from environment variable for SDK signer
+        let private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
+            .or_else(|_| std::env::var("PRIVATE_KEY"))
+            .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
+
+        let signer: PrivateKeySigner = private_key_hex.trim_start_matches("0x")
             .parse::<PrivateKeySigner>()
             .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
             .with_chain_id(Some(POLYGON_CHAIN_ID));
@@ -458,9 +461,12 @@ impl PolymarketClient {
         let gamma_client = GammaClient::new(GAMMA_API_URL)
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
-        // Convert wallet private key to alloy signer with Polygon chain ID
-        let private_key_hex = wallet.private_key_hex();
-        let signer: PrivateKeySigner = private_key_hex
+        // Read private key from environment variable for SDK signer
+        let private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
+            .or_else(|_| std::env::var("PRIVATE_KEY"))
+            .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
+
+        let signer: PrivateKeySigner = private_key_hex.trim_start_matches("0x")
             .parse::<PrivateKeySigner>()
             .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
             .with_chain_id(Some(POLYGON_CHAIN_ID));

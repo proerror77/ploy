@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
 
 /// Complete market snapshot with synchronized data

@@ -142,7 +142,7 @@ impl StrategyEngine {
 
     /// Handle a quote update
     async fn on_quote_update(&self, update: QuoteUpdate) -> Result<()> {
-        let mut state = self.state.write().await;
+        let state = self.state.write().await;
         let round = state.current_round.as_ref();
 
         // Process based on current strategy state
