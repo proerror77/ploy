@@ -58,6 +58,22 @@ pub enum PloyError {
     #[error("Unexpected state: {0}")]
     UnexpectedState(String),
 
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
+
+    // Data availability errors (for 24/7 reliability)
+    #[error("Quote unavailable for token: {token_id}")]
+    QuoteUnavailable { token_id: String },
+
+    #[error("Address parsing error: {0}")]
+    AddressParsing(String),
+
+    #[error("Component failure: {component} - {reason}")]
+    ComponentFailure { component: String, reason: String },
+
+    #[error("Stale data: {0}")]
+    StaleData(String),
+
     // Risk management errors
     #[error("Risk limit exceeded: {0}")]
     RiskLimitExceeded(String),

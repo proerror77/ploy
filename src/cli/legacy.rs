@@ -30,7 +30,7 @@ pub struct Cli {
     pub dry_run: bool,
 
     /// Market slug to trade
-    #[arg(short, long, default_value = "will-btc-go-up-15m")]
+    #[arg(short, long, default_value = "btc-price-series-15m")]
     pub market: String,
 
     /// Config file path
@@ -308,6 +308,29 @@ pub enum Commands {
     #[cfg(feature = "rl")]
     #[command(subcommand)]
     Rl(RlCommands),
+
+    /// Run volatility arbitrage in paper trading mode (signals only, no execution)
+    Paper {
+        /// Symbols to monitor (comma-separated)
+        #[arg(short, long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT")]
+        symbols: String,
+
+        /// Minimum volatility edge percentage
+        #[arg(long, default_value = "5.0")]
+        min_vol_edge: f64,
+
+        /// Minimum price edge in cents
+        #[arg(long, default_value = "2.0")]
+        min_price_edge: f64,
+
+        /// Log file path for signals
+        #[arg(long, default_value = "./data/paper_signals.json")]
+        log_file: String,
+
+        /// Stats print interval (seconds)
+        #[arg(long, default_value = "300")]
+        stats_interval: u64,
+    },
 }
 
 /// Crypto market subcommands
@@ -663,7 +686,7 @@ pub enum RlCommands {
         /// Maximum total position in USD
         #[arg(long, default_value = "50.0")]
         max_position: f64,
-        /// Polymarket market slug (e.g., "will-btc-go-up-15m")
+        /// Polymarket market slug (e.g., "btc-price-series-15m")
         #[arg(short, long)]
         market: String,
         /// Checkpoint directory to load model from
@@ -681,7 +704,7 @@ pub enum RlCommands {
         /// Binance symbol to trade
         #[arg(short, long, default_value = "BTCUSDT")]
         symbol: String,
-        /// Polymarket market slug (e.g., "will-btc-go-up-15m")
+        /// Polymarket market slug (e.g., "btc-price-series-15m")
         #[arg(short, long)]
         market: String,
         /// UP token ID
@@ -805,7 +828,7 @@ impl TerminalUI {
     }
 
     async fn print_quotes(&self, stdout: &mut std::io::Stdout) -> Result<()> {
-        let (up_quote, down_quote) = self.quote_cache.get_quotes().await;
+        let (up_quote, down_quote) = self.quote_cache.get_quotes();
 
         execute!(stdout, Print("\n"))?;
 

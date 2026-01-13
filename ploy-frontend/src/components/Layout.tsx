@@ -1,0 +1,93 @@
+import { Link, Outlet, useLocation } from 'react-router-dom';
+import { cn } from '@/lib/utils';
+import { useStore } from '@/store';
+import {
+  LayoutDashboard,
+  History,
+  Activity,
+  Target,
+  Power,
+  Shield,
+  TrendingUp,
+} from 'lucide-react';
+
+const navigation = [
+  { name: '仪表盘', href: '/', icon: LayoutDashboard },
+  { name: '交易历史', href: '/trades', icon: History },
+  { name: '实时日志', href: '/monitor', icon: Activity },
+  { name: '策略监控', href: '/monitor-strategy', icon: Target },
+  { name: 'NBA Swing', href: '/nba-swing', icon: TrendingUp },
+  { name: '系统控制', href: '/control', icon: Power },
+  { name: '安全审计', href: '/security', icon: Shield },
+];
+
+export function Layout() {
+  const location = useLocation();
+  const { wsConnected, systemStatus } = useStore();
+
+  return (
+    <div className="flex h-screen bg-background">
+      {/* Sidebar */}
+      <div className="w-64 border-r bg-card">
+        <div className="flex h-16 items-center border-b px-6">
+          <h1 className="text-xl font-bold">Ploy Trading</h1>
+        </div>
+        <nav className="space-y-1 p-4">
+          {navigation.map((item) => {
+            const Icon = item.icon;
+            const isActive = location.pathname === item.href;
+            return (
+              <Link
+                key={item.name}
+                to={item.href}
+                className={cn(
+                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                )}
+              >
+                <Icon className="h-5 w-5" />
+                {item.name}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Status indicators */}
+        <div className="absolute bottom-0 w-64 border-t bg-card p-4">
+          <div className="space-y-2 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">WebSocket</span>
+              <div
+                className={cn('h-2 w-2 rounded-full', {
+                  'bg-success': wsConnected,
+                  'bg-destructive': !wsConnected,
+                })}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">系统状态</span>
+              <span
+                className={cn('text-xs font-medium', {
+                  'text-success': systemStatus === 'running',
+                  'text-muted-foreground': systemStatus === 'stopped',
+                  'text-destructive': systemStatus === 'error',
+                })}
+              >
+                {systemStatus === 'running' && '运行中'}
+                {systemStatus === 'stopped' && '已停止'}
+                {systemStatus === 'error' && '错误'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div className="flex-1 overflow-auto">
+        <Outlet />
+      </div>
+    </div>
+  );
+}

@@ -69,10 +69,27 @@ pub struct ExecutionConfig {
     /// Polling interval for order status in milliseconds
     #[serde(default = "default_poll_interval")]
     pub poll_interval_ms: u64,
+    /// Best-effort post-submit fill confirmation via polling
+    #[serde(default)]
+    pub confirm_fills: bool,
+    /// Maximum time to wait for a terminal order status (ms) when confirm_fills is enabled
+    #[serde(default = "default_confirm_fill_timeout_ms")]
+    pub confirm_fill_timeout_ms: u64,
+    /// Maximum quote age in seconds before rejecting trade (default: 5s)
+    #[serde(default = "default_max_quote_age")]
+    pub max_quote_age_secs: u64,
 }
 
 fn default_poll_interval() -> u64 {
     500
+}
+
+fn default_confirm_fill_timeout_ms() -> u64 {
+    2000
+}
+
+fn default_max_quote_age() -> u64 {
+    5 // 5 seconds max for trading decisions
 }
 
 impl Default for ExecutionConfig {
@@ -82,6 +99,9 @@ impl Default for ExecutionConfig {
             max_retries: 3,
             max_spread_bps: 500,
             poll_interval_ms: 500,
+            confirm_fills: false,
+            confirm_fill_timeout_ms: default_confirm_fill_timeout_ms(),
+            max_quote_age_secs: default_max_quote_age(),
         }
     }
 }
@@ -170,6 +190,8 @@ impl AppConfig {
             .set_default("logging.level", "info")?
             .set_default("logging.json", false)?
             .set_default("execution.poll_interval_ms", 500)?
+            .set_default("execution.confirm_fills", false)?
+            .set_default("execution.confirm_fill_timeout_ms", default_confirm_fill_timeout_ms())?
             .set_default("database.max_connections", 5)?
             // Load default config file
             .add_source(File::from(config_dir.join("default.toml")).required(false))
@@ -215,6 +237,9 @@ impl AppConfig {
                 max_retries: 3,
                 max_spread_bps: 500,
                 poll_interval_ms: 500,
+                confirm_fills: false,
+                confirm_fill_timeout_ms: default_confirm_fill_timeout_ms(),
+                max_quote_age_secs: default_max_quote_age(),
             },
             risk: RiskConfig {
                 max_single_exposure_usd: dec!(100),

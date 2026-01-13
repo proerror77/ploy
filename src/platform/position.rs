@@ -328,7 +328,7 @@ impl PositionAggregator {
     /// 獲取 Agent 統計
     pub async fn agent_stats(&self, agent_id: &str) -> AgentPositionStats {
         let positions = self.positions.read().await;
-        let realized = self.realized_pnl.read().await;
+        let _realized = self.realized_pnl.read().await;
 
         let mut stats = AgentPositionStats::default();
 

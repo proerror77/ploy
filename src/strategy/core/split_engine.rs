@@ -349,8 +349,8 @@ impl SplitArbEngine {
     /// Print current stats
     pub async fn print_stats(&self) {
         let stats = self.stats.read().await;
-        let partial = self.partial_positions.read().await;
-        let hedged = self.hedged_positions.read().await;
+        let _partial = self.partial_positions.read().await;
+        let _hedged = self.hedged_positions.read().await;
         
         info!(
             "📊 Stats: {} signals, {} entries, {} hedged, {} exits, P&L: ${:.2}",

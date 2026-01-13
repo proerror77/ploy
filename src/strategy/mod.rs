@@ -55,6 +55,7 @@ pub mod claimer;
 pub mod engine;
 pub mod executor;
 pub mod fund_manager;
+pub mod idempotency;
 pub mod momentum;
 pub mod multi_event;
 pub mod multi_outcome;
@@ -67,10 +68,23 @@ pub mod volatility;
 pub mod dump_hedge;
 pub mod volatility_arb;
 pub mod backtest;
+pub mod paper_runner;
+pub mod position_manager;
+pub mod reconciliation;
+pub mod trading_costs;
+pub mod slippage;
+pub mod execution_sim;
+pub mod nba_winprob;
+pub mod nba_filters;
+pub mod nba_entry;
+pub mod nba_exit;
+pub mod nba_state_machine;
+pub mod nba_data_collector;
 
 // Legacy re-exports
 pub use engine::StrategyEngine;
 pub use executor::OrderExecutor;
+pub use idempotency::{IdempotencyManager, IdempotencyResult};
 pub use claimer::{AutoClaimer, ClaimerConfig, ClaimResult, RedeemablePosition};
 pub use fund_manager::{FundManager, FundStatus, PositionSizeResult};
 pub use trade_logger::{
@@ -118,6 +132,47 @@ pub use backtest::{
     PaperTrader, PaperSignal, PaperTradingStats,
     KlineRecord, PMPriceRecord, MarketSnapshot,
     load_klines_from_csv, load_pm_prices_from_csv, calculate_kline_volatility,
+};
+pub use paper_runner::{
+    PaperTradingConfig, PaperTradingRunner, TrackedMarket,
+    run_paper_trading,
+};
+pub use position_manager::{
+    PositionManager, Position as PersistedPosition, PositionStatus as PersistedPositionStatus, PositionSummary,
+};
+pub use reconciliation::{
+    ReconciliationService, ReconciliationConfig, ReconciliationResult,
+    PositionDiscrepancy, DiscrepancySeverity,
+};
+pub use trading_costs::{
+    TradingCostCalculator, TradingCostConfig, TradingCostBreakdown, OrderType,
+};
+pub use slippage::{
+    SlippageProtection, SlippageConfig, SlippageCheck, MarketDepth,
+};
+pub use execution_sim::{
+    ExecutionSimulator, ExecutionSimConfig, ExecutionResult,
+};
+pub use nba_winprob::{
+    LiveWinProbModel, WinProbCoefficients, ModelMetadata,
+    GameFeatures, WinProbPrediction,
+};
+pub use nba_filters::{
+    MarketFilters, FilterConfig, MarketContext, FilterResult,
+};
+pub use nba_entry::{
+    EntryLogic, EntryConfig, EntrySignal, EntryDecision, PartialSignal,
+};
+pub use nba_exit::{
+    ExitLogic, ExitDecision, ExitUrgency, PositionState,
+    ExitConfig as NbaExitConfig,
+};
+pub use nba_state_machine::{
+    StateMachine as NbaStateMachine, StrategyState as NbaStrategyState, StateEvent as NbaStateEvent,
+};
+pub use nba_data_collector::{
+    DataCollector as NbaDataCollector, CollectorConfig as NbaCollectorConfig,
+    MarketSnapshot as NbaMarketSnapshot, OrderbookData, GameState as NbaGameState, TeamStats,
 };
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition,

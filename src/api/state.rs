@@ -1,0 +1,92 @@
+use std::sync::Arc;
+use tokio::sync::{RwLock, broadcast};
+use chrono::{DateTime, Utc};
+use crate::adapters::PostgresStore;
+use crate::api::types::WsMessage;
+
+/// Shared application state for API handlers
+#[derive(Clone)]
+pub struct AppState {
+    /// Database connection pool
+    pub store: Arc<PostgresStore>,
+
+    /// WebSocket broadcast channel
+    pub ws_tx: broadcast::Sender<WsMessage>,
+
+    /// System status
+    pub system_status: Arc<RwLock<SystemStatusState>>,
+
+    /// Strategy configuration
+    pub config: Arc<RwLock<StrategyConfigState>>,
+
+    /// Application start time
+    pub start_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemStatusState {
+    pub status: SystemRunStatus,
+    pub last_trade_time: Option<DateTime<Utc>>,
+    pub websocket_connected: bool,
+    pub database_connected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemRunStatus {
+    Running,
+    Stopped,
+    Error,
+}
+
+impl SystemRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyConfigState {
+    pub symbols: Vec<String>,
+    pub min_move: f64,
+    pub max_entry: f64,
+    pub shares: i32,
+    pub predictive: bool,
+    pub take_profit: Option<f64>,
+    pub stop_loss: Option<f64>,
+}
+
+impl AppState {
+    pub fn new(
+        store: Arc<PostgresStore>,
+        config: StrategyConfigState,
+    ) -> Self {
+        let (ws_tx, _) = broadcast::channel(1000);
+
+        Self {
+            store,
+            ws_tx,
+            system_status: Arc::new(RwLock::new(SystemStatusState {
+                status: SystemRunStatus::Stopped,
+                last_trade_time: None,
+                websocket_connected: false,
+                database_connected: true,
+            })),
+            config: Arc::new(RwLock::new(config)),
+            start_time: Utc::now(),
+        }
+    }
+
+    /// Broadcast a WebSocket message to all connected clients
+    pub fn broadcast(&self, msg: WsMessage) {
+        let _ = self.ws_tx.send(msg);
+    }
+
+    /// Get system uptime in seconds
+    pub fn uptime_seconds(&self) -> i64 {
+        (Utc::now() - self.start_time).num_seconds()
+    }
+}

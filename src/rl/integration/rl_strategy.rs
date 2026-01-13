@@ -271,6 +271,7 @@ impl RLStrategy {
                     if let Some(bid) = bid {
                         let order = OrderRequest {
                             client_order_id: Uuid::new_v4().to_string(),
+                            idempotency_key: None,
                             token_id: pos.token_id.clone(),
                             market_side: pos.side,
                             order_side: OrderSide::Sell,
@@ -320,6 +321,7 @@ impl RLStrategy {
     ) -> OrderRequest {
         OrderRequest {
             client_order_id: Uuid::new_v4().to_string(),
+            idempotency_key: None,
             token_id: token_id.to_string(),
             market_side,
             order_side: OrderSide::Buy,
@@ -537,6 +539,7 @@ impl Strategy for RLStrategy {
                     client_order_id: format!("rl_shutdown_{}", self.step_count),
                     order: OrderRequest {
                         client_order_id: Uuid::new_v4().to_string(),
+                        idempotency_key: None,
                         token_id: pos.token_id.clone(),
                         market_side: pos.side,
                         order_side: OrderSide::Sell,

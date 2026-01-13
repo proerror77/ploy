@@ -153,11 +153,13 @@ async fn list_strategies() -> Result<()> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map(|e| e == "toml").unwrap_or(false) {
-                    let name = path.file_stem().unwrap().to_string_lossy();
-                    // Skip default configs
-                    if !name.ends_with("_default") {
-                        println!("  {:<15} (config: {})", name, path.display());
-                        found = true;
+                    if let Some(stem) = path.file_stem() {
+                        let name = stem.to_string_lossy();
+                        // Skip default configs
+                        if !name.ends_with("_default") {
+                            println!("  {:<15} (config: {})", name, path.display());
+                            found = true;
+                        }
                     }
                 }
             }

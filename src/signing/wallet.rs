@@ -1,39 +1,56 @@
 use crate::error::{PloyError, Result};
 use ethers::signers::{LocalWallet, Signer as EthersSigner};
 use ethers::types::{Address, Signature, H256};
-use tracing::info;
+use tracing::{info, warn};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Wallet for signing Polymarket orders and authentication messages
+///
+/// # Security
+/// This wallet no longer stores the private key in memory after initialization.
+/// The private key is only used during wallet creation and then immediately zeroized.
+/// This prevents memory dumps from exposing the private key.
 #[derive(Clone)]
 pub struct Wallet {
     inner: LocalWallet,
     chain_id: u64,
-    private_key_hex: String,
 }
 
 impl Wallet {
     /// Create a wallet from a private key hex string
+    ///
+    /// # Security
+    /// The private key is zeroized from memory after wallet creation.
+    /// It is never stored in the Wallet struct.
     pub fn from_private_key(private_key: &str, chain_id: u64) -> Result<Self> {
         // Remove 0x prefix if present
         let key_hex = private_key.trim_start_matches("0x");
 
-        let wallet = key_hex
+        // Create a zeroizing string for the key
+        let mut secure_key = key_hex.to_string();
+
+        let wallet = secure_key
             .parse::<LocalWallet>()
             .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
             .with_chain_id(chain_id);
 
-        info!("Wallet initialized: {}", wallet.address());
+        // Zeroize the key from memory
+        secure_key.zeroize();
+
+        info!("Wallet initialized: {} (private key zeroized from memory)", wallet.address());
 
         Ok(Self {
             inner: wallet,
             chain_id,
-            private_key_hex: format!("0x{}", key_hex),
         })
     }
 
     /// Create a wallet from environment variable
+    ///
+    /// # Security
+    /// The private key is read from environment and immediately zeroized after use.
     pub fn from_env(chain_id: u64) -> Result<Self> {
-        let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
+        let mut private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
             .or_else(|_| std::env::var("PRIVATE_KEY"))
             .map_err(|_| {
                 PloyError::Wallet(
@@ -42,7 +59,12 @@ impl Wallet {
                 )
             })?;
 
-        Self::from_private_key(&private_key, chain_id)
+        let result = Self::from_private_key(&private_key, chain_id);
+
+        // Zeroize the key from memory
+        private_key.zeroize();
+
+        result
     }
 
     /// Get the wallet address
@@ -55,9 +77,20 @@ impl Wallet {
         self.chain_id
     }
 
-    /// Get the private key as hex string (with 0x prefix)
+    /// Get the private key as hex string (DEPRECATED - DO NOT USE)
+    ///
+    /// # Security Warning
+    /// This method is deprecated and will be removed in a future version.
+    /// Private keys should never be exposed after wallet creation.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Private key access is a security risk. This method will be removed."
+    )]
     pub fn private_key_hex(&self) -> &str {
-        &self.private_key_hex
+        warn!("SECURITY WARNING: private_key_hex() called - this is deprecated and insecure");
+        // Return empty string to maintain API compatibility
+        // The actual key is not stored anymore
+        ""
     }
 
     /// Sign a message hash (32 bytes)

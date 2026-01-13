@@ -56,7 +56,7 @@ impl HmacAuth {
     fn timestamp() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("System clock is before UNIX epoch")
             .as_secs() as i64
     }
 

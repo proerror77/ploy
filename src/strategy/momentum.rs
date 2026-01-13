@@ -2037,8 +2037,8 @@ impl MomentumEngine {
         pm_cache: &QuoteCache,
         event: &EventInfo,
     ) -> (Option<Decimal>, Option<Decimal>) {
-        let up_quote = pm_cache.get(&event.up_token_id).await;
-        let down_quote = pm_cache.get(&event.down_token_id).await;
+        let up_quote = pm_cache.get(&event.up_token_id);
+        let down_quote = pm_cache.get(&event.down_token_id);
 
         let up_ask = up_quote.and_then(|q| q.best_ask);
         let down_ask = down_quote.and_then(|q| q.best_ask);

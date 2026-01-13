@@ -549,8 +549,7 @@ impl TradeLogger {
                 _ => {}
             }
 
-            if symbol_stats.last_trade.is_none() ||
-               trade.timestamp > symbol_stats.last_trade.unwrap() {
+            if symbol_stats.last_trade.map_or(true, |last| trade.timestamp > last) {
                 symbol_stats.last_trade = Some(trade.timestamp);
             }
 

@@ -185,6 +185,22 @@ async fn main() -> Result<()> {
         Some(Commands::History { limit, symbol, stats_only, open_only }) => {
             run_history(*limit, symbol.clone(), *stats_only, *open_only).await?;
         }
+        Some(Commands::Paper {
+            symbols,
+            min_vol_edge,
+            min_price_edge,
+            log_file,
+            stats_interval,
+        }) => {
+            init_logging();
+            run_paper_trading(
+                symbols.clone(),
+                *min_vol_edge,
+                *min_price_edge,
+                log_file.clone(),
+                *stats_interval,
+            ).await?;
+        }
         Some(Commands::Run) | None => {
             init_logging();
             run_bot(&cli).await?;
@@ -285,6 +301,59 @@ async fn run_claimer(check_only: bool, min_size: f64, interval: u64) -> Result<(
     Ok(())
 }
 
+/// Run paper trading with real market data but no execution
+async fn run_paper_trading(
+    symbols: String,
+    min_vol_edge: f64,
+    min_price_edge: f64,
+    log_file: String,
+    stats_interval: u64,
+) -> Result<()> {
+    use ploy::adapters::PolymarketClient;
+    use ploy::strategy::{PaperTradingConfig, run_paper_trading, VolatilityArbConfig};
+    use rust_decimal::Decimal;
+    use rust_decimal::prelude::*;
+    use rust_decimal_macros::dec;
+
+    // Parse symbols
+    let symbols: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .collect();
+
+    // Build series IDs from symbols
+    let series_ids: Vec<String> = symbols.iter()
+        .filter_map(|s| {
+            match s.trim_end_matches("USDT") {
+                "BTC" => Some("btc-price-series-15m".into()),
+                "ETH" => Some("eth-price-series-15m".into()),
+                "SOL" => Some("sol-price-series-15m".into()),
+                _ => None,
+            }
+        })
+        .collect();
+
+    let mut vol_arb_config = VolatilityArbConfig::default();
+    vol_arb_config.min_vol_edge_pct = min_vol_edge / 100.0;
+    vol_arb_config.min_price_edge = Decimal::from_f64_retain(min_price_edge / 100.0)
+        .unwrap_or(dec!(0.02));
+    vol_arb_config.symbols = symbols.clone();
+
+    let config = PaperTradingConfig {
+        vol_arb_config,
+        symbols,
+        series_ids,
+        kline_update_interval_secs: 60,
+        stats_interval_secs: stats_interval,
+        log_file: Some(log_file),
+    };
+
+    let pm_client = PolymarketClient::new("https://clob.polymarket.com", true)?;
+    run_paper_trading(pm_client, Some(config)).await?;
+
+    Ok(())
+}
+
 /// View trading history and statistics
 async fn run_history(limit: usize, symbol: Option<String>, stats_only: bool, open_only: bool) -> Result<()> {
     use ploy::strategy::TradeLogger;
@@ -325,8 +394,8 @@ async fn run_history(limit: usize, symbol: Option<String>, stats_only: bool, ope
     if trades.is_empty() {
         if open_only {
             println!("\n  No open trades.\n");
-        } else if symbol.is_some() {
-            println!("\n  No trades for symbol: {}\n", symbol.unwrap());
+        } else if let Some(sym) = &symbol {
+            println!("\n  No trades for symbol: {}\n", sym);
         }
         return Ok(());
     }
@@ -462,7 +531,7 @@ async fn run_trade_mode(
                             println!("\n\x1b[33m═══ Market Rotation ═══\x1b[0m");
                             println!("\x1b[32mNew market:\x1b[0m {}", title);
 
-                            ws.quote_cache().clear().await;
+                            ws.quote_cache().clear();
                             let mut side_map = token_to_side.write().await;
                             side_map.clear();
 
@@ -1224,7 +1293,7 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
                             println!("\x1b[32mNew market:\x1b[0m {}", title);
 
                             // Clear old tokens from cache
-                            ws.quote_cache().clear().await;
+                            ws.quote_cache().clear();
 
                             // Register new tokens
                             for token in &market.tokens {
@@ -2330,16 +2399,16 @@ async fn run_split_arb_mode(
     // Build config
     let config = SplitArbConfig {
         max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
-            .unwrap_or(Decimal::from_str("0.35").unwrap()),
+            .unwrap_or_else(|_| Decimal::new(35, 2)), // 0.35 fallback
         target_total_cost: Decimal::from_str(&format!("{:.6}", target_cost / 100.0))
-            .unwrap_or(Decimal::from_str("0.70").unwrap()),
+            .unwrap_or_else(|_| Decimal::new(70, 2)), // 0.70 fallback
         min_profit_margin: Decimal::from_str(&format!("{:.6}", min_profit / 100.0))
-            .unwrap_or(Decimal::from_str("0.05").unwrap()),
+            .unwrap_or_else(|_| Decimal::new(5, 2)), // 0.05 fallback
         max_hedge_wait_secs: max_wait,
         shares_per_trade: shares,
         max_unhedged_positions: max_unhedged,
         unhedged_stop_loss: Decimal::from_str(&format!("{:.6}", stop_loss / 100.0))
-            .unwrap_or(Decimal::from_str("0.15").unwrap()),
+            .unwrap_or_else(|_| Decimal::new(15, 2)), // 0.15 fallback
         series_ids,
     };
 
@@ -3126,14 +3195,15 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
             };
 
             // Build URL or use provided
-            let event_url = match url {
-                Some(u) => u.clone(),
-                None => {
-                    // Build a fake URL from team names
-                    let t1 = team1.clone().unwrap().to_lowercase().replace(' ', "-");
-                    let t2 = team2.clone().unwrap().to_lowercase().replace(' ', "-");
-                    format!("https://polymarket.com/event/nba-{}-vs-{}", t1, t2)
+            let event_url = match (&url, &team1, &team2) {
+                (Some(u), _, _) => u.clone(),
+                (None, Some(t1), Some(t2)) => {
+                    // Build URL from team names
+                    let t1_slug = t1.to_lowercase().replace(' ', "-");
+                    let t2_slug = t2.to_lowercase().replace(' ', "-");
+                    format!("https://polymarket.com/event/nba-{}-vs-{}", t1_slug, t2_slug)
                 }
+                _ => unreachable!("Validated by earlier check"),
             };
 
             println!("\nAnalyzing: \x1b[36m{}\x1b[0m\n", event_url);
@@ -3758,7 +3828,7 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                     } else {
                         action_values.iter()
                             .enumerate()
-                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                             .map(|(i, _)| i)
                             .unwrap_or(0)
                     };
@@ -3937,7 +4007,7 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
                                 let best_action = probs.iter()
                                     .enumerate()
-                                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                                     .map(|(i, p)| (LeadLagAction::from(i), *p))
                                     .unwrap_or((LeadLagAction::Hold, 0.0));
 
@@ -4002,13 +4072,14 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                                 }
 
                                 // Print status every 100 records
-                                static mut COUNTER: u64 = 0;
-                                unsafe {
-                                    COUNTER += 1;
-                                    if COUNTER % 100 == 0 {
-                                        println!("📊 Status: Yes=${:.2}, No=${:.2}, Total=${:.2}, Trades={}",
-                                            yes_position, no_position, yes_position + no_position, trade_count);
-                                    }
+                                // CRITICAL FIX: Use AtomicU64 instead of unsafe static mut
+                                use std::sync::atomic::{AtomicU64, Ordering};
+                                static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+                                let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+                                if count % 100 == 0 {
+                                    println!("📊 Status: Yes=${:.2}, No=${:.2}, Total=${:.2}, Trades={}",
+                                        yes_position, no_position, yes_position + no_position, trade_count);
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

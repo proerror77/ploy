@@ -1,0 +1,40 @@
+{
+  "total_markets": 2688,
+  "total_signals": 258,
+  "total_trades": 258,
+  "winning_trades": 219,
+  "win_rate": 0.8488372093023255,
+  "total_pnl": 1063.9697008570465,
+  "avg_pnl": 4.123913569213358,
+  "profit_factor": 2.5784937785814503,
+  "max_drawdown": 0.10648580854728172,
+  "sharpe_ratio": 0.3519353716785973,
+  "avg_vol_edge": 0.7145254742710896,
+  "avg_price_edge": 0.07378251585274297,
+  "by_symbol": {
+    "ETHUSDT": {
+      "trades": 79,
+      "wins": 75,
+      "win_rate": 0.9493670886075949,
+      "pnl": 456.44057597169865
+    },
+    "BTCUSDT": {
+      "trades": 99,
+      "wins": 80,
+      "win_rate": 0.8080808080808081,
+      "pnl": 445.0234528942342
+    },
+    "SOLUSDT": {
+      "trades": 28,
+      "wins": 26,
+      "win_rate": 0.9285714285714286,
+      "pnl": 211.20060517915016
+    },
+    "XRPUSDT": {
+      "trades": 52,
+      "wins": 38,
+      "win_rate": 0.7307692307692307,
+      "pnl": -48.69493318803657
+    }
+  }
+}

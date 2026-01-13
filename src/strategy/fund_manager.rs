@@ -15,7 +15,7 @@ use rust_decimal_macros::dec;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Fund manager for position sizing and balance management
 pub struct FundManager {
@@ -206,16 +206,21 @@ impl FundManager {
             fixed
         } else if let Some(pct) = self.config.position_size_pct {
             // Percentage of available balance
-            let available = balance - self.config.min_balance_usd;
+            let available = (balance - self.config.min_balance_usd).max(Decimal::ZERO);
             available * pct
         } else {
-            // Default: use dynamic per-symbol allocation
-            // This is the key change: use remaining allocation for this symbol
-            max_allocation.min(self.config.max_single_exposure_usd)
+            // Conservative default: use a small slice of available balance rather than
+            // consuming the entire per-symbol allocation in one trade.
+            let available = (balance - self.config.min_balance_usd).max(Decimal::ZERO);
+            (available * dec!(0.05))
+                .min(max_allocation)
+                .min(self.config.max_single_exposure_usd)
         };
 
-        // Apply per-symbol limit
-        let amount_usd = base_amount.min(max_allocation);
+        // Apply per-symbol and per-position risk limits
+        let amount_usd = base_amount
+            .min(max_allocation)
+            .min(self.config.max_single_exposure_usd);
 
         // Calculate shares: amount / price
         // Round down to avoid over-spending

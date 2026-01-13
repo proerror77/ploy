@@ -640,6 +640,7 @@ impl VolatilityDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn test_active_event() {

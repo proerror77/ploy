@@ -234,6 +234,11 @@ mod tests {
             max_consecutive_failures: 3,
             daily_loss_limit_usd: dec!(500),
             leg2_force_close_seconds: 20,
+            max_positions: 0,
+            max_positions_per_symbol: 1,
+            position_size_pct: None,
+            fixed_amount_usd: None,
+            min_balance_usd: dec!(0),
         }
     }
 

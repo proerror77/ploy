@@ -87,6 +87,8 @@ impl OrderStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderRequest {
     pub client_order_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub token_id: String,
     pub market_side: Side,
     pub order_side: OrderSide,
@@ -100,6 +102,7 @@ impl OrderRequest {
     pub fn buy_limit(token_id: String, market_side: Side, shares: u64, price: Decimal) -> Self {
         Self {
             client_order_id: Uuid::new_v4().to_string(),
+            idempotency_key: None,
             token_id,
             market_side,
             order_side: OrderSide::Buy,
@@ -113,6 +116,7 @@ impl OrderRequest {
     pub fn sell_limit(token_id: String, market_side: Side, shares: u64, price: Decimal) -> Self {
         Self {
             client_order_id: Uuid::new_v4().to_string(),
+            idempotency_key: None,
             token_id,
             market_side,
             order_side: OrderSide::Sell,

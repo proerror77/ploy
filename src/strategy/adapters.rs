@@ -501,20 +501,18 @@ impl Strategy for MomentumStrategyAdapter {
                             // Log why we can't get entry price
                             let events = self.events.read().await;
                             let quotes = self.pm_quotes.read().await;
-                            if !events.contains_key(symbol) {
-                                debug!("[{}] No event mapped for symbol {}", self.id, symbol);
-                            } else {
-                                let event = events.get(symbol).unwrap();
+                            if let Some(event) = events.get(symbol) {
                                 let token_id = match direction {
                                     Direction::Up => &event.up_token_id,
                                     Direction::Down => &event.down_token_id,
                                 };
-                                if !quotes.contains_key(token_id) {
-                                    debug!("[{}] No quote for token {} ({})", self.id, &token_id[..8], direction);
-                                } else {
-                                    let q = quotes.get(token_id).unwrap();
+                                if let Some(q) = quotes.get(token_id) {
                                     debug!("[{}] Quote has no best_ask for {} (bid={:?})", self.id, direction, q.best_bid);
+                                } else {
+                                    debug!("[{}] No quote for token {} ({})", self.id, &token_id[..8], direction);
                                 }
+                            } else {
+                                debug!("[{}] No event mapped for symbol {}", self.id, symbol);
                             }
                         }
                     }

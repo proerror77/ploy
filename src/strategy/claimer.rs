@@ -283,15 +283,19 @@ impl AutoClaimer {
         let wallet = EthereumWallet::from(signer);
 
         // Connect to Polygon
+        let rpc_url = POLYGON_RPC.parse()
+            .map_err(|e| crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e)))?;
         let provider = ProviderBuilder::new()
             .wallet(wallet)
-            .connect_http(POLYGON_RPC.parse().unwrap());
+            .connect_http(rpc_url);
 
         // Select appropriate exchange contract
         let exchange_addr: Address = if pos.neg_risk {
-            NEG_RISK_CTF_EXCHANGE_POLYGON.parse().unwrap()
+            NEG_RISK_CTF_EXCHANGE_POLYGON.parse()
+                .map_err(|e| crate::error::PloyError::AddressParsing(format!("Invalid NegRisk CTF address: {}", e)))?
         } else {
-            CTF_EXCHANGE_POLYGON.parse().unwrap()
+            CTF_EXCHANGE_POLYGON.parse()
+                .map_err(|e| crate::error::PloyError::AddressParsing(format!("Invalid CTF address: {}", e)))?
         };
 
         let contract = ICTFExchange::new(exchange_addr, provider);

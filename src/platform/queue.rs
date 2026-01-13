@@ -261,7 +261,7 @@ mod tests {
     use super::*;
     use rust_decimal::Decimal;
     use crate::domain::Side;
-    use super::super::types::Domain;
+    use super::super::types::{Domain, OrderPriority};
 
     fn make_intent(agent: &str, priority: OrderPriority) -> OrderIntent {
         OrderIntent::new(

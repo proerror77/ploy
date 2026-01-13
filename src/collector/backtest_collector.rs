@@ -14,7 +14,6 @@
 
 use chrono::{DateTime, Utc, Duration, Timelike};
 use rust_decimal::prelude::*;
-use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions, create_dir_all};
@@ -396,7 +395,7 @@ impl BacktestCollector {
 
                 {
                     let tracked = tracked_markets.read().await;
-                    for (market_id, market) in tracked.iter() {
+                    for (_market_id, market) in tracked.iter() {
                         // If past resolution time, check outcome
                         if now > market.resolution_time + Duration::minutes(5) {
                             resolved.push(market.clone());
@@ -510,7 +509,7 @@ impl BacktestCollector {
     }
 
     /// Fetch active 15-minute markets for a symbol
-    async fn fetch_active_markets(client: &PolymarketClient, symbol: &str) -> Result<Vec<ActiveMarket>> {
+    async fn fetch_active_markets(_client: &PolymarketClient, symbol: &str) -> Result<Vec<ActiveMarket>> {
         // Map symbol to coin name
         let coin = match symbol {
             "BTCUSDT" => "BTC",
@@ -522,7 +521,7 @@ impl BacktestCollector {
 
         // Search for active 15-minute markets
         // This is a simplified version - in production, you'd use the actual PM API
-        let search_term = format!("{} 15", coin);
+        let _search_term = format!("{} 15", coin);
 
         // Use client to search markets
         // For now, return empty - this needs to be connected to actual PM API
@@ -532,7 +531,7 @@ impl BacktestCollector {
     }
 
     /// Check if a market has resolved
-    async fn check_resolution(client: &PolymarketClient, condition_id: &str) -> Result<bool> {
+    async fn check_resolution(_client: &PolymarketClient, _condition_id: &str) -> Result<bool> {
         // Check market resolution status
         // This needs to be connected to actual PM API
         // Returns true for YES, false for NO
@@ -595,7 +594,7 @@ pub async fn collect_historical_klines(
     output_path: &Path,
     days: u64,
 ) -> Result<u64> {
-    let client = BinanceKlineClient::new();
+    let _client = BinanceKlineClient::new();
     let mut total_records = 0u64;
 
     // Create output file with header
@@ -713,6 +712,7 @@ pub fn print_collector_status(stats: &CollectorStats) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn test_next_15min_boundary() {

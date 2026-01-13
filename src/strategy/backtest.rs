@@ -15,7 +15,7 @@
 //! ploy paper-trade vol-arb --symbols BTC,ETH,SOL
 //! ```
 
-use chrono::{DateTime, Duration, NaiveDateTime, Utc, TimeZone};
+use chrono::{DateTime, NaiveDateTime, Utc, TimeZone};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -23,11 +23,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::Path;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn};
 
 use crate::strategy::volatility_arb::{
     VolatilityArbConfig, VolatilityArbEngine, VolArbSignal,
-    calculate_fair_yes_price, calculate_implied_volatility,
+    calculate_implied_volatility,
 };
 
 // ============================================================================

@@ -32,6 +32,8 @@ struct EngineState {
     current_cycle: Option<CycleContext>,
     /// Whether we should stop
     shutdown: bool,
+    /// Version number for optimistic locking (prevents race conditions)
+    version: u64,
 }
 
 /// Context for an active cycle
@@ -52,6 +54,7 @@ impl Default for EngineState {
             current_round: None,
             current_cycle: None,
             shutdown: false,
+            version: 0,
         }
     }
 }
@@ -303,7 +306,11 @@ impl StrategyEngine {
 
         // Get token ID
         let token_id = round.token_id(side).to_string();
-        let round_id = round.id.unwrap();
+        let round_id = round.id.ok_or_else(|| {
+            crate::error::PloyError::InvalidState(
+                "Round ID not set after database upsert".to_string()
+            )
+        })?;
 
         // Create cycle
         let cycle_id = self.store.create_cycle(round_id, StrategyState::Leg1Pending).await?;
@@ -313,7 +320,10 @@ impl StrategyEngine {
             side, self.config.strategy.shares, token_id, price
         );
 
+        // Capture version before releasing lock
+        let expected_version = state.version;
         state.strategy_state = StrategyState::Leg1Pending;
+        state.version += 1;
         drop(state);
 
         // Execute order
@@ -322,8 +332,22 @@ impl StrategyEngine {
             .buy(&token_id, side, self.config.strategy.shares, price)
             .await?;
 
-        // Update state based on result
+        // Update state based on result with version check
         let mut state = self.state.write().await;
+
+        // Check if state was modified by another thread
+        if state.version != expected_version + 1 {
+            warn!(
+                "State version mismatch: expected {}, got {}. Another thread modified state during order execution.",
+                expected_version + 1,
+                state.version
+            );
+            // Abort the cycle since state is inconsistent
+            self.store.abort_cycle(cycle_id, "State modified by concurrent operation").await?;
+            return Err(PloyError::Internal(
+                "Concurrent state modification detected during Leg1 execution".to_string()
+            ));
+        }
 
         if result.filled_shares > 0 {
             let fill_price = result.avg_fill_price.unwrap_or(price);
@@ -344,6 +368,7 @@ impl StrategyEngine {
             });
 
             state.strategy_state = StrategyState::Leg1Filled;
+            state.version += 1;
             info!(
                 "Leg1 filled: {} shares @ {}",
                 result.filled_shares, fill_price
@@ -356,6 +381,7 @@ impl StrategyEngine {
             // Order failed
             self.store.abort_cycle(cycle_id, "Leg1 not filled").await?;
             state.strategy_state = StrategyState::Abort;
+            state.version += 1;
             warn!("Leg1 order failed to fill");
         }
 
@@ -392,7 +418,10 @@ impl StrategyEngine {
             side, ctx.leg1_shares, token_id, price
         );
 
+        // Capture version before releasing lock
+        let expected_version = state.version;
         state.strategy_state = StrategyState::Leg2Pending;
+        state.version += 1;
         drop(state);
 
         // Execute order
@@ -401,8 +430,22 @@ impl StrategyEngine {
             .buy(&token_id, side, ctx.leg1_shares, price)
             .await?;
 
-        // Update state based on result
+        // Update state based on result with version check
         let mut state = self.state.write().await;
+
+        // Check if state was modified by another thread
+        if state.version != expected_version + 1 {
+            warn!(
+                "State version mismatch in Leg2: expected {}, got {}. Another thread modified state during order execution.",
+                expected_version + 1,
+                state.version
+            );
+            // Abort the cycle since state is inconsistent
+            self.store.abort_cycle(ctx.cycle_id, "State modified by concurrent operation").await?;
+            return Err(PloyError::Internal(
+                "Concurrent state modification detected during Leg2 execution".to_string()
+            ));
+        }
 
         if result.filled_shares > 0 {
             let fill_price = result.avg_fill_price.unwrap_or(price);
@@ -427,6 +470,7 @@ impl StrategyEngine {
             self.store.record_cycle_completion(today, net_pnl).await?;
 
             state.strategy_state = StrategyState::CycleComplete;
+            state.version += 1;
             info!(
                 "Leg2 filled: {} shares @ {}. Cycle PnL: {}",
                 result.filled_shares, fill_price, net_pnl
@@ -439,6 +483,7 @@ impl StrategyEngine {
             self.risk_manager.record_failure("Leg2 not filled").await;
 
             state.strategy_state = StrategyState::Abort;
+            state.version += 1;
         }
 
         Ok(())

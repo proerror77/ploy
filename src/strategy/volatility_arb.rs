@@ -32,7 +32,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f64::consts::PI;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // ============================================================================
 // Configuration
@@ -71,6 +71,12 @@ pub struct VolatilityArbConfig {
     pub max_position_usd: Decimal,
     /// Kelly fraction for position sizing (0.25 = quarter Kelly)
     pub kelly_fraction: f64,
+    /// Combined volatility level above which we reduce Kelly sizing
+    #[serde(default = "default_high_vol_threshold")]
+    pub high_vol_threshold: f64,
+    /// Multiplier applied to Kelly sizing in high volatility regimes
+    #[serde(default = "default_high_vol_kelly_multiplier")]
+    pub high_vol_kelly_multiplier: f64,
     /// Maximum total exposure per symbol
     pub max_symbol_exposure_usd: Decimal,
     /// Cooldown between trades on same market
@@ -106,6 +112,8 @@ impl Default for VolatilityArbConfig {
             // Risk management
             max_position_usd: dec!(50),
             kelly_fraction: 0.25,          // Quarter Kelly
+            high_vol_threshold: default_high_vol_threshold(),
+            high_vol_kelly_multiplier: default_high_vol_kelly_multiplier(),
             max_symbol_exposure_usd: dec!(100),
             cooldown_secs: 300,            // 5 minute cooldown
 
@@ -120,6 +128,14 @@ impl Default for VolatilityArbConfig {
             ],
         }
     }
+}
+
+fn default_high_vol_threshold() -> f64 {
+    0.005
+}
+
+fn default_high_vol_kelly_multiplier() -> f64 {
+    0.7
 }
 
 // ============================================================================
@@ -248,10 +264,10 @@ fn norm_cdf(x: f64) -> f64 {
     let p = 0.3275911;
 
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
+    let z = x.abs() / 2.0_f64.sqrt();
 
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
+    let t = 1.0 / (1.0 + p * z);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
 
     0.5 * (1.0 + sign * y)
 }
@@ -502,22 +518,35 @@ impl VolatilityArbEngine {
         let kline_vol = self.kline_vol_cache.get(symbol).copied().unwrap_or(0.003);
         let tick_vol = tick_volatility.unwrap_or(kline_vol);
 
-        // Weighted combination
-        let combined = self.config.kline_weight * kline_vol
-                     + self.config.tick_weight * tick_vol;
+        // Combine vols by blending variances (more stable than linear vol blending).
+        let weight_sum = self.config.kline_weight + self.config.tick_weight;
+        let (wk, wt) = if weight_sum > 0.0 {
+            (self.config.kline_weight / weight_sum, self.config.tick_weight / weight_sum)
+        } else {
+            (0.5, 0.5)
+        };
+        let combined = (wk * kline_vol * kline_vol + wt * tick_vol * tick_vol).sqrt();
 
         // Confidence based on data availability
-        let confidence = if self.kline_vol_cache.contains_key(symbol) {
+        let mut confidence = if self.kline_vol_cache.contains_key(symbol) {
             if tick_volatility.is_some() { 0.9 } else { 0.7 }
         } else {
             if tick_volatility.is_some() { 0.5 } else { 0.3 }
         };
 
+        // Penalize confidence when kline/tick disagree (proxy for vol-of-vol / instability).
+        if tick_volatility.is_some() {
+            let denom = combined.max(1e-9);
+            let disagreement = ((kline_vol - tick_vol).abs() / denom).min(1.0);
+            let agreement_factor = (1.0 - disagreement).clamp(0.3, 1.0);
+            confidence *= agreement_factor;
+        }
+
         VolatilityEstimate {
             kline_vol,
             tick_vol,
             combined_vol: combined,
-            confidence,
+            confidence: confidence.clamp(0.0, 1.0),
             sample_size: self.config.vol_lookback_periods,
         }
     }
@@ -632,12 +661,16 @@ impl VolatilityArbEngine {
         } else {
             0.7
         };
-        let confidence = vol_estimate.confidence * time_confidence * (1.0 + vol_edge_pct).min(1.0);
+        let confidence = (vol_estimate.confidence * time_confidence * (1.0 + vol_edge_pct)).min(1.0);
 
         // Calculate position size using Kelly criterion
         let win_prob = if buy_yes { fair_value_f64 } else { 1.0 - fair_value_f64 };
         let kelly = calculate_kelly_fraction(win_prob, entry_price.to_f64().unwrap_or(0.5));
-        let adjusted_kelly = kelly * self.config.kelly_fraction;
+        let mut adjusted_kelly = kelly * self.config.kelly_fraction * confidence;
+        if vol_estimate.combined_vol > self.config.high_vol_threshold {
+            adjusted_kelly *= self.config.high_vol_kelly_multiplier;
+        }
+        adjusted_kelly = adjusted_kelly.clamp(0.0, 1.0);
 
         let max_shares = (self.config.max_position_usd / entry_price)
             .to_u64()
