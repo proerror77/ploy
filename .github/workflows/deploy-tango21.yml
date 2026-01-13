@@ -1,0 +1,261 @@
+name: Deploy to tango-2-1
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # 允許手動觸發
+
+env:
+  AWS_REGION: ap-northeast-1
+  EC2_INSTANCE_ID: i-01de34df55726073d
+  EC2_IP: 3.112.247.26
+  S3_BUCKET: ploy-deployment-${{ github.run_number }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ploy-frontend/package-lock.json
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Build frontend
+      run: |
+        cd ploy-frontend
+        npm ci
+        npm run build
+        echo "✅ Frontend built successfully"
+
+    - name: Create S3 bucket
+      run: |
+        aws s3 mb s3://${{ env.S3_BUCKET }} || echo "Bucket may already exist"
+        echo "✅ S3 bucket ready: ${{ env.S3_BUCKET }}"
+
+    - name: Upload frontend to S3
+      run: |
+        aws s3 cp ploy-frontend/dist/ s3://${{ env.S3_BUCKET }}/frontend/ --recursive
+        echo "✅ Frontend uploaded to S3"
+
+    - name: Package and upload backend
+      run: |
+        tar czf ploy-backend.tar.gz \
+          --exclude='target' \
+          --exclude='node_modules' \
+          --exclude='ploy-frontend' \
+          --exclude='.git' \
+          --exclude='data' \
+          --exclude='results' \
+          --exclude='dist' \
+          Cargo.toml Cargo.lock src/ examples/ migrations/
+
+        aws s3 cp ploy-backend.tar.gz s3://${{ env.S3_BUCKET }}/
+        echo "✅ Backend uploaded to S3"
+
+    - name: Create deployment script
+      run: |
+        cat > deploy.sh << 'DEPLOY_SCRIPT'
+        #!/bin/bash
+        set -e
+
+        echo "🚀 Starting deployment on tango-2-1..."
+
+        # Backup existing deployment
+        if [ -d ~/ploy ]; then
+          echo "📦 Backing up existing deployment..."
+          mv ~/ploy ~/ploy.backup.$(date +%Y%m%d_%H%M%S)
+        fi
+
+        # Create directories
+        mkdir -p ~/ploy/{frontend,backend}
+
+        # Download files from S3
+        echo "📥 Downloading files from S3..."
+        aws s3 cp s3://${{ env.S3_BUCKET }}/frontend/ ~/ploy/frontend/ --recursive
+        aws s3 cp s3://${{ env.S3_BUCKET }}/ploy-backend.tar.gz ~/ploy/backend/
+
+        # Extract backend
+        cd ~/ploy/backend
+        tar xzf ploy-backend.tar.gz
+        rm ploy-backend.tar.gz
+
+        # Install dependencies
+        echo "📦 Installing dependencies..."
+        sudo apt-get update -qq
+        sudo apt-get install -y nginx build-essential pkg-config libssl-dev -qq
+
+        # Install Rust if needed
+        if ! command -v cargo &> /dev/null; then
+          echo "📦 Installing Rust..."
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        fi
+        source $HOME/.cargo/env
+
+        # Configure Nginx
+        echo "⚙️  Configuring Nginx..."
+        sudo tee /etc/nginx/sites-available/ploy > /dev/null << 'EOF'
+        server {
+            listen 80;
+            server_name _;
+
+            location / {
+                root /home/ubuntu/ploy/frontend;
+                try_files $uri $uri/ /index.html;
+            }
+
+            location /api {
+                proxy_pass http://localhost:8080;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_cache_bypass $http_upgrade;
+            }
+
+            location /ws {
+                proxy_pass http://localhost:8080;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "Upgrade";
+                proxy_set_header Host $host;
+            }
+        }
+        EOF
+
+        sudo ln -sf /etc/nginx/sites-available/ploy /etc/nginx/sites-enabled/
+        sudo rm -f /etc/nginx/sites-enabled/default
+        sudo nginx -t
+        sudo systemctl restart nginx
+        sudo systemctl enable nginx
+
+        # Build backend
+        echo "🔨 Building backend..."
+        cd ~/ploy/backend
+        cargo build --release
+
+        # Create systemd service
+        echo "⚙️  Creating systemd service..."
+        sudo tee /etc/systemd/system/ploy-backend.service > /dev/null << 'EOF'
+        [Unit]
+        Description=Ploy Trading Backend
+        After=network.target
+
+        [Service]
+        Type=simple
+        User=ubuntu
+        WorkingDirectory=/home/ubuntu/ploy/backend
+        ExecStart=/home/ubuntu/ploy/backend/target/release/ploy
+        Restart=always
+        RestartSec=10
+        Environment="RUST_LOG=info"
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+        # Start services
+        sudo systemctl daemon-reload
+        sudo systemctl restart ploy-backend
+        sudo systemctl enable ploy-backend
+
+        # Check status
+        echo ""
+        echo "📊 Service status:"
+        sudo systemctl status nginx --no-pager | head -5
+        sudo systemctl status ploy-backend --no-pager | head -5
+
+        echo ""
+        echo "✅ Deployment completed!"
+        echo "🌐 Access at: http://${{ env.EC2_IP }}"
+        DEPLOY_SCRIPT
+
+        aws s3 cp deploy.sh s3://${{ env.S3_BUCKET }}/
+        echo "✅ Deployment script uploaded"
+
+    - name: Deploy to EC2 via SSM
+      run: |
+        echo "🚀 Executing deployment on EC2..."
+
+        COMMAND_ID=$(aws ssm send-command \
+          --instance-ids ${{ env.EC2_INSTANCE_ID }} \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["aws s3 cp s3://${{ env.S3_BUCKET }}/deploy.sh /tmp/","chmod +x /tmp/deploy.sh","/tmp/deploy.sh"]' \
+          --output text \
+          --query 'Command.CommandId')
+
+        echo "Command ID: $COMMAND_ID"
+
+        # Wait for command to complete
+        echo "⏳ Waiting for deployment to complete..."
+        aws ssm wait command-executed \
+          --command-id "$COMMAND_ID" \
+          --instance-id ${{ env.EC2_INSTANCE_ID }} \
+          --timeout 600 || true
+
+        # Get command output
+        echo "📋 Deployment output:"
+        aws ssm get-command-invocation \
+          --command-id "$COMMAND_ID" \
+          --instance-id ${{ env.EC2_INSTANCE_ID }} \
+          --query 'StandardOutputContent' \
+          --output text
+
+    - name: Verify deployment
+      run: |
+        echo "🔍 Verifying deployment..."
+
+        # Wait a bit for services to start
+        sleep 10
+
+        # Test frontend
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://${{ env.EC2_IP }} || echo "000")
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo "✅ Frontend is accessible (HTTP $HTTP_CODE)"
+        else
+          echo "⚠️  Frontend returned HTTP $HTTP_CODE"
+        fi
+
+        echo ""
+        echo "🎉 Deployment completed!"
+        echo "🌐 Access your application at:"
+        echo "   Frontend: http://${{ env.EC2_IP }}"
+        echo "   NBA Swing: http://${{ env.EC2_IP }}/nba-swing"
+
+    - name: Cleanup S3 (optional)
+      if: success()
+      run: |
+        echo "🧹 Cleaning up S3 bucket..."
+        # Uncomment the line below to auto-delete S3 bucket after deployment
+        # aws s3 rb s3://${{ env.S3_BUCKET }} --force
+        echo "S3 bucket: ${{ env.S3_BUCKET }}"
+        echo "To manually delete: aws s3 rb s3://${{ env.S3_BUCKET }} --force"
+
+    - name: Deployment summary
+      if: always()
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Instance**: tango-2-1 (${{ env.EC2_INSTANCE_ID }})" >> $GITHUB_STEP_SUMMARY
+        echo "- **IP Address**: ${{ env.EC2_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **S3 Bucket**: ${{ env.S3_BUCKET }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Access URLs" >> $GITHUB_STEP_SUMMARY
+        echo "- [Frontend](http://${{ env.EC2_IP }})" >> $GITHUB_STEP_SUMMARY
+        echo "- [NBA Swing](http://${{ env.EC2_IP }}/nba-swing)" >> $GITHUB_STEP_SUMMARY
+        echo "- [Strategy Monitor](http://${{ env.EC2_IP }}/monitor-strategy)" >> $GITHUB_STEP_SUMMARY
