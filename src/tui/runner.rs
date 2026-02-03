@@ -129,9 +129,9 @@ impl DashboardRunner {
                                 }
                                 KeyAction::ScrollUp => self.app.scroll_up(),
                                 KeyAction::ScrollDown => self.app.scroll_down(),
-                                KeyAction::Help => {
-                                    // TODO: Show help overlay
-                                }
+                                KeyAction::Help => self.app.toggle_help(),
+                                KeyAction::NextMarket => self.app.next_market(),
+                                KeyAction::PrevMarket => self.app.prev_market(),
                                 KeyAction::None => {}
                             }
                         }

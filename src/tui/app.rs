@@ -28,6 +28,12 @@ pub struct TuiApp {
     pub running: bool,
     /// Last update timestamp
     pub last_update: DateTime<Utc>,
+    /// Show help overlay
+    pub show_help: bool,
+    /// Available markets for switching
+    pub available_markets: Vec<String>,
+    /// Currently selected market index
+    pub selected_market_idx: usize,
 }
 
 impl Default for TuiApp {
@@ -47,6 +53,13 @@ impl TuiApp {
             tx_scroll_offset: 0,
             running: true,
             last_update: Utc::now(),
+            show_help: false,
+            available_markets: vec![
+                "SOL-15m".to_string(),
+                "ETH-15m".to_string(),
+                "BTC-Daily".to_string(),
+            ],
+            selected_market_idx: 0,
         }
     }
 
@@ -170,6 +183,29 @@ impl TuiApp {
     /// Reset scroll to top
     pub fn scroll_to_top(&mut self) {
         self.tx_scroll_offset = 0;
+    }
+
+    /// Toggle help overlay
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
+    /// Switch to next market
+    pub fn next_market(&mut self) {
+        if !self.available_markets.is_empty() {
+            self.selected_market_idx = (self.selected_market_idx + 1) % self.available_markets.len();
+        }
+    }
+
+    /// Switch to previous market
+    pub fn prev_market(&mut self) {
+        if !self.available_markets.is_empty() {
+            if self.selected_market_idx == 0 {
+                self.selected_market_idx = self.available_markets.len() - 1;
+            } else {
+                self.selected_market_idx -= 1;
+            }
+        }
     }
 
     /// Create demo data for testing

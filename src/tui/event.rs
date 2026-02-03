@@ -125,6 +125,10 @@ pub enum KeyAction {
     ScrollDown,
     /// Show help
     Help,
+    /// Next market
+    NextMarket,
+    /// Previous market
+    PrevMarket,
     /// No action
     None,
 }
@@ -136,7 +140,9 @@ impl From<KeyEvent> for KeyAction {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
             KeyCode::Up | KeyCode::Char('k') => KeyAction::ScrollUp,
             KeyCode::Down | KeyCode::Char('j') => KeyAction::ScrollDown,
-            KeyCode::Char('?') => KeyAction::Help,
+            KeyCode::Char('?') | KeyCode::Char('h') => KeyAction::Help,
+            KeyCode::Left | KeyCode::Char('[') => KeyAction::PrevMarket,
+            KeyCode::Right | KeyCode::Char(']') => KeyAction::NextMarket,
             KeyCode::Esc => KeyAction::Quit,
             _ => KeyAction::None,
         }

@@ -10,6 +10,9 @@ pub mod theme;
 pub mod ui;
 pub mod widgets;
 
+#[cfg(test)]
+mod tests;
+
 pub use app::TuiApp;
 pub use data::{DashboardStats, DisplayPosition, DisplayTransaction, MarketState};
 pub use event::{AppEvent, EventHandler, KeyAction};
@@ -98,9 +101,9 @@ pub async fn run_tui(mut app: TuiApp) -> io::Result<()> {
                     }
                     KeyAction::ScrollUp => app.scroll_up(),
                     KeyAction::ScrollDown => app.scroll_down(),
-                    KeyAction::Help => {
-                        // TODO: Show help overlay
-                    }
+                    KeyAction::Help => app.toggle_help(),
+                    KeyAction::NextMarket => app.next_market(),
+                    KeyAction::PrevMarket => app.prev_market(),
                     KeyAction::None => {}
                 }
             }

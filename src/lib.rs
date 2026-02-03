@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod agent;
+#[cfg(feature = "api")]
 pub mod api;
 pub mod cli;
 pub mod collector;

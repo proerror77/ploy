@@ -103,6 +103,7 @@ bincode = { version = "=2.0.0-rc.3", optional = true }
 
 [features]
 default = []
+api = []  # Enable API module with SQLx compile-time checks (requires DATABASE_URL)
 rl = ["burn", "burn-ndarray", "bincode"]
 
 [dev-dependencies]

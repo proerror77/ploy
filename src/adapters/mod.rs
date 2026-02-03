@@ -1,3 +1,4 @@
+#[cfg(feature = "api")]
 pub mod api_server;
 pub mod binance_ws;
 pub mod feishu;
@@ -19,6 +20,7 @@ pub use polymarket_ws::{
 pub use postgres::{
     DailyMetrics, IncompleteCycle, OrphanedOrder, PersistedState, PostgresStore, RecoverySummary,
 };
+#[cfg(feature = "api")]
 pub use api_server::{start_api_server, start_api_server_background};
 pub use binance_ws::{BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice};
 pub use feishu::FeishuNotifier;
