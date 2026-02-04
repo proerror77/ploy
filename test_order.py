@@ -2,6 +2,7 @@
 """Test order placement on Polymarket using official SDK approach"""
 
 import requests
+import os
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType, ApiCreds, MarketOrderArgs
 from py_clob_client.constants import POLYGON
@@ -9,7 +10,7 @@ from py_clob_client.order_builder.constants import BUY
 
 # Configuration
 # EOA private key (controls the proxy wallet)
-PRIVATE_KEY = ""
+PRIVATE_KEY = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
 # Proxy wallet address (holds the funds) - IMPORTANT for Magic/email wallets
 FUNDER = "0xCbaAa60c5DEc85eaC2A2c424bdcD7258Ab67eEE2"
 HOST = "https://clob.polymarket.com"
@@ -48,6 +49,11 @@ def get_active_btc_market():
 
 
 def main():
+    if not PRIVATE_KEY:
+        print("❌ Missing POLYMARKET_PRIVATE_KEY environment variable.")
+        print("   Example: export POLYMARKET_PRIVATE_KEY='0x...'\n")
+        return
+
     print("=== Polymarket Order Test ===\n")
     print(f"Private Key: {PRIVATE_KEY[:20]}...")
     print(f"Funder (Proxy Wallet): {FUNDER}")
