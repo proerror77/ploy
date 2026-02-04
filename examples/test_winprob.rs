@@ -4,7 +4,7 @@ use ploy::strategy::{LiveWinProbModel, GameFeatures};
 
 fn main() {
     println!("Testing NBA Live Win Probability Model\n");
-    println!("=" .repeat(60));
+    println!("{}", "=".repeat(60));
 
     // Create a default model (untrained, for testing only)
     let model = LiveWinProbModel::default_untrained();

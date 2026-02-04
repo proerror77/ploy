@@ -4,10 +4,20 @@
 // 1. 设置环境变量: export DATABASE_URL="postgresql://localhost/ploy"
 // 2. 运行: cargo run --example api_server
 
-use ploy::adapters::{PostgresStore, start_api_server};
+#[cfg(feature = "api")]
+use ploy::adapters::{start_api_server, PostgresStore};
+#[cfg(feature = "api")]
 use ploy::api::state::StrategyConfigState;
+#[cfg(feature = "api")]
 use std::sync::Arc;
 
+#[cfg(not(feature = "api"))]
+fn main() {
+    eprintln!("This example requires the `api` feature.");
+    eprintln!("Try: cargo run --example api_server --features api");
+}
+
+#[cfg(feature = "api")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 初始化日志

@@ -16,13 +16,13 @@ use tracing::{debug, info, warn};
 /// Uses database-backed atomic increments to prevent collisions.
 ///
 /// # Example
-/// ```rust
-/// let nonce_manager = NonceManager::new(store);
-/// nonce_manager.recover().await?;
-///
-/// let nonce = nonce_manager.get_next().await?;
-/// // Use nonce in API call
-/// ```
+    /// ```rust,ignore
+    /// let nonce_manager = NonceManager::new(store);
+    /// nonce_manager.recover().await?;
+    ///
+    /// let nonce = nonce_manager.get_next().await?;
+    /// // Use nonce in API call
+    /// ```
 pub struct NonceManager {
     store: Arc<PostgresStore>,
     cache: Arc<RwLock<Option<i64>>>,

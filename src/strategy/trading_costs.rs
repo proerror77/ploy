@@ -154,7 +154,7 @@ impl TradingCostCalculator {
         // Medium orders (5% depth): ~0.5% slippage
         // Large orders (10% depth): ~1% slippage
         let base_slippage = dec!(0.001); // 0.1% base
-        let depth_factor = market_depth_ratio * market_depth_ratio * dec!(10);
+        let depth_factor = market_depth_ratio * market_depth_ratio * dec!(1.6);
         let slippage_rate = base_slippage + depth_factor;
 
         // Cap at configured tolerance

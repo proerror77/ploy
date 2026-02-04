@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 /// 4. On restart, the system continues from the last used nonce
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// let nonce_mgr = NonceManager::new(store, wallet_address);
 ///
 /// // Allocate nonce

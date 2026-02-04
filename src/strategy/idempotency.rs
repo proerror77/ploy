@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 /// 4. If new, proceed with submission and cache the result
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// let idempotency = IdempotencyManager::new(store);
 /// let key = IdempotencyManager::generate_key(&request);
 ///

@@ -369,7 +369,7 @@ impl ExitDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::nba_winprob::{LiveWinProbModel, GameFeatures};
+    use crate::strategy::nba_winprob::GameFeatures;
     
     fn create_position(entry_price: f64, current_price: f64) -> PositionState {
         let mut position = PositionState::new(
@@ -380,17 +380,21 @@ mod tests {
         position
     }
     
-    fn create_prediction(point_diff: f64, quarter: u8, time_remaining: f64) -> WinProbPrediction {
-        let model = LiveWinProbModel::default_untrained();
-        let features = GameFeatures {
-            point_diff,
-            time_remaining,
-            quarter,
-            possession: 1.0,
-            pregame_spread: 0.0,
-            elo_diff: 0.0,
-        };
-        model.predict(&features)
+    fn create_prediction(win_prob: f64, quarter: u8, time_remaining: f64) -> WinProbPrediction {
+        WinProbPrediction {
+            win_prob,
+            uncertainty: 0.1,
+            confidence: 0.9,
+            features: GameFeatures {
+                point_diff: 0.0,
+                time_remaining,
+                quarter,
+                possession: 1.0,
+                pregame_spread: 0.0,
+                elo_diff: 0.0,
+            },
+            logit: 0.0,
+        }
     }
     
     fn create_good_market_context() -> MarketContext {
@@ -418,24 +422,22 @@ mod tests {
     #[test]
     fn test_hold_with_good_edge() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
-        let position = create_position(0.15, 0.25); // Profitable
-        let prediction = create_prediction(-5.0, 3, 10.0);
+        let position = create_position(0.15, 0.20); // Profitable
+        let prediction = create_prediction(0.30, 3, 10.0);
         let market_price = Decimal::new(20, 2); // 0.20
         let market = create_good_market_context();
         
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
         
         // Should hold if edge is still good
-        if prediction.win_prob > 0.25 {
-            assert!(decision.is_hold(), "Should hold with good edge");
-        }
+        assert!(decision.is_hold(), "Should hold with good edge");
     }
     
     #[test]
     fn test_edge_disappeared() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
         let position = create_position(0.15, 0.20);
-        let prediction = create_prediction(-5.0, 3, 10.0);
+        let prediction = create_prediction(0.40, 3, 10.0);
         let market_price = Decimal::new(50, 2); // 0.50 (higher than model)
         let market = create_good_market_context();
         
@@ -454,7 +456,7 @@ mod tests {
         position.peak_price = Some(Decimal::new(40, 2));
         position.update_price(Decimal::new(35, 2)); // Dropped to 0.35 (12.5% drawdown)
         
-        let prediction = create_prediction(-3.0, 3, 8.0);
+        let prediction = create_prediction(0.60, 3, 8.0);
         let market_price = Decimal::new(35, 2);
         let market = create_good_market_context();
         
@@ -471,7 +473,7 @@ mod tests {
     fn test_liquidity_risk() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
         let position = create_position(0.15, 0.25);
-        let prediction = create_prediction(-5.0, 3, 10.0);
+        let prediction = create_prediction(0.30, 3, 10.0);
         let market_price = Decimal::new(25, 2);
         let mut market = create_good_market_context();
         
@@ -494,9 +496,9 @@ mod tests {
     #[test]
     fn test_time_stop() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
-        let position = create_position(0.15, 0.18); // Small profit (20%)
-        let prediction = create_prediction(-5.0, 4, 1.5); // Q4, 1.5 min left
-        let market_price = Decimal::new(18, 2);
+        let position = create_position(0.15, 0.16); // Profit < 10%
+        let prediction = create_prediction(0.30, 4, 1.5); // Q4, 1.5 min left
+        let market_price = Decimal::new(16, 2);
         let market = create_good_market_context();
         
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
