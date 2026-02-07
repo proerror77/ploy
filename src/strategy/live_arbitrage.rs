@@ -209,6 +209,8 @@ pub struct LiveArbitrageMonitor {
     client: Client,
     comeback_model: ComebackModel,
     price_history: HashMap<String, Vec<(DateTime<Utc>, MoneylinePrices)>>,
+    /// Team strength factors (team name -> 0.8-1.2 multiplier)
+    team_strength: HashMap<String, f64>,
 }
 
 impl LiveArbitrageMonitor {
@@ -220,7 +222,41 @@ impl LiveArbitrageMonitor {
                 .unwrap(),
             comeback_model: ComebackModel::new(),
             price_history: HashMap::new(),
+            team_strength: Self::default_team_strength(),
         }
+    }
+
+    /// Default NBA team strength factors based on historical comeback ability.
+    /// Values range from 0.85 (weaker) to 1.15 (stronger).
+    /// Neutral = 1.0 for unknown or average teams.
+    fn default_team_strength() -> HashMap<String, f64> {
+        let mut m = HashMap::new();
+        // Elite tier (strong comeback teams)
+        for name in ["Boston Celtics", "Denver Nuggets", "Oklahoma City Thunder",
+                      "Milwaukee Bucks", "Phoenix Suns"] {
+            m.insert(name.to_string(), 1.12);
+        }
+        // Above average
+        for name in ["Cleveland Cavaliers", "Minnesota Timberwolves",
+                      "New York Knicks", "Dallas Mavericks", "LA Clippers"] {
+            m.insert(name.to_string(), 1.06);
+        }
+        // Below average
+        for name in ["Charlotte Hornets", "Portland Trail Blazers",
+                      "San Antonio Spurs", "Utah Jazz", "Detroit Pistons"] {
+            m.insert(name.to_string(), 0.92);
+        }
+        // Weak tier
+        for name in ["Washington Wizards", "Brooklyn Nets"] {
+            m.insert(name.to_string(), 0.87);
+        }
+        // All other teams default to 1.0 via lookup
+        m
+    }
+
+    /// Look up team strength factor (defaults to 1.0 for unknown teams)
+    fn team_strength_factor(&self, team_name: &str) -> f64 {
+        self.team_strength.get(team_name).copied().unwrap_or(1.0)
     }
 
     /// Monitor live NBA games for arbitrage opportunities
@@ -480,9 +516,8 @@ impl LiveArbitrageMonitor {
 
         let score_diff = score.differential.abs();
 
-        // Predict comeback probability
-        // TODO: Add team strength factor from historical data
-        let team_strength_factor = 1.0; // Neutral for now
+        // Predict comeback probability using team-specific strength factor
+        let team_strength_factor = self.team_strength_factor(underdog_team);
 
         let predicted_prob = self.comeback_model.predict_comeback_prob(
             period,

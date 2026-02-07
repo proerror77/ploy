@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::Result;
 
 use super::core::{ExecutionConfig, OrderExecutor, PositionManager, RiskCheck, RiskConfig, RiskManager};
+use super::multi_event::MultiEventMonitor;
 use super::reconciliation::ReconciliationService;
 use super::traits::{
     DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction, StrategyStateInfo,
@@ -51,6 +52,8 @@ pub struct StrategyOrchestrator {
     shutdown: Arc<RwLock<bool>>,
     /// Optional reconciliation service for periodic position checks
     reconciliation: Option<Arc<ReconciliationService>>,
+    /// Optional multi-event monitor for cross-event arbitrage scanning
+    multi_event_monitor: Option<Arc<RwLock<MultiEventMonitor>>>,
 }
 
 impl StrategyOrchestrator {
@@ -70,6 +73,34 @@ impl StrategyOrchestrator {
             active_feeds: Arc::new(RwLock::new(HashMap::new())),
             shutdown: Arc::new(RwLock::new(false)),
             reconciliation: None,
+            multi_event_monitor: None,
+        }
+    }
+
+    /// Set the multi-event monitor for cross-event arbitrage scanning
+    pub fn set_multi_event_monitor(&mut self, monitor: Arc<RwLock<MultiEventMonitor>>) {
+        self.multi_event_monitor = Some(monitor);
+    }
+
+    /// Spawn the multi-event monitor background task if configured.
+    /// Periodically scans all tracked events for the best arbitrage opportunity.
+    pub fn spawn_multi_event_scanner(&self) {
+        if let Some(monitor) = &self.multi_event_monitor {
+            let monitor = monitor.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let mon = monitor.read().await;
+                    if let Some(opp) = mon.find_best_opportunity() {
+                        info!(
+                            "Multi-event opportunity: {} sum={:.4} profit={:.4}/share",
+                            opp.event_slug, opp.sum, opp.profit_per_share,
+                        );
+                    }
+                }
+            });
+            info!("Multi-event scanner background task spawned (5s interval)");
         }
     }
 

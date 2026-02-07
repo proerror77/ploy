@@ -276,10 +276,23 @@ impl GracefulShutdown {
         Ok(())
     }
 
-    /// Wait for shutdown to complete
+    /// Wait for shutdown to complete (with timeout to prevent deadlock)
     pub async fn wait_for_completion(&self) {
+        // If already complete, return immediately (prevents deadlock when
+        // execute() already finished or was never called)
+        if *self.phase_rx.borrow() == ShutdownPhase::Complete {
+            return;
+        }
+
+        let timeout = Duration::from_secs(self.config.total_timeout_secs + 10);
         let mut rx = self.completion_rx.lock().await;
-        let _ = rx.recv().await;
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(_) => debug!("Shutdown completion signal received"),
+            Err(_) => warn!(
+                "wait_for_completion timed out after {}s, proceeding anyway",
+                timeout.as_secs()
+            ),
+        }
     }
 
     /// Create a token that can be used to check shutdown status
