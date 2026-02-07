@@ -184,12 +184,14 @@ impl MultiEventMonitor {
                     event.id
                 );
 
-                let tracker = EventTracker::new(&event, up_token.clone(), down_token.clone(), self.config.clone());
-
-                self.token_to_event.insert(up_token.clone(), event.id.clone());
-                self.token_to_event.insert(down_token.clone(), event.id.clone());
-                new_token_ids.push(up_token);
-                new_token_ids.push(down_token);
+                // Clone each token once; reuse for map insert + push, move originals into tracker
+                let up = up_token.clone();
+                let down = down_token.clone();
+                let tracker = EventTracker::new(&event, up_token, down_token, self.config.clone());
+                self.token_to_event.insert(up.clone(), event.id.clone());
+                self.token_to_event.insert(down.clone(), event.id.clone());
+                new_token_ids.push(up);
+                new_token_ids.push(down);
                 self.events.insert(event.id, tracker);
             }
         }

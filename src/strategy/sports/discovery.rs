@@ -117,19 +117,20 @@ impl SportsMarketDiscovery {
 
                 // Get CLOB market for token IDs
                 match self.client.get_market(&condition_id).await {
-                    Ok(clob_market) => {
+                    Ok(mut clob_market) => {
                         if clob_market.tokens.len() < 2 {
                             continue;
                         }
 
-                        let t1 = &clob_market.tokens[0];
-                        let t2 = &clob_market.tokens[1];
-
-                        // Determine YES vs NO based on outcome
-                        let (yes_token, no_token) = if t1.outcome.to_lowercase() == "yes" {
-                            (t1.token_id.clone(), t2.token_id.clone())
+                        // Move token IDs out of owned vec to avoid cloning
+                        let is_first_yes = clob_market.tokens[0].outcome.to_lowercase() == "yes";
+                        let mut tokens = clob_market.tokens.drain(..2);
+                        let first = tokens.next().unwrap();
+                        let second = tokens.next().unwrap();
+                        let (yes_token, no_token) = if is_first_yes {
+                            (first.token_id, second.token_id)
                         } else {
-                            (t2.token_id.clone(), t1.token_id.clone())
+                            (second.token_id, first.token_id)
                         };
 
                         // Get market question for metadata
@@ -198,16 +199,18 @@ impl MarketDiscovery for SportsMarketDiscovery {
         // Get first market with condition_id
         for gamma_market in &event_details.markets {
             if let Some(condition_id) = &gamma_market.condition_id {
-                let clob_market = self.client.get_market(condition_id).await?;
+                let mut clob_market = self.client.get_market(condition_id).await?;
 
                 if clob_market.tokens.len() >= 2 {
-                    let t1 = &clob_market.tokens[0];
-                    let t2 = &clob_market.tokens[1];
-
-                    let (yes_token, no_token) = if t1.outcome.to_lowercase() == "yes" {
-                        (t1.token_id.clone(), t2.token_id.clone())
+                    // Move token IDs out of owned vec to avoid cloning
+                    let is_first_yes = clob_market.tokens[0].outcome.to_lowercase() == "yes";
+                    let mut tokens = clob_market.tokens.drain(..2);
+                    let first = tokens.next().unwrap();
+                    let second = tokens.next().unwrap();
+                    let (yes_token, no_token) = if is_first_yes {
+                        (first.token_id, second.token_id)
                     } else {
-                        (t2.token_id.clone(), t1.token_id.clone())
+                        (second.token_id, first.token_id)
                     };
 
                     let question = gamma_market.question.clone()

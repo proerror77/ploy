@@ -316,6 +316,7 @@ impl TradingCircuitBreaker {
         *state = CircuitState::Closed;
         self.consecutive_failures.store(0, Ordering::SeqCst);
         *self.opened_at.write().await = None;
+        self.half_open_successes.store(0, Ordering::SeqCst);
         self.half_open_trade_count.store(0, Ordering::SeqCst);
         *self.half_open_exposure_usd.write().await = Decimal::ZERO;
 

@@ -1448,11 +1448,11 @@ pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, sh
 
         // Rows
         for price_cents in [90, 92, 94, 95, 96, 97, 98, 99].iter() {
-            let p = Decimal::from_f64(*price_cents as f64 / 100.0).unwrap();
+            let p = Decimal::from_f64(*price_cents as f64 / 100.0).unwrap_or(Decimal::ZERO);
             print!("  {:>4}¢ ", price_cents);
 
             for prob_pct in [92, 94, 95, 96, 97, 98, 99].iter() {
-                let pr = Decimal::from_f64(*prob_pct as f64 / 100.0).unwrap();
+                let pr = Decimal::from_f64(*prob_pct as f64 / 100.0).unwrap_or(Decimal::ZERO);
                 let ev = ExpectedValue::calculate(p, pr, None);
                 if ev.is_positive_ev {
                     print!(" \x1b[32m{:>6.2}%\x1b[0m", ev.roi * dec!(100));

@@ -15,6 +15,7 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 /// Autonomy level for the trading agent
@@ -121,11 +122,14 @@ pub struct AutonomousAgent {
     action_tx: broadcast::Sender<AgentAction>,
     /// Optional Grok client for real-time search
     grok: Option<GrokClient>,
+    /// Last time Grok was called (for rate limiting)
+    last_grok_call: std::sync::Mutex<Option<Instant>>,
 }
 
 impl AutonomousAgent {
     /// Create a new autonomous agent
     pub fn new(client: ClaudeAgentClient, config: AutonomousConfig) -> Self {
+        // Capacity 100: bounded to prevent unbounded memory growth; broadcast drops oldest if full
         let (action_tx, _) = broadcast::channel(100);
         Self {
             client,
@@ -135,6 +139,7 @@ impl AutonomousAgent {
             shutdown: Arc::new(RwLock::new(false)),
             action_tx,
             grok: None,
+            last_grok_call: std::sync::Mutex::new(None),
         }
     }
 
@@ -151,10 +156,23 @@ impl AutonomousAgent {
 
     /// Fetch real-time context from Grok
     pub async fn fetch_realtime_context(&self, market_slug: &str) -> Option<SearchResult> {
+        // Rate limit Grok calls to at most once per 60 seconds
+        if let Ok(last) = self.last_grok_call.lock() {
+            if let Some(last_time) = *last {
+                if last_time.elapsed() < Duration::from_secs(60) {
+                    debug!("Skipping Grok search - rate limited");
+                    return None;
+                }
+            }
+        }
+
         if let Some(ref grok) = self.grok {
             if grok.is_configured() {
                 match grok.search_market(market_slug, "15 minutes").await {
                     Ok(result) => {
+                        if let Ok(mut last) = self.last_grok_call.lock() {
+                            *last = Some(Instant::now());
+                        }
                         info!("Grok search: sentiment={:?}", result.sentiment);
                         return Some(result);
                     }
@@ -270,20 +288,33 @@ impl AutonomousAgent {
         Ok(valid_actions)
     }
 
+    /// Sanitize external input before embedding in LLM prompts.
+    /// Strips control characters (except newline) and truncates to 500 chars
+    /// to mitigate prompt injection from attacker-controlled market data.
+    fn sanitize_for_prompt(input: &str) -> String {
+        input
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .take(500)
+            .collect()
+    }
+
     /// Build analysis prompt based on current state
     fn build_analysis_prompt(&self, _context: &AgentContext, grok_context: Option<&SearchResult>) -> String {
         let strategies = self.config.allowed_strategies.join(", ");
 
         let realtime_info = if let Some(search) = grok_context {
-            let sentiment = search.sentiment
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let sentiment = Self::sanitize_for_prompt(
+                &search.sentiment
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
             let key_points = if search.key_points.is_empty() {
                 "None available".to_string()
             } else {
                 search.key_points.iter()
                     .take(5)
-                    .map(|p| format!("  - {}", p))
+                    .map(|p| format!("  - {}", Self::sanitize_for_prompt(p)))
                     .collect::<Vec<_>>()
                     .join("\n")
             };

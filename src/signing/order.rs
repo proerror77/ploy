@@ -225,7 +225,7 @@ impl OrderDomain {
             name: ORDER_DOMAIN_NAME.to_string(),
             version: ORDER_DOMAIN_VERSION.to_string(),
             chain_id,
-            verifying_contract: contract.parse().unwrap(),
+            verifying_contract: contract.parse().unwrap_or_default(),
         }
     }
 

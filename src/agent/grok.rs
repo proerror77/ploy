@@ -8,7 +8,10 @@
 use crate::error::{PloyError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::{debug, warn};
 
 /// Grok API client configuration
@@ -117,6 +120,10 @@ impl std::fmt::Display for Sentiment {
 pub struct GrokClient {
     config: GrokConfig,
     http: Client,
+    /// Timestamp of last API call for rate limiting
+    last_call: Arc<Mutex<Option<Instant>>>,
+    /// Minimum interval between API calls (~10 req/min)
+    min_interval: Duration,
 }
 
 impl GrokClient {
@@ -127,7 +134,12 @@ impl GrokClient {
             .build()
             .map_err(|e| PloyError::Internal(format!("Failed to create HTTP client: {}", e)))?;
 
-        Ok(Self { config, http })
+        Ok(Self {
+            config,
+            http,
+            last_call: Arc::new(Mutex::new(None)),
+            min_interval: Duration::from_secs(6),
+        })
     }
 
     /// Create from environment variables
@@ -140,8 +152,24 @@ impl GrokClient {
         self.config.is_configured()
     }
 
+    /// Enforce minimum interval between API calls
+    async fn rate_limit(&self) {
+        let mut last = self.last_call.lock().await;
+        if let Some(last_time) = *last {
+            let elapsed = last_time.elapsed();
+            if elapsed < self.min_interval {
+                let wait = self.min_interval - elapsed;
+                debug!("Grok rate limit: waiting {:?}", wait);
+                tokio::time::sleep(wait).await;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+
     /// Search for real-time information about a topic
     pub async fn search(&self, query: &str) -> Result<SearchResult> {
+        self.rate_limit().await;
+
         if !self.is_configured() {
             return Err(PloyError::Internal("Grok API key not configured".to_string()));
         }
@@ -181,6 +209,8 @@ Focus on information from the last few hours that could affect trading decisions
 
     /// Search for market-specific news
     pub async fn search_market(&self, asset: &str, timeframe: &str) -> Result<SearchResult> {
+        self.rate_limit().await;
+
         let query = format!(
             "{} price prediction {} - latest news, sentiment, and market analysis",
             asset, timeframe
@@ -190,6 +220,8 @@ Focus on information from the last few hours that could affect trading decisions
 
     /// Get sentiment analysis for a specific topic
     pub async fn analyze_sentiment(&self, topic: &str) -> Result<Sentiment> {
+        self.rate_limit().await;
+
         if !self.is_configured() {
             return Err(PloyError::Internal("Grok API key not configured".to_string()));
         }
@@ -250,10 +282,11 @@ Respond with exactly one word: bullish, bearish, neutral, or mixed"#,
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            warn!("Grok API error: {} - {}", status, body);
+            let truncated_body: String = body.chars().take(200).collect();
+            warn!("Grok API error: {} - {}", status, truncated_body);
             return Err(PloyError::Internal(format!(
                 "Grok API error: {} - {}",
-                status, body
+                status, truncated_body
             )));
         }
 

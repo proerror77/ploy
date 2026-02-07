@@ -6,7 +6,7 @@ use crate::strategy::{OrderExecutor, RiskManager, SignalDetector, TradingCalcula
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// Main strategy engine orchestrating all components
@@ -19,6 +19,8 @@ pub struct StrategyEngine {
     quote_cache: QuoteCache,
     state: Arc<RwLock<EngineState>>,
     calculator: TradingCalculator,
+    /// Mutex to prevent concurrent order submissions (separate from state lock)
+    execution_mutex: Mutex<()>,
 }
 
 /// Internal engine state
@@ -86,6 +88,7 @@ impl StrategyEngine {
             quote_cache,
             state: Arc::new(RwLock::new(EngineState::default())),
             calculator,
+            execution_mutex: Mutex::new(()),
         })
     }
 
@@ -283,6 +286,7 @@ impl StrategyEngine {
 
     /// Enter Leg1 position
     async fn enter_leg1(&self, side: Side, price: Decimal) -> Result<()> {
+        let _exec_guard = self.execution_mutex.lock().await;
         let mut state = self.state.write().await;
 
         // Validate state
@@ -390,6 +394,7 @@ impl StrategyEngine {
 
     /// Enter Leg2 position
     async fn enter_leg2(&self, side: Side, price: Decimal) -> Result<()> {
+        let _exec_guard = self.execution_mutex.lock().await;
         let mut state = self.state.write().await;
 
         // Validate state

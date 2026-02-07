@@ -334,6 +334,27 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Mark a DLQ entry as permanently failed in a single atomic operation
+    pub async fn mark_dlq_permanent_failure(&self, id: i64, reason: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE dead_letter_queue SET
+                status = 'failed',
+                retry_count = max_retries,
+                last_retry_at = NOW(),
+                resolved_by = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+
+        info!("DLQ entry {} marked as permanently failed: {}", id, reason);
+        Ok(())
+    }
+
     /// Increment retry count for DLQ entry
     pub async fn increment_dlq_retry(&self, id: i64) -> Result<()> {
         sqlx::query(

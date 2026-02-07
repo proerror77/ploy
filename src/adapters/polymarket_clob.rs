@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
+use zeroize::Zeroize;
 
 /// Chain ID for Polygon Mainnet
 pub const POLYGON_CHAIN_ID: u64 = 137;
@@ -422,13 +423,19 @@ impl PolymarketClient {
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
         // Read private key from environment variable for SDK signer
-        let private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
-            .or_else(|_| std::env::var("PRIVATE_KEY"))
-            .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
+        // Scope the raw key string so it is zeroized and dropped immediately after parsing
+        let signer: PrivateKeySigner = {
+            let mut private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
+                .or_else(|_| std::env::var("PRIVATE_KEY"))
+                .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
 
-        let signer: PrivateKeySigner = private_key_hex.trim_start_matches("0x")
-            .parse::<PrivateKeySigner>()
-            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
+            let result = private_key_hex.trim_start_matches("0x")
+                .parse::<PrivateKeySigner>()
+                .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)));
+
+            private_key_hex.zeroize();
+            result?
+        }
             .with_chain_id(Some(POLYGON_CHAIN_ID));
 
         info!("Created authenticated Polymarket SDK client, address: {:?}", signer.address());
@@ -462,13 +469,19 @@ impl PolymarketClient {
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
         // Read private key from environment variable for SDK signer
-        let private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
-            .or_else(|_| std::env::var("PRIVATE_KEY"))
-            .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
+        // Scope the raw key string so it is zeroized and dropped immediately after parsing
+        let signer: PrivateKeySigner = {
+            let mut private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
+                .or_else(|_| std::env::var("PRIVATE_KEY"))
+                .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
 
-        let signer: PrivateKeySigner = private_key_hex.trim_start_matches("0x")
-            .parse::<PrivateKeySigner>()
-            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
+            let result = private_key_hex.trim_start_matches("0x")
+                .parse::<PrivateKeySigner>()
+                .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)));
+
+            private_key_hex.zeroize();
+            result?
+        }
             .with_chain_id(Some(POLYGON_CHAIN_ID));
 
         // Parse funder address

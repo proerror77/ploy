@@ -139,10 +139,10 @@ impl SlippageProtection {
             };
         }
 
-        // Calculate slippage from reference price
+        // Calculate slippage from reference price (clamp to zero to prevent negative bypass)
         let slippage = best_ask - reference_price;
         let slippage_pct = if reference_price > Decimal::ZERO {
-            slippage / reference_price
+            (slippage / reference_price).max(Decimal::ZERO)
         } else {
             Decimal::ZERO
         };
@@ -201,10 +201,10 @@ impl SlippageProtection {
             };
         }
 
-        // Calculate slippage from reference price
+        // Calculate slippage from reference price (clamp to zero to prevent negative bypass)
         let slippage = reference_price - best_bid;
         let slippage_pct = if reference_price > Decimal::ZERO {
-            slippage / reference_price
+            (slippage / reference_price).max(Decimal::ZERO)
         } else {
             Decimal::ZERO
         };

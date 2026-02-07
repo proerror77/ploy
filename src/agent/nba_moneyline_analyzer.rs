@@ -55,13 +55,13 @@ pub struct NBAMoneylineAnalyzer {
 }
 
 impl NBAMoneylineAnalyzer {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap(),
-        }
+                .map_err(|e| PloyError::Internal(format!("HTTP client error: {}", e)))?,
+        })
     }
 
     /// Fetch all active NBA moneyline markets
@@ -315,7 +315,7 @@ impl NBAMoneylineAnalyzer {
         analyses.sort_by(|a, b| {
             let score_a = a.value_score * 0.5 + a.liquidity_score * 0.5;
             let score_b = b.value_score * 0.5 + b.liquidity_score * 0.5;
-            score_b.partial_cmp(&score_a).unwrap()
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         analyses
@@ -384,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_nba_moneylines() {
-        let analyzer = NBAMoneylineAnalyzer::new();
+        let analyzer = NBAMoneylineAnalyzer::new().unwrap();
         let markets = analyzer.fetch_nba_moneylines().await;
 
         match markets {
@@ -419,7 +419,7 @@ mod tests {
             all_markets: vec![],
         };
 
-        let analyzer = NBAMoneylineAnalyzer::new();
+        let analyzer = NBAMoneylineAnalyzer::new().unwrap();
         let analysis = analyzer.analyze_market(&market);
 
         assert!(analysis.value_score > 0.0);

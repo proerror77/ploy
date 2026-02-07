@@ -139,7 +139,8 @@ impl ClaudeAgentClient {
                     last_error = Some(e);
 
                     if attempts < self.config.max_retries {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let delay = Duration::from_secs(1u64.saturating_mul(2u64.saturating_pow(attempts as u32 - 1)).min(30));
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }

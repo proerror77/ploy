@@ -224,28 +224,47 @@ impl EmergencyStopManager {
         }
     }
 
-    /// Cancel all pending orders
+    /// Cancel all pending orders (parallel with timeout)
     async fn cancel_all_orders(&self) -> Result<usize> {
-        // Get all open orders from exchange
         let orders = self.client.get_open_orders().await?;
 
-        let mut cancelled = 0;
-        for order in orders {
-            match self.client.cancel_order(&order.id).await {
-                Ok(true) => {
-                    cancelled += 1;
-                    info!("Cancelled order: {}", order.id);
-                }
-                Ok(false) => {
-                    warn!("Order {} already cancelled or filled", order.id);
-                }
-                Err(e) => {
-                    error!("Failed to cancel order {}: {}", order.id, e);
-                }
-            }
+        if orders.is_empty() {
+            return Ok(0);
         }
 
-        Ok(cancelled)
+        let timeout_dur = std::time::Duration::from_secs(self.config.cancel_timeout_secs);
+        let client = self.client.clone();
+
+        let futs: Vec<_> = orders.iter().map(|order| {
+            let client = client.clone();
+            let order_id = order.id.clone();
+            async move {
+                match client.cancel_order(&order_id).await {
+                    Ok(true) => {
+                        info!("Cancelled order: {}", order_id);
+                        true
+                    }
+                    Ok(false) => {
+                        warn!("Order {} already cancelled or filled", order_id);
+                        false
+                    }
+                    Err(e) => {
+                        error!("Failed to cancel order {}: {}", order_id, e);
+                        false
+                    }
+                }
+            }
+        }).collect();
+
+        match tokio::time::timeout(timeout_dur, futures_util::future::join_all(futs)).await {
+            Ok(results) => Ok(results.into_iter().filter(|r| *r).count()),
+            Err(_) => {
+                error!("Order cancellation timed out after {}s", self.config.cancel_timeout_secs);
+                Err(PloyError::OrderTimeout(
+                    format!("Cancel all orders timed out after {}s", self.config.cancel_timeout_secs)
+                ))
+            }
+        }
     }
 
     /// Close all open positions

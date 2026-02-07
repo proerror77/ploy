@@ -200,12 +200,8 @@ impl DLQProcessor {
                     id, error, entry.operation_type
                 );
 
-                // Mark as permanently failed by exhausting retries
-                for _ in 0..10 {
-                    if let Err(e) = self.transaction_manager.increment_dlq_retry(id).await {
-                        error!("Failed to mark DLQ entry {} as failed: {}", id, e);
-                        break;
-                    }
+                if let Err(e) = self.transaction_manager.mark_dlq_permanent_failure(id, &error).await {
+                    error!("Failed to mark DLQ entry {} as permanently failed: {}", id, e);
                 }
 
                 let mut stats = self.stats.write().await;
@@ -320,9 +316,7 @@ impl DLQProcessor {
                                 }
                                 DLQResult::PermanentFailure { error } => {
                                     error!("DLQ {} permanent failure: {}", id, error);
-                                    for _ in 0..10 {
-                                        let _ = tm.increment_dlq_retry(id).await;
-                                    }
+                                    let _ = tm.mark_dlq_permanent_failure(id, &error).await;
                                 }
                                 DLQResult::Skip => {
                                     debug!("DLQ {} skipped", id);

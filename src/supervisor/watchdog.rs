@@ -394,7 +394,17 @@ impl Watchdog {
                         }
                     }
 
-                    tokio::time::sleep(restart_delay).await;
+                    // Exponential backoff: base_delay * 2^attempt, capped at 60s
+                    let attempt_count = {
+                        let components = components.read().await;
+                        components.get(&name).map(|c| {
+                            c.restart_timestamps.iter().filter(|t| **t > window_start).count()
+                        }).unwrap_or(0)
+                    };
+                    let backoff_secs = restart_delay.as_secs()
+                        .saturating_mul(2u64.saturating_pow(attempt_count as u32))
+                        .min(60);
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
 
                     match restart_fn(name.clone()).await {
                         Ok(()) => {

@@ -29,8 +29,8 @@ pub struct FundManager {
     symbol_exposure: Arc<RwLock<std::collections::HashMap<String, Decimal>>>,
     /// Total number of symbols for equal allocation
     total_symbols: u32,
-    /// Cached balance (refreshed periodically)
-    cached_balance: Arc<RwLock<Option<Decimal>>>,
+    /// Cached balance with timestamp for TTL expiry
+    cached_balance: Arc<RwLock<Option<(Decimal, tokio::time::Instant)>>>,
 }
 
 impl FundManager {
@@ -46,6 +46,9 @@ impl FundManager {
             cached_balance: Arc::new(RwLock::new(None)),
         }
     }
+
+    /// Cache TTL duration
+    const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// Create a new fund manager with specified symbol count
     pub fn new_with_symbols(client: PolymarketClient, config: RiskConfig, total_symbols: u32) -> Self {
@@ -242,32 +245,26 @@ impl FundManager {
         Ok((actual_amount, shares))
     }
 
-    /// Get current balance (with caching)
+    /// Get current balance (with timestamp-based TTL caching)
     pub async fn get_balance(&self) -> Result<Decimal> {
-        // Check cache first (valid for 10 seconds)
+        // Check cache first
         {
             let cached = self.cached_balance.read().await;
-            if let Some(bal) = *cached {
-                return Ok(bal);
+            if let Some((bal, ts)) = *cached {
+                if ts.elapsed() < Self::CACHE_TTL {
+                    return Ok(bal);
+                }
             }
         }
 
         // Fetch fresh balance
         let balance = self.client.get_usdc_balance().await?;
 
-        // Update cache
+        // Update cache with current timestamp
         {
             let mut cached = self.cached_balance.write().await;
-            *cached = Some(balance);
+            *cached = Some((balance, tokio::time::Instant::now()));
         }
-
-        // Clear cache after 10 seconds
-        let cache = self.cached_balance.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            let mut cached = cache.write().await;
-            *cached = None;
-        });
 
         Ok(balance)
     }
@@ -276,7 +273,7 @@ impl FundManager {
     pub async fn refresh_balance(&self) -> Result<Decimal> {
         let balance = self.client.get_usdc_balance().await?;
         let mut cached = self.cached_balance.write().await;
-        *cached = Some(balance);
+        *cached = Some((balance, tokio::time::Instant::now()));
         Ok(balance)
     }
 
