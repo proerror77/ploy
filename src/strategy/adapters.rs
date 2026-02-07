@@ -206,9 +206,7 @@ impl MomentumStrategyAdapter {
                 entry.get("min_edge").and_then(|v| v.as_float()).unwrap_or(5.0) / 100.0
             ).unwrap_or(dec!(0.05)),
             lookback_secs: 5,
-            // NEW: Multi-timeframe momentum and volatility adjustment
-            use_weighted_momentum: entry.get("use_weighted_momentum")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
+            // Multi-timeframe momentum (always enabled) with volatility adjustment
             use_volatility_adjustment: entry.get("use_volatility_adjustment")
                 .and_then(|v| v.as_bool()).unwrap_or(true),
             baseline_volatility,
@@ -727,6 +725,8 @@ pub struct SplitArbStrategyAdapter {
     hedged_positions: Arc<RwLock<Vec<HedgedSplitPosition>>>,
     /// Price cache (token_id -> bid/ask)
     prices: Arc<RwLock<HashMap<String, (Option<Decimal>, Option<Decimal>)>>>,
+    /// Order-to-market mapping (order_id -> (market_id, side))
+    order_market_map: Arc<RwLock<HashMap<String, (String, Side)>>>,
     /// Stats
     stats: Arc<RwLock<SplitStats>>,
     /// Enabled flag
@@ -791,6 +791,7 @@ impl SplitArbStrategyAdapter {
             partial_positions: Arc::new(RwLock::new(HashMap::new())),
             hedged_positions: Arc::new(RwLock::new(Vec::new())),
             prices: Arc::new(RwLock::new(HashMap::new())),
+            order_market_map: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(SplitStats::default())),
             enabled: true,
         }
@@ -910,6 +911,12 @@ impl SplitArbStrategyAdapter {
             self.id, if side == Side::Up { "YES" } else { "NO" },
             price * dec!(100), self.config.shares_per_trade);
 
+        // Track order -> market mapping so we can associate fills with positions
+        {
+            let mut map = self.order_market_map.write().await;
+            map.insert(client_order_id.clone(), (market_id.to_string(), side));
+        }
+
         Some(StrategyAction::SubmitOrder {
             client_order_id,
             order,
@@ -973,8 +980,79 @@ impl Strategy for SplitArbStrategyAdapter {
                     };
 
                     if has_partial {
-                        // Check if we can hedge
-                        // TODO: Implement hedge check
+                        // Check if we can complete the hedge (second leg)
+                        let partials = self.partial_positions.read().await;
+                        if let Some(partial) = partials.get(&market_id) {
+                            let hedge_side = partial.first_side.opposite();
+                            let markets = self.markets.read().await;
+                            if let Some(market) = markets.get(&market_id) {
+                                let hedge_token = match hedge_side {
+                                    Side::Up => market.yes_token_id.clone(),
+                                    Side::Down => market.no_token_id.clone(),
+                                };
+                                drop(markets);
+
+                                let prices = self.prices.read().await;
+                                if let Some((_, Some(opposite_ask))) = prices.get(&hedge_token) {
+                                    let fee_buffer = dec!(0.02);
+                                    let combined = partial.entry_price + *opposite_ask;
+                                    if combined < dec!(1.0) - fee_buffer {
+                                        let profit = dec!(1.0) - combined - fee_buffer;
+                                        let hedge_price = *opposite_ask;
+                                        let shares = partial.shares;
+                                        let partial_market_id = partial.market_id.clone();
+                                        drop(prices);
+                                        drop(partials);
+
+                                        let client_order_id = format!(
+                                            "{}_leg2_{}_{}",
+                                            self.id, partial_market_id, Utc::now().timestamp_millis()
+                                        );
+
+                                        let order = OrderRequest::buy_limit(
+                                            hedge_token,
+                                            hedge_side,
+                                            shares,
+                                            hedge_price,
+                                        );
+
+                                        // Track hedge order -> market mapping
+                                        {
+                                            let mut map = self.order_market_map.write().await;
+                                            map.insert(client_order_id.clone(), (partial_market_id.clone(), hedge_side));
+                                        }
+
+                                        info!(
+                                            "[{}] Hedge leg: {} @ {:.2}c (combined {:.2}c, profit {:.2}c)",
+                                            self.id,
+                                            if hedge_side == Side::Up { "YES" } else { "NO" },
+                                            hedge_price * dec!(100),
+                                            combined * dec!(100),
+                                            profit * dec!(100),
+                                        );
+
+                                        actions.push(StrategyAction::LogEvent {
+                                            event: StrategyEvent::new(
+                                                StrategyEventType::EntryTriggered,
+                                                format!(
+                                                    "Hedge leg for {}: {} @ {:.0}c, locked profit {:.1}c",
+                                                    partial_market_id,
+                                                    if hedge_side == Side::Up { "YES" } else { "NO" },
+                                                    hedge_price * dec!(100),
+                                                    profit * dec!(100),
+                                                ),
+                                            ),
+                                        });
+
+                                        actions.push(StrategyAction::SubmitOrder {
+                                            client_order_id,
+                                            order,
+                                            priority: 10,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         // Check for new opportunity
                         let partials = self.partial_positions.read().await;
@@ -1035,10 +1113,108 @@ impl Strategy for SplitArbStrategyAdapter {
                 info!("[{}] Order filled: {} @ {:?}",
                     self.id, update.order_id, update.avg_fill_price);
 
-                let mut stats = self.stats.write().await;
-                stats.first_leg_entries += 1;
+                // Look up which market/side this order belongs to
+                let order_key = update.client_order_id.clone()
+                    .unwrap_or_else(|| update.order_id.clone());
+                let mapping = {
+                    let map = self.order_market_map.read().await;
+                    map.get(&order_key).cloned()
+                };
 
-                // TODO: Track position and attempt hedge
+                if let Some((market_id, side)) = mapping {
+                    let fill_price = update.avg_fill_price.unwrap_or(Decimal::ZERO);
+                    let has_partial = {
+                        let partials = self.partial_positions.read().await;
+                        partials.contains_key(&market_id)
+                    };
+
+                    if !has_partial {
+                        // First leg fill -- create a partial position
+                        let markets = self.markets.read().await;
+                        let token_id = markets.get(&market_id).map(|m| match side {
+                            Side::Up => m.yes_token_id.clone(),
+                            Side::Down => m.no_token_id.clone(),
+                        }).unwrap_or_default();
+                        drop(markets);
+
+                        let partial = SplitPosition {
+                            market_id: market_id.clone(),
+                            first_side: side,
+                            first_token_id: token_id,
+                            shares: update.filled_qty,
+                            entry_price: fill_price,
+                            opened_at: Utc::now(),
+                            order_id: Some(order_key.clone()),
+                        };
+
+                        let mut partials = self.partial_positions.write().await;
+                        partials.insert(market_id.clone(), partial);
+
+                        let mut stats = self.stats.write().await;
+                        stats.first_leg_entries += 1;
+
+                        info!("[{}] First leg tracked: {} {} @ {:.2}c",
+                            self.id, market_id,
+                            if side == Side::Up { "YES" } else { "NO" },
+                            fill_price * dec!(100));
+                    } else {
+                        // Hedge leg fill -- complete the arb cycle
+                        let mut partials = self.partial_positions.write().await;
+                        if let Some(partial) = partials.remove(&market_id) {
+                            let total_cost = partial.entry_price + fill_price;
+                            let profit = dec!(1.0) - total_cost;
+
+                            let markets = self.markets.read().await;
+                            let (yes_token, no_token, yes_price, no_price) =
+                                if let Some(m) = markets.get(&market_id) {
+                                    match partial.first_side {
+                                        Side::Up => (
+                                            m.yes_token_id.clone(), m.no_token_id.clone(),
+                                            partial.entry_price, fill_price,
+                                        ),
+                                        Side::Down => (
+                                            m.yes_token_id.clone(), m.no_token_id.clone(),
+                                            fill_price, partial.entry_price,
+                                        ),
+                                    }
+                                } else {
+                                    (String::new(), String::new(), partial.entry_price, fill_price)
+                                };
+                            drop(markets);
+
+                            let hedged = HedgedSplitPosition {
+                                market_id: market_id.clone(),
+                                yes_token_id: yes_token,
+                                no_token_id: no_token,
+                                shares: partial.shares,
+                                yes_price,
+                                no_price,
+                                total_cost,
+                                profit_locked: profit,
+                                opened_at: partial.opened_at,
+                            };
+
+                            let mut hedged_positions = self.hedged_positions.write().await;
+                            hedged_positions.push(hedged);
+
+                            let mut stats = self.stats.write().await;
+                            stats.hedges_completed += 1;
+                            stats.total_profit += profit * Decimal::from(partial.shares);
+
+                            info!(
+                                "[{}] Hedge complete: {} cost={:.2}c profit={:.2}c/share ({} shares)",
+                                self.id, market_id,
+                                total_cost * dec!(100),
+                                profit * dec!(100),
+                                partial.shares,
+                            );
+                        }
+                    }
+
+                    // Clean up the order mapping
+                    let mut map = self.order_market_map.write().await;
+                    map.remove(&order_key);
+                }
 
                 actions.push(StrategyAction::LogEvent {
                     event: StrategyEvent::new(
@@ -1077,11 +1253,41 @@ impl Strategy for SplitArbStrategyAdapter {
             warn!("[{}] Hedge timeout for {}, exiting unhedged", self.id, market_id);
 
             let mut partials = self.partial_positions.write().await;
-            if let Some(_pos) = partials.remove(&market_id) {
+            if let Some(pos) = partials.remove(&market_id) {
                 let mut stats = self.stats.write().await;
                 stats.unhedged_exits += 1;
 
-                // TODO: Generate exit order
+                // Generate a sell order to exit the unhedged first leg
+                let urgency_buffer = dec!(0.01);
+                let exit_price = pos.entry_price - urgency_buffer;
+                // Floor at 1 cent to avoid nonsensical prices
+                let exit_price = if exit_price < dec!(0.01) { dec!(0.01) } else { exit_price };
+
+                let client_order_id = format!(
+                    "{}_exit_{}_{}",
+                    self.id, market_id, now.timestamp_millis()
+                );
+
+                let order = OrderRequest::sell_limit(
+                    pos.first_token_id.clone(),
+                    pos.first_side,
+                    pos.shares,
+                    exit_price,
+                );
+
+                info!(
+                    "[{}] Unhedged exit: {} {} @ {:.2}c ({} shares)",
+                    self.id, market_id,
+                    if pos.first_side == Side::Up { "YES" } else { "NO" },
+                    exit_price * dec!(100),
+                    pos.shares,
+                );
+
+                actions.push(StrategyAction::SubmitOrder {
+                    client_order_id,
+                    order,
+                    priority: 8,
+                });
 
                 actions.push(StrategyAction::Alert {
                     level: AlertLevel::Warning,

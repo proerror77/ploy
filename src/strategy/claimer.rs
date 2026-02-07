@@ -257,7 +257,10 @@ impl AutoClaimer {
                 outcome: p.outcome.clone().unwrap_or_default(),
                 size,
                 payout,
-                neg_risk: false, // TODO: detect from market type
+                neg_risk: p.extra.get("neg_risk")
+                    .or_else(|| p.extra.get("negRisk"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             });
 
             info!(

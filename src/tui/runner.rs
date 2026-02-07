@@ -199,6 +199,15 @@ impl DashboardRunner {
             AppEvent::StrategyState(state) => {
                 self.app.set_strategy_state(&state);
             }
+            AppEvent::BinancePrice { symbol, price } => {
+                self.app.update_binance_price(symbol, price);
+            }
+            AppEvent::ConnectionStatus(connected) => {
+                self.app.set_connection_status(connected);
+            }
+            AppEvent::Error(msg) => {
+                self.app.set_last_error(msg);
+            }
             AppEvent::Tick | AppEvent::Key(_) | AppEvent::Resize(_, _) => {
                 // Handled in main loop
             }
@@ -208,7 +217,7 @@ impl DashboardRunner {
     /// Run Binance price feed
     async fn run_binance_feed(
         symbols: Vec<String>,
-        _event_tx: mpsc::UnboundedSender<AppEvent>,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
         running: Arc<AtomicBool>,
     ) {
         info!("Connecting to Binance WebSocket...");
@@ -218,25 +227,36 @@ impl DashboardRunner {
 
         // Spawn WebSocket runner
         let ws_running = Arc::clone(&running);
+        let err_tx = event_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = binance_ws.run().await {
                 if ws_running.load(Ordering::SeqCst) {
                     error!("Binance WebSocket error: {}", e);
+                    let _ = err_tx.send(AppEvent::Error(format!("Binance WS: {}", e)));
                 }
             }
         });
+
+        let mut first_update = true;
 
         // Forward price updates
         while running.load(Ordering::SeqCst) {
             match rx.recv().await {
                 Ok(update) => {
                     debug!("BTC price: {}", update.price);
-                    // Price updates are used when fills occur
-                    // We don't send them as separate events
+                    if first_update {
+                        let _ = event_tx.send(AppEvent::ConnectionStatus(true));
+                        first_update = false;
+                    }
+                    let _ = event_tx.send(AppEvent::BinancePrice {
+                        symbol: update.symbol,
+                        price: update.price,
+                    });
                 }
                 Err(e) => {
                     if running.load(Ordering::SeqCst) {
                         warn!("Binance channel error: {}", e);
+                        let _ = event_tx.send(AppEvent::Error(format!("Binance: {}", e)));
                     }
                     break;
                 }
@@ -381,6 +401,24 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
         dry_run,
     };
 
-    let runner = DashboardRunner::new(config);
+    let mut runner = DashboardRunner::new(config);
+
+    // Set available markets from series info
+    let mut market_names = vec![series_input.to_string()];
+    // Add common related series for switching
+    match series_input.to_lowercase().as_str() {
+        s if s.starts_with("sol") => {
+            market_names = vec!["SOL-15m".into(), "SOL-4h".into()];
+        }
+        s if s.starts_with("eth") => {
+            market_names = vec!["ETH-15m".into(), "ETH-1h".into(), "ETH-4h".into()];
+        }
+        s if s.starts_with("btc") => {
+            market_names = vec!["BTC-Daily".into()];
+        }
+        _ => {}
+    }
+    runner.app.set_markets(market_names);
+
     runner.run().await
 }

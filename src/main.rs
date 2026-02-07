@@ -2144,8 +2144,7 @@ async fn run_momentum_mode(
         min_edge: Decimal::from_str(&format!("{:.6}", min_edge / 100.0))
             .unwrap_or(dec!(0.03)),
         lookback_secs: 5,
-        // NEW: Multi-timeframe momentum and volatility adjustment
-        use_weighted_momentum: true,    // Use 10s/30s/60s weighted combination
+        // Multi-timeframe momentum (always enabled) with volatility adjustment
         use_volatility_adjustment: true, // Adjust threshold by current volatility
         baseline_volatility,
         volatility_lookback_secs: 60,   // 60-second rolling volatility

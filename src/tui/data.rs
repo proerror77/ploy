@@ -190,6 +190,14 @@ pub struct DashboardStats {
     pub strategy_state: String,
     /// Is dry run mode
     pub dry_run: bool,
+    /// Latest Binance price (BTC/SOL/ETH)
+    pub binance_price: Option<Decimal>,
+    /// Binance symbol being tracked (e.g. "BTCUSDT")
+    pub binance_symbol: String,
+    /// WebSocket connection status
+    pub ws_connected: bool,
+    /// Last error message
+    pub last_error: Option<String>,
 }
 
 impl DashboardStats {

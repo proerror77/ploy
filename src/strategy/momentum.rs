@@ -48,12 +48,8 @@ pub struct MomentumConfig {
     pub min_edge: Decimal,
 
     /// Lookback window for momentum calculation (seconds)
-    /// DEPRECATED: Use weighted momentum instead (10s, 30s, 60s combined)
+    /// Used as fallback when weighted momentum has insufficient history
     pub lookback_secs: u64,
-
-    /// Use weighted multi-timeframe momentum instead of single lookback
-    /// Formula: 0.2 * mom_10s + 0.3 * mom_30s + 0.5 * mom_60s
-    pub use_weighted_momentum: bool,
 
     /// Use volatility-adjusted thresholds
     /// threshold = min_move_pct * (current_vol / baseline_vol)
@@ -153,10 +149,9 @@ impl Default for MomentumConfig {
             min_move_pct: dec!(0.0005),     // 0.05% base minimum move (adjusted by volatility)
             max_entry_price: dec!(0.35),    // Max 35¢ entry (confirmed winner should be cheap)
             min_edge: dec!(0.03),           // 3% minimum edge
-            lookback_secs: 5,               // 5-second momentum window (deprecated)
+            lookback_secs: 5,               // 5-second fallback window
 
-            // === NEW: Multi-timeframe momentum ===
-            use_weighted_momentum: true,    // Use 10s/30s/60s weighted combination
+            // === Multi-timeframe momentum (always enabled) ===
             use_volatility_adjustment: true, // Adjust threshold by current volatility
             baseline_volatility,
             volatility_lookback_secs: 60,   // 60-second rolling volatility
@@ -730,17 +725,14 @@ impl MomentumDetector {
         down_ask: Option<Decimal>,
     ) -> Option<MomentumSignal> {
         // Calculate CEX momentum (weighted or single timeframe)
-        let momentum = if self.config.use_weighted_momentum {
-            match spot.weighted_momentum() {
-                Some(m) => m,
-                None => {
-                    // Fall back to single timeframe if not enough history
-                    debug!("{} insufficient history for weighted momentum, using single timeframe", symbol);
-                    spot.momentum(self.config.lookback_secs)?
-                }
+        // Always use weighted multi-timeframe momentum (10s/30s/60s),
+        // falling back to single-timeframe if insufficient history
+        let momentum = match spot.weighted_momentum() {
+            Some(m) => m,
+            None => {
+                debug!("{} insufficient history for weighted momentum, using single timeframe", symbol);
+                spot.momentum(self.config.lookback_secs)?
             }
-        } else {
-            spot.momentum(self.config.lookback_secs)?
         };
 
         // Calculate volatility-adjusted threshold

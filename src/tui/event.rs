@@ -44,6 +44,15 @@ pub enum AppEvent {
     RoundEndTime(Option<chrono::DateTime<chrono::Utc>>),
     /// Strategy state change
     StrategyState(String),
+    /// Binance price update
+    BinancePrice {
+        symbol: String,
+        price: rust_decimal::Decimal,
+    },
+    /// WebSocket connection status change
+    ConnectionStatus(bool),
+    /// Error message from a data source
+    Error(String),
 }
 
 /// Event handler that manages the event loop

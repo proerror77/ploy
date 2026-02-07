@@ -32,10 +32,46 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
             format!("[{}]", stats.strategy_state.to_uppercase()),
             THEME.border_style()
         ));
+        indicators.push(Span::raw(" "));
     }
 
+    // Binance price display
+    if let Some(price) = stats.binance_price {
+        let sym_label = format_binance_label(&stats.binance_symbol);
+        let price_str = format_currency(price);
+        indicators.push(Span::styled(
+            format!("{}: {}", sym_label, price_str),
+            THEME.highlight_style(),
+        ));
+        indicators.push(Span::raw(" "));
+    }
+
+    // Connection status indicator
+    let conn_indicator = if stats.ws_connected {
+        Span::styled("●", THEME.up_style())
+    } else {
+        Span::styled("●", THEME.down_style())
+    };
+    indicators.push(conn_indicator);
+
+    // Show truncated error if present
+    if let Some(ref err) = stats.last_error {
+        let truncated = if err.len() > 30 { &err[..30] } else { err };
+        indicators.push(Span::raw(" "));
+        indicators.push(Span::styled(truncated.to_string(), THEME.down_style()));
+    }
+
+    // Market name display
+    let market_label = if app.selected_market.is_empty() {
+        "[--]".to_string()
+    } else {
+        format!("[{}]", app.selected_market)
+    };
+
     let line = Line::from(vec![
-        Span::raw("  Trades: "),
+        Span::raw("  "),
+        Span::styled(market_label, THEME.border_style()),
+        Span::raw(" Trades: "),
         Span::styled(format!("{}", stats.trade_count), THEME.highlight_style()),
         Span::raw("  "),
         Span::styled("", THEME.inactive_style()),
@@ -79,4 +115,9 @@ fn format_with_commas(n: u64) -> String {
         result.insert(0, c);
     }
     result
+}
+
+/// Convert Binance symbol to short label (e.g. "BTCUSDT" -> "BTC")
+fn format_binance_label(symbol: &str) -> &str {
+    symbol.strip_suffix("USDT").unwrap_or(symbol)
 }

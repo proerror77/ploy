@@ -24,17 +24,23 @@ mod tests {
     #[test]
     fn test_market_switching() {
         let mut app = TuiApp::new();
+        // Markets are now dynamic; set them before testing switching
+        app.set_markets(vec!["SOL-15m".into(), "SOL-4h".into(), "ETH-15m".into()]);
         assert_eq!(app.selected_market_idx, 0);
+        assert_eq!(app.selected_market, "SOL-15m");
 
         app.next_market();
         assert_eq!(app.selected_market_idx, 1);
+        assert_eq!(app.selected_market, "SOL-4h");
 
         app.prev_market();
         assert_eq!(app.selected_market_idx, 0);
+        assert_eq!(app.selected_market, "SOL-15m");
 
         // Test wrap around
         app.prev_market();
         assert_eq!(app.selected_market_idx, 2);
+        assert_eq!(app.selected_market, "ETH-15m");
     }
 
     #[test]

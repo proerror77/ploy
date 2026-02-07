@@ -34,6 +34,8 @@ pub struct TuiApp {
     pub available_markets: Vec<String>,
     /// Currently selected market index
     pub selected_market_idx: usize,
+    /// Currently selected market name
+    pub selected_market: String,
 }
 
 impl Default for TuiApp {
@@ -54,12 +56,9 @@ impl TuiApp {
             running: true,
             last_update: Utc::now(),
             show_help: false,
-            available_markets: vec![
-                "SOL-15m".to_string(),
-                "ETH-15m".to_string(),
-                "BTC-Daily".to_string(),
-            ],
+            available_markets: Vec::new(),
             selected_market_idx: 0,
+            selected_market: String::new(),
         }
     }
 
@@ -168,6 +167,22 @@ impl TuiApp {
         self.stats.dry_run = dry_run;
     }
 
+    /// Update Binance price
+    pub fn update_binance_price(&mut self, symbol: String, price: Decimal) {
+        self.stats.binance_symbol = symbol;
+        self.stats.binance_price = Some(price);
+    }
+
+    /// Update WebSocket connection status
+    pub fn set_connection_status(&mut self, connected: bool) {
+        self.stats.ws_connected = connected;
+    }
+
+    /// Set last error message
+    pub fn set_last_error(&mut self, error: String) {
+        self.stats.last_error = Some(error);
+    }
+
     /// Scroll transactions up
     pub fn scroll_up(&mut self) {
         self.tx_scroll_offset = self.tx_scroll_offset.saturating_sub(1);
@@ -190,10 +205,18 @@ impl TuiApp {
         self.show_help = !self.show_help;
     }
 
+    /// Set available markets dynamically
+    pub fn set_markets(&mut self, markets: Vec<String>) {
+        self.available_markets = markets;
+        self.selected_market_idx = 0;
+        self.selected_market = self.available_markets.first().cloned().unwrap_or_default();
+    }
+
     /// Switch to next market
     pub fn next_market(&mut self) {
         if !self.available_markets.is_empty() {
             self.selected_market_idx = (self.selected_market_idx + 1) % self.available_markets.len();
+            self.selected_market = self.available_markets[self.selected_market_idx].clone();
         }
     }
 
@@ -205,6 +228,7 @@ impl TuiApp {
             } else {
                 self.selected_market_idx -= 1;
             }
+            self.selected_market = self.available_markets[self.selected_market_idx].clone();
         }
     }
 

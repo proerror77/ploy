@@ -2,7 +2,7 @@ use crate::adapters::{PostgresStore, QuoteCache, QuoteUpdate};
 use crate::config::AppConfig;
 use crate::domain::{Round, Side, StrategyState};
 use crate::error::{PloyError, Result};
-use crate::strategy::{OrderExecutor, RiskManager, SignalDetector, TradingCalculator};
+use crate::strategy::{OrderExecutor, RiskManager, SignalDetector, TradingCalculator, SlippageProtection, SlippageConfig, SlippageCheck, MarketDepth};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -19,6 +19,8 @@ pub struct StrategyEngine {
     quote_cache: QuoteCache,
     state: Arc<RwLock<EngineState>>,
     calculator: TradingCalculator,
+    /// Slippage protection for order execution
+    slippage: SlippageProtection,
     /// Mutex to prevent concurrent order submissions (separate from state lock)
     execution_mutex: Mutex<()>,
 }
@@ -79,6 +81,12 @@ impl StrategyEngine {
             config.strategy.profit_buffer,
         );
 
+        // Create slippage protection from config
+        let slippage = SlippageProtection::new(SlippageConfig {
+            max_slippage_pct: config.strategy.slippage_buffer,
+            ..SlippageConfig::default()
+        });
+
         Ok(Self {
             config,
             store,
@@ -88,6 +96,7 @@ impl StrategyEngine {
             quote_cache,
             state: Arc::new(RwLock::new(EngineState::default())),
             calculator,
+            slippage,
             execution_mutex: Mutex::new(()),
         })
     }
@@ -316,6 +325,30 @@ impl StrategyEngine {
             )
         })?;
 
+        // Slippage check using cached quote
+        if let Some(quote) = self.quote_cache.get(&token_id) {
+            if let (Some(best_bid), Some(best_ask)) = (quote.best_bid, quote.best_ask) {
+                let depth = MarketDepth {
+                    best_bid,
+                    best_ask,
+                    bid_size: quote.bid_size.unwrap_or(Decimal::ZERO),
+                    ask_size: quote.ask_size.unwrap_or(Decimal::ZERO),
+                };
+                let order_size = Decimal::from(self.config.strategy.shares);
+                match self.slippage.check_buy_order(&depth, order_size, price) {
+                    SlippageCheck::Rejected { reason, .. } => {
+                        warn!("Leg1 slippage check failed: {}", reason);
+                        return Err(PloyError::Validation(
+                            format!("Leg1 slippage rejected: {}", reason),
+                        ));
+                    }
+                    SlippageCheck::Approved { estimated_slippage_pct, .. } => {
+                        debug!("Leg1 slippage approved: {:.2}%", estimated_slippage_pct * Decimal::from(100));
+                    }
+                }
+            }
+        }
+
         // Create cycle
         let cycle_id = self.store.create_cycle(round_id, StrategyState::Leg1Pending).await?;
 
@@ -417,6 +450,30 @@ impl StrategyEngine {
             .ok_or_else(|| PloyError::Internal("No active round".to_string()))?;
 
         let token_id = round.token_id(side).to_string();
+
+        // Slippage check using cached quote
+        if let Some(quote) = self.quote_cache.get(&token_id) {
+            if let (Some(best_bid), Some(best_ask)) = (quote.best_bid, quote.best_ask) {
+                let depth = MarketDepth {
+                    best_bid,
+                    best_ask,
+                    bid_size: quote.bid_size.unwrap_or(Decimal::ZERO),
+                    ask_size: quote.ask_size.unwrap_or(Decimal::ZERO),
+                };
+                let order_size = Decimal::from(ctx.leg1_shares);
+                match self.slippage.check_buy_order(&depth, order_size, price) {
+                    SlippageCheck::Rejected { reason, .. } => {
+                        warn!("Leg2 slippage check failed: {}", reason);
+                        return Err(PloyError::Validation(
+                            format!("Leg2 slippage rejected: {}", reason),
+                        ));
+                    }
+                    SlippageCheck::Approved { estimated_slippage_pct, .. } => {
+                        debug!("Leg2 slippage approved: {:.2}%", estimated_slippage_pct * Decimal::from(100));
+                    }
+                }
+            }
+        }
 
         info!(
             "Entering Leg2: {} {} shares of {} @ {}",
