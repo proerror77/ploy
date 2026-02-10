@@ -13,11 +13,11 @@ market_slug = "sol-updown-15m"
 shares = 20                     # Number of shares per leg
 window_min = 2                  # Minutes to watch for dump after round start
 move_pct = 0.15                 # 15% drop triggers Leg1
-sum_target = 0.95               # Raw sum threshold before fees
+sum_target = 1.0                # Raw sum threshold (typically 1.0 for binary markets)
 fee_buffer = 0.005              # 0.5% fee estimate
 slippage_buffer = 0.02          # 2% slippage buffer
 profit_buffer = 0.01            # 1% minimum profit target
-# Effective target = 1 - 0.005 - 0.02 - 0.01 = 0.965
+# Effective target = sum_target - 0.005 - 0.02 - 0.01
 
 [execution]
 order_timeout_ms = 5000         # 5 second timeout for order fills
@@ -42,3 +42,70 @@ enabled = true                  # Start in dry run mode for safety
 [logging]
 level = "info"
 json = false
+
+# =============================================================================
+# Optional always-on agent: Arena leaderboard → Polymarket event mispricing scan
+# =============================================================================
+#
+# This is designed for markets like:
+# "Which company has the best AI model end of February?"
+#
+# It fetches the Arena Text leaderboard via a proxy:
+#   https://r.jina.ai/https://arena.ai/leaderboard/text
+# then builds a conservative "true probability" estimate per company and compares
+# against Polymarket order book asks to find mispricing.
+#
+# To enable live order placement, you still need to run the bot (`ploy run`) and
+# set authentication env vars (and set `dry_run.enabled=false`).
+#
+# [event_edge_agent]
+# enabled = false
+# framework = "deterministic" # or "event_driven" or "claude_agent_sdk"
+# # Note: `claude_agent_sdk` requires the Claude Code CLI installed + authenticated on this host.
+# trade = false
+# interval_secs = 30
+# min_edge = 0.08
+# max_entry = 0.75
+# shares = 100
+# cooldown_secs = 120
+# max_daily_spend_usd = 50
+# model = ""                 # optional
+# claude_max_turns = 20
+# titles = ["Which company has the best AI model end of February?"]
+# event_ids = []
+
+# =============================================================================
+# NBA Q3→Q4 Comeback Trading Agent
+# =============================================================================
+#
+# Scans live NBA games via ESPN, identifies teams trailing in Q3 with high
+# historical comeback rates, and buys YES shares on Polymarket when the
+# market underprices their win probability.
+#
+# [nba_comeback]
+# enabled = false
+# min_edge = 0.05
+# max_entry_price = 0.75
+# shares = 50
+# cooldown_secs = 300
+# max_daily_spend_usd = 100
+# min_deficit = 1
+# max_deficit = 15
+# target_quarter = 3
+# espn_poll_interval_secs = 30
+# min_comeback_rate = 0.15
+# season = "2025-26"
+
+# =============================================================================
+# Event Registry — shared event pool for cross-strategy discovery
+# =============================================================================
+#
+# Background scanner that populates the event_registry table.
+# Events flow: discovered → researched → monitoring → trade
+#
+# [event_registry]
+# enabled = false
+# scan_interval_secs = 300
+# sports_keywords = ["NBA", "NFL"]
+# general_keywords = []
+

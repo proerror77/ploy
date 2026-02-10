@@ -17,6 +17,227 @@ pub struct AppConfig {
     /// Health server port (default: 8080)
     #[serde(default)]
     pub health_port: Option<u16>,
+    /// Optional always-on external event mispricing agent (Arena → Polymarket)
+    #[serde(default)]
+    pub event_edge_agent: Option<EventEdgeAgentConfig>,
+    /// Optional NBA Q3→Q4 comeback trading agent
+    #[serde(default)]
+    pub nba_comeback: Option<NbaComebackConfig>,
+    /// Optional event registry discovery service
+    #[serde(default)]
+    pub event_registry: Option<DiscoveryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventEdgeAgentConfig {
+    /// Enable the agent inside `ploy run`
+    #[serde(default)]
+    pub enabled: bool,
+    /// Agent framework to use:
+    /// - "deterministic" (default): internal loop with fixed rules
+    /// - "event_driven": event-driven + persisted-state loop (Arena `last_updated` gating)
+    /// - "claude_agent_sdk": tool-using agent via `claude-agent-sdk-rs` (Claude Code CLI)
+    #[serde(default = "default_event_edge_framework")]
+    pub framework: String,
+    /// Polymarket event IDs to monitor (preferred)
+    #[serde(default)]
+    pub event_ids: Vec<String>,
+    /// Polymarket event titles to discover via Gamma `title_contains`
+    #[serde(default)]
+    pub titles: Vec<String>,
+    /// Poll interval seconds
+    #[serde(default = "default_event_edge_interval_secs")]
+    pub interval_secs: u64,
+    /// Minimum edge (p_true - ask) to consider entering
+    #[serde(default = "default_event_edge_min_edge")]
+    pub min_edge: Decimal,
+    /// Max entry price (ask) to pay
+    #[serde(default = "default_event_edge_max_entry")]
+    pub max_entry: Decimal,
+    /// Shares per order
+    #[serde(default = "default_event_edge_shares")]
+    pub shares: u64,
+    /// If true, places orders when conditions are met (respects global dry_run)
+    #[serde(default)]
+    pub trade: bool,
+    /// Cooldown seconds per token (avoid repeated buys)
+    #[serde(default = "default_event_edge_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Maximum notional spend per UTC day (simple safety guard)
+    #[serde(default = "default_event_edge_max_daily_spend_usd")]
+    pub max_daily_spend_usd: Decimal,
+
+    /// Claude model override for framework mode (optional)
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Maximum Claude turns per cycle (framework mode)
+    #[serde(default = "default_event_edge_claude_max_turns")]
+    pub claude_max_turns: u32,
+}
+
+impl EventEdgeAgentConfig {
+    /// Validate config invariants. Returns list of problems (empty = valid).
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.min_edge <= Decimal::ZERO {
+            errors.push(format!("min_edge must be > 0, got {}", self.min_edge));
+        }
+        if self.max_entry <= Decimal::ZERO || self.max_entry >= Decimal::ONE {
+            errors.push(format!(
+                "max_entry must be in (0, 1), got {}",
+                self.max_entry
+            ));
+        }
+        if self.shares == 0 {
+            errors.push("shares must be > 0".to_string());
+        }
+        if self.max_daily_spend_usd <= Decimal::ZERO {
+            errors.push(format!(
+                "max_daily_spend_usd must be > 0, got {}",
+                self.max_daily_spend_usd
+            ));
+        }
+        let valid_frameworks = ["deterministic", "event_driven", "claude_agent_sdk"];
+        if !valid_frameworks.contains(&self.framework.as_str()) {
+            errors.push(format!(
+                "framework must be one of {:?}, got \"{}\"",
+                valid_frameworks, self.framework
+            ));
+        }
+        errors
+    }
+}
+
+fn default_event_edge_framework() -> String {
+    "deterministic".to_string()
+}
+
+fn default_event_edge_interval_secs() -> u64 {
+    30
+}
+
+fn default_event_edge_min_edge() -> Decimal {
+    Decimal::new(8, 2) // 0.08
+}
+
+fn default_event_edge_max_entry() -> Decimal {
+    Decimal::new(75, 2) // 0.75
+}
+
+fn default_event_edge_shares() -> u64 {
+    100
+}
+
+fn default_event_edge_cooldown_secs() -> u64 {
+    120
+}
+
+fn default_event_edge_max_daily_spend_usd() -> Decimal {
+    Decimal::new(50, 0) // $50
+}
+
+fn default_event_edge_claude_max_turns() -> u32 {
+    20
+}
+
+/// NBA Q3→Q4 comeback trading agent configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct NbaComebackConfig {
+    /// Enable the agent
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum edge (adjusted_win_prob - market_price) to enter
+    #[serde(default = "default_nba_comeback_min_edge")]
+    pub min_edge: Decimal,
+    /// Maximum entry price (YES ask) to pay
+    #[serde(default = "default_nba_comeback_max_entry_price")]
+    pub max_entry_price: Decimal,
+    /// Shares per order
+    #[serde(default = "default_nba_comeback_shares")]
+    pub shares: u64,
+    /// Cooldown seconds per game (avoid repeated buys on same game)
+    #[serde(default = "default_nba_comeback_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Maximum notional spend per UTC day
+    #[serde(default = "default_nba_comeback_max_daily_spend")]
+    pub max_daily_spend_usd: Decimal,
+    /// Minimum point deficit to consider (inclusive)
+    #[serde(default = "default_nba_comeback_min_deficit")]
+    pub min_deficit: i32,
+    /// Maximum point deficit to consider (inclusive)
+    #[serde(default = "default_nba_comeback_max_deficit")]
+    pub max_deficit: i32,
+    /// Target quarter to scan (3 = look for comebacks entering Q4)
+    #[serde(default = "default_nba_comeback_target_quarter")]
+    pub target_quarter: u8,
+    /// ESPN poll interval in seconds
+    #[serde(default = "default_nba_comeback_poll_interval")]
+    pub espn_poll_interval_secs: u64,
+    /// Minimum historical comeback rate to consider a team
+    #[serde(default = "default_nba_comeback_min_rate")]
+    pub min_comeback_rate: f64,
+    /// Season string for DB lookups (e.g. "2025-26")
+    #[serde(default = "default_nba_comeback_season")]
+    pub season: String,
+}
+
+fn default_nba_comeback_min_edge() -> Decimal {
+    Decimal::new(5, 2) // 0.05 = 5%
+}
+fn default_nba_comeback_max_entry_price() -> Decimal {
+    Decimal::new(75, 2) // 0.75
+}
+fn default_nba_comeback_shares() -> u64 {
+    50
+}
+fn default_nba_comeback_cooldown_secs() -> u64 {
+    300 // 5 minutes per game
+}
+fn default_nba_comeback_max_daily_spend() -> Decimal {
+    Decimal::new(100, 0) // $100
+}
+fn default_nba_comeback_min_deficit() -> i32 {
+    1
+}
+fn default_nba_comeback_max_deficit() -> i32 {
+    15
+}
+fn default_nba_comeback_target_quarter() -> u8 {
+    3
+}
+fn default_nba_comeback_poll_interval() -> u64 {
+    30
+}
+fn default_nba_comeback_min_rate() -> f64 {
+    0.15 // 15%
+}
+fn default_nba_comeback_season() -> String {
+    "2025-26".to_string()
+}
+
+/// Event registry discovery service configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscoveryConfig {
+    /// Enable the background discovery scanner
+    #[serde(default)]
+    pub enabled: bool,
+    /// Scan interval in seconds (default: 300 = 5 minutes)
+    #[serde(default = "default_discovery_scan_interval")]
+    pub scan_interval_secs: u64,
+    /// Sports keywords to scan (e.g. ["NBA", "NFL"])
+    #[serde(default = "default_discovery_sports_keywords")]
+    pub sports_keywords: Vec<String>,
+    /// General keywords to scan
+    #[serde(default)]
+    pub general_keywords: Vec<String>,
+}
+
+fn default_discovery_scan_interval() -> u64 {
+    300
+}
+
+fn default_discovery_sports_keywords() -> Vec<String> {
+    vec!["NBA".to_string(), "NFL".to_string()]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,9 +273,9 @@ pub struct StrategyConfig {
 
 impl StrategyConfig {
     /// Calculate effective sum target after all buffers
-    /// sum_target_eff = 1 - fee_buffer - slippage_buffer - profit_buffer
+    /// sum_target_eff = sum_target - fee_buffer - slippage_buffer - profit_buffer
     pub fn effective_sum_target(&self) -> Decimal {
-        Decimal::ONE - self.fee_buffer - self.slippage_buffer - self.profit_buffer
+        self.sum_target - self.fee_buffer - self.slippage_buffer - self.profit_buffer
     }
 }
 
@@ -185,29 +406,33 @@ impl AppConfig {
     pub fn load_from<P: AsRef<Path>>(config_dir: P) -> Result<Self, ConfigError> {
         let config_dir = config_dir.as_ref();
 
-        let builder = Config::builder()
-            // Start with default values
-            .set_default("logging.level", "info")?
-            .set_default("logging.json", false)?
-            .set_default("execution.poll_interval_ms", 500)?
-            .set_default("execution.confirm_fills", false)?
-            .set_default("execution.confirm_fill_timeout_ms", default_confirm_fill_timeout_ms())?
-            .set_default("database.max_connections", 5)?
-            // Load default config file
-            .add_source(File::from(config_dir.join("default.toml")).required(false))
-            // Load environment-specific config (e.g., config/production.toml)
-            .add_source(
-                File::from(config_dir.join(
-                    std::env::var("PLOY_ENV").unwrap_or_else(|_| "development".to_string()),
-                ))
-                .required(false),
-            )
-            // Override with environment variables (PLOY_MARKET__WS_URL, etc.)
-            .add_source(
-                Environment::with_prefix("PLOY")
-                    .separator("__")
-                    .try_parsing(true),
-            );
+        let builder =
+            Config::builder()
+                // Start with default values
+                .set_default("logging.level", "info")?
+                .set_default("logging.json", false)?
+                .set_default("execution.poll_interval_ms", 500)?
+                .set_default("execution.confirm_fills", false)?
+                .set_default(
+                    "execution.confirm_fill_timeout_ms",
+                    default_confirm_fill_timeout_ms(),
+                )?
+                .set_default("database.max_connections", 5)?
+                // Load default config file
+                .add_source(File::from(config_dir.join("default.toml")).required(false))
+                // Load environment-specific config (e.g., config/production.toml)
+                .add_source(
+                    File::from(config_dir.join(
+                        std::env::var("PLOY_ENV").unwrap_or_else(|_| "development".to_string()),
+                    ))
+                    .required(false),
+                )
+                // Override with environment variables (PLOY_MARKET__WS_URL, etc.)
+                .add_source(
+                    Environment::with_prefix("PLOY")
+                        .separator("__")
+                        .try_parsing(true),
+                );
 
         builder.build()?.try_deserialize()
     }
@@ -227,7 +452,7 @@ impl AppConfig {
                 shares: 20,
                 window_min: 2,
                 move_pct: dec!(0.15),
-                sum_target: dec!(0.95),
+                sum_target: Decimal::ONE,
                 fee_buffer: dec!(0.005),
                 slippage_buffer: dec!(0.02),
                 profit_buffer: dec!(0.01),
@@ -248,11 +473,11 @@ impl AppConfig {
                 daily_loss_limit_usd: dec!(500),
                 leg2_force_close_seconds: 20,
                 // Fund management defaults
-                max_positions: 3,              // Max 3 concurrent positions
-                max_positions_per_symbol: 1,   // Only 1 position per symbol
-                position_size_pct: None,       // Not using percentage-based sizing
+                max_positions: 3,                // Max 3 concurrent positions
+                max_positions_per_symbol: 1,     // Only 1 position per symbol
+                position_size_pct: None,         // Not using percentage-based sizing
                 fixed_amount_usd: Some(dec!(1)), // $1 per trade
-                min_balance_usd: dec!(2),      // Keep $2 minimum balance
+                min_balance_usd: dec!(2),        // Keep $2 minimum balance
             },
             database: DatabaseConfig {
                 url: "postgres://localhost/ploy".to_string(),
@@ -261,6 +486,9 @@ impl AppConfig {
             dry_run: DryRunConfig { enabled: dry_run },
             logging: LoggingConfig::default(),
             health_port: Some(8080),
+            event_edge_agent: None,
+            nba_comeback: None,
+            event_registry: None,
         }
     }
 
@@ -273,8 +501,8 @@ impl AppConfig {
             errors.push("move_pct must be between 0 and 1".to_string());
         }
 
-        if self.strategy.sum_target <= Decimal::ZERO || self.strategy.sum_target >= Decimal::ONE {
-            errors.push("sum_target must be between 0 and 1".to_string());
+        if self.strategy.sum_target <= Decimal::ZERO || self.strategy.sum_target > Decimal::ONE {
+            errors.push("sum_target must be > 0 and <= 1".to_string());
         }
 
         let eff_target = self.strategy.effective_sum_target();
@@ -324,7 +552,7 @@ mod tests {
             profit_buffer: dec!(0.01),
         };
 
-        // 1 - 0.005 - 0.02 - 0.01 = 0.965
-        assert_eq!(strategy.effective_sum_target(), dec!(0.965));
+        // 0.95 - 0.005 - 0.02 - 0.01 = 0.915
+        assert_eq!(strategy.effective_sum_target(), dec!(0.915));
     }
 }

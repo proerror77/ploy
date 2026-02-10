@@ -252,12 +252,10 @@ impl PostgresStore {
 
     /// Get tick count for a round
     pub async fn get_tick_count(&self, round_id: i32) -> Result<i64> {
-        let row = sqlx::query(
-            r#"SELECT COUNT(*) as count FROM ticks WHERE round_id = $1"#,
-        )
-        .bind(round_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let row = sqlx::query(r#"SELECT COUNT(*) as count FROM ticks WHERE round_id = $1"#)
+            .bind(round_id)
+            .fetch_one(&self.pool)
+            .await?;
 
         Ok(row.get("count"))
     }
@@ -441,7 +439,15 @@ impl PostgresStore {
             UPDATE orders SET
                 status = $1,
                 exchange_order_id = COALESCE($2, exchange_order_id),
-                submitted_at = CASE WHEN $1 = 'Submitted' THEN NOW() ELSE submitted_at END
+                submitted_at = CASE
+                    WHEN $1 = 'Submitted' AND submitted_at IS NULL THEN NOW()
+                    ELSE submitted_at
+                END,
+                cancelled_at = CASE
+                    WHEN $1 = 'Cancelled' AND cancelled_at IS NULL THEN NOW()
+                    ELSE cancelled_at
+                END,
+                updated_at = NOW()
             WHERE client_order_id = $3
             "#,
         )
@@ -467,7 +473,15 @@ impl PostgresStore {
                 filled_shares = $1,
                 avg_fill_price = $2,
                 status = $3,
-                filled_at = CASE WHEN $3 = 'Filled' THEN NOW() ELSE filled_at END
+                filled_at = CASE
+                    WHEN $3 = 'Filled' AND filled_at IS NULL THEN NOW()
+                    ELSE filled_at
+                END,
+                cancelled_at = CASE
+                    WHEN $3 = 'Cancelled' AND cancelled_at IS NULL THEN NOW()
+                    ELSE cancelled_at
+                END,
+                updated_at = NOW()
             WHERE client_order_id = $4
             "#,
         )
@@ -522,6 +536,7 @@ impl PostgresStore {
 
     /// Increment cycle count
     pub async fn increment_cycle_count(&self, date: NaiveDate) -> Result<()> {
+        self.ensure_daily_metrics_row(date).await?;
         sqlx::query("UPDATE daily_metrics SET total_cycles = total_cycles + 1 WHERE date = $1")
             .bind(date)
             .execute(&self.pool)
@@ -531,6 +546,7 @@ impl PostgresStore {
 
     /// Record cycle completion
     pub async fn record_cycle_completion(&self, date: NaiveDate, pnl: Decimal) -> Result<()> {
+        self.ensure_daily_metrics_row(date).await?;
         sqlx::query(
             r#"
             UPDATE daily_metrics SET
@@ -550,6 +566,7 @@ impl PostgresStore {
 
     /// Record cycle abort
     pub async fn record_cycle_abort(&self, date: NaiveDate) -> Result<()> {
+        self.ensure_daily_metrics_row(date).await?;
         sqlx::query(
             r#"
             UPDATE daily_metrics SET
@@ -564,13 +581,47 @@ impl PostgresStore {
         Ok(())
     }
 
+    /// Record cycle abort without counting as a failure.
+    ///
+    /// Useful for expected/neutral aborts (e.g. IOC order got 0 fill) where we should track
+    /// the abort rate but not trip consecutive-failure logic.
+    pub async fn record_cycle_abort_neutral(&self, date: NaiveDate) -> Result<()> {
+        self.ensure_daily_metrics_row(date).await?;
+        sqlx::query(
+            r#"
+            UPDATE daily_metrics SET
+                aborted_cycles = aborted_cycles + 1
+            WHERE date = $1
+            "#,
+        )
+        .bind(date)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Halt trading
     pub async fn halt_trading(&self, date: NaiveDate, reason: &str) -> Result<()> {
+        self.ensure_daily_metrics_row(date).await?;
         sqlx::query("UPDATE daily_metrics SET halted = TRUE, halt_reason = $1 WHERE date = $2")
             .bind(reason)
             .bind(date)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn ensure_daily_metrics_row(&self, date: NaiveDate) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO daily_metrics (date)
+            VALUES ($1)
+            ON CONFLICT (date) DO NOTHING
+            "#,
+        )
+        .bind(date)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -711,7 +762,8 @@ impl PostgresStore {
             UPDATE orders SET
                 status = 'Cancelled',
                 error = $1,
-                filled_at = NOW()
+                cancelled_at = NOW(),
+                updated_at = NOW()
             WHERE client_order_id = $2
             "#,
         )
@@ -883,7 +935,11 @@ impl RecoverySummary {
         );
 
         for cycle in &self.incomplete_cycles {
-            let expired = if cycle.is_round_expired() { " [EXPIRED]" } else { "" };
+            let expired = if cycle.is_round_expired() {
+                " [EXPIRED]"
+            } else {
+                ""
+            };
             info!(
                 "  - Cycle {} in state {} (round: {}){}",
                 cycle.cycle_id, cycle.state, cycle.round_slug, expired
@@ -899,6 +955,343 @@ impl RecoverySummary {
                 &order.token_id[..8]
             );
         }
+    }
+
+}
+
+impl PostgresStore {
+
+    // ==================== NBA Comeback Stats ====================
+
+    /// Load all team stats for a given season
+    pub async fn load_nba_team_stats(
+        &self,
+        season: &str,
+    ) -> Result<Vec<crate::strategy::nba_data_collector::TeamStats>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT team_name, team_abbrev, season,
+                   wins, losses, win_rate, avg_points,
+                   q1_avg_points, q2_avg_points, q3_avg_points, q4_avg_points,
+                   comeback_rate_5pt, comeback_rate_10pt, comeback_rate_15pt,
+                   q4_net_rating, q4_pace,
+                   elo_rating, offensive_rating, defensive_rating
+            FROM nba_team_stats
+            WHERE season = $1
+            "#,
+        )
+        .bind(season)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let stats = rows
+            .iter()
+            .map(|r| crate::strategy::nba_data_collector::TeamStats {
+                team_name: r.get("team_name"),
+                season: r.get("season"),
+                wins: r.get("wins"),
+                losses: r.get("losses"),
+                win_rate: r.get("win_rate"),
+                avg_points: r.get("avg_points"),
+                q1_avg_points: r.get("q1_avg_points"),
+                q2_avg_points: r.get("q2_avg_points"),
+                q3_avg_points: r.get("q3_avg_points"),
+                q4_avg_points: r.get("q4_avg_points"),
+                comeback_rate_5pt: r.get("comeback_rate_5pt"),
+                comeback_rate_10pt: r.get("comeback_rate_10pt"),
+                comeback_rate_15pt: r.get("comeback_rate_15pt"),
+                elo_rating: r.get("elo_rating"),
+                offensive_rating: r.get("offensive_rating"),
+                defensive_rating: r.get("defensive_rating"),
+            })
+        .collect();
+
+        Ok(stats)
+    }
+
+    /// Upsert a single team's stats (insert or update on conflict)
+    pub async fn upsert_nba_team_stats(
+        &self,
+        team_name: &str,
+        team_abbrev: &str,
+        season: &str,
+        stats: &crate::strategy::nba_data_collector::TeamStats,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO nba_team_stats (
+                team_name, team_abbrev, season,
+                wins, losses, win_rate, avg_points,
+                q1_avg_points, q2_avg_points, q3_avg_points, q4_avg_points,
+                comeback_rate_5pt, comeback_rate_10pt, comeback_rate_15pt,
+                q4_net_rating,
+                elo_rating, offensive_rating, defensive_rating,
+                updated_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, NOW())
+            ON CONFLICT (team_abbrev, season) DO UPDATE SET
+                team_name = EXCLUDED.team_name,
+                wins = EXCLUDED.wins,
+                losses = EXCLUDED.losses,
+                win_rate = EXCLUDED.win_rate,
+                avg_points = EXCLUDED.avg_points,
+                q1_avg_points = EXCLUDED.q1_avg_points,
+                q2_avg_points = EXCLUDED.q2_avg_points,
+                q3_avg_points = EXCLUDED.q3_avg_points,
+                q4_avg_points = EXCLUDED.q4_avg_points,
+                comeback_rate_5pt = EXCLUDED.comeback_rate_5pt,
+                comeback_rate_10pt = EXCLUDED.comeback_rate_10pt,
+                comeback_rate_15pt = EXCLUDED.comeback_rate_15pt,
+                q4_net_rating = EXCLUDED.q4_net_rating,
+                elo_rating = EXCLUDED.elo_rating,
+                offensive_rating = EXCLUDED.offensive_rating,
+                defensive_rating = EXCLUDED.defensive_rating,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(team_name)
+        .bind(team_abbrev)
+        .bind(season)
+        .bind(stats.wins)
+        .bind(stats.losses)
+        .bind(stats.win_rate)
+        .bind(stats.avg_points)
+        .bind(stats.q1_avg_points)
+        .bind(stats.q2_avg_points)
+        .bind(stats.q3_avg_points)
+        .bind(stats.q4_avg_points)
+        .bind(stats.comeback_rate_5pt)
+        .bind(stats.comeback_rate_10pt)
+        .bind(stats.comeback_rate_15pt)
+        .bind(0.0f64) // q4_net_rating placeholder
+        .bind(stats.elo_rating)
+        .bind(stats.offensive_rating)
+        .bind(stats.defensive_rating)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    // ==================== Event Registry ====================
+
+    /// Insert or update an event in the registry.
+    /// Deduplicates on (title, source); uses COALESCE to preserve existing data.
+    pub async fn upsert_event(
+        &self,
+        req: &crate::strategy::registry::EventUpsertRequest,
+    ) -> Result<i32> {
+        let status = req.status.as_deref().unwrap_or("discovered");
+        let metadata = req
+            .metadata
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO event_registry (
+                title, source, event_id, slug, domain, strategy_hint,
+                status, confidence, settlement_rule, end_time,
+                market_slug, condition_id, token_ids, outcome_prices,
+                metadata, last_scanned_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, NOW())
+            ON CONFLICT (title, source) DO UPDATE SET
+                event_id       = COALESCE(EXCLUDED.event_id, event_registry.event_id),
+                slug           = COALESCE(EXCLUDED.slug, event_registry.slug),
+                domain         = EXCLUDED.domain,
+                strategy_hint  = COALESCE(EXCLUDED.strategy_hint, event_registry.strategy_hint),
+                confidence     = COALESCE(EXCLUDED.confidence, event_registry.confidence),
+                settlement_rule= COALESCE(EXCLUDED.settlement_rule, event_registry.settlement_rule),
+                end_time       = COALESCE(EXCLUDED.end_time, event_registry.end_time),
+                market_slug    = COALESCE(EXCLUDED.market_slug, event_registry.market_slug),
+                condition_id   = COALESCE(EXCLUDED.condition_id, event_registry.condition_id),
+                token_ids      = COALESCE(EXCLUDED.token_ids, event_registry.token_ids),
+                outcome_prices = COALESCE(EXCLUDED.outcome_prices, event_registry.outcome_prices),
+                metadata       = event_registry.metadata || EXCLUDED.metadata,
+                last_scanned_at= NOW(),
+                updated_at     = NOW()
+            RETURNING id
+            "#,
+        )
+        .bind(&req.title)
+        .bind(&req.source)
+        .bind(&req.event_id)
+        .bind(&req.slug)
+        .bind(&req.domain)
+        .bind(&req.strategy_hint)
+        .bind(status)
+        .bind(req.confidence)
+        .bind(&req.settlement_rule)
+        .bind(req.end_time)
+        .bind(&req.market_slug)
+        .bind(&req.condition_id)
+        .bind(&req.token_ids)
+        .bind(&req.outcome_prices)
+        .bind(&metadata)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.get("id"))
+    }
+
+    /// List events matching the given filter criteria.
+    pub async fn list_events(
+        &self,
+        filter: &crate::strategy::registry::EventFilter,
+    ) -> Result<Vec<crate::strategy::registry::RegisteredEvent>> {
+        let limit = filter.limit.unwrap_or(100);
+
+        // Build dynamic WHERE clauses
+        let mut conditions = Vec::new();
+        let mut idx = 1u32;
+
+        if filter.status.is_some() {
+            conditions.push(format!("status = ${idx}"));
+            idx += 1;
+        }
+        if filter.domain.is_some() {
+            conditions.push(format!("domain = ${idx}"));
+            idx += 1;
+        }
+        if filter.strategy_hint.is_some() {
+            conditions.push(format!("strategy_hint = ${idx}"));
+            idx += 1;
+        }
+        if filter.source.is_some() {
+            conditions.push(format!("source = ${idx}"));
+            idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            r#"
+            SELECT id, event_id, title, slug, source, domain, strategy_hint,
+                   status, confidence, settlement_rule, end_time,
+                   market_slug, condition_id, token_ids, outcome_prices,
+                   metadata, last_scanned_at, created_at, updated_at
+            FROM event_registry
+            {where_clause}
+            ORDER BY updated_at DESC
+            LIMIT ${idx}
+            "#,
+        );
+
+        let mut query = sqlx::query(&sql);
+
+        if let Some(ref s) = filter.status {
+            query = query.bind(s);
+        }
+        if let Some(ref d) = filter.domain {
+            query = query.bind(d);
+        }
+        if let Some(ref sh) = filter.strategy_hint {
+            query = query.bind(sh);
+        }
+        if let Some(ref src) = filter.source {
+            query = query.bind(src);
+        }
+        query = query.bind(limit);
+
+        let rows = query.fetch_all(&self.pool).await?;
+
+        let events = rows
+            .iter()
+            .map(|r| crate::strategy::registry::RegisteredEvent {
+                id: r.get("id"),
+                event_id: r.get("event_id"),
+                title: r.get("title"),
+                slug: r.get("slug"),
+                source: r.get("source"),
+                domain: r.get("domain"),
+                strategy_hint: r.get("strategy_hint"),
+                status: r.get("status"),
+                confidence: r.get("confidence"),
+                settlement_rule: r.get("settlement_rule"),
+                end_time: r.get("end_time"),
+                market_slug: r.get("market_slug"),
+                condition_id: r.get("condition_id"),
+                token_ids: r.get("token_ids"),
+                outcome_prices: r.get("outcome_prices"),
+                metadata: r.get("metadata"),
+                last_scanned_at: r.get("last_scanned_at"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect();
+
+        Ok(events)
+    }
+
+    /// Transition an event to a new status (validates the state machine).
+    pub async fn update_event_status(
+        &self,
+        id: i32,
+        new_status: crate::strategy::registry::EventStatus,
+    ) -> Result<()> {
+        let row = sqlx::query("SELECT status FROM event_registry WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        let row = row.ok_or_else(|| {
+            PloyError::Validation(format!("event_registry id={id} not found"))
+        })?;
+
+        let current_str: String = row.get("status");
+        let current = crate::strategy::registry::EventStatus::from_str(&current_str)
+            .ok_or_else(|| {
+                PloyError::Validation(format!("unknown status in DB: {current_str}"))
+            })?;
+
+        if !current.can_transition_to(new_status) {
+            return Err(PloyError::InvalidStateTransition {
+                from: current_str,
+                to: new_status.to_string(),
+            });
+        }
+
+        sqlx::query(
+            "UPDATE event_registry SET status = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(new_status.as_str())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get events with status=monitoring for a given strategy.
+    pub async fn get_monitoring_events(
+        &self,
+        strategy_hint: &str,
+    ) -> Result<Vec<crate::strategy::registry::RegisteredEvent>> {
+        let filter = crate::strategy::registry::EventFilter {
+            status: Some("monitoring".to_string()),
+            strategy_hint: Some(strategy_hint.to_string()),
+            ..Default::default()
+        };
+        self.list_events(&filter).await
+    }
+
+    /// Expire events whose end_time has passed (from non-terminal states).
+    pub async fn expire_stale_events(&self) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE event_registry
+            SET status = 'expired', updated_at = NOW()
+            WHERE end_time < NOW()
+              AND status NOT IN ('settled', 'expired')
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
 }
 
