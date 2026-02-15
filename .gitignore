@@ -29,6 +29,12 @@ Thumbs.db
 *.log
 logs/
 
+# Runtime artifacts (RPC idempotency/audit files)
+data/rpc/
+
+# Local one-off generators / scratch
+gen_parts/
+
 # Temporary files
 /tmp/
 *.tmp
