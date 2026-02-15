@@ -84,29 +84,15 @@ pub enum WatchdogEvent {
         last_heartbeat: DateTime<Utc>,
     },
     /// Component failed
-    ComponentFailed {
-        component: String,
-        error: String,
-    },
+    ComponentFailed { component: String, error: String },
     /// Attempting to restart component
-    RestartAttempt {
-        component: String,
-        attempt: u32,
-    },
+    RestartAttempt { component: String, attempt: u32 },
     /// Restart succeeded
-    RestartSucceeded {
-        component: String,
-    },
+    RestartSucceeded { component: String },
     /// Restart failed
-    RestartFailed {
-        component: String,
-        error: String,
-    },
+    RestartFailed { component: String, error: String },
     /// Component exhausted restart attempts
-    RestartExhausted {
-        component: String,
-        attempts: u32,
-    },
+    RestartExhausted { component: String, attempts: u32 },
 }
 
 /// Tracked component state
@@ -230,9 +216,12 @@ impl Watchdog {
     /// Check if all components are healthy
     pub async fn all_healthy(&self) -> bool {
         let components = self.components.read().await;
-        components
-            .values()
-            .all(|c| matches!(c.health.status, HealthStatus::Healthy | HealthStatus::Stopped))
+        components.values().all(|c| {
+            matches!(
+                c.health.status,
+                HealthStatus::Healthy | HealthStatus::Stopped
+            )
+        })
     }
 
     /// Get list of unhealthy components
@@ -280,9 +269,7 @@ impl Watchdog {
             // Clean old timestamps
             let window_start =
                 now - chrono::Duration::seconds(self.config.restart_window_secs as i64);
-            component
-                .restart_timestamps
-                .retain(|t| *t > window_start);
+            component.restart_timestamps.retain(|t| *t > window_start);
 
             let attempt = component.restart_timestamps.len() as u32;
             let _ = self.event_tx.send(WatchdogEvent::RestartAttempt {
@@ -366,7 +353,10 @@ impl Watchdog {
                             matches!(c.health.status, HealthStatus::Stale | HealthStatus::Failed)
                         })
                         .filter(|(_, c)| {
-                            c.restart_timestamps.iter().filter(|t| **t > window_start).count()
+                            c.restart_timestamps
+                                .iter()
+                                .filter(|t| **t > window_start)
+                                .count()
                                 < max_attempts as usize
                         })
                         .map(|(name, _)| name.clone())
@@ -397,11 +387,18 @@ impl Watchdog {
                     // Exponential backoff: base_delay * 2^attempt, capped at 60s
                     let attempt_count = {
                         let components = components.read().await;
-                        components.get(&name).map(|c| {
-                            c.restart_timestamps.iter().filter(|t| **t > window_start).count()
-                        }).unwrap_or(0)
+                        components
+                            .get(&name)
+                            .map(|c| {
+                                c.restart_timestamps
+                                    .iter()
+                                    .filter(|t| **t > window_start)
+                                    .count()
+                            })
+                            .unwrap_or(0)
                     };
-                    let backoff_secs = restart_delay.as_secs()
+                    let backoff_secs = restart_delay
+                        .as_secs()
                         .saturating_mul(2u64.saturating_pow(attempt_count as u32))
                         .min(60);
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;

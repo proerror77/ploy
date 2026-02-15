@@ -2,11 +2,11 @@
 //!
 //! Manages ordered startup and shutdown of system components with state tracking.
 
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
-use chrono::{DateTime, Utc};
 
 /// Component lifecycle states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,10 +105,10 @@ pub struct LifecycleConfig {
 impl Default for LifecycleConfig {
     fn default() -> Self {
         Self {
-            startup_timeout_ms: 30_000,    // 30 seconds
-            shutdown_timeout_ms: 120_000,  // 2 minutes
+            startup_timeout_ms: 30_000,   // 30 seconds
+            shutdown_timeout_ms: 120_000, // 2 minutes
             max_restart_attempts: 3,
-            restart_delay_ms: 1_000,       // 1 second
+            restart_delay_ms: 1_000, // 1 second
         }
     }
 }
@@ -220,12 +220,14 @@ impl LifecycleManager {
 
     /// Mark component as failed
     pub async fn mark_failed(&self, name: &str, error: &str) {
-        self.set_state(name, ComponentState::Failed, Some(error)).await;
+        self.set_state(name, ComponentState::Failed, Some(error))
+            .await;
     }
 
     /// Mark component as degraded
     pub async fn mark_degraded(&self, name: &str, reason: &str) {
-        self.set_state(name, ComponentState::Degraded, Some(reason)).await;
+        self.set_state(name, ComponentState::Degraded, Some(reason))
+            .await;
     }
 
     /// Record component restart
@@ -297,10 +299,8 @@ impl LifecycleManager {
                     return Err(e);
                 }
                 Err(_) => {
-                    let error = format!(
-                        "Startup timeout after {}ms",
-                        self.config.startup_timeout_ms
-                    );
+                    let error =
+                        format!("Startup timeout after {}ms", self.config.startup_timeout_ms);
                     self.mark_failed(&name, &error).await;
                     error!("Component {} startup timeout", name);
                     *self.system_state.write().await = ComponentState::Failed;
@@ -315,7 +315,9 @@ impl LifecycleManager {
         *self.system_state.write().await = ComponentState::Running;
 
         let duration = start_time.elapsed().as_millis() as u64;
-        let _ = self.event_tx.send(LifecycleEvent::StartupCompleted { duration_ms: duration });
+        let _ = self.event_tx.send(LifecycleEvent::StartupCompleted {
+            duration_ms: duration,
+        });
         info!("All components started successfully in {}ms", duration);
 
         Ok(())
@@ -343,13 +345,17 @@ impl LifecycleManager {
         );
 
         for name in order {
-            let current_state = self.get_state(&name).await.unwrap_or(ComponentState::Stopped);
+            let current_state = self
+                .get_state(&name)
+                .await
+                .unwrap_or(ComponentState::Stopped);
 
             if current_state.is_terminal() {
                 continue;
             }
 
-            self.set_state(&name, ComponentState::Stopping, Some(reason)).await;
+            self.set_state(&name, ComponentState::Stopping, Some(reason))
+                .await;
 
             match tokio::time::timeout(
                 std::time::Duration::from_millis(self.config.shutdown_timeout_ms),
@@ -365,7 +371,8 @@ impl LifecycleManager {
                         "Component {} shutdown timeout after {}ms",
                         name, self.config.shutdown_timeout_ms
                     );
-                    self.set_state(&name, ComponentState::Stopped, Some("timeout")).await;
+                    self.set_state(&name, ComponentState::Stopped, Some("timeout"))
+                        .await;
                 }
             }
         }
@@ -373,7 +380,9 @@ impl LifecycleManager {
         *self.system_state.write().await = ComponentState::Stopped;
 
         let duration = start_time.elapsed().as_millis() as u64;
-        let _ = self.event_tx.send(LifecycleEvent::ShutdownCompleted { duration_ms: duration });
+        let _ = self.event_tx.send(LifecycleEvent::ShutdownCompleted {
+            duration_ms: duration,
+        });
         info!("All components stopped in {}ms", duration);
     }
 
@@ -440,6 +449,9 @@ mod tests {
         manager.register("medium_priority", 2).await;
 
         let order = manager.get_startup_order().await;
-        assert_eq!(order, vec!["high_priority", "medium_priority", "low_priority"]);
+        assert_eq!(
+            order,
+            vec!["high_priority", "medium_priority", "low_priority"]
+        );
     }
 }

@@ -14,8 +14,8 @@ use crate::strategy::trading_costs::OrderType;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -160,7 +160,8 @@ impl EmergencyStopManager {
         drop(state);
 
         // Persist to database
-        self.persist_emergency_state(&reason, context.as_deref()).await?;
+        self.persist_emergency_state(&reason, context.as_deref())
+            .await?;
 
         // Cancel pending orders if configured
         if self.config.cancel_pending_orders {
@@ -217,7 +218,7 @@ impl EmergencyStopManager {
     pub fn check_allowed(&self) -> Result<()> {
         if self.is_stopped() {
             Err(PloyError::CircuitBreakerTriggered(
-                "Emergency stop is active - all trading operations are blocked".to_string()
+                "Emergency stop is active - all trading operations are blocked".to_string(),
             ))
         } else {
             Ok(())
@@ -235,34 +236,41 @@ impl EmergencyStopManager {
         let timeout_dur = std::time::Duration::from_secs(self.config.cancel_timeout_secs);
         let client = self.client.clone();
 
-        let futs: Vec<_> = orders.iter().map(|order| {
-            let client = client.clone();
-            let order_id = order.id.clone();
-            async move {
-                match client.cancel_order(&order_id).await {
-                    Ok(true) => {
-                        info!("Cancelled order: {}", order_id);
-                        true
-                    }
-                    Ok(false) => {
-                        warn!("Order {} already cancelled or filled", order_id);
-                        false
-                    }
-                    Err(e) => {
-                        error!("Failed to cancel order {}: {}", order_id, e);
-                        false
+        let futs: Vec<_> = orders
+            .iter()
+            .map(|order| {
+                let client = client.clone();
+                let order_id = order.id.clone();
+                async move {
+                    match client.cancel_order(&order_id).await {
+                        Ok(true) => {
+                            info!("Cancelled order: {}", order_id);
+                            true
+                        }
+                        Ok(false) => {
+                            warn!("Order {} already cancelled or filled", order_id);
+                            false
+                        }
+                        Err(e) => {
+                            error!("Failed to cancel order {}: {}", order_id, e);
+                            false
+                        }
                     }
                 }
-            }
-        }).collect();
+            })
+            .collect();
 
         match tokio::time::timeout(timeout_dur, futures_util::future::join_all(futs)).await {
             Ok(results) => Ok(results.into_iter().filter(|r| *r).count()),
             Err(_) => {
-                error!("Order cancellation timed out after {}s", self.config.cancel_timeout_secs);
-                Err(PloyError::OrderTimeout(
-                    format!("Cancel all orders timed out after {}s", self.config.cancel_timeout_secs)
-                ))
+                error!(
+                    "Order cancellation timed out after {}s",
+                    self.config.cancel_timeout_secs
+                );
+                Err(PloyError::OrderTimeout(format!(
+                    "Cancel all orders timed out after {}s",
+                    self.config.cancel_timeout_secs
+                )))
             }
         }
     }
@@ -278,12 +286,16 @@ impl EmergencyStopManager {
             match self.client.get_best_prices(&pos.token_id).await {
                 Ok((Some(bid), _)) => {
                     // Close at current bid price (taker order, assume 2% market depth)
-                    match self.position_manager.close_position(
-                        pos.id,
-                        bid,
-                        OrderType::Taker,
-                        dec!(0.02), // 2% of market depth
-                    ).await {
+                    match self
+                        .position_manager
+                        .close_position(
+                            pos.id,
+                            bid,
+                            OrderType::Taker,
+                            dec!(0.02), // 2% of market depth
+                        )
+                        .await
+                    {
                         Ok(pnl) => {
                             closed += 1;
                             info!(
@@ -309,7 +321,11 @@ impl EmergencyStopManager {
     }
 
     /// Persist emergency state to database
-    async fn persist_emergency_state(&self, reason: &EmergencyReason, context: Option<&str>) -> Result<()> {
+    async fn persist_emergency_state(
+        &self,
+        reason: &EmergencyReason,
+        context: Option<&str>,
+    ) -> Result<()> {
         let reason_str = reason.to_string();
         let metadata = serde_json::json!({
             "reason": reason_str,
@@ -365,7 +381,10 @@ impl EmergencyStopManager {
             .await?;
 
             if !reset_exists {
-                warn!("Found active emergency stop from previous session: {}", message);
+                warn!(
+                    "Found active emergency stop from previous session: {}",
+                    message
+                );
                 self.is_stopped.store(true, Ordering::SeqCst);
 
                 let mut state = self.state.write().await;
@@ -386,7 +405,10 @@ mod tests {
     #[test]
     fn test_emergency_reason_display() {
         assert_eq!(EmergencyReason::Manual.to_string(), "Manual");
-        assert_eq!(EmergencyReason::CircuitBreaker.to_string(), "CircuitBreaker");
+        assert_eq!(
+            EmergencyReason::CircuitBreaker.to_string(),
+            "CircuitBreaker"
+        );
         assert_eq!(
             EmergencyReason::Other("test".to_string()).to_string(),
             "Other: test"

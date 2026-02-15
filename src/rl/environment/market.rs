@@ -153,7 +153,8 @@ impl SimulatedMarket {
 
         // Generate price return with mean reversion and trend
         let random_return = self.sample_normal() * self.config.volatility;
-        let reversion = self.config.mean_reversion * (self.config.mean_price - self.state.spot_price);
+        let reversion =
+            self.config.mean_reversion * (self.config.mean_price - self.state.spot_price);
         let trend_component = self.config.trend * self.config.volatility;
 
         let total_return = random_return + reversion + trend_component;

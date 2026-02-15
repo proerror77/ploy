@@ -8,10 +8,13 @@ use crate::signing::Wallet;
 use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once};
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
 use crate::strategy::multi_outcome::fetch_multi_outcome_event;
-use config::{Config, Environment, File};
+use chrono::Utc;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
@@ -25,6 +28,21 @@ struct JsonRpcRequest {
     method: String,
     #[serde(default)]
     params: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RpcIdempotencyRecord {
+    method: String,
+    params_hash: String,
+    response: Value,
+    created_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct IdempotencyContext {
+    key: String,
+    params_hash: String,
+    record_path: PathBuf,
 }
 
 fn jsonrpc_ok(id: Option<Value>, result: Value) -> Value {
@@ -109,22 +127,7 @@ fn parse_decimal(v: &Value, key: &str) -> std::result::Result<Decimal, PloyError
 }
 
 fn load_app_config(config_path: &Path) -> std::result::Result<AppConfig, PloyError> {
-    if config_path.is_dir() {
-        return AppConfig::load_from(config_path).map_err(PloyError::from);
-    }
-
-    let mut builder = Config::builder();
-    builder = builder.add_source(File::from(config_path).required(true));
-    builder = builder.add_source(
-        Environment::with_prefix("PLOY")
-            .separator("__")
-            .try_parsing(true),
-    );
-    builder
-        .build()
-        .map_err(PloyError::from)?
-        .try_deserialize()
-        .map_err(PloyError::from)
+    AppConfig::load_from(config_path).map_err(PloyError::from)
 }
 
 async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClient> {
@@ -139,6 +142,121 @@ async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClie
     } else {
         PolymarketClient::new_authenticated(rest_url, wallet, true).await
     }
+}
+
+fn is_write_method(method: &str) -> bool {
+    matches!(
+        method,
+        "pm.submit_limit" | "pm.cancel_order" | "events.upsert" | "events.update_status"
+    )
+}
+
+fn rpc_state_dir() -> PathBuf {
+    std::env::var("PLOY_RPC_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("data/rpc"))
+}
+
+fn sanitize_idempotency_key(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn idempotency_record_path(method: &str, key: &str) -> PathBuf {
+    let mut path = rpc_state_dir();
+    path.push("idempotency");
+    path.push(method.replace('.', "_"));
+    path.push(format!("{}.json", sanitize_idempotency_key(key)));
+    path
+}
+
+fn hash_idempotency_params(params: &Value) -> std::result::Result<String, PloyError> {
+    let mut normalized = params.clone();
+    if let Some(obj) = normalized.as_object_mut() {
+        obj.remove("idempotency_key");
+    }
+    let bytes = serde_json::to_vec(&normalized)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn load_idempotency_record(
+    path: &Path,
+) -> std::result::Result<Option<RpcIdempotencyRecord>, PloyError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)?;
+    let record = serde_json::from_str::<RpcIdempotencyRecord>(&text)?;
+    Ok(Some(record))
+}
+
+fn save_idempotency_record(
+    path: &Path,
+    record: &RpcIdempotencyRecord,
+) -> std::result::Result<(), PloyError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(record)?)?;
+    Ok(())
+}
+
+fn append_write_audit_log(
+    method: &str,
+    idempotency_key: Option<&str>,
+    params: &Value,
+    response: &Value,
+) -> std::result::Result<(), PloyError> {
+    let mut path = rpc_state_dir();
+    path.push("audit");
+    fs::create_dir_all(&path)?;
+    path.push(format!("{}.jsonl", Utc::now().format("%Y-%m-%d")));
+
+    let mut params_for_log = params.clone();
+    if let Some(obj) = params_for_log.as_object_mut() {
+        for secret_key in ["private_key", "api_secret", "passphrase"] {
+            if obj.contains_key(secret_key) {
+                obj.insert(
+                    secret_key.to_string(),
+                    Value::String("***redacted***".to_string()),
+                );
+            }
+        }
+    }
+
+    let line = json!({
+        "ts": Utc::now().to_rfc3339(),
+        "method": method,
+        "idempotency_key": idempotency_key,
+        "params": params_for_log,
+        "response": response
+    });
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{}", line)?;
+    Ok(())
+}
+
+fn parse_idempotency_key(params: &Value) -> std::result::Result<String, PloyError> {
+    let key = parse_str(params, "idempotency_key")?;
+    if key.trim().is_empty() {
+        return Err(PloyError::Validation(
+            "missing/invalid string param: idempotency_key".to_string(),
+        ));
+    }
+    Ok(key)
 }
 
 pub async fn run_rpc(config_path: &str) -> Result<()> {
@@ -202,6 +320,84 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
     let rest_url = config.market.rest_url.clone();
     let dry_run = config.dry_run.enabled;
     let allow_write = write_enabled();
+    let method_name = req.method.clone();
+    let request_id = req.id.clone();
+    let idempotency_ctx = if is_write_method(&method_name) {
+        let key = match parse_idempotency_key(&params) {
+            Ok(v) => v,
+            Err(e) => {
+                println!(
+                    "{}",
+                    jsonrpc_err(
+                        request_id,
+                        -32602,
+                        "invalid params",
+                        Some(json!({"detail": e.to_string()})),
+                    )
+                );
+                return Ok(());
+            }
+        };
+        let params_hash = match hash_idempotency_params(&params) {
+            Ok(v) => v,
+            Err(e) => {
+                println!(
+                    "{}",
+                    jsonrpc_err(
+                        req.id.clone(),
+                        -32001,
+                        "idempotency hash failed",
+                        Some(json!({"detail": e.to_string()})),
+                    )
+                );
+                return Ok(());
+            }
+        };
+        let record_path = idempotency_record_path(&method_name, &key);
+
+        match load_idempotency_record(&record_path) {
+            Ok(Some(existing)) => {
+                if existing.params_hash != params_hash {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id.clone(),
+                            -32011,
+                            "idempotency key conflict (params mismatch)",
+                            Some(json!({"key": key})),
+                        )
+                    );
+                    return Ok(());
+                }
+
+                let mut replay = existing.response.clone();
+                if let Some(obj) = replay.as_object_mut() {
+                    obj.insert("id".to_string(), req.id.clone().unwrap_or(Value::Null));
+                }
+                println!("{}", replay);
+                return Ok(());
+            }
+            Ok(None) => Some(IdempotencyContext {
+                key,
+                params_hash,
+                record_path,
+            }),
+            Err(e) => {
+                println!(
+                    "{}",
+                    jsonrpc_err(
+                        req.id.clone(),
+                        -32001,
+                        "idempotency check failed",
+                        Some(json!({"detail": e.to_string()})),
+                    )
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
 
     let resp = match req.method.as_str() {
         "system.ping" => jsonrpc_ok(req.id, json!({"ok": true})),
@@ -534,7 +730,10 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
         }
 
         "pm.get_trades" => {
-            let limit = params.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
             match build_pm_client(&rest_url, true).await {
                 Ok(c) => match c.get_trades(limit).await {
                     Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
@@ -833,7 +1032,6 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
         }
 
         // ==================== Event Registry ====================
-
         "events.upsert" => {
             if let Err(v) = require_write_enabled(req.id.clone()) {
                 println!("{}", v.to_string());
@@ -863,24 +1061,45 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
             let req_body = crate::strategy::registry::EventUpsertRequest {
                 title,
                 source,
-                event_id: params.get("event_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                slug: params.get("slug").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                event_id: params
+                    .get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                slug: params
+                    .get("slug")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 domain: params
                     .get("domain")
                     .and_then(|v| v.as_str())
                     .unwrap_or("politics")
                     .to_string(),
-                strategy_hint: params.get("strategy_hint").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                status: params.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                strategy_hint: params
+                    .get("strategy_hint")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                status: params
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 confidence: params.get("confidence").and_then(|v| v.as_f64()),
-                settlement_rule: params.get("settlement_rule").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                settlement_rule: params
+                    .get("settlement_rule")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 end_time: params
                     .get("end_time")
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc)),
-                market_slug: params.get("market_slug").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                condition_id: params.get("condition_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                market_slug: params
+                    .get("market_slug")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                condition_id: params
+                    .get("condition_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 token_ids: params.get("token_ids").cloned(),
                 outcome_prices: params.get("outcome_prices").cloned(),
                 metadata: params.get("metadata").cloned(),
@@ -907,10 +1126,22 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
 
         "events.list" => {
             let filter = crate::strategy::registry::EventFilter {
-                status: params.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                domain: params.get("domain").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                strategy_hint: params.get("strategy_hint").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                source: params.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                status: params
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                domain: params
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                strategy_hint: params
+                    .get("strategy_hint")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                source: params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 limit: params.get("limit").and_then(|v| v.as_i64()),
             };
 
@@ -986,7 +1217,9 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
 
             match PostgresStore::new(&config.database.url, config.database.max_connections).await {
                 Ok(store) => match store.update_event_status(id, new_status).await {
-                    Ok(()) => jsonrpc_ok(req.id, json!({"ok": true, "id": id, "status": status_str})),
+                    Ok(()) => {
+                        jsonrpc_ok(req.id, json!({"ok": true, "id": id, "status": status_str}))
+                    }
                     Err(e) => jsonrpc_err(
                         req.id,
                         -32001,
@@ -1010,6 +1243,28 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
             Some(json!({"method": req.method})),
         ),
     };
+
+    if let Some(ctx) = idempotency_ctx {
+        if resp.get("error").is_none() {
+            let record = RpcIdempotencyRecord {
+                method: method_name.clone(),
+                params_hash: ctx.params_hash,
+                response: resp.clone(),
+                created_at: Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = save_idempotency_record(&ctx.record_path, &record) {
+                eprintln!("rpc idempotency persistence failed: {}", e);
+            }
+        }
+
+        if let Err(e) = append_write_audit_log(&method_name, Some(&ctx.key), &params, &resp) {
+            eprintln!("rpc write audit log failed: {}", e);
+        }
+    } else if is_write_method(&method_name) {
+        if let Err(e) = append_write_audit_log(&method_name, None, &params, &resp) {
+            eprintln!("rpc write audit log failed: {}", e);
+        }
+    }
 
     // Keep output single-line JSON for robust remote parsing.
     println!("{}", resp.to_string());

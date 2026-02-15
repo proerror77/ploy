@@ -16,7 +16,7 @@
 use crate::adapters::PostgresStore;
 use crate::domain::Side;
 use crate::error::{PloyError, Result};
-use crate::strategy::trading_costs::{TradingCostCalculator, OrderType};
+use crate::strategy::trading_costs::{OrderType, TradingCostCalculator};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -273,11 +273,25 @@ impl PositionManager {
 
     /// Get a position by ID
     pub async fn get_position(&self, position_id: i32) -> Result<Position> {
-        let row = sqlx::query_as::<_, (
-            i32, String, String, String, String,
-            i64, Decimal, Decimal,
-            DateTime<Utc>, Option<DateTime<Utc>>, String, Option<Decimal>, Option<Decimal>, Option<String>
-        )>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                i32,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                Decimal,
+                Decimal,
+                DateTime<Utc>,
+                Option<DateTime<Utc>>,
+                String,
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<String>,
+            ),
+        >(
             r#"
             SELECT id, event_id, symbol, token_id, market_side,
                    shares, avg_entry_price, amount_usd,
@@ -288,8 +302,7 @@ impl PositionManager {
         )
         .bind(position_id)
         .fetch_one(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         let market_side = match row.4.as_str() {
             "UP" => Side::Up,
@@ -333,11 +346,25 @@ impl PositionManager {
 
     /// Get all open positions
     pub async fn get_open_positions(&self) -> Result<Vec<Position>> {
-        let rows = sqlx::query_as::<_, (
-            i32, String, String, String, String,
-            i64, Decimal, Decimal,
-            DateTime<Utc>, Option<DateTime<Utc>>, String, Option<Decimal>, Option<Decimal>, Option<String>
-        )>(
+        let rows = sqlx::query_as::<
+            _,
+            (
+                i32,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                Decimal,
+                Decimal,
+                DateTime<Utc>,
+                Option<DateTime<Utc>>,
+                String,
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<String>,
+            ),
+        >(
             r#"
             SELECT id, event_id, symbol, token_id, market_side,
                    shares, avg_entry_price, amount_usd,
@@ -348,8 +375,7 @@ impl PositionManager {
             "#,
         )
         .fetch_all(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         let mut positions = Vec::new();
         for row in rows {
@@ -389,11 +415,25 @@ impl PositionManager {
 
     /// Get open positions for a specific symbol
     pub async fn get_open_positions_by_symbol(&self, symbol: &str) -> Result<Vec<Position>> {
-        let rows = sqlx::query_as::<_, (
-            i32, String, String, String, String,
-            i64, Decimal, Decimal,
-            DateTime<Utc>, Option<DateTime<Utc>>, String, Option<Decimal>, Option<Decimal>, Option<String>
-        )>(
+        let rows = sqlx::query_as::<
+            _,
+            (
+                i32,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                Decimal,
+                Decimal,
+                DateTime<Utc>,
+                Option<DateTime<Utc>>,
+                String,
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<String>,
+            ),
+        >(
             r#"
             SELECT id, event_id, symbol, token_id, market_side,
                    shares, avg_entry_price, amount_usd,
@@ -405,8 +445,7 @@ impl PositionManager {
         )
         .bind(symbol)
         .fetch_all(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         let mut positions = Vec::new();
         for row in rows {
@@ -463,8 +502,7 @@ impl PositionManager {
             "#,
         )
         .fetch_one(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         Ok(PositionSummary {
             total_open: row.0,
@@ -486,8 +524,7 @@ impl PositionManager {
         )
         .bind(symbol)
         .fetch_one(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         Ok(count)
     }
@@ -502,19 +539,32 @@ impl PositionManager {
             "#,
         )
         .fetch_one(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         Ok(count)
     }
 
     /// Get position by token ID
     pub async fn get_position_by_token(&self, token_id: &str) -> Result<Option<Position>> {
-        let row = sqlx::query_as::<_, (
-            i32, String, String, String, String,
-            i64, Decimal, Decimal,
-            DateTime<Utc>, Option<DateTime<Utc>>, String, Option<Decimal>, Option<Decimal>, Option<String>
-        )>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                i32,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                Decimal,
+                Decimal,
+                DateTime<Utc>,
+                Option<DateTime<Utc>>,
+                String,
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<String>,
+            ),
+        >(
             r#"
             SELECT id, event_id, symbol, token_id, market_side,
                    shares, avg_entry_price, amount_usd,
@@ -527,8 +577,7 @@ impl PositionManager {
         )
         .bind(token_id)
         .fetch_optional(self.store.pool())
-        .await
-        ?;
+        .await?;
 
         if let Some(row) = row {
             let market_side = match row.4.as_str() {

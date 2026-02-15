@@ -26,8 +26,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // 从环境变量获取数据库 URL
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://localhost/ploy".to_string());
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost/ploy".to_string());
 
     println!("🔌 Connecting to database: {}", database_url);
 

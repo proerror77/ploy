@@ -9,19 +9,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::RwLock;
-use tracing::{info, warn, debug, error};
+use tracing::{debug, error, info, warn};
 
-use crate::adapters::{PolymarketClient, PolymarketWebSocket, BinanceWebSocket};
+use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket};
 use crate::collector::BinanceKlineClient;
-use crate::strategy::{
-    PaperTrader, PaperTradingStats, VolatilityArbConfig,
-    CryptoMarketDiscovery,
-};
 use crate::strategy::core::{BinaryMarket, MarketDiscovery};
+use crate::strategy::{CryptoMarketDiscovery, PaperTrader, PaperTradingStats, VolatilityArbConfig};
 
 /// Configuration for paper trading runner
 #[derive(Debug, Clone)]
@@ -44,18 +41,14 @@ impl Default for PaperTradingConfig {
     fn default() -> Self {
         Self {
             vol_arb_config: VolatilityArbConfig::default(),
-            symbols: vec![
-                "BTCUSDT".into(),
-                "ETHUSDT".into(),
-                "SOLUSDT".into(),
-            ],
+            symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
             series_ids: vec![
                 "btc-price-series-15m".into(),
                 "eth-price-series-15m".into(),
                 "sol-price-series-15m".into(),
             ],
-            kline_update_interval_secs: 60,  // Update volatility every minute
-            stats_interval_secs: 300,        // Print stats every 5 minutes
+            kline_update_interval_secs: 60, // Update volatility every minute
+            stats_interval_secs: 300,       // Print stats every 5 minutes
             log_file: Some("./data/paper_signals.json".into()),
         }
     }
@@ -80,49 +73,50 @@ pub struct PaperTradingRunner {
 
 impl PaperTradingRunner {
     pub fn new(config: PaperTradingConfig) -> Self {
-        let paper_trader = PaperTrader::new(
-            config.vol_arb_config.clone(),
-            config.log_file.clone(),
-        );
-        
+        let paper_trader = PaperTrader::new(config.vol_arb_config.clone(), config.log_file.clone());
+
         Self {
             config,
             paper_trader: Arc::new(RwLock::new(paper_trader)),
             tracked_markets: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Run the paper trading system
     pub async fn run(self, pm_client: PolymarketClient) -> Result<()> {
         info!("Starting paper trading runner");
-        
+
         // Print banner
-        println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+        println!(
+            "\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+        );
         println!("\x1b[36m║         VOLATILITY ARBITRAGE - PAPER TRADING                 ║\x1b[0m");
         println!("\x1b[36m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
-        println!("\x1b[36m║\x1b[0m  Symbols: {:49}\x1b[36m║\x1b[0m", 
-                 self.config.symbols.join(", "));
+        println!(
+            "\x1b[36m║\x1b[0m  Symbols: {:49}\x1b[36m║\x1b[0m",
+            self.config.symbols.join(", ")
+        );
         println!("\x1b[36m║\x1b[0m  Min Vol Edge: {:.1}%                                        \x1b[36m║\x1b[0m",
                  self.config.vol_arb_config.min_vol_edge_pct * 100.0);
         println!("\x1b[36m║\x1b[0m  Min Price Edge: {}¢                                        \x1b[36m║\x1b[0m",
                  self.config.vol_arb_config.min_price_edge * dec!(100));
         println!("\x1b[36m║\x1b[0m  Mode: PAPER TRADING (signals only)                         \x1b[36m║\x1b[0m");
-        println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-        
-        // Discover markets
-        let discovery = CryptoMarketDiscovery::with_series(
-            pm_client.clone(),
-            self.config.series_ids.clone(),
+        println!(
+            "\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n"
         );
-        
+
+        // Discover markets
+        let discovery =
+            CryptoMarketDiscovery::with_series(pm_client.clone(), self.config.series_ids.clone());
+
         let markets = discovery.discover_markets().await?;
         info!("Discovered {} markets to monitor", markets.len());
-        
+
         if markets.is_empty() {
             warn!("No markets found to monitor!");
             return Ok(());
         }
-        
+
         // Build token -> market mapping and collect token IDs
         let mut token_ids: Vec<String> = Vec::new();
         {
@@ -131,7 +125,7 @@ impl PaperTradingRunner {
                 // Parse threshold price from market metadata or labels
                 let threshold = self.parse_threshold_price(market);
                 let symbol = self.extract_symbol(market);
-                
+
                 let tracked_market = TrackedMarket {
                     market: market.clone(),
                     symbol: symbol.clone(),
@@ -139,23 +133,27 @@ impl PaperTradingRunner {
                     yes_token_id: market.yes_token_id.clone(),
                     no_token_id: market.no_token_id.clone(),
                 };
-                
+
                 // Map both token IDs to this market
                 tracked.insert(market.yes_token_id.clone(), tracked_market.clone());
                 tracked.insert(market.no_token_id.clone(), tracked_market);
-                
+
                 token_ids.push(market.yes_token_id.clone());
                 token_ids.push(market.no_token_id.clone());
             }
         }
-        
-        info!("Monitoring {} tokens across {} markets", token_ids.len(), markets.len());
-        
+
+        info!(
+            "Monitoring {} tokens across {} markets",
+            token_ids.len(),
+            markets.len()
+        );
+
         // Initialize K-line client for volatility
         let kline_client = BinanceKlineClient::new();
         info!("Initializing K-line volatility data...");
         kline_client.initialize_symbols(&self.config.symbols).await;
-        
+
         // Update paper trader with initial volatility
         {
             let mut trader = self.paper_trader.write().await;
@@ -167,12 +165,16 @@ impl PaperTradingRunner {
                 }
             }
         }
-        
+
         // Create WebSocket connections
-        let pm_ws = PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
-        
+        let pm_ws =
+            PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+
         // Binance WS needs lowercase symbols
-        let binance_symbols: Vec<String> = self.config.symbols.iter()
+        let binance_symbols: Vec<String> = self
+            .config
+            .symbols
+            .iter()
             .map(|s| s.to_lowercase())
             .collect();
         let binance_ws = Arc::new(BinanceWebSocket::new(binance_symbols.clone()));
@@ -182,13 +184,13 @@ impl PaperTradingRunner {
         let mut binance_update_rx = binance_ws.subscribe();
         let _pm_quote_cache = pm_ws.quote_cache();
         let binance_price_cache = binance_ws.price_cache().clone();
-        
+
         // Clone for background tasks
         let paper_trader = Arc::clone(&self.paper_trader);
         let tracked_markets = Arc::clone(&self.tracked_markets);
         let symbols = self.config.symbols.clone();
         let kline_interval = self.config.kline_update_interval_secs;
-        
+
         // Spawn K-line volatility updater
         let paper_trader_kline = Arc::clone(&paper_trader);
         let symbols_kline = symbols.clone();
@@ -198,13 +200,13 @@ impl PaperTradingRunner {
             loop {
                 interval.tick().await;
                 debug!("Updating K-line volatility...");
-                
+
                 for symbol in &symbols_kline {
                     if let Err(e) = kline_client.update_volatility_stats(symbol).await {
                         warn!("Failed to update volatility for {}: {}", symbol, e);
                         continue;
                     }
-                    
+
                     if let Some(vol) = kline_client.get_15m_volatility(symbol).await {
                         let vol_f64 = vol.to_f64().unwrap_or(0.003);
                         let mut trader = paper_trader_kline.write().await;
@@ -214,7 +216,7 @@ impl PaperTradingRunner {
                 }
             }
         });
-        
+
         // Spawn stats printer
         let paper_trader_stats = Arc::clone(&paper_trader);
         let stats_interval = self.config.stats_interval_secs;
@@ -227,7 +229,7 @@ impl PaperTradingRunner {
                 Self::print_stats(&stats);
             }
         });
-        
+
         // Spawn PM WebSocket runner
         let token_ids_clone = token_ids.clone();
         tokio::spawn(async move {
@@ -235,7 +237,7 @@ impl PaperTradingRunner {
                 error!("Polymarket WebSocket error: {}", e);
             }
         });
-        
+
         // Spawn Binance WebSocket runner
         let binance_ws_runner = Arc::clone(&binance_ws);
         tokio::spawn(async move {
@@ -243,9 +245,9 @@ impl PaperTradingRunner {
                 error!("Binance WebSocket error: {}", e);
             }
         });
-        
+
         info!("Paper trading runner started, waiting for quotes...");
-        
+
         // Main loop - process PM quote updates
         loop {
             tokio::select! {
@@ -258,11 +260,11 @@ impl PaperTradingRunner {
                             if let Some(market_info) = tracked.get(&quote_update.token_id) {
                                 // Get current spot price from Binance
                                 let spot_symbol = market_info.symbol.to_lowercase();
-                                
+
                                 let spot_price = binance_price_cache.get(&spot_symbol).await
                                     .map(|sp| sp.price)
                                     .unwrap_or(Decimal::ZERO);
-                                
+
                                 if spot_price > Decimal::ZERO {
                                     // Calculate time remaining
                                     let now = Utc::now();
@@ -271,16 +273,16 @@ impl PaperTradingRunner {
                                     } else {
                                         0
                                     };
-                                    
+
                                     // Skip expired markets
                                     if time_remaining == 0 {
                                         continue;
                                     }
-                                    
+
                                     // Get tick volatility from Binance (use 60s lookback)
                                     let tick_vol = binance_price_cache.volatility(&spot_symbol, 60).await
                                         .map(|d| d.to_f64().unwrap_or(0.0));
-                                    
+
                                     // Get bid/ask prices, skip if not available
                                     let yes_bid = match quote_update.quote.best_bid {
                                         Some(b) => b,
@@ -290,7 +292,7 @@ impl PaperTradingRunner {
                                         Some(a) => a,
                                         None => continue,
                                     };
-                                    
+
                                     // Check for signal
                                     let mut trader = paper_trader.write().await;
                                     if let Some(signal) = trader.check_and_record(
@@ -322,7 +324,7 @@ impl PaperTradingRunner {
                         }
                     }
                 }
-                
+
                 // Process Binance price updates (just for logging)
                 binance_result = binance_update_rx.recv() => {
                     match binance_result {
@@ -337,25 +339,25 @@ impl PaperTradingRunner {
             }
         }
     }
-    
+
     /// Parse threshold price from market
     fn parse_threshold_price(&self, market: &BinaryMarket) -> Decimal {
         // Try to parse from yes_label (e.g., "BTC above $94,000")
         let label = &market.yes_label;
-        
+
         // Look for dollar amount pattern
         if let Some(idx) = label.find('$') {
             let price_str: String = label[idx + 1..]
                 .chars()
                 .filter(|c| c.is_numeric() || *c == '.' || *c == ',')
                 .collect();
-            
+
             let clean_price: String = price_str.replace(',', "");
             if let Ok(price) = Decimal::from_str(&clean_price) {
                 return price;
             }
         }
-        
+
         // Default based on symbol (rough estimates)
         match market.yes_label.to_uppercase() {
             l if l.contains("BTC") => dec!(95000),
@@ -364,11 +366,11 @@ impl PaperTradingRunner {
             _ => dec!(0),
         }
     }
-    
+
     /// Extract symbol from market
     fn extract_symbol(&self, market: &BinaryMarket) -> String {
         let label = market.yes_label.to_uppercase();
-        
+
         if label.contains("BTC") || label.contains("BITCOIN") {
             "BTCUSDT".into()
         } else if label.contains("ETH") || label.contains("ETHEREUM") {
@@ -381,11 +383,15 @@ impl PaperTradingRunner {
             "UNKNOWN".into()
         }
     }
-    
+
     /// Print trading statistics
     fn print_stats(stats: &PaperTradingStats) {
-        println!("\n\x1b[33m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-        println!("\x1b[33m║               PAPER TRADING STATISTICS                        ║\x1b[0m");
+        println!(
+            "\n\x1b[33m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+        );
+        println!(
+            "\x1b[33m║               PAPER TRADING STATISTICS                        ║\x1b[0m"
+        );
         println!("\x1b[33m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
         println!("\x1b[33m║\x1b[0m  Total Signals:     {:>10}                              \x1b[33m║\x1b[0m", 
                  stats.total_signals);
@@ -401,9 +407,11 @@ impl PaperTradingRunner {
                  stats.avg_confidence * 100.0);
         println!("\x1b[33m║\x1b[0m  Pending Signals:   {:>10}                              \x1b[33m║\x1b[0m",
                  stats.pending_signals);
-        println!("\x1b[33m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+        println!(
+            "\x1b[33m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n"
+        );
     }
-    
+
     /// Get current statistics
     pub async fn statistics(&self) -> PaperTradingStats {
         self.paper_trader.read().await.statistics()

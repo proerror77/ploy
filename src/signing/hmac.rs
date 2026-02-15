@@ -26,12 +26,17 @@ impl ApiCredentials {
 
     /// Load from environment variables
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("POLYMARKET_API_KEY")
-            .map_err(|_| PloyError::Config(config::ConfigError::NotFound("POLYMARKET_API_KEY".into())))?;
-        let secret = std::env::var("POLYMARKET_SECRET")
-            .map_err(|_| PloyError::Config(config::ConfigError::NotFound("POLYMARKET_SECRET".into())))?;
-        let passphrase = std::env::var("POLYMARKET_PASSPHRASE")
-            .map_err(|_| PloyError::Config(config::ConfigError::NotFound("POLYMARKET_PASSPHRASE".into())))?;
+        let api_key = std::env::var("POLYMARKET_API_KEY").map_err(|_| {
+            PloyError::Config(config::ConfigError::NotFound("POLYMARKET_API_KEY".into()))
+        })?;
+        let secret = std::env::var("POLYMARKET_SECRET").map_err(|_| {
+            PloyError::Config(config::ConfigError::NotFound("POLYMARKET_SECRET".into()))
+        })?;
+        let passphrase = std::env::var("POLYMARKET_PASSPHRASE").map_err(|_| {
+            PloyError::Config(config::ConfigError::NotFound(
+                "POLYMARKET_PASSPHRASE".into(),
+            ))
+        })?;
 
         Ok(Self::new(api_key, secret, passphrase))
     }
@@ -92,12 +97,7 @@ impl HmacAuth {
     }
 
     /// Build authentication headers for a request
-    pub fn build_headers(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<&str>,
-    ) -> Result<HeaderMap> {
+    pub fn build_headers(&self, method: &str, path: &str, body: Option<&str>) -> Result<HeaderMap> {
         let timestamp = Self::timestamp();
         let message = self.build_message(method, path, timestamp, body);
         let signature = self.sign(&message)?;
@@ -105,7 +105,11 @@ impl HmacAuth {
         // Debug: Log what we're signing
         tracing::debug!(
             "HMAC signing - timestamp: {}, method: {}, path: {}, message: '{}', address: {}",
-            timestamp, method, path, message, self.address
+            timestamp,
+            method,
+            path,
+            message,
+            self.address
         );
 
         let mut headers = HeaderMap::new();

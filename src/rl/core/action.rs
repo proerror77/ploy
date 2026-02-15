@@ -145,16 +145,14 @@ impl ContinuousAction {
 
     /// Create from a raw tensor output (Vec of f32)
     pub fn from_tensor(values: &[f32]) -> Self {
-        assert!(values.len() >= CONTINUOUS_ACTION_DIM,
-            "Expected {} values, got {}", CONTINUOUS_ACTION_DIM, values.len());
+        assert!(
+            values.len() >= CONTINUOUS_ACTION_DIM,
+            "Expected {} values, got {}",
+            CONTINUOUS_ACTION_DIM,
+            values.len()
+        );
 
-        Self::new(
-            values[0],
-            values[1],
-            values[2],
-            values[3],
-            values[4],
-        )
+        Self::new(values[0], values[1], values[2], values[3], values[4])
     }
 
     /// Convert to tensor representation
@@ -246,7 +244,11 @@ impl HybridAction {
     /// Create a buy action
     pub fn buy(side_is_up: bool, size: f32, aggressiveness: f32) -> Self {
         Self::new(
-            if side_is_up { DiscreteAction::BuyUp } else { DiscreteAction::BuyDown },
+            if side_is_up {
+                DiscreteAction::BuyUp
+            } else {
+                DiscreteAction::BuyDown
+            },
             size,
             aggressiveness,
         )

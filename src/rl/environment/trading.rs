@@ -329,7 +329,8 @@ impl TradingEnvironment {
 
                 let proceeds = self.position.shares as f64 * price;
                 let fee = proceeds * self.config.transaction_cost;
-                let pnl = proceeds - fee - (self.position.shares as f64 * self.position.entry_price);
+                let pnl =
+                    proceeds - fee - (self.position.shares as f64 * self.position.entry_price);
 
                 self.capital += proceeds - fee;
                 self.episode_pnl += pnl;

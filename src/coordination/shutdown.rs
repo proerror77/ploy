@@ -150,7 +150,10 @@ impl GracefulShutdown {
     /// Request shutdown with specified signal type
     pub fn request_shutdown(&self, signal: ShutdownSignal) {
         if self.shutdown_requested.swap(true, Ordering::SeqCst) {
-            warn!("Shutdown already requested, ignoring duplicate signal: {}", signal);
+            warn!(
+                "Shutdown already requested, ignoring duplicate signal: {}",
+                signal
+            );
             return;
         }
 
@@ -184,9 +187,13 @@ impl GracefulShutdown {
     where
         F1: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
         F2: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
-        F3: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>,
+        F3: FnOnce() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+        >,
         F4: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
-        F5: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>,
+        F5: FnOnce() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+        >,
     {
         let start = std::time::Instant::now();
         let total_timeout = Duration::from_secs(self.config.total_timeout_secs);
@@ -357,7 +364,9 @@ impl std::fmt::Display for ShutdownError {
         match self {
             ShutdownError::Timeout => write!(f, "shutdown timed out"),
             ShutdownError::Interrupted => write!(f, "shutdown interrupted"),
-            ShutdownError::ComponentFailed(c) => write!(f, "component {} failed during shutdown", c),
+            ShutdownError::ComponentFailed(c) => {
+                write!(f, "component {} failed during shutdown", c)
+            }
         }
     }
 }
@@ -376,7 +385,8 @@ pub async fn install_signal_handlers(shutdown: Arc<GracefulShutdown>) {
 
         // Handle SIGTERM
         tokio::spawn(async move {
-            let mut stream = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+            let mut stream =
+                signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
             stream.recv().await;
             info!("Received SIGTERM");
             shutdown_sigterm.request_shutdown(ShutdownSignal::Graceful);
@@ -384,7 +394,8 @@ pub async fn install_signal_handlers(shutdown: Arc<GracefulShutdown>) {
 
         // Handle SIGINT (Ctrl+C)
         tokio::spawn(async move {
-            let mut stream = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+            let mut stream =
+                signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
             stream.recv().await;
             info!("Received SIGINT");
             shutdown_sigint.request_shutdown(ShutdownSignal::Graceful);
@@ -403,7 +414,9 @@ pub async fn install_signal_handlers(shutdown: Arc<GracefulShutdown>) {
     {
         let shutdown_ctrl_c = shutdown.clone();
         tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
             info!("Received Ctrl+C");
             shutdown_ctrl_c.request_shutdown(ShutdownSignal::Graceful);
         });

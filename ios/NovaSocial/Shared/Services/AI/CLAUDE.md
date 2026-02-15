@@ -1,3 +1,8 @@
+# Project Instructions
+
+Follow the repository-level instructions in the repo-root `CLAUDE.md`.
+This file is reserved for `claude-mem` context; edit outside `<claude-mem-context>` tags only.
+
 <claude-mem-context>
 # Recent Activity
 

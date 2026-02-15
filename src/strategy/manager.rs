@@ -6,19 +6,18 @@
 //! - Track running strategies
 //! - Provide status information
 
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, broadcast};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
-use chrono::{DateTime, Utc};
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
+use super::traits::{
+    MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyStateInfo,
+};
 use crate::error::Result;
 use anyhow::anyhow;
-use super::traits::{
-    Strategy, MarketUpdate, OrderUpdate, StrategyAction,
-    StrategyStateInfo, PositionInfo,
-};
 
 // ============================================================================
 // Strategy Manager
@@ -110,20 +109,22 @@ impl StrategyManager {
         }
 
         // Create the background task for this strategy
-        let task_handle = self.spawn_strategy_task(
-            strategy_id.clone(),
-            strategy.clone(),
-        ).await;
+        let task_handle = self
+            .spawn_strategy_task(strategy_id.clone(), strategy.clone())
+            .await;
 
         // Store the running strategy
         {
             let mut strategies = self.strategies.write().await;
-            strategies.insert(strategy_id.clone(), RunningStrategy {
-                strategy,
-                task_handle: Some(task_handle),
-                started_at: Utc::now(),
-                config_path,
-            });
+            strategies.insert(
+                strategy_id.clone(),
+                RunningStrategy {
+                    strategy,
+                    task_handle: Some(task_handle),
+                    started_at: Utc::now(),
+                    config_path,
+                },
+            );
         }
 
         info!("Strategy {} started successfully", strategy_id);
@@ -134,9 +135,9 @@ impl StrategyManager {
     pub async fn stop_strategy(&self, strategy_id: &str, graceful: bool) -> Result<()> {
         let mut strategies = self.strategies.write().await;
 
-        let running = strategies.remove(strategy_id).ok_or_else(|| {
-            anyhow!("Strategy {} is not running", strategy_id)
-        })?;
+        let running = strategies
+            .remove(strategy_id)
+            .ok_or_else(|| anyhow!("Strategy {} is not running", strategy_id))?;
 
         info!("Stopping strategy: {}", strategy_id);
 
@@ -393,13 +394,15 @@ impl StrategyFactory {
     pub fn from_toml(config_content: &str, dry_run: bool) -> Result<Box<dyn Strategy>> {
         use toml::Value;
 
-        let config: Value = toml::from_str(config_content)
-            .map_err(|e| anyhow!("Invalid TOML: {}", e))?;
+        let config: Value =
+            toml::from_str(config_content).map_err(|e| anyhow!("Invalid TOML: {}", e))?;
 
-        let strategy_section = config.get("strategy")
+        let strategy_section = config
+            .get("strategy")
             .ok_or_else(|| anyhow!("Missing [strategy] section"))?;
 
-        let strategy_name = strategy_section.get("name")
+        let strategy_name = strategy_section
+            .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing strategy.name"))?;
 

@@ -37,7 +37,10 @@ impl Wallet {
         // Zeroize the key from memory
         secure_key.zeroize();
 
-        info!("Wallet initialized: {} (private key zeroized from memory)", wallet.address());
+        info!(
+            "Wallet initialized: {} (private key zeroized from memory)",
+            wallet.address()
+        );
 
         Ok(Self {
             inner: wallet,
@@ -101,7 +104,10 @@ impl Wallet {
     }
 
     /// Sign a message (will be prefixed with Ethereum signed message)
-    pub async fn sign_message<S: AsRef<[u8]> + Send + Sync>(&self, message: S) -> Result<Signature> {
+    pub async fn sign_message<S: AsRef<[u8]> + Send + Sync>(
+        &self,
+        message: S,
+    ) -> Result<Signature> {
         self.inner
             .sign_message(message)
             .await

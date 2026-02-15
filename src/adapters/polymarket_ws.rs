@@ -4,7 +4,7 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,13 +53,10 @@ async fn connect_via_proxy(
     );
 
     let proxy_addr = format!("{}:{}", proxy_host, proxy_port);
-    let stream = tokio::time::timeout(
-        Duration::from_secs(10),
-        TcpStream::connect(&proxy_addr),
-    )
-    .await
-    .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
-    .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
+    let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&proxy_addr))
+        .await
+        .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
+        .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
 
     let connect_request = format!(
         "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
@@ -102,7 +99,10 @@ async fn connect_via_proxy(
         .reunite(writer)
         .map_err(|e| PloyError::Internal(format!("Failed to reunite stream: {}", e)))?;
 
-    debug!("Proxy tunnel established to {}:{}", target_host, target_port);
+    debug!(
+        "Proxy tunnel established to {}:{}",
+        target_host, target_port
+    );
     Ok(stream)
 }
 
@@ -110,12 +110,17 @@ async fn connect_via_proxy(
 async fn connect_websocket_with_proxy(
     url: &Url,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
-    let host = url.host_str().ok_or_else(|| PloyError::Internal("No host in URL".to_string()))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| PloyError::Internal("No host in URL".to_string()))?;
     let port = url.port().unwrap_or(443);
 
     if let Some(proxy_url) = get_proxy_url() {
         if let Some((proxy_host, proxy_port)) = parse_proxy_url(&proxy_url) {
-            info!("Using proxy {}:{} for Polymarket WebSocket", proxy_host, proxy_port);
+            info!(
+                "Using proxy {}:{} for Polymarket WebSocket",
+                proxy_host, proxy_port
+            );
 
             let tcp_stream = connect_via_proxy(&proxy_host, proxy_port, host, port).await?;
 
@@ -210,7 +215,8 @@ impl CircuitBreaker {
             CircuitBreakerState::Open => {
                 // Check if we should transition to half-open
                 if let Some(last_failure) = *self.last_failure_time.read().await {
-                    if last_failure.elapsed() >= Duration::from_secs(self.config.open_timeout_secs) {
+                    if last_failure.elapsed() >= Duration::from_secs(self.config.open_timeout_secs)
+                    {
                         // Transition to half-open
                         *self.state.write().await = CircuitBreakerState::HalfOpen;
                         self.consecutive_successes.store(0, Ordering::SeqCst);
@@ -240,7 +246,10 @@ impl CircuitBreaker {
             && successes >= self.config.success_threshold
         {
             *self.state.write().await = CircuitBreakerState::Closed;
-            info!("Circuit breaker closed after {} successful operations", successes);
+            info!(
+                "Circuit breaker closed after {} successful operations",
+                successes
+            );
         }
     }
 
@@ -261,8 +270,7 @@ impl CircuitBreaker {
         }
 
         // In closed, check threshold
-        if current_state == CircuitBreakerState::Closed
-            && failures >= self.config.failure_threshold
+        if current_state == CircuitBreakerState::Closed && failures >= self.config.failure_threshold
         {
             *self.state.write().await = CircuitBreakerState::Open;
             self.open_count.fetch_add(1, Ordering::SeqCst);
@@ -330,6 +338,63 @@ pub struct PriceLevel {
 pub struct PriceChangeEntry {
     pub interval: String,
     pub change: String,
+}
+
+fn parse_price_level(level: &PriceLevel) -> Option<(Decimal, Decimal)> {
+    let price = level.price.parse::<Decimal>().ok()?;
+    let size = level.size.parse::<Decimal>().ok()?;
+    Some((price, size))
+}
+
+fn extract_best_and_total(
+    levels: &[PriceLevel],
+    pick_best: impl Fn(Decimal, Decimal) -> Decimal,
+) -> (Option<Decimal>, Decimal) {
+    let mut best: Option<Decimal> = None;
+    let mut total_size = Decimal::ZERO;
+
+    for lvl in levels {
+        let Some((price, size)) = parse_price_level(lvl) else {
+            continue;
+        };
+
+        total_size += size;
+        best = Some(match best {
+            Some(current) => pick_best(current, price),
+            None => price,
+        });
+    }
+
+    (best, total_size)
+}
+
+fn extract_book_top(
+    book: &BookMessage,
+) -> (
+    Option<Decimal>,
+    Option<Decimal>,
+    Option<Decimal>,
+    Option<Decimal>,
+) {
+    // Do not assume any ordering from the exchange. Always compute:
+    // - best_bid: max(bids.price)
+    // - best_ask: min(asks.price)
+    // Also compute total depth as the sum of sizes in the snapshot.
+    let (best_bid, bid_total) = extract_best_and_total(&book.bids, |a, b| a.max(b));
+    let (best_ask, ask_total) = extract_best_and_total(&book.asks, |a, b| a.min(b));
+
+    let bid_total = if bid_total > Decimal::ZERO {
+        Some(bid_total)
+    } else {
+        None
+    };
+    let ask_total = if ask_total > Decimal::ZERO {
+        Some(ask_total)
+    } else {
+        None
+    };
+
+    (best_bid, best_ask, bid_total, ask_total)
 }
 
 /// Initial subscription request
@@ -407,13 +472,22 @@ impl QuoteCache {
     /// # CRITICAL FIX
     /// Now enforces maximum cache size by cleaning up stale entries
     /// when the cache is full.
-    pub fn update(&self, token_id: &str, side: Side, bid: Option<Decimal>, ask: Option<Decimal>, bid_size: Option<Decimal>, ask_size: Option<Decimal>) {
+    pub fn update(
+        &self,
+        token_id: &str,
+        side: Side,
+        bid: Option<Decimal>,
+        ask: Option<Decimal>,
+        bid_size: Option<Decimal>,
+        ask_size: Option<Decimal>,
+    ) {
         // Check if cache is full and cleanup if needed
         if self.quotes.len() >= self.max_size {
             self.cleanup_stale();
         }
 
-        self.quotes.entry(token_id.to_string())
+        self.quotes
+            .entry(token_id.to_string())
             .and_modify(|quote| {
                 if bid.is_some() {
                     quote.best_bid = bid;
@@ -435,9 +509,47 @@ impl QuoteCache {
             });
     }
 
+    /// Update quote from a full book snapshot.
+    ///
+    /// Unlike `update`, this overwrites bid/ask even when the value is `None`,
+    /// which is important to avoid keeping stale quotes when one side becomes empty.
+    pub fn update_snapshot(
+        &self,
+        token_id: &str,
+        side: Side,
+        bid: Option<Decimal>,
+        ask: Option<Decimal>,
+        bid_size: Option<Decimal>,
+        ask_size: Option<Decimal>,
+    ) {
+        if self.quotes.len() >= self.max_size {
+            self.cleanup_stale();
+        }
+
+        self.quotes
+            .entry(token_id.to_string())
+            .and_modify(|quote| {
+                quote.side = side;
+                quote.best_bid = bid;
+                quote.best_ask = ask;
+                quote.bid_size = bid_size;
+                quote.ask_size = ask_size;
+                quote.timestamp = Utc::now();
+            })
+            .or_insert_with(|| Quote {
+                side,
+                best_bid: bid,
+                best_ask: ask,
+                bid_size,
+                ask_size,
+                timestamp: Utc::now(),
+            });
+    }
+
     /// Get quote for a token (returns None if stale)
     pub fn get(&self, token_id: &str) -> Option<Quote> {
-        self.quotes.get(token_id)
+        self.quotes
+            .get(token_id)
             .filter(|q| !Self::is_stale(q.value()))
             .map(|q| q.value().clone())
     }
@@ -461,16 +573,20 @@ impl QuoteCache {
     /// # Returns
     /// * `Ok(())` if quote is fresh enough
     /// * `Err` if quote is missing or too old
-    pub async fn validate_freshness(&self, token_id: &str, max_age_secs: u64) -> crate::error::Result<()> {
-        let age = self.get_age(token_id)
-            .ok_or_else(|| crate::error::PloyError::Internal(
-                format!("No quote available for token {}", token_id)
-            ))?;
+    pub async fn validate_freshness(
+        &self,
+        token_id: &str,
+        max_age_secs: u64,
+    ) -> crate::error::Result<()> {
+        let age = self.get_age(token_id).ok_or_else(|| {
+            crate::error::PloyError::Internal(format!("No quote available for token {}", token_id))
+        })?;
 
         if age > max_age_secs {
-            return Err(crate::error::PloyError::Internal(
-                format!("Quote for {} is stale (age: {}s, max: {}s)", token_id, age, max_age_secs)
-            ));
+            return Err(crate::error::PloyError::Internal(format!(
+                "Quote for {} is stale (age: {}s, max: {}s)",
+                token_id, age, max_age_secs
+            )));
         }
 
         Ok(())
@@ -538,9 +654,11 @@ pub struct PolymarketWebSocket {
     quote_cache: QuoteCache,
     token_to_side: Arc<RwLock<HashMap<String, Side>>>,
     update_tx: broadcast::Sender<QuoteUpdate>,
+    book_tx: broadcast::Sender<Arc<BookMessage>>,
     reconnect_delay: Duration,
     max_reconnect_attempts: u32,
     circuit_breaker: Arc<CircuitBreaker>,
+    resubscribe_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Quote update notification
@@ -560,15 +678,19 @@ impl PolymarketWebSocket {
     /// Create a new WebSocket client with custom circuit breaker config
     pub fn with_circuit_breaker(ws_url: &str, cb_config: CircuitBreakerConfig) -> Self {
         let (update_tx, _) = broadcast::channel(1000);
+        // Book snapshots can be significantly larger than quotes; keep a smaller buffer.
+        let (book_tx, _) = broadcast::channel(256);
 
         Self {
             ws_url: ws_url.to_string(),
             quote_cache: QuoteCache::new(),
             token_to_side: Arc::new(RwLock::new(HashMap::new())),
             update_tx,
+            book_tx,
             reconnect_delay: Duration::from_secs(1),
             max_reconnect_attempts: 10,
             circuit_breaker: Arc::new(CircuitBreaker::new(cb_config)),
+            resubscribe_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -582,9 +704,22 @@ impl PolymarketWebSocket {
         self.update_tx.subscribe()
     }
 
+    /// Get a receiver for order book snapshot updates (full bid/ask ladders).
+    pub fn subscribe_books(&self) -> broadcast::Receiver<Arc<BookMessage>> {
+        self.book_tx.subscribe()
+    }
+
     /// Get the quote cache
     pub fn quote_cache(&self) -> &QuoteCache {
         &self.quote_cache
+    }
+
+    /// Request a WebSocket resubscription cycle.
+    ///
+    /// The current connection loop will reconnect and apply the latest token set.
+    pub fn request_resubscribe(&self) {
+        self.resubscribe_requested
+            .store(true, Ordering::SeqCst);
     }
 
     /// Register token ID to side mapping
@@ -592,7 +727,10 @@ impl PolymarketWebSocket {
         let mut mapping = self.token_to_side.write().await;
         mapping.insert(up_token_id.to_string(), Side::Up);
         mapping.insert(down_token_id.to_string(), Side::Down);
-        info!("Registered tokens: UP={}, DOWN={}", up_token_id, down_token_id);
+        info!(
+            "Registered tokens: UP={}, DOWN={}",
+            up_token_id, down_token_id
+        );
     }
 
     /// Register a single token with its side
@@ -608,6 +746,24 @@ impl PolymarketWebSocket {
         mapping.get(token_id).copied()
     }
 
+    /// Build the current token subscription set from startup seed + dynamic registrations.
+    async fn build_subscription_list(&self, seed_tokens: &[String]) -> Vec<String> {
+        let mut set = HashSet::new();
+
+        for token in seed_tokens {
+            if !token.trim().is_empty() {
+                set.insert(token.clone());
+            }
+        }
+
+        let mapping = self.token_to_side.read().await;
+        for token in mapping.keys() {
+            set.insert(token.clone());
+        }
+
+        set.into_iter().collect()
+    }
+
     /// Connect and run the WebSocket client with circuit breaker and infinite reconnection
     pub async fn run(&self, token_ids: Vec<String>) -> Result<()> {
         let mut attempt: u32 = 0;
@@ -615,6 +771,13 @@ impl PolymarketWebSocket {
         let circuit_open_delay = Duration::from_secs(5); // Check circuit breaker every 5s when open
 
         loop {
+            let subscription_ids = self.build_subscription_list(&token_ids).await;
+            if subscription_ids.is_empty() {
+                warn!("No token subscriptions registered yet; waiting before reconnect attempt");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+
             // Check circuit breaker before attempting connection
             if !self.circuit_breaker.should_allow().await {
                 let cb_state = self.circuit_breaker.get_state().await;
@@ -626,7 +789,7 @@ impl PolymarketWebSocket {
                 continue;
             }
 
-            match self.connect_and_subscribe(&token_ids).await {
+            match self.connect_and_subscribe(&subscription_ids).await {
                 Ok(()) => {
                     // Connection closed normally - still counts as success for circuit breaker
                     self.circuit_breaker.record_success().await;
@@ -644,7 +807,8 @@ impl PolymarketWebSocket {
                     );
 
                     // Exponential backoff with jitter, capped at max_delay
-                    let base_delay = self.reconnect_delay * attempt.min(10);
+                    let capped_attempt = attempt.min(self.max_reconnect_attempts.max(1));
+                    let base_delay = self.reconnect_delay * capped_attempt;
                     let delay = base_delay.min(max_delay);
 
                     // Add jitter: ±25% randomization
@@ -698,6 +862,9 @@ impl PolymarketWebSocket {
 
         // Set up ping interval
         let mut ping_interval = interval(Duration::from_secs(30));
+        let mut health_interval = interval(Duration::from_secs(15));
+        let mut last_market_data = Instant::now();
+        let stale_timeout = Duration::from_secs(90);
 
         loop {
             tokio::select! {
@@ -705,7 +872,9 @@ impl PolymarketWebSocket {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            self.handle_message(&text).await;
+                            if self.handle_message(&text).await {
+                                last_market_data = Instant::now();
+                            }
                         }
                         Some(Ok(Message::Ping(data))) => {
                             write.send(Message::Pong(data)).await?;
@@ -728,6 +897,20 @@ impl PolymarketWebSocket {
                     write.send(Message::Ping(vec![])).await?;
                     debug!("Sent ping");
                 }
+                // Connection health / resubscribe checks
+                _ = health_interval.tick() => {
+                    if self.resubscribe_requested.swap(false, Ordering::SeqCst) {
+                        info!("Resubscribe requested; reconnecting WebSocket session");
+                        break;
+                    }
+
+                    if last_market_data.elapsed() > stale_timeout {
+                        return Err(PloyError::Internal(format!(
+                            "No market data received for {:?}; forcing reconnect",
+                            stale_timeout
+                        )));
+                    }
+                }
             }
         }
 
@@ -735,72 +918,73 @@ impl PolymarketWebSocket {
     }
 
     /// Handle an incoming WebSocket message
-    async fn handle_message(&self, text: &str) {
+    ///
+    /// Returns `true` when the message contained market data updates.
+    async fn handle_message(&self, text: &str) -> bool {
         // Log first few chars for debugging
         let preview = &text[..text.len().min(200)];
         debug!("WS message received: {}", preview);
 
         // Try to parse as array of book messages (order book snapshots)
         if let Ok(books) = serde_json::from_str::<Vec<BookMessage>>(text) {
-            info!("Received {} book updates", books.len());
+            if books.is_empty() {
+                debug!("Received empty book updates array");
+                return false;
+            }
+            debug!("Received {} book updates", books.len());
             for book in books {
                 self.process_book_message(book).await;
             }
-            return;
+            return true;
         }
 
         // Try to parse as price changes message
         if let Ok(price_msg) = serde_json::from_str::<PriceChangesMessage>(text) {
             debug!("Received price changes for market: {}", price_msg.market);
+            let has_data = !price_msg.price_changes.is_empty();
             self.process_price_changes(price_msg).await;
-            return;
+            return has_data;
         }
 
         // Try to parse as single book message
         if let Ok(book) = serde_json::from_str::<BookMessage>(text) {
             debug!("Received single book update for: {}", book.asset_id);
             self.process_book_message(book).await;
-            return;
+            return true;
         }
 
         // Unknown format - log for debugging (include more of message)
         warn!("Unknown WS message format: {}", preview);
+        false
     }
 
     /// Process an order book message
     async fn process_book_message(&self, book: BookMessage) {
-        let asset_id = &book.asset_id;
+        // Avoid borrowing `book` across await points so we can move it into the broadcast channel.
+        let asset_id = book.asset_id.clone();
 
-        // Polymarket order books are sorted:
-        // - Bids: ascending (lowest to highest), so best bid = last element
-        // - Asks: descending (highest to lowest), so best ask = last element
-        let best_bid = book.bids
-            .last()
-            .and_then(|p| p.price.parse::<Decimal>().ok());
-        let best_ask = book.asks
-            .last()
-            .and_then(|p| p.price.parse::<Decimal>().ok());
-        let bid_size = book.bids
-            .last()
-            .and_then(|p| p.size.parse::<Decimal>().ok());
-        let ask_size = book.asks
-            .last()
-            .and_then(|p| p.size.parse::<Decimal>().ok());
+        let (best_bid, best_ask, bid_size, ask_size) = extract_book_top(&book);
 
-        if let Some(side) = self.get_side(asset_id).await {
+        if let Some(side) = self.get_side(&asset_id).await {
             self.quote_cache
-                .update(asset_id, side, best_bid, best_ask, bid_size, ask_size);
+                .update_snapshot(&asset_id, side, best_bid, best_ask, bid_size, ask_size);
 
             // Notify subscribers
-            if let Some(quote) = self.quote_cache.get(asset_id) {
+            if let Some(quote) = self.quote_cache.get(&asset_id) {
                 let update = QuoteUpdate {
                     token_id: asset_id.clone(),
                     side,
                     quote,
                 };
                 match self.update_tx.send(update) {
-                    Ok(n) => info!("Quote broadcast to {} receivers: {} {:?} bid={:?} ask={:?}",
-                        n, side, &asset_id[..8.min(asset_id.len())], best_bid, best_ask),
+                    Ok(n) => debug!(
+                        "Quote broadcast to {} receivers: {} {:?} bid={:?} ask={:?}",
+                        n,
+                        side,
+                        &asset_id[..8.min(asset_id.len())],
+                        best_bid,
+                        best_ask
+                    ),
                     Err(_) => warn!("No receivers for quote update - channel closed"),
                 }
             }
@@ -812,11 +996,16 @@ impl PolymarketWebSocket {
         } else {
             // Token not registered - this is a critical issue for debugging
             let registered_count = self.token_to_side.read().await.len();
-            warn!(
+            debug!(
                 "Unregistered token in book update: {} (registered tokens: {})",
-                &asset_id[..16.min(asset_id.len())], registered_count
+                &asset_id[..16.min(asset_id.len())],
+                registered_count
             );
         }
+
+        // Broadcast the full book snapshot for downstream persistence/analytics.
+        // Best-effort: if no receivers are present, the send fails and we simply drop the snapshot.
+        let _ = self.book_tx.send(Arc::new(book));
     }
 
     /// Process price changes message
@@ -827,6 +1016,25 @@ impl PolymarketWebSocket {
                 change.price.parse::<Decimal>(),
             ) {
                 debug!("Price change {}: {}", side, price);
+                // Price change messages are typically top-of-book deltas without side depth.
+                // Keep cache warm by updating both bid/ask to the latest quoted price.
+                self.quote_cache.update(
+                    &change.asset_id,
+                    side,
+                    Some(price),
+                    Some(price),
+                    None,
+                    None,
+                );
+
+                if let Some(quote) = self.quote_cache.get(&change.asset_id) {
+                    let update = QuoteUpdate {
+                        token_id: change.asset_id.clone(),
+                        side,
+                        quote,
+                    };
+                    let _ = self.update_tx.send(update);
+                }
             }
         }
     }
@@ -835,25 +1043,100 @@ impl PolymarketWebSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[tokio::test]
     async fn test_quote_cache() {
         let cache = QuoteCache::new();
 
-        cache
-            .update(
-                "token1",
-                Side::Up,
-                Some(Decimal::from(45) / Decimal::from(100)),
-                Some(Decimal::from(46) / Decimal::from(100)),
-                Some(Decimal::from(100)),
-                Some(Decimal::from(50)),
-            );
+        cache.update(
+            "token1",
+            Side::Up,
+            Some(Decimal::from(45) / Decimal::from(100)),
+            Some(Decimal::from(46) / Decimal::from(100)),
+            Some(Decimal::from(100)),
+            Some(Decimal::from(50)),
+        );
 
         let quote = cache.get("token1").unwrap();
         assert_eq!(quote.side, Side::Up);
         assert!(quote.best_bid.is_some());
         assert!(quote.best_ask.is_some());
+    }
+
+    #[test]
+    fn test_quote_cache_snapshot_clears_missing_sides() {
+        let cache = QuoteCache::new();
+
+        cache.update_snapshot(
+            "token1",
+            Side::Up,
+            Some(dec!(0.45)),
+            Some(dec!(0.46)),
+            Some(dec!(10)),
+            Some(dec!(10)),
+        );
+
+        let quote = cache.get("token1").unwrap();
+        assert_eq!(quote.best_bid, Some(dec!(0.45)));
+
+        // Snapshot without bids should clear best_bid instead of keeping a stale value.
+        cache.update_snapshot(
+            "token1",
+            Side::Up,
+            None,
+            Some(dec!(0.46)),
+            None,
+            Some(dec!(10)),
+        );
+
+        let quote = cache.get("token1").unwrap();
+        assert_eq!(quote.best_bid, None);
+        assert_eq!(quote.best_ask, Some(dec!(0.46)));
+    }
+
+    #[test]
+    fn test_extract_book_top_unordered() {
+        let book = BookMessage {
+            asset_id: "token".to_string(),
+            market: "m".to_string(),
+            bids: vec![
+                PriceLevel {
+                    price: "0.40".to_string(),
+                    size: "10".to_string(),
+                },
+                PriceLevel {
+                    price: "0.45".to_string(),
+                    size: "5".to_string(),
+                },
+                PriceLevel {
+                    price: "0.42".to_string(),
+                    size: "7".to_string(),
+                },
+            ],
+            asks: vec![
+                PriceLevel {
+                    price: "0.55".to_string(),
+                    size: "2".to_string(),
+                },
+                PriceLevel {
+                    price: "0.50".to_string(),
+                    size: "3".to_string(),
+                },
+                PriceLevel {
+                    price: "0.60".to_string(),
+                    size: "1".to_string(),
+                },
+            ],
+            timestamp: None,
+            hash: None,
+        };
+
+        let (best_bid, best_ask, bid_total, ask_total) = extract_book_top(&book);
+        assert_eq!(best_bid, Some(dec!(0.45)));
+        assert_eq!(best_ask, Some(dec!(0.50)));
+        assert_eq!(bid_total, Some(dec!(22))); // 10 + 5 + 7
+        assert_eq!(ask_total, Some(dec!(6))); // 2 + 3 + 1
     }
 
     #[tokio::test]

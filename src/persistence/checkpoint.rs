@@ -88,7 +88,10 @@ impl CheckpointService {
     }
 
     /// Create a checkpoint for a component
-    pub async fn create_checkpoint<T: Checkpointable>(&self, component: &T) -> crate::error::Result<i64> {
+    pub async fn create_checkpoint<T: Checkpointable>(
+        &self,
+        component: &T,
+    ) -> crate::error::Result<i64> {
         let checkpoint_type = component.checkpoint_type();
         let component_name = component.component_name();
         let data = component.to_checkpoint();
@@ -121,27 +124,25 @@ impl CheckpointService {
             .get_latest_snapshot(&checkpoint_type, &component_name)
             .await?
         {
-            Some((id, data, version)) => {
-                match component.from_checkpoint(&data) {
-                    Ok(()) => {
-                        info!(
-                            "Restored checkpoint {} for {}/{} (version {})",
-                            id, checkpoint_type, component_name, version
-                        );
-                        Ok(Some(id))
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to restore checkpoint {} for {}/{}: {}",
-                            id, checkpoint_type, component_name, e
-                        );
-                        Err(crate::error::PloyError::InvalidState(format!(
-                            "Checkpoint restore failed: {}",
-                            e
-                        )))
-                    }
+            Some((id, data, version)) => match component.from_checkpoint(&data) {
+                Ok(()) => {
+                    info!(
+                        "Restored checkpoint {} for {}/{} (version {})",
+                        id, checkpoint_type, component_name, version
+                    );
+                    Ok(Some(id))
                 }
-            }
+                Err(e) => {
+                    error!(
+                        "Failed to restore checkpoint {} for {}/{}: {}",
+                        id, checkpoint_type, component_name, e
+                    );
+                    Err(crate::error::PloyError::InvalidState(format!(
+                        "Checkpoint restore failed: {}",
+                        e
+                    )))
+                }
+            },
             None => {
                 debug!(
                     "No checkpoint found for {}/{}",
@@ -287,10 +288,7 @@ mod tests {
         }
 
         fn from_checkpoint(&mut self, data: &serde_json::Value) -> Result<(), String> {
-            self.state = data["state"]
-                .as_i64()
-                .ok_or("missing state")?
-                as i32;
+            self.state = data["state"].as_i64().ok_or("missing state")? as i32;
             Ok(())
         }
 

@@ -17,6 +17,9 @@ pub struct AppConfig {
     /// Health server port (default: 8080)
     #[serde(default)]
     pub health_port: Option<u16>,
+    /// API server port (default: 8081, when `api` feature is enabled)
+    #[serde(default)]
+    pub api_port: Option<u16>,
     /// Optional always-on external event mispricing agent (Arena → Polymarket)
     #[serde(default)]
     pub event_edge_agent: Option<EventEdgeAgentConfig>,
@@ -105,6 +108,26 @@ impl EventEdgeAgentConfig {
             ));
         }
         errors
+    }
+}
+
+impl Default for EventEdgeAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            framework: default_event_edge_framework(),
+            event_ids: Vec::new(),
+            titles: Vec::new(),
+            interval_secs: default_event_edge_interval_secs(),
+            min_edge: default_event_edge_min_edge(),
+            max_entry: default_event_edge_max_entry(),
+            shares: default_event_edge_shares(),
+            trade: false,
+            cooldown_secs: default_event_edge_cooldown_secs(),
+            max_daily_spend_usd: default_event_edge_max_daily_spend_usd(),
+            model: None,
+            claude_max_turns: default_event_edge_claude_max_turns(),
+        }
     }
 }
 
@@ -402,39 +425,54 @@ impl AppConfig {
         Self::load_from("config")
     }
 
-    /// Load configuration from a specific directory
+    /// Load configuration from either a config directory or a single TOML file
     pub fn load_from<P: AsRef<Path>>(config_dir: P) -> Result<Self, ConfigError> {
-        let config_dir = config_dir.as_ref();
+        let config_path = config_dir.as_ref();
 
-        let builder =
-            Config::builder()
-                // Start with default values
-                .set_default("logging.level", "info")?
-                .set_default("logging.json", false)?
-                .set_default("execution.poll_interval_ms", 500)?
-                .set_default("execution.confirm_fills", false)?
-                .set_default(
-                    "execution.confirm_fill_timeout_ms",
-                    default_confirm_fill_timeout_ms(),
-                )?
-                .set_default("database.max_connections", 5)?
+        let mut builder = Config::builder()
+            // Start with default values
+            .set_default("logging.level", "info")?
+            .set_default("logging.json", false)?
+            .set_default("execution.poll_interval_ms", 500)?
+            .set_default("execution.confirm_fills", false)?
+            .set_default(
+                "execution.confirm_fill_timeout_ms",
+                default_confirm_fill_timeout_ms(),
+            )?
+            .set_default("database.max_connections", 5)?
+            .set_default("api_port", 8081)?;
+
+        // Accept either a config directory (`config/`) or a single TOML file
+        // (`config/default.toml`) for CLI compatibility.
+        if config_path.is_file() {
+            builder = builder.add_source(File::from(config_path).required(true));
+        } else {
+            builder = builder
                 // Load default config file
-                .add_source(File::from(config_dir.join("default.toml")).required(false))
+                .add_source(File::from(config_path.join("default.toml")).required(false))
                 // Load environment-specific config (e.g., config/production.toml)
                 .add_source(
-                    File::from(config_dir.join(
+                    File::from(config_path.join(
                         std::env::var("PLOY_ENV").unwrap_or_else(|_| "development".to_string()),
                     ))
                     .required(false),
-                )
-                // Override with environment variables (PLOY_MARKET__WS_URL, etc.)
-                .add_source(
-                    Environment::with_prefix("PLOY")
-                        .separator("__")
-                        .try_parsing(true),
                 );
+        }
 
-        builder.build()?.try_deserialize()
+        builder = builder.add_source(
+            // Override with environment variables (PLOY_MARKET__WS_URL, etc.)
+            Environment::with_prefix("PLOY")
+                .prefix_separator("_")
+                .separator("__")
+                .list_separator(",")
+                .with_list_parse_key("event_edge_agent.event_ids")
+                .with_list_parse_key("event_edge_agent.titles")
+                .try_parsing(true),
+        );
+
+        let mut cfg: Self = builder.build()?.try_deserialize()?;
+        cfg.apply_env_overrides();
+        Ok(cfg)
     }
 
     /// Create a default configuration for CLI usage
@@ -486,6 +524,7 @@ impl AppConfig {
             dry_run: DryRunConfig { enabled: dry_run },
             logging: LoggingConfig::default(),
             health_port: Some(8080),
+            api_port: Some(8081),
             event_edge_agent: None,
             nba_comeback: None,
             event_registry: None,
@@ -533,6 +572,133 @@ impl AppConfig {
             Err(errors)
         }
     }
+
+    fn apply_env_overrides(&mut self) {
+        if let Some(v) = env_bool(&["PLOY_DRY_RUN__ENABLED", "PLOY__DRY_RUN__ENABLED"]) {
+            self.dry_run.enabled = v;
+        }
+
+        if let Some(v) = env_string(&["PLOY_MARKET__MARKET_SLUG", "PLOY__MARKET__MARKET_SLUG"]) {
+            self.market.market_slug = v;
+        }
+
+        if let Some(v) = env_u16(&["PLOY_API_PORT", "PLOY__API_PORT"]) {
+            self.api_port = Some(v);
+        }
+
+        if let Some(v) = env_string(&[
+            "PLOY_DATABASE__URL",
+            "PLOY__DATABASE__URL",
+            "PLOY_DATABASE_URL",
+            "DATABASE_URL",
+        ]) {
+            self.database.url = v;
+        }
+
+        if let Some(v) = env_string(&[
+            "PLOY_DATABASE__MAX_CONNECTIONS",
+            "PLOY__DATABASE__MAX_CONNECTIONS",
+            "PLOY_DATABASE_MAX_CONNECTIONS",
+        ])
+        .and_then(|raw| raw.parse::<u32>().ok())
+        {
+            self.database.max_connections = v;
+        }
+
+        let ee_enabled = env_bool(&[
+            "PLOY_EVENT_EDGE_AGENT__ENABLED",
+            "PLOY__EVENT_EDGE_AGENT__ENABLED",
+        ]);
+        let ee_trade = env_bool(&[
+            "PLOY_EVENT_EDGE_AGENT__TRADE",
+            "PLOY__EVENT_EDGE_AGENT__TRADE",
+        ]);
+        let ee_event_ids = env_list(&[
+            "PLOY_EVENT_EDGE_AGENT__EVENT_IDS",
+            "PLOY__EVENT_EDGE_AGENT__EVENT_IDS",
+            "PLOY_EVENT_EDGE_AGENT_EVENT_IDS",
+        ]);
+        let ee_titles = env_list(&[
+            "PLOY_EVENT_EDGE_AGENT__TITLES",
+            "PLOY__EVENT_EDGE_AGENT__TITLES",
+            "PLOY_EVENT_EDGE_AGENT_TITLES",
+        ]);
+        if ee_enabled.is_some() || ee_trade.is_some() {
+            let ee = self
+                .event_edge_agent
+                .get_or_insert_with(EventEdgeAgentConfig::default);
+            if let Some(v) = ee_enabled {
+                ee.enabled = v;
+            }
+            if let Some(v) = ee_trade {
+                ee.trade = v;
+            }
+        }
+        if ee_event_ids.is_some() || ee_titles.is_some() {
+            let ee = self
+                .event_edge_agent
+                .get_or_insert_with(EventEdgeAgentConfig::default);
+            if let Some(v) = ee_event_ids {
+                ee.event_ids = v;
+            }
+            if let Some(v) = ee_titles {
+                ee.titles = v;
+            }
+        }
+    }
+}
+
+fn env_string(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Ok(v) = std::env::var(key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn env_u16(keys: &[&str]) -> Option<u16> {
+    env_string(keys).and_then(|v| v.parse::<u16>().ok())
+}
+
+fn env_bool(keys: &[&str]) -> Option<bool> {
+    env_string(keys).and_then(|v| parse_bool_like(&v))
+}
+
+fn env_list(keys: &[&str]) -> Option<Vec<String>> {
+    env_string(keys).map(|raw| parse_string_list(&raw))
+}
+
+fn parse_string_list(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    if trimmed.starts_with('[') {
+        if let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return values
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
+    trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn parse_bool_like(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -554,5 +720,17 @@ mod tests {
 
         // 0.95 - 0.005 - 0.02 - 0.01 = 0.915
         assert_eq!(strategy.effective_sum_target(), dec!(0.915));
+    }
+
+    #[test]
+    fn test_parse_string_list_csv() {
+        let parsed = parse_string_list("a,b, c ,,d");
+        assert_eq!(parsed, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_parse_string_list_json_array() {
+        let parsed = parse_string_list(r#"["id-1","id-2"]"#);
+        assert_eq!(parsed, vec!["id-1", "id-2"]);
     }
 }

@@ -9,8 +9,8 @@
 use burn::nn::{Linear, LinearConfig, Relu};
 use burn::prelude::*;
 
-use crate::rl::core::{CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS};
 use super::encoder::{StateEncoderConfig, StateEncoderNetwork, ENCODER_OUTPUT_DIM};
+use crate::rl::core::{CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS};
 
 /// Actor network configuration
 #[derive(Config, Debug)]

@@ -2,10 +2,12 @@
 //!
 //! Fundamental types for state representation, actions, and rewards.
 
-pub mod state;
 pub mod action;
 pub mod reward;
+pub mod state;
 
-pub use state::{RawObservation, StateEncoder, DefaultStateEncoder, TOTAL_FEATURES};
-pub use action::{DiscreteAction, ContinuousAction, HybridAction, NUM_DISCRETE_ACTIONS, CONTINUOUS_ACTION_DIM};
-pub use reward::{RewardSignal, RewardFunction, PnLRewardFunction, RewardTransition};
+pub use action::{
+    ContinuousAction, DiscreteAction, HybridAction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
+};
+pub use reward::{PnLRewardFunction, RewardFunction, RewardSignal, RewardTransition};
+pub use state::{DefaultStateEncoder, RawObservation, StateEncoder, TOTAL_FEATURES};

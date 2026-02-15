@@ -9,6 +9,6 @@ pub mod checkpoint;
 pub mod dlq_processor;
 pub mod event_store;
 
-pub use checkpoint::{CheckpointService, CheckpointConfig, Checkpointable};
-pub use dlq_processor::{DLQProcessor, DLQProcessorConfig, DLQHandler};
-pub use event_store::{EventStore, StoredEvent, EventMetadata};
+pub use checkpoint::{CheckpointConfig, CheckpointService, Checkpointable};
+pub use dlq_processor::{DLQHandler, DLQProcessor, DLQProcessorConfig};
+pub use event_store::{EventMetadata, EventStore, StoredEvent};

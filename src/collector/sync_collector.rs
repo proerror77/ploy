@@ -36,9 +36,9 @@ pub struct SyncRecord {
     pub pm_market_slug: Option<String>,
 
     // Derived signals
-    pub bn_price_change_1s: Option<Decimal>,  // Price change vs 1s ago
-    pub bn_price_change_5s: Option<Decimal>,  // Price change vs 5s ago
-    pub bn_momentum: Option<Decimal>,          // Short-term momentum signal
+    pub bn_price_change_1s: Option<Decimal>, // Price change vs 1s ago
+    pub bn_price_change_5s: Option<Decimal>, // Price change vs 5s ago
+    pub bn_momentum: Option<Decimal>,        // Short-term momentum signal
 }
 
 /// Polymarket price snapshot
@@ -254,7 +254,11 @@ impl SyncCollector {
             let mut result = (None, None, None);
             for (slug, price) in prices.iter() {
                 if slug.to_lowercase().contains(slug_prefix) {
-                    result = (Some(price.yes_price), Some(price.no_price), Some(slug.clone()));
+                    result = (
+                        Some(price.yes_price),
+                        Some(price.no_price),
+                        Some(slug.clone()),
+                    );
                     break;
                 }
             }
@@ -382,7 +386,16 @@ impl LagAnalyzer {
         end: DateTime<Utc>,
     ) -> Result<LagAnalysisResult> {
         // Get records with significant price moves
-        let records = sqlx::query_as::<_, (DateTime<Utc>, Decimal, Option<Decimal>, Option<Decimal>, Option<Decimal>)>(
+        let records = sqlx::query_as::<
+            _,
+            (
+                DateTime<Utc>,
+                Decimal,
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<Decimal>,
+            ),
+        >(
             r#"
             SELECT timestamp, bn_mid_price, bn_price_change_5s, pm_yes_price, pm_no_price
             FROM sync_records
@@ -408,15 +421,22 @@ impl LagAnalyzer {
 
             if let Some(change) = bn_change.as_ref() {
                 // Look ahead 1-10 seconds for PM reaction
-                let pm_reacted = records.iter().skip(i + 1).take(100).any(|(_, _, _, future_pm, _)| {
-                    if let (Some(current), Some(future)) = (pm_yes.as_ref(), future_pm.as_ref()) {
-                        let pm_change = (*future - *current) / *current;
-                        (*change > Decimal::ZERO && pm_change > Decimal::ZERO) ||
-                        (*change < Decimal::ZERO && pm_change < Decimal::ZERO)
-                    } else {
-                        false
-                    }
-                });
+                let pm_reacted =
+                    records
+                        .iter()
+                        .skip(i + 1)
+                        .take(100)
+                        .any(|(_, _, _, future_pm, _)| {
+                            if let (Some(current), Some(future)) =
+                                (pm_yes.as_ref(), future_pm.as_ref())
+                            {
+                                let pm_change = (*future - *current) / *current;
+                                (*change > Decimal::ZERO && pm_change > Decimal::ZERO)
+                                    || (*change < Decimal::ZERO && pm_change < Decimal::ZERO)
+                            } else {
+                                false
+                            }
+                        });
 
                 if *change > Decimal::ZERO {
                     total_up_moves += 1;
@@ -442,7 +462,8 @@ impl LagAnalyzer {
             up_moves_bn_lead,
             down_moves_bn_lead,
             bn_lead_rate: if total_up_moves + total_down_moves > 0 {
-                (up_moves_bn_lead + down_moves_bn_lead) as f64 / (total_up_moves + total_down_moves) as f64
+                (up_moves_bn_lead + down_moves_bn_lead) as f64
+                    / (total_up_moves + total_down_moves) as f64
             } else {
                 0.0
             },

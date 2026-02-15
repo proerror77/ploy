@@ -78,13 +78,10 @@ async fn connect_via_proxy(
 
     // Connect to proxy
     let proxy_addr = format!("{}:{}", proxy_host, proxy_port);
-    let stream = tokio::time::timeout(
-        Duration::from_secs(10),
-        TcpStream::connect(&proxy_addr),
-    )
-    .await
-    .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
-    .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
+    let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&proxy_addr))
+        .await
+        .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
+        .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
 
     // Send HTTP CONNECT request
     let connect_request = format!(
@@ -132,7 +129,10 @@ async fn connect_via_proxy(
         .reunite(writer)
         .map_err(|e| PloyError::Internal(format!("Failed to reunite stream: {}", e)))?;
 
-    debug!("Proxy tunnel established to {}:{}", target_host, target_port);
+    debug!(
+        "Proxy tunnel established to {}:{}",
+        target_host, target_port
+    );
     Ok(stream)
 }
 
@@ -145,7 +145,10 @@ async fn connect_websocket_with_proxy(
 
     if let Some(proxy_url) = get_proxy_url() {
         if let Some((proxy_host, proxy_port)) = parse_proxy_url(&proxy_url) {
-            info!("Using proxy {}:{} for WebSocket connection", proxy_host, proxy_port);
+            info!(
+                "Using proxy {}:{} for WebSocket connection",
+                proxy_host, proxy_port
+            );
 
             // Connect through proxy
             let tcp_stream = connect_via_proxy(&proxy_host, proxy_port, host, port).await?;
@@ -220,6 +223,7 @@ pub struct BinanceAggTrade {
 pub struct PriceUpdate {
     pub symbol: String,
     pub price: Decimal,
+    pub quantity: Option<Decimal>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -229,13 +233,14 @@ pub struct SpotPrice {
     pub price: Decimal,
     pub timestamp: DateTime<Utc>,
     /// Price history for momentum calculation (newest first)
-    history: VecDeque<(Decimal, DateTime<Utc>)>,
+    /// Stores (price, quantity, timestamp). Quantity is the Binance trade size when available.
+    history: VecDeque<(Decimal, Option<Decimal>, DateTime<Utc>)>,
 }
 
 impl SpotPrice {
-    pub fn new(price: Decimal, timestamp: DateTime<Utc>) -> Self {
+    pub fn new(price: Decimal, quantity: Option<Decimal>, timestamp: DateTime<Utc>) -> Self {
         let mut history = VecDeque::with_capacity(MAX_PRICE_HISTORY);
-        history.push_front((price, timestamp));
+        history.push_front((price, quantity, timestamp));
         Self {
             price,
             timestamp,
@@ -244,10 +249,10 @@ impl SpotPrice {
     }
 
     /// Update with new price, maintaining history
-    pub fn update(&mut self, price: Decimal, timestamp: DateTime<Utc>) {
+    pub fn update(&mut self, price: Decimal, quantity: Option<Decimal>, timestamp: DateTime<Utc>) {
         self.price = price;
         self.timestamp = timestamp;
-        self.history.push_front((price, timestamp));
+        self.history.push_front((price, quantity, timestamp));
 
         // Keep bounded history
         while self.history.len() > MAX_PRICE_HISTORY {
@@ -260,14 +265,14 @@ impl SpotPrice {
         let target_time = self.timestamp - chrono::Duration::seconds(secs as i64);
 
         // Find the closest price at or before target time
-        for (price, ts) in &self.history {
+        for (price, _qty, ts) in &self.history {
             if *ts <= target_time {
                 return Some(*price);
             }
         }
 
         // If no exact match, return oldest available
-        self.history.back().map(|(p, _)| *p)
+        self.history.back().map(|(p, _, _)| *p)
     }
 
     /// Calculate momentum over N seconds: (current - past) / past
@@ -305,7 +310,7 @@ impl SpotPrice {
         // Weights: short-term 20%, mid-term 30%, longer-term 50%
         let weighted = mom_10s * Decimal::new(2, 1)  // 0.2
             + mom_30s * Decimal::new(3, 1)           // 0.3
-            + mom_60s * Decimal::new(5, 1);          // 0.5
+            + mom_60s * Decimal::new(5, 1); // 0.5
 
         Some(weighted)
     }
@@ -338,8 +343,8 @@ impl SpotPrice {
         let prices: Vec<Decimal> = self
             .history
             .iter()
-            .filter(|(_, ts)| *ts >= cutoff_time)
-            .map(|(p, _)| *p)
+            .filter(|(_, _, ts)| *ts >= cutoff_time)
+            .map(|(p, _, _)| *p)
             .collect();
 
         if prices.len() < 5 {
@@ -384,6 +389,36 @@ impl SpotPrice {
         self.history.len()
     }
 
+    /// Calculate VWAP (volume-weighted average price) over the lookback window.
+    ///
+    /// Uses Binance trade quantity as the weight. Returns None if there is no usable
+    /// quantity data in the window.
+    pub fn vwap(&self, lookback_secs: u64) -> Option<Decimal> {
+        let cutoff_time = self.timestamp - chrono::Duration::seconds(lookback_secs as i64);
+
+        let mut sum_pq = Decimal::ZERO;
+        let mut sum_q = Decimal::ZERO;
+
+        for (price, qty, ts) in &self.history {
+            if *ts < cutoff_time {
+                continue;
+            }
+            let Some(q) = qty.as_ref() else { continue };
+            if *q <= Decimal::ZERO {
+                continue;
+            }
+
+            sum_pq += *price * *q;
+            sum_q += *q;
+        }
+
+        if sum_q <= Decimal::ZERO {
+            return None;
+        }
+
+        Some(sum_pq / sum_q)
+    }
+
     /// Check if we have enough history for weighted momentum calculation
     pub fn has_sufficient_history(&self) -> bool {
         // Need at least 60 seconds of data
@@ -392,7 +427,7 @@ impl SpotPrice {
         }
 
         // Check if oldest entry is at least 60 seconds old
-        if let Some((_, oldest_ts)) = self.history.back() {
+        if let Some((_, _, oldest_ts)) = self.history.back() {
             let age = self.timestamp - *oldest_ts;
             return age.num_seconds() >= 60;
         }
@@ -448,13 +483,19 @@ impl PriceCache {
     }
 
     /// Update price for a symbol
-    pub async fn update(&self, symbol: &str, price: Decimal, timestamp: DateTime<Utc>) {
+    pub async fn update(
+        &self,
+        symbol: &str,
+        price: Decimal,
+        quantity: Option<Decimal>,
+        timestamp: DateTime<Utc>,
+    ) {
         let mut prices = self.prices.write().await;
 
         if let Some(spot) = prices.get_mut(symbol) {
-            spot.update(price, timestamp);
+            spot.update(price, quantity, timestamp);
         } else {
-            prices.insert(symbol.to_string(), SpotPrice::new(price, timestamp));
+            prices.insert(symbol.to_string(), SpotPrice::new(price, quantity, timestamp));
         }
     }
 
@@ -486,6 +527,12 @@ impl PriceCache {
     pub async fn volatility(&self, symbol: &str, lookback_secs: u64) -> Option<Decimal> {
         let prices = self.prices.read().await;
         prices.get(symbol)?.volatility(lookback_secs)
+    }
+
+    /// Calculate VWAP for a symbol
+    pub async fn vwap(&self, symbol: &str, lookback_secs: u64) -> Option<Decimal> {
+        let prices = self.prices.read().await;
+        prices.get(symbol)?.vwap(lookback_secs)
     }
 
     /// Check if symbol has sufficient history for weighted momentum
@@ -573,10 +620,7 @@ impl BinanceWebSocket {
                 }
                 Err(e) => {
                     attempt += 1;
-                    error!(
-                        "Binance WebSocket error (attempt {}): {}",
-                        attempt, e
-                    );
+                    error!("Binance WebSocket error (attempt {}): {}", attempt, e);
                 }
             }
 
@@ -595,7 +639,8 @@ impl BinanceWebSocket {
 
             info!(
                 "Reconnecting to Binance in {:?} (attempt {})",
-                final_delay, attempt + 1
+                final_delay,
+                attempt + 1
             );
             tokio::time::sleep(final_delay).await;
         }
@@ -661,22 +706,27 @@ impl BinanceWebSocket {
     async fn handle_message(&self, text: &str) {
         // Try parsing as aggregated trade
         if let Ok(trade) = serde_json::from_str::<BinanceAggTrade>(text) {
-            self.process_trade(&trade.symbol, &trade.price, trade.trade_time).await;
+            self.process_trade(&trade.symbol, &trade.price, &trade.quantity, trade.trade_time)
+                .await;
             return;
         }
 
         // Try parsing as regular trade
         if let Ok(trade) = serde_json::from_str::<BinanceTrade>(text) {
-            self.process_trade(&trade.symbol, &trade.price, trade.trade_time).await;
+            self.process_trade(&trade.symbol, &trade.price, &trade.quantity, trade.trade_time)
+                .await;
             return;
         }
 
         // Log unrecognized messages
-        debug!("Unrecognized Binance message: {}", &text[..text.len().min(100)]);
+        debug!(
+            "Unrecognized Binance message: {}",
+            &text[..text.len().min(100)]
+        );
     }
 
     /// Process a trade update
-    async fn process_trade(&self, symbol: &str, price_str: &str, timestamp_ms: u64) {
+    async fn process_trade(&self, symbol: &str, price_str: &str, qty_str: &str, timestamp_ms: u64) {
         let price = match price_str.parse::<Decimal>() {
             Ok(p) => p,
             Err(e) => {
@@ -684,17 +734,27 @@ impl BinanceWebSocket {
                 return;
             }
         };
+        let quantity = match qty_str.parse::<Decimal>() {
+            Ok(q) => Some(q),
+            Err(e) => {
+                warn!("Failed to parse quantity '{}': {}", qty_str, e);
+                None
+            }
+        };
 
-        let timestamp = DateTime::from_timestamp_millis(timestamp_ms as i64)
-            .unwrap_or_else(Utc::now);
+        let timestamp =
+            DateTime::from_timestamp_millis(timestamp_ms as i64).unwrap_or_else(Utc::now);
 
         // Update cache
-        self.price_cache.update(symbol, price, timestamp).await;
+        self.price_cache
+            .update(symbol, price, quantity, timestamp)
+            .await;
 
         // Broadcast update
         let update = PriceUpdate {
             symbol: symbol.to_string(),
             price,
+            quantity,
             timestamp,
         };
 
@@ -711,11 +771,11 @@ mod tests {
     #[test]
     fn test_spot_price_momentum() {
         let now = Utc::now();
-        let mut spot = SpotPrice::new(dec!(100), now - chrono::Duration::seconds(10));
+        let mut spot = SpotPrice::new(dec!(100), None, now - chrono::Duration::seconds(10));
 
         // Add price history
-        spot.update(dec!(101), now - chrono::Duration::seconds(5));
-        spot.update(dec!(102), now);
+        spot.update(dec!(101), None, now - chrono::Duration::seconds(5));
+        spot.update(dec!(102), None, now);
 
         // Current price should be latest
         assert_eq!(spot.price, dec!(102));
@@ -731,12 +791,13 @@ mod tests {
     #[test]
     fn test_price_history_bounded() {
         let now = Utc::now();
-        let mut spot = SpotPrice::new(dec!(100), now);
+        let mut spot = SpotPrice::new(dec!(100), None, now);
 
         // Add more than MAX_PRICE_HISTORY entries
         for i in 0..MAX_PRICE_HISTORY + 10 {
             spot.update(
                 Decimal::from(100 + i as i64),
+                None,
                 now + chrono::Duration::seconds(i as i64),
             );
         }
@@ -750,8 +811,8 @@ mod tests {
         let cache = PriceCache::new();
         let now = Utc::now();
 
-        cache.update("BTCUSDT", dec!(50000), now).await;
-        cache.update("ETHUSDT", dec!(3000), now).await;
+        cache.update("BTCUSDT", dec!(50000), None, now).await;
+        cache.update("ETHUSDT", dec!(3000), None, now).await;
 
         let btc = cache.get("BTCUSDT").await;
         assert!(btc.is_some());

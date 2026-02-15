@@ -21,8 +21,8 @@ use crate::rl::core::{
 };
 use crate::rl::memory::ReplayBuffer;
 use crate::strategy::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, StrategyAction,
-    StrategyStateInfo, Strategy,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy, StrategyAction,
+    StrategyStateInfo,
 };
 
 /// RL-based trading strategy
@@ -82,9 +82,7 @@ impl RLStrategy {
             config: config.clone(),
             encoder: Arc::new(DefaultStateEncoder::new()),
             reward_fn: Box::new(PnLRewardFunction::new()),
-            replay_buffer: Arc::new(RwLock::new(ReplayBuffer::new(
-                config.training.buffer_size,
-            ))),
+            replay_buffer: Arc::new(RwLock::new(ReplayBuffer::new(config.training.buffer_size))),
             current_obs: RawObservation::new(),
             prev_obs: None,
             position: None,
@@ -147,8 +145,7 @@ impl RLStrategy {
             self.current_obs.position_shares = pos.shares;
             self.current_obs.entry_price = Some(pos.entry_price);
             self.current_obs.unrealized_pnl = Some(pos.unrealized_pnl);
-            self.current_obs.position_duration_secs =
-                Some((now - pos.opened_at).num_seconds());
+            self.current_obs.position_duration_secs = Some((now - pos.opened_at).num_seconds());
         } else {
             self.current_obs.has_position = false;
             self.current_obs.position_side = None;
@@ -199,17 +196,15 @@ impl RLStrategy {
             if sum_f32 < 0.96 && !self.current_obs.has_position {
                 // Choose side based on spread
                 let side_pref = match (self.current_obs.spread_up, self.current_obs.spread_down) {
-                    (Some(up), Some(down)) if up < down => 0.5, // Prefer UP
+                    (Some(up), Some(down)) if up < down => 0.5,  // Prefer UP
                     (Some(up), Some(down)) if down < up => -0.5, // Prefer DOWN
-                    _ => 0.0, // No preference
+                    _ => 0.0,                                    // No preference
                 };
 
                 return ContinuousAction::new(
-                    0.7,  // Buy signal
-                    side_pref,
-                    0.5,  // Medium urgency
-                    0.0,
-                    0.0,
+                    0.7, // Buy signal
+                    side_pref, 0.5, // Medium urgency
+                    0.0, 0.0,
                 );
             }
 
@@ -217,10 +212,8 @@ impl RLStrategy {
             if sum_f32 > 1.0 && self.current_obs.has_position {
                 return ContinuousAction::new(
                     -0.8, // Sell signal
-                    0.0,
-                    0.7, // Urgent exit
-                    0.0,
-                    0.0,
+                    0.0, 0.7, // Urgent exit
+                    0.0, 0.0,
                 );
             }
         }
@@ -241,7 +234,8 @@ impl RLStrategy {
             DiscreteAction::BuyUp => {
                 if let Some(ask) = self.current_obs.up_ask {
                     let shares = self.calculate_position_size(&action);
-                    let order = self.create_order(&self.token_ids.0, Side::Up, shares, ask, &action);
+                    let order =
+                        self.create_order(&self.token_ids.0, Side::Up, shares, ask, &action);
                     actions.push(StrategyAction::SubmitOrder {
                         client_order_id: format!("rl_buy_up_{}", self.step_count),
                         order,
@@ -252,7 +246,8 @@ impl RLStrategy {
             DiscreteAction::BuyDown => {
                 if let Some(ask) = self.current_obs.down_ask {
                     let shares = self.calculate_position_size(&action);
-                    let order = self.create_order(&self.token_ids.1, Side::Down, shares, ask, &action);
+                    let order =
+                        self.create_order(&self.token_ids.1, Side::Down, shares, ask, &action);
                     actions.push(StrategyAction::SubmitOrder {
                         client_order_id: format!("rl_buy_down_{}", self.step_count),
                         order,
@@ -349,12 +344,23 @@ impl RLStrategy {
         }
 
         // Set sum of asks at entry
-        if self.current_obs.has_position && !self.prev_obs.as_ref().map(|o| o.has_position).unwrap_or(false) {
+        if self.current_obs.has_position
+            && !self
+                .prev_obs
+                .as_ref()
+                .map(|o| o.has_position)
+                .unwrap_or(false)
+        {
             transition.sum_of_asks_at_entry = self.current_obs.sum_of_asks;
         }
 
         // Risk exposure from config
-        transition.risk_exposure = self.current_obs.exposure_pct.to_string().parse().unwrap_or(0.0);
+        transition.risk_exposure = self
+            .current_obs
+            .exposure_pct
+            .to_string()
+            .parse()
+            .unwrap_or(0.0);
 
         transition
     }
@@ -440,9 +446,10 @@ impl Strategy for RLStrategy {
                 // Simplified: check if we have a position
                 if self.position.is_some() {
                     // Assume it's a close
-                    let realized_pnl = self.position.as_ref().map(|p| {
-                        (price - p.entry_price) * Decimal::from(p.shares)
-                    });
+                    let realized_pnl = self
+                        .position
+                        .as_ref()
+                        .map(|p| (price - p.entry_price) * Decimal::from(p.shares));
 
                     if let Some(pnl) = realized_pnl {
                         self.state.realized_pnl_today += pnl;
@@ -454,7 +461,12 @@ impl Strategy for RLStrategy {
                     // Opening a new position
                     // We need to know which side this is
                     // For now, assume the order_id tells us
-                    let side = if update.client_order_id.as_ref().map(|s| s.contains("up")).unwrap_or(false) {
+                    let side = if update
+                        .client_order_id
+                        .as_ref()
+                        .map(|s| s.contains("up"))
+                        .unwrap_or(false)
+                    {
                         Side::Up
                     } else {
                         Side::Down
@@ -487,10 +499,8 @@ impl Strategy for RLStrategy {
 
     async fn on_tick(&mut self, now: DateTime<Utc>) -> Result<Vec<StrategyAction>> {
         // Periodic updates (e.g., time-based actions)
-        self.current_obs.update_time_features(
-            now.hour(),
-            now.weekday().num_days_from_monday(),
-        );
+        self.current_obs
+            .update_time_features(now.hour(), now.weekday().num_days_from_monday());
 
         // Update position price if we have one
         if let Some(pos) = &mut self.position {

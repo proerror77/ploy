@@ -3,16 +3,16 @@
 //! Monitors for positions that can be redeemed (winning positions after market resolution)
 //! and automatically claims them by calling the CTFExchange contract.
 
-use std::sync::Arc;
-use std::time::Duration;
+use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
-use alloy::network::EthereumWallet;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use crate::adapters::PolymarketClient;
 use crate::error::Result;
@@ -113,9 +113,10 @@ impl AutoClaimer {
         *running = true;
         drop(running);
 
-        info!("Starting AutoClaimer (check interval: {}s, auto_claim: {})",
-            self.config.check_interval_secs,
-            self.config.auto_claim);
+        info!(
+            "Starting AutoClaimer (check interval: {}s, auto_claim: {})",
+            self.config.check_interval_secs, self.config.auto_claim
+        );
 
         loop {
             // Check if we should stop
@@ -128,11 +129,15 @@ impl AutoClaimer {
                 Ok(results) => {
                     for result in results {
                         if result.success {
-                            info!("Claimed ${:.2} from condition {}",
-                                result.amount_claimed, result.condition_id);
+                            info!(
+                                "Claimed ${:.2} from condition {}",
+                                result.amount_claimed, result.condition_id
+                            );
                         } else {
-                            warn!("Failed to claim condition {}: {:?}",
-                                result.condition_id, result.error);
+                            warn!(
+                                "Failed to claim condition {}: {:?}",
+                                result.condition_id, result.error
+                            );
                         }
                     }
                 }
@@ -185,8 +190,10 @@ impl AutoClaimer {
             }
 
             // Log the opportunity
-            info!("Redeemable: {} - {} shares = ${:.2}",
-                pos.outcome, pos.size, pos.payout);
+            info!(
+                "Redeemable: {} - {} shares = ${:.2}",
+                pos.outcome, pos.size, pos.payout
+            );
 
             if self.config.auto_claim {
                 // Attempt to claim
@@ -214,7 +221,10 @@ impl AutoClaimer {
                     }
                 }
             } else {
-                info!("[DRY RUN] Would claim ${:.2} from {}", pos.payout, pos.condition_id);
+                info!(
+                    "[DRY RUN] Would claim ${:.2} from {}",
+                    pos.payout, pos.condition_id
+                );
             }
         }
 
@@ -237,7 +247,9 @@ impl AutoClaimer {
 
             // Check if position is redeemable (API may provide this flag)
             // Or check if current price = 1.0 (winning side)
-            let is_winner = p.cur_price.as_ref()
+            let is_winner = p
+                .cur_price
+                .as_ref()
                 .and_then(|price_str| price_str.parse::<f64>().ok())
                 .map(|price| price > 0.99) // Winner = price ~1.0
                 .unwrap_or(false);
@@ -257,7 +269,9 @@ impl AutoClaimer {
                 outcome: p.outcome.clone().unwrap_or_default(),
                 size,
                 payout,
-                neg_risk: p.extra.get("neg_risk")
+                neg_risk: p
+                    .extra
+                    .get("neg_risk")
                     .or_else(|| p.extra.get("negRisk"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
@@ -267,7 +281,12 @@ impl AutoClaimer {
                 "Found redeemable position: {} {} shares, condition={}",
                 p.outcome.clone().unwrap_or_default(),
                 size,
-                p.condition_id.clone().unwrap_or_default().chars().take(16).collect::<String>()
+                p.condition_id
+                    .clone()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(16)
+                    .collect::<String>()
             );
         }
 
@@ -276,29 +295,36 @@ impl AutoClaimer {
 
     /// Claim a specific position by calling the CTFExchange contract
     async fn claim_position(&self, pos: &RedeemablePosition) -> Result<String> {
-        let private_key = self.config.private_key.as_ref()
-            .ok_or_else(|| crate::error::PloyError::Wallet("No private key for claiming".into()))?;
+        let private_key =
+            self.config.private_key.as_ref().ok_or_else(|| {
+                crate::error::PloyError::Wallet("No private key for claiming".into())
+            })?;
 
         // Parse private key
-        let signer: PrivateKeySigner = private_key.parse()
+        let signer: PrivateKeySigner = private_key
+            .parse()
             .map_err(|e| crate::error::PloyError::Wallet(format!("Invalid private key: {}", e)))?;
 
         let wallet = EthereumWallet::from(signer);
 
         // Connect to Polygon
-        let rpc_url = POLYGON_RPC.parse()
-            .map_err(|e| crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e)))?;
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_http(rpc_url);
+        let rpc_url = POLYGON_RPC.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
+        })?;
+        let provider = ProviderBuilder::new().wallet(wallet).connect_http(rpc_url);
 
         // Select appropriate exchange contract
         let exchange_addr: Address = if pos.neg_risk {
-            NEG_RISK_CTF_EXCHANGE_POLYGON.parse()
-                .map_err(|e| crate::error::PloyError::AddressParsing(format!("Invalid NegRisk CTF address: {}", e)))?
+            NEG_RISK_CTF_EXCHANGE_POLYGON.parse().map_err(|e| {
+                crate::error::PloyError::AddressParsing(format!(
+                    "Invalid NegRisk CTF address: {}",
+                    e
+                ))
+            })?
         } else {
-            CTF_EXCHANGE_POLYGON.parse()
-                .map_err(|e| crate::error::PloyError::AddressParsing(format!("Invalid CTF address: {}", e)))?
+            CTF_EXCHANGE_POLYGON.parse().map_err(|e| {
+                crate::error::PloyError::AddressParsing(format!("Invalid CTF address: {}", e))
+            })?
         };
 
         let contract = ICTFExchange::new(exchange_addr, provider);
@@ -316,22 +342,27 @@ impl AutoClaimer {
         // For binary markets: [1, 2] redeems both outcomes
         let index_sets = vec![U256::from(1), U256::from(2)];
 
-        info!("Calling redeemPositions on {} for condition {}...",
-            if pos.neg_risk { "NegRisk CTF Exchange" } else { "CTF Exchange" },
-            &pos.condition_id[..16]);
-
-        // Call redeem
-        let tx = contract.redeemPositions(
-            parent_collection_id.into(),
-            condition_id.into(),
-            index_sets,
+        info!(
+            "Calling redeemPositions on {} for condition {}...",
+            if pos.neg_risk {
+                "NegRisk CTF Exchange"
+            } else {
+                "CTF Exchange"
+            },
+            &pos.condition_id[..16]
         );
 
-        let pending = tx.send().await
-            .map_err(|e| crate::error::PloyError::OrderSubmission(format!("Redeem tx failed: {}", e)))?;
+        // Call redeem
+        let tx =
+            contract.redeemPositions(parent_collection_id.into(), condition_id.into(), index_sets);
 
-        let receipt = pending.get_receipt().await
-            .map_err(|e| crate::error::PloyError::OrderSubmission(format!("Tx confirmation failed: {}", e)))?;
+        let pending = tx.send().await.map_err(|e| {
+            crate::error::PloyError::OrderSubmission(format!("Redeem tx failed: {}", e))
+        })?;
+
+        let receipt = pending.get_receipt().await.map_err(|e| {
+            crate::error::PloyError::OrderSubmission(format!("Tx confirmation failed: {}", e))
+        })?;
 
         let tx_hash = format!("{:?}", receipt.transaction_hash);
         info!("Redeem successful! Tx: {}", tx_hash);

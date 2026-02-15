@@ -1,6 +1,6 @@
 //! Test the NBA live win probability model
 
-use ploy::strategy::{LiveWinProbModel, GameFeatures};
+use ploy::strategy::{GameFeatures, LiveWinProbModel};
 
 fn main() {
     println!("Testing NBA Live Win Probability Model\n");
@@ -26,6 +26,7 @@ fn main() {
         possession: 1.0,
         pregame_spread: 0.0,
         elo_diff: 0.0,
+        comeback_rate: None,
     };
 
     let pred1 = model.predict(&features1);
@@ -46,6 +47,7 @@ fn main() {
         possession: 0.0,
         pregame_spread: 0.0,
         elo_diff: 0.0,
+        comeback_rate: None,
     };
 
     let pred2 = model.predict(&features2);
@@ -64,8 +66,9 @@ fn main() {
         time_remaining: 8.0,
         quarter: 3,
         possession: 1.0,
-        pregame_spread: 5.0,  // Was favored pre-game
-        elo_diff: 50.0,       // Higher Elo
+        pregame_spread: 5.0, // Was favored pre-game
+        elo_diff: 50.0,      // Higher Elo
+        comeback_rate: None,
     };
 
     let pred3 = model.predict(&features3);
@@ -84,8 +87,9 @@ fn main() {
         time_remaining: 25.0,
         quarter: 2,
         possession: 0.0,
-        pregame_spread: -3.0,  // Was underdog
+        pregame_spread: -3.0, // Was underdog
         elo_diff: -30.0,
+        comeback_rate: None,
     };
 
     let pred4 = model.predict(&features4);
@@ -119,7 +123,7 @@ fn main() {
             } else {
                 println!("  ✗ Predictions differ after load");
             }
-        },
+        }
         Err(e) => println!("  ✗ Failed to load: {}", e),
     }
 

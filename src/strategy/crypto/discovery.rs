@@ -31,25 +31,25 @@ impl CryptoMarketDiscovery {
             ],
         }
     }
-    
+
     pub fn with_series(client: PolymarketClient, series_ids: Vec<String>) -> Self {
         Self { client, series_ids }
     }
-    
+
     /// Parse end date string to DateTime
     fn parse_end_date(end_date_str: &str) -> Option<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(end_date_str)
             .ok()
             .map(|dt| dt.with_timezone(&Utc))
     }
-    
+
     /// Fetch markets for a specific series
     async fn fetch_series_markets(&self, series_id: &str) -> Result<Vec<BinaryMarket>> {
         let events = self.client.get_all_active_events(series_id).await?;
         info!("Found {} events in series {}", events.len(), series_id);
-        
+
         let mut markets = Vec::new();
-        
+
         // Only process first 5 events per series to avoid rate limits
         for event in events.into_iter().take(5) {
             // Get market details
@@ -60,20 +60,21 @@ impl CryptoMarketDiscovery {
                     continue;
                 }
             };
-            
+
             // Parse end time
-            let end_time = event_details.end_date
+            let end_time = event_details
+                .end_date
                 .as_ref()
                 .and_then(|s| Self::parse_end_date(s))
                 .unwrap_or_else(Utc::now);
-            
+
             // Iterate through markets in the event
             for gamma_market in &event_details.markets {
                 let condition_id = match &gamma_market.condition_id {
                     Some(cid) => cid.clone(),
                     None => continue,
                 };
-                
+
                 // Get CLOB market for token IDs
                 match self.client.get_market(&condition_id).await {
                     Ok(mut clob_market) => {
@@ -94,7 +95,7 @@ impl CryptoMarketDiscovery {
                         } else {
                             (second.token_id, first.token_id)
                         };
-                        
+
                         let market = BinaryMarket::crypto_up_down(
                             event.id.clone(),
                             condition_id,
@@ -102,7 +103,7 @@ impl CryptoMarketDiscovery {
                             down_token,
                             end_time,
                         );
-                        
+
                         markets.push(market);
                     }
                     Err(e) => {
@@ -111,7 +112,7 @@ impl CryptoMarketDiscovery {
                 }
             }
         }
-        
+
         Ok(markets)
     }
 }
@@ -121,14 +122,18 @@ impl MarketDiscovery for CryptoMarketDiscovery {
     fn market_type(&self) -> MarketType {
         MarketType::CryptoUpDown
     }
-    
+
     async fn discover_markets(&self) -> Result<Vec<BinaryMarket>> {
         let mut all_markets = Vec::new();
-        
+
         for series_id in &self.series_ids {
             match self.fetch_series_markets(series_id).await {
                 Ok(markets) => {
-                    info!("Discovered {} markets from series {}", markets.len(), series_id);
+                    info!(
+                        "Discovered {} markets from series {}",
+                        markets.len(),
+                        series_id
+                    );
                     all_markets.extend(markets);
                 }
                 Err(e) => {
@@ -136,18 +141,19 @@ impl MarketDiscovery for CryptoMarketDiscovery {
                 }
             }
         }
-        
+
         Ok(all_markets)
     }
-    
+
     async fn get_market(&self, event_id: &str) -> Result<Option<BinaryMarket>> {
         let event_details = self.client.get_event_details(event_id).await?;
-        
-        let end_time = event_details.end_date
+
+        let end_time = event_details
+            .end_date
             .as_ref()
             .and_then(|s| Self::parse_end_date(s))
             .unwrap_or_else(Utc::now);
-        
+
         // Get first market with condition_id
         for gamma_market in &event_details.markets {
             if let Some(condition_id) = &gamma_market.condition_id {
@@ -164,7 +170,7 @@ impl MarketDiscovery for CryptoMarketDiscovery {
                     } else {
                         (second.token_id, first.token_id)
                     };
-                    
+
                     let market = BinaryMarket::crypto_up_down(
                         event_id.to_string(),
                         condition_id.clone(),
@@ -172,12 +178,12 @@ impl MarketDiscovery for CryptoMarketDiscovery {
                         down_token,
                         end_time,
                     );
-                    
+
                     return Ok(Some(market));
                 }
             }
         }
-        
+
         Ok(None)
     }
 }

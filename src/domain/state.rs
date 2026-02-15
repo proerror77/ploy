@@ -94,6 +94,17 @@ impl StrategyState {
         )
     }
 
+    /// Does this state imply open exposure / pending execution that should be aborted on round end?
+    ///
+    /// Note: `CycleComplete` is intentionally excluded. A completed cycle should be
+    /// cleaned up, not aborted, even if the round has ended.
+    pub fn requires_abort_on_round_end(&self) -> bool {
+        matches!(
+            self,
+            StrategyState::Leg1Pending | StrategyState::Leg1Filled | StrategyState::Leg2Pending
+        )
+    }
+
     /// Does this state require immediate attention (pending orders)?
     pub fn has_pending_order(&self) -> bool {
         matches!(
@@ -235,5 +246,16 @@ mod tests {
         assert!(StrategyState::Leg2Pending.is_in_cycle());
         assert!(StrategyState::CycleComplete.is_in_cycle());
         assert!(!StrategyState::Abort.is_in_cycle());
+    }
+
+    #[test]
+    fn test_requires_abort_on_round_end() {
+        assert!(!StrategyState::Idle.requires_abort_on_round_end());
+        assert!(!StrategyState::WatchWindow.requires_abort_on_round_end());
+        assert!(StrategyState::Leg1Pending.requires_abort_on_round_end());
+        assert!(StrategyState::Leg1Filled.requires_abort_on_round_end());
+        assert!(StrategyState::Leg2Pending.requires_abort_on_round_end());
+        assert!(!StrategyState::CycleComplete.requires_abort_on_round_end());
+        assert!(!StrategyState::Abort.requires_abort_on_round_end());
     }
 }

@@ -4,15 +4,9 @@
 //! and Prometheus metrics endpoint.
 
 use crate::domain::StrategyState;
-use crate::strategy::RiskManager;
 use crate::services::Metrics;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
+use crate::strategy::RiskManager;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -278,9 +272,7 @@ impl HealthServer {
 }
 
 /// Full health check endpoint
-async fn health_handler(
-    State(state): State<Arc<HealthState>>,
-) -> impl IntoResponse {
+async fn health_handler(State(state): State<Arc<HealthState>>) -> impl IntoResponse {
     let health = state.get_health().await;
     let status_code = match health.status {
         HealthStatus::Healthy => StatusCode::OK,
@@ -296,9 +288,7 @@ async fn liveness_handler() -> impl IntoResponse {
 }
 
 /// Kubernetes readiness probe - is the service ready to handle traffic?
-async fn readiness_handler(
-    State(state): State<Arc<HealthState>>,
-) -> impl IntoResponse {
+async fn readiness_handler(State(state): State<Arc<HealthState>>) -> impl IntoResponse {
     let health = state.get_health().await;
     match health.status {
         HealthStatus::Healthy | HealthStatus::Degraded => StatusCode::OK,
@@ -307,13 +297,19 @@ async fn readiness_handler(
 }
 
 /// Prometheus metrics endpoint
-async fn metrics_handler(
-    State(state): State<Arc<HealthState>>,
-) -> impl IntoResponse {
+async fn metrics_handler(State(state): State<Arc<HealthState>>) -> impl IntoResponse {
     let health = state.get_health().await;
     let uptime = health.uptime_seconds;
-    let ws_connected = if state.ws_connected.load(Ordering::SeqCst) { 1 } else { 0 };
-    let db_connected = if state.db_connected.load(Ordering::SeqCst) { 1 } else { 0 };
+    let ws_connected = if state.ws_connected.load(Ordering::SeqCst) {
+        1
+    } else {
+        0
+    };
+    let db_connected = if state.db_connected.load(Ordering::SeqCst) {
+        1
+    } else {
+        0
+    };
 
     // Get metrics from Metrics struct if available
     let (quote_updates, orders_submitted, orders_filled, ws_reconnections) =
@@ -329,13 +325,12 @@ async fn metrics_handler(
         };
 
     // Get risk metrics
-    let (daily_pnl, cycle_count, consecutive_failures) =
-        if let Some(ref rm) = state.risk_manager {
-            let (pnl, cycles, _) = rm.daily_stats().await;
-            (pnl.to_string(), cycles, rm.consecutive_failures())
-        } else {
-            ("0".to_string(), 0, 0)
-        };
+    let (daily_pnl, cycle_count, consecutive_failures) = if let Some(ref rm) = state.risk_manager {
+        let (pnl, cycles, _) = rm.daily_stats().await;
+        (pnl.to_string(), cycles, rm.consecutive_failures())
+    } else {
+        ("0".to_string(), 0, 0)
+    };
 
     let health_status = match health.status {
         HealthStatus::Healthy => 1,
@@ -401,7 +396,14 @@ ploy_consecutive_failures {}
         consecutive_failures,
     );
 
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], metrics)
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        metrics,
+    )
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ impl Default for DumpDetectorConfig {
 impl DumpDetectorConfig {
     /// Calculate effective sum target after buffers
     pub fn effective_sum_target(&self) -> Decimal {
-        Decimal::ONE - self.fee_buffer - self.slippage_buffer - self.profit_buffer
+        self.sum_target - self.fee_buffer - self.slippage_buffer - self.profit_buffer
     }
 }
 
@@ -366,8 +366,8 @@ mod tests {
     fn test_leg2_condition() {
         let detector = DumpDetector::new(test_config());
 
-        // effective = 1 - 0.005 - 0.02 - 0.01 = 0.965
-        assert!(detector.check_leg2_condition(dec!(0.45), dec!(0.50))); // 0.95 <= 0.965
-        assert!(!detector.check_leg2_condition(dec!(0.45), dec!(0.55))); // 1.00 > 0.965
+        // effective = 0.95 - 0.005 - 0.02 - 0.01 = 0.915
+        assert!(detector.check_leg2_condition(dec!(0.45), dec!(0.46))); // 0.91 <= 0.915
+        assert!(!detector.check_leg2_condition(dec!(0.45), dec!(0.47))); // 0.92 > 0.915
     }
 }

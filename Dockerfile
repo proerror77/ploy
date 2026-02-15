@@ -36,7 +36,7 @@ COPY migrations ./migrations
 COPY config ./config
 
 # Build the actual binary
-RUN cargo build --release --features rl
+RUN cargo build --release --features rl,api
 
 # Stage 2: Runtime environment
 FROM debian:bookworm-slim AS runtime
@@ -44,6 +44,7 @@ FROM debian:bookworm-slim AS runtime
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     libssl3 \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*

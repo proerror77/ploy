@@ -2,10 +2,10 @@
 //!
 //! Experience replay buffer for off-policy learning and PPO rollouts.
 
-use std::collections::VecDeque;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 use crate::rl::core::{ContinuousAction, DiscreteAction, RewardSignal};
 
@@ -154,7 +154,13 @@ impl ReplayBuffer {
     pub fn to_batch_tensors(
         &self,
         batch: &[Transition],
-    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<f32>, Vec<Vec<f32>>, Vec<bool>) {
+    ) -> (
+        Vec<Vec<f32>>,
+        Vec<Vec<f32>>,
+        Vec<f32>,
+        Vec<Vec<f32>>,
+        Vec<bool>,
+    ) {
         let states: Vec<Vec<f32>> = batch.iter().map(|t| t.state.clone()).collect();
         let actions: Vec<Vec<f32>> = batch.iter().map(|t| t.action.clone()).collect();
         let rewards: Vec<f32> = batch.iter().map(|t| t.reward).collect();
@@ -170,17 +176,21 @@ impl ReplayBuffer {
     pub fn to_ppo_tensors(
         &self,
         transitions: &[Transition],
-    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<bool>) {
+    ) -> (
+        Vec<Vec<f32>>,
+        Vec<Vec<f32>>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<bool>,
+    ) {
         let states: Vec<Vec<f32>> = transitions.iter().map(|t| t.state.clone()).collect();
         let actions: Vec<Vec<f32>> = transitions.iter().map(|t| t.action.clone()).collect();
         let log_probs: Vec<f32> = transitions
             .iter()
             .map(|t| t.log_prob.unwrap_or(0.0))
             .collect();
-        let values: Vec<f32> = transitions
-            .iter()
-            .map(|t| t.value.unwrap_or(0.0))
-            .collect();
+        let values: Vec<f32> = transitions.iter().map(|t| t.value.unwrap_or(0.0)).collect();
         let rewards: Vec<f32> = transitions.iter().map(|t| t.reward).collect();
         let dones: Vec<bool> = transitions.iter().map(|t| t.done).collect();
 
@@ -267,7 +277,12 @@ impl RolloutBuffer {
         // Normalize advantages
         if n > 1 {
             let mean: f32 = self.advantages.iter().sum::<f32>() / n as f32;
-            let var: f32 = self.advantages.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / n as f32;
+            let var: f32 = self
+                .advantages
+                .iter()
+                .map(|a| (a - mean).powi(2))
+                .sum::<f32>()
+                / n as f32;
             let std = var.sqrt().max(1e-8);
 
             for adv in &mut self.advantages {
@@ -327,13 +342,7 @@ mod tests {
     use super::*;
 
     fn make_transition(reward: f32, done: bool) -> Transition {
-        Transition::new(
-            vec![0.0; 42],
-            vec![0.0; 5],
-            reward,
-            vec![0.0; 42],
-            done,
-        )
+        Transition::new(vec![0.0; 42], vec![0.0; 5], reward, vec![0.0; 42], done)
     }
 
     #[test]

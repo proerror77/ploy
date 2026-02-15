@@ -5,7 +5,7 @@
 //! ploy infra ssh      - SSH into instance
 //! ploy infra logs     - View infrastructure logs
 
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 
 /// Infrastructure-related commands
@@ -98,7 +98,10 @@ fn get_infra_config(env: &str) -> Result<InfraConfig> {
                 .unwrap_or_else(|_| "~/.ssh/ploy-staging.pem".to_string()),
             user: "ec2-user".to_string(),
         }),
-        _ => bail!("Unknown environment: {}. Use 'production' or 'staging'", env),
+        _ => bail!(
+            "Unknown environment: {}. Use 'production' or 'staging'",
+            env
+        ),
     }
 }
 
@@ -114,16 +117,24 @@ async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
     let config = get_infra_config(env)?;
 
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Deploy to {}                                        ║\x1b[0m",
-        format!("{:<15}", config.name));
+    println!(
+        "\x1b[36m║  Deploy to {}                                        ║\x1b[0m",
+        format!("{:<15}", config.name)
+    );
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
     println!("  Environment: {}", config.name);
     println!("  Region:      {}", config.region);
-    println!("  Host:        {}", config.host.as_deref().unwrap_or("(not configured)"));
+    println!(
+        "  Host:        {}",
+        config.host.as_deref().unwrap_or("(not configured)")
+    );
 
     if !skip_confirm {
-        println!("\n  \x1b[33m⚠ This will deploy the current code to {}\x1b[0m", config.name);
+        println!(
+            "\n  \x1b[33m⚠ This will deploy the current code to {}\x1b[0m",
+            config.name
+        );
         print!("  Continue? [y/N] ");
 
         use std::io::{self, Write};
@@ -184,8 +195,10 @@ async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
 
         let status = std::process::Command::new("ssh")
             .args([
-                "-i", &config.key_path,
-                "-o", "StrictHostKeyChecking=no",
+                "-i",
+                &config.key_path,
+                "-o",
+                "StrictHostKeyChecking=no",
                 &format!("{}@{}", config.user, host),
                 &ssh_cmd,
             ])
@@ -198,7 +211,10 @@ async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
 
         println!("  \x1b[32m✓ Deployed to EC2\x1b[0m");
     } else {
-        println!("\n  \x1b[33m⚠ No host configured for {}. Skipping remote deployment.\x1b[0m", env);
+        println!(
+            "\n  \x1b[33m⚠ No host configured for {}. Skipping remote deployment.\x1b[0m",
+            env
+        );
         println!("  Set AWS_EC2_HOST environment variable to enable remote deployment.");
     }
 
@@ -215,7 +231,10 @@ async fn show_status(env: &str) -> Result<()> {
 
     println!("  Environment: {}", config.name);
     println!("  Region:      {}", config.region);
-    println!("  Host:        {}", config.host.as_deref().unwrap_or("(not configured)"));
+    println!(
+        "  Host:        {}",
+        config.host.as_deref().unwrap_or("(not configured)")
+    );
 
     if let Some(host) = &config.host {
         println!("\n  Checking remote status...\n");
@@ -258,7 +277,9 @@ async fn show_status(env: &str) -> Result<()> {
             }
         }
     } else {
-        println!("\n  \x1b[33m⚠ No host configured. Set AWS_EC2_HOST to enable remote status.\x1b[0m");
+        println!(
+            "\n  \x1b[33m⚠ No host configured. Set AWS_EC2_HOST to enable remote status.\x1b[0m"
+        );
     }
 
     println!("\n{}\n", "=".repeat(60));
@@ -268,7 +289,9 @@ async fn show_status(env: &str) -> Result<()> {
 async fn ssh_connect(env: &str, command: Option<&str>) -> Result<()> {
     let config = get_infra_config(env)?;
 
-    let host = config.host.as_ref()
+    let host = config
+        .host
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No host configured for {}", env))?;
 
     let mut ssh_args = vec![
@@ -309,7 +332,9 @@ async fn ssh_connect(env: &str, command: Option<&str>) -> Result<()> {
 async fn show_logs(env: &str, tail: usize, follow: bool) -> Result<()> {
     let config = get_infra_config(env)?;
 
-    let host = config.host.as_ref()
+    let host = config
+        .host
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No host configured for {}", env))?;
 
     let docker_cmd = if follow {
@@ -322,8 +347,10 @@ async fn show_logs(env: &str, tail: usize, follow: bool) -> Result<()> {
 
     let status = std::process::Command::new("ssh")
         .args([
-            "-i", &config.key_path,
-            "-o", "StrictHostKeyChecking=no",
+            "-i",
+            &config.key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
             &format!("{}@{}", config.user, host),
             &docker_cmd,
         ])
@@ -340,7 +367,9 @@ async fn show_logs(env: &str, tail: usize, follow: bool) -> Result<()> {
 async fn update_infra(env: &str, component: &str) -> Result<()> {
     let config = get_infra_config(env)?;
 
-    let host = config.host.as_ref()
+    let host = config
+        .host
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No host configured for {}", env))?;
 
     println!("\n  Updating {} on {}...\n", component, config.name);
@@ -359,13 +388,18 @@ async fn update_infra(env: &str, component: &str) -> Result<()> {
                -v /opt/ploy/config:/opt/ploy/config \
                ploy-trading:latest"
         }
-        _ => bail!("Unknown component: {}. Use 'docker', 'config', or 'all'", component),
+        _ => bail!(
+            "Unknown component: {}. Use 'docker', 'config', or 'all'",
+            component
+        ),
     };
 
     let status = std::process::Command::new("ssh")
         .args([
-            "-i", &config.key_path,
-            "-o", "StrictHostKeyChecking=no",
+            "-i",
+            &config.key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
             &format!("{}@{}", config.user, host),
             update_cmd,
         ])

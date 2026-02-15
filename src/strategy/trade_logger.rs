@@ -346,10 +346,17 @@ impl TradeLogger {
         edge_pct: Decimal,
     ) -> String {
         self.record_entry_with_context(
-            symbol, event_slug, condition_id, direction,
-            entry_price, shares, momentum_pct, edge_pct,
-            TradeContext::default()
-        ).await
+            symbol,
+            event_slug,
+            condition_id,
+            direction,
+            entry_price,
+            shares,
+            momentum_pct,
+            edge_pct,
+            TradeContext::default(),
+        )
+        .await
     }
 
     /// Record a new trade entry with full market context
@@ -389,9 +396,12 @@ impl TradeLogger {
 
         info!(
             "📝 Trade logged: {} {} {} @ {:.2}¢ | {} shares = ${:.2}",
-            symbol, direction, event_slug,
+            symbol,
+            direction,
+            event_slug,
             entry_price * dec!(100),
-            shares, cost_usd
+            shares,
+            cost_usd
         );
 
         {
@@ -406,7 +416,8 @@ impl TradeLogger {
             stats.open += 1;
             stats.total_cost += cost_usd;
 
-            let symbol_stats = stats.by_symbol
+            let symbol_stats = stats
+                .by_symbol
                 .entry(symbol.to_string())
                 .or_insert_with(|| SymbolStats {
                     symbol: symbol.to_string(),
@@ -427,15 +438,12 @@ impl TradeLogger {
     }
 
     /// Record trade resolution (win/loss)
-    pub async fn record_resolution(
-        &self,
-        condition_id: &str,
-        won: bool,
-    ) {
+    pub async fn record_resolution(&self, condition_id: &str, won: bool) {
         let mut trades = self.trades.write().await;
 
         // Find the trade
-        if let Some(trade) = trades.iter_mut()
+        if let Some(trade) = trades
+            .iter_mut()
             .find(|t| t.condition_id == condition_id && t.outcome == TradeOutcome::Open)
         {
             let payout = if won {
@@ -445,7 +453,11 @@ impl TradeLogger {
             };
             let pnl = payout - trade.cost_usd;
 
-            trade.outcome = if won { TradeOutcome::Won } else { TradeOutcome::Lost };
+            trade.outcome = if won {
+                TradeOutcome::Won
+            } else {
+                TradeOutcome::Lost
+            };
             trade.payout_usd = Some(payout);
             trade.pnl_usd = Some(pnl);
             trade.resolved_at = Some(Utc::now());
@@ -524,7 +536,8 @@ impl TradeLogger {
             }
 
             // Per-symbol stats
-            let symbol_stats = stats.by_symbol
+            let symbol_stats = stats
+                .by_symbol
                 .entry(trade.symbol.clone())
                 .or_insert_with(|| SymbolStats {
                     symbol: trade.symbol.clone(),
@@ -548,13 +561,17 @@ impl TradeLogger {
                 _ => {}
             }
 
-            if symbol_stats.last_trade.map_or(true, |last| trade.timestamp > last) {
+            if symbol_stats
+                .last_trade
+                .map_or(true, |last| trade.timestamp > last)
+            {
                 symbol_stats.last_trade = Some(trade.timestamp);
             }
 
             // === Time Bucket Stats ===
             if let Some(ref bucket) = trade.context.time_bucket {
-                let bucket_stats = stats.by_time_bucket
+                let bucket_stats = stats
+                    .by_time_bucket
                     .entry(bucket.clone())
                     .or_insert_with(BucketStats::default);
 
@@ -573,7 +590,8 @@ impl TradeLogger {
 
             // === Strategy Mode Stats ===
             if let Some(ref mode) = trade.context.strategy_mode {
-                let mode_stats = stats.by_strategy_mode
+                let mode_stats = stats
+                    .by_strategy_mode
                     .entry(mode.clone())
                     .or_insert_with(BucketStats::default);
 
@@ -603,17 +621,14 @@ impl TradeLogger {
     /// Get recent trades
     pub async fn get_recent_trades(&self, limit: usize) -> Vec<TradeRecord> {
         let trades = self.trades.read().await;
-        trades.iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        trades.iter().rev().take(limit).cloned().collect()
     }
 
     /// Get trades for a specific symbol
     pub async fn get_trades_by_symbol(&self, symbol: &str) -> Vec<TradeRecord> {
         let trades = self.trades.read().await;
-        trades.iter()
+        trades
+            .iter()
             .filter(|t| t.symbol == symbol)
             .cloned()
             .collect()
@@ -622,7 +637,8 @@ impl TradeLogger {
     /// Get open trades
     pub async fn get_open_trades(&self) -> Vec<TradeRecord> {
         let trades = self.trades.read().await;
-        trades.iter()
+        trades
+            .iter()
             .filter(|t| t.outcome == TradeOutcome::Open)
             .cloned()
             .collect()
@@ -644,14 +660,20 @@ impl TradeLogger {
         output.push_str("╚══════════════════════════════════════════════════════════════╝\n\n");
 
         output.push_str(&format!("  Total Trades:  {}\n", stats.total_trades));
-        output.push_str(&format!("  Wins:          {} ({:.1}%)\n",
-            stats.wins, stats.win_rate() * dec!(100)));
+        output.push_str(&format!(
+            "  Wins:          {} ({:.1}%)\n",
+            stats.wins,
+            stats.win_rate() * dec!(100)
+        ));
         output.push_str(&format!("  Losses:        {}\n", stats.losses));
         output.push_str(&format!("  Open:          {}\n", stats.open));
         output.push_str(&format!("  Total Cost:    ${:.2}\n", stats.total_cost));
         output.push_str(&format!("  Total Payout:  ${:.2}\n", stats.total_payout));
         output.push_str(&format!("  Total PnL:     ${:.2}\n", stats.total_pnl));
-        output.push_str(&format!("  ROI:           {:.1}%\n", stats.roi() * dec!(100)));
+        output.push_str(&format!(
+            "  ROI:           {:.1}%\n",
+            stats.roi() * dec!(100)
+        ));
 
         // Per-symbol breakdown
         output.push_str("\n  ── Per Symbol ──────────────────────────────────────────────\n\n");

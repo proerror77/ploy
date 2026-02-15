@@ -47,7 +47,11 @@ impl ServiceCommands {
             Self::Start { service } => start_services(service.as_deref()).await,
             Self::Stop { service } => stop_services(service.as_deref()).await,
             Self::Status => show_status().await,
-            Self::Logs { service, tail, follow } => show_logs(&service, tail, follow).await,
+            Self::Logs {
+                service,
+                tail,
+                follow,
+            } => show_logs(&service, tail, follow).await,
         }
     }
 }
@@ -97,8 +101,16 @@ async fn show_status() -> Result<()> {
     println!("{}\n", "=".repeat(60));
 
     let services = vec![
-        ("market_data", "Market Data Service", "Binance + Polymarket WebSocket"),
-        ("executor", "Order Executor", "Order execution and risk management"),
+        (
+            "market_data",
+            "Market Data Service",
+            "Binance + Polymarket WebSocket",
+        ),
+        (
+            "executor",
+            "Order Executor",
+            "Order execution and risk management",
+        ),
     ];
 
     println!("  {:<15} {:<12} {}", "SERVICE", "STATUS", "DESCRIPTION");

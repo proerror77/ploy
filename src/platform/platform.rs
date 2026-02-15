@@ -217,7 +217,10 @@ impl OrderPlatform {
     pub async fn enqueue_intent(&self, intent: OrderIntent) -> Result<()> {
         let mut queue = self.queue.write().await;
         queue.enqueue(intent.clone()).map_err(|e| {
-            PloyError::Internal(format!("Failed to enqueue intent {}: {}", intent.intent_id, e))
+            PloyError::Internal(format!(
+                "Failed to enqueue intent {}: {}",
+                intent.intent_id, e
+            ))
         })?;
 
         // 更新統計
@@ -347,26 +350,33 @@ impl OrderPlatform {
         match self.executor.execute(&request).await {
             Ok(result) => {
                 // 檢查是否成交
-                let is_filled = matches!(result.status, OrderStatus::Filled | OrderStatus::PartiallyFilled);
+                let is_filled = matches!(
+                    result.status,
+                    OrderStatus::Filled | OrderStatus::PartiallyFilled
+                );
                 let has_fill = result.filled_shares > 0;
 
                 // 創建執行報告
                 let report = if is_filled || has_fill {
                     // 更新倉位
                     if intent.is_buy && has_fill {
-                        self.positions.open_position(
-                            agent_id,
-                            intent.domain,
-                            &intent.market_slug,
-                            &intent.token_id,
-                            intent.side,
-                            result.filled_shares,
-                            result.avg_fill_price.unwrap_or(intent.limit_price),
-                        ).await;
+                        self.positions
+                            .open_position(
+                                agent_id,
+                                intent.domain,
+                                &intent.market_slug,
+                                &intent.token_id,
+                                intent.side,
+                                result.filled_shares,
+                                result.avg_fill_price.unwrap_or(intent.limit_price),
+                            )
+                            .await;
                     }
 
                     // 更新風控統計
-                    self.risk_gate.record_success(agent_id, rust_decimal::Decimal::ZERO).await;
+                    self.risk_gate
+                        .record_success(agent_id, rust_decimal::Decimal::ZERO)
+                        .await;
 
                     // 更新平台統計
                     self.stats.write().await.executions_success += 1;
@@ -396,7 +406,9 @@ impl OrderPlatform {
             }
             Err(e) => {
                 // 執行錯誤
-                self.risk_gate.record_failure(agent_id, &e.to_string()).await;
+                self.risk_gate
+                    .record_failure(agent_id, &e.to_string())
+                    .await;
                 self.stats.write().await.executions_failed += 1;
 
                 let report = ExecutionReport::rejected(intent, e.to_string());
@@ -412,19 +424,26 @@ impl OrderPlatform {
     /// 發送執行報告給 Agent
     async fn send_execution_report(&self, report: &ExecutionReport) {
         // 通過路由器發送給對應的 Agent
-        if let Err(e) = self.router.dispatch_to_agent(
-            &report.agent_id,
-            DomainEvent::OrderUpdate(super::types::OrderUpdateEvent {
-                domain: super::types::Domain::Crypto, // TODO: 從 report 獲取
-                order_id: report.order_id.clone().unwrap_or_default(),
-                client_order_id: report.intent_id.to_string(),
-                status: format!("{:?}", report.status),
-                filled_shares: report.filled_shares,
-                avg_price: report.avg_fill_price,
-                timestamp: report.executed_at,
-            }),
-        ).await {
-            warn!("Failed to send execution report to agent {}: {}", report.agent_id, e);
+        if let Err(e) = self
+            .router
+            .dispatch_to_agent(
+                &report.agent_id,
+                DomainEvent::OrderUpdate(super::types::OrderUpdateEvent {
+                    domain: super::types::Domain::Crypto, // TODO: 從 report 獲取
+                    order_id: report.order_id.clone().unwrap_or_default(),
+                    client_order_id: report.intent_id.to_string(),
+                    status: format!("{:?}", report.status),
+                    filled_shares: report.filled_shares,
+                    avg_price: report.avg_fill_price,
+                    timestamp: report.executed_at,
+                }),
+            )
+            .await
+        {
+            warn!(
+                "Failed to send execution report to agent {}: {}",
+                report.agent_id, e
+            );
         }
     }
 

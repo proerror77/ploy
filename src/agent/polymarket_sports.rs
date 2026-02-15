@@ -16,19 +16,17 @@ pub const NBA_SERIES_ID: &str = "10345";
 pub const NFL_SERIES_ID: &str = "10346"; // Placeholder, verify actual ID
 
 /// Deserialize optional number that could be string or number
-fn deserialize_optional_number<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+fn deserialize_optional_number<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
     match value {
         None => Ok(None),
-        Some(serde_json::Value::Number(n)) => {
-            Ok(n.as_f64())
-        }
-        Some(serde_json::Value::String(s)) => {
-            Ok(s.parse::<f64>().ok())
-        }
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<f64>().ok()),
         Some(_) => Ok(None),
     }
 }
@@ -36,22 +34,93 @@ where
 /// Sports keywords for filtering markets
 pub const SPORTS_KEYWORDS: &[&str] = &[
     // NBA teams
-    "lakers", "celtics", "warriors", "knicks", "heat", "bucks", "suns",
-    "76ers", "nets", "bulls", "mavericks", "nuggets", "clippers", "grizzlies",
-    "timberwolves", "pelicans", "thunder", "spurs", "rockets", "hawks",
-    "hornets", "pistons", "pacers", "magic", "wizards", "raptors", "cavaliers",
-    "kings", "blazers", "jazz",
+    "lakers",
+    "celtics",
+    "warriors",
+    "knicks",
+    "heat",
+    "bucks",
+    "suns",
+    "76ers",
+    "nets",
+    "bulls",
+    "mavericks",
+    "nuggets",
+    "clippers",
+    "grizzlies",
+    "timberwolves",
+    "pelicans",
+    "thunder",
+    "spurs",
+    "rockets",
+    "hawks",
+    "hornets",
+    "pistons",
+    "pacers",
+    "magic",
+    "wizards",
+    "raptors",
+    "cavaliers",
+    "kings",
+    "blazers",
+    "jazz",
     // NFL teams
-    "chiefs", "eagles", "bills", "cowboys", "49ers", "dolphins", "ravens",
-    "bengals", "lions", "packers", "vikings", "saints", "chargers", "raiders",
-    "broncos", "seahawks", "commanders", "bears", "giants", "jets", "patriots",
-    "steelers", "browns", "colts", "texans", "titans", "jaguars", "panthers",
-    "falcons", "buccaneers", "cardinals", "rams",
+    "chiefs",
+    "eagles",
+    "bills",
+    "cowboys",
+    "49ers",
+    "dolphins",
+    "ravens",
+    "bengals",
+    "lions",
+    "packers",
+    "vikings",
+    "saints",
+    "chargers",
+    "raiders",
+    "broncos",
+    "seahawks",
+    "commanders",
+    "bears",
+    "giants",
+    "jets",
+    "patriots",
+    "steelers",
+    "browns",
+    "colts",
+    "texans",
+    "titans",
+    "jaguars",
+    "panthers",
+    "falcons",
+    "buccaneers",
+    "cardinals",
+    "rams",
     // General sports terms
-    "nba", "nfl", "nhl", "mlb", "ncaa", "basketball", "football", "hockey",
-    "baseball", "super bowl", "playoffs", "championship", "mvp", "finals",
+    "nba",
+    "nfl",
+    "nhl",
+    "mlb",
+    "ncaa",
+    "basketball",
+    "football",
+    "hockey",
+    "baseball",
+    "super bowl",
+    "playoffs",
+    "championship",
+    "mvp",
+    "finals",
     // Game patterns
-    "win", "beat", "defeat", "vs", "game", "match", "score", "points",
+    "win",
+    "beat",
+    "defeat",
+    "vs",
+    "game",
+    "match",
+    "score",
+    "points",
 ];
 
 /// Live game event from series endpoint
@@ -304,22 +373,24 @@ impl PolymarketSportsMarket {
 
     /// Check if this is a sports market based on keywords
     pub fn is_sports_market(&self) -> bool {
-        let question_lower = self.question.as_ref()
+        let question_lower = self
+            .question
+            .as_ref()
             .map(|q| q.to_lowercase())
             .unwrap_or_default();
 
-        let desc_lower = self.description.as_ref()
+        let desc_lower = self
+            .description
+            .as_ref()
             .map(|d| d.to_lowercase())
             .unwrap_or_default();
 
-        let tags_lower: Vec<String> = self.tags.iter()
-            .map(|t| t.to_lowercase())
-            .collect();
+        let tags_lower: Vec<String> = self.tags.iter().map(|t| t.to_lowercase()).collect();
 
         SPORTS_KEYWORDS.iter().any(|keyword| {
-            question_lower.contains(keyword) ||
-            desc_lower.contains(keyword) ||
-            tags_lower.iter().any(|t| t.contains(keyword))
+            question_lower.contains(keyword)
+                || desc_lower.contains(keyword)
+                || tags_lower.iter().any(|t| t.contains(keyword))
         })
     }
 
@@ -333,7 +404,12 @@ impl PolymarketSportsMarket {
             if parts.len() == 2 {
                 return Some((
                     parts[0].trim().to_string(),
-                    parts[1].split('?').next().unwrap_or(parts[1]).trim().to_string()
+                    parts[1]
+                        .split('?')
+                        .next()
+                        .unwrap_or(parts[1])
+                        .trim()
+                        .to_string(),
                 ));
             }
         }
@@ -446,7 +522,8 @@ impl PolymarketSportsClient {
     pub async fn fetch_all_markets(&self, limit: u32) -> Result<Vec<PolymarketSportsMarket>> {
         let url = format!("{}/markets", self.gamma_url);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .query(&[
                 ("limit", limit.to_string()),
@@ -460,10 +537,15 @@ impl PolymarketSportsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Gamma API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Gamma API error {}: {}",
+                status, text
+            )));
         }
 
-        let markets: Vec<PolymarketSportsMarket> = resp.json().await
+        let markets: Vec<PolymarketSportsMarket> = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
         debug!("Fetched {} total markets", markets.len());
@@ -487,15 +569,36 @@ impl PolymarketSportsClient {
     pub async fn fetch_nba_markets(&self) -> Result<Vec<PolymarketSportsMarket>> {
         let sports_markets = self.fetch_sports_markets().await?;
 
-        let nba_keywords = ["nba", "lakers", "celtics", "warriors", "knicks", "heat",
-                           "bucks", "suns", "76ers", "nets", "bulls", "mavericks",
-                           "nuggets", "clippers", "grizzlies", "timberwolves",
-                           "pelicans", "thunder", "cavaliers", "kings", "hornets"];
+        let nba_keywords = [
+            "nba",
+            "lakers",
+            "celtics",
+            "warriors",
+            "knicks",
+            "heat",
+            "bucks",
+            "suns",
+            "76ers",
+            "nets",
+            "bulls",
+            "mavericks",
+            "nuggets",
+            "clippers",
+            "grizzlies",
+            "timberwolves",
+            "pelicans",
+            "thunder",
+            "cavaliers",
+            "kings",
+            "hornets",
+        ];
 
         let nba_markets: Vec<PolymarketSportsMarket> = sports_markets
             .into_iter()
             .filter(|m| {
-                let question_lower = m.question.as_ref()
+                let question_lower = m
+                    .question
+                    .as_ref()
                     .map(|q| q.to_lowercase())
                     .unwrap_or_default();
                 nba_keywords.iter().any(|k| question_lower.contains(k))
@@ -510,14 +613,29 @@ impl PolymarketSportsClient {
     pub async fn fetch_nfl_markets(&self) -> Result<Vec<PolymarketSportsMarket>> {
         let sports_markets = self.fetch_sports_markets().await?;
 
-        let nfl_keywords = ["nfl", "chiefs", "eagles", "bills", "cowboys", "49ers",
-                           "dolphins", "ravens", "bengals", "lions", "packers",
-                           "super bowl", "touchdown", "quarterback"];
+        let nfl_keywords = [
+            "nfl",
+            "chiefs",
+            "eagles",
+            "bills",
+            "cowboys",
+            "49ers",
+            "dolphins",
+            "ravens",
+            "bengals",
+            "lions",
+            "packers",
+            "super bowl",
+            "touchdown",
+            "quarterback",
+        ];
 
         let nfl_markets: Vec<PolymarketSportsMarket> = sports_markets
             .into_iter()
             .filter(|m| {
-                let question_lower = m.question.as_ref()
+                let question_lower = m
+                    .question
+                    .as_ref()
                     .map(|q| q.to_lowercase())
                     .unwrap_or_default();
                 nfl_keywords.iter().any(|k| question_lower.contains(k))
@@ -536,10 +654,12 @@ impl PolymarketSportsClient {
         let matching: Vec<PolymarketSportsMarket> = all_markets
             .into_iter()
             .filter(|m| {
-                m.active && !m.closed &&
-                m.question.as_ref()
-                    .map(|q| q.to_lowercase().contains(&keyword_lower))
-                    .unwrap_or(false)
+                m.active
+                    && !m.closed
+                    && m.question
+                        .as_ref()
+                        .map(|q| q.to_lowercase().contains(&keyword_lower))
+                        .unwrap_or(false)
             })
             .collect();
 
@@ -553,7 +673,8 @@ impl PolymarketSportsClient {
     pub async fn fetch_series_events(&self, series_id: &str) -> Result<Vec<LiveGameEvent>> {
         let url = format!("{}/series/{}", self.gamma_url, series_id);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -562,18 +683,25 @@ impl PolymarketSportsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Series API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Series API error {}: {}",
+                status, text
+            )));
         }
 
-        let series: SeriesResponse = resp.json().await
+        let series: SeriesResponse = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
-        let open_events: Vec<LiveGameEvent> = series.events
-            .into_iter()
-            .filter(|e| !e.closed)
-            .collect();
+        let open_events: Vec<LiveGameEvent> =
+            series.events.into_iter().filter(|e| !e.closed).collect();
 
-        info!("Found {} open events in series {}", open_events.len(), series_id);
+        info!(
+            "Found {} open events in series {}",
+            open_events.len(),
+            series_id
+        );
         Ok(open_events)
     }
 
@@ -583,7 +711,11 @@ impl PolymarketSportsClient {
     }
 
     /// Filter games by date (format: "2026-01-03")
-    pub async fn fetch_games_by_date(&self, series_id: &str, date: &str) -> Result<Vec<LiveGameEvent>> {
+    pub async fn fetch_games_by_date(
+        &self,
+        series_id: &str,
+        date: &str,
+    ) -> Result<Vec<LiveGameEvent>> {
         let events = self.fetch_series_events(series_id).await?;
 
         let dated_events: Vec<LiveGameEvent> = events
@@ -605,7 +737,8 @@ impl PolymarketSportsClient {
     pub async fn get_event_details(&self, event_id: &str) -> Result<EventDetails> {
         let url = format!("{}/events/{}", self.gamma_url, event_id);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -614,10 +747,15 @@ impl PolymarketSportsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Event API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Event API error {}: {}",
+                status, text
+            )));
         }
 
-        let event: EventDetails = resp.json().await
+        let event: EventDetails = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
         debug!("Event {} has {} markets", event.title, event.markets.len());
@@ -691,7 +829,10 @@ impl PolymarketSportsClient {
     }
 
     /// Fetch all today's games with full details
-    pub async fn fetch_todays_games_with_details(&self, series_id: &str) -> Result<Vec<EventDetails>> {
+    pub async fn fetch_todays_games_with_details(
+        &self,
+        series_id: &str,
+    ) -> Result<Vec<EventDetails>> {
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let events = self.fetch_series_events(series_id).await?;
         let mut games = Vec::new();
@@ -704,7 +845,9 @@ impl PolymarketSportsClient {
         }
 
         // Also check for games from yesterday that might still be live
-        let yesterday = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
         for event in self.fetch_series_events(series_id).await? {
             if event.slug.contains(&yesterday) {
                 let details = self.get_event_details(&event.id).await?;
@@ -722,7 +865,8 @@ impl PolymarketSportsClient {
     pub async fn get_order_book(&self, token_id: &str) -> Result<SportsOrderBook> {
         let url = format!("{}/book", self.clob_url);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .query(&[("token_id", token_id)])
             .send()
@@ -732,17 +876,25 @@ impl PolymarketSportsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("CLOB API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "CLOB API error {}: {}",
+                status, text
+            )));
         }
 
-        let book: SportsOrderBook = resp.json().await
+        let book: SportsOrderBook = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
         Ok(book)
     }
 
     /// Get full market details with order books
-    pub async fn get_market_details(&self, market: PolymarketSportsMarket) -> Result<Option<SportsMarketDetails>> {
+    pub async fn get_market_details(
+        &self,
+        market: PolymarketSportsMarket,
+    ) -> Result<Option<SportsMarketDetails>> {
         let (yes_token, no_token) = match market.get_token_ids() {
             Some(ids) => ids,
             None => {
@@ -764,14 +916,20 @@ impl PolymarketSportsClient {
     }
 
     /// Find market for a specific game (e.g., "Lakers vs Celtics")
-    pub async fn find_game_market(&self, team1: &str, team2: &str) -> Result<Option<SportsMarketDetails>> {
+    pub async fn find_game_market(
+        &self,
+        team1: &str,
+        team2: &str,
+    ) -> Result<Option<SportsMarketDetails>> {
         let team1_lower = team1.to_lowercase();
         let team2_lower = team2.to_lowercase();
 
         let markets = self.fetch_sports_markets().await?;
 
         for market in markets {
-            let question_lower = market.question.as_ref()
+            let question_lower = market
+                .question
+                .as_ref()
                 .map(|q| q.to_lowercase())
                 .unwrap_or_default();
 
@@ -804,10 +962,7 @@ pub struct PolymarketEdgeAnalysis {
 
 impl PolymarketEdgeAnalysis {
     /// Calculate edge between Polymarket and sportsbook
-    pub fn calculate(
-        details: &SportsMarketDetails,
-        sportsbook_yes_prob: Decimal,
-    ) -> Option<Self> {
+    pub fn calculate(details: &SportsMarketDetails, sportsbook_yes_prob: Decimal) -> Option<Self> {
         let poly_yes = details.yes_price()?;
         let poly_no = details.no_price()?;
         let sb_no = Decimal::ONE - sportsbook_yes_prob;

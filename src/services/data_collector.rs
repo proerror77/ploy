@@ -252,4 +252,3 @@ impl DataCollector {
         })
     }
 }
-

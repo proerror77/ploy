@@ -42,28 +42,28 @@ impl std::fmt::Display for MarketType {
 pub struct BinaryMarket {
     /// Unique event identifier
     pub event_id: String,
-    
+
     /// Market condition ID (for Polymarket)
     pub condition_id: String,
-    
+
     /// Token ID for "Yes" side
     pub yes_token_id: String,
-    
+
     /// Token ID for "No" side
     pub no_token_id: String,
-    
+
     /// Human-readable name for Yes outcome
     pub yes_label: String,
-    
+
     /// Human-readable name for No outcome
     pub no_label: String,
-    
+
     /// When the market resolves
     pub end_time: DateTime<Utc>,
-    
+
     /// Type of market
     pub market_type: MarketType,
-    
+
     /// Market-specific metadata (JSON)
     pub metadata: Option<String>,
 }
@@ -89,7 +89,7 @@ impl BinaryMarket {
             metadata: None,
         }
     }
-    
+
     /// Create a sports moneyline market
     pub fn sports_moneyline(
         event_id: String,
@@ -119,10 +119,10 @@ impl BinaryMarket {
 pub trait MarketDiscovery: Send + Sync {
     /// Get the market type this discovery handles
     fn market_type(&self) -> MarketType;
-    
+
     /// Discover all currently tradable markets
     async fn discover_markets(&self) -> Result<Vec<BinaryMarket>>;
-    
+
     /// Get a specific market by ID
     async fn get_market(&self, event_id: &str) -> Result<Option<BinaryMarket>>;
 }

@@ -15,7 +15,7 @@
 //! ploy paper-trade vol-arb --symbols BTC,ETH,SOL
 //! ```
 
-use chrono::{DateTime, NaiveDateTime, Utc, TimeZone};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use crate::strategy::volatility_arb::{
-    VolatilityArbConfig, VolatilityArbEngine, VolArbSignal,
-    calculate_implied_volatility,
+    calculate_implied_volatility, VolArbSignal, VolatilityArbConfig, VolatilityArbEngine,
 };
 
 // ============================================================================
@@ -192,8 +191,8 @@ pub fn load_klines_from_csv<P: AsRef<Path>>(path: P) -> Result<Vec<KlineRecord>,
             continue;
         }
 
-        let timestamp = parse_timestamp(parts[0])
-            .ok_or_else(|| format!("Invalid timestamp at line {}", i))?;
+        let timestamp =
+            parse_timestamp(parts[0]).ok_or_else(|| format!("Invalid timestamp at line {}", i))?;
 
         let record = KlineRecord {
             timestamp,
@@ -232,8 +231,8 @@ pub fn load_pm_prices_from_csv<P: AsRef<Path>>(path: P) -> Result<Vec<PMPriceRec
             continue;
         }
 
-        let timestamp = parse_timestamp(parts[0])
-            .ok_or_else(|| format!("Invalid timestamp at line {}", i))?;
+        let timestamp =
+            parse_timestamp(parts[0]).ok_or_else(|| format!("Invalid timestamp at line {}", i))?;
         let resolution_time = parse_timestamp(parts[9])
             .ok_or_else(|| format!("Invalid resolution_time at line {}", i))?;
 
@@ -312,7 +311,8 @@ pub fn calculate_kline_volatility(klines: &[KlineRecord], lookback: usize) -> f6
     let recent = &klines[klines.len() - n..];
 
     // Calculate log returns
-    let returns: Vec<f64> = recent.windows(2)
+    let returns: Vec<f64> = recent
+        .windows(2)
         .filter_map(|w| {
             let prev = w[0].close.to_f64()?;
             let curr = w[1].close.to_f64()?;
@@ -330,9 +330,7 @@ pub fn calculate_kline_volatility(klines: &[KlineRecord], lookback: usize) -> f6
 
     // Calculate standard deviation
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance = returns.iter()
-        .map(|r| (r - mean).powi(2))
-        .sum::<f64>() / returns.len() as f64;
+    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
 
     variance.sqrt().max(0.0001)
 }
@@ -363,13 +361,12 @@ impl BacktestEngine {
     }
 
     /// Run backtest on historical data
-    pub fn run(
-        &mut self,
-        klines: &[KlineRecord],
-        pm_prices: &[PMPriceRecord],
-    ) -> BacktestResults {
-        info!("Starting backtest with {} klines and {} PM prices",
-              klines.len(), pm_prices.len());
+    pub fn run(&mut self, klines: &[KlineRecord], pm_prices: &[PMPriceRecord]) -> BacktestResults {
+        info!(
+            "Starting backtest with {} klines and {} PM prices",
+            klines.len(),
+            pm_prices.len()
+        );
 
         // Build volatility lookup by symbol and time
         let vol_lookup = self.build_volatility_lookup(klines);
@@ -402,7 +399,8 @@ impl BacktestEngine {
 
         // Group klines by symbol
         for kline in klines {
-            by_symbol.entry(kline.symbol.clone())
+            by_symbol
+                .entry(kline.symbol.clone())
                 .or_default()
                 .push(kline);
         }
@@ -428,11 +426,15 @@ impl BacktestEngine {
         lookup
     }
 
-    fn group_by_market<'a>(&self, prices: &'a [PMPriceRecord]) -> HashMap<String, Vec<&'a PMPriceRecord>> {
+    fn group_by_market<'a>(
+        &self,
+        prices: &'a [PMPriceRecord],
+    ) -> HashMap<String, Vec<&'a PMPriceRecord>> {
         let mut markets: HashMap<String, Vec<&PMPriceRecord>> = HashMap::new();
 
         for price in prices {
-            markets.entry(price.market_id.clone())
+            markets
+                .entry(price.market_id.clone())
                 .or_default()
                 .push(price);
         }
@@ -469,19 +471,22 @@ impl BacktestEngine {
             let time_remaining = (price.resolution_time - price.timestamp).num_seconds() as u64;
 
             // Skip if outside time window
-            if time_remaining < self.config.min_time_remaining_secs ||
-               time_remaining > self.config.max_time_remaining_secs {
+            if time_remaining < self.config.min_time_remaining_secs
+                || time_remaining > self.config.max_time_remaining_secs
+            {
                 continue;
             }
 
             // Get volatility estimate
             let bucket = (price.timestamp.timestamp() / 900) * 900;
-            let kline_vol = vol_lookup.get(&(price.symbol.clone(), bucket))
+            let kline_vol = vol_lookup
+                .get(&(price.symbol.clone(), bucket))
                 .copied()
                 .unwrap_or(0.003);
 
             // Update engine volatility
-            self.vol_engine.update_kline_volatility(&price.symbol, kline_vol);
+            self.vol_engine
+                .update_kline_volatility(&price.symbol, kline_vol);
 
             // Get spot price (use threshold + buffer implied by YES price as proxy)
             // In real backtest, we'd have actual spot prices
@@ -505,7 +510,10 @@ impl BacktestEngine {
                 Some(kline_vol),
             ) {
                 // Keep best signal (highest confidence)
-                if best_signal.as_ref().map_or(true, |(s, _)| signal.confidence > s.confidence) {
+                if best_signal
+                    .as_ref()
+                    .map_or(true, |(s, _)| signal.confidence > s.confidence)
+                {
                     best_signal = Some((signal, price));
                 }
             }
@@ -585,7 +593,11 @@ impl BacktestEngine {
             exit_time: entry_record.resolution_time,
             symbol: signal.symbol.clone(),
             market_id: signal.market_id.clone(),
-            direction: if signal.buy_yes { "YES".into() } else { "NO".into() },
+            direction: if signal.buy_yes {
+                "YES".into()
+            } else {
+                "NO".into()
+            },
             entry_price,
             exit_price,
             shares,
@@ -597,12 +609,16 @@ impl BacktestEngine {
             vol_edge_pct: signal.vol_edge_pct,
             confidence: signal.confidence,
             buffer_pct: signal.buffer_pct,
-            our_volatility: self.vol_engine.estimate_volatility(&signal.symbol, None).combined_vol,
+            our_volatility: self
+                .vol_engine
+                .estimate_volatility(&signal.symbol, None)
+                .combined_vol,
             implied_volatility: calculate_implied_volatility(
                 entry_price.to_f64().unwrap_or(0.5),
                 signal.buffer_pct.to_f64().unwrap_or(0.0),
                 signal.time_remaining_secs as f64 / 900.0,
-            ).unwrap_or(0.003),
+            )
+            .unwrap_or(0.003),
         };
 
         // Update statistics
@@ -617,7 +633,9 @@ impl BacktestEngine {
         }
 
         // Update symbol stats
-        let symbol_stats = self.results.trades_by_symbol
+        let symbol_stats = self
+            .results
+            .trades_by_symbol
             .entry(signal.symbol.clone())
             .or_insert(SymbolStats {
                 total_trades: 0,
@@ -632,7 +650,9 @@ impl BacktestEngine {
         symbol_stats.total_pnl += pnl;
 
         // Record equity curve point
-        self.results.equity_curve.push((entry_record.resolution_time, self.current_equity));
+        self.results
+            .equity_curve
+            .push((entry_record.resolution_time, self.current_equity));
 
         self.results.trades.push(trade);
     }
@@ -645,22 +665,26 @@ impl BacktestEngine {
         }
 
         // Win rate
-        self.results.win_rate = self.results.winning_trades as f64 / self.results.total_trades as f64;
+        self.results.win_rate =
+            self.results.winning_trades as f64 / self.results.total_trades as f64;
 
         // Average PnL
-        self.results.avg_pnl_per_trade = self.results.total_pnl / Decimal::from(self.results.total_trades);
+        self.results.avg_pnl_per_trade =
+            self.results.total_pnl / Decimal::from(self.results.total_trades);
 
         // Wins and losses
         let wins: Vec<_> = trades.iter().filter(|t| t.won).collect();
         let losses: Vec<_> = trades.iter().filter(|t| !t.won).collect();
 
         if !wins.is_empty() {
-            self.results.avg_win = wins.iter().map(|t| t.pnl).sum::<Decimal>() / Decimal::from(wins.len() as u64);
+            self.results.avg_win =
+                wins.iter().map(|t| t.pnl).sum::<Decimal>() / Decimal::from(wins.len() as u64);
             self.results.largest_win = wins.iter().map(|t| t.pnl).max().unwrap_or(Decimal::ZERO);
         }
 
         if !losses.is_empty() {
-            self.results.avg_loss = losses.iter().map(|t| t.pnl).sum::<Decimal>() / Decimal::from(losses.len() as u64);
+            self.results.avg_loss =
+                losses.iter().map(|t| t.pnl).sum::<Decimal>() / Decimal::from(losses.len() as u64);
             self.results.largest_loss = losses.iter().map(|t| t.pnl).min().unwrap_or(Decimal::ZERO);
         }
 
@@ -688,15 +712,12 @@ impl BacktestEngine {
         }
 
         // Sharpe ratio (simplified)
-        let returns: Vec<f64> = trades.iter()
-            .filter_map(|t| t.pnl_pct.to_f64())
-            .collect();
+        let returns: Vec<f64> = trades.iter().filter_map(|t| t.pnl_pct.to_f64()).collect();
 
         if returns.len() > 1 {
             let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-            let variance = returns.iter()
-                .map(|r| (r - mean).powi(2))
-                .sum::<f64>() / returns.len() as f64;
+            let variance =
+                returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
             let std_dev = variance.sqrt();
 
             if std_dev > 0.0 {
@@ -706,7 +727,8 @@ impl BacktestEngine {
         }
 
         // Average holding time
-        let total_hold_time: i64 = trades.iter()
+        let total_hold_time: i64 = trades
+            .iter()
             .map(|t| (t.exit_time - t.entry_time).num_seconds())
             .sum();
         self.results.avg_holding_time_secs = total_hold_time as f64 / trades.len() as f64;
@@ -808,14 +830,19 @@ impl PaperTrader {
             yes_price.to_f64().unwrap_or(0.5),
             signal.buffer_pct.to_f64().unwrap_or(0.0),
             time_remaining_secs as f64 / 900.0,
-        ).unwrap_or(0.003);
+        )
+        .unwrap_or(0.003);
 
         let paper_signal = PaperSignal {
             timestamp: Utc::now(),
             symbol: symbol.to_string(),
             market_id: market_id.to_string(),
             condition_id: condition_id.to_string(),
-            direction: if signal.buy_yes { "YES".into() } else { "NO".into() },
+            direction: if signal.buy_yes {
+                "YES".into()
+            } else {
+                "NO".into()
+            },
             entry_price: signal.market_price,
             fair_value: signal.fair_value,
             price_edge: signal.price_edge,
@@ -836,7 +863,8 @@ impl PaperTrader {
         self.log_signal(&paper_signal);
 
         // Store pending signal
-        self.pending_signals.insert(market_id.to_string(), paper_signal.clone());
+        self.pending_signals
+            .insert(market_id.to_string(), paper_signal.clone());
 
         info!(
             symbol,
@@ -869,7 +897,11 @@ impl PaperTrader {
             // Calculate theoretical PnL
             let entry_price = signal.entry_price;
             let shares = signal.recommended_shares;
-            let exit_price = if would_have_won { Decimal::ONE } else { Decimal::ZERO };
+            let exit_price = if would_have_won {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            };
             let cost = entry_price * Decimal::from(shares);
             let revenue = exit_price * Decimal::from(shares);
             let fees = cost * self.config.pm_fee_rate;
@@ -894,7 +926,9 @@ impl PaperTrader {
 
     /// Get paper trading statistics
     pub fn statistics(&self) -> PaperTradingStats {
-        let resolved: Vec<_> = self.signals.iter()
+        let resolved: Vec<_> = self
+            .signals
+            .iter()
             .filter(|s| s.would_have_won.is_some())
             .collect();
 
@@ -903,18 +937,17 @@ impl PaperTrader {
         }
 
         let total = resolved.len() as u64;
-        let wins = resolved.iter().filter(|s| s.would_have_won == Some(true)).count() as u64;
-        let total_pnl: Decimal = resolved.iter()
-            .filter_map(|s| s.theoretical_pnl)
-            .sum();
+        let wins = resolved
+            .iter()
+            .filter(|s| s.would_have_won == Some(true))
+            .count() as u64;
+        let total_pnl: Decimal = resolved.iter().filter_map(|s| s.theoretical_pnl).sum();
 
-        let avg_vol_edge = resolved.iter()
-            .map(|s| s.vol_edge_pct)
-            .sum::<f64>() / resolved.len() as f64;
+        let avg_vol_edge =
+            resolved.iter().map(|s| s.vol_edge_pct).sum::<f64>() / resolved.len() as f64;
 
-        let avg_confidence = resolved.iter()
-            .map(|s| s.confidence)
-            .sum::<f64>() / resolved.len() as f64;
+        let avg_confidence =
+            resolved.iter().map(|s| s.confidence).sum::<f64>() / resolved.len() as f64;
 
         PaperTradingStats {
             total_signals: total,
@@ -989,10 +1022,19 @@ impl PaperTrader {
                 s.implied_volatility,
                 s.buffer_pct,
                 s.time_remaining_secs,
-                s.actual_outcome.map_or("pending".to_string(), |o| if o { "YES".to_string() } else { "NO".to_string() }),
-                s.would_have_won.map_or("pending".to_string(), |w| if w { "WIN".to_string() } else { "LOSS".to_string() }),
+                s.actual_outcome.map_or("pending".to_string(), |o| if o {
+                    "YES".to_string()
+                } else {
+                    "NO".to_string()
+                }),
+                s.would_have_won.map_or("pending".to_string(), |w| if w {
+                    "WIN".to_string()
+                } else {
+                    "LOSS".to_string()
+                }),
                 s.theoretical_pnl.map_or("0".to_string(), |p| p.to_string()),
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         Ok(())
@@ -1023,37 +1065,78 @@ impl BacktestResults {
         report.push_str("║              VOLATILITY ARBITRAGE BACKTEST REPORT            ║\n");
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
 
-        report.push_str(&format!("║ Period: {} to {}\n",
+        report.push_str(&format!(
+            "║ Period: {} to {}\n",
             self.start_time.format("%Y-%m-%d"),
-            self.end_time.format("%Y-%m-%d")));
+            self.end_time.format("%Y-%m-%d")
+        ));
 
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
         report.push_str("║ PERFORMANCE SUMMARY                                          ║\n");
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
 
-        report.push_str(&format!("║ Total Trades:      {:>10}                              ║\n", self.total_trades));
-        report.push_str(&format!("║ Winning Trades:    {:>10}                              ║\n", self.winning_trades));
-        report.push_str(&format!("║ Win Rate:          {:>10.2}%                             ║\n", self.win_rate * 100.0));
-        report.push_str(&format!("║ Total PnL:         ${:>9.2}                             ║\n", self.total_pnl));
-        report.push_str(&format!("║ Total Volume:      ${:>9.2}                             ║\n", self.total_volume));
-        report.push_str(&format!("║ Avg PnL/Trade:     ${:>9.2}                             ║\n", self.avg_pnl_per_trade));
+        report.push_str(&format!(
+            "║ Total Trades:      {:>10}                              ║\n",
+            self.total_trades
+        ));
+        report.push_str(&format!(
+            "║ Winning Trades:    {:>10}                              ║\n",
+            self.winning_trades
+        ));
+        report.push_str(&format!(
+            "║ Win Rate:          {:>10.2}%                             ║\n",
+            self.win_rate * 100.0
+        ));
+        report.push_str(&format!(
+            "║ Total PnL:         ${:>9.2}                             ║\n",
+            self.total_pnl
+        ));
+        report.push_str(&format!(
+            "║ Total Volume:      ${:>9.2}                             ║\n",
+            self.total_volume
+        ));
+        report.push_str(&format!(
+            "║ Avg PnL/Trade:     ${:>9.2}                             ║\n",
+            self.avg_pnl_per_trade
+        ));
 
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
         report.push_str("║ RISK METRICS                                                 ║\n");
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
 
-        report.push_str(&format!("║ Max Drawdown:      {:>10.2}%                             ║\n", self.max_drawdown * dec!(100)));
-        report.push_str(&format!("║ Sharpe Ratio:      {:>10.2}                              ║\n", self.sharpe_ratio));
-        report.push_str(&format!("║ Profit Factor:     {:>10.2}                              ║\n", self.profit_factor));
+        report.push_str(&format!(
+            "║ Max Drawdown:      {:>10.2}%                             ║\n",
+            self.max_drawdown * dec!(100)
+        ));
+        report.push_str(&format!(
+            "║ Sharpe Ratio:      {:>10.2}                              ║\n",
+            self.sharpe_ratio
+        ));
+        report.push_str(&format!(
+            "║ Profit Factor:     {:>10.2}                              ║\n",
+            self.profit_factor
+        ));
 
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
         report.push_str("║ WIN/LOSS ANALYSIS                                            ║\n");
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
 
-        report.push_str(&format!("║ Average Win:       ${:>9.2}                             ║\n", self.avg_win));
-        report.push_str(&format!("║ Average Loss:      ${:>9.2}                             ║\n", self.avg_loss));
-        report.push_str(&format!("║ Largest Win:       ${:>9.2}                             ║\n", self.largest_win));
-        report.push_str(&format!("║ Largest Loss:      ${:>9.2}                             ║\n", self.largest_loss));
+        report.push_str(&format!(
+            "║ Average Win:       ${:>9.2}                             ║\n",
+            self.avg_win
+        ));
+        report.push_str(&format!(
+            "║ Average Loss:      ${:>9.2}                             ║\n",
+            self.avg_loss
+        ));
+        report.push_str(&format!(
+            "║ Largest Win:       ${:>9.2}                             ║\n",
+            self.largest_win
+        ));
+        report.push_str(&format!(
+            "║ Largest Loss:      ${:>9.2}                             ║\n",
+            self.largest_loss
+        ));
 
         report.push_str("╠══════════════════════════════════════════════════════════════╣\n");
         report.push_str("║ BY SYMBOL                                                    ║\n");
@@ -1062,7 +1145,10 @@ impl BacktestResults {
         for (symbol, stats) in &self.trades_by_symbol {
             report.push_str(&format!(
                 "║ {:8} | Trades: {:>4} | Win: {:>5.1}% | PnL: ${:>8.2}        ║\n",
-                symbol, stats.total_trades, stats.win_rate * 100.0, stats.total_pnl
+                symbol,
+                stats.total_trades,
+                stats.win_rate * 100.0,
+                stats.total_pnl
             ));
         }
 

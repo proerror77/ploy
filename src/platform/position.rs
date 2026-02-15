@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use crate::domain::Side;
 use super::types::Domain;
+use crate::domain::Side;
 
 /// 單一倉位
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,17 +101,29 @@ pub struct AggregatedPosition {
 impl AggregatedPosition {
     /// 最大單一領域暴露
     pub fn max_domain_exposure(&self) -> Decimal {
-        self.exposure_by_domain.values().cloned().max().unwrap_or(Decimal::ZERO)
+        self.exposure_by_domain
+            .values()
+            .cloned()
+            .max()
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// 最大單一 Agent 暴露
     pub fn max_agent_exposure(&self) -> Decimal {
-        self.exposure_by_agent.values().cloned().max().unwrap_or(Decimal::ZERO)
+        self.exposure_by_agent
+            .values()
+            .cloned()
+            .max()
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// 最大單一市場暴露
     pub fn max_market_exposure(&self) -> Decimal {
-        self.exposure_by_market.values().cloned().max().unwrap_or(Decimal::ZERO)
+        self.exposure_by_market
+            .values()
+            .cloned()
+            .max()
+            .unwrap_or(Decimal::ZERO)
     }
 }
 
@@ -196,7 +208,10 @@ impl PositionAggregator {
             position_id, agent_id, domain, market_slug, shares, entry_price
         );
 
-        self.positions.write().await.insert(position_id.clone(), position);
+        self.positions
+            .write()
+            .await
+            .insert(position_id.clone(), position);
         position_id
     }
 
@@ -209,7 +224,9 @@ impl PositionAggregator {
 
             // 記錄已實現損益
             let mut realized = self.realized_pnl.write().await;
-            *realized.entry(position.agent_id.clone()).or_insert(Decimal::ZERO) += pnl;
+            *realized
+                .entry(position.agent_id.clone())
+                .or_insert(Decimal::ZERO) += pnl;
 
             info!(
                 "Closed position {} for agent {}: {} shares @ {} (PnL: {})",
@@ -315,9 +332,18 @@ impl PositionAggregator {
                 result.unhedged_count += 1;
             }
 
-            *result.exposure_by_domain.entry(position.domain).or_insert(Decimal::ZERO) += exposure;
-            *result.exposure_by_agent.entry(position.agent_id.clone()).or_insert(Decimal::ZERO) += exposure;
-            *result.exposure_by_market.entry(position.market_slug.clone()).or_insert(Decimal::ZERO) += exposure;
+            *result
+                .exposure_by_domain
+                .entry(position.domain)
+                .or_insert(Decimal::ZERO) += exposure;
+            *result
+                .exposure_by_agent
+                .entry(position.agent_id.clone())
+                .or_insert(Decimal::ZERO) += exposure;
+            *result
+                .exposure_by_market
+                .entry(position.market_slug.clone())
+                .or_insert(Decimal::ZERO) += exposure;
         }
 
         result.realized_pnl = realized.values().sum();
@@ -453,21 +479,25 @@ mod tests {
         let agg = PositionAggregator::new();
 
         // 開倉
-        let pos_id = agg.open_position(
-            "agent1",
-            Domain::Crypto,
-            "btc-15m",
-            "token-yes",
-            Side::Up,
-            100,
-            Decimal::from_str_exact("0.50").unwrap(),
-        ).await;
+        let pos_id = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
 
         assert_eq!(agg.position_count().await, 1);
         assert_eq!(agg.total_exposure().await, Decimal::from(50));
 
         // 平倉
-        let pnl = agg.close_position(&pos_id, Decimal::from_str_exact("0.55").unwrap()).await;
+        let pnl = agg
+            .close_position(&pos_id, Decimal::from_str_exact("0.55").unwrap())
+            .await;
         assert!(pnl.is_some());
         assert_eq!(pnl.unwrap(), Decimal::from(5)); // (0.55 - 0.50) * 100 = 5
 
@@ -480,9 +510,36 @@ mod tests {
         let agg = PositionAggregator::new();
 
         // 開多個倉位
-        agg.open_position("agent1", Domain::Crypto, "btc-15m", "t1", Side::Up, 100, Decimal::from_str_exact("0.50").unwrap()).await;
-        agg.open_position("agent1", Domain::Crypto, "eth-15m", "t2", Side::Down, 50, Decimal::from_str_exact("0.40").unwrap()).await;
-        agg.open_position("agent2", Domain::Sports, "nba-123", "t3", Side::Up, 200, Decimal::from_str_exact("0.60").unwrap()).await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "t1",
+            Side::Up,
+            100,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "eth-15m",
+            "t2",
+            Side::Down,
+            50,
+            Decimal::from_str_exact("0.40").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent2",
+            Domain::Sports,
+            "nba-123",
+            "t3",
+            Side::Up,
+            200,
+            Decimal::from_str_exact("0.60").unwrap(),
+        )
+        .await;
 
         let aggregate = agg.aggregate().await;
 
@@ -492,33 +549,48 @@ mod tests {
         assert_eq!(aggregate.total_exposure, Decimal::from(190));
 
         // 按領域
-        assert_eq!(aggregate.exposure_by_domain.get(&Domain::Crypto), Some(&Decimal::from(70)));
-        assert_eq!(aggregate.exposure_by_domain.get(&Domain::Sports), Some(&Decimal::from(120)));
+        assert_eq!(
+            aggregate.exposure_by_domain.get(&Domain::Crypto),
+            Some(&Decimal::from(70))
+        );
+        assert_eq!(
+            aggregate.exposure_by_domain.get(&Domain::Sports),
+            Some(&Decimal::from(120))
+        );
 
         // 按 Agent
-        assert_eq!(aggregate.exposure_by_agent.get("agent1"), Some(&Decimal::from(70)));
-        assert_eq!(aggregate.exposure_by_agent.get("agent2"), Some(&Decimal::from(120)));
+        assert_eq!(
+            aggregate.exposure_by_agent.get("agent1"),
+            Some(&Decimal::from(70))
+        );
+        assert_eq!(
+            aggregate.exposure_by_agent.get("agent2"),
+            Some(&Decimal::from(120))
+        );
     }
 
     #[tokio::test]
     async fn test_update_price() {
         let agg = PositionAggregator::new();
 
-        let pos_id = agg.open_position(
-            "agent1",
-            Domain::Crypto,
-            "btc-15m",
-            "token-yes",
-            Side::Up,
-            100,
-            Decimal::from_str_exact("0.50").unwrap(),
-        ).await;
+        let pos_id = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
 
         // 初始未實現損益為 0
         assert_eq!(agg.total_unrealized_pnl().await, Decimal::ZERO);
 
         // 更新價格
-        agg.update_price(&pos_id, Decimal::from_str_exact("0.55").unwrap()).await;
+        agg.update_price(&pos_id, Decimal::from_str_exact("0.55").unwrap())
+            .await;
 
         // 未實現損益 = (0.55 - 0.50) * 100 = 5
         assert_eq!(agg.total_unrealized_pnl().await, Decimal::from(5));
@@ -528,9 +600,36 @@ mod tests {
     async fn test_agent_stats() {
         let agg = PositionAggregator::new();
 
-        agg.open_position("agent1", Domain::Crypto, "btc-15m", "t1", Side::Up, 100, Decimal::from_str_exact("0.50").unwrap()).await;
-        agg.open_position("agent1", Domain::Crypto, "eth-15m", "t2", Side::Down, 50, Decimal::from_str_exact("0.40").unwrap()).await;
-        agg.open_position("agent2", Domain::Sports, "nba-123", "t3", Side::Up, 200, Decimal::from_str_exact("0.60").unwrap()).await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "t1",
+            Side::Up,
+            100,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "eth-15m",
+            "t2",
+            Side::Down,
+            50,
+            Decimal::from_str_exact("0.40").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent2",
+            Domain::Sports,
+            "nba-123",
+            "t3",
+            Side::Up,
+            200,
+            Decimal::from_str_exact("0.60").unwrap(),
+        )
+        .await;
 
         let stats = agg.agent_stats("agent1").await;
         assert_eq!(stats.exposure, Decimal::from(70));

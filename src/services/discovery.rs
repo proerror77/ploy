@@ -17,11 +17,7 @@ pub struct DiscoveryService {
 
 impl DiscoveryService {
     pub fn new(store: PostgresStore, client: PolymarketClient, cfg: DiscoveryConfig) -> Self {
-        Self {
-            store,
-            client,
-            cfg,
-        }
+        Self { store, client, cfg }
     }
 
     /// Run the discovery loop forever (call from a spawned task).

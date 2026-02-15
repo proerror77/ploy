@@ -27,10 +27,10 @@ impl AlertLevel {
     /// Get emoji prefix for alert level
     pub fn emoji(&self) -> &'static str {
         match self {
-            AlertLevel::Info => "\u{2139}\u{fe0f}",      // info icon
-            AlertLevel::Warning => "\u{26a0}\u{fe0f}",   // warning icon
-            AlertLevel::Error => "\u{274c}",            // red X
-            AlertLevel::Critical => "\u{1f6a8}",        // police light
+            AlertLevel::Info => "\u{2139}\u{fe0f}",    // info icon
+            AlertLevel::Warning => "\u{26a0}\u{fe0f}", // warning icon
+            AlertLevel::Error => "\u{274c}",           // red X
+            AlertLevel::Critical => "\u{1f6a8}",       // police light
         }
     }
 

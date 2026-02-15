@@ -14,7 +14,7 @@ pub mod widgets;
 mod tests;
 
 pub use app::TuiApp;
-pub use data::{DashboardStats, DisplayPosition, DisplayTransaction, MarketState};
+pub use data::{DashboardStats, DisplayAgent, DisplayPosition, DisplayTransaction, MarketState};
 pub use event::{AppEvent, EventHandler, KeyAction};
 pub use runner::{run_dashboard_auto, DashboardConfig, DashboardRunner};
 pub use theme::Theme;
@@ -59,7 +59,8 @@ pub async fn run_tui(mut app: TuiApp) -> io::Result<()> {
     });
 
     // Create a new receiver since we moved events
-    let (_tx, _rx): (tokio::sync::mpsc::UnboundedSender<AppEvent>, _) = tokio::sync::mpsc::unbounded_channel();
+    let (_tx, _rx): (tokio::sync::mpsc::UnboundedSender<AppEvent>, _) =
+        tokio::sync::mpsc::unbounded_channel();
 
     // Main loop - simplified version that handles basic events
     let event_handler = EventHandler::new(Duration::from_millis(100));

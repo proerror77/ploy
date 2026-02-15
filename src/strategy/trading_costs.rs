@@ -148,7 +148,11 @@ impl TradingCostCalculator {
     /// Slippage increases non-linearly with order size relative to market depth.
     /// For small orders (<1% of depth), slippage is minimal.
     /// For large orders (>10% of depth), slippage can be significant.
-    pub fn estimate_slippage(&self, notional_value: Decimal, market_depth_ratio: Decimal) -> Decimal {
+    pub fn estimate_slippage(
+        &self,
+        notional_value: Decimal,
+        market_depth_ratio: Decimal,
+    ) -> Decimal {
         // Slippage model: quadratic function of depth ratio
         // Small orders: ~0.1% slippage
         // Medium orders (5% depth): ~0.5% slippage

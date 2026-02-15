@@ -158,7 +158,10 @@ impl EventRouter {
         );
 
         self.agents.write().await.insert(agent_id.clone(), agent);
-        self.subscriptions.write().await.insert(agent_id, subscription);
+        self.subscriptions
+            .write()
+            .await
+            .insert(agent_id, subscription);
     }
 
     /// 取消註冊 Agent
@@ -211,10 +214,7 @@ impl EventRouter {
                     Ok(intents) => {
                         let intent_count = intents.len();
                         if intent_count > 0 {
-                            debug!(
-                                "Agent {} generated {} intents",
-                                agent_id, intent_count
-                            );
+                            debug!("Agent {} generated {} intents", agent_id, intent_count);
                         }
 
                         // 更新統計

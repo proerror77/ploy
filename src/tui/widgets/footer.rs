@@ -30,7 +30,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
     if !stats.strategy_state.is_empty() {
         indicators.push(Span::styled(
             format!("[{}]", stats.strategy_state.to_uppercase()),
-            THEME.border_style()
+            THEME.border_style(),
         ));
         indicators.push(Span::raw(" "));
     }
@@ -68,25 +68,30 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
         format!("[{}]", app.selected_market)
     };
 
-    let line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(market_label, THEME.border_style()),
-        Span::raw(" Trades: "),
-        Span::styled(format!("{}", stats.trade_count), THEME.highlight_style()),
-        Span::raw("  "),
-        Span::styled("", THEME.inactive_style()),
-        Span::raw("  Volume: "),
-        Span::styled(volume_str, THEME.highlight_style()),
-        Span::raw("  "),
-        Span::styled("", THEME.inactive_style()),
-        Span::raw("  "),
-        Span::styled("", THEME.border_style()),
-        Span::raw(" "),
-        Span::styled(stats.formatted_remaining(), THEME.highlight_style()),
-        Span::raw("  "),
-        Span::styled("", THEME.inactive_style()),
-        Span::raw("  "),
-    ].into_iter().chain(indicators).collect::<Vec<_>>());
+    let line = Line::from(
+        vec![
+            Span::raw("  "),
+            Span::styled(market_label, THEME.border_style()),
+            Span::raw(" Trades: "),
+            Span::styled(format!("{}", stats.trade_count), THEME.highlight_style()),
+            Span::raw("  "),
+            Span::styled("", THEME.inactive_style()),
+            Span::raw("  Volume: "),
+            Span::styled(volume_str, THEME.highlight_style()),
+            Span::raw("  "),
+            Span::styled("", THEME.inactive_style()),
+            Span::raw("  "),
+            Span::styled("", THEME.border_style()),
+            Span::raw(" "),
+            Span::styled(stats.formatted_remaining(), THEME.highlight_style()),
+            Span::raw("  "),
+            Span::styled("", THEME.inactive_style()),
+            Span::raw("  "),
+        ]
+        .into_iter()
+        .chain(indicators)
+        .collect::<Vec<_>>(),
+    );
 
     let paragraph = Paragraph::new(line);
     f.render_widget(paragraph, area);

@@ -1,15 +1,10 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
-
+use axum::{extract::State, http::StatusCode, Json};
+use sqlx::{postgres::Postgres, QueryBuilder, Row};
 
 use crate::api::{
     state::{AppState, SystemRunStatus},
     types::*,
 };
-
 
 /// GET /api/system/status
 pub async fn get_system_status(
@@ -18,13 +13,13 @@ pub async fn get_system_status(
     let status_state = state.system_status.read().await;
 
     // Get error count from last hour
-    let error_count = sqlx::query_scalar!(
+    let error_count = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*) as "count!"
+        SELECT COUNT(*)::BIGINT as count
         FROM security_audit_log
         WHERE timestamp > NOW() - INTERVAL '1 hour'
           AND severity IN ('HIGH', 'CRITICAL')
-        "#
+        "#,
     )
     .fetch_one(state.store.pool())
     .await
@@ -63,11 +58,11 @@ pub async fn start_system(
     }));
 
     // Log to audit
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         INSERT INTO security_audit_log (event_type, severity, details, metadata)
         VALUES ('SYSTEM_START', 'LOW', 'System started via API', '{}')
-        "#
+        "#,
     )
     .execute(state.store.pool())
     .await;
@@ -99,11 +94,11 @@ pub async fn stop_system(
     }));
 
     // Log to audit
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         INSERT INTO security_audit_log (event_type, severity, details, metadata)
         VALUES ('SYSTEM_STOP', 'LOW', 'System stopped via API', '{}')
-        "#
+        "#,
     )
     .execute(state.store.pool())
     .await;
@@ -136,11 +131,11 @@ pub async fn restart_system(
     }));
 
     // Log to audit
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         INSERT INTO security_audit_log (event_type, severity, details, metadata)
         VALUES ('SYSTEM_RESTART', 'MEDIUM', 'System restarted via API', '{}')
-        "#
+        "#,
     )
     .execute(state.store.pool())
     .await;
@@ -185,13 +180,13 @@ pub async fn update_config(
     config.stop_loss = new_config.stop_loss;
 
     // Log to audit
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         r#"
         INSERT INTO security_audit_log (event_type, severity, details, metadata)
         VALUES ('CONFIG_UPDATE', 'MEDIUM', 'Strategy config updated via API', $1)
         "#,
-        serde_json::to_value(&*config).unwrap()
     )
+    .bind(serde_json::to_value(&*config).unwrap())
     .execute(state.store.pool())
     .await;
 
@@ -205,16 +200,7 @@ pub async fn get_security_events(
 ) -> std::result::Result<Json<Vec<SecurityEvent>>, (StatusCode, String)> {
     let limit = query.limit.unwrap_or(100).min(500);
 
-    let mut where_clauses = vec!["1=1".to_string()];
-    if let Some(ref severity) = query.severity {
-        where_clauses.push(format!("severity = '{}'", severity));
-    }
-    if let Some(start_time) = query.start_time {
-        where_clauses.push(format!("timestamp >= '{}'", start_time));
-    }
-    let where_clause = where_clauses.join(" AND ");
-
-    let events = sqlx::query!(
+    let mut qb = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
             id,
@@ -225,26 +211,59 @@ pub async fn get_security_events(
             metadata
         FROM security_audit_log
         WHERE 1=1
-        ORDER BY timestamp DESC
-        LIMIT $1
         "#,
-        limit
-    )
-    .fetch_all(state.store.pool())
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    );
 
-    let security_events: Vec<SecurityEvent> = events
-        .into_iter()
-        .map(|row| SecurityEvent {
-            id: row.id.to_string(),
-            timestamp: row.timestamp,
-            event_type: row.event_type,
-            severity: row.severity,
-            details: row.details,
-            metadata: row.metadata,
-        })
-        .collect();
+    if let Some(ref severity) = query.severity {
+        qb.push(" AND severity = ").push_bind(severity);
+    }
+    if let Some(start_time) = query.start_time {
+        qb.push(" AND timestamp >= ").push_bind(start_time);
+    }
+    qb.push(" ORDER BY timestamp DESC LIMIT ").push_bind(limit);
+
+    let rows = qb
+        .build()
+        .fetch_all(state.store.pool())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut security_events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = if let Ok(v) = row.try_get::<uuid::Uuid, _>("id") {
+            v.to_string()
+        } else if let Ok(v) = row.try_get::<i64, _>("id") {
+            v.to_string()
+        } else if let Ok(v) = row.try_get::<String, _>("id") {
+            v
+        } else {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unsupported security_audit_log.id type".to_string(),
+            ));
+        };
+        let timestamp = row
+            .try_get("timestamp")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let event_type = row
+            .try_get("event_type")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let severity = row
+            .try_get("severity")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let details = row
+            .try_get("details")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let metadata = row.try_get("metadata").ok();
+        security_events.push(SecurityEvent {
+            id,
+            timestamp,
+            event_type,
+            severity,
+            details,
+            metadata,
+        });
+    }
 
     Ok(Json(security_events))
 }

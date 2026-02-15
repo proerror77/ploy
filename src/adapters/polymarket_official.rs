@@ -7,14 +7,14 @@ use crate::domain::{OrderRequest, OrderSide};
 use crate::error::{PloyError, Result};
 use alloy::signers::local::PrivateKeySigner;
 use chrono::Utc;
-use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::clob::types::{
     request::{
-        MidpointRequest, OrderBookSummaryRequest, LastTradePriceRequest,
-        PriceRequest, BalanceAllowanceRequest,
+        BalanceAllowanceRequest, LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest,
+        PriceRequest,
     },
-    AssetType, Side as SdkSide, OrderType as SdkOrderType,
+    AssetType, OrderType as SdkOrderType, Side as SdkSide,
 };
+use polymarket_client_sdk::clob::{Client, Config};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
@@ -101,10 +101,7 @@ impl SdkPolymarketClient {
     }
 
     /// Create an authenticated client
-    pub async fn new_authenticated(
-        base_url: &str,
-        private_key: &str,
-    ) -> Result<Self> {
+    pub async fn new_authenticated(base_url: &str, private_key: &str) -> Result<Self> {
         let config = Config::default();
         let client = Client::new(base_url, config)
             .map_err(|e| PloyError::Internal(format!("Failed to create SDK client: {}", e)))?;
@@ -114,7 +111,10 @@ impl SdkPolymarketClient {
             .parse()
             .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?;
 
-        info!("Created authenticated Polymarket SDK client, address: {:?}", signer.address());
+        info!(
+            "Created authenticated Polymarket SDK client, address: {:?}",
+            signer.address()
+        );
 
         Ok(Self {
             read_client: client,
@@ -137,11 +137,10 @@ impl SdkPolymarketClient {
     /// Get midpoint price for a token
     #[instrument(skip(self))]
     pub async fn get_midpoint(&self, token_id: &str) -> Result<Decimal> {
-        let req = MidpointRequest::builder()
-            .token_id(token_id)
-            .build();
+        let req = MidpointRequest::builder().token_id(token_id).build();
 
-        let resp = self.read_client
+        let resp = self
+            .read_client
             .midpoint(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get midpoint: {}", e)))?;
@@ -156,20 +155,29 @@ impl SdkPolymarketClient {
             .token_id(token_id)
             .build();
 
-        let resp = self.read_client
+        let resp = self
+            .read_client
             .order_book(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get order book: {}", e)))?;
 
         Ok(OrderBookResponse {
-            bids: resp.bids.into_iter().map(|l| PriceLevel {
-                price: l.price,
-                size: l.size,
-            }).collect(),
-            asks: resp.asks.into_iter().map(|l| PriceLevel {
-                price: l.price,
-                size: l.size,
-            }).collect(),
+            bids: resp
+                .bids
+                .into_iter()
+                .map(|l| PriceLevel {
+                    price: l.price,
+                    size: l.size,
+                })
+                .collect(),
+            asks: resp
+                .asks
+                .into_iter()
+                .map(|l| PriceLevel {
+                    price: l.price,
+                    size: l.size,
+                })
+                .collect(),
             hash: resp.hash.unwrap_or_default(),
             timestamp: resp.timestamp.timestamp_millis(),
         })
@@ -208,7 +216,8 @@ impl SdkPolymarketClient {
             .side(sdk_side)
             .build();
 
-        let resp = self.read_client
+        let resp = self
+            .read_client
             .price(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get price: {}", e)))?;
@@ -219,14 +228,12 @@ impl SdkPolymarketClient {
     /// Get last trade price
     #[instrument(skip(self))]
     pub async fn get_last_trade_price(&self, token_id: &str) -> Result<Decimal> {
-        let req = LastTradePriceRequest::builder()
-            .token_id(token_id)
-            .build();
+        let req = LastTradePriceRequest::builder().token_id(token_id).build();
 
-        let resp = self.read_client
-            .last_trade_price(&req)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get last trade price: {}", e)))?;
+        let resp =
+            self.read_client.last_trade_price(&req).await.map_err(|e| {
+                PloyError::Internal(format!("Failed to get last trade price: {}", e))
+            })?;
 
         Ok(resp.price)
     }
@@ -255,11 +262,14 @@ impl SdkPolymarketClient {
             });
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
         // Authenticate for this operation
-        let auth_client = self.read_client
+        let auth_client = self
+            .read_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -319,10 +329,13 @@ impl SdkPolymarketClient {
             return Ok(true);
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.read_client
+        let auth_client = self
+            .read_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -345,10 +358,13 @@ impl SdkPolymarketClient {
             return Ok(());
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.read_client
+        let auth_client = self
+            .read_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -370,10 +386,13 @@ impl SdkPolymarketClient {
             return Ok(Decimal::new(10000, 2)); // $100.00 fake balance
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.read_client
+        let auth_client = self
+            .read_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -403,7 +422,8 @@ impl SdkPolymarketClient {
 
     /// Check if geoblocked
     pub async fn check_geoblock(&self) -> Result<bool> {
-        let resp = self.read_client
+        let resp = self
+            .read_client
             .check_geoblock()
             .await
             .map_err(|e| PloyError::Internal(format!("Geoblock check failed: {}", e)))?;
@@ -424,9 +444,9 @@ impl Clone for SdkPolymarketClient {
 
 /// Re-export SDK for direct access when needed
 pub mod sdk {
-    pub use polymarket_client_sdk::clob::{Client, Config};
     pub use polymarket_client_sdk::clob::types::*;
-    pub use polymarket_client_sdk::{POLYGON, AMOY};
+    pub use polymarket_client_sdk::clob::{Client, Config};
+    pub use polymarket_client_sdk::{AMOY, POLYGON};
 }
 
 #[cfg(test)]

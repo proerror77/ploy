@@ -1,7 +1,7 @@
 //! Exit Logic - Position Management and Exit Strategy
 //!
 //! This module implements exit decision logic for managing open positions.
-//! 
+//!
 //! Exit strategies:
 //! 1. Partial profit taking (lock in gains, reduce risk)
 //! 2. Edge disappearance (model no longer predicts value)
@@ -14,34 +14,34 @@
 //! - Exit when: edge gone OR risk too high OR profit target hit
 //! - Avoid "快贏了想多賺" and "快輸了不肯認" (gambler's fallacy)
 
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
-use super::nba_winprob::WinProbPrediction;
 use super::nba_filters::MarketContext;
+use super::nba_winprob::WinProbPrediction;
 
 /// Exit logic configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExitConfig {
     // Partial profit taking
-    pub partial_exit_threshold: f64,   // Edge threshold for partial exit, e.g., 0.02 = 2%
-    pub partial_exit_pct: f64,         // Percentage to exit, e.g., 0.50 = 50%
-    
+    pub partial_exit_threshold: f64, // Edge threshold for partial exit, e.g., 0.02 = 2%
+    pub partial_exit_pct: f64,       // Percentage to exit, e.g., 0.50 = 50%
+
     // Edge-based exit
     pub edge_disappear_threshold: f64, // Exit if edge drops below this, e.g., -0.01 = -1%
-    
+
     // Trailing stop
-    pub trailing_stop_pct: f64,        // Drawdown from peak to exit, e.g., 0.10 = 10%
+    pub trailing_stop_pct: f64, // Drawdown from peak to exit, e.g., 0.10 = 10%
     pub trailing_stop_enabled: bool,
-    
+
     // Liquidity risk
     pub min_exit_liquidity_ratio: f64, // Min liquidity as ratio of position, e.g., 2.0 = 2x
-    
+
     // Time-based exit
-    pub time_stop_quarter: u8,         // Quarter to apply time stop, e.g., 4
-    pub time_stop_minutes: f64,        // Minutes remaining to force exit, e.g., 2.0
+    pub time_stop_quarter: u8,  // Quarter to apply time stop, e.g., 4
+    pub time_stop_minutes: f64, // Minutes remaining to force exit, e.g., 2.0
     pub time_stop_min_profit_pct: f64, // Only exit if profit below this, e.g., 0.10 = 10%
 }
 
@@ -49,15 +49,15 @@ impl Default for ExitConfig {
     fn default() -> Self {
         Self {
             // Conservative defaults
-            partial_exit_threshold: 0.02,      // Take profit when edge drops to 2%
-            partial_exit_pct: 0.50,            // Exit 50% of position
-            edge_disappear_threshold: -0.01,   // Exit if edge becomes negative
-            trailing_stop_pct: 0.10,           // 10% trailing stop
+            partial_exit_threshold: 0.02, // Take profit when edge drops to 2%
+            partial_exit_pct: 0.50,       // Exit 50% of position
+            edge_disappear_threshold: -0.01, // Exit if edge becomes negative
+            trailing_stop_pct: 0.10,      // 10% trailing stop
             trailing_stop_enabled: true,
-            min_exit_liquidity_ratio: 2.0,     // Need 2x position size in liquidity
+            min_exit_liquidity_ratio: 2.0, // Need 2x position size in liquidity
             time_stop_quarter: 4,
-            time_stop_minutes: 2.0,            // Exit in last 2 minutes if not profitable
-            time_stop_min_profit_pct: 0.10,    // 10% profit threshold
+            time_stop_minutes: 2.0, // Exit in last 2 minutes if not profitable
+            time_stop_min_profit_pct: 0.10, // 10% profit threshold
         }
     }
 }
@@ -70,11 +70,11 @@ pub struct PositionState {
     pub entry_time: DateTime<Utc>,
     pub entry_size: Decimal,
     pub remaining_size: Decimal,
-    
+
     // Peak tracking (for trailing stop)
     pub peak_price: Option<Decimal>,
     pub peak_time: Option<DateTime<Utc>>,
-    
+
     // Current state
     pub current_price: Decimal,
     pub unrealized_pnl: Decimal,
@@ -95,16 +95,16 @@ impl PositionState {
             unrealized_pnl_pct: 0.0,
         }
     }
-    
+
     pub fn update_price(&mut self, new_price: Decimal) {
         self.current_price = new_price;
-        
+
         // Update PnL
         let price_change = new_price - self.entry_price;
         self.unrealized_pnl = price_change * self.remaining_size;
-        self.unrealized_pnl_pct = price_change.to_f64().unwrap_or(0.0) 
-            / self.entry_price.to_f64().unwrap_or(1.0);
-        
+        self.unrealized_pnl_pct =
+            price_change.to_f64().unwrap_or(0.0) / self.entry_price.to_f64().unwrap_or(1.0);
+
         // Update peak
         if let Some(peak) = self.peak_price {
             if new_price > peak {
@@ -116,7 +116,7 @@ impl PositionState {
             self.peak_time = Some(Utc::now());
         }
     }
-    
+
     pub fn reduce_size(&mut self, amount: Decimal) {
         self.remaining_size = self.remaining_size - amount;
         if self.remaining_size < Decimal::ZERO {
@@ -134,14 +134,14 @@ pub enum ExitDecision {
         details: String,
         urgency: ExitUrgency,
     },
-    
+
     /// Partial exit (close portion of position)
     PartialExit {
         pct: f64,
         reason: String,
         details: String,
     },
-    
+
     /// Hold position (no action)
     Hold {
         reason: String,
@@ -167,9 +167,9 @@ impl ExitLogic {
     pub fn new(config: ExitConfig) -> Self {
         Self { config }
     }
-    
+
     /// Evaluate whether to exit a position
-    /// 
+    ///
     /// This is called continuously while holding a position.
     /// Returns ExitDecision with reasoning.
     pub fn should_exit(
@@ -182,7 +182,7 @@ impl ExitLogic {
         let p_model = current_prediction.win_prob;
         let p_market = current_market_price.to_f64().unwrap_or(0.5);
         let current_edge = p_model - p_market;
-        
+
         // Priority 1: Edge disappeared (model says no value)
         if current_edge < self.config.edge_disappear_threshold {
             return ExitDecision::full_exit(
@@ -197,13 +197,13 @@ impl ExitLogic {
                 ExitUrgency::Medium,
             );
         }
-        
+
         // Priority 2: Liquidity risk (can't exit if needed)
         let total_depth = market_context.bid_depth + market_context.ask_depth;
         let position_value = position.remaining_size * current_market_price;
-        let liquidity_ratio = total_depth.to_f64().unwrap_or(0.0) 
-            / position_value.to_f64().unwrap_or(1.0);
-        
+        let liquidity_ratio =
+            total_depth.to_f64().unwrap_or(0.0) / position_value.to_f64().unwrap_or(1.0);
+
         if liquidity_ratio < self.config.min_exit_liquidity_ratio {
             return ExitDecision::full_exit(
                 "Liquidity risk",
@@ -217,14 +217,14 @@ impl ExitLogic {
                 ExitUrgency::High,
             );
         }
-        
+
         // Priority 3: Trailing stop (protect profits from peak)
         if self.config.trailing_stop_enabled {
             if let Some(peak_price) = position.peak_price {
                 let peak = peak_price.to_f64().unwrap_or(0.0);
                 let current = current_market_price.to_f64().unwrap_or(0.0);
                 let drawdown = (current - peak) / peak;
-                
+
                 if drawdown < -self.config.trailing_stop_pct {
                     return ExitDecision::full_exit(
                         "Trailing stop triggered",
@@ -239,16 +239,16 @@ impl ExitLogic {
                 }
             }
         }
-        
+
         // Priority 4: Partial profit taking (lock in gains)
-        if current_edge < self.config.partial_exit_threshold 
+        if current_edge < self.config.partial_exit_threshold
             && current_edge > self.config.edge_disappear_threshold
-            && position.unrealized_pnl_pct > 0.0 {
-            
+            && position.unrealized_pnl_pct > 0.0
+        {
             // Only do partial exit if we haven't already reduced position significantly
             let remaining_pct = position.remaining_size.to_f64().unwrap_or(0.0)
                 / position.entry_size.to_f64().unwrap_or(1.0);
-            
+
             if remaining_pct > 0.6 {
                 return ExitDecision::partial_exit(
                     self.config.partial_exit_pct,
@@ -262,12 +262,12 @@ impl ExitLogic {
                 );
             }
         }
-        
+
         // Priority 5: Time stop (Q4 末段，時間不夠)
         let features = &current_prediction.features;
         if features.quarter == self.config.time_stop_quarter
-            && features.time_remaining < self.config.time_stop_minutes {
-            
+            && features.time_remaining < self.config.time_stop_minutes
+        {
             // Only exit if not profitable enough
             if position.unrealized_pnl_pct < self.config.time_stop_min_profit_pct {
                 return ExitDecision::full_exit(
@@ -283,10 +283,10 @@ impl ExitLogic {
                 );
             }
         }
-        
+
         // Priority 6: Hold position
         let mut warnings = vec![];
-        
+
         // Warning: Edge getting small
         if current_edge < self.config.partial_exit_threshold * 1.5 {
             warnings.push(format!(
@@ -294,16 +294,17 @@ impl ExitLogic {
                 current_edge * 100.0
             ));
         }
-        
+
         // Warning: Approaching time stop
         if features.quarter == self.config.time_stop_quarter
-            && features.time_remaining < self.config.time_stop_minutes * 2.0 {
+            && features.time_remaining < self.config.time_stop_minutes * 2.0
+        {
             warnings.push(format!(
                 "Approaching time stop: {:.1}min remaining",
                 features.time_remaining
             ));
         }
-        
+
         // Warning: Liquidity declining
         if liquidity_ratio < self.config.min_exit_liquidity_ratio * 1.5 {
             warnings.push(format!(
@@ -311,7 +312,7 @@ impl ExitLogic {
                 liquidity_ratio
             ));
         }
-        
+
         ExitDecision::hold(
             format!(
                 "Edge: {:.2}%, PnL: {:.1}%, Confidence: {:.1}%",
@@ -322,7 +323,7 @@ impl ExitLogic {
             warnings,
         )
     }
-    
+
     pub fn config(&self) -> &ExitConfig {
         &self.config
     }
@@ -336,7 +337,7 @@ impl ExitDecision {
             urgency,
         }
     }
-    
+
     pub fn partial_exit(pct: f64, reason: &str, details: String) -> Self {
         Self::PartialExit {
             pct,
@@ -344,23 +345,23 @@ impl ExitDecision {
             details,
         }
     }
-    
+
     pub fn hold(reason: String, warnings: Vec<String>) -> Self {
         Self::Hold { reason, warnings }
     }
-    
+
     pub fn is_exit(&self) -> bool {
         matches!(self, Self::FullExit { .. } | Self::PartialExit { .. })
     }
-    
+
     pub fn is_full_exit(&self) -> bool {
         matches!(self, Self::FullExit { .. })
     }
-    
+
     pub fn is_partial_exit(&self) -> bool {
         matches!(self, Self::PartialExit { .. })
     }
-    
+
     pub fn is_hold(&self) -> bool {
         matches!(self, Self::Hold { .. })
     }
@@ -370,7 +371,7 @@ impl ExitDecision {
 mod tests {
     use super::*;
     use crate::strategy::nba_winprob::GameFeatures;
-    
+
     fn create_position(entry_price: f64, current_price: f64) -> PositionState {
         let mut position = PositionState::new(
             Decimal::new((entry_price * 100.0) as i64, 2),
@@ -379,7 +380,7 @@ mod tests {
         position.update_price(Decimal::new((current_price * 100.0) as i64, 2));
         position
     }
-    
+
     fn create_prediction(win_prob: f64, quarter: u8, time_remaining: f64) -> WinProbPrediction {
         WinProbPrediction {
             win_prob,
@@ -392,11 +393,12 @@ mod tests {
                 possession: 1.0,
                 pregame_spread: 0.0,
                 elo_diff: 0.0,
+                comeback_rate: None,
             },
             logit: 0.0,
         }
     }
-    
+
     fn create_good_market_context() -> MarketContext {
         MarketContext {
             best_bid: Some(Decimal::new(45, 2)),
@@ -418,7 +420,7 @@ mod tests {
             depth_imbalance: 0.05,
         }
     }
-    
+
     #[test]
     fn test_hold_with_good_edge() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
@@ -426,13 +428,13 @@ mod tests {
         let prediction = create_prediction(0.30, 3, 10.0);
         let market_price = Decimal::new(20, 2); // 0.20
         let market = create_good_market_context();
-        
+
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
-        
+
         // Should hold if edge is still good
         assert!(decision.is_hold(), "Should hold with good edge");
     }
-    
+
     #[test]
     fn test_edge_disappeared() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
@@ -440,35 +442,35 @@ mod tests {
         let prediction = create_prediction(0.40, 3, 10.0);
         let market_price = Decimal::new(50, 2); // 0.50 (higher than model)
         let market = create_good_market_context();
-        
+
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
-        
+
         // Should exit if model predicts < market price
         if prediction.win_prob < 0.50 {
             assert!(decision.is_full_exit(), "Should exit when edge disappears");
         }
     }
-    
+
     #[test]
     fn test_trailing_stop() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
         let mut position = create_position(0.15, 0.40); // Went up to 0.40
         position.peak_price = Some(Decimal::new(40, 2));
         position.update_price(Decimal::new(35, 2)); // Dropped to 0.35 (12.5% drawdown)
-        
+
         let prediction = create_prediction(0.60, 3, 8.0);
         let market_price = Decimal::new(35, 2);
         let market = create_good_market_context();
-        
+
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
-        
+
         // Should trigger trailing stop with 12.5% drawdown (> 10% threshold)
         assert!(decision.is_full_exit(), "Should trigger trailing stop");
         if let ExitDecision::FullExit { reason, .. } = decision {
             assert!(reason.contains("Trailing stop"));
         }
     }
-    
+
     #[test]
     fn test_liquidity_risk() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
@@ -476,7 +478,7 @@ mod tests {
         let prediction = create_prediction(0.30, 3, 10.0);
         let market_price = Decimal::new(25, 2);
         let mut market = create_good_market_context();
-        
+
         // Reduce liquidity to below 2x position size
         market.bid_depth = Decimal::new(300, 0);
         market.ask_depth = Decimal::new(200, 0);
@@ -484,15 +486,15 @@ mod tests {
         // Need to be below 2x to trigger
         market.bid_depth = Decimal::new(200, 0);
         market.ask_depth = Decimal::new(100, 0); // Total 300 < 500 (2x of 250)
-        
+
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
-        
+
         assert!(decision.is_full_exit(), "Should exit due to liquidity risk");
         if let ExitDecision::FullExit { reason, .. } = decision {
             assert!(reason.contains("Liquidity"));
         }
     }
-    
+
     #[test]
     fn test_time_stop() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
@@ -500,16 +502,16 @@ mod tests {
         let prediction = create_prediction(0.30, 4, 1.5); // Q4, 1.5 min left
         let market_price = Decimal::new(16, 2);
         let market = create_good_market_context();
-        
+
         let decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
-        
+
         // Should trigger time stop (Q4 < 2min, profit < 10%)
         assert!(decision.is_full_exit(), "Should trigger time stop");
         if let ExitDecision::FullExit { reason, .. } = decision {
             assert!(reason.contains("Time stop"));
         }
     }
-    
+
     #[test]
     fn test_partial_exit() {
         let exit_logic = ExitLogic::new(ExitConfig::default());
@@ -519,7 +521,7 @@ mod tests {
         let market = create_good_market_context();
 
         let _decision = exit_logic.should_exit(&position, &prediction, market_price, &market);
-        
+
         // Might trigger partial exit if edge is small but positive
         // (depends on model prediction)
     }

@@ -20,27 +20,89 @@ pub const CANADIAN_REFERENDUM_SERIES: &str = "10568";
 /// Political keywords for filtering markets
 pub const POLITICS_KEYWORDS: &[&str] = &[
     // US Leaders & Politicians
-    "trump", "biden", "harris", "vance", "obama", "desantis", "newsom",
-    "pelosi", "mcconnell", "schumer", "pence", "cruz", "aoc", "rfk",
+    "trump",
+    "biden",
+    "harris",
+    "vance",
+    "obama",
+    "desantis",
+    "newsom",
+    "pelosi",
+    "mcconnell",
+    "schumer",
+    "pence",
+    "cruz",
+    "aoc",
+    "rfk",
     // Offices & Institutions
-    "president", "presidential", "senate", "congress", "governor", "house",
-    "supreme court", "scotus", "cabinet", "secretary", "attorney general",
+    "president",
+    "presidential",
+    "senate",
+    "congress",
+    "governor",
+    "house",
+    "supreme court",
+    "scotus",
+    "cabinet",
+    "secretary",
+    "attorney general",
     // Elections & Voting
-    "election", "primary", "caucus", "electoral", "vote", "votes", "ballot",
-    "midterm", "2024", "2025", "2026", "runoff", "recount",
+    "election",
+    "primary",
+    "caucus",
+    "electoral",
+    "vote",
+    "votes",
+    "ballot",
+    "midterm",
+    "2024",
+    "2025",
+    "2026",
+    "runoff",
+    "recount",
     // Polling & Approval
-    "approval", "favorability", "polls", "polling", "rating", "popularity",
-    "fivethirtyeight", "realclearpolitics",
+    "approval",
+    "favorability",
+    "polls",
+    "polling",
+    "rating",
+    "popularity",
+    "fivethirtyeight",
+    "realclearpolitics",
     // Parties & Movements
-    "republican", "democrat", "gop", "dnc", "rnc", "conservative", "liberal",
-    "maga", "progressive",
+    "republican",
+    "democrat",
+    "gop",
+    "dnc",
+    "rnc",
+    "conservative",
+    "liberal",
+    "maga",
+    "progressive",
     // Political Events
-    "impeachment", "resignation", "nomination", "confirmation", "pardon",
-    "indictment", "trial", "conviction",
+    "impeachment",
+    "resignation",
+    "nomination",
+    "confirmation",
+    "pardon",
+    "indictment",
+    "trial",
+    "conviction",
     // International Politics
-    "referendum", "secession", "treaty", "nato", "un", "g7", "sanctions",
+    "referendum",
+    "secession",
+    "treaty",
+    "nato",
+    "un",
+    "g7",
+    "sanctions",
     // General Political Terms
-    "political", "politics", "policy", "legislation", "bill", "law",
+    "political",
+    "politics",
+    "policy",
+    "legislation",
+    "bill",
+    "law",
 ];
 
 /// Political market categories
@@ -74,18 +136,33 @@ impl PoliticalCategory {
 
     pub fn keywords(&self) -> &[&str] {
         match self {
-            Self::Presidential => &["president", "presidential", "trump", "biden", "harris", "desantis"],
+            Self::Presidential => &[
+                "president",
+                "presidential",
+                "trump",
+                "biden",
+                "harris",
+                "desantis",
+            ],
             Self::Congressional => &["senate", "congress", "house", "midterm", "election"],
             Self::Approval => &["approval", "favorability", "polls", "rating", "popularity"],
             Self::Geopolitical => &["referendum", "secession", "treaty", "nato", "sanctions"],
-            Self::Executive => &["cabinet", "secretary", "nomination", "confirmation", "resignation"],
+            Self::Executive => &[
+                "cabinet",
+                "secretary",
+                "nomination",
+                "confirmation",
+                "resignation",
+            ],
             Self::All => POLITICS_KEYWORDS,
         }
     }
 }
 
 /// Deserialize optional number that could be string or number
-fn deserialize_optional_number<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+fn deserialize_optional_number<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -295,27 +372,32 @@ impl PolymarketPoliticsMarket {
 
     /// Check if this is a politics market based on keywords
     pub fn is_politics_market(&self) -> bool {
-        let question_lower = self.question.as_ref()
+        let question_lower = self
+            .question
+            .as_ref()
             .map(|q| q.to_lowercase())
             .unwrap_or_default();
 
-        let desc_lower = self.description.as_ref()
+        let desc_lower = self
+            .description
+            .as_ref()
             .map(|d| d.to_lowercase())
             .unwrap_or_default();
 
-        let tags_lower: Vec<String> = self.tags.iter()
-            .map(|t| t.to_lowercase())
-            .collect();
+        let tags_lower: Vec<String> = self.tags.iter().map(|t| t.to_lowercase()).collect();
 
         // Check for explicit politics tag first
-        if tags_lower.iter().any(|t| t.contains("politic") || t.contains("election")) {
+        if tags_lower
+            .iter()
+            .any(|t| t.contains("politic") || t.contains("election"))
+        {
             return true;
         }
 
         POLITICS_KEYWORDS.iter().any(|keyword| {
-            question_lower.contains(keyword) ||
-            desc_lower.contains(keyword) ||
-            tags_lower.iter().any(|t| t.contains(keyword))
+            question_lower.contains(keyword)
+                || desc_lower.contains(keyword)
+                || tags_lower.iter().any(|t| t.contains(keyword))
         })
     }
 
@@ -325,11 +407,16 @@ impl PolymarketPoliticsMarket {
             return self.is_politics_market();
         }
 
-        let question_lower = self.question.as_ref()
+        let question_lower = self
+            .question
+            .as_ref()
             .map(|q| q.to_lowercase())
             .unwrap_or_default();
 
-        category.keywords().iter().any(|k| question_lower.contains(k))
+        category
+            .keywords()
+            .iter()
+            .any(|k| question_lower.contains(k))
     }
 
     /// Extract candidate/subject from question
@@ -337,7 +424,9 @@ impl PolymarketPoliticsMarket {
         let question = self.question.as_ref()?;
 
         // Common patterns: "Trump approval...", "Will Biden..."
-        let subjects = ["trump", "biden", "harris", "desantis", "newsom", "vance", "pence"];
+        let subjects = [
+            "trump", "biden", "harris", "desantis", "newsom", "vance", "pence",
+        ];
 
         for subject in subjects {
             if question.to_lowercase().contains(subject) {
@@ -445,7 +534,8 @@ impl PolymarketPoliticsClient {
     pub async fn fetch_all_markets(&self, limit: u32) -> Result<Vec<PolymarketPoliticsMarket>> {
         let url = format!("{}/markets", self.gamma_url);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .query(&[
                 ("limit", limit.to_string()),
@@ -459,10 +549,15 @@ impl PolymarketPoliticsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Gamma API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Gamma API error {}: {}",
+                status, text
+            )));
         }
 
-        let markets: Vec<PolymarketPoliticsMarket> = resp.json().await
+        let markets: Vec<PolymarketPoliticsMarket> = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
         debug!("Fetched {} total markets", markets.len());
@@ -483,7 +578,10 @@ impl PolymarketPoliticsClient {
     }
 
     /// Fetch markets by category
-    pub async fn fetch_by_category(&self, category: PoliticalCategory) -> Result<Vec<PolymarketPoliticsMarket>> {
+    pub async fn fetch_by_category(
+        &self,
+        category: PoliticalCategory,
+    ) -> Result<Vec<PolymarketPoliticsMarket>> {
         let all_markets = self.fetch_all_markets(500).await?;
 
         let filtered: Vec<PolymarketPoliticsMarket> = all_markets
@@ -491,7 +589,11 @@ impl PolymarketPoliticsClient {
             .filter(|m| m.matches_category(category) && m.active && !m.closed)
             .collect();
 
-        info!("Found {} {} markets", filtered.len(), format!("{:?}", category));
+        info!(
+            "Found {} {} markets",
+            filtered.len(),
+            format!("{:?}", category)
+        );
         Ok(filtered)
     }
 
@@ -504,12 +606,16 @@ impl PolymarketPoliticsClient {
     pub async fn fetch_election_markets(&self) -> Result<Vec<PolymarketPoliticsMarket>> {
         let politics_markets = self.fetch_politics_markets().await?;
 
-        let election_keywords = ["election", "win", "primary", "caucus", "2024", "2025", "2026", "midterm"];
+        let election_keywords = [
+            "election", "win", "primary", "caucus", "2024", "2025", "2026", "midterm",
+        ];
 
         let election_markets: Vec<PolymarketPoliticsMarket> = politics_markets
             .into_iter()
             .filter(|m| {
-                let question_lower = m.question.as_ref()
+                let question_lower = m
+                    .question
+                    .as_ref()
                     .map(|q| q.to_lowercase())
                     .unwrap_or_default();
                 election_keywords.iter().any(|k| question_lower.contains(k))
@@ -533,13 +639,17 @@ impl PolymarketPoliticsClient {
         let matching: Vec<PolymarketPoliticsMarket> = all_markets
             .into_iter()
             .filter(|m| {
-                m.active && !m.closed &&
-                (m.question.as_ref()
-                    .map(|q| q.to_lowercase().contains(&keyword_lower))
-                    .unwrap_or(false) ||
-                 m.description.as_ref()
-                    .map(|d| d.to_lowercase().contains(&keyword_lower))
-                    .unwrap_or(false))
+                m.active
+                    && !m.closed
+                    && (m
+                        .question
+                        .as_ref()
+                        .map(|q| q.to_lowercase().contains(&keyword_lower))
+                        .unwrap_or(false)
+                        || m.description
+                            .as_ref()
+                            .map(|d| d.to_lowercase().contains(&keyword_lower))
+                            .unwrap_or(false))
             })
             .collect();
 
@@ -558,7 +668,8 @@ impl PolymarketPoliticsClient {
     pub async fn fetch_series_events(&self, series_id: &str) -> Result<Vec<PoliticalEvent>> {
         let url = format!("{}/series/{}", self.gamma_url, series_id);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -567,18 +678,25 @@ impl PolymarketPoliticsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Series API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Series API error {}: {}",
+                status, text
+            )));
         }
 
-        let series: PoliticalSeriesResponse = resp.json().await
+        let series: PoliticalSeriesResponse = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
-        let open_events: Vec<PoliticalEvent> = series.events
-            .into_iter()
-            .filter(|e| !e.closed)
-            .collect();
+        let open_events: Vec<PoliticalEvent> =
+            series.events.into_iter().filter(|e| !e.closed).collect();
 
-        info!("Found {} open events in series {}", open_events.len(), series_id);
+        info!(
+            "Found {} open events in series {}",
+            open_events.len(),
+            series_id
+        );
         Ok(open_events)
     }
 
@@ -596,7 +714,8 @@ impl PolymarketPoliticsClient {
     pub async fn get_event_details(&self, event_id: &str) -> Result<PoliticalEventDetails> {
         let url = format!("{}/events/{}", self.gamma_url, event_id);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -605,10 +724,15 @@ impl PolymarketPoliticsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Event API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Event API error {}: {}",
+                status, text
+            )));
         }
 
-        let event: PoliticalEventDetails = resp.json().await
+        let event: PoliticalEventDetails = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
         debug!("Event {} has {} markets", event.title, event.markets.len());
@@ -621,7 +745,8 @@ impl PolymarketPoliticsClient {
     pub async fn get_order_book(&self, token_id: &str) -> Result<PoliticsOrderBook> {
         let url = format!("{}/book", self.clob_url);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .query(&[("token_id", token_id)])
             .send()
@@ -631,17 +756,25 @@ impl PolymarketPoliticsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("CLOB API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "CLOB API error {}: {}",
+                status, text
+            )));
         }
 
-        let book: PoliticsOrderBook = resp.json().await
+        let book: PoliticsOrderBook = resp
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
         Ok(book)
     }
 
     /// Get full market details with order books
-    pub async fn get_market_details(&self, market: PolymarketPoliticsMarket) -> Result<Option<PoliticsMarketDetails>> {
+    pub async fn get_market_details(
+        &self,
+        market: PolymarketPoliticsMarket,
+    ) -> Result<Option<PoliticsMarketDetails>> {
         let (yes_token, no_token) = match market.get_token_ids() {
             Some(ids) => ids,
             None => {
@@ -681,10 +814,7 @@ pub struct PoliticsEdgeAnalysis {
 
 impl PoliticsEdgeAnalysis {
     /// Calculate edge between Polymarket and polling data
-    pub fn calculate(
-        details: &PoliticsMarketDetails,
-        poll_yes_prob: Decimal,
-    ) -> Option<Self> {
+    pub fn calculate(details: &PoliticsMarketDetails, poll_yes_prob: Decimal) -> Option<Self> {
         let poly_yes = details.yes_price()?;
         let poly_no = details.no_price()?;
         let poll_no = Decimal::ONE - poll_yes_prob;

@@ -3,25 +3,22 @@
 //! This module provides a client that uses the official polymarket-client-sdk
 //! for both CLOB (trading) and Gamma (market discovery) operations.
 
-use crate::domain::{OrderRequest, OrderSide, OrderStatus};
+use crate::domain::{OrderRequest, OrderSide, OrderStatus, TimeInForce};
 use crate::error::{PloyError, Result};
 use crate::signing::Wallet;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use chrono::Utc;
-use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::clob::types::{
-    request::{
-        OrderBookSummaryRequest, BalanceAllowanceRequest, OrdersRequest, TradesRequest,
-    },
-    AssetType, Side as SdkSide, OrderType as SdkOrderType, SignatureType as SdkSignatureType,
+    request::{BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest},
+    AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType as SdkSignatureType,
 };
-use polymarket_client_sdk::gamma::{Client as GammaClient};
+use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma::types::request::{
-    EventsRequest, EventByIdRequest, MarketByIdRequest,
-    SeriesByIdRequest, SearchRequest,
+    EventByIdRequest, EventsRequest, MarketByIdRequest, SearchRequest, SeriesByIdRequest,
 };
 use polymarket_client_sdk::gamma::types::response::Event as SdkEvent;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,7 +74,7 @@ impl Clone for PolymarketClient {
 // ==================== API Response Types ====================
 
 /// Market response from CLOB API
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MarketResponse {
     pub condition_id: String,
     #[serde(default)]
@@ -100,7 +97,7 @@ pub struct MarketResponse {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TokenInfo {
     pub token_id: String,
     #[serde(default)]
@@ -124,7 +121,7 @@ where
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OrderBookResponse {
     pub market: Option<String>,
     pub asset_id: String,
@@ -134,13 +131,13 @@ pub struct OrderBookResponse {
     pub hash: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OrderBookLevel {
     pub price: String,
     pub size: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OrderResponse {
     pub id: String,
     pub status: String,
@@ -158,7 +155,7 @@ pub struct OrderResponse {
     pub order_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TradeInfo {
     pub id: String,
     pub taker_order_id: String,
@@ -173,7 +170,7 @@ pub struct TradeInfo {
     pub outcome: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateOrderResponse {
     pub success: Option<bool>,
     pub error_msg: Option<String>,
@@ -182,33 +179,39 @@ pub struct CreateOrderResponse {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CancelOrderResponse {
     pub canceled: Option<Vec<String>>,
     pub not_canceled: Option<Vec<NotCanceledOrder>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct NotCanceledOrder {
     pub order_id: String,
     pub reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MarketsSearchResponse {
     pub data: Option<Vec<MarketSummary>>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MarketSummary {
     pub condition_id: String,
     pub question: Option<String>,
     pub slug: Option<String>,
     pub active: bool,
+    /// JSON-encoded CLOB token IDs (e.g., '["token_yes","token_no"]')
+    #[serde(default)]
+    pub clob_token_ids: Option<String>,
+    /// JSON-encoded outcome prices (e.g., '["0.65","0.35"]')
+    #[serde(default)]
+    pub outcome_prices: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ApiKeyResponse {
     #[serde(rename = "apiKey")]
     pub api_key: String,
@@ -298,7 +301,7 @@ pub struct TradeResponse {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountSummary {
     pub usdc_balance: Decimal,
     pub open_order_count: usize,
@@ -334,7 +337,7 @@ impl AccountSummary {
 
 // ==================== Gamma API Types ====================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GammaSeriesResponse {
     pub id: String,
     pub ticker: Option<String>,
@@ -347,7 +350,7 @@ pub struct GammaSeriesResponse {
     pub liquidity: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GammaEventInfo {
     pub id: String,
     pub slug: Option<String>,
@@ -360,7 +363,7 @@ pub struct GammaEventInfo {
     pub markets: Vec<GammaMarketInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GammaMarketInfo {
     #[serde(rename = "conditionId")]
     pub condition_id: Option<String>,
@@ -375,7 +378,7 @@ pub struct GammaMarketInfo {
     pub outcome_prices: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GammaTokenInfo {
     pub token_id: String,
     pub outcome: String,
@@ -393,7 +396,10 @@ impl PolymarketClient {
         let gamma_client = GammaClient::new(GAMMA_API_URL)
             .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
-        info!("Created Polymarket SDK client (read-only, dry_run={})", dry_run);
+        info!(
+            "Created Polymarket SDK client (read-only, dry_run={})",
+            dry_run
+        );
 
         Ok(Self {
             clob_client,
@@ -410,11 +416,7 @@ impl PolymarketClient {
 
     /// Create an authenticated CLOB client with wallet
     /// For proxy wallets (Magic/email), use new_authenticated_proxy instead
-    pub async fn new_authenticated(
-        base_url: &str,
-        wallet: Wallet,
-        neg_risk: bool,
-    ) -> Result<Self> {
+    pub async fn new_authenticated(base_url: &str, wallet: Wallet, neg_risk: bool) -> Result<Self> {
         let config = ClobConfig::default();
         let clob_client = ClobClient::new(base_url, config)
             .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
@@ -427,18 +429,27 @@ impl PolymarketClient {
         let signer: PrivateKeySigner = {
             let mut private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
                 .or_else(|_| std::env::var("PRIVATE_KEY"))
-                .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
+                .map_err(|_| {
+                    PloyError::Wallet(
+                        "POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set"
+                            .to_string(),
+                    )
+                })?;
 
-            let result = private_key_hex.trim_start_matches("0x")
+            let result = private_key_hex
+                .trim_start_matches("0x")
                 .parse::<PrivateKeySigner>()
                 .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)));
 
             private_key_hex.zeroize();
             result?
         }
-            .with_chain_id(Some(POLYGON_CHAIN_ID));
+        .with_chain_id(Some(POLYGON_CHAIN_ID));
 
-        info!("Created authenticated Polymarket SDK client, address: {:?}", signer.address());
+        info!(
+            "Created authenticated Polymarket SDK client, address: {:?}",
+            signer.address()
+        );
 
         Ok(Self {
             clob_client,
@@ -473,16 +484,22 @@ impl PolymarketClient {
         let signer: PrivateKeySigner = {
             let mut private_key_hex = std::env::var("POLYMARKET_PRIVATE_KEY")
                 .or_else(|_| std::env::var("PRIVATE_KEY"))
-                .map_err(|_| PloyError::Wallet("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set".to_string()))?;
+                .map_err(|_| {
+                    PloyError::Wallet(
+                        "POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set"
+                            .to_string(),
+                    )
+                })?;
 
-            let result = private_key_hex.trim_start_matches("0x")
+            let result = private_key_hex
+                .trim_start_matches("0x")
                 .parse::<PrivateKeySigner>()
                 .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)));
 
             private_key_hex.zeroize();
             result?
         }
-            .with_chain_id(Some(POLYGON_CHAIN_ID));
+        .with_chain_id(Some(POLYGON_CHAIN_ID));
 
         // Parse funder address
         let funder: alloy::primitives::Address = funder_address
@@ -538,20 +555,21 @@ impl PolymarketClient {
     /// Get market by condition ID
     #[instrument(skip(self))]
     pub async fn get_market(&self, condition_id: &str) -> Result<MarketResponse> {
-        let req = MarketByIdRequest::builder()
-            .id(condition_id)
-            .build();
+        let req = MarketByIdRequest::builder().id(condition_id).build();
 
-        let market = self.gamma_client
+        let market = self
+            .gamma_client
             .market_by_id(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get market: {}", e)))?;
 
         // Convert SDK Market to our MarketResponse
         Ok(MarketResponse {
-            condition_id: market.condition_id.unwrap_or_else(|| condition_id.to_string()),
+            condition_id: market
+                .condition_id
+                .unwrap_or_else(|| condition_id.to_string()),
             question_id: None,
-            tokens: vec![],  // Tokens need to be fetched separately from CLOB
+            tokens: vec![], // Tokens need to be fetched separately from CLOB
             minimum_order_size: None,
             minimum_tick_size: None,
             active: market.active.unwrap_or(true),
@@ -569,7 +587,8 @@ impl PolymarketClient {
             .token_id(token_id)
             .build();
 
-        let resp = self.clob_client
+        let resp = self
+            .clob_client
             .order_book(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get order book: {}", e)))?;
@@ -577,14 +596,22 @@ impl PolymarketClient {
         Ok(OrderBookResponse {
             market: Some(resp.market),
             asset_id: resp.asset_id,
-            bids: resp.bids.into_iter().map(|l| OrderBookLevel {
-                price: l.price.to_string(),
-                size: l.size.to_string(),
-            }).collect(),
-            asks: resp.asks.into_iter().map(|l| OrderBookLevel {
-                price: l.price.to_string(),
-                size: l.size.to_string(),
-            }).collect(),
+            bids: resp
+                .bids
+                .into_iter()
+                .map(|l| OrderBookLevel {
+                    price: l.price.to_string(),
+                    size: l.size.to_string(),
+                })
+                .collect(),
+            asks: resp
+                .asks
+                .into_iter()
+                .map(|l| OrderBookLevel {
+                    price: l.price.to_string(),
+                    size: l.size.to_string(),
+                })
+                .collect(),
             timestamp: Some(resp.timestamp.to_rfc3339()),
             hash: resp.hash,
         })
@@ -598,9 +625,13 @@ impl PolymarketClient {
     ) -> Result<(Option<Decimal>, Option<Decimal>)> {
         let order_book = self.get_order_book(token_id).await?;
 
-        let best_bid = order_book.bids.first()
+        let best_bid = order_book
+            .bids
+            .first()
             .and_then(|l| l.price.parse::<Decimal>().ok());
-        let best_ask = order_book.asks.first()
+        let best_ask = order_book
+            .asks
+            .first()
             .and_then(|l| l.price.parse::<Decimal>().ok());
 
         Ok((best_bid, best_ask))
@@ -609,11 +640,10 @@ impl PolymarketClient {
     /// Search for markets
     #[instrument(skip(self))]
     pub async fn search_markets(&self, query: &str) -> Result<Vec<MarketSummary>> {
-        let req = SearchRequest::builder()
-            .q(query)
-            .build();
+        let req = SearchRequest::builder().q(query).build();
 
-        let results = self.gamma_client
+        let results = self
+            .gamma_client
             .search(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to search markets: {}", e)))?;
@@ -628,6 +658,8 @@ impl PolymarketClient {
                         question: m.question,
                         slug: m.slug,
                         active: m.active.unwrap_or(true),
+                        clob_token_ids: m.clob_token_ids,
+                        outcome_prices: m.outcome_prices,
                     });
                 }
             }
@@ -639,11 +671,10 @@ impl PolymarketClient {
     /// Get series by ID
     #[instrument(skip(self))]
     pub async fn get_series(&self, series_id: &str) -> Result<GammaSeriesResponse> {
-        let req = SeriesByIdRequest::builder()
-            .id(series_id)
-            .build();
+        let req = SeriesByIdRequest::builder().id(series_id).build();
 
-        let series = self.gamma_client
+        let series = self
+            .gamma_client
             .series_by_id(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get series: {}", e)))?;
@@ -654,9 +685,11 @@ impl PolymarketClient {
             slug: series.slug,
             title: series.title,
             recurrence: series.recurrence,
-            events: vec![],  // Events need to be fetched separately
+            events: vec![], // Events need to be fetched separately
             volume: series.volume.map(|d| d.to_string().parse().unwrap_or(0.0)),
-            liquidity: series.liquidity.map(|d| d.to_string().parse().unwrap_or(0.0)),
+            liquidity: series
+                .liquidity
+                .map(|d| d.to_string().parse().unwrap_or(0.0)),
         })
     }
 
@@ -664,23 +697,22 @@ impl PolymarketClient {
     #[instrument(skip(self))]
     pub async fn get_current_event(&self, series_id: &str) -> Result<Option<GammaEventInfo>> {
         // Fetch active events and filter by series
-        let req = EventsRequest::builder()
-            .active(true)
-            .closed(false)
-            .build();
+        let req = EventsRequest::builder().active(true).closed(false).build();
 
-        let events = self.gamma_client
+        let events = self
+            .gamma_client
             .events(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get events: {}", e)))?;
 
         // Find the first event that belongs to this series
-        let event = events.into_iter()
+        let event = events
+            .into_iter()
             .filter(|e| !e.closed.unwrap_or(false))
             .find(|e| {
-                e.series.as_ref().map_or(false, |series| {
-                    series.iter().any(|s| s.id == series_id)
-                })
+                e.series
+                    .as_ref()
+                    .map_or(false, |series| series.iter().any(|s| s.id == series_id))
             });
 
         match event {
@@ -692,11 +724,10 @@ impl PolymarketClient {
     /// Get event details by ID
     #[instrument(skip(self))]
     pub async fn get_event_details(&self, event_id: &str) -> Result<GammaEventInfo> {
-        let req = EventByIdRequest::builder()
-            .id(event_id)
-            .build();
+        let req = EventByIdRequest::builder().id(event_id).build();
 
-        let event = self.gamma_client
+        let event = self
+            .gamma_client
             .event_by_id(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get event: {}", e)))?;
@@ -706,7 +737,10 @@ impl PolymarketClient {
 
     /// Get current market tokens from a series
     #[instrument(skip(self))]
-    pub async fn get_current_market_tokens(&self, series_id: &str) -> Result<Option<(String, MarketResponse)>> {
+    pub async fn get_current_market_tokens(
+        &self,
+        series_id: &str,
+    ) -> Result<Option<(String, MarketResponse)>> {
         let event = self.get_current_event(series_id).await?;
 
         match event {
@@ -730,7 +764,8 @@ impl PolymarketClient {
         let url = format!("{}/series/{}", GAMMA_API_URL, series_id);
 
         let client = reqwest::Client::new();
-        let response = client.get(&url)
+        let response = client
+            .get(&url)
             .send()
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to fetch series: {}", e)))?;
@@ -743,34 +778,38 @@ impl PolymarketClient {
             )));
         }
 
-        let series: GammaSeriesResponse = response.json()
+        let series: GammaSeriesResponse = response
+            .json()
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to parse series response: {}", e)))?;
 
         // Filter for active (not closed) events
-        let active_events: Vec<GammaEventInfo> = series.events
-            .into_iter()
-            .filter(|e| !e.closed)
-            .collect();
+        let active_events: Vec<GammaEventInfo> =
+            series.events.into_iter().filter(|e| !e.closed).collect();
 
-        debug!("Found {} active events in series {}", active_events.len(), series_id);
+        debug!(
+            "Found {} active events in series {}",
+            active_events.len(),
+            series_id
+        );
         Ok(active_events)
     }
 
     /// Get active sports events matching a keyword
     #[instrument(skip(self))]
     pub async fn get_active_sports_events(&self, keyword: &str) -> Result<Vec<GammaEventInfo>> {
-        let req = SearchRequest::builder()
-            .q(keyword)
-            .build();
+        let req = SearchRequest::builder().q(keyword).build();
 
-        let results = self.gamma_client
+        let results = self
+            .gamma_client
             .search(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to search: {}", e)))?;
 
         // Convert events from search results
-        Ok(results.events.unwrap_or_default()
+        Ok(results
+            .events
+            .unwrap_or_default()
             .into_iter()
             .filter(|e| !e.closed.unwrap_or(false))
             .map(|e| self.convert_sdk_event(&e))
@@ -780,9 +819,10 @@ impl PolymarketClient {
     /// Get all tokens from all active events in a series
     /// Returns (event, up_token_id, down_token_id) for each event
     #[instrument(skip(self))]
-    pub async fn get_series_all_tokens(&self, series_id: &str)
-        -> Result<Vec<(GammaEventInfo, String, String)>>
-    {
+    pub async fn get_series_all_tokens(
+        &self,
+        series_id: &str,
+    ) -> Result<Vec<(GammaEventInfo, String, String)>> {
         let events = self.get_all_active_events(series_id).await?;
         let mut result = Vec::new();
 
@@ -794,11 +834,7 @@ impl PolymarketClient {
                     if let Ok(ids) = serde_json::from_str::<Vec<String>>(clob_ids) {
                         if ids.len() >= 2 {
                             // First token is "Yes", second is "No"
-                            result.push((
-                                event.clone(),
-                                ids[0].clone(),
-                                ids[1].clone(),
-                            ));
+                            result.push((event.clone(), ids[0].clone(), ids[1].clone()));
                             break; // Only take first market per event
                         }
                     }
@@ -820,6 +856,13 @@ impl PolymarketClient {
                 request.order_side, request.shares, request.token_id, request.limit_price
             );
 
+            let sdk_order_type = match request.time_in_force {
+                TimeInForce::GTC => SdkOrderType::GTC,
+                TimeInForce::FOK => SdkOrderType::FOK,
+                // Polymarket SDK uses FAK (Fill and Kill) for IOC semantics.
+                TimeInForce::IOC => SdkOrderType::FAK,
+            };
+
             return Ok(OrderResponse {
                 id: request.client_order_id.clone(),
                 status: "OPEN".to_string(),
@@ -833,11 +876,13 @@ impl PolymarketClient {
                 associate_trades: None,
                 created_at: Some(Utc::now().to_rfc3339()),
                 expiration: None,
-                order_type: Some("GTC".to_string()),
+                order_type: Some(sdk_order_type.to_string()),
             });
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
         // Acquire mutex to serialize order submissions and prevent auth race condition
@@ -873,13 +918,20 @@ impl PolymarketClient {
             OrderSide::Sell => SdkSide::Sell,
         };
 
+        let sdk_order_type = match request.time_in_force {
+            TimeInForce::GTC => SdkOrderType::GTC,
+            TimeInForce::FOK => SdkOrderType::FOK,
+            // Polymarket SDK uses FAK (Fill and Kill) for IOC semantics.
+            TimeInForce::IOC => SdkOrderType::FAK,
+        };
+
         let order = auth_client
             .limit_order()
             .token_id(&request.token_id)
             .price(request.limit_price)
             .size(Decimal::from(request.shares))
             .side(sdk_side)
-            .order_type(SdkOrderType::GTC)
+            .order_type(sdk_order_type)
             .build()
             .await
             .map_err(|e| PloyError::OrderSubmission(format!("Failed to build order: {}", e)))?;
@@ -911,17 +963,20 @@ impl PolymarketClient {
             associate_trades: None,
             created_at: Some(Utc::now().to_rfc3339()),
             expiration: None,
-            order_type: Some("GTC".to_string()),
+            order_type: Some(sdk_order_type.to_string()),
         })
     }
 
     /// Get order by ID
     #[instrument(skip(self))]
     pub async fn get_order(&self, order_id: &str) -> Result<OrderResponse> {
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -958,10 +1013,13 @@ impl PolymarketClient {
             return Ok(true);
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -987,10 +1045,13 @@ impl PolymarketClient {
             });
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -1020,10 +1081,13 @@ impl PolymarketClient {
             });
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -1049,7 +1113,9 @@ impl PolymarketClient {
     #[instrument(skip(self))]
     pub async fn get_usdc_balance(&self) -> Result<Decimal> {
         let balance = self.get_balance().await?;
-        balance.balance.parse::<Decimal>()
+        balance
+            .balance
+            .parse::<Decimal>()
             .map_err(|e| PloyError::Internal(format!("Failed to parse balance: {}", e)))
     }
 
@@ -1060,10 +1126,13 @@ impl PolymarketClient {
             return Ok(vec![]);
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -1078,7 +1147,9 @@ impl PolymarketClient {
             .map_err(|e| PloyError::Internal(format!("Failed to get open orders: {}", e)))?;
 
         // Filter for open orders (LIVE status)
-        Ok(orders.data.into_iter()
+        Ok(orders
+            .data
+            .into_iter()
             .filter(|o| {
                 let status = format!("{:?}", o.status);
                 status.contains("Live") || status.contains("Open")
@@ -1097,7 +1168,8 @@ impl PolymarketClient {
                 created_at: Some(o.created_at.to_rfc3339()),
                 expiration: Some(o.expiration.to_rfc3339()),
                 order_type: Some(format!("{:?}", o.order_type)),
-            }).collect())
+            })
+            .collect())
     }
 
     /// Get orders for a specific token
@@ -1107,40 +1179,45 @@ impl PolymarketClient {
             return Ok(vec![]);
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
             .await
             .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
 
-        let req = OrdersRequest::builder()
-            .asset_id(token_id)
-            .build();
+        let req = OrdersRequest::builder().asset_id(token_id).build();
 
         let orders = auth_client
             .orders(&req, None)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get orders: {}", e)))?;
 
-        Ok(orders.data.into_iter().map(|o| OrderResponse {
-            id: o.id.clone(),
-            status: format!("{:?}", o.status),
-            owner: Some(o.owner.to_string()),
-            market: Some(o.market.clone()),
-            asset_id: Some(o.asset_id.clone()),
-            side: Some(format!("{:?}", o.side)),
-            original_size: Some(o.original_size.to_string()),
-            size_matched: Some(o.size_matched.to_string()),
-            price: Some(o.price.to_string()),
-            associate_trades: None,
-            created_at: Some(o.created_at.to_rfc3339()),
-            expiration: Some(o.expiration.to_rfc3339()),
-            order_type: Some(format!("{:?}", o.order_type)),
-        }).collect())
+        Ok(orders
+            .data
+            .into_iter()
+            .map(|o| OrderResponse {
+                id: o.id.clone(),
+                status: format!("{:?}", o.status),
+                owner: Some(o.owner.to_string()),
+                market: Some(o.market.clone()),
+                asset_id: Some(o.asset_id.clone()),
+                side: Some(format!("{:?}", o.side)),
+                original_size: Some(o.original_size.to_string()),
+                size_matched: Some(o.size_matched.to_string()),
+                price: Some(o.price.to_string()),
+                associate_trades: None,
+                created_at: Some(o.created_at.to_rfc3339()),
+                expiration: Some(o.expiration.to_rfc3339()),
+                order_type: Some(format!("{:?}", o.order_type)),
+            })
+            .collect())
     }
 
     /// Get order history
@@ -1150,10 +1227,13 @@ impl PolymarketClient {
             return Ok(vec![]);
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -1174,21 +1254,24 @@ impl PolymarketClient {
             orders.data
         };
 
-        Ok(orders_data.into_iter().map(|o| OrderResponse {
-            id: o.id.clone(),
-            status: format!("{:?}", o.status),
-            owner: Some(o.owner.to_string()),
-            market: Some(o.market.clone()),
-            asset_id: Some(o.asset_id.clone()),
-            side: Some(format!("{:?}", o.side)),
-            original_size: Some(o.original_size.to_string()),
-            size_matched: Some(o.size_matched.to_string()),
-            price: Some(o.price.to_string()),
-            associate_trades: None,
-            created_at: Some(o.created_at.to_rfc3339()),
-            expiration: Some(o.expiration.to_rfc3339()),
-            order_type: Some(format!("{:?}", o.order_type)),
-        }).collect())
+        Ok(orders_data
+            .into_iter()
+            .map(|o| OrderResponse {
+                id: o.id.clone(),
+                status: format!("{:?}", o.status),
+                owner: Some(o.owner.to_string()),
+                market: Some(o.market.clone()),
+                asset_id: Some(o.asset_id.clone()),
+                side: Some(format!("{:?}", o.side)),
+                original_size: Some(o.original_size.to_string()),
+                size_matched: Some(o.size_matched.to_string()),
+                price: Some(o.price.to_string()),
+                associate_trades: None,
+                created_at: Some(o.created_at.to_rfc3339()),
+                expiration: Some(o.expiration.to_rfc3339()),
+                order_type: Some(format!("{:?}", o.order_type)),
+            })
+            .collect())
     }
 
     /// Get positions (placeholder - SDK may not support this directly)
@@ -1211,10 +1294,13 @@ impl PolymarketClient {
             return Ok(vec![]);
         }
 
-        let signer = self.signer.as_ref()
+        let signer = self
+            .signer
+            .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.clob_client
+        let auth_client = self
+            .clob_client
             .clone()
             .authentication_builder(signer)
             .authenticate()
@@ -1234,17 +1320,19 @@ impl PolymarketClient {
             None => Box::new(trades.data.into_iter()),
         };
 
-        Ok(trades_iter.map(|t| TradeResponse {
-            id: Some(t.id.clone()),
-            order_id: Some(t.taker_order_id.clone()),
-            asset_id: t.asset_id.clone(),
-            side: format!("{:?}", t.side),
-            price: t.price.to_string(),
-            size: t.size.to_string(),
-            fee: Some(t.fee_rate_bps.to_string()),
-            timestamp: Some(t.match_time.to_rfc3339()),
-            extra: HashMap::new(),
-        }).collect())
+        Ok(trades_iter
+            .map(|t| TradeResponse {
+                id: Some(t.id.clone()),
+                order_id: Some(t.taker_order_id.clone()),
+                asset_id: t.asset_id.clone(),
+                side: format!("{:?}", t.side),
+                price: t.price.to_string(),
+                size: t.size.to_string(),
+                fee: Some(t.fee_rate_bps.to_string()),
+                timestamp: Some(t.match_time.to_rfc3339()),
+                extra: HashMap::new(),
+            })
+            .collect())
     }
 
     /// Get comprehensive account summary
@@ -1254,7 +1342,8 @@ impl PolymarketClient {
         let open_orders = self.get_open_orders().await.unwrap_or_default();
         let positions = self.get_positions().await.unwrap_or_default();
 
-        let open_order_value = open_orders.iter()
+        let open_order_value = open_orders
+            .iter()
             .filter_map(|o| {
                 let price = o.price.as_ref()?.parse::<Decimal>().ok()?;
                 let size = o.original_size.as_ref()?.parse::<Decimal>().ok()?;
@@ -1262,9 +1351,7 @@ impl PolymarketClient {
             })
             .sum();
 
-        let position_value = positions.iter()
-            .filter_map(|p| p.market_value())
-            .sum();
+        let position_value = positions.iter().filter_map(|p| p.market_value()).sum();
 
         let total_equity = usdc_balance + position_value;
 
@@ -1290,15 +1377,22 @@ impl PolymarketClient {
             title: event.title.clone(),
             end_date: event.end_date.map(|d| d.to_rfc3339()),
             closed: event.closed.unwrap_or(false),
-            markets: event.markets.as_ref()
-                .map(|markets| markets.iter().map(|m| GammaMarketInfo {
-                    condition_id: m.condition_id.clone(),
-                    question: m.question.clone(),
-                    tokens: None,
-                    group_item_title: m.group_item_title.clone(),
-                    clob_token_ids: m.clob_token_ids.clone(),
-                    outcome_prices: m.outcome_prices.clone(),
-                }).collect())
+            markets: event
+                .markets
+                .as_ref()
+                .map(|markets| {
+                    markets
+                        .iter()
+                        .map(|m| GammaMarketInfo {
+                            condition_id: m.condition_id.clone(),
+                            question: m.question.clone(),
+                            tokens: None,
+                            group_item_title: m.group_item_title.clone(),
+                            clob_token_ids: m.clob_token_ids.clone(),
+                            outcome_prices: m.outcome_prices.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
         }
     }
@@ -1307,9 +1401,63 @@ impl PolymarketClient {
     pub fn parse_order_status(status: &str) -> OrderStatus {
         match status.to_uppercase().as_str() {
             "LIVE" | "OPEN" => OrderStatus::Submitted,
-            "MATCHED" | "FILLED" => OrderStatus::Filled,
+            "MATCHED" => OrderStatus::PartiallyFilled,
+            "FILLED" => OrderStatus::Filled,
             "CANCELED" | "CANCELLED" => OrderStatus::Cancelled,
+            "REJECTED" => OrderStatus::Rejected,
+            "EXPIRED" => OrderStatus::Expired,
             "DELAYED" | "PENDING" => OrderStatus::Pending,
+            _ => OrderStatus::Pending,
+        }
+    }
+
+    /// Infer order status using both the status string and fill amounts.
+    ///
+    /// Polymarket can report intermediate states like `MATCHED`; use size_matched/original_size
+    /// when available to distinguish partial vs full fills.
+    pub fn infer_order_status(order: &OrderResponse) -> OrderStatus {
+        let status = order.status.to_uppercase();
+
+        // Terminal status overrides (may still have partial fills).
+        match status.as_str() {
+            "CANCELED" | "CANCELLED" => return OrderStatus::Cancelled,
+            "REJECTED" => return OrderStatus::Rejected,
+            "EXPIRED" => return OrderStatus::Expired,
+            _ => {}
+        }
+
+        let size_matched = order
+            .size_matched
+            .as_ref()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .unwrap_or(Decimal::ZERO);
+        let original_size = order
+            .original_size
+            .as_ref()
+            .and_then(|s| s.parse::<Decimal>().ok());
+
+        if size_matched > Decimal::ZERO {
+            if let Some(orig) = original_size {
+                if size_matched >= orig {
+                    return OrderStatus::Filled;
+                }
+                return OrderStatus::PartiallyFilled;
+            }
+
+            // If we can't read original size, fall back to the status string.
+            if status == "FILLED" || status == "MATCHED" {
+                return OrderStatus::Filled;
+            }
+            return OrderStatus::PartiallyFilled;
+        }
+
+        // No fills observed yet.
+        match status.as_str() {
+            "LIVE" | "OPEN" => OrderStatus::Submitted,
+            "DELAYED" | "PENDING" => OrderStatus::Pending,
+            // Some APIs return MATCHED before size_matched is populated.
+            "MATCHED" => OrderStatus::Submitted,
+            "FILLED" => OrderStatus::Filled,
             _ => OrderStatus::Pending,
         }
     }
@@ -1317,19 +1465,56 @@ impl PolymarketClient {
     /// Calculate fill amount and average price from an order
     /// Returns (filled_shares, avg_price)
     pub fn calculate_fill(order: &OrderResponse) -> (Decimal, Decimal) {
-        let size_matched = order.size_matched.as_ref()
+        let size_matched = order
+            .size_matched
+            .as_ref()
             .and_then(|s| s.parse::<Decimal>().ok())
             .unwrap_or(Decimal::ZERO);
-        let price = order.price.as_ref()
-            .and_then(|p| p.parse::<Decimal>().ok())
-            .unwrap_or(Decimal::ZERO);
-        (size_matched, price)
+
+        // Prefer a weighted average from associated trades when available.
+        let avg_price = if let Some(trades) = order.associate_trades.as_ref() {
+            let mut total_size = Decimal::ZERO;
+            let mut total_notional = Decimal::ZERO;
+
+            for t in trades {
+                let Some(size) = t.size.parse::<Decimal>().ok() else {
+                    continue;
+                };
+                let Some(price) = t.price.parse::<Decimal>().ok() else {
+                    continue;
+                };
+                if size <= Decimal::ZERO || price <= Decimal::ZERO {
+                    continue;
+                }
+                total_size += size;
+                total_notional += size * price;
+            }
+
+            if total_size > Decimal::ZERO {
+                total_notional / total_size
+            } else {
+                order
+                    .price
+                    .as_ref()
+                    .and_then(|p| p.parse::<Decimal>().ok())
+                    .unwrap_or(Decimal::ZERO)
+            }
+        } else {
+            order
+                .price
+                .as_ref()
+                .and_then(|p| p.parse::<Decimal>().ok())
+                .unwrap_or(Decimal::ZERO)
+        };
+
+        (size_matched, avg_price)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[tokio::test]
     async fn test_create_client() {
@@ -1340,8 +1525,106 @@ mod tests {
 
     #[test]
     fn test_parse_order_status() {
-        assert!(matches!(PolymarketClient::parse_order_status("LIVE"), OrderStatus::Submitted));
-        assert!(matches!(PolymarketClient::parse_order_status("MATCHED"), OrderStatus::Filled));
-        assert!(matches!(PolymarketClient::parse_order_status("CANCELED"), OrderStatus::Cancelled));
+        assert!(matches!(
+            PolymarketClient::parse_order_status("LIVE"),
+            OrderStatus::Submitted
+        ));
+        assert!(matches!(
+            PolymarketClient::parse_order_status("MATCHED"),
+            OrderStatus::PartiallyFilled
+        ));
+        assert!(matches!(
+            PolymarketClient::parse_order_status("CANCELED"),
+            OrderStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn test_infer_order_status_uses_sizes() {
+        let base = OrderResponse {
+            id: "1".to_string(),
+            status: "MATCHED".to_string(),
+            owner: None,
+            market: None,
+            asset_id: None,
+            side: None,
+            original_size: Some("10".to_string()),
+            size_matched: Some("5".to_string()),
+            price: Some("0.50".to_string()),
+            associate_trades: None,
+            created_at: None,
+            expiration: None,
+            order_type: None,
+        };
+
+        assert_eq!(
+            PolymarketClient::infer_order_status(&base),
+            OrderStatus::PartiallyFilled
+        );
+
+        let mut full = base.clone();
+        full.size_matched = Some("10".to_string());
+        assert_eq!(
+            PolymarketClient::infer_order_status(&full),
+            OrderStatus::Filled
+        );
+
+        let mut cancelled = base.clone();
+        cancelled.status = "CANCELED".to_string();
+        assert_eq!(
+            PolymarketClient::infer_order_status(&cancelled),
+            OrderStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_calculate_fill_prefers_associated_trades() {
+        let order = OrderResponse {
+            id: "1".to_string(),
+            status: "FILLED".to_string(),
+            owner: None,
+            market: None,
+            asset_id: None,
+            side: None,
+            original_size: Some("5".to_string()),
+            size_matched: Some("5".to_string()),
+            price: Some("0.99".to_string()), // should be ignored if trades present
+            associate_trades: Some(vec![
+                TradeInfo {
+                    id: "t1".to_string(),
+                    taker_order_id: "o1".to_string(),
+                    market: "m".to_string(),
+                    asset_id: "a".to_string(),
+                    side: "BUY".to_string(),
+                    size: "2".to_string(),
+                    fee_rate_bps: "0".to_string(),
+                    price: "0.40".to_string(),
+                    status: "MATCHED".to_string(),
+                    match_time: "now".to_string(),
+                    outcome: None,
+                },
+                TradeInfo {
+                    id: "t2".to_string(),
+                    taker_order_id: "o1".to_string(),
+                    market: "m".to_string(),
+                    asset_id: "a".to_string(),
+                    side: "BUY".to_string(),
+                    size: "3".to_string(),
+                    fee_rate_bps: "0".to_string(),
+                    price: "0.50".to_string(),
+                    status: "MATCHED".to_string(),
+                    match_time: "now".to_string(),
+                    outcome: None,
+                },
+            ]),
+            created_at: None,
+            expiration: None,
+            order_type: None,
+        };
+
+        let (filled, avg) = PolymarketClient::calculate_fill(&order);
+        assert_eq!(filled, dec!(5));
+        // (2*0.40 + 3*0.50)/5 = 0.46
+        assert_eq!(avg, dec!(0.46));
     }
 }

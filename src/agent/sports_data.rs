@@ -181,8 +181,16 @@ impl SportsDataFetcher {
     }
 
     /// Fetch structured game data for a matchup
-    pub async fn fetch_game_data(&self, team1: &str, team2: &str, league: &str) -> Result<StructuredGameData> {
-        info!("Fetching comprehensive structured data for {} vs {}", team1, team2);
+    pub async fn fetch_game_data(
+        &self,
+        team1: &str,
+        team2: &str,
+        league: &str,
+    ) -> Result<StructuredGameData> {
+        info!(
+            "Fetching comprehensive structured data for {} vs {}",
+            team1, team2
+        );
 
         // Step 1: Fetch player status
         info!("📊 Step 1/7: Fetching player status and injuries...");
@@ -239,7 +247,12 @@ impl SportsDataFetcher {
     }
 
     /// Fetch player injury/status data in structured format
-    async fn fetch_player_status(&self, team1: &str, team2: &str, league: &str) -> Result<(Vec<PlayerStatus>, Vec<PlayerStatus>)> {
+    async fn fetch_player_status(
+        &self,
+        team1: &str,
+        team2: &str,
+        league: &str,
+    ) -> Result<(Vec<PlayerStatus>, Vec<PlayerStatus>)> {
         let prompt = format!(
             r#"You are a sports data API. Return ONLY valid JSON, no other text.
 
@@ -279,7 +292,10 @@ Return ONLY the JSON, no markdown, no explanation."#,
         );
 
         let response = self.grok.chat(&prompt).await?;
-        debug!("Player status response: {}", &response[..response.len().min(200)]);
+        debug!(
+            "Player status response: {}",
+            &response[..response.len().min(200)]
+        );
 
         self.parse_player_response(&response, team1, team2)
     }
@@ -309,7 +325,10 @@ Return ONLY the JSON, no markdown, no explanation."#,
         );
 
         let response = self.grok.chat(&prompt).await?;
-        debug!("Betting lines response: {}", &response[..response.len().min(200)]);
+        debug!(
+            "Betting lines response: {}",
+            &response[..response.len().min(200)]
+        );
 
         self.parse_betting_response(&response, team1)
     }
@@ -342,13 +361,21 @@ Return ONLY the JSON, no markdown, no explanation."#,
         );
 
         let response = self.grok.chat(&prompt).await?;
-        debug!("Sentiment response: {}", &response[..response.len().min(200)]);
+        debug!(
+            "Sentiment response: {}",
+            &response[..response.len().min(200)]
+        );
 
         self.parse_sentiment_response(&response, team1)
     }
 
     /// Parse player status response
-    fn parse_player_response(&self, response: &str, _team1: &str, _team2: &str) -> Result<(Vec<PlayerStatus>, Vec<PlayerStatus>)> {
+    fn parse_player_response(
+        &self,
+        response: &str,
+        _team1: &str,
+        _team2: &str,
+    ) -> Result<(Vec<PlayerStatus>, Vec<PlayerStatus>)> {
         // Extract JSON from response
         let json_str = self.extract_json(response)?;
 
@@ -359,12 +386,10 @@ Return ONLY the JSON, no markdown, no explanation."#,
         }
 
         match serde_json::from_str::<PlayerResponse>(&json_str) {
-            Ok(parsed) => {
-                Ok((
-                    parsed.team1_players.unwrap_or_default(),
-                    parsed.team2_players.unwrap_or_default(),
-                ))
-            }
+            Ok(parsed) => Ok((
+                parsed.team1_players.unwrap_or_default(),
+                parsed.team2_players.unwrap_or_default(),
+            )),
             Err(e) => {
                 warn!("Failed to parse player response: {}", e);
                 // Return empty defaults
@@ -384,7 +409,10 @@ Return ONLY the JSON, no markdown, no explanation."#,
             Ok(parsed) => Ok(parsed),
             Err(e) => {
                 warn!("Failed to parse betting response: {}", e);
-                debug!("Problematic JSON: {}", &sanitized[..sanitized.len().min(500)]);
+                debug!(
+                    "Problematic JSON: {}",
+                    &sanitized[..sanitized.len().min(500)]
+                );
                 // Return defaults
                 Ok(BettingLines {
                     spread: 0.0,
@@ -507,7 +535,12 @@ Return ONLY the JSON, no markdown, no explanation."#,
     }
 
     /// Fetch head-to-head historical data
-    async fn fetch_head_to_head(&self, team1: &str, team2: &str, league: &str) -> Result<HeadToHeadData> {
+    async fn fetch_head_to_head(
+        &self,
+        team1: &str,
+        team2: &str,
+        league: &str,
+    ) -> Result<HeadToHeadData> {
         let prompt = format!(
             r#"You are a sports statistics API. Return ONLY valid JSON, no other text.
 
@@ -592,13 +625,21 @@ Return ONLY the JSON, no markdown, no explanation."#,
         );
 
         let response = self.grok.chat(&prompt).await?;
-        debug!("Team stats response: {}", &response[..response.len().min(200)]);
+        debug!(
+            "Team stats response: {}",
+            &response[..response.len().min(200)]
+        );
 
         self.parse_team_stats_response(&response, team1, team2)
     }
 
     /// Fetch advanced analytics and betting trends
-    async fn fetch_advanced_analytics(&self, team1: &str, team2: &str, league: &str) -> Result<AdvancedAnalytics> {
+    async fn fetch_advanced_analytics(
+        &self,
+        team1: &str,
+        team2: &str,
+        league: &str,
+    ) -> Result<AdvancedAnalytics> {
         let prompt = format!(
             r#"You are a sports analytics API. Return ONLY valid JSON, no other text.
 
@@ -639,7 +680,10 @@ Return ONLY the JSON, no markdown, no explanation."#,
         );
 
         let response = self.grok.chat(&prompt).await?;
-        debug!("Advanced analytics response: {}", &response[..response.len().min(200)]);
+        debug!(
+            "Advanced analytics response: {}",
+            &response[..response.len().min(200)]
+        );
 
         self.parse_advanced_analytics_response(&response, team1)
     }
@@ -682,7 +726,12 @@ Return ONLY the JSON, no markdown, no explanation."#,
     }
 
     /// Parse team stats response
-    fn parse_team_stats_response(&self, response: &str, team1: &str, team2: &str) -> Result<TeamStats> {
+    fn parse_team_stats_response(
+        &self,
+        response: &str,
+        team1: &str,
+        team2: &str,
+    ) -> Result<TeamStats> {
         let json_str = self.extract_json(response)?;
 
         match serde_json::from_str::<TeamStats>(&json_str) {
@@ -726,7 +775,11 @@ Return ONLY the JSON, no markdown, no explanation."#,
     }
 
     /// Parse advanced analytics response
-    fn parse_advanced_analytics_response(&self, response: &str, _team1: &str) -> Result<AdvancedAnalytics> {
+    fn parse_advanced_analytics_response(
+        &self,
+        response: &str,
+        _team1: &str,
+    ) -> Result<AdvancedAnalytics> {
         let json_str = self.extract_json(response)?;
 
         match serde_json::from_str::<AdvancedAnalytics>(&json_str) {
@@ -841,18 +894,13 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
     output.push_str("\n## Betting Lines\n");
     output.push_str(&format!(
         "- Spread: {} {}\n",
-        data.betting_lines.spread_team,
-        data.betting_lines.spread
+        data.betting_lines.spread_team, data.betting_lines.spread
     ));
     output.push_str(&format!(
         "- Moneyline: Fav {} / Dog {}\n",
-        data.betting_lines.moneyline_favorite,
-        data.betting_lines.moneyline_underdog
+        data.betting_lines.moneyline_favorite, data.betting_lines.moneyline_underdog
     ));
-    output.push_str(&format!(
-        "- O/U: {}\n",
-        data.betting_lines.over_under
-    ));
+    output.push_str(&format!("- O/U: {}\n", data.betting_lines.over_under));
     output.push_str(&format!(
         "- Implied Win Prob: {:.1}%\n",
         data.betting_lines.implied_probability * 100.0
@@ -876,10 +924,7 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
         "- Sharp Money: {}\n",
         data.sentiment.sharp_money_side
     ));
-    output.push_str(&format!(
-        "- Social: {}\n",
-        data.sentiment.social_sentiment
-    ));
+    output.push_str(&format!("- Social: {}\n", data.sentiment.social_sentiment));
 
     if !data.sentiment.key_narratives.is_empty() {
         output.push_str("\nKey Narratives:\n");
@@ -910,7 +955,10 @@ mod tests {
 
         // Markdown code block
         let markdown = "```json\n{\"key\": \"value\"}\n```";
-        assert_eq!(fetcher.extract_json(markdown).unwrap(), "{\"key\": \"value\"}");
+        assert_eq!(
+            fetcher.extract_json(markdown).unwrap(),
+            "{\"key\": \"value\"}"
+        );
 
         // JSON with surrounding text
         let messy = "Here is the data: {\"key\": \"value\"} end";
@@ -1042,7 +1090,10 @@ mod tests {
         // Test removing + prefix from numbers
         let input = r#"{"moneyline_favorite": -190, "moneyline_underdog": +158}"#;
         let sanitized = fetcher.sanitize_json(input);
-        assert_eq!(sanitized, r#"{"moneyline_favorite": -190, "moneyline_underdog": 158}"#);
+        assert_eq!(
+            sanitized,
+            r#"{"moneyline_favorite": -190, "moneyline_underdog": 158}"#
+        );
 
         // Test with spaces
         let input2 = r#"{"value": +42.5}"#;

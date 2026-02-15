@@ -2,13 +2,11 @@
 //!
 //! Training loops, checkpointing, and evaluation utilities.
 
-pub mod trainer;
 pub mod checkpointing;
+pub mod trainer;
 
-pub use trainer::{
-    TrainingLoop, TrainingStats, EpisodeResult, TrainingSummary,
-    train_simulated, summarize_results,
-    BacktestResult, BacktestSummary,
-    run_backtest, train_backtest, summarize_backtest_results,
-};
 pub use checkpointing::Checkpointer;
+pub use trainer::{
+    run_backtest, summarize_backtest_results, summarize_results, train_backtest, train_simulated,
+    BacktestResult, BacktestSummary, EpisodeResult, TrainingLoop, TrainingStats, TrainingSummary,
+};

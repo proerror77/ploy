@@ -17,11 +17,12 @@ use crate::tui::widgets;
 pub fn render(f: &mut Frame, app: &TuiApp) {
     // Main vertical layout
     let chunks = Layout::vertical([
-        Constraint::Length(7),   // Positions panel
-        Constraint::Length(5),   // Market Analysis panel
-        Constraint::Min(8),      // Transactions panel (fills remaining)
-        Constraint::Length(1),   // Footer status bar
-    ]).split(f.area());
+        Constraint::Length(7), // Positions panel
+        Constraint::Length(5), // Market Analysis panel
+        Constraint::Min(8),    // Transactions panel (fills remaining)
+        Constraint::Length(1), // Footer status bar
+    ])
+    .split(f.area());
 
     // Render each panel
     widgets::render_positions(f, chunks[0], app);

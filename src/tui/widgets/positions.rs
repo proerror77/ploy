@@ -28,16 +28,19 @@ pub fn render_positions(f: &mut Frame, area: Rect, app: &TuiApp) {
     f.render_widget(block, area);
 
     if app.positions.is_empty() {
-        let no_pos = Paragraph::new("No open positions")
-            .style(THEME.inactive_style());
+        let no_pos = Paragraph::new("No open positions").style(THEME.inactive_style());
         f.render_widget(no_pos, inner);
         return;
     }
 
     // Split inner area for each position (up to 2)
     let chunks = Layout::vertical(
-        app.positions.iter().map(|_| Constraint::Length(3)).collect::<Vec<_>>()
-    ).split(inner);
+        app.positions
+            .iter()
+            .map(|_| Constraint::Length(3))
+            .collect::<Vec<_>>(),
+    )
+    .split(inner);
 
     for (i, pos) in app.positions.iter().enumerate() {
         if i < chunks.len() {
@@ -51,7 +54,8 @@ fn render_position_row(f: &mut Frame, area: Rect, pos: &DisplayPosition) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // Main line with progress bar
         Constraint::Length(1), // Cost/avg line
-    ]).split(area);
+    ])
+    .split(area);
 
     // Side indicator
     let (side_str, side_style) = match pos.side {
@@ -74,11 +78,7 @@ fn render_position_row(f: &mut Frame, area: Rect, pos: &DisplayPosition) {
         Side::Down => Color::Red,
     };
 
-    let progress_bar = format!(
-        "[{}{}]",
-        "".repeat(filled),
-        "".repeat(empty)
-    );
+    let progress_bar = format!("[{}{}]", "".repeat(filled), "".repeat(empty));
 
     // PnL formatting
     let pnl_style = THEME.pnl_style(pos.pnl >= Decimal::ZERO);
@@ -107,7 +107,7 @@ fn render_position_row(f: &mut Frame, area: Rect, pos: &DisplayPosition) {
         Span::raw("        "),
         Span::styled(
             format!("Cost: ${:.2} | Avg: ${:.4}", pos.cost, pos.avg_price),
-            THEME.inactive_style()
+            THEME.inactive_style(),
         ),
     ]);
 

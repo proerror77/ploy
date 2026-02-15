@@ -162,10 +162,14 @@ impl GameEvent {
         let market = bookie.markets.iter().find(|m| m.key == "h2h")?;
 
         if market.outcomes.len() >= 2 {
-            let home_odds = market.outcomes.iter()
+            let home_odds = market
+                .outcomes
+                .iter()
                 .find(|o| o.name == self.home_team)?
                 .implied_probability();
-            let away_odds = market.outcomes.iter()
+            let away_odds = market
+                .outcomes
+                .iter()
                 .find(|o| o.name == self.away_team)?
                 .implied_probability();
             Some((home_odds, away_odds))
@@ -198,19 +202,20 @@ impl GameEvent {
         }
 
         match (best_home, best_away) {
-            (Some((home_book, home_prob, home_american)), Some((away_book, away_prob, away_american))) => {
-                Some(BestOdds {
-                    home_team: self.home_team.clone(),
-                    away_team: self.away_team.clone(),
-                    home_bookmaker: home_book,
-                    away_bookmaker: away_book,
-                    home_implied_prob: home_prob,
-                    away_implied_prob: away_prob,
-                    home_american_odds: home_american,
-                    away_american_odds: away_american,
-                    total_implied: home_prob + away_prob,
-                })
-            }
+            (
+                Some((home_book, home_prob, home_american)),
+                Some((away_book, away_prob, away_american)),
+            ) => Some(BestOdds {
+                home_team: self.home_team.clone(),
+                away_team: self.away_team.clone(),
+                home_bookmaker: home_book,
+                away_bookmaker: away_book,
+                home_implied_prob: home_prob,
+                away_implied_prob: away_prob,
+                home_american_odds: home_american,
+                away_american_odds: away_american,
+                total_implied: home_prob + away_prob,
+            }),
             _ => None,
         }
     }
@@ -278,7 +283,9 @@ impl OddsProvider {
     /// Create new odds provider
     pub fn new(config: OddsProviderConfig) -> Result<Self> {
         if config.api_key.is_empty() {
-            return Err(PloyError::Internal("THE_ODDS_API_KEY not configured".into()));
+            return Err(PloyError::Internal(
+                "THE_ODDS_API_KEY not configured".into(),
+            ));
         }
 
         Ok(Self {
@@ -311,15 +318,12 @@ impl OddsProvider {
     pub async fn get_odds(&self, sport: Sport, market: Market) -> Result<Vec<GameEvent>> {
         let bookmakers = self.config.bookmakers.join(",");
 
-        let url = format!(
-            "{}/sports/{}/odds",
-            THE_ODDS_API_BASE,
-            sport.api_key()
-        );
+        let url = format!("{}/sports/{}/odds", THE_ODDS_API_BASE, sport.api_key());
 
         debug!("Fetching odds from: {}", url);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .query(&[
                 ("apiKey", self.config.api_key.as_str()),
@@ -335,13 +339,22 @@ impl OddsProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!("Odds API error {}: {}", status, text)));
+            return Err(PloyError::Internal(format!(
+                "Odds API error {}: {}",
+                status, text
+            )));
         }
 
-        let events: Vec<GameEvent> = response.json().await
+        let events: Vec<GameEvent> = response
+            .json()
+            .await
             .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
 
-        info!("Fetched {} {} games with odds", events.len(), sport.display_name());
+        info!(
+            "Fetched {} {} games with odds",
+            events.len(),
+            sport.display_name()
+        );
         Ok(events)
     }
 
@@ -390,10 +403,19 @@ impl OddsProvider {
 
         // Find matching game
         let event = events.iter().find(|e| {
-            (e.home_team.to_lowercase().contains(&home_team.to_lowercase()) ||
-             home_team.to_lowercase().contains(&e.home_team.to_lowercase())) &&
-            (e.away_team.to_lowercase().contains(&away_team.to_lowercase()) ||
-             away_team.to_lowercase().contains(&e.away_team.to_lowercase()))
+            (e.home_team
+                .to_lowercase()
+                .contains(&home_team.to_lowercase())
+                || home_team
+                    .to_lowercase()
+                    .contains(&e.home_team.to_lowercase()))
+                && (e
+                    .away_team
+                    .to_lowercase()
+                    .contains(&away_team.to_lowercase())
+                    || away_team
+                        .to_lowercase()
+                        .contains(&e.away_team.to_lowercase()))
         });
 
         let event = match event {
@@ -514,7 +536,7 @@ mod tests {
     fn test_implied_probability() {
         let outcome = Outcome {
             name: "Team".to_string(),
-            price: -200.0,  // 66.67% implied
+            price: -200.0, // 66.67% implied
             point: None,
         };
         let prob = outcome.implied_probability();

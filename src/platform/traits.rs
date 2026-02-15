@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use super::types::{Domain, DomainEvent, ExecutionReport, OrderIntent};
 use crate::error::Result;
-use super::types::{Domain, DomainEvent, OrderIntent, ExecutionReport};
 
 /// Agent 狀態
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +30,10 @@ impl AgentStatus {
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(self, AgentStatus::Running | AgentStatus::Observing | AgentStatus::Paused)
+        matches!(
+            self,
+            AgentStatus::Running | AgentStatus::Observing | AgentStatus::Paused
+        )
     }
 }
 

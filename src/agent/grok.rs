@@ -171,7 +171,9 @@ impl GrokClient {
         self.rate_limit().await;
 
         if !self.is_configured() {
-            return Err(PloyError::Internal("Grok API key not configured".to_string()));
+            return Err(PloyError::Internal(
+                "Grok API key not configured".to_string(),
+            ));
         }
 
         let prompt = format!(
@@ -187,7 +189,7 @@ Focus on information from the last few hours that could affect trading decisions
         );
 
         let response = self.chat(&prompt).await?;
-        
+
         // Parse sentiment from response
         let sentiment = if response.to_lowercase().contains("bullish") {
             Some(Sentiment::Bullish)
@@ -223,7 +225,9 @@ Focus on information from the last few hours that could affect trading decisions
         self.rate_limit().await;
 
         if !self.is_configured() {
-            return Err(PloyError::Internal("Grok API key not configured".to_string()));
+            return Err(PloyError::Internal(
+                "Grok API key not configured".to_string(),
+            ));
         }
 
         let prompt = format!(
@@ -252,7 +256,9 @@ Respond with exactly one word: bullish, bearish, neutral, or mixed"#,
     /// Send a chat message to Grok
     pub async fn chat(&self, prompt: &str) -> Result<String> {
         if !self.is_configured() {
-            return Err(PloyError::Internal("Grok API key not configured".to_string()));
+            return Err(PloyError::Internal(
+                "Grok API key not configured".to_string(),
+            ));
         }
 
         debug!("Sending request to Grok API");
@@ -269,8 +275,9 @@ Respond with exactly one word: bullish, bearish, neutral, or mixed"#,
         };
 
         let url = format!("{}/chat/completions", self.config.base_url);
-        
-        let response = self.http
+
+        let response = self
+            .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -311,14 +318,22 @@ fn extract_bullet_points(text: &str) -> Vec<String> {
     text.lines()
         .filter(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with('-') 
-                || trimmed.starts_with('•') 
+            trimmed.starts_with('-')
+                || trimmed.starts_with('•')
                 || trimmed.starts_with('*')
-                || (trimmed.len() > 2 && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && trimmed.chars().nth(1) == Some('.'))
+                || (trimmed.len() > 2
+                    && trimmed
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
+                    && trimmed.chars().nth(1) == Some('.'))
         })
         .map(|line| {
             line.trim()
-                .trim_start_matches(|c: char| c == '-' || c == '•' || c == '*' || c.is_ascii_digit() || c == '.')
+                .trim_start_matches(|c: char| {
+                    c == '-' || c == '•' || c == '*' || c.is_ascii_digit() || c == '.'
+                })
                 .trim()
                 .to_string()
         })

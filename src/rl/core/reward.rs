@@ -47,8 +47,7 @@ impl RewardSignal {
 
     /// Calculate total from components using config weights
     pub fn calculate_total(&mut self, config: &RewardConfig) {
-        self.total = self.pnl_reward * config.pnl_weight
-            - self.risk_penalty * config.risk_weight
+        self.total = self.pnl_reward * config.pnl_weight - self.risk_penalty * config.risk_weight
             + self.timing_bonus * config.timing_weight
             - self.cost_penalty * config.cost_weight
             - self.step_penalty;

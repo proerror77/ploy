@@ -96,22 +96,20 @@ impl EventHandler {
 
         // Spawn keyboard event task
         let key_tx = tx.clone();
-        std::thread::spawn(move || {
-            loop {
-                if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                    match event::read() {
-                        Ok(Event::Key(key)) => {
-                            if key_tx.send(AppEvent::Key(key)).is_err() {
-                                break;
-                            }
+        std::thread::spawn(move || loop {
+            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                match event::read() {
+                    Ok(Event::Key(key)) => {
+                        if key_tx.send(AppEvent::Key(key)).is_err() {
+                            break;
                         }
-                        Ok(Event::Resize(w, h)) => {
-                            if key_tx.send(AppEvent::Resize(w, h)).is_err() {
-                                break;
-                            }
-                        }
-                        _ => {}
                     }
+                    Ok(Event::Resize(w, h)) => {
+                        if key_tx.send(AppEvent::Resize(w, h)).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
             }
         });

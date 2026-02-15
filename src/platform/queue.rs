@@ -1,8 +1,8 @@
 //! Order Queue - 優先級訂單隊列
 
-use std::collections::BinaryHeap;
-use std::cmp::Ordering;
 use chrono::Utc;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
 use super::types::OrderIntent;
@@ -258,10 +258,10 @@ impl std::fmt::Display for QueueStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rust_decimal::Decimal;
-    use crate::domain::Side;
     use super::super::types::{Domain, OrderPriority};
+    use super::*;
+    use crate::domain::Side;
+    use rust_decimal::Decimal;
 
     fn make_intent(agent: &str, priority: OrderPriority) -> OrderIntent {
         OrderIntent::new(
@@ -273,7 +273,8 @@ mod tests {
             true,
             100,
             Decimal::from_str_exact("0.50").unwrap(),
-        ).with_priority(priority)
+        )
+        .with_priority(priority)
     }
 
     #[test]
@@ -281,10 +282,18 @@ mod tests {
         let mut queue = OrderQueue::new(100);
 
         // 入隊順序：Normal, Low, Critical, High
-        queue.enqueue(make_intent("a1", OrderPriority::Normal)).unwrap();
-        queue.enqueue(make_intent("a2", OrderPriority::Low)).unwrap();
-        queue.enqueue(make_intent("a3", OrderPriority::Critical)).unwrap();
-        queue.enqueue(make_intent("a4", OrderPriority::High)).unwrap();
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Low))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a3", OrderPriority::Critical))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a4", OrderPriority::High))
+            .unwrap();
 
         // 出隊順序應該是：Critical, High, Normal, Low
         assert_eq!(queue.dequeue().unwrap().agent_id, "a3");
@@ -297,9 +306,15 @@ mod tests {
     fn test_fifo_same_priority() {
         let mut queue = OrderQueue::new(100);
 
-        queue.enqueue(make_intent("first", OrderPriority::Normal)).unwrap();
-        queue.enqueue(make_intent("second", OrderPriority::Normal)).unwrap();
-        queue.enqueue(make_intent("third", OrderPriority::Normal)).unwrap();
+        queue
+            .enqueue(make_intent("first", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("second", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("third", OrderPriority::Normal))
+            .unwrap();
 
         assert_eq!(queue.dequeue().unwrap().agent_id, "first");
         assert_eq!(queue.dequeue().unwrap().agent_id, "second");
@@ -310,15 +325,21 @@ mod tests {
     fn test_queue_full() {
         let mut queue = OrderQueue::new(2);
 
-        queue.enqueue(make_intent("a1", OrderPriority::Normal)).unwrap();
-        queue.enqueue(make_intent("a2", OrderPriority::Normal)).unwrap();
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Normal))
+            .unwrap();
 
         // 滿了，低優先級無法入隊
         let result = queue.enqueue(make_intent("a3", OrderPriority::Low));
         assert!(result.is_err());
 
         // 高優先級可以入隊 (踢掉最低的)
-        queue.enqueue(make_intent("a4", OrderPriority::Critical)).unwrap();
+        queue
+            .enqueue(make_intent("a4", OrderPriority::Critical))
+            .unwrap();
         assert_eq!(queue.len(), 2);
     }
 
@@ -326,10 +347,18 @@ mod tests {
     fn test_stats() {
         let mut queue = OrderQueue::new(100);
 
-        queue.enqueue(make_intent("a1", OrderPriority::Critical)).unwrap();
-        queue.enqueue(make_intent("a2", OrderPriority::High)).unwrap();
-        queue.enqueue(make_intent("a3", OrderPriority::Normal)).unwrap();
-        queue.enqueue(make_intent("a4", OrderPriority::Low)).unwrap();
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Critical))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::High))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a3", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a4", OrderPriority::Low))
+            .unwrap();
 
         let stats = queue.stats();
         assert_eq!(stats.current_size, 4);

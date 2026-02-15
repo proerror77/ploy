@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::tui::{TuiApp, DisplayTransaction};
+    use crate::tui::{DisplayTransaction, TuiApp};
     use rust_decimal_macros::dec;
 
     #[test]

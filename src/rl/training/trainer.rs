@@ -10,17 +10,17 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
+use crate::rl::algorithms::ppo::{PPOBatch, PPOTrainer, PPOTrainerConfig};
 use crate::rl::config::TrainingConfig;
 use crate::rl::core::{
-    DefaultStateEncoder, RawObservation, RewardFunction, PnLRewardFunction, RewardTransition,
-    StateEncoder, ContinuousAction,
+    ContinuousAction, DefaultStateEncoder, PnLRewardFunction, RawObservation, RewardFunction,
+    RewardTransition, StateEncoder,
+};
+use crate::rl::environment::{
+    generate_sample_data, BacktestEnvironment, EnvAction, HistoricalData, TradingEnvConfig,
+    TradingEnvironment,
 };
 use crate::rl::memory::{RolloutBuffer, Transition};
-use crate::rl::environment::{
-    TradingEnvironment, TradingEnvConfig, EnvAction,
-    BacktestEnvironment, HistoricalData, generate_sample_data,
-};
-use crate::rl::algorithms::ppo::{PPOTrainer, PPOTrainerConfig, PPOBatch};
 
 /// Training statistics
 #[derive(Debug, Clone, Default)]
@@ -217,7 +217,8 @@ pub fn train_simulated(
             let value = trainer.get_value(&obs);
 
             // Convert action to discrete
-            let action_idx = action_vec.iter()
+            let action_idx = action_vec
+                .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i)
@@ -302,9 +303,21 @@ pub fn summarize_results(results: &[EpisodeResult]) -> TrainingSummary {
     let avg_win_rate: f64 = results.iter().map(|r| r.win_rate).sum::<f64>() / n;
 
     // Calculate profit factor (sum of wins / sum of losses)
-    let total_wins: f64 = results.iter().filter(|r| r.final_pnl > 0.0).map(|r| r.final_pnl).sum();
-    let total_losses: f64 = results.iter().filter(|r| r.final_pnl < 0.0).map(|r| -r.final_pnl).sum();
-    let profit_factor = if total_losses > 0.0 { total_wins / total_losses } else { f64::INFINITY };
+    let total_wins: f64 = results
+        .iter()
+        .filter(|r| r.final_pnl > 0.0)
+        .map(|r| r.final_pnl)
+        .sum();
+    let total_losses: f64 = results
+        .iter()
+        .filter(|r| r.final_pnl < 0.0)
+        .map(|r| -r.final_pnl)
+        .sum();
+    let profit_factor = if total_losses > 0.0 {
+        total_wins / total_losses
+    } else {
+        f64::INFINITY
+    };
 
     TrainingSummary {
         num_episodes: results.len(),
@@ -370,7 +383,10 @@ pub fn run_backtest(
     let mut total_reward = 0.0f32;
 
     if verbose {
-        info!("Starting backtest on '{}' with {} ticks", round_slug, total_ticks);
+        info!(
+            "Starting backtest on '{}' with {} ticks",
+            round_slug, total_ticks
+        );
     }
 
     while env.remaining_ticks() > 0 {
@@ -378,7 +394,8 @@ pub fn run_backtest(
         let (action_vec, _log_prob) = trainer.get_action(&obs);
 
         // Convert to discrete action
-        let action_idx = action_vec.iter()
+        let action_idx = action_vec
+            .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
@@ -472,9 +489,21 @@ pub fn summarize_backtest_results(results: &[BacktestResult]) -> BacktestSummary
     let avg_reward: f64 = results.iter().map(|r| r.total_reward as f64).sum::<f64>() / n;
 
     // Profit factor
-    let total_wins: f64 = results.iter().filter(|r| r.final_pnl > 0.0).map(|r| r.final_pnl).sum();
-    let total_losses: f64 = results.iter().filter(|r| r.final_pnl < 0.0).map(|r| -r.final_pnl).sum();
-    let profit_factor = if total_losses > 0.0 { total_wins / total_losses } else { f64::INFINITY };
+    let total_wins: f64 = results
+        .iter()
+        .filter(|r| r.final_pnl > 0.0)
+        .map(|r| r.final_pnl)
+        .sum();
+    let total_losses: f64 = results
+        .iter()
+        .filter(|r| r.final_pnl < 0.0)
+        .map(|r| -r.final_pnl)
+        .sum();
+    let profit_factor = if total_losses > 0.0 {
+        total_wins / total_losses
+    } else {
+        f64::INFINITY
+    };
 
     // Win rate by episode
     let winning_episodes = results.iter().filter(|r| r.final_pnl > 0.0).count();

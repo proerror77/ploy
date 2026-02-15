@@ -14,8 +14,8 @@ use tracing::{debug, info, warn};
 use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent,
-    ExecutionReport, OrderIntent, OrderPriority,
+    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent,
+    OrderPriority,
 };
 
 /// Crypto Agent 配置
@@ -117,7 +117,10 @@ impl CryptoAgent {
     }
 
     /// 分析 Crypto 事件，決定是否下單
-    fn analyze_crypto_event(&mut self, event: &super::super::types::CryptoEvent) -> Vec<OrderIntent> {
+    fn analyze_crypto_event(
+        &mut self,
+        event: &super::super::types::CryptoEvent,
+    ) -> Vec<OrderIntent> {
         let mut intents = Vec::new();
 
         // 檢查是否是我們監控的幣種
@@ -144,7 +147,8 @@ impl CryptoAgent {
         };
 
         // 更新價格緩存
-        self.price_cache.insert(round_slug.clone(), (quotes.up_ask, quotes.down_ask));
+        self.price_cache
+            .insert(round_slug.clone(), (quotes.up_ask, quotes.down_ask));
 
         // 計算 sum of asks
         let sum_of_asks = quotes.sum_of_asks();
@@ -163,7 +167,8 @@ impl CryptoAgent {
         // 檢查入場條件
         if sum_of_asks < self.config.sum_threshold {
             // 檢查動量
-            let momentum_ok = event.momentum
+            let momentum_ok = event
+                .momentum
                 .map(|m| m[0].abs() >= self.config.min_momentum_1s)
                 .unwrap_or(true);
 
@@ -224,7 +229,11 @@ impl CryptoAgent {
         };
 
         // 生成 token_id (實際應該從市場數據獲取)
-        let token_id = format!("{}-{}", event.round_slug.as_ref().unwrap_or(&"unknown".to_string()), side);
+        let token_id = format!(
+            "{}-{}",
+            event.round_slug.as_ref().unwrap_or(&"unknown".to_string()),
+            side
+        );
 
         (side, token_id)
     }
@@ -262,7 +271,9 @@ impl CryptoAgent {
 
                 info!(
                     "[{}] Take profit: {} pnl={}%",
-                    self.config.id, market_slug, pnl_pct * dec!(100)
+                    self.config.id,
+                    market_slug,
+                    pnl_pct * dec!(100)
                 );
 
                 intents.push(intent);
@@ -284,7 +295,9 @@ impl CryptoAgent {
 
                 warn!(
                     "[{}] Stop loss: {} pnl={}%",
-                    self.config.id, market_slug, pnl_pct * dec!(100)
+                    self.config.id,
+                    market_slug,
+                    pnl_pct * dec!(100)
                 );
 
                 intents.push(intent);
@@ -364,7 +377,9 @@ impl CryptoAgent {
 
     /// 更新內部暴露計算
     fn update_exposure(&mut self) {
-        self.total_exposure = self.positions.values()
+        self.total_exposure = self
+            .positions
+            .values()
             .map(|p| p.entry_price * Decimal::from(p.shares))
             .sum();
     }
@@ -399,9 +414,7 @@ impl DomainAgent for CryptoAgent {
         }
 
         match event {
-            DomainEvent::Crypto(crypto_event) => {
-                Ok(self.analyze_crypto_event(&crypto_event))
-            }
+            DomainEvent::Crypto(crypto_event) => Ok(self.analyze_crypto_event(&crypto_event)),
             DomainEvent::QuoteUpdate(update) => {
                 // 處理報價更新 (更新價格緩存)
                 if update.domain == Domain::Crypto {
@@ -466,7 +479,12 @@ mod tests {
     use super::*;
     use crate::platform::types::{CryptoEvent, QuoteData};
 
-    fn make_crypto_event(symbol: &str, spot: Decimal, up_ask: Decimal, down_ask: Decimal) -> CryptoEvent {
+    fn make_crypto_event(
+        symbol: &str,
+        spot: Decimal,
+        up_ask: Decimal,
+        down_ask: Decimal,
+    ) -> CryptoEvent {
         CryptoEvent {
             symbol: symbol.to_string(),
             spot_price: spot,

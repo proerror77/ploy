@@ -16,13 +16,13 @@ use tracing::{debug, info, warn};
 /// Uses database-backed atomic increments to prevent collisions.
 ///
 /// # Example
-    /// ```rust,ignore
-    /// let nonce_manager = NonceManager::new(store);
-    /// nonce_manager.recover().await?;
-    ///
-    /// let nonce = nonce_manager.get_next().await?;
-    /// // Use nonce in API call
-    /// ```
+/// ```rust,ignore
+/// let nonce_manager = NonceManager::new(store);
+/// nonce_manager.recover().await?;
+///
+/// let nonce = nonce_manager.get_next().await?;
+/// // Use nonce in API call
+/// ```
 pub struct NonceManager {
     store: Arc<PostgresStore>,
     cache: Arc<RwLock<Option<i64>>>,
@@ -74,12 +74,13 @@ impl NonceManager {
     /// # Returns
     /// The current nonce value from the database
     pub async fn recover(&self) -> Result<i64> {
-        let current = sqlx::query_scalar::<_, i64>(
-            "SELECT current_nonce FROM nonce_state WHERE id = 1"
-        )
-        .fetch_one(self.store.pool())
-        .await
-        .map_err(|e| PloyError::Internal(format!("Failed to recover nonce state: {}", e)))?;
+        let current =
+            sqlx::query_scalar::<_, i64>("SELECT current_nonce FROM nonce_state WHERE id = 1")
+                .fetch_one(self.store.pool())
+                .await
+                .map_err(|e| {
+                    PloyError::Internal(format!("Failed to recover nonce state: {}", e))
+                })?;
 
         *self.cache.write().await = Some(current);
         info!("Recovered nonce state: {}", current);
@@ -101,12 +102,11 @@ impl NonceManager {
         }
 
         // Fetch from database
-        let current = sqlx::query_scalar::<_, i64>(
-            "SELECT current_nonce FROM nonce_state WHERE id = 1"
-        )
-        .fetch_one(self.store.pool())
-        .await
-        .map_err(|e| PloyError::Internal(format!("Failed to get current nonce: {}", e)))?;
+        let current =
+            sqlx::query_scalar::<_, i64>("SELECT current_nonce FROM nonce_state WHERE id = 1")
+                .fetch_one(self.store.pool())
+                .await
+                .map_err(|e| PloyError::Internal(format!("Failed to get current nonce: {}", e)))?;
 
         // Update cache
         *self.cache.write().await = Some(current);
@@ -236,7 +236,11 @@ mod tests {
     #[ignore] // Requires database
     async fn test_nonce_increment() {
         // Setup test database
-        let store = Arc::new(PostgresStore::new("postgresql://localhost/ploy_test", 5).await.unwrap());
+        let store = Arc::new(
+            PostgresStore::new("postgresql://localhost/ploy_test", 5)
+                .await
+                .unwrap(),
+        );
         let manager = NonceManager::new(store);
 
         // Initialize
@@ -255,7 +259,11 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires database
     async fn test_nonce_recovery() {
-        let store = Arc::new(PostgresStore::new("postgresql://localhost/ploy_test", 5).await.unwrap());
+        let store = Arc::new(
+            PostgresStore::new("postgresql://localhost/ploy_test", 5)
+                .await
+                .unwrap(),
+        );
 
         // First manager
         let manager1 = NonceManager::new(store.clone());
@@ -279,7 +287,11 @@ mod tests {
     async fn test_concurrent_nonce_generation() {
         use tokio::task::JoinSet;
 
-        let store = Arc::new(PostgresStore::new("postgresql://localhost/ploy_test", 10).await.unwrap());
+        let store = Arc::new(
+            PostgresStore::new("postgresql://localhost/ploy_test", 10)
+                .await
+                .unwrap(),
+        );
         let manager = Arc::new(NonceManager::new(store));
         manager.initialize().await.unwrap();
 
@@ -287,9 +299,7 @@ mod tests {
         let mut tasks = JoinSet::new();
         for _ in 0..100 {
             let manager = manager.clone();
-            tasks.spawn(async move {
-                manager.get_next().await.unwrap()
-            });
+            tasks.spawn(async move { manager.get_next().await.unwrap() });
         }
 
         // Collect all nonces

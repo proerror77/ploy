@@ -3,8 +3,8 @@ use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::{OrderError, Result};
 use crate::strategy::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
@@ -63,8 +63,16 @@ impl OrderExecutor {
             let idem_key = IdempotencyManager::generate_key(request);
 
             match idempotency.check_or_create(&idem_key, request).await? {
-                IdempotencyResult::Duplicate { order_id, status, response_data, error_message } => {
-                    warn!("Duplicate order detected (key: {}), status: {}", idem_key, status);
+                IdempotencyResult::Duplicate {
+                    order_id,
+                    status,
+                    response_data,
+                    error_message,
+                } => {
+                    warn!(
+                        "Duplicate order detected (key: {}), status: {}",
+                        idem_key, status
+                    );
 
                     let mut record = IdempotencyRecord {
                         order_id,
@@ -140,7 +148,10 @@ impl OrderExecutor {
             // Mark idempotency status
             match &result {
                 Ok(exec_result) => {
-                    if let Err(e) = idempotency.mark_completed(&idem_key, &exec_result.order_id, exec_result).await {
+                    if let Err(e) = idempotency
+                        .mark_completed(&idem_key, &exec_result.order_id, exec_result)
+                        .await
+                    {
                         warn!("Failed to mark idempotency as completed: {}", e);
                     }
                 }
@@ -208,7 +219,8 @@ impl OrderExecutor {
                             Side::Up => "UP",
                             Side::Down => "DOWN",
                         };
-                        let price = result.avg_fill_price
+                        let price = result
+                            .avg_fill_price
                             .map(|p| p.to_f64().unwrap_or(0.0))
                             .unwrap_or(request.limit_price.to_f64().unwrap_or(0.0));
 
@@ -218,31 +230,27 @@ impl OrderExecutor {
                         } else {
                             request.shares
                         };
-                        feishu.notify_trade(
-                            action,
-                            &request.token_id[..16.min(request.token_id.len())],
-                            side,
-                            price,
-                            shares as f64,
-                            Some(&result.order_id),
-                        ).await;
+                        feishu
+                            .notify_trade(
+                                action,
+                                &request.token_id[..16.min(request.token_id.len())],
+                                side,
+                                price,
+                                shares as f64,
+                                Some(&result.order_id),
+                            )
+                            .await;
                     }
 
                     return Ok(result);
                 }
                 Err(e) => {
                     if attempts >= self.config.max_retries {
-                        error!(
-                            "Order execution failed after {} attempts: {}",
-                            attempts, e
-                        );
+                        error!("Order execution failed after {} attempts: {}", attempts, e);
                         return Err(OrderError::MaxRetriesExceeded { attempts }.into());
                     }
 
-                    warn!(
-                        "Order attempt {} failed: {}. Retrying...",
-                        attempts, e
-                    );
+                    warn!("Order attempt {} failed: {}. Retrying...", attempts, e);
 
                     // Exponential backoff
                     let delay = Duration::from_millis(100 * (1 << attempts));
@@ -279,7 +287,12 @@ impl OrderExecutor {
             let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(100));
             let confirm_timeout = Duration::from_millis(self.config.confirm_fill_timeout_ms);
 
-            match timeout(confirm_timeout, self.wait_for_fill(&order_id, poll_interval)).await {
+            match timeout(
+                confirm_timeout,
+                self.wait_for_fill(&order_id, poll_interval),
+            )
+            .await
+            {
                 Ok(Ok(mut result)) => {
                     result.elapsed_ms = start.elapsed().as_millis() as u64;
                     return Ok(result);
@@ -299,15 +312,40 @@ impl OrderExecutor {
                     );
                 }
             }
+
+            // For non-resting orders, make a best-effort attempt to cancel and fetch final fill
+            // so callers don't treat a partially-filled order as 0-fill.
+            match request.time_in_force {
+                crate::domain::TimeInForce::IOC | crate::domain::TimeInForce::FOK => {
+                    let _ = self.client.cancel_order(&order_id).await;
+                    if let Ok(order) = self.client.get_order(&order_id).await {
+                        let status = PolymarketClient::infer_order_status(&order);
+                        let (filled, price) = PolymarketClient::calculate_fill(&order);
+                        let filled_u64 = filled.to_u64().unwrap_or(0);
+
+                        return Ok(ExecutionResult {
+                            order_id,
+                            status,
+                            filled_shares: filled_u64,
+                            avg_fill_price: Some(price),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                        });
+                    }
+                }
+                crate::domain::TimeInForce::GTC => {}
+            }
         }
 
         // Default: return immediately after submission (order is live on the book).
-        info!("Order {} submitted to market, status: {}", order_id, order_resp.status);
+        info!(
+            "Order {} submitted to market, status: {}",
+            order_id, order_resp.status
+        );
 
         Ok(ExecutionResult {
             order_id,
             status: OrderStatus::Submitted, // Order is live on the book
-            filled_shares: 0, // Will be determined at market resolution
+            filled_shares: 0,               // Will be determined at market resolution
             avg_fill_price: Some(request.limit_price),
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
@@ -321,7 +359,7 @@ impl OrderExecutor {
     ) -> Result<ExecutionResult> {
         loop {
             let order = self.client.get_order(order_id).await?;
-            let status = PolymarketClient::parse_order_status(&order.status);
+            let status = PolymarketClient::infer_order_status(&order);
             let (filled, price) = PolymarketClient::calculate_fill(&order);
             let filled_u64 = filled.to_u64().unwrap_or(0);
 
@@ -475,8 +513,7 @@ mod tests {
 
     #[test]
     fn test_execution_params() {
-        let params = ExecutionParams::new(100, dec!(0.50))
-            .with_slippage(dec!(0.02));
+        let params = ExecutionParams::new(100, dec!(0.50)).with_slippage(dec!(0.02));
 
         // 0.50 * 1.02 = 0.51
         assert_eq!(params.effective_max_price(), dec!(0.51));

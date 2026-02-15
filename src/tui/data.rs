@@ -27,12 +27,7 @@ pub struct DisplayPosition {
 
 impl DisplayPosition {
     /// Create a new display position
-    pub fn new(
-        side: Side,
-        shares: u64,
-        current_price: Decimal,
-        avg_price: Decimal,
-    ) -> Self {
+    pub fn new(side: Side, shares: u64, current_price: Decimal, avg_price: Decimal) -> Self {
         let cost = avg_price * Decimal::from(shares);
         let current_value = current_price * Decimal::from(shares);
         let pnl = current_value - cost;
@@ -200,12 +195,42 @@ pub struct DashboardStats {
     pub last_error: Option<String>,
 }
 
+/// Agent display data for the coordinator TUI panel
+#[derive(Debug, Clone)]
+pub struct DisplayAgent {
+    pub agent_id: String,
+    pub name: String,
+    pub domain: String,
+    pub status: String,
+    pub position_count: usize,
+    pub exposure: Decimal,
+    pub daily_pnl: Decimal,
+    pub last_heartbeat: String,
+    pub is_healthy: bool,
+}
+
+impl DisplayAgent {
+    /// Create from a coordinator AgentSnapshot
+    pub fn from_snapshot(snap: &crate::coordinator::AgentSnapshot) -> Self {
+        Self {
+            agent_id: snap.agent_id.clone(),
+            name: snap.name.clone(),
+            domain: format!("{:?}", snap.domain),
+            status: format!("{:?}", snap.status),
+            position_count: snap.position_count,
+            exposure: snap.exposure,
+            daily_pnl: snap.daily_pnl,
+            last_heartbeat: snap.last_heartbeat.format("%H:%M:%S").to_string(),
+            is_healthy: snap.error_message.is_none(),
+        }
+    }
+}
+
 impl DashboardStats {
     /// Get remaining time until round end
     pub fn time_remaining(&self) -> Option<i64> {
-        self.round_end_time.map(|end| {
-            (end - Utc::now()).num_seconds().max(0)
-        })
+        self.round_end_time
+            .map(|end| (end - Utc::now()).num_seconds().max(0))
     }
 
     /// Format remaining time as MM:SS

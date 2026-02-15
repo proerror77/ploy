@@ -9,9 +9,9 @@
 //! 3. Format structured data and send to Claude Opus for analysis
 //! 4. Generate trade recommendation based on edge detection
 
+use crate::agent::client::{AgentClientConfig, ClaudeAgentClient};
 use crate::agent::grok::GrokClient;
-use crate::agent::client::{ClaudeAgentClient, AgentClientConfig};
-use crate::agent::sports_data::{SportsDataFetcher, StructuredGameData, format_for_claude};
+use crate::agent::sports_data::{format_for_claude, SportsDataFetcher, StructuredGameData};
 use crate::error::{PloyError, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,6 @@ pub struct MarketOdds {
     pub team2_no_price: Option<Decimal>,
     pub spread: Option<String>,
 }
-
 
 /// Win probability prediction from Claude
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +85,10 @@ impl SportsAnalyst {
     /// Create a new sports analyst with Grok and Claude
     pub fn new(grok: GrokClient, claude: ClaudeAgentClient) -> Self {
         let data_fetcher = SportsDataFetcher::new(grok);
-        Self { data_fetcher, claude }
+        Self {
+            data_fetcher,
+            claude,
+        }
     }
 
     /// Create from environment with Opus model for decision making
@@ -101,11 +103,13 @@ impl SportsAnalyst {
         let data_fetcher = SportsDataFetcher::new(grok);
 
         // Use longer timeout and Opus model for complex sports analysis
-        let config = AgentClientConfig::for_autonomous()
-            .with_timeout(300); // 5 minutes for detailed analysis
+        let config = AgentClientConfig::for_autonomous().with_timeout(300); // 5 minutes for detailed analysis
         let claude = ClaudeAgentClient::with_config(config);
 
-        Ok(Self { data_fetcher, claude })
+        Ok(Self {
+            data_fetcher,
+            claude,
+        })
     }
 
     /// Analyze a sports event from Polymarket URL
@@ -113,50 +117,74 @@ impl SportsAnalyst {
     pub async fn analyze_event(&self, event_url: &str) -> Result<SportsAnalysis> {
         // 1. Parse event URL to extract slug, teams, and league
         let (event_slug, league, team1, team2) = self.parse_event_url(event_url)?;
-        info!("Analyzing {} event: {} vs {}", league.to_uppercase(), team1, team2);
+        info!(
+            "Analyzing {} event: {} vs {}",
+            league.to_uppercase(),
+            team1,
+            team2
+        );
 
         // 2. Fetch structured data from Grok (player stats, betting lines, sentiment)
         info!("Fetching structured game data via Grok...");
-        let structured_data = match self.data_fetcher.fetch_game_data(&team1, &team2, &league).await {
+        let structured_data = match self
+            .data_fetcher
+            .fetch_game_data(&team1, &team2, &league)
+            .await
+        {
             Ok(data) => {
-                info!("Got structured data: {} {} players, {} {} players",
-                    data.team1_players.len(), team1,
-                    data.team2_players.len(), team2);
-                info!("Betting: {} {} spread, O/U {}",
-                    data.betting_lines.spread_team, data.betting_lines.spread,
-                    data.betting_lines.over_under);
-                info!("Sentiment: {} pick at {:.0}% confidence",
-                    data.sentiment.expert_pick, data.sentiment.expert_confidence * 100.0);
+                info!(
+                    "Got structured data: {} {} players, {} {} players",
+                    data.team1_players.len(),
+                    team1,
+                    data.team2_players.len(),
+                    team2
+                );
+                info!(
+                    "Betting: {} {} spread, O/U {}",
+                    data.betting_lines.spread_team,
+                    data.betting_lines.spread,
+                    data.betting_lines.over_under
+                );
+                info!(
+                    "Sentiment: {} pick at {:.0}% confidence",
+                    data.sentiment.expert_pick,
+                    data.sentiment.expert_confidence * 100.0
+                );
                 Some(data)
             }
             Err(e) => {
-                warn!("Failed to fetch structured data: {}, will use Polymarket odds only", e);
+                warn!(
+                    "Failed to fetch structured data: {}, will use Polymarket odds only",
+                    e
+                );
                 None
             }
         };
 
         // 3. Also fetch market data from Polymarket for comparison
         let market_odds = self.fetch_market_odds(&event_slug, &team1, &team2).await?;
-        info!("Polymarket odds: {} @ {:.3}", team1, market_odds.team1_yes_price);
+        info!(
+            "Polymarket odds: {} @ {:.3}",
+            team1, market_odds.team1_yes_price
+        );
 
         // 4. Send structured data to Claude Opus for win probability analysis
         info!("Sending to Claude Opus for analysis...");
-        let prediction = self.get_claude_prediction(
-            &team1, &team2,
-            &market_odds,
-            structured_data.as_ref(),
-        ).await?;
-        info!("Claude prediction: {} {:.1}% vs {} {:.1}% (confidence: {:.0}%)",
-            team1, prediction.team1_win_prob * 100.0,
-            team2, prediction.team2_win_prob * 100.0,
-            prediction.confidence * 100.0);
+        let prediction = self
+            .get_claude_prediction(&team1, &team2, &market_odds, structured_data.as_ref())
+            .await?;
+        info!(
+            "Claude prediction: {} {:.1}% vs {} {:.1}% (confidence: {:.0}%)",
+            team1,
+            prediction.team1_win_prob * 100.0,
+            team2,
+            prediction.team2_win_prob * 100.0,
+            prediction.confidence * 100.0
+        );
 
         // 5. Generate trade recommendation based on edge
-        let recommendation = self.generate_recommendation(
-            &team1, &team2,
-            &market_odds,
-            &prediction
-        );
+        let recommendation =
+            self.generate_recommendation(&team1, &team2, &market_odds, &prediction);
 
         Ok(SportsAnalysis {
             event_slug,
@@ -214,7 +242,9 @@ impl SportsAnalyst {
                 }
             }
 
-            return Err(PloyError::Internal("Cannot parse teams from long URL format".into()));
+            return Err(PloyError::Internal(
+                "Cannot parse teams from long URL format".into(),
+            ));
         }
 
         // Short format: nba-phi-dal-2026-01-01
@@ -233,7 +263,9 @@ impl SportsAnalyst {
     /// Extract team name from slug, removing trailing date components
     fn extract_team_name(&self, slug: &str) -> String {
         // Month abbreviations that indicate start of date
-        let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+        let months = [
+            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        ];
 
         let parts: Vec<&str> = slug.split('-').collect();
         let mut team_parts = Vec::new();
@@ -363,7 +395,12 @@ impl SportsAnalyst {
 
     /// Fetch market odds from Polymarket
     /// Tries multiple strategies: slug query, team name search, matchup search
-    async fn fetch_market_odds(&self, event_slug: &str, team1: &str, team2: &str) -> Result<MarketOdds> {
+    async fn fetch_market_odds(
+        &self,
+        event_slug: &str,
+        team1: &str,
+        team2: &str,
+    ) -> Result<MarketOdds> {
         let client = reqwest::Client::new();
 
         // Strategy 1: Try slug-based query (correct format with ?slug=)
@@ -375,7 +412,10 @@ impl SportsAnalyst {
         };
 
         debug!("Searching Polymarket for slug: {}", search_slug);
-        let url = format!("https://gamma-api.polymarket.com/events?slug={}", search_slug);
+        let url = format!(
+            "https://gamma-api.polymarket.com/events?slug={}",
+            search_slug
+        );
 
         if let Some(odds) = self.try_fetch_odds(&client, &url).await {
             info!("Found market data via slug query");
@@ -394,24 +434,32 @@ impl SportsAnalyst {
             encoded_team
         );
 
-        if let Some(odds) = self.try_search_team_matchup(&client, &search_url, team1, team2).await {
+        if let Some(odds) = self
+            .try_search_team_matchup(&client, &search_url, team1, team2)
+            .await
+        {
             info!("Found market data via team search");
             return Ok(odds);
         }
 
         // Strategy 3: Search markets endpoint directly
-        let markets_url = format!(
-            "https://gamma-api.polymarket.com/markets?active=true&closed=false&_limit=100"
-        );
+        let markets_url =
+            format!("https://gamma-api.polymarket.com/markets?active=true&closed=false&_limit=100");
 
-        if let Some(odds) = self.try_search_markets(&client, &markets_url, team1, team2).await {
+        if let Some(odds) = self
+            .try_search_markets(&client, &markets_url, team1, team2)
+            .await
+        {
             info!("Found market data via markets search");
             return Ok(odds);
         }
 
         // No market found - this might be expected for sports events
         // Polymarket may not have this specific matchup
-        warn!("Could not fetch market data for {} vs {} - market may not exist on Polymarket", team1, team2);
+        warn!(
+            "Could not fetch market data for {} vs {} - market may not exist on Polymarket",
+            team1, team2
+        );
         warn!("Analysis will proceed with Grok data only (no Polymarket odds comparison)");
 
         // Return default if API fails
@@ -426,7 +474,8 @@ impl SportsAnalyst {
 
     /// Try to fetch odds from a specific URL
     async fn try_fetch_odds(&self, client: &reqwest::Client, url: &str) -> Option<MarketOdds> {
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -456,7 +505,8 @@ impl SportsAnalyst {
         team1: &str,
         team2: &str,
     ) -> Option<MarketOdds> {
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -494,7 +544,8 @@ impl SportsAnalyst {
         team1: &str,
         team2: &str,
     ) -> Option<MarketOdds> {
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -532,7 +583,8 @@ impl SportsAnalyst {
 
     /// Parse odds from a market object
     fn parse_market_odds(&self, market: &serde_json::Value) -> Option<MarketOdds> {
-        let yes_price = market.get("outcomePrices")
+        let yes_price = market
+            .get("outcomePrices")
             .and_then(|p| p.as_array())
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
@@ -540,14 +592,15 @@ impl SportsAnalyst {
             .unwrap_or(0.5);
 
         Some(MarketOdds {
-            team1_yes_price: Decimal::from_f64_retain(yes_price)
-                .unwrap_or(Decimal::new(50, 2)),
+            team1_yes_price: Decimal::from_f64_retain(yes_price).unwrap_or(Decimal::new(50, 2)),
             team1_no_price: Decimal::from_f64_retain(1.0 - yes_price)
                 .unwrap_or(Decimal::new(50, 2)),
-            team2_yes_price: Some(Decimal::from_f64_retain(1.0 - yes_price)
-                .unwrap_or(Decimal::new(50, 2))),
-            team2_no_price: Some(Decimal::from_f64_retain(yes_price)
-                .unwrap_or(Decimal::new(50, 2))),
+            team2_yes_price: Some(
+                Decimal::from_f64_retain(1.0 - yes_price).unwrap_or(Decimal::new(50, 2)),
+            ),
+            team2_no_price: Some(
+                Decimal::from_f64_retain(yes_price).unwrap_or(Decimal::new(50, 2)),
+            ),
             spread: None,
         })
     }
@@ -613,9 +666,15 @@ IMPORTANT:
 - confidence is 0.0-1.0 (how sure you are)
 - Be specific in reasoning - cite actual player data or betting line movements"#,
             odds.team1_yes_price,
-            odds.team1_yes_price.to_string().parse::<f64>().unwrap_or(0.5) * 100.0,
+            odds.team1_yes_price
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.5)
+                * 100.0,
             odds.team2_yes_price.unwrap_or(Decimal::new(50, 2)),
-            odds.team2_yes_price.map(|p| p.to_string().parse::<f64>().unwrap_or(0.5) * 100.0).unwrap_or(50.0),
+            odds.team2_yes_price
+                .map(|p| p.to_string().parse::<f64>().unwrap_or(0.5) * 100.0)
+                .unwrap_or(50.0),
             data_section = data_section,
             team1 = team1,
             team2 = team2,
@@ -650,7 +709,10 @@ IMPORTANT:
             team1_win_prob: 0.5,
             team2_win_prob: 0.5,
             confidence: 0.5,
-            reasoning: format!("Could not parse detailed prediction for {} vs {}", team1, team2),
+            reasoning: format!(
+                "Could not parse detailed prediction for {} vs {}",
+                team1, team2
+            ),
             key_factors: vec!["Insufficient data".to_string()],
         })
     }
@@ -663,7 +725,11 @@ IMPORTANT:
         odds: &MarketOdds,
         prediction: &WinPrediction,
     ) -> TradeRecommendation {
-        let market_prob = odds.team1_yes_price.to_string().parse::<f64>().unwrap_or(0.5);
+        let market_prob = odds
+            .team1_yes_price
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.5);
         let predicted_prob = prediction.team1_win_prob;
         let edge = predicted_prob - market_prob;
 
@@ -753,18 +819,25 @@ IMPORTANT:
                 };
 
                 // Get predicted probability from Claude
-                let predicted_home_prob = Decimal::from_f64_retain(analysis.prediction.team1_win_prob)
-                    .unwrap_or(Decimal::new(50, 2));
+                let predicted_home_prob =
+                    Decimal::from_f64_retain(analysis.prediction.team1_win_prob)
+                        .unwrap_or(Decimal::new(50, 2));
 
-                match provider.compare_with_prediction(
-                    sport,
-                    &analysis.teams.0,
-                    &analysis.teams.1,
-                    predicted_home_prob,
-                ).await {
+                match provider
+                    .compare_with_prediction(
+                        sport,
+                        &analysis.teams.0,
+                        &analysis.teams.1,
+                        predicted_home_prob,
+                    )
+                    .await
+                {
                     Ok(Some(edge)) => Some(edge),
                     Ok(None) => {
-                        warn!("No DraftKings odds found for {} vs {}", analysis.teams.0, analysis.teams.1);
+                        warn!(
+                            "No DraftKings odds found for {} vs {}",
+                            analysis.teams.0, analysis.teams.1
+                        );
                         None
                     }
                     Err(e) => {
@@ -849,7 +922,10 @@ mod tests {
         assert_eq!(analyst.expand_team_code("DET", "NBA"), "Detroit Pistons");
 
         // NFL teams - same codes, different names
-        assert_eq!(analyst.expand_team_code("phi", "NFL"), "Philadelphia Eagles");
+        assert_eq!(
+            analyst.expand_team_code("phi", "NFL"),
+            "Philadelphia Eagles"
+        );
         assert_eq!(analyst.expand_team_code("DAL", "NFL"), "Dallas Cowboys");
         assert_eq!(analyst.expand_team_code("DET", "NFL"), "Detroit Lions");
     }

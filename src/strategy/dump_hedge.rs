@@ -112,9 +112,9 @@ impl DumpHedgeConfig {
 pub struct EnhancedSnapshot {
     pub price: Decimal,
     pub timestamp: DateTime<Utc>,
-    pub bid_depth: Option<Decimal>,   // Total bid volume in top levels
-    pub ask_depth: Option<Decimal>,   // Total ask volume in top levels
-    pub volume_spike: bool,           // Unusual volume detected
+    pub bid_depth: Option<Decimal>, // Total bid volume in top levels
+    pub ask_depth: Option<Decimal>, // Total ask volume in top levels
+    pub volume_spike: bool,         // Unusual volume detected
 }
 
 /// Tracks PM token price movements with enhanced signals
@@ -161,7 +161,10 @@ impl TokenPriceTracker {
 
         // Update baseline depth
         if let Some(depth) = bid_depth {
-            let baseline = self.baseline_depth.entry(token_id.to_string()).or_insert(depth);
+            let baseline = self
+                .baseline_depth
+                .entry(token_id.to_string())
+                .or_insert(depth);
             // Exponential moving average for baseline
             *baseline = *baseline * dec!(0.95) + depth * dec!(0.05);
         }
@@ -180,7 +183,11 @@ impl TokenPriceTracker {
     }
 
     /// Detect if current volume is unusual
-    fn detect_volume_spike(&self, snapshots: &[EnhancedSnapshot], current_depth: Option<Decimal>) -> bool {
+    fn detect_volume_spike(
+        &self,
+        snapshots: &[EnhancedSnapshot],
+        current_depth: Option<Decimal>,
+    ) -> bool {
         if snapshots.len() < 5 {
             return false;
         }
@@ -191,10 +198,7 @@ impl TokenPriceTracker {
         };
 
         // Calculate average depth from recent snapshots
-        let depths: Vec<Decimal> = snapshots
-            .iter()
-            .filter_map(|s| s.bid_depth)
-            .collect();
+        let depths: Vec<Decimal> = snapshots.iter().filter_map(|s| s.bid_depth).collect();
 
         if depths.is_empty() {
             return false;
@@ -207,7 +211,11 @@ impl TokenPriceTracker {
     }
 
     /// Check if price dropped by at least `move_pct` within the window
-    pub fn detect_dump(&self, token_id: &str, config: &DumpHedgeConfig) -> Option<EnhancedDumpSignal> {
+    pub fn detect_dump(
+        &self,
+        token_id: &str,
+        config: &DumpHedgeConfig,
+    ) -> Option<EnhancedDumpSignal> {
         let snapshots = self.recent_prices.get(token_id)?;
         if snapshots.len() < 2 {
             return None;
@@ -276,7 +284,11 @@ impl TokenPriceTracker {
                 timestamp: current.timestamp,
                 has_depth_collapse,
                 has_volume_spike,
-                signal_strength: self.calculate_signal_strength(drop_pct, has_depth_collapse, has_volume_spike),
+                signal_strength: self.calculate_signal_strength(
+                    drop_pct,
+                    has_depth_collapse,
+                    has_volume_spike,
+                ),
             });
         }
 
@@ -305,7 +317,12 @@ impl TokenPriceTracker {
     }
 
     /// Calculate signal strength (0.0 - 1.0)
-    fn calculate_signal_strength(&self, drop_pct: Decimal, depth_collapse: bool, volume_spike: bool) -> f64 {
+    fn calculate_signal_strength(
+        &self,
+        drop_pct: Decimal,
+        depth_collapse: bool,
+        volume_spike: bool,
+    ) -> f64 {
         let mut strength = 0.0;
 
         // Drop percentage contribution (0-0.5)
@@ -391,10 +408,10 @@ impl PendingHedge {
             Decimal::from(self.leg1_shares) - (leg1_cost + hedge_cost)
         } else {
             // Partial: hedge profit + mark-to-market unhedged
-            let hedge_profit = Decimal::from(self.hedged_shares) - (
-                self.leg1_price * Decimal::from(self.hedged_shares) + hedge_cost
-            );
-            hedge_profit + unhedged_value - (self.leg1_price * Decimal::from(self.remaining_shares()))
+            let hedge_profit = Decimal::from(self.hedged_shares)
+                - (self.leg1_price * Decimal::from(self.hedged_shares) + hedge_cost);
+            hedge_profit + unhedged_value
+                - (self.leg1_price * Decimal::from(self.remaining_shares()))
         }
     }
 
@@ -596,7 +613,9 @@ impl DumpHedgeEngine {
             let remaining = pending.remaining_shares();
             let shares_to_hedge = if self.config.progressive_hedge && !is_urgent {
                 // Progressive: hedge in chunks
-                remaining.min(self.config.shares / 3).max(self.config.min_progressive_shares)
+                remaining
+                    .min(self.config.shares / 3)
+                    .max(self.config.min_progressive_shares)
             } else {
                 // Full hedge or urgent
                 remaining
@@ -694,11 +713,7 @@ impl DumpHedgeEngine {
 
         info!(
             "🎉 HEDGE COMPLETE: {} | Cost=${:.2} | Payout=${:.2} | Profit=${:.2} ({:.1}%)",
-            pending.event_id,
-            total_cost,
-            payout,
-            locked_profit,
-            locked_profit_pct
+            pending.event_id, total_cost, payout, locked_profit, locked_profit_pct
         );
 
         HedgeResult {
@@ -712,7 +727,10 @@ impl DumpHedgeEngine {
     }
 
     /// Check for positions that need stop-loss (failed hedge)
-    pub async fn check_stop_loss(&self, current_prices: &HashMap<String, Decimal>) -> Vec<StopLossSignal> {
+    pub async fn check_stop_loss(
+        &self,
+        current_prices: &HashMap<String, Decimal>,
+    ) -> Vec<StopLossSignal> {
         let hedges = self.pending_hedges.read().await;
         let mut signals = Vec::new();
 
@@ -735,10 +753,7 @@ impl DumpHedgeEngine {
             if elapsed > self.config.max_hedge_wait_secs as i64 && !pending.is_fully_hedged() {
                 warn!(
                     "⚠️ Hedge timeout: {} waited {}s, only {}/{} hedged",
-                    pending.event_id,
-                    elapsed,
-                    pending.hedged_shares,
-                    pending.leg1_shares
+                    pending.event_id, elapsed, pending.hedged_shares, pending.leg1_shares
                 );
                 signals.push(StopLossSignal {
                     event_id: pending.event_id.clone(),
@@ -791,7 +806,11 @@ impl DumpHedgeEngine {
         let avg_profit_pct = if completed.is_empty() {
             Decimal::ZERO
         } else {
-            completed.iter().map(|h| h.locked_profit_pct).sum::<Decimal>() / Decimal::from(completed.len())
+            completed
+                .iter()
+                .map(|h| h.locked_profit_pct)
+                .sum::<Decimal>()
+                / Decimal::from(completed.len())
         };
 
         DumpHedgeStats {

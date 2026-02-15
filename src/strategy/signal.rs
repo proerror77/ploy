@@ -169,7 +169,12 @@ impl SignalDetector {
     }
 
     /// Check if a dump has occurred
-    fn check_dump_inner(&self, side: Side, rolling_high: Option<Decimal>, quote: &Quote) -> Option<DumpSignal> {
+    fn check_dump_inner(
+        &self,
+        side: Side,
+        rolling_high: Option<Decimal>,
+        quote: &Quote,
+    ) -> Option<DumpSignal> {
         let Some(rolling_high) = rolling_high else {
             return None;
         };
@@ -228,11 +233,7 @@ impl SignalDetector {
     }
 
     /// Check if Leg2 condition is met
-    pub fn check_leg2_condition(
-        &self,
-        leg1_price: Decimal,
-        opposite_ask: Decimal,
-    ) -> bool {
+    pub fn check_leg2_condition(&self, leg1_price: Decimal, opposite_ask: Decimal) -> bool {
         let sum = leg1_price + opposite_ask;
         let target = self.effective_sum_target();
 
@@ -350,11 +351,11 @@ mod tests {
         let config = test_config();
         let detector = SignalDetector::new(config);
 
-        // effective_target = 1 - 0.005 - 0.02 - 0.01 = 0.965
-        // leg1 = 0.45, opposite = 0.50, sum = 0.95 <= 0.965 -> true
-        assert!(detector.check_leg2_condition(dec!(0.45), dec!(0.50)));
+        // effective_target = 0.95 - 0.005 - 0.02 - 0.01 = 0.915
+        // leg1 = 0.45, opposite = 0.46, sum = 0.91 <= 0.915 -> true
+        assert!(detector.check_leg2_condition(dec!(0.45), dec!(0.46)));
 
-        // leg1 = 0.45, opposite = 0.55, sum = 1.00 > 0.965 -> false
-        assert!(!detector.check_leg2_condition(dec!(0.45), dec!(0.55)));
+        // leg1 = 0.45, opposite = 0.47, sum = 0.92 > 0.915 -> false
+        assert!(!detector.check_leg2_condition(dec!(0.45), dec!(0.47)));
     }
 }

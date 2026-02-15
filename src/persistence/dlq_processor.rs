@@ -36,7 +36,9 @@ impl Default for DLQProcessorConfig {
 
 impl DLQProcessorConfig {
     fn backoff_duration(&self, retry_count: u32) -> Duration {
-        let delay = self.base_backoff_secs.saturating_mul(2u64.saturating_pow(retry_count));
+        let delay = self
+            .base_backoff_secs
+            .saturating_mul(2u64.saturating_pow(retry_count));
         let capped = delay.min(self.max_backoff_secs);
         Duration::from_secs(capped)
     }
@@ -200,8 +202,15 @@ impl DLQProcessor {
                     id, error, entry.operation_type
                 );
 
-                if let Err(e) = self.transaction_manager.mark_dlq_permanent_failure(id, &error).await {
-                    error!("Failed to mark DLQ entry {} as permanently failed: {}", id, e);
+                if let Err(e) = self
+                    .transaction_manager
+                    .mark_dlq_permanent_failure(id, &error)
+                    .await
+                {
+                    error!(
+                        "Failed to mark DLQ entry {} as permanently failed: {}",
+                        id, e
+                    );
                 }
 
                 let mut stats = self.stats.write().await;
@@ -211,10 +220,7 @@ impl DLQProcessor {
             }
 
             DLQResult::Skip => {
-                debug!(
-                    "DLQ entry {} skipped (type: {})",
-                    id, entry.operation_type
-                );
+                debug!("DLQ entry {} skipped (type: {})", id, entry.operation_type);
 
                 let mut stats = self.stats.write().await;
                 stats.entries_skipped += 1;
@@ -248,10 +254,7 @@ impl DLQProcessor {
         stats.entries_processed += processed;
         stats.last_run = Some(chrono::Utc::now());
 
-        info!(
-            "DLQ cycle complete: {}/{} succeeded",
-            succeeded, processed
-        );
+        info!("DLQ cycle complete: {}/{} succeeded", succeeded, processed);
 
         Ok((processed, succeeded))
     }

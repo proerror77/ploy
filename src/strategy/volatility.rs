@@ -58,14 +58,14 @@ pub struct VolatilityConfig {
 impl Default for VolatilityConfig {
     fn default() -> Self {
         Self {
-            max_entry_price: dec!(0.30),      // Max 30¢ entry
-            min_edge: dec!(0.05),             // 5% minimum edge
-            min_deviation_pct: dec!(0.0005),  // 0.05% minimum deviation from start
-            obi_threshold: dec!(0.05),        // 5% OBI imbalance threshold
-            obi_levels: 5,                    // Use top 5 levels
-            min_time_remaining_secs: 60,      // Min 1 minute left
-            max_time_remaining_secs: 600,     // Max 10 minutes left
-            history_window: 20,               // Track last 20 events
+            max_entry_price: dec!(0.30),     // Max 30¢ entry
+            min_edge: dec!(0.05),            // 5% minimum edge
+            min_deviation_pct: dec!(0.0005), // 0.05% minimum deviation from start
+            obi_threshold: dec!(0.05),       // 5% OBI imbalance threshold
+            obi_levels: 5,                   // Use top 5 levels
+            min_time_remaining_secs: 60,     // Min 1 minute left
+            max_time_remaining_secs: 600,    // Max 10 minutes left
+            history_window: 20,              // Track last 20 events
             shares_per_trade: 100,
         }
     }
@@ -81,9 +81,9 @@ pub struct EventRecord {
     pub end_price: Decimal,
     pub high_price: Decimal,
     pub low_price: Decimal,
-    pub outcome: Side,           // UP or DOWN
-    pub deviation_pct: Decimal,  // (end - start) / start
-    pub range_pct: Decimal,      // (high - low) / start
+    pub outcome: Side,          // UP or DOWN
+    pub deviation_pct: Decimal, // (end - start) / start
+    pub range_pct: Decimal,     // (high - low) / start
 }
 
 /// Active event being tracked
@@ -237,7 +237,9 @@ impl EventTracker {
 
     /// Check if an event is already being tracked (by event_id only)
     pub fn has_active_event(&self, event_id: &str) -> bool {
-        self.active_events.keys().any(|k| k.ends_with(&format!(":{}", event_id)))
+        self.active_events
+            .keys()
+            .any(|k| k.ends_with(&format!(":{}", event_id)))
     }
 
     /// Start tracking a new event (convenience wrapper)
@@ -344,11 +346,11 @@ pub struct VolatilitySignal {
     pub symbol: String,
     pub event_id: String,
     pub side: Side,
-    pub entry_price: Decimal,     // Token price to pay
-    pub fair_value: Decimal,      // Estimated fair value
-    pub edge: Decimal,            // fair_value - entry_price
-    pub deviation_pct: Decimal,   // Current deviation from start
-    pub obi: Decimal,             // Order book imbalance
+    pub entry_price: Decimal,   // Token price to pay
+    pub fair_value: Decimal,    // Estimated fair value
+    pub edge: Decimal,          // fair_value - entry_price
+    pub deviation_pct: Decimal, // Current deviation from start
+    pub obi: Decimal,           // Order book imbalance
     pub time_remaining_secs: i64,
     pub confidence: f64,
     pub timestamp: DateTime<Utc>,
@@ -388,11 +390,19 @@ impl VolatilityDetector {
         obi: Option<Decimal>,
         price_to_beat: Option<Decimal>,
     ) -> Option<VolatilitySignal> {
-        self.check_signal(symbol, event_id, &self.event_tracker, up_ask, down_ask, obi, price_to_beat)
+        self.check_signal(
+            symbol,
+            event_id,
+            &self.event_tracker,
+            up_ask,
+            down_ask,
+            obi,
+            price_to_beat,
+        )
     }
 
     /// Check for trading signal using external event tracker
-    /// 
+    ///
     /// # Arguments
     /// * `price_to_beat` - The threshold price from Polymarket (e.g., $94,000 for "Will BTC be above $94,000?")
     ///                     If None, falls back to using start_price (legacy behavior)
@@ -412,25 +422,31 @@ impl VolatilityDetector {
 
         // Check time window
         if time_remaining < self.config.min_time_remaining_secs as i64 {
-            debug!("{} time remaining {}s < min {}s", symbol, time_remaining, self.config.min_time_remaining_secs);
+            debug!(
+                "{} time remaining {}s < min {}s",
+                symbol, time_remaining, self.config.min_time_remaining_secs
+            );
             return None;
         }
         if time_remaining > self.config.max_time_remaining_secs as i64 {
-            debug!("{} time remaining {}s > max {}s", symbol, time_remaining, self.config.max_time_remaining_secs);
+            debug!(
+                "{} time remaining {}s > max {}s",
+                symbol, time_remaining, self.config.max_time_remaining_secs
+            );
             return None;
         }
 
         // Use price_to_beat if available, otherwise fall back to start_price
         let reference_price = price_to_beat.unwrap_or(event.start_price);
         let current_price = event.current_price;
-        
+
         // Calculate deviation from the reference price (price_to_beat or start_price)
         let deviation = if reference_price.is_zero() {
             Decimal::ZERO
         } else {
             (current_price - reference_price) / reference_price
         };
-        
+
         let obi_value = obi.unwrap_or(Decimal::ZERO);
 
         // Determine direction: if current > price_to_beat, UP wins; otherwise DOWN wins
@@ -441,12 +457,15 @@ impl VolatilityDetector {
             // Current price is BELOW price_to_beat → DOWN wins
             (Side::Down, down_ask?)
         };
-        
+
         // Log which reference we're using
         if price_to_beat.is_some() {
             debug!(
                 "{} using price_to_beat={:.2} current={:.2} deviation={:.4}%",
-                symbol, reference_price, current_price, deviation * dec!(100)
+                symbol,
+                reference_price,
+                current_price,
+                deviation * dec!(100)
             );
         }
 
@@ -480,8 +499,7 @@ impl VolatilityDetector {
         }
 
         // Get historical volatility for proper Z-score calculation
-        let volatility = tracker.historical_volatility(symbol)
-            .unwrap_or(dec!(0.003)); // Default 0.3% if no history
+        let volatility = tracker.historical_volatility(symbol).unwrap_or(dec!(0.003)); // Default 0.3% if no history
 
         // Calculate fair value based on Z-score model
         let fair_value = self.estimate_fair_value(deviation, time_remaining, obi_value, volatility);

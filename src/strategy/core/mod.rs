@@ -8,9 +8,7 @@ mod price_cache;
 mod split_engine;
 mod traits;
 
-pub use position::{
-    ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
-};
+pub use position::{ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus};
 pub use price_cache::PriceCache;
 pub use split_engine::{SplitArbConfig, SplitArbEngine};
 pub use traits::{BinaryMarket, MarketDiscovery, MarketType};

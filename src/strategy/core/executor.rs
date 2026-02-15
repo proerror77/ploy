@@ -299,7 +299,7 @@ impl OrderExecutor {
     ) -> Result<ExecutionResult> {
         loop {
             let order = self.client.get_order(order_id).await?;
-            let status = PolymarketClient::parse_order_status(&order.status);
+            let status = PolymarketClient::infer_order_status(&order);
             let (filled, price) = PolymarketClient::calculate_fill(&order);
 
             match status {

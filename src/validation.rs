@@ -9,7 +9,6 @@
 /// - Using expired events
 /// - Invalid share quantities
 /// - Malformed timestamps
-
 use crate::error::{PloyError, Result};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -54,9 +53,7 @@ pub fn validate_shares(shares: u64, max_shares: Option<u64>) -> Result<()> {
     let max = max_shares.unwrap_or(1_000_000);
 
     if shares == 0 {
-        return Err(PloyError::Validation(
-            "Shares cannot be zero".to_string()
-        ));
+        return Err(PloyError::Validation("Shares cannot be zero".to_string()));
     }
 
     if shares > max {
@@ -114,7 +111,7 @@ pub fn validate_event_time(
 pub fn validate_token_id(token_id: &str) -> Result<()> {
     if token_id.is_empty() {
         return Err(PloyError::Validation(
-            "Token ID cannot be empty".to_string()
+            "Token ID cannot be empty".to_string(),
         ));
     }
 
@@ -139,10 +136,7 @@ pub fn validate_token_id(token_id: &str) -> Result<()> {
 /// # Returns
 /// * `Ok(())` if valid
 /// * `Err` if invalid
-pub fn validate_market_data(
-    best_bid: Option<Decimal>,
-    best_ask: Option<Decimal>,
-) -> Result<()> {
+pub fn validate_market_data(best_bid: Option<Decimal>, best_ask: Option<Decimal>) -> Result<()> {
     if let Some(bid) = best_bid {
         validate_price(bid, "best_bid")?;
     }
@@ -184,7 +178,7 @@ pub fn validate_event_data(
     // Validate event ID
     if event_id.is_empty() {
         return Err(PloyError::Validation(
-            "Event ID cannot be empty".to_string()
+            "Event ID cannot be empty".to_string(),
         ));
     }
 
@@ -198,7 +192,7 @@ pub fn validate_event_data(
     // Token IDs should be different
     if up_token_id == down_token_id {
         return Err(PloyError::Validation(
-            "UP and DOWN token IDs must be different".to_string()
+            "UP and DOWN token IDs must be different".to_string(),
         ));
     }
 

@@ -5,7 +5,7 @@
 
 use crate::agent::client::ClaudeAgentClient;
 use crate::agent::protocol::{
-    AgentContext, AgentResponse, MarketSnapshot, RiskAssessment, DailyStats,
+    AgentContext, AgentResponse, DailyStats, MarketSnapshot, RiskAssessment,
 };
 use crate::domain::{RiskState, StrategyState};
 use crate::error::Result;
@@ -59,11 +59,7 @@ Provide specific, actionable recommendations."#,
             market.sum_bids,
         );
 
-        let context = AgentContext::new(
-            market.clone(),
-            StrategyState::Idle,
-            RiskState::Normal,
-        );
+        let context = AgentContext::new(market.clone(), StrategyState::Idle, RiskState::Normal);
 
         info!("Requesting market analysis from Claude agent");
         self.client.query(&prompt, &context).await
@@ -129,10 +125,7 @@ Should we:
 3. Adjust our exit strategy?
 
 Consider market conditions and time remaining."#,
-            position_value,
-            unrealized_pnl,
-            context.strategy_state,
-            context.risk_state,
+            position_value, unrealized_pnl, context.strategy_state, context.risk_state,
         );
 
         self.client.query(&prompt, context).await

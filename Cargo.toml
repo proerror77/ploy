@@ -12,6 +12,7 @@ tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
 # WebSocket
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
+futures = "0.3"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 
@@ -56,6 +57,9 @@ ethers = { version = "2", features = ["rustls"] }
 # Official Polymarket CLOB client SDK
 polymarket-client-sdk = { version = "0.3", features = ["ws", "gamma", "data", "tracing"] }
 
+# Agent framework (Claude Code CLI) with MCP tools
+claude-agent-sdk-rs = "0.6.3"
+
 # Alloy for signing (used by polymarket-client-sdk)
 alloy = { version = "1", features = ["signers", "signer-local", "provider-http", "network", "contract", "sol-types"] }
 
@@ -75,6 +79,7 @@ ordered-float = "4"
 
 # URL parsing
 url = "2"
+urlencoding = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -101,10 +106,14 @@ burn-ndarray = { version = "0.14", optional = true }
 # Pin bincode to version compatible with burn (rc.3 has decode_borrowed_from_slice)
 bincode = { version = "=2.0.0-rc.3", optional = true }
 
+# DuckDB for offline Parquet analysis (optional)
+duckdb = { version = "1.4", features = ["bundled"], optional = true }
+
 [features]
 default = []
 api = []  # Enable API module with SQLx compile-time checks (requires DATABASE_URL)
 rl = ["burn", "burn-ndarray", "bincode"]
+analysis = ["duckdb"]
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -2,17 +2,12 @@
 //!
 //! Run with: cargo run --example test_grok_agent
 
-use ploy::agent::{
-    AutonomousAgent, AutonomousConfig, ClaudeAgentClient,
-    GrokClient, GrokConfig,
-};
+use ploy::agent::{AutonomousAgent, AutonomousConfig, ClaudeAgentClient, GrokClient, GrokConfig};
 
 #[tokio::main]
 async fn main() {
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     println!("=== Testing Grok + Autonomous Agent Integration ===\n");
 
@@ -75,8 +70,7 @@ async fn main() {
     // Recreate Grok client for agent
     let grok_for_agent = GrokClient::new(GrokConfig::from_env()).unwrap();
 
-    let agent = AutonomousAgent::new(claude_client, config)
-        .with_grok(grok_for_agent);
+    let agent = AutonomousAgent::new(claude_client, config).with_grok(grok_for_agent);
 
     println!("   Grok available: {}", agent.has_grok());
     println!("   Can trade: {}", agent.can_trade());

@@ -3,16 +3,16 @@
 //! Coordinates data feeds from Binance and Polymarket, converting their
 //! updates to MarketUpdate events for the StrategyManager.
 
-use std::sync::Arc;
-use std::collections::HashMap;
 use chrono::Utc;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PolymarketClient};
-use crate::error::Result;
 use super::manager::StrategyManager;
-use super::traits::{MarketUpdate, DataFeed};
+use super::traits::{DataFeed, MarketUpdate};
+use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket};
+use crate::error::Result;
 
 /// Manages data feeds and routes updates to StrategyManager
 pub struct DataFeedManager {
@@ -109,12 +109,14 @@ impl DataFeedManager {
                     match rx.recv().await {
                         Ok(update) => {
                             quote_count += 1;
-                            info!("Feed forwarding quote #{}: {} {:?} bid={:?} ask={:?}",
+                            info!(
+                                "Feed forwarding quote #{}: {} {:?} bid={:?} ask={:?}",
                                 quote_count,
                                 &update.token_id[..8.min(update.token_id.len())],
                                 update.side,
                                 update.quote.best_bid,
-                                update.quote.best_ask);
+                                update.quote.best_ask
+                            );
                             let market_update = MarketUpdate::PolymarketQuote {
                                 token_id: update.token_id,
                                 side: update.side,
@@ -183,9 +185,12 @@ impl DataFeedManager {
                         if let Ok(event_details) = client.get_event_details(&event.id).await {
                             for market in event_details.markets {
                                 // Get token IDs from clobTokenIds field (JSON string array)
-                                let tokens: Vec<String> = market.clob_token_ids
+                                let tokens: Vec<String> = market
+                                    .clob_token_ids
                                     .as_ref()
-                                    .and_then(|ids_str| serde_json::from_str::<Vec<String>>(ids_str).ok())
+                                    .and_then(|ids_str| {
+                                        serde_json::from_str::<Vec<String>>(ids_str).ok()
+                                    })
                                     .unwrap_or_default();
 
                                 if tokens.len() >= 2 {
@@ -197,11 +202,15 @@ impl DataFeedManager {
                                     if let Some(ref pm_ws) = self.polymarket_ws {
                                         pm_ws.register_token(&up_token, Side::Up).await;
                                         pm_ws.register_token(&down_token, Side::Down).await;
-                                        debug!("Registered tokens: UP={}, DOWN={}", up_token, down_token);
+                                        debug!(
+                                            "Registered tokens: UP={}, DOWN={}",
+                                            up_token, down_token
+                                        );
                                     }
 
                                     // Notify strategies of event discovery
-                                    let end_time = event.end_date
+                                    let end_time = event
+                                        .end_date
                                         .as_ref()
                                         .and_then(|d| d.parse().ok())
                                         .unwrap_or_else(Utc::now);
@@ -228,8 +237,12 @@ impl DataFeedManager {
                             }
                         }
                     }
-                    info!("Discovered {} active events in series {}, fetched details for {} nearest",
-                        total_events, series_id, token_ids.len() / 2);
+                    info!(
+                        "Discovered {} active events in series {}, fetched details for {} nearest",
+                        total_events,
+                        series_id,
+                        token_ids.len() / 2
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to fetch events for series {}: {}", series_id, e);

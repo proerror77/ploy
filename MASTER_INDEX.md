@@ -90,6 +90,7 @@
 |------|------|--------|
 | **QUICKSTART.md** | 快速開始 | ⭐⭐ |
 | **README.md** | 項目 README | ⭐⭐ |
+| **docs/STRATEGY_FRAMEWORK_4_PILLARS.md** | 四大策略框架對照（repo mapping） | ⭐⭐ |
 | **STRATEGY_MONITOR_UPDATE.md** | 策略監控更新 | ⭐ |
 
 ---

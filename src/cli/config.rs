@@ -5,7 +5,7 @@
 //! ploy config validate - Validate configuration
 //! ploy config init     - Initialize default configuration
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::path::PathBuf;
 
@@ -69,13 +69,15 @@ async fn show_config(section: Option<&str>) -> Result<()> {
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
     if !main_config.exists() {
-        println!("  \x1b[33m⚠ No configuration found at {}\x1b[0m", main_config.display());
+        println!(
+            "  \x1b[33m⚠ No configuration found at {}\x1b[0m",
+            main_config.display()
+        );
         println!("  Run 'ploy config init' to create default configuration\n");
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&main_config)
-        .context("Failed to read config file")?;
+    let content = std::fs::read_to_string(&main_config).context("Failed to read config file")?;
 
     if let Some(section) = section {
         // Show specific section
@@ -147,7 +149,8 @@ async fn validate_config(config: Option<&str>) -> Result<()> {
     let mut all_valid = true;
 
     for config_path in configs_to_validate {
-        let name = config_path.file_name()
+        let name = config_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -158,15 +161,13 @@ async fn validate_config(config: Option<&str>) -> Result<()> {
         }
 
         match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match toml::from_str::<toml::Value>(&content) {
-                    Ok(_) => println!("  \x1b[32m✓ {} - valid\x1b[0m", name),
-                    Err(e) => {
-                        println!("  \x1b[31m✗ {} - invalid: {}\x1b[0m", name, e);
-                        all_valid = false;
-                    }
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(_) => println!("  \x1b[32m✓ {} - valid\x1b[0m", name),
+                Err(e) => {
+                    println!("  \x1b[31m✗ {} - invalid: {}\x1b[0m", name, e);
+                    all_valid = false;
                 }
-            }
+            },
             Err(e) => {
                 println!("  \x1b[31m✗ {} - read error: {}\x1b[0m", name, e);
                 all_valid = false;
@@ -193,14 +194,16 @@ async fn init_config(force: bool) -> Result<()> {
 
     // Check if config exists
     if main_config.exists() && !force {
-        println!("  \x1b[33m⚠ Configuration already exists at {}\x1b[0m", main_config.display());
+        println!(
+            "  \x1b[33m⚠ Configuration already exists at {}\x1b[0m",
+            main_config.display()
+        );
         println!("  Use --force to overwrite\n");
         return Ok(());
     }
 
     // Create directories
-    std::fs::create_dir_all(&strategies_dir)
-        .context("Failed to create config directories")?;
+    std::fs::create_dir_all(&strategies_dir).context("Failed to create config directories")?;
 
     // Write main config
     let main_config_content = r#"# Ploy Trading System Configuration
@@ -237,8 +240,7 @@ max_shares = 500
 daily_loss_limit = 100.0
 "#;
 
-    std::fs::write(&main_config, main_config_content)
-        .context("Failed to write main config")?;
+    std::fs::write(&main_config, main_config_content).context("Failed to write main config")?;
     println!("  \x1b[32m✓ Created {}\x1b[0m", main_config.display());
 
     // Write example strategy config

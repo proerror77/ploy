@@ -25,13 +25,13 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Enable dry run mode (no real orders)
-    #[arg(short, long, default_value = "true")]
-    pub dry_run: bool,
+    /// Override dry run mode: `--dry-run` = true, `--dry-run=false` = false
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]
+    pub dry_run: Option<bool>,
 
-    /// Market slug to trade
-    #[arg(short, long, default_value = "btc-price-series-15m")]
-    pub market: String,
+    /// Optional market slug override (otherwise use config file value)
+    #[arg(short, long)]
+    pub market: Option<String>,
 
     /// Config file path
     #[arg(short, long, default_value = "config/default.toml")]
@@ -107,6 +107,38 @@ pub enum Commands {
         #[arg(short, long)]
         event: String,
     },
+    /// Scan a multi-outcome event for external-data-driven mispricing (Arena leaderboard)
+    EventEdge {
+        /// Polymarket event id (preferred)
+        #[arg(long)]
+        event: Option<String>,
+        /// Market title to search Polymarket for (uses Gamma `title_contains`)
+        #[arg(long, visible_alias = "titles")]
+        title: Option<String>,
+        /// Minimum edge required (p_true - ask), e.g. 0.08 = 8pp
+        #[arg(long, default_value = "0.08")]
+        min_edge: f64,
+        /// Maximum entry price to pay (Yes ask), e.g. 0.75 = 75¢
+        #[arg(long, default_value = "0.75")]
+        max_entry: f64,
+        /// Shares per order
+        #[arg(long, default_value = "100")]
+        shares: u64,
+        /// Poll interval seconds (watch mode)
+        #[arg(long, default_value = "30")]
+        interval_secs: u64,
+        /// Continuously monitor (vs one-shot)
+        #[arg(long)]
+        watch: bool,
+        /// Place orders when +EV and edge thresholds are met
+        #[arg(long)]
+        trade: bool,
+        /// Enable dry-run mode (prints orders, no execution)
+        #[arg(long, default_value = "true")]
+        dry_run: bool,
+    },
+    /// JSON-RPC 2.0 over stdin/stdout (for remote agent tool integration)
+    Rpc,
     /// Show account balance and positions
     Account {
         /// Show open orders
@@ -179,6 +211,18 @@ pub enum Commands {
         /// Maximum time remaining to enter (seconds) - for predictive mode
         #[arg(long, default_value = "900")]
         max_time: u64,
+
+        /// Require VWAP confirmation (spot must be on the correct side of VWAP)
+        #[arg(long)]
+        vwap_confirm: bool,
+
+        /// VWAP lookback window (seconds)
+        #[arg(long, default_value = "60")]
+        vwap_lookback: u64,
+
+        /// Minimum deviation from VWAP required for confirmation (%) (e.g., 0.1 = 0.1%)
+        #[arg(long, default_value = "0.0")]
+        vwap_min_dev: f64,
     },
     /// Split arbitrage strategy (gabagool22 分时套利)
     /// Buy UP when cheap, wait for DOWN to be cheap, lock profit
@@ -330,6 +374,31 @@ pub enum Commands {
         /// Stats print interval (seconds)
         #[arg(long, default_value = "300")]
         stats_interval: u64,
+    },
+
+    /// Multi-agent platform (Coordinator + Agents)
+    Platform {
+        /// Subcommand: start
+        #[arg(default_value = "start", value_parser = ["start"])]
+        action: String,
+        /// Enable crypto agent
+        #[arg(long)]
+        crypto: bool,
+        /// Enable sports agent
+        #[arg(long)]
+        sports: bool,
+        /// Enable politics agent
+        #[arg(long)]
+        politics: bool,
+        /// Dry run mode
+        #[arg(long)]
+        dry_run: bool,
+        /// Pause a specific agent
+        #[arg(long)]
+        pause: Option<String>,
+        /// Resume a specific agent
+        #[arg(long)]
+        resume: Option<String>,
     },
 }
 
@@ -1055,12 +1124,22 @@ pub async fn show_current_market(client: &PolymarketClient, series_id: &str) -> 
     // Get series info first
     match client.get_series(series_id).await {
         Ok(series) => {
-            println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-            println!("\x1b[36m║  Series: {:<52} ║\x1b[0m", series.ticker.as_deref().unwrap_or("Unknown"));
-            println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+            println!(
+                "\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+            );
+            println!(
+                "\x1b[36m║  Series: {:<52} ║\x1b[0m",
+                series.ticker.as_deref().unwrap_or("Unknown")
+            );
+            println!(
+                "\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n"
+            );
 
             println!("  Title: {}", series.title.as_deref().unwrap_or("N/A"));
-            println!("  Recurrence: {}", series.recurrence.as_deref().unwrap_or("N/A"));
+            println!(
+                "  Recurrence: {}",
+                series.recurrence.as_deref().unwrap_or("N/A")
+            );
             if let Some(vol) = series.volume {
                 println!("  Volume: ${:.2}", vol);
             }
@@ -1069,10 +1148,8 @@ pub async fn show_current_market(client: &PolymarketClient, series_id: &str) -> 
             }
 
             // Find current active events
-            let active_events: Vec<_> = series.events.iter()
-                .filter(|e| !e.closed)
-                .take(3)
-                .collect();
+            let active_events: Vec<_> =
+                series.events.iter().filter(|e| !e.closed).take(3).collect();
 
             if active_events.is_empty() {
                 println!("\n\x1b[33m  No active events found.\x1b[0m");
@@ -1098,7 +1175,8 @@ pub async fn show_current_market(client: &PolymarketClient, series_id: &str) -> 
                                 if let Ok(clob_market) = client.get_market(cid).await {
                                     println!("\n    \x1b[32mTokens:\x1b[0m");
                                     for token in &clob_market.tokens {
-                                        println!("      {} ({}): Price={}",
+                                        println!(
+                                            "      {} ({}): Price={}",
                                             token.outcome,
                                             &token.token_id[..20.min(token.token_id.len())],
                                             token.price.as_deref().unwrap_or("N/A")
@@ -1107,13 +1185,24 @@ pub async fn show_current_market(client: &PolymarketClient, series_id: &str) -> 
 
                                     // Show order book for first token
                                     if let Some(first_token) = clob_market.tokens.first() {
-                                        println!("\n    \x1b[33mOrder Book ({}):\x1b[0m", first_token.outcome);
-                                        if let Ok(book) = client.get_order_book(&first_token.token_id).await {
+                                        println!(
+                                            "\n    \x1b[33mOrder Book ({}):\x1b[0m",
+                                            first_token.outcome
+                                        );
+                                        if let Ok(book) =
+                                            client.get_order_book(&first_token.token_id).await
+                                        {
                                             if let Some(bid) = book.bids.first() {
-                                                println!("      Best Bid: {} @ {}", bid.size, bid.price);
+                                                println!(
+                                                    "      Best Bid: {} @ {}",
+                                                    bid.size, bid.price
+                                                );
                                             }
                                             if let Some(ask) = book.asks.first() {
-                                                println!("      Best Ask: {} @ {}", ask.size, ask.price);
+                                                println!(
+                                                    "      Best Ask: {} @ {}",
+                                                    ask.size, ask.price
+                                                );
                                             }
                                         }
                                     }
@@ -1160,22 +1249,29 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
             None => " ",
         };
 
-        let name = format!("{} {}", direction_icon,
-            summary.name.chars().take(16).collect::<String>());
+        let name = format!(
+            "{} {}",
+            direction_icon,
+            summary.name.chars().take(16).collect::<String>()
+        );
 
-        let yes_str = summary.yes_price
+        let yes_str = summary
+            .yes_price
             .map(|p| format!("{:.1}", p * dec!(100)))
             .unwrap_or_else(|| "-".to_string());
 
-        let no_str = summary.no_price
+        let no_str = summary
+            .no_price
             .map(|p| format!("{:.1}", p * dec!(100)))
             .unwrap_or_else(|| "-".to_string());
 
-        let spread_str = summary.spread
+        let spread_str = summary
+            .spread
             .map(|s| format!("{:.1}%", s * dec!(100)))
             .unwrap_or_else(|| "-".to_string());
 
-        let prob_str = summary.implied_prob_pct
+        let prob_str = summary
+            .implied_prob_pct
             .map(|p| format!("{:.1}%", p))
             .unwrap_or_else(|| "-".to_string());
 
@@ -1183,7 +1279,7 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
         let spread_color = match summary.spread {
             Some(s) if s > dec!(0.03) => "\x1b[31m", // Red for high spread
             Some(s) if s > dec!(0.01) => "\x1b[33m", // Yellow for medium
-            _ => "\x1b[32m", // Green for low/none
+            _ => "\x1b[32m",                         // Green for low/none
         };
 
         println!(
@@ -1199,7 +1295,10 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
     if arbitrages.is_empty() {
         println!("\x1b[33m⚠ No arbitrage opportunities detected.\x1b[0m\n");
     } else {
-        println!("\x1b[32m✓ Found {} arbitrage opportunities:\x1b[0m\n", arbitrages.len());
+        println!(
+            "\x1b[32m✓ Found {} arbitrage opportunities:\x1b[0m\n",
+            arbitrages.len()
+        );
 
         for (i, arb) in arbitrages.iter().enumerate() {
             match &arb.arb_type {
@@ -1211,11 +1310,18 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
                     expected_relationship,
                 } => {
                     println!("\x1b[31m{}. MONOTONICITY VIOLATION\x1b[0m", i + 1);
-                    println!("   {} ({:.1}%) vs {} ({:.1}%)",
-                        outcome_a, prob_a * dec!(100),
-                        outcome_b, prob_b * dec!(100));
+                    println!(
+                        "   {} ({:.1}%) vs {} ({:.1}%)",
+                        outcome_a,
+                        prob_a * dec!(100),
+                        outcome_b,
+                        prob_b * dec!(100)
+                    );
                     println!("   \x1b[33m→ {}\x1b[0m", expected_relationship);
-                    println!("   Estimated profit: {:.2}%\n", arb.profit_per_dollar * dec!(100));
+                    println!(
+                        "   Estimated profit: {:.2}%\n",
+                        arb.profit_per_dollar * dec!(100)
+                    );
                 }
                 ArbitrageType::SpreadArbitrage {
                     outcome,
@@ -1224,11 +1330,13 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
                     profit,
                 } => {
                     println!("\x1b[32m{}. SPREAD ARBITRAGE\x1b[0m", i + 1);
-                    println!("   {}: Yes={:.1}¢ + No={:.1}¢ = {:.1}¢ < 100¢",
+                    println!(
+                        "   {}: Yes={:.1}¢ + No={:.1}¢ = {:.1}¢ < 100¢",
                         outcome,
                         yes_price * dec!(100),
                         no_price * dec!(100),
-                        (yes_price + no_price) * dec!(100));
+                        (yes_price + no_price) * dec!(100)
+                    );
                     println!("   Profit per $1: ${:.4}\n", profit);
                 }
                 ArbitrageType::CrossOutcomeArbitrage {
@@ -1239,7 +1347,10 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
                     println!("\x1b[35m{}. CROSS-OUTCOME ARBITRAGE\x1b[0m", i + 1);
                     println!("   {}", description);
                     println!("   Outcomes: {:?}", outcomes);
-                    println!("   Estimated profit: {:.2}%\n", estimated_profit * dec!(100));
+                    println!(
+                        "   Estimated profit: {:.2}%\n",
+                        estimated_profit * dec!(100)
+                    );
                 }
             }
         }
@@ -1247,13 +1358,20 @@ pub async fn analyze_multi_outcome(client: &PolymarketClient, event_id: &str) ->
 
     // Summary
     println!("\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m");
-    println!("Analysis complete. {} outcomes analyzed.", monitor.outcome_count());
+    println!(
+        "Analysis complete. {} outcomes analyzed.",
+        monitor.outcome_count()
+    );
 
     Ok(())
 }
 
 /// Show account balance, positions, and orders
-pub async fn show_account(client: &PolymarketClient, show_orders: bool, show_positions: bool) -> Result<()> {
+pub async fn show_account(
+    client: &PolymarketClient,
+    show_orders: bool,
+    show_positions: bool,
+) -> Result<()> {
     println!("\x1b[36m");
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║                    POLYMARKET ACCOUNT                        ║");
@@ -1292,8 +1410,11 @@ pub async fn show_account(client: &PolymarketClient, show_orders: bool, show_pos
                     for (i, pos) in positions.iter().enumerate() {
                         let size: f64 = pos.size.parse().unwrap_or(0.0);
                         if size.abs() > 0.0001 {
-                            println!("    {}. Token: {}", i + 1,
-                                pos.token_id.as_ref().unwrap_or(&pos.asset_id));
+                            println!(
+                                "    {}. Token: {}",
+                                i + 1,
+                                pos.token_id.as_ref().unwrap_or(&pos.asset_id)
+                            );
                             println!("       Size: {} shares", pos.size);
                             if let Some(avg) = &pos.avg_price {
                                 println!("       Avg Price: ${}", avg);
@@ -1330,14 +1451,20 @@ pub async fn show_account(client: &PolymarketClient, show_orders: bool, show_pos
                     println!("\n  \x1b[33m📋 Open Orders ({}):\x1b[0m", orders.len());
                     for (i, order) in orders.iter().enumerate() {
                         println!("    {}. Order ID: {}", i + 1, order.id);
-                        println!("       Token: {}",
-                            order.asset_id.as_deref().unwrap_or("N/A"));
-                        println!("       Side: {} @ ${}",
+                        println!(
+                            "       Token: {}",
+                            order.asset_id.as_deref().unwrap_or("N/A")
+                        );
+                        println!(
+                            "       Side: {} @ ${}",
                             order.side.as_deref().unwrap_or("N/A"),
-                            order.price.as_deref().unwrap_or("N/A"));
-                        println!("       Size: {} (filled: {})",
+                            order.price.as_deref().unwrap_or("N/A")
+                        );
+                        println!(
+                            "       Size: {} (filled: {})",
                             order.original_size.as_deref().unwrap_or("0"),
-                            order.size_matched.as_deref().unwrap_or("0"));
+                            order.size_matched.as_deref().unwrap_or("0")
+                        );
                         println!("       Status: {}", order.status);
                         println!();
                     }
@@ -1360,12 +1487,19 @@ pub async fn show_account(client: &PolymarketClient, show_orders: bool, show_pos
             Ok(summary) => {
                 println!("\x1b[32mOK\x1b[0m\n");
                 println!("  \x1b[36m─────────────────────────────────────\x1b[0m");
-                println!("  Total Equity:     \x1b[32m${:.2}\x1b[0m", summary.total_equity);
+                println!(
+                    "  Total Equity:     \x1b[32m${:.2}\x1b[0m",
+                    summary.total_equity
+                );
                 println!("  USDC Balance:     ${:.2}", summary.usdc_balance);
-                println!("  Position Value:   ${:.2} ({} positions)",
-                    summary.position_value, summary.position_count);
-                println!("  Open Orders:      ${:.2} ({} orders)",
-                    summary.open_order_value, summary.open_order_count);
+                println!(
+                    "  Position Value:   ${:.2} ({} positions)",
+                    summary.position_value, summary.position_count
+                );
+                println!(
+                    "  Open Orders:      ${:.2} ({} orders)",
+                    summary.open_order_value, summary.open_order_count
+                );
                 println!("  \x1b[36m─────────────────────────────────────\x1b[0m\n");
             }
             Err(e) => {
@@ -1380,8 +1514,13 @@ pub async fn show_account(client: &PolymarketClient, show_orders: bool, show_pos
 }
 
 /// Calculate expected value for near-settlement betting
-pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, show_table: bool) -> Result<()> {
-    use crate::strategy::{ExpectedValue, analyze_near_settlement, POLYMARKET_FEE_RATE};
+pub async fn calculate_ev(
+    price_cents: f64,
+    probability_pct: f64,
+    hours: f64,
+    show_table: bool,
+) -> Result<()> {
+    use crate::strategy::{analyze_near_settlement, ExpectedValue, POLYMARKET_FEE_RATE};
     use rust_decimal::prelude::FromPrimitive;
 
     let price = Decimal::from_f64(price_cents / 100.0).unwrap_or(dec!(0.95));
@@ -1398,16 +1537,34 @@ pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, sh
     println!("   Entry Price:        {:.1}¢ per Yes share", price_cents);
     println!("   True Probability:   {:.1}%", probability_pct);
     println!("   Hours to Settlement: {:.1}h", hours);
-    println!("   Platform Fee:       {:.1}%\n", POLYMARKET_FEE_RATE * dec!(100));
+    println!(
+        "   Platform Fee:       {:.1}%\n",
+        POLYMARKET_FEE_RATE * dec!(100)
+    );
 
     println!("\x1b[33m📈 Expected Value Analysis:\x1b[0m");
-    println!("   Gross EV:           ${:.4} per share", analysis.ev_analysis.gross_ev);
-    println!("   Net EV (after fee): ${:.4} per share", analysis.ev_analysis.net_ev);
-    println!("   ROI:                {:.2}%", analysis.ev_analysis.roi * dec!(100));
-    println!("   Breakeven Prob:     {:.1}%\n", analysis.ev_analysis.breakeven_prob * dec!(100));
+    println!(
+        "   Gross EV:           ${:.4} per share",
+        analysis.ev_analysis.gross_ev
+    );
+    println!(
+        "   Net EV (after fee): ${:.4} per share",
+        analysis.ev_analysis.net_ev
+    );
+    println!(
+        "   ROI:                {:.2}%",
+        analysis.ev_analysis.roi * dec!(100)
+    );
+    println!(
+        "   Breakeven Prob:     {:.1}%\n",
+        analysis.ev_analysis.breakeven_prob * dec!(100)
+    );
 
     println!("\x1b[33m🎯 Kelly Criterion:\x1b[0m");
-    println!("   Optimal Bet Size:   {:.1}% of bankroll\n", analysis.ev_analysis.kelly_fraction * dec!(100));
+    println!(
+        "   Optimal Bet Size:   {:.1}% of bankroll\n",
+        analysis.ev_analysis.kelly_fraction * dec!(100)
+    );
 
     println!("\x1b[33m⚠️  Risk Assessment:\x1b[0m");
     println!("   Risk Level:         {}", analysis.risk_level);
@@ -1422,8 +1579,13 @@ pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, sh
     let win_profit = shares * (Decimal::ONE - price) * (Decimal::ONE - POLYMARKET_FEE_RATE);
     let lose_loss = bet_size;
 
-    println!("   If WIN:  +${:.2} profit ({:.0} shares × {:.1}¢ profit × {:.0}% fee retained)",
-        win_profit, shares, (Decimal::ONE - price) * dec!(100), (Decimal::ONE - POLYMARKET_FEE_RATE) * dec!(100));
+    println!(
+        "   If WIN:  +${:.2} profit ({:.0} shares × {:.1}¢ profit × {:.0}% fee retained)",
+        win_profit,
+        shares,
+        (Decimal::ONE - price) * dec!(100),
+        (Decimal::ONE - POLYMARKET_FEE_RATE) * dec!(100)
+    );
     println!("   If LOSE: -${:.2} loss (full bet amount)\n", lose_loss);
 
     let ev_dollars = prob * win_profit - (Decimal::ONE - prob) * lose_loss;
@@ -1435,7 +1597,9 @@ pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, sh
 
     // Show table if requested
     if show_table {
-        println!("\n\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m");
+        println!(
+            "\n\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m"
+        );
         println!("\x1b[33m📋 EV Table (Net EV per $1 bet):\x1b[0m\n");
 
         // Header
@@ -1471,8 +1635,12 @@ pub async fn calculate_ev(price_cents: f64, probability_pct: f64, hours: f64, sh
 }
 
 /// Analyze market making opportunities
-pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, show_detail: bool) -> Result<()> {
-    use crate::strategy::{MarketMakingConfig, analyze_market_making_opportunity, SplitMergeType};
+pub async fn analyze_market_making(
+    client: &PolymarketClient,
+    token_id: &str,
+    show_detail: bool,
+) -> Result<()> {
+    use crate::strategy::{analyze_market_making_opportunity, MarketMakingConfig, SplitMergeType};
     use rust_decimal::prelude::FromStr;
 
     println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
@@ -1484,10 +1652,14 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
     // Get orderbook for Yes token
     let book = client.get_order_book(token_id).await?;
 
-    let yes_bid = book.bids.first()
+    let yes_bid = book
+        .bids
+        .first()
         .and_then(|b| Decimal::from_str(&b.price).ok())
         .unwrap_or(dec!(0.5));
-    let yes_ask = book.asks.first()
+    let yes_ask = book
+        .asks
+        .first()
         .and_then(|a| Decimal::from_str(&a.price).ok())
         .unwrap_or(dec!(0.5));
 
@@ -1499,13 +1671,23 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
     let opportunity = analyze_market_making_opportunity(yes_bid, yes_ask, no_bid, no_ask, &config);
 
     println!("\x1b[33m📊 Current Market:\x1b[0m");
-    println!("   Yes Bid/Ask:  {:.3} / {:.3}  (Spread: {:.1}%)",
-        yes_bid, yes_ask, (yes_ask - yes_bid) * dec!(100));
-    println!("   No Bid/Ask:   {:.3} / {:.3}  (Spread: {:.1}%)",
-        no_bid, no_ask, (no_ask - no_bid) * dec!(100));
-    println!("   Combined Ask: {:.3} ({:.1}% over $1.00)\n",
+    println!(
+        "   Yes Bid/Ask:  {:.3} / {:.3}  (Spread: {:.1}%)",
+        yes_bid,
+        yes_ask,
+        (yes_ask - yes_bid) * dec!(100)
+    );
+    println!(
+        "   No Bid/Ask:   {:.3} / {:.3}  (Spread: {:.1}%)",
+        no_bid,
+        no_ask,
+        (no_ask - no_bid) * dec!(100)
+    );
+    println!(
+        "   Combined Ask: {:.3} ({:.1}% over $1.00)\n",
         opportunity.current_spread,
-        (opportunity.current_spread - Decimal::ONE) * dec!(100));
+        (opportunity.current_spread - Decimal::ONE) * dec!(100)
+    );
 
     // Split/Merge opportunity
     println!("\x1b[33m🔄 Split/Merge Analysis:\x1b[0m");
@@ -1513,14 +1695,22 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
         match sm.opportunity_type {
             SplitMergeType::SplitAndSell => {
                 println!("   \x1b[32m✓ SPLIT & SELL OPPORTUNITY!\x1b[0m");
-                println!("   Yes_bid + No_bid = {:.3} > $1.00", sm.yes_bid + sm.no_bid);
+                println!(
+                    "   Yes_bid + No_bid = {:.3} > $1.00",
+                    sm.yes_bid + sm.no_bid
+                );
                 println!("   Gross Profit: ${:.4} per $1 split", sm.profit_per_dollar);
                 println!("   Net Profit:   ${:.4} (after slippage)\n", sm.net_profit);
-                println!("   \x1b[36mAction:\x1b[0m Split $1 USDC → 1 Yes + 1 No → Sell both → Profit");
+                println!(
+                    "   \x1b[36mAction:\x1b[0m Split $1 USDC → 1 Yes + 1 No → Sell both → Profit"
+                );
             }
             SplitMergeType::BuyAndMerge => {
                 println!("   \x1b[32m✓ BUY & MERGE OPPORTUNITY!\x1b[0m");
-                println!("   Yes_ask + No_ask = {:.3} < $1.00", sm.yes_ask + sm.no_ask);
+                println!(
+                    "   Yes_ask + No_ask = {:.3} < $1.00",
+                    sm.yes_ask + sm.no_ask
+                );
                 println!("   Gross Profit: ${:.4} per pair", sm.profit_per_dollar);
                 println!("   Net Profit:   ${:.4} (after slippage)\n", sm.net_profit);
                 println!("   \x1b[36mAction:\x1b[0m Buy 1 Yes + 1 No → Merge → Redeem $1 → Profit");
@@ -1534,19 +1724,36 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
 
     // Market making strategy
     println!("\x1b[33m📈 Market Making Strategy:\x1b[0m");
-    println!("   Target Spread Range: {:.1}% - {:.1}%",
+    println!(
+        "   Target Spread Range: {:.1}% - {:.1}%",
         (config.target_spread_min - Decimal::ONE) * dec!(100),
-        (config.target_spread_max - Decimal::ONE) * dec!(100));
-    println!("   Current Spread:      {:.1}% ({})",
+        (config.target_spread_max - Decimal::ONE) * dec!(100)
+    );
+    println!(
+        "   Current Spread:      {:.1}% ({})",
         (opportunity.current_spread - Decimal::ONE) * dec!(100),
-        if opportunity.spread_in_range { "\x1b[32mIN RANGE\x1b[0m" } else { "\x1b[33mOUT OF RANGE\x1b[0m" });
+        if opportunity.spread_in_range {
+            "\x1b[32mIN RANGE\x1b[0m"
+        } else {
+            "\x1b[33mOUT OF RANGE\x1b[0m"
+        }
+    );
 
     match &opportunity.recommendation {
-        crate::strategy::MarketMakingAction::PostBothSides { yes_quote, no_quote } => {
+        crate::strategy::MarketMakingAction::PostBothSides {
+            yes_quote,
+            no_quote,
+        } => {
             println!("\n   \x1b[32mRecommendation: POST BOTH SIDES\x1b[0m");
-            println!("   Post Yes: Bid {:.3} / Ask {:.3}", yes_quote.0, yes_quote.1);
+            println!(
+                "   Post Yes: Bid {:.3} / Ask {:.3}",
+                yes_quote.0, yes_quote.1
+            );
             println!("   Post No:  Bid {:.3} / Ask {:.3}", no_quote.0, no_quote.1);
-            println!("   Estimated Profit: ${:.2} if both sides fill", opportunity.estimated_profit);
+            println!(
+                "   Estimated Profit: ${:.2} if both sides fill",
+                opportunity.estimated_profit
+            );
         }
         crate::strategy::MarketMakingAction::SplitAndSell => {
             println!("\n   \x1b[32mRecommendation: SPLIT & SELL\x1b[0m");
@@ -1560,14 +1767,19 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
             println!("\n   \x1b[33mRecommendation: WAIT\x1b[0m");
             println!("   Reason: {}", reason);
         }
-        crate::strategy::MarketMakingAction::Rebalance { sell_side, buy_side } => {
+        crate::strategy::MarketMakingAction::Rebalance {
+            sell_side,
+            buy_side,
+        } => {
             println!("\n   \x1b[33mRecommendation: REBALANCE\x1b[0m");
             println!("   Sell {} / Buy {}", sell_side, buy_side);
         }
     }
 
     if show_detail {
-        println!("\n\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m");
+        println!(
+            "\n\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m"
+        );
         println!("\x1b[33m📚 Professional MM Strategy Guide:\x1b[0m\n");
         println!("   1. \x1b[36mSplit & Quote:\x1b[0m Split $1 USDC → 1 Yes + 1 No");
         println!("   2. \x1b[36mPost Both Sides:\x1b[0m Sell Yes @ markup, Sell No @ markup");
@@ -1588,8 +1800,14 @@ pub async fn analyze_market_making(client: &PolymarketClient, token_id: &str, sh
 }
 
 /// Show Polymarket sports markets
-pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_dk: bool, min_edge: f64, live: bool) -> Result<()> {
-    use crate::agent::{PolymarketSportsClient, OddsProvider, Sport, Market, NBA_SERIES_ID};
+pub async fn show_polymarket_sports(
+    league: &str,
+    search: Option<&str>,
+    compare_dk: bool,
+    min_edge: f64,
+    live: bool,
+) -> Result<()> {
+    use crate::agent::{Market, OddsProvider, PolymarketSportsClient, Sport, NBA_SERIES_ID};
     use rust_decimal::prelude::FromPrimitive;
 
     let client = PolymarketSportsClient::new()?;
@@ -1598,7 +1816,9 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
     if live {
         println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
         println!("\x1b[36m║           LIVE SPORTS - In-Play Betting                      ║\x1b[0m");
-        println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+        println!(
+            "\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n"
+        );
 
         println!("Fetching live {} games...\n", league.to_uppercase());
 
@@ -1641,16 +1861,20 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
                 let score = game.score.as_deref().unwrap_or("--");
 
                 println!("│ \x1b[31m{}\x1b[0m  \x1b[1m{}\x1b[0m", status, game.title);
-                println!("│ Score: \x1b[1;33m{}\x1b[0m  Vol: ${:.0}k",
+                println!(
+                    "│ Score: \x1b[1;33m{}\x1b[0m  Vol: ${:.0}k",
                     score,
-                    game.volume.unwrap_or(0.0) / 1000.0);
+                    game.volume.unwrap_or(0.0) / 1000.0
+                );
 
                 // Show moneyline
                 if let Some(ml) = game.moneyline() {
                     if let Some((p1, p2)) = ml.get_prices() {
-                        println!("│ Moneyline: \x1b[32m{}¢\x1b[0m / \x1b[31m{}¢\x1b[0m",
+                        println!(
+                            "│ Moneyline: \x1b[32m{}¢\x1b[0m / \x1b[31m{}¢\x1b[0m",
                             (p1 * dec!(100)).round_dp(1),
-                            (p2 * dec!(100)).round_dp(1));
+                            (p2 * dec!(100)).round_dp(1)
+                        );
                     }
                 }
 
@@ -1658,9 +1882,12 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
                 let spreads = game.spreads();
                 if let Some(spread) = spreads.first() {
                     if let Some((p1, p2)) = spread.get_prices() {
-                        println!("│ {}: {}¢ / {}¢", spread.question,
+                        println!(
+                            "│ {}: {}¢ / {}¢",
+                            spread.question,
                             (p1 * dec!(100)).round_dp(0),
-                            (p2 * dec!(100)).round_dp(0));
+                            (p2 * dec!(100)).round_dp(0)
+                        );
                     }
                 }
 
@@ -1671,15 +1898,20 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
 
         // Display scheduled games
         if !scheduled_games.is_empty() {
-            println!("\x1b[34m○ TODAY'S GAMES\x1b[0m ({} games)\n", scheduled_games.len());
+            println!(
+                "\x1b[34m○ TODAY'S GAMES\x1b[0m ({} games)\n",
+                scheduled_games.len()
+            );
 
             for game in &scheduled_games {
                 if let Some(ml) = game.moneyline() {
                     if let Some((p1, p2)) = ml.get_prices() {
-                        println!("  {} - \x1b[32m{}¢\x1b[0m / \x1b[31m{}¢\x1b[0m",
+                        println!(
+                            "  {} - \x1b[32m{}¢\x1b[0m / \x1b[31m{}¢\x1b[0m",
                             game.title,
                             (p1 * dec!(100)).round_dp(1),
-                            (p2 * dec!(100)).round_dp(1));
+                            (p2 * dec!(100)).round_dp(1)
+                        );
                     }
                 } else {
                     println!("  {}", game.title);
@@ -1716,9 +1948,11 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
     // Filter by search term if provided
     let markets = if let Some(term) = search {
         let term_lower = term.to_lowercase();
-        markets.into_iter()
+        markets
+            .into_iter()
             .filter(|m| {
-                m.question.as_ref()
+                m.question
+                    .as_ref()
                     .map(|q| q.to_lowercase().contains(&term_lower))
                     .unwrap_or(false)
             })
@@ -1788,7 +2022,8 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
                             if let Some((poly_yes, _)) = market.get_prices() {
                                 let edge = dk_prob - poly_yes;
                                 let edge_pct = edge * dec!(100);
-                                if edge_pct.abs() >= Decimal::from_f64(min_edge).unwrap_or(dec!(5)) {
+                                if edge_pct.abs() >= Decimal::from_f64(min_edge).unwrap_or(dec!(5))
+                                {
                                     if edge > Decimal::ZERO {
                                         println!("│   \x1b[32m✓ EDGE: +{:.1}% (DK favors YES)\x1b[0m                            │", edge_pct);
                                     } else {
@@ -1804,7 +2039,10 @@ pub async fn show_polymarket_sports(league: &str, search: Option<&str>, compare_
 
         // Show token IDs
         if let Some((yes_token, _no_token)) = market.get_token_ids() {
-            println!("│   Yes Token: {}... │", &yes_token[..40.min(yes_token.len())]);
+            println!(
+                "│   Yes Token: {}... │",
+                &yes_token[..40.min(yes_token.len())]
+            );
         }
 
         println!("├────────────────────────────────────────────────────────────────┤");
@@ -1830,8 +2068,8 @@ pub async fn run_sports_chain(
     amount: f64,
 ) -> Result<()> {
     use crate::agent::{
-        PolymarketSportsClient, OddsProvider, Sport, Market,
-        GrokClient, GrokConfig, PolymarketEdgeAnalysis,
+        GrokClient, GrokConfig, Market, OddsProvider, PolymarketEdgeAnalysis,
+        PolymarketSportsClient, Sport,
     };
 
     println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
@@ -1851,7 +2089,10 @@ pub async fn run_sports_chain(
                 match client.search(&query).await {
                     Ok(result) => {
                         println!("   ✓ Grok analysis complete");
-                        println!("   Summary: {}", &result.summary[..100.min(result.summary.len())]);
+                        println!(
+                            "   Summary: {}",
+                            &result.summary[..100.min(result.summary.len())]
+                        );
                         if let Some(sentiment) = result.sentiment {
                             println!("   Sentiment: {}", sentiment);
                         }
@@ -1892,16 +2133,25 @@ pub async fn run_sports_chain(
             Ok(events) => {
                 let matching = events.iter().find(|e| {
                     let matchup = format!("{} {}", e.home_team, e.away_team).to_lowercase();
-                    matchup.contains(&team1.to_lowercase()) || matchup.contains(&team2.to_lowercase())
+                    matchup.contains(&team1.to_lowercase())
+                        || matchup.contains(&team2.to_lowercase())
                 });
 
                 if let Some(event) = matching {
                     if let Some(best) = event.best_odds() {
                         println!("   ✓ {} vs {}", event.home_team, event.away_team);
-                        println!("   Home ({}) odds: {} ({:.1}%)",
-                            best.home_bookmaker, best.home_american_odds, best.home_implied_prob * dec!(100));
-                        println!("   Away ({}) odds: {} ({:.1}%)",
-                            best.away_bookmaker, best.away_american_odds, best.away_implied_prob * dec!(100));
+                        println!(
+                            "   Home ({}) odds: {} ({:.1}%)",
+                            best.home_bookmaker,
+                            best.home_american_odds,
+                            best.home_implied_prob * dec!(100)
+                        );
+                        println!(
+                            "   Away ({}) odds: {} ({:.1}%)",
+                            best.away_bookmaker,
+                            best.away_american_odds,
+                            best.away_implied_prob * dec!(100)
+                        );
                         Some(best.home_implied_prob)
                     } else {
                         println!("   ⚠ No odds available for this matchup");
@@ -1929,11 +2179,16 @@ pub async fn run_sports_chain(
     let market_details = poly_client.find_game_market(team1, team2).await?;
 
     let (edge_analysis, _yes_token, _no_token) = if let Some(ref details) = market_details {
-        println!("   ✓ Found: {}", details.market.question.as_deref().unwrap_or("Unknown"));
+        println!(
+            "   ✓ Found: {}",
+            details.market.question.as_deref().unwrap_or("Unknown")
+        );
         if let Some(yes_price) = details.yes_price() {
-            println!("   Current Polymarket: Yes={:.1}¢ No={:.1}¢",
+            println!(
+                "   Current Polymarket: Yes={:.1}¢ No={:.1}¢",
                 yes_price * dec!(100),
-                details.no_price().unwrap_or(dec!(0)) * dec!(100));
+                details.no_price().unwrap_or(dec!(0)) * dec!(100)
+            );
         }
 
         let edge = if let Some(sb_prob) = sportsbook_prob {
@@ -1942,7 +2197,11 @@ pub async fn run_sports_chain(
             None
         };
 
-        (edge, Some(details.yes_token_id.clone()), Some(details.no_token_id.clone()))
+        (
+            edge,
+            Some(details.yes_token_id.clone()),
+            Some(details.no_token_id.clone()),
+        )
     } else {
         println!("   ⚠ No Polymarket market found for {} vs {}", team1, team2);
         (None, None, None)
@@ -1954,19 +2213,44 @@ pub async fn run_sports_chain(
 
     if let Some(ref edge) = edge_analysis {
         println!("\n   \x1b[32m📊 Edge Analysis:\x1b[0m");
-        println!("   Polymarket: Yes={:.1}% No={:.1}%",
-            edge.polymarket_yes_prob * dec!(100), edge.polymarket_no_prob * dec!(100));
-        println!("   DraftKings:  Yes={:.1}% No={:.1}%",
-            edge.sportsbook_yes_prob * dec!(100), edge.sportsbook_no_prob * dec!(100));
-        println!("   Edge on YES: {}{:.1}%",
-            if edge.yes_edge > Decimal::ZERO { "+" } else { "" }, edge.yes_edge * dec!(100));
-        println!("   Edge on NO:  {}{:.1}%",
-            if edge.no_edge > Decimal::ZERO { "+" } else { "" }, edge.no_edge * dec!(100));
+        println!(
+            "   Polymarket: Yes={:.1}% No={:.1}%",
+            edge.polymarket_yes_prob * dec!(100),
+            edge.polymarket_no_prob * dec!(100)
+        );
+        println!(
+            "   DraftKings:  Yes={:.1}% No={:.1}%",
+            edge.sportsbook_yes_prob * dec!(100),
+            edge.sportsbook_no_prob * dec!(100)
+        );
+        println!(
+            "   Edge on YES: {}{:.1}%",
+            if edge.yes_edge > Decimal::ZERO {
+                "+"
+            } else {
+                ""
+            },
+            edge.yes_edge * dec!(100)
+        );
+        println!(
+            "   Edge on NO:  {}{:.1}%",
+            if edge.no_edge > Decimal::ZERO {
+                "+"
+            } else {
+                ""
+            },
+            edge.no_edge * dec!(100)
+        );
 
         if edge.is_significant() {
-            println!("\n   \x1b[32m✓ RECOMMENDATION: Bet {} on {}\x1b[0m",
-                edge.recommended_side, edge.market);
-            println!("   Kelly fraction: {:.1}% of bankroll", edge.kelly_fraction() * dec!(100));
+            println!(
+                "\n   \x1b[32m✓ RECOMMENDATION: Bet {} on {}\x1b[0m",
+                edge.recommended_side, edge.market
+            );
+            println!(
+                "   Kelly fraction: {:.1}% of bankroll",
+                edge.kelly_fraction() * dec!(100)
+            );
 
             if execute {
                 println!("\n   \x1b[33m⚠ Order execution not yet implemented.\x1b[0m");
@@ -1978,7 +2262,14 @@ pub async fn run_sports_chain(
         }
     } else {
         println!("\n   \x1b[33m⚠ Unable to calculate edge.\x1b[0m");
-        println!("   Missing: {}", if sportsbook_prob.is_none() { "DraftKings odds" } else { "Polymarket market" });
+        println!(
+            "   Missing: {}",
+            if sportsbook_prob.is_none() {
+                "DraftKings odds"
+            } else {
+                "Polymarket market"
+            }
+        );
     }
 
     println!("\n\x1b[36m─────────────────────────────────────────────────────────────────\x1b[0m");
@@ -1988,8 +2279,12 @@ pub async fn run_sports_chain(
 }
 
 /// Show Polymarket political markets
-pub async fn show_polymarket_politics(category: &str, search: Option<&str>, high_volume: bool) -> Result<()> {
-    use crate::agent::{PolymarketPoliticsClient, PoliticalCategory};
+pub async fn show_polymarket_politics(
+    category: &str,
+    search: Option<&str>,
+    high_volume: bool,
+) -> Result<()> {
+    use crate::agent::{PoliticalCategory, PolymarketPoliticsClient};
 
     let client = PolymarketPoliticsClient::new()?;
 
@@ -2013,14 +2308,17 @@ pub async fn show_polymarket_politics(category: &str, search: Option<&str>, high
     // Filter by search term if provided
     let markets = if let Some(term) = search {
         let term_lower = term.to_lowercase();
-        markets.into_iter()
+        markets
+            .into_iter()
             .filter(|m| {
-                m.question.as_ref()
+                m.question
+                    .as_ref()
                     .map(|q| q.to_lowercase().contains(&term_lower))
-                    .unwrap_or(false) ||
-                m.description.as_ref()
-                    .map(|d| d.to_lowercase().contains(&term_lower))
                     .unwrap_or(false)
+                    || m.description
+                        .as_ref()
+                        .map(|d| d.to_lowercase().contains(&term_lower))
+                        .unwrap_or(false)
             })
             .collect()
     } else {
@@ -2029,7 +2327,8 @@ pub async fn show_polymarket_politics(category: &str, search: Option<&str>, high
 
     // Filter by volume if requested
     let markets: Vec<_> = if high_volume {
-        markets.into_iter()
+        markets
+            .into_iter()
             .filter(|m| m.volume.unwrap_or(0.0) > 100000.0)
             .collect()
     } else {
@@ -2074,7 +2373,10 @@ pub async fn show_polymarket_politics(category: &str, search: Option<&str>, high
         // Show end date if available
         if let Some(end_date) = &market.end_date {
             if let Some(date_part) = end_date.split('T').next() {
-                println!("│   Ends: {}                                            │", date_part);
+                println!(
+                    "│   Ends: {}                                            │",
+                    date_part
+                );
             }
         }
 
@@ -2114,7 +2416,10 @@ pub async fn search_politics_markets(query: &str) -> Result<()> {
     let markets = client.search_markets(query).await?;
 
     if markets.is_empty() {
-        println!("\x1b[33m⚠ No markets found matching \"{}\".\x1b[0m\n", query);
+        println!(
+            "\x1b[33m⚠ No markets found matching \"{}\".\x1b[0m\n",
+            query
+        );
         return Ok(());
     }
 
@@ -2134,8 +2439,12 @@ pub async fn search_politics_markets(query: &str) -> Result<()> {
                 None => "N/A".to_string(),
             };
 
-            println!("   \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
-                yes_price * dec!(100), no_price * dec!(100), vol_str);
+            println!(
+                "   \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
+                yes_price * dec!(100),
+                no_price * dec!(100),
+                vol_str
+            );
         }
 
         if let Some(end_date) = &market.end_date {
@@ -2147,14 +2456,20 @@ pub async fn search_politics_markets(query: &str) -> Result<()> {
     }
 
     if markets.len() > 20 {
-        println!("\x1b[90m... and {} more markets\x1b[0m\n", markets.len() - 20);
+        println!(
+            "\x1b[90m... and {} more markets\x1b[0m\n",
+            markets.len() - 20
+        );
     }
 
     Ok(())
 }
 
 /// Analyze specific political market or candidate
-pub async fn analyze_politics_market(event_id: Option<&str>, candidate: Option<&str>) -> Result<()> {
+pub async fn analyze_politics_market(
+    event_id: Option<&str>,
+    candidate: Option<&str>,
+) -> Result<()> {
     use crate::agent::PolymarketPoliticsClient;
 
     let client = PolymarketPoliticsClient::new()?;
@@ -2189,8 +2504,11 @@ pub async fn analyze_politics_market(event_id: Option<&str>, candidate: Option<&
         for (i, market) in event.markets.iter().enumerate() {
             println!("  {}. {}", i + 1, market.question);
             if let Some((p1, p2)) = market.get_prices() {
-                println!("     \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m",
-                    p1 * dec!(100), p2 * dec!(100));
+                println!(
+                    "     \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m",
+                    p1 * dec!(100),
+                    p2 * dec!(100)
+                );
             }
         }
     } else if let Some(name) = candidate {
@@ -2206,10 +2524,16 @@ pub async fn analyze_politics_market(event_id: Option<&str>, candidate: Option<&
         println!("Found {} markets for {}:\n", markets.len(), name);
 
         for market in markets.iter().take(10) {
-            println!("\x1b[1m{}\x1b[0m", market.question.as_deref().unwrap_or("Unknown"));
+            println!(
+                "\x1b[1m{}\x1b[0m",
+                market.question.as_deref().unwrap_or("Unknown")
+            );
             if let Some((p1, p2)) = market.get_prices() {
-                println!("  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m",
-                    p1 * dec!(100), p2 * dec!(100));
+                println!(
+                    "  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m",
+                    p1 * dec!(100),
+                    p2 * dec!(100)
+                );
             }
             println!();
         }
@@ -2298,7 +2622,10 @@ pub async fn show_trump_markets(market_type: &str) -> Result<()> {
     println!("Found {} Trump markets:\n", markets.len());
 
     for market in markets.iter().take(15) {
-        println!("\x1b[1m{}\x1b[0m", market.question.as_deref().unwrap_or("Unknown"));
+        println!(
+            "\x1b[1m{}\x1b[0m",
+            market.question.as_deref().unwrap_or("Unknown")
+        );
 
         if let Some((yes_price, no_price)) = market.get_prices() {
             let vol_str = match market.volume {
@@ -2308,14 +2635,21 @@ pub async fn show_trump_markets(market_type: &str) -> Result<()> {
                 None => "N/A".to_string(),
             };
 
-            println!("  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
-                yes_price * dec!(100), no_price * dec!(100), vol_str);
+            println!(
+                "  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
+                yes_price * dec!(100),
+                no_price * dec!(100),
+                vol_str
+            );
         }
         println!();
     }
 
     if markets.len() > 15 {
-        println!("\x1b[90m... and {} more markets\x1b[0m\n", markets.len() - 15);
+        println!(
+            "\x1b[90m... and {} more markets\x1b[0m\n",
+            markets.len() - 15
+        );
     }
 
     Ok(())
@@ -2335,12 +2669,9 @@ pub async fn show_election_markets(year: Option<&str>) -> Result<()> {
 
     // Filter by year if provided
     let markets: Vec<_> = if let Some(y) = year {
-        markets.into_iter()
-            .filter(|m| {
-                m.question.as_ref()
-                    .map(|q| q.contains(y))
-                    .unwrap_or(false)
-            })
+        markets
+            .into_iter()
+            .filter(|m| m.question.as_ref().map(|q| q.contains(y)).unwrap_or(false))
             .collect()
     } else {
         markets
@@ -2354,7 +2685,10 @@ pub async fn show_election_markets(year: Option<&str>) -> Result<()> {
     println!("Found {} election markets:\n", markets.len());
 
     for market in markets.iter().take(20) {
-        println!("\x1b[1m{}\x1b[0m", market.question.as_deref().unwrap_or("Unknown"));
+        println!(
+            "\x1b[1m{}\x1b[0m",
+            market.question.as_deref().unwrap_or("Unknown")
+        );
 
         if let Some((yes_price, no_price)) = market.get_prices() {
             let vol_str = match market.volume {
@@ -2364,8 +2698,12 @@ pub async fn show_election_markets(year: Option<&str>) -> Result<()> {
                 None => "N/A".to_string(),
             };
 
-            println!("  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
-                yes_price * dec!(100), no_price * dec!(100), vol_str);
+            println!(
+                "  \x1b[32mYES: {:.1}¢\x1b[0m  \x1b[31mNO: {:.1}¢\x1b[0m  Volume: {}",
+                yes_price * dec!(100),
+                no_price * dec!(100),
+                vol_str
+            );
         }
 
         if let Some(end_date) = &market.end_date {
@@ -2377,7 +2715,10 @@ pub async fn show_election_markets(year: Option<&str>) -> Result<()> {
     }
 
     if markets.len() > 20 {
-        println!("\x1b[90m... and {} more markets\x1b[0m\n", markets.len() - 20);
+        println!(
+            "\x1b[90m... and {} more markets\x1b[0m\n",
+            markets.len() - 20
+        );
     }
 
     Ok(())
@@ -2410,16 +2751,17 @@ pub async fn run_live_edge_scanner(
     scan_props: bool,
     alert_sound: bool,
 ) -> Result<()> {
-    use crate::agent::{
-        PolymarketSportsClient, OddsProvider, Sport, Market,
-        NBA_SERIES_ID,
-    };
+    use crate::agent::{Market, OddsProvider, PolymarketSportsClient, Sport, NBA_SERIES_ID};
     use std::collections::HashMap;
 
     println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
     println!("\x1b[36m║         🎯 LIVE EDGE SCANNER                                 ║\x1b[0m");
-    println!("\x1b[36m║   Monitoring {} | Min Edge: {}% | Interval: {}s             ║\x1b[0m",
-        sport.to_uppercase(), min_edge, interval);
+    println!(
+        "\x1b[36m║   Monitoring {} | Min Edge: {}% | Interval: {}s             ║\x1b[0m",
+        sport.to_uppercase(),
+        min_edge,
+        interval
+    );
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
     let pm_client = PolymarketSportsClient::new()?;
@@ -2443,10 +2785,20 @@ pub async fn run_live_edge_scanner(
 
     let scan_all = !scan_spreads && !scan_moneyline && !scan_props;
 
-    println!("Scanning: {}{}{}",
-        if scan_spreads || scan_all { "Spreads " } else { "" },
-        if scan_moneyline || scan_all { "Moneyline " } else { "" },
-        if scan_props || scan_all { "Props " } else { "" });
+    println!(
+        "Scanning: {}{}{}",
+        if scan_spreads || scan_all {
+            "Spreads "
+        } else {
+            ""
+        },
+        if scan_moneyline || scan_all {
+            "Moneyline "
+        } else {
+            ""
+        },
+        if scan_props || scan_all { "Props " } else { "" }
+    );
     println!("Press Ctrl+C to stop\n");
 
     let mut scan_count = 0u64;
@@ -2489,7 +2841,8 @@ pub async fn run_live_edge_scanner(
                             let fair_away = away_prob / total;
 
                             // Store both full name key and nickname key
-                            let key = format!("{} {}", event.home_team, event.away_team).to_lowercase();
+                            let key =
+                                format!("{} {}", event.home_team, event.away_team).to_lowercase();
                             odds_map.insert(key, (fair_home, fair_away));
 
                             // Also store with nicknames for PM matching (PM uses "Timberwolves vs. Heat" format)
@@ -2516,7 +2869,8 @@ pub async fn run_live_edge_scanner(
                             let fair_home = home_prob / total;
                             let fair_away = away_prob / total;
 
-                            let key = format!("{} {} spread", event.home_team, event.away_team).to_lowercase();
+                            let key = format!("{} {} spread", event.home_team, event.away_team)
+                                .to_lowercase();
                             odds_map.insert(key, (fair_home, fair_away));
 
                             // Also store with nicknames for PM matching
@@ -2537,14 +2891,21 @@ pub async fn run_live_edge_scanner(
         let live_count = live_games.iter().filter(|g| g.live).count();
         let scheduled_count = live_games.len() - live_count;
 
-        println!("  Found {} games ({} LIVE, {} scheduled)",
-            live_games.len(), live_count, scheduled_count);
+        println!(
+            "  Found {} games ({} LIVE, {} scheduled)",
+            live_games.len(),
+            live_count,
+            scheduled_count
+        );
 
         // Warn if DK comparison unavailable
         if dk_odds.is_empty() && dk_provider.is_some() {
             println!("  \x1b[33m⚠ DK odds empty - edge comparison unavailable\x1b[0m");
         } else if !dk_odds.is_empty() {
-            println!("  \x1b[32m✓ DK odds loaded ({} markets)\x1b[0m", dk_odds.len());
+            println!(
+                "  \x1b[32m✓ DK odds loaded ({} markets)\x1b[0m",
+                dk_odds.len()
+            );
         }
 
         let mut new_opportunities: Vec<EdgeOpportunity> = Vec::new();
@@ -2557,26 +2918,36 @@ pub async fn run_live_edge_scanner(
                 // Determine market type
                 let is_spread = question.contains("Spread:");
                 let is_first_half = question.contains("1H ") || question.contains("1st Half");
-                let is_moneyline = !is_spread && !is_first_half &&
-                                   !question.contains("Over") &&
-                                   !question.contains("Points") && !question.contains("Rebounds") &&
-                                   !question.contains("Assists") && !question.contains("O/U") &&
-                                   !question.contains("Total");
-                let is_prop = question.contains("Points Over") || question.contains("Rebounds Over") ||
-                              question.contains("Assists Over");
+                let is_moneyline = !is_spread
+                    && !is_first_half
+                    && !question.contains("Over")
+                    && !question.contains("Points")
+                    && !question.contains("Rebounds")
+                    && !question.contains("Assists")
+                    && !question.contains("O/U")
+                    && !question.contains("Total");
+                let is_prop = question.contains("Points Over")
+                    || question.contains("Rebounds Over")
+                    || question.contains("Assists Over");
 
                 // Skip if not scanning this type
                 if !scan_all {
-                    if is_spread && !scan_spreads { continue; }
-                    if is_moneyline && !scan_moneyline { continue; }
-                    if is_prop && !scan_props { continue; }
+                    if is_spread && !scan_spreads {
+                        continue;
+                    }
+                    if is_moneyline && !scan_moneyline {
+                        continue;
+                    }
+                    if is_prop && !scan_props {
+                        continue;
+                    }
                 }
 
                 // Parse Polymarket prices (stored as JSON string like "[\"0.5\", \"0.5\"]")
-                let pm_yes_price: f64 = market.outcome_prices.as_ref()
-                    .and_then(|p| {
-                        serde_json::from_str::<Vec<String>>(p).ok()
-                    })
+                let pm_yes_price: f64 = market
+                    .outcome_prices
+                    .as_ref()
+                    .and_then(|p| serde_json::from_str::<Vec<String>>(p).ok())
                     .and_then(|prices| prices.get(0).cloned())
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0.5);
@@ -2607,16 +2978,22 @@ pub async fn run_live_edge_scanner(
 
                     if edge.abs() >= min_edge {
                         // Parse token IDs (stored as JSON string like "[\"123...\", \"456...\"]")
-                        let token_id = market.clob_token_ids.as_ref()
+                        let token_id = market
+                            .clob_token_ids
+                            .as_ref()
                             .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
                             .and_then(|ids| ids.get(0).cloned())
                             .unwrap_or_default();
 
                         let opp = EdgeOpportunity {
                             game: game.title.clone(),
-                            market_type: if is_spread { "Spread".to_string() }
-                                        else if is_moneyline { "Moneyline".to_string() }
-                                        else { "Prop".to_string() },
+                            market_type: if is_spread {
+                                "Spread".to_string()
+                            } else if is_moneyline {
+                                "Moneyline".to_string()
+                            } else {
+                                "Prop".to_string()
+                            },
                             market_question: question.clone(),
                             pm_price: pm_yes_price,
                             dk_fair_prob: dk_prob,
@@ -2637,12 +3014,18 @@ pub async fn run_live_edge_scanner(
 
         // Display new opportunities
         if !new_opportunities.is_empty() {
-            println!("\n\x1b[32m🎯 Found {} opportunities with edge >= {}%:\x1b[0m\n",
-                new_opportunities.len(), min_edge);
+            println!(
+                "\n\x1b[32m🎯 Found {} opportunities with edge >= {}%:\x1b[0m\n",
+                new_opportunities.len(),
+                min_edge
+            );
 
             for opp in &new_opportunities {
                 let live_tag = if opp.is_live {
-                    format!("\x1b[31m🔴 LIVE {}\x1b[0m", opp.period.as_deref().unwrap_or(""))
+                    format!(
+                        "\x1b[31m🔴 LIVE {}\x1b[0m",
+                        opp.period.as_deref().unwrap_or("")
+                    )
                 } else {
                     "\x1b[34m○ SCHEDULED\x1b[0m".to_string()
                 };
@@ -2664,8 +3047,14 @@ pub async fn run_live_edge_scanner(
                 println!("│ PM Price: \x1b[33m{:.1}¢\x1b[0m │ DK Fair: \x1b[36m{:.1}%\x1b[0m │ Edge: {}{}%\x1b[0m │",
                     opp.pm_price * 100.0, opp.dk_fair_prob * 100.0, edge_color, format!("{:+.1}", opp.edge.abs()));
                 println!("├────────────────────────────────────────────────────────────────┤");
-                println!("│ Action: \x1b[1;32m{} @ {:.1}¢\x1b[0m │", action, action_price);
-                println!("│ Token: {}... │", &opp.token_id[..20.min(opp.token_id.len())]);
+                println!(
+                    "│ Action: \x1b[1;32m{} @ {:.1}¢\x1b[0m │",
+                    action, action_price
+                );
+                println!(
+                    "│ Token: {}... │",
+                    &opp.token_id[..20.min(opp.token_id.len())]
+                );
                 println!("└────────────────────────────────────────────────────────────────┘\n");
 
                 // Play alert sound if enabled
@@ -2681,8 +3070,10 @@ pub async fn run_live_edge_scanner(
         }
 
         // Summary
-        println!("\n\x1b[90m  Total opportunities found this session: {}\x1b[0m",
-            found_opportunities.len());
+        println!(
+            "\n\x1b[90m  Total opportunities found this session: {}\x1b[0m",
+            found_opportunities.len()
+        );
         println!("\x1b[90m  Next scan in {} seconds...\x1b[0m\n", interval);
 
         // Wait for next scan

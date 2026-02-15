@@ -18,16 +18,15 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{
-    GammaEventInfo, PolymarketClient, PriceCache, PriceUpdate, QuoteCache,
-    QuoteUpdate, SpotPrice,
+    GammaEventInfo, PolymarketClient, PriceCache, PriceUpdate, QuoteCache, QuoteUpdate, SpotPrice,
 };
 use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
-use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
-use crate::strategy::OrderExecutor;
-use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
 use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
+use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
+use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
+use crate::strategy::OrderExecutor;
 
 // ============================================================================
 // Configuration
@@ -133,35 +132,49 @@ pub struct MomentumConfig {
 
     /// Minimum confidence for entry (0.0 - 1.0)
     pub min_confidence: f64,
+
+    // === VWAP CONFIRMATION ===
+    /// Require spot price direction to agree with VWAP.
+    ///
+    /// When true:
+    /// - Up signals require: spot_price >= VWAP * (1 + min_vwap_deviation)
+    /// - Down signals require: spot_price <= VWAP * (1 - min_vwap_deviation)
+    pub require_vwap_confirmation: bool,
+
+    /// VWAP lookback window (seconds).
+    pub vwap_lookback_secs: u64,
+
+    /// Minimum deviation from VWAP required for confirmation (e.g., 0.001 = 0.1%).
+    pub min_vwap_deviation: Decimal,
 }
 
 impl Default for MomentumConfig {
     fn default() -> Self {
         // Default baseline volatility (60s rolling std dev)
         let mut baseline_volatility = HashMap::new();
-        baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005));  // 0.05%
-        baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008));  // 0.08%
-        baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015));  // 0.15%
-        baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012));  // 0.12%
+        baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005)); // 0.05%
+        baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008)); // 0.08%
+        baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015)); // 0.15%
+        baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012)); // 0.12%
 
         Self {
             // === AGGRESSIVE ENTRY (CRYINGLITTLEBABY style) ===
-            min_move_pct: dec!(0.0005),     // 0.05% base minimum move (adjusted by volatility)
-            max_entry_price: dec!(0.35),    // Max 35¢ entry (confirmed winner should be cheap)
-            min_edge: dec!(0.03),           // 3% minimum edge
-            lookback_secs: 5,               // 5-second fallback window
+            min_move_pct: dec!(0.0005), // 0.05% base minimum move (adjusted by volatility)
+            max_entry_price: dec!(0.35), // Max 35¢ entry (confirmed winner should be cheap)
+            min_edge: dec!(0.03),       // 3% minimum edge
+            lookback_secs: 5,           // 5-second fallback window
 
             // === Multi-timeframe momentum (always enabled) ===
             use_volatility_adjustment: true, // Adjust threshold by current volatility
             baseline_volatility,
-            volatility_lookback_secs: 60,   // 60-second rolling volatility
+            volatility_lookback_secs: 60, // 60-second rolling volatility
 
-            shares_per_trade: 100,          // ~$35 per trade at 35¢
+            shares_per_trade: 100, // ~$35 per trade at 35¢
 
             // === ANTI-OVERTRADING CONTROLS ===
-            max_positions: 3,               // Max 3 concurrent
-            cooldown_secs: 60,              // 60s between same symbol
-            max_daily_trades: 20,           // Max 20 trades/day
+            max_positions: 3,     // Max 3 concurrent
+            cooldown_secs: 60,    // 60s between same symbol
+            max_daily_trades: 20, // Max 20 trades/day
 
             symbols: vec![
                 "BTCUSDT".into(),
@@ -171,9 +184,9 @@ impl Default for MomentumConfig {
             ],
 
             // === CRYINGLITTLEBABY CONFIRMATORY MODE (DEFAULT: ON) ===
-            hold_to_resolution: true,       // Hold to collect $1
-            min_time_remaining_secs: 60,    // Min 1 min left
-            max_time_remaining_secs: 300,   // Max 5 min left (outcome should be decided)
+            hold_to_resolution: true,     // Hold to collect $1
+            min_time_remaining_secs: 60,  // Min 1 min left
+            max_time_remaining_secs: 300, // Max 5 min left (outcome should be decided)
 
             // === CROSS-SYMBOL RISK CONTROL ===
             max_window_exposure_usd: dec!(25), // Max $25 total per 15-min window
@@ -181,13 +194,18 @@ impl Default for MomentumConfig {
             signal_collection_delay_ms: 2000,  // 2 second delay to collect signals
 
             // === ENHANCED MOMENTUM DETECTION ===
-            require_mtf_agreement: true,       // Require all timeframes to agree
-            min_obi_confirmation: dec!(0.05),  // 5% OBI confirmation
-            use_kline_volatility: true,        // Use K-line historical volatility
-            time_decay_factor: dec!(0.3),      // 30% time decay
-            use_price_to_beat: true,           // Consider price-to-beat
-            dynamic_position_sizing: true,     // Scale by confidence
-            min_confidence: 0.5,               // Min 50% confidence
+            require_mtf_agreement: true, // Require all timeframes to agree
+            min_obi_confirmation: dec!(0.05), // 5% OBI confirmation
+            use_kline_volatility: true,  // Use K-line historical volatility
+            time_decay_factor: dec!(0.3), // 30% time decay
+            use_price_to_beat: true,     // Consider price-to-beat
+            dynamic_position_sizing: true, // Scale by confidence
+            min_confidence: 0.5,         // Min 50% confidence
+
+            // === VWAP CONFIRMATION (DEFAULT: OFF) ===
+            require_vwap_confirmation: false,
+            vwap_lookback_secs: 60,
+            min_vwap_deviation: dec!(0),
         }
     }
 }
@@ -211,10 +229,10 @@ pub struct ExitConfig {
 impl Default for ExitConfig {
     fn default() -> Self {
         Self {
-            take_profit_pct: dec!(0.20),      // +20% take profit
-            stop_loss_pct: dec!(0.15),        // -15% stop loss
-            trailing_stop_pct: dec!(0.10),    // 10% trailing from high
-            exit_before_resolution_secs: 30,  // Exit 30s before end
+            take_profit_pct: dec!(0.20),     // +20% take profit
+            stop_loss_pct: dec!(0.15),       // -15% stop loss
+            trailing_stop_pct: dec!(0.10),   // 10% trailing from high
+            exit_before_resolution_secs: 30, // Exit 30s before end
         }
     }
 }
@@ -287,36 +305,40 @@ impl EventMatcher {
         let mut symbol_to_series = HashMap::new();
 
         // Map each symbol to its series IDs (from Gamma API)
-        // === 15-MINUTE MARKETS ONLY (CRYINGLITTLEBABY style) ===
+        // Prefer 5m first, then 15m fallback.
 
-        // BTC: 10192 = 15m (btc-up-or-down-15m)
+        // BTC: 10684 = 5m, 10192 = 15m
         symbol_to_series.insert(
             "BTCUSDT".into(),
             vec![
+                "10684".into(), // btc-up-or-down-5m
                 "10192".into(), // btc-up-or-down-15m
             ],
         );
 
-        // ETH: 10191 = 15m ONLY
+        // ETH: 10683 = 5m, 10191 = 15m
         symbol_to_series.insert(
             "ETHUSDT".into(),
             vec![
+                "10683".into(), // eth-up-or-down-5m
                 "10191".into(), // eth-up-or-down-15m
             ],
         );
 
-        // SOL: 10423 = 15m ONLY
+        // SOL: 10686 = 5m, 10423 = 15m
         symbol_to_series.insert(
             "SOLUSDT".into(),
             vec![
+                "10686".into(), // sol-up-or-down-5m
                 "10423".into(), // sol-up-or-down-15m
             ],
         );
 
-        // XRP: 10422 = 15m (xrp-up-or-down-15m)
+        // XRP: 10685 = 5m, 10422 = 15m
         symbol_to_series.insert(
             "XRPUSDT".into(),
             vec![
+                "10685".into(), // xrp-up-or-down-5m
                 "10422".into(), // xrp-up-or-down-15m
             ],
         );
@@ -333,7 +355,8 @@ impl EventMatcher {
     /// In predictive mode: prefers events with more time remaining
     pub async fn find_event(&self, symbol: &str) -> Option<EventInfo> {
         // Default: predictive mode (more time = better)
-        self.find_event_with_timing(symbol, 60, i64::MAX, false).await
+        self.find_event_with_timing(symbol, 60, i64::MAX, false)
+            .await
     }
 
     /// Find event with timing constraints (CRYINGLITTLEBABY confirmatory mode)
@@ -351,38 +374,38 @@ impl EventMatcher {
     ) -> Option<EventInfo> {
         let series_ids = self.symbol_to_series.get(symbol)?;
         let events = self.active_events.read().await;
+        let mut best: Option<(i64, EventInfo)> = None;
 
-        // Search through all series for this symbol
+        // Search through all series for this symbol and choose the global best.
         for series_id in series_ids {
-            if let Some(series_events) = events.get(series_id) {
-                // Filter to events within time window
-                let filtered: Vec<_> = series_events
-                    .iter()
-                    .filter(|e| {
-                        let remaining = e.time_remaining().num_seconds();
-                        remaining >= min_secs as i64 && remaining <= max_secs
-                    })
-                    .collect();
+            let Some(series_events) = events.get(series_id) else {
+                continue;
+            };
 
-                if filtered.is_empty() {
+            for event in series_events {
+                let remaining = event.time_remaining().num_seconds();
+                if remaining < min_secs as i64 || remaining > max_secs {
                     continue;
                 }
 
-                // CRYINGLITTLEBABY: prefer events CLOSEST to ending (less time = better)
-                // Predictive: prefer events with MORE time remaining
-                let best = if prefer_close_to_end {
-                    filtered.into_iter().min_by_key(|e| e.time_remaining().num_seconds())
-                } else {
-                    filtered.into_iter().max_by_key(|e| e.time_remaining().num_seconds())
+                let is_better = match best.as_ref() {
+                    None => true,
+                    Some((best_remaining, _)) => {
+                        if prefer_close_to_end {
+                            remaining < *best_remaining
+                        } else {
+                            remaining > *best_remaining
+                        }
+                    }
                 };
 
-                if let Some(event) = best {
-                    return Some(event.clone());
+                if is_better {
+                    best = Some((remaining, event.clone()));
                 }
             }
         }
 
-        None
+        best.map(|(_, event)| event)
     }
 
     /// Get all tradeable events for a symbol
@@ -456,14 +479,21 @@ impl EventMatcher {
 
         // Sort by end_time (soonest first)
         sorted_events.sort_by(|a, b| {
-            let a_end = a.end_date.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok());
-            let b_end = b.end_date.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            let a_end = a
+                .end_date
+                .as_ref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            let b_end = b
+                .end_date
+                .as_ref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok());
             a_end.cmp(&b_end)
         });
 
         info!(
             "Series {}: {} events ending in next 60 minutes",
-            series_id, sorted_events.len()
+            series_id,
+            sorted_events.len()
         );
 
         let mut events = vec![];
@@ -487,13 +517,17 @@ impl EventMatcher {
 
             // Parse token IDs from clobTokenIds field (JSON string array)
             // Format: ["token_id_for_up", "token_id_for_down"]
-            let tokens: Vec<String> = market.clob_token_ids
+            let tokens: Vec<String> = market
+                .clob_token_ids
                 .as_ref()
                 .and_then(|ids_str| serde_json::from_str::<Vec<String>>(ids_str).ok())
                 .unwrap_or_default();
 
             if tokens.len() < 2 {
-                debug!("Market {} has insufficient tokens: {:?}", condition_id, tokens);
+                debug!(
+                    "Market {} has insufficient tokens: {:?}",
+                    condition_id, tokens
+                );
                 continue;
             }
 
@@ -513,7 +547,7 @@ impl EventMatcher {
 
             // Parse price_to_beat from market title (e.g., "Will BTC be above $94,000?")
             let price_to_beat = EventInfo::parse_price_from_question(
-                &event_details.title.clone().unwrap_or_default()
+                &event_details.title.clone().unwrap_or_default(),
             );
 
             let event_info = EventInfo {
@@ -541,7 +575,11 @@ impl EventMatcher {
 
     /// Convert Gamma API event to EventInfo
     fn convert_gamma_event(&self, gamma: &GammaEventInfo) -> Option<EventInfo> {
-        debug!("Converting event: id={}, markets={}", gamma.id, gamma.markets.len());
+        debug!(
+            "Converting event: id={}, markets={}",
+            gamma.id,
+            gamma.markets.len()
+        );
 
         let market = gamma.markets.first()?;
         let tokens = match market.tokens.as_ref() {
@@ -580,7 +618,7 @@ impl EventMatcher {
 
         let title = gamma.title.clone().unwrap_or_default();
         let price_to_beat = EventInfo::parse_price_from_question(&title);
-        
+
         Some(EventInfo {
             slug: gamma.slug.clone().unwrap_or_default(),
             title,
@@ -730,7 +768,10 @@ impl MomentumDetector {
         let momentum = match spot.weighted_momentum() {
             Some(m) => m,
             None => {
-                debug!("{} insufficient history for weighted momentum, using single timeframe", symbol);
+                debug!(
+                    "{} insufficient history for weighted momentum, using single timeframe",
+                    symbol
+                );
                 spot.momentum(self.config.lookback_secs)?
             }
         };
@@ -758,6 +799,38 @@ impl MomentumDetector {
         } else {
             (Direction::Down, down_ask?)
         };
+
+        // Optional VWAP confirmation (Binance trade-volume VWAP)
+        if self.config.require_vwap_confirmation {
+            let vwap = match spot.vwap(self.config.vwap_lookback_secs) {
+                Some(v) => v,
+                None => {
+                    debug!(
+                        "{} {} insufficient data for VWAP confirmation (lookback={}s)",
+                        symbol, direction, self.config.vwap_lookback_secs
+                    );
+                    return None;
+                }
+            };
+
+            let dev = self.config.min_vwap_deviation.max(dec!(0));
+            let ok = match direction {
+                Direction::Up => spot.price >= vwap * (Decimal::ONE + dev),
+                Direction::Down => spot.price <= vwap * (Decimal::ONE - dev),
+            };
+
+            if !ok {
+                debug!(
+                    "{} {} VWAP confirmation failed: spot=${:.4} vwap=${:.4} dev={:.3}%",
+                    symbol,
+                    direction,
+                    spot.price,
+                    vwap,
+                    dev * dec!(100)
+                );
+                return None;
+            }
+        }
 
         // Check if PM price is still attractive (lagging)
         if pm_price > self.config.max_entry_price {
@@ -889,7 +962,11 @@ impl MomentumDetector {
         let score = momentum_score * dec!(0.4) + edge_score * dec!(0.6);
 
         // Convert to f64, clamp to [0, 1]
-        score.to_string().parse::<f64>().unwrap_or(0.5).clamp(0.0, 1.0)
+        score
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0)
     }
 
     // ========================================================================
@@ -919,10 +996,7 @@ impl MomentumDetector {
 
         // If MTF agreement required but not met, skip
         if self.config.require_mtf_agreement && !mtf_agrees {
-            debug!(
-                "{} MTF disagreement: timeframes not aligned",
-                symbol
-            );
+            debug!("{} MTF disagreement: timeframes not aligned", symbol);
             return None;
         }
 
@@ -1002,7 +1076,8 @@ impl MomentumDetector {
         if edge < self.config.min_edge {
             debug!(
                 "{} {} edge {:.2}% < min {:.2}%",
-                symbol, direction,
+                symbol,
+                direction,
                 edge * dec!(100),
                 self.config.min_edge * dec!(100)
             );
@@ -1022,7 +1097,8 @@ impl MomentumDetector {
         if confidence < self.config.min_confidence {
             debug!(
                 "{} {} confidence {:.0}% < min {:.0}%",
-                symbol, direction,
+                symbol,
+                direction,
                 confidence * 100.0,
                 self.config.min_confidence * 100.0
             );
@@ -1066,9 +1142,7 @@ impl MomentumDetector {
             (Some(m10), Some(m30), Some(m60)) => {
                 m10 * dec!(0.2) + m30 * dec!(0.3) + m60 * dec!(0.5)
             }
-            (Some(m10), Some(m30), None) => {
-                m10 * dec!(0.4) + m30 * dec!(0.6)
-            }
+            (Some(m10), Some(m30), None) => m10 * dec!(0.4) + m30 * dec!(0.6),
             (Some(m), _, _) | (_, Some(m), _) | (_, _, Some(m)) => m,
             _ => return (Decimal::ZERO, false),
         };
@@ -1259,7 +1333,12 @@ impl std::fmt::Display for ExitReason {
                 write!(f, "StopLoss({:.1}%)", loss_pct * dec!(100))
             }
             ExitReason::TrailingStop { high, current } => {
-                write!(f, "TrailingStop(high={:.2}¢, cur={:.2}¢)", high * dec!(100), current * dec!(100))
+                write!(
+                    f,
+                    "TrailingStop(high={:.2}¢, cur={:.2}¢)",
+                    high * dec!(100),
+                    current * dec!(100)
+                )
             }
             ExitReason::TimeExit => write!(f, "TimeExit"),
             ExitReason::Manual => write!(f, "Manual"),
@@ -1283,7 +1362,9 @@ impl ExitManager {
 
         // 1. Take Profit
         if pnl_pct >= self.config.take_profit_pct {
-            return Some(ExitReason::TakeProfit { profit_pct: pnl_pct });
+            return Some(ExitReason::TakeProfit {
+                profit_pct: pnl_pct,
+            });
         }
 
         // 2. Stop Loss
@@ -1380,7 +1461,10 @@ impl WindowRiskTracker {
 
     /// Check if window already has an executed trade
     fn has_executed(&self, window_id: &str) -> bool {
-        self.executed_windows.get(window_id).copied().unwrap_or(false)
+        self.executed_windows
+            .get(window_id)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Mark window as executed
@@ -1390,13 +1474,17 @@ impl WindowRiskTracker {
 
     /// Get current exposure for a window
     fn get_exposure(&self, window_id: &str) -> Decimal {
-        self.window_exposure.get(window_id).copied().unwrap_or(Decimal::ZERO)
+        self.window_exposure
+            .get(window_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// Add exposure to a window
     fn add_exposure(&mut self, window_id: &str, amount: Decimal) {
         let current = self.get_exposure(window_id);
-        self.window_exposure.insert(window_id.to_string(), current + amount);
+        self.window_exposure
+            .insert(window_id.to_string(), current + amount);
     }
 
     /// Add pending signal for a window
@@ -1411,11 +1499,7 @@ impl WindowRiskTracker {
     fn get_best_signal(&self, window_id: &str) -> Option<PendingSignal> {
         self.pending_signals
             .get(window_id)
-            .and_then(|signals| {
-                signals.iter()
-                    .max_by(|a, b| a.edge.cmp(&b.edge))
-                    .cloned()
-            })
+            .and_then(|signals| signals.iter().max_by(|a, b| a.edge.cmp(&b.edge)).cloned())
     }
 
     /// Clear pending signals for a window
@@ -1428,7 +1512,8 @@ impl WindowRiskTracker {
         let now = Utc::now();
         let threshold = ChronoDuration::milliseconds(delay_ms as i64);
 
-        self.pending_signals.keys()
+        self.pending_signals
+            .keys()
             .filter(|window_id| {
                 // Check if window has signals and oldest is past threshold
                 if let Some(signals) = self.pending_signals.get(*window_id) {
@@ -1637,7 +1722,10 @@ impl MomentumEngine {
             return (0, 0, Decimal::ZERO);
         }
 
-        info!("🔍 Checking {} resolved positions...", resolved_symbols.len());
+        info!(
+            "🔍 Checking {} resolved positions...",
+            resolved_symbols.len()
+        );
 
         for symbol in resolved_symbols {
             // Get position details
@@ -1652,7 +1740,11 @@ impl MomentumEngine {
             };
 
             // Check market status via API
-            let market_result = self.event_matcher.client().get_market(&pos.condition_id).await;
+            let market_result = self
+                .event_matcher
+                .client()
+                .get_market(&pos.condition_id)
+                .await;
 
             match market_result {
                 Ok(market) => {
@@ -1699,11 +1791,15 @@ impl MomentumEngine {
                                             info!(
                                                 "✅ Claimed ${:.2} from {}: tx={}",
                                                 result.amount_claimed,
-                                                &result.condition_id[..16.min(result.condition_id.len())],
+                                                &result.condition_id
+                                                    [..16.min(result.condition_id.len())],
                                                 result.tx_hash
                                             );
                                         } else if let Some(err) = result.error {
-                                            warn!("❌ Failed to claim {}: {}", result.condition_id, err);
+                                            warn!(
+                                                "❌ Failed to claim {}: {}",
+                                                result.condition_id, err
+                                            );
                                         }
                                     }
                                 }
@@ -1747,7 +1843,8 @@ impl MomentumEngine {
 
                     // Update fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_closed(&pos.condition_id, &pos.symbol).await;
+                        fm.record_position_closed(&pos.condition_id, &pos.symbol)
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -1802,19 +1899,24 @@ impl MomentumEngine {
         // Log mode-specific configuration
         if self.config.hold_to_resolution {
             info!("=== CRYINGLITTLEBABY CONFIRMATORY MODE ===");
-            info!("• Entry window: {}-{}s before resolution",
-                self.config.min_time_remaining_secs,
-                self.config.max_time_remaining_secs);
+            info!(
+                "• Entry window: {}-{}s before resolution",
+                self.config.min_time_remaining_secs, self.config.max_time_remaining_secs
+            );
             info!("• Hold to resolution: YES (collect $1)");
-            info!("• Min CEX move: {:.2}%, Max entry: {:.0}¢",
+            info!(
+                "• Min CEX move: {:.2}%, Max entry: {:.0}¢",
                 self.config.min_move_pct * dec!(100),
-                self.config.max_entry_price * dec!(100));
+                self.config.max_entry_price * dec!(100)
+            );
         } else {
             info!("=== PREDICTIVE MODE (early entry) ===");
-            info!("Config: min_move={:.2}%, max_entry={:.0}¢, min_edge={:.1}%",
+            info!(
+                "Config: min_move={:.2}%, max_entry={:.0}¢, min_edge={:.1}%",
                 self.config.min_move_pct * dec!(100),
                 self.config.max_entry_price * dec!(100),
-                self.config.min_edge * dec!(100));
+                self.config.min_edge * dec!(100)
+            );
         }
 
         // Refresh events initially
@@ -1839,8 +1941,14 @@ impl MomentumEngine {
         if self.config.best_edge_only {
             info!("=== CROSS-SYMBOL RISK CONTROL ===");
             info!("• Best edge only: YES (queue signals, select highest edge)");
-            info!("• Signal collection delay: {}ms", self.config.signal_collection_delay_ms);
-            info!("• Max window exposure: ${:.2}", self.config.max_window_exposure_usd);
+            info!(
+                "• Signal collection delay: {}ms",
+                self.config.signal_collection_delay_ms
+            );
+            info!(
+                "• Max window exposure: ${:.2}",
+                self.config.max_window_exposure_usd
+            );
         }
 
         loop {
@@ -1910,18 +2018,24 @@ impl MomentumEngine {
         // Predictive: prefer events with more time remaining
         let event = if self.config.hold_to_resolution {
             // Confirmatory mode: find events within 1-5 min window
-            match self.event_matcher.find_event_with_timing(
-                symbol,
-                self.config.min_time_remaining_secs,
-                self.config.max_time_remaining_secs as i64,
-                true, // prefer_close_to_end
-            ).await {
+            match self
+                .event_matcher
+                .find_event_with_timing(
+                    symbol,
+                    self.config.min_time_remaining_secs,
+                    self.config.max_time_remaining_secs as i64,
+                    true, // prefer_close_to_end
+                )
+                .await
+            {
                 Some(e) => e,
                 None => {
-                    debug!("{} no event in confirmatory window ({}-{}s)",
+                    debug!(
+                        "{} no event in confirmatory window ({}-{}s)",
                         symbol,
                         self.config.min_time_remaining_secs,
-                        self.config.max_time_remaining_secs);
+                        self.config.max_time_remaining_secs
+                    );
                     return Ok(());
                 }
             }
@@ -1939,8 +2053,10 @@ impl MomentumEngine {
         // Log timing info in confirmatory mode
         if self.config.hold_to_resolution {
             let remaining = event.time_remaining().num_seconds();
-            debug!("{} found event {} with {}s remaining (confirmatory mode)",
-                symbol, event.title, remaining);
+            debug!(
+                "{} found event {} with {}s remaining (confirmatory mode)",
+                symbol, event.title, remaining
+            );
         }
 
         // Track event start price for volatility detection
@@ -1993,7 +2109,7 @@ impl MomentumEngine {
                 up_ask,
                 down_ask,
                 obi,
-                event.price_to_beat,  // Pass price_to_beat from EventInfo
+                event.price_to_beat, // Pass price_to_beat from EventInfo
             ) {
                 // Convert volatility signal to momentum signal for unified execution
                 let momentum_signal = MomentumSignal {
@@ -2043,7 +2159,9 @@ impl MomentumEngine {
         // Update dump hedge price tracker if enabled
         if let Some(ref dump_hedge) = self.dump_hedge {
             if let Some(ask) = update.quote.best_ask {
-                dump_hedge.on_simple_price_update(&update.token_id, ask).await;
+                dump_hedge
+                    .on_simple_price_update(&update.token_id, ask)
+                    .await;
             }
         }
 
@@ -2082,7 +2200,10 @@ impl MomentumEngine {
     async fn maybe_enter(&self, signal: MomentumSignal, event: &EventInfo) -> Result<()> {
         // Check daily trade limit
         if self.daily_limit_reached().await {
-            debug!("Daily trade limit reached ({}), skipping", self.config.max_daily_trades);
+            debug!(
+                "Daily trade limit reached ({}), skipping",
+                self.config.max_daily_trades
+            );
             return Ok(());
         }
 
@@ -2099,13 +2220,19 @@ impl MomentumEngine {
 
             // Check by symbol
             if positions.values().any(|p| p.symbol == signal.symbol) {
-                debug!("Already have position in {}, skipping duplicate entry", signal.symbol);
+                debug!(
+                    "Already have position in {}, skipping duplicate entry",
+                    signal.symbol
+                );
                 return Ok(());
             }
 
             // Check by condition_id (same event)
             if positions.contains_key(&event.condition_id) {
-                debug!("Already have position in event {}, skipping", event.condition_id);
+                debug!(
+                    "Already have position in event {}, skipping",
+                    event.condition_id
+                );
                 return Ok(());
             }
         }
@@ -2120,7 +2247,10 @@ impl MomentumEngine {
 
             // Check if window already has an executed trade (best_edge_only mode)
             if self.config.best_edge_only && tracker.has_executed(&window_id) {
-                debug!("Window {} already has trade, skipping {}", window_id, signal.symbol);
+                debug!(
+                    "Window {} already has trade, skipping {}",
+                    window_id, signal.symbol
+                );
                 return Ok(());
             }
 
@@ -2130,7 +2260,9 @@ impl MomentumEngine {
                 if current_exposure + estimated_cost > self.config.max_window_exposure_usd {
                     debug!(
                         "Window {} exposure ${:.2} + ${:.2} would exceed limit ${:.2}",
-                        window_id, current_exposure, estimated_cost,
+                        window_id,
+                        current_exposure,
+                        estimated_cost,
                         self.config.max_window_exposure_usd
                     );
                     return Ok(());
@@ -2155,8 +2287,10 @@ impl MomentumEngine {
 
             info!(
                 "📋 Queued: {} {} edge={:.2}% (window {})",
-                signal.symbol, signal.direction,
-                signal.edge * dec!(100), window_id
+                signal.symbol,
+                signal.direction,
+                signal.edge * dec!(100),
+                window_id
             );
 
             return Ok(());
@@ -2165,7 +2299,10 @@ impl MomentumEngine {
         // Determine shares to trade - use fund manager if available
         let shares_to_trade = if let Some(ref fm) = self.fund_manager {
             // Use fund manager for balance check and position sizing
-            match fm.can_open_position(&event.condition_id, &signal.symbol, signal.pm_price).await {
+            match fm
+                .can_open_position(&event.condition_id, &signal.symbol, signal.pm_price)
+                .await
+            {
                 Ok(PositionSizeResult::Approved { shares, amount_usd }) => {
                     info!(
                         "💰 Fund manager approved: {} shares @ {:.2}¢ = ${:.2}",
@@ -2189,7 +2326,10 @@ impl MomentumEngine {
             // No fund manager - check max positions limit
             let positions = self.positions.read().await;
             if positions.len() >= self.config.max_positions {
-                debug!("Max positions reached ({}), skipping", self.config.max_positions);
+                debug!(
+                    "Max positions reached ({}), skipping",
+                    self.config.max_positions
+                );
                 return Ok(());
             }
             // Position duplicate check already done above
@@ -2214,8 +2354,10 @@ impl MomentumEngine {
                 time_remaining,
                 signal.cex_move_pct * dec!(100),
             );
-            info!("   → Expected payout: $1.00 (profit: {:.0}¢ per share)",
-                (dec!(1) - signal.pm_price) * dec!(100));
+            info!(
+                "   → Expected payout: $1.00 (profit: {:.0}¢ per share)",
+                (dec!(1) - signal.pm_price) * dec!(100)
+            );
         } else {
             info!(
                 "ENTRY SIGNAL: {} {} @ {:.2}¢ (CEX move: {:.2}%, edge: {:.2}%, conf: {:.0}%)",
@@ -2231,12 +2373,17 @@ impl MomentumEngine {
         if self.dry_run {
             let expected_profit = if self.config.hold_to_resolution {
                 let profit_per_share = dec!(1) - signal.pm_price;
-                format!(" → Expected: ${:.2}", profit_per_share * Decimal::from(shares_to_trade))
+                format!(
+                    " → Expected: ${:.2}",
+                    profit_per_share * Decimal::from(shares_to_trade)
+                )
             } else {
                 String::new()
             };
-            info!("[DRY RUN] Would buy {} shares of {} {}{}",
-                shares_to_trade, signal.symbol, signal.direction, expected_profit);
+            info!(
+                "[DRY RUN] Would buy {} shares of {} {}{}",
+                shares_to_trade, signal.symbol, signal.direction, expected_profit
+            );
         } else {
             // Create and execute order with calculated shares
             let order = OrderRequest::buy_limit(
@@ -2259,7 +2406,8 @@ impl MomentumEngine {
 
                     // Record position with fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_opened(&event.condition_id, &signal.symbol).await;
+                        fm.record_position_opened(&event.condition_id, &signal.symbol)
+                            .await;
                     }
 
                     // Track position in local state
@@ -2281,16 +2429,18 @@ impl MomentumEngine {
 
                     // Log trade entry
                     if let Some(ref logger) = self.trade_logger {
-                        logger.record_entry(
-                            &signal.symbol,
-                            &event.slug,
-                            &event.condition_id,
-                            &format!("{}", signal.direction),
-                            fill_price,
-                            result.filled_shares,
-                            signal.cex_move_pct,
-                            signal.edge,
-                        ).await;
+                        logger
+                            .record_entry(
+                                &signal.symbol,
+                                &event.slug,
+                                &event.condition_id,
+                                &format!("{}", signal.direction),
+                                fill_price,
+                                result.filled_shares,
+                                signal.cex_move_pct,
+                                signal.edge,
+                            )
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -2402,8 +2552,8 @@ impl MomentumEngine {
                     let current_exposure = tracker.get_exposure(&window_id);
                     let max_exposure = self.config.max_window_exposure_usd;
 
-                    max_exposure == Decimal::ZERO ||
-                    current_exposure + pending.cost_usd <= max_exposure
+                    max_exposure == Decimal::ZERO
+                        || current_exposure + pending.cost_usd <= max_exposure
                 };
 
                 if can_execute {
@@ -2463,7 +2613,10 @@ impl MomentumEngine {
 
         // Get position size
         let shares_to_trade = if let Some(ref fm) = self.fund_manager {
-            match fm.can_open_position(&event.condition_id, &signal.symbol, signal.pm_price).await {
+            match fm
+                .can_open_position(&event.condition_id, &signal.symbol, signal.pm_price)
+                .await
+            {
                 Ok(PositionSizeResult::Approved { shares, amount_usd }) => {
                     info!(
                         "💰 Fund manager approved: {} shares @ {:.2}¢ = ${:.2}",
@@ -2496,7 +2649,9 @@ impl MomentumEngine {
         if self.dry_run {
             info!(
                 "[DRY RUN] Best edge trade: {} {} {} shares @ {:.2}¢",
-                signal.symbol, signal.direction, shares_to_trade,
+                signal.symbol,
+                signal.direction,
+                shares_to_trade,
                 signal.pm_price * dec!(100)
             );
         } else {
@@ -2521,7 +2676,8 @@ impl MomentumEngine {
 
                     // Record with fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_opened(&event.condition_id, &signal.symbol).await;
+                        fm.record_position_opened(&event.condition_id, &signal.symbol)
+                            .await;
                     }
 
                     // Track position
@@ -2543,16 +2699,18 @@ impl MomentumEngine {
 
                     // Log trade
                     if let Some(ref logger) = self.trade_logger {
-                        logger.record_entry(
-                            &signal.symbol,
-                            &event.slug,
-                            &event.condition_id,
-                            &format!("{}", signal.direction),
-                            fill_price,
-                            result.filled_shares,
-                            signal.cex_move_pct,
-                            signal.edge,
-                        ).await;
+                        logger
+                            .record_entry(
+                                &signal.symbol,
+                                &event.slug,
+                                &event.condition_id,
+                                &format!("{}", signal.direction),
+                                fill_price,
+                                result.filled_shares,
+                                signal.cex_move_pct,
+                                signal.edge,
+                            )
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -2585,9 +2743,9 @@ mod tests {
         let signal = MomentumSignal {
             symbol: "BTCUSDT".into(),
             direction: Direction::Up,
-            cex_move_pct: dec!(0.01),  // 1% (>= min_move_pct of 0.3%)
-            pm_price: dec!(0.30),       // 30¢ (<= max_entry_price of 35¢)
-            edge: dec!(0.10),           // 10% (>= min_edge of 3%)
+            cex_move_pct: dec!(0.01), // 1% (>= min_move_pct of 0.3%)
+            pm_price: dec!(0.30),     // 30¢ (<= max_entry_price of 35¢)
+            edge: dec!(0.10),         // 10% (>= min_edge of 3%)
             confidence: 0.8,
             timestamp: Utc::now(),
         };
@@ -2672,53 +2830,100 @@ mod tests {
     #[test]
     fn test_parse_price_from_question() {
         // Test various Polymarket question formats
-        
+
         // Standard format with dollar sign and commas
         assert_eq!(
             EventInfo::parse_price_from_question("Will BTC be above $94,000 at 9:15 PM?"),
             Some(dec!(94000))
         );
-        
+
         // With decimals
         assert_eq!(
             EventInfo::parse_price_from_question("Will ETH be above $3,500.50 at 10:00 AM?"),
             Some(dec!(3500.50))
         );
-        
+
         // Without dollar sign (outcome format like "↑ 94,000")
         assert_eq!(
             EventInfo::parse_price_from_question("↑ 94,000"),
             Some(dec!(94000))
         );
-        
+
         // Down arrow format
         assert_eq!(
             EventInfo::parse_price_from_question("↓ 86,000"),
             Some(dec!(86000))
         );
-        
+
         // Large numbers
         assert_eq!(
             EventInfo::parse_price_from_question("Will BTC be above $100,000?"),
             Some(dec!(100000))
         );
-        
+
         // Small numbers (SOL)
         assert_eq!(
             EventInfo::parse_price_from_question("Will SOL be above $150.25?"),
             Some(dec!(150.25))
         );
-        
+
         // No price in question
         assert_eq!(
             EventInfo::parse_price_from_question("Will it rain tomorrow?"),
             None
         );
-        
+
         // Empty string
-        assert_eq!(
-            EventInfo::parse_price_from_question(""),
-            None
+        assert_eq!(EventInfo::parse_price_from_question(""), None);
+    }
+
+    #[test]
+    fn test_event_matcher_includes_btc_5m_series() {
+        let client = PolymarketClient::new("https://clob.polymarket.com", true).unwrap();
+        let matcher = EventMatcher::new(client);
+
+        let btc_series = matcher
+            .symbol_to_series
+            .get("BTCUSDT")
+            .expect("BTCUSDT mapping should exist");
+
+        assert!(
+            btc_series.iter().any(|id| id == "10684"),
+            "BTCUSDT series should include 5m series id 10684"
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_event_with_timing_prefers_best_across_all_series() {
+        let client = PolymarketClient::new("https://clob.polymarket.com", true).unwrap();
+        let mut matcher = EventMatcher::new(client);
+
+        matcher
+            .symbol_to_series
+            .insert("BTCUSDT".into(), vec!["series-a".into(), "series-b".into()]);
+
+        let now = Utc::now();
+        let mk_event = |slug: &str, seconds_remaining: i64| EventInfo {
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            up_token_id: format!("{slug}-up"),
+            down_token_id: format!("{slug}-down"),
+            end_time: now + ChronoDuration::seconds(seconds_remaining),
+            condition_id: format!("{slug}-condition"),
+            price_to_beat: None,
+        };
+
+        {
+            let mut events = matcher.active_events.write().await;
+            events.insert("series-a".into(), vec![mk_event("event-a", 600)]);
+            events.insert("series-b".into(), vec![mk_event("event-b", 120)]);
+        }
+
+        let best = matcher
+            .find_event_with_timing("BTCUSDT", 60, 900, true)
+            .await
+            .expect("expected event");
+
+        assert_eq!(best.slug, "event-b");
     }
 }

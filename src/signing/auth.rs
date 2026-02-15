@@ -30,9 +30,7 @@ impl ClobAuthDomain {
 
     /// Compute the EIP-712 domain separator hash
     pub fn separator_hash(&self) -> [u8; 32] {
-        let type_hash = keccak256(
-            b"EIP712Domain(string name,string version,uint256 chainId)",
-        );
+        let type_hash = keccak256(b"EIP712Domain(string name,string version,uint256 chainId)");
 
         let name_hash = keccak256(self.name.as_bytes());
         let version_hash = keccak256(self.version.as_bytes());
@@ -41,9 +39,9 @@ impl ClobAuthDomain {
         encoded.extend_from_slice(&type_hash);
         encoded.extend_from_slice(&name_hash);
         encoded.extend_from_slice(&version_hash);
-        encoded.extend_from_slice(&ethers::abi::encode(&[
-            ethers::abi::Token::Uint(U256::from(self.chain_id)),
-        ]));
+        encoded.extend_from_slice(&ethers::abi::encode(&[ethers::abi::Token::Uint(
+            U256::from(self.chain_id),
+        )]));
 
         keccak256(&encoded)
     }
@@ -71,9 +69,8 @@ impl ClobAuthMessage {
 
     /// Compute the EIP-712 struct hash
     pub fn struct_hash(&self) -> [u8; 32] {
-        let type_hash = keccak256(
-            b"ClobAuth(address address,string timestamp,uint256 nonce,string message)",
-        );
+        let type_hash =
+            keccak256(b"ClobAuth(address address,string timestamp,uint256 nonce,string message)");
 
         let timestamp_hash = keccak256(self.timestamp.as_bytes());
         let message_hash = keccak256(self.message.as_bytes());
@@ -84,7 +81,9 @@ impl ClobAuthMessage {
         encoded.extend_from_slice(&[0u8; 12]);
         encoded.extend_from_slice(self.address.as_bytes());
         encoded.extend_from_slice(&timestamp_hash);
-        encoded.extend_from_slice(&ethers::abi::encode(&[ethers::abi::Token::Uint(self.nonce)]));
+        encoded.extend_from_slice(&ethers::abi::encode(&[ethers::abi::Token::Uint(
+            self.nonce,
+        )]));
         encoded.extend_from_slice(&message_hash);
 
         keccak256(&encoded)

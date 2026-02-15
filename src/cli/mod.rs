@@ -6,21 +6,26 @@
 //! - `ploy config` - Configuration management
 //! - `ploy infra` - Infrastructure management
 
-pub mod strategy;
-pub mod service;
 pub mod config;
 pub mod infra;
 pub mod legacy;
+pub mod rpc;
+pub mod service;
+pub mod strategy;
 
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 /// Ploy Trading System CLI
 #[derive(Parser, Debug)]
 #[command(name = "ploy")]
-#[command(author, version, about = "Professional trading system for prediction markets")]
+#[command(
+    author,
+    version,
+    about = "Professional trading system for prediction markets"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -45,7 +50,6 @@ pub enum Commands {
     Infra(infra::InfraCommands),
 
     // === Legacy commands for backward compatibility ===
-
     /// [Legacy] Run momentum strategy directly
     Momentum {
         #[arg(short, long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
@@ -138,7 +142,7 @@ impl Cli {
                 stats_interval,
             } => {
                 use crate::adapters::PolymarketClient;
-                use crate::strategy::{PaperTradingConfig, run_paper_trading, VolatilityArbConfig};
+                use crate::strategy::{run_paper_trading, PaperTradingConfig, VolatilityArbConfig};
 
                 // Parse symbols
                 let symbols: Vec<String> = symbols
@@ -147,21 +151,20 @@ impl Cli {
                     .collect();
 
                 // Build series IDs from symbols
-                let series_ids: Vec<String> = symbols.iter()
-                    .filter_map(|s| {
-                        match s.trim_end_matches("USDT") {
-                            "BTC" => Some("btc-price-series-15m".into()),
-                            "ETH" => Some("eth-price-series-15m".into()),
-                            "SOL" => Some("sol-price-series-15m".into()),
-                            _ => None,
-                        }
+                let series_ids: Vec<String> = symbols
+                    .iter()
+                    .filter_map(|s| match s.trim_end_matches("USDT") {
+                        "BTC" => Some("btc-price-series-15m".into()),
+                        "ETH" => Some("eth-price-series-15m".into()),
+                        "SOL" => Some("sol-price-series-15m".into()),
+                        _ => None,
                     })
                     .collect();
 
                 let mut vol_arb_config = VolatilityArbConfig::default();
                 vol_arb_config.min_vol_edge_pct = min_vol_edge / 100.0;
-                vol_arb_config.min_price_edge = Decimal::from_f64_retain(min_price_edge / 100.0)
-                    .unwrap_or(dec!(0.02));
+                vol_arb_config.min_price_edge =
+                    Decimal::from_f64_retain(min_price_edge / 100.0).unwrap_or(dec!(0.02));
                 vol_arb_config.symbols = symbols.clone();
 
                 let config = PaperTradingConfig {

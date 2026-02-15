@@ -54,7 +54,13 @@ impl FeishuNotifier {
             },
         };
 
-        match self.client.post(&self.webhook_url).json(&message).send().await {
+        match self
+            .client
+            .post(&self.webhook_url)
+            .json(&message)
+            .send()
+            .await
+        {
             Ok(resp) => {
                 if resp.status().is_success() {
                     debug!("Feishu notification sent successfully");
@@ -76,9 +82,9 @@ impl FeishuNotifier {
     /// Send trade notification
     pub async fn notify_trade(
         &self,
-        action: &str,      // "BUY" or "SELL"
-        market: &str,      // Market name
-        side: &str,        // "UP" or "DOWN"
+        action: &str, // "BUY" or "SELL"
+        market: &str, // Market name
+        side: &str,   // "UP" or "DOWN"
         price: f64,
         size: f64,
         order_id: Option<&str>,
@@ -97,7 +103,9 @@ impl FeishuNotifier {
             price * 100.0,
             size as i64,
             cost,
-            order_id.map(|id| format!("Order: {}", &id[..16.min(id.len())])).unwrap_or_default()
+            order_id
+                .map(|id| format!("Order: {}", &id[..16.min(id.len())]))
+                .unwrap_or_default()
         );
 
         if let Err(e) = self.send_message(&text).await {
@@ -117,10 +125,12 @@ impl FeishuNotifier {
     ) {
         let emoji = if action == "BUY" { "🟢" } else { "🔴" };
 
-        let pnl_str = pnl.map(|p| {
-            let pnl_emoji = if p >= 0.0 { "📈" } else { "📉" };
-            format!("\n{} PnL: ${:.2}", pnl_emoji, p)
-        }).unwrap_or_default();
+        let pnl_str = pnl
+            .map(|p| {
+                let pnl_emoji = if p >= 0.0 { "📈" } else { "📉" };
+                format!("\n{} PnL: ${:.2}", pnl_emoji, p)
+            })
+            .unwrap_or_default();
 
         let text = format!(
             "{} FILLED: {} {} {}\n\

@@ -11,4 +11,4 @@ pub mod watchdog;
 
 pub use alert_manager::{AlertLevel, AlertManager, AlertManagerConfig};
 pub use playbook::{RecoveryAction, RecoveryPlaybook};
-pub use watchdog::{Watchdog, WatchdogConfig, ComponentHealth};
+pub use watchdog::{ComponentHealth, Watchdog, WatchdogConfig};

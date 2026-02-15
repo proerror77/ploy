@@ -3,8 +3,8 @@
 //! Fetches historical K-line data for volatility analysis and pattern recognition.
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -98,12 +98,16 @@ impl BinanceKlineClient {
     ) -> Result<Vec<Kline>> {
         let url = format!(
             "{}/api/v3/klines?symbol={}&interval={}&limit={}",
-            BINANCE_API_URL, symbol, interval, limit.min(1000)
+            BINANCE_API_URL,
+            symbol,
+            interval,
+            limit.min(1000)
         );
 
         debug!("Fetching K-lines: {}", url);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .send()
             .await
@@ -177,12 +181,12 @@ impl BinanceKlineClient {
                 let diff = k.range_pct() - avg_range_pct;
                 diff * diff
             })
-            .sum::<Decimal>() / n_dec;
+            .sum::<Decimal>()
+            / n_dec;
 
         // Approximate sqrt for Decimal
-        let range_std = Decimal::try_from(
-            range_variance.to_f64().unwrap_or(0.0).sqrt()
-        ).unwrap_or(Decimal::ZERO);
+        let range_std = Decimal::try_from(range_variance.to_f64().unwrap_or(0.0).sqrt())
+            .unwrap_or(Decimal::ZERO);
 
         Some(VolatilityStats {
             avg_range_pct,
@@ -199,7 +203,8 @@ impl BinanceKlineClient {
         // Fetch last 100 15-minute candles (~25 hours of data)
         let klines = self.fetch_klines(symbol, "15m", 100).await?;
 
-        let stats = self.calculate_stats(&klines)
+        let stats = self
+            .calculate_stats(&klines)
             .ok_or_else(|| PloyError::Internal("Failed to calculate stats".to_string()))?;
 
         info!(
@@ -238,7 +243,10 @@ impl BinanceKlineClient {
 
     /// Initialize volatility stats for multiple symbols
     pub async fn initialize_symbols(&self, symbols: &[String]) -> Result<()> {
-        info!("Initializing K-line volatility stats for {} symbols", symbols.len());
+        info!(
+            "Initializing K-line volatility stats for {} symbols",
+            symbols.len()
+        );
 
         for symbol in symbols {
             match self.update_volatility_stats(symbol).await {

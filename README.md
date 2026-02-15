@@ -35,11 +35,18 @@ A high-performance Polymarket trading bot with a cyberpunk-style terminal dashbo
   - Momentum trading based on CEX price movements
   - Split arbitrage (time-separated entry for hedged positions)
   - Two-leg arbitrage for binary markets
+- **Event-Driven Mispricing Scanner** - Auto-scan Polymarket multi-outcome events using public resolution-like data sources (Arena leaderboard)
 - **Claude AI Agent** - AI-powered trading assistance and market analysis
 - **Live Data Feeds**
   - Polymarket CLOB WebSocket for quotes
   - Binance WebSocket for BTC prices
 - **Order Execution** - Authenticated order placement with retry logic
+
+## 四大策略框架（Strategy Framework）
+
+你提出的四大策略（事件驅動 / 套利 / 動量 / 信息優勢）已在 repo 內有對應落地，但目前以多個執行框架並存（legacy bot loop / StrategyManager / multi-agent）方式存在。
+
+詳細對照與下一步工程化建議：`docs/STRATEGY_FRAMEWORK_4_PILLARS.md`
 
 ## Installation
 
@@ -147,9 +154,27 @@ ploy book <token_id>
 # View account balance and positions
 ploy account
 
+# Scan an external-data-driven market (Arena leaderboard → implied true probabilities)
+# One-shot scan by title (finds best matching Polymarket event via Gamma `title_contains`)
+ploy event-edge --title "Which company has the best AI model end of February?"
+
+# Watch mode (polls both Arena + Polymarket quotes)
+ploy event-edge --title "Which company has the best AI model end of February?" --watch --interval-secs 30
+
+# Place orders when edge/EV thresholds are met (defaults to dry-run prints)
+ploy event-edge --event <event_id> --watch --trade --min-edge 0.08 --max-entry 0.75 --shares 100
+
 # Analyze market making opportunities
 ploy market-make <token_id>
 ```
+
+**Notes for `event-edge`:**
+- Fetches Arena text leaderboard via `https://r.jina.ai/https://arena.ai/leaderboard/text` (proxy for JS/CF-protected pages).
+- Trades only when `p_true - best_ask >= min_edge` and price is below `max_entry`.
+- For real order placement, set `POLYMARKET_PRIVATE_KEY` (and `POLYMARKET_FUNDER` if using a proxy/Magic wallet) and run with `--dry-run false`.
+
+**Always-on (autonomous loop):**
+- Enable `[event_edge_agent]` in `config/default.toml` and run `ploy run`; the agent will scan and trade continuously in the background. See `docs/EVENT_EDGE_AGENT.md`.
 
 ## Architecture
 

@@ -63,24 +63,16 @@ pub trait Strategy: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DataFeed {
     /// Polymarket WebSocket quotes for specific tokens
-    PolymarketQuotes {
-        tokens: Vec<String>,
-    },
+    PolymarketQuotes { tokens: Vec<String> },
 
     /// Binance spot prices for specific symbols
-    BinanceSpot {
-        symbols: Vec<String>,
-    },
+    BinanceSpot { symbols: Vec<String> },
 
     /// Polymarket event metadata (for series monitoring)
-    PolymarketEvents {
-        series_ids: Vec<String>,
-    },
+    PolymarketEvents { series_ids: Vec<String> },
 
     /// Periodic tick at specified interval
-    Tick {
-        interval_ms: u64,
-    },
+    Tick { interval_ms: u64 },
 }
 
 // ============================================================================
@@ -115,9 +107,7 @@ pub enum MarketUpdate {
     },
 
     /// Event expired/closed
-    EventExpired {
-        event_id: String,
-    },
+    EventExpired { event_id: String },
 }
 
 impl MarketUpdate {
@@ -172,9 +162,7 @@ pub enum StrategyAction {
     },
 
     /// Cancel an existing order
-    CancelOrder {
-        order_id: String,
-    },
+    CancelOrder { order_id: String },
 
     /// Modify an existing order
     ModifyOrder {
@@ -184,31 +172,19 @@ pub enum StrategyAction {
     },
 
     /// Update risk state
-    UpdateRisk {
-        level: RiskLevel,
-        reason: String,
-    },
+    UpdateRisk { level: RiskLevel, reason: String },
 
     /// Log a strategy event
-    LogEvent {
-        event: StrategyEvent,
-    },
+    LogEvent { event: StrategyEvent },
 
     /// Send an alert
-    Alert {
-        level: AlertLevel,
-        message: String,
-    },
+    Alert { level: AlertLevel, message: String },
 
     /// Request data feed subscription change
-    SubscribeFeed {
-        feed: DataFeed,
-    },
+    SubscribeFeed { feed: DataFeed },
 
     /// Request data feed unsubscription
-    UnsubscribeFeed {
-        feed: DataFeed,
-    },
+    UnsubscribeFeed { feed: DataFeed },
 }
 
 // ============================================================================

@@ -90,7 +90,11 @@ impl BacktestPosition {
         if self.shares == 0 {
             return 0.0;
         }
-        let price = if self.is_up { state.up_bid } else { state.down_bid };
+        let price = if self.is_up {
+            state.up_bid
+        } else {
+            state.down_bid
+        };
         self.shares as f64 * price
     }
 
@@ -98,7 +102,11 @@ impl BacktestPosition {
         if self.shares == 0 {
             return 0.0;
         }
-        let price = if self.is_up { state.up_bid } else { state.down_bid };
+        let price = if self.is_up {
+            state.up_bid
+        } else {
+            state.down_bid
+        };
         self.shares as f64 * (price - self.entry_price)
     }
 }
@@ -372,7 +380,8 @@ impl BacktestEnvironment {
 
                 let proceeds = self.position.shares as f64 * price;
                 let fee = proceeds * self.config.transaction_cost;
-                let pnl = proceeds - fee - (self.position.shares as f64 * self.position.entry_price);
+                let pnl =
+                    proceeds - fee - (self.position.shares as f64 * self.position.entry_price);
 
                 self.capital += proceeds - fee;
                 self.episode_pnl += pnl;

@@ -16,13 +16,13 @@ use tracing::{debug, info, warn};
 use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent,
-    ExecutionReport, OrderIntent, OrderPriority,
+    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent,
+    OrderPriority,
 };
 use crate::rl::config::RLConfig;
 use crate::rl::core::{
-    ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction,
-    RawObservation, RewardFunction, StateEncoder,
+    ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
+    RewardFunction, StateEncoder,
 };
 use crate::rl::memory::ReplayBuffer;
 
@@ -180,8 +180,10 @@ impl RLCryptoAgent {
         if let Some(momentum) = event.momentum {
             self.current_obs.momentum_1s = Some(Decimal::try_from(momentum[0]).unwrap_or_default());
             self.current_obs.momentum_5s = Some(Decimal::try_from(momentum[1]).unwrap_or_default());
-            self.current_obs.momentum_15s = Some(Decimal::try_from(momentum[2]).unwrap_or_default());
-            self.current_obs.momentum_60s = Some(Decimal::try_from(momentum[3]).unwrap_or_default());
+            self.current_obs.momentum_15s =
+                Some(Decimal::try_from(momentum[2]).unwrap_or_default());
+            self.current_obs.momentum_60s =
+                Some(Decimal::try_from(momentum[3]).unwrap_or_default());
         }
 
         // Update quotes
@@ -196,10 +198,8 @@ impl RLCryptoAgent {
 
         // Update time features
         let now = Utc::now();
-        self.current_obs.update_time_features(
-            now.hour(),
-            now.weekday().num_days_from_monday(),
-        );
+        self.current_obs
+            .update_time_features(now.hour(), now.weekday().num_days_from_monday());
 
         // Update position features
         self.update_position_features();
@@ -267,11 +267,9 @@ impl RLCryptoAgent {
                 };
 
                 return ContinuousAction::new(
-                    0.7,      // Buy signal
-                    side_pref,
-                    0.5,      // Medium urgency
-                    0.0,
-                    0.0,
+                    0.7, // Buy signal
+                    side_pref, 0.5, // Medium urgency
+                    0.0, 0.0,
                 );
             }
 
@@ -279,10 +277,8 @@ impl RLCryptoAgent {
             if sum_f32 > 1.0 && self.current_obs.has_position {
                 return ContinuousAction::new(
                     -0.8, // Sell signal
-                    0.0,
-                    0.7,  // Urgent exit
-                    0.0,
-                    0.0,
+                    0.0, 0.7, // Urgent exit
+                    0.0, 0.0,
                 );
             }
 
@@ -292,10 +288,8 @@ impl RLCryptoAgent {
                 if pnl_f32 < -0.05 && self.current_obs.has_position {
                     return ContinuousAction::new(
                         -1.0, // Strong sell
-                        0.0,
-                        1.0,  // Maximum urgency
-                        0.0,
-                        0.0,
+                        0.0, 1.0, // Maximum urgency
+                        0.0, 0.0,
                     );
                 }
             }
@@ -394,7 +388,11 @@ impl RLCryptoAgent {
                 // Complete hedge by buying opposite side
                 if let Some(pos) = &self.position {
                     let (other_side, other_token, other_ask) = match pos.side {
-                        Side::Up => (Side::Down, &self.config.down_token_id, self.current_obs.down_ask),
+                        Side::Up => (
+                            Side::Down,
+                            &self.config.down_token_id,
+                            self.current_obs.down_ask,
+                        ),
                         Side::Down => (Side::Up, &self.config.up_token_id, self.current_obs.up_ask),
                     };
 
@@ -442,7 +440,10 @@ impl RLCryptoAgent {
     }
 
     /// Process crypto event and generate intents
-    fn process_crypto_event(&mut self, event: &super::super::types::CryptoEvent) -> Vec<OrderIntent> {
+    fn process_crypto_event(
+        &mut self,
+        event: &super::super::types::CryptoEvent,
+    ) -> Vec<OrderIntent> {
         // Check if this is a coin we're monitoring
         let coin = event.symbol.replace("USDT", "");
         if !self.config.coins.iter().any(|c| c == &coin) {
@@ -475,7 +476,10 @@ impl RLCryptoAgent {
         if !intents.is_empty() {
             debug!(
                 "[{}] Step {}: Generated {} intents, action={:?}",
-                self.config.id, self.step_count, intents.len(), action.to_discrete()
+                self.config.id,
+                self.step_count,
+                intents.len(),
+                action.to_discrete()
             );
         }
 
@@ -493,7 +497,8 @@ impl RLCryptoAgent {
                 if self.position.is_some() {
                     // Closing position
                     if let Some(pos) = &self.position {
-                        let realized = (avg_price - pos.entry_price) * Decimal::from(report.filled_shares);
+                        let realized =
+                            (avg_price - pos.entry_price) * Decimal::from(report.filled_shares);
                         self.daily_pnl += realized;
                         info!(
                             "[{}] Position closed: realized PnL = {}",
@@ -505,7 +510,11 @@ impl RLCryptoAgent {
                 } else {
                     // Opening position
                     // Determine side from intent metadata (simplified)
-                    let side = if self.last_action.map(|a| a.side_preference > 0.0).unwrap_or(true) {
+                    let side = if self
+                        .last_action
+                        .map(|a| a.side_preference > 0.0)
+                        .unwrap_or(true)
+                    {
                         Side::Up
                     } else {
                         Side::Down
@@ -551,7 +560,8 @@ impl RLCryptoAgent {
 
     /// Update exposure calculation
     fn update_exposure(&mut self) {
-        self.total_exposure = self.position
+        self.total_exposure = self
+            .position
             .as_ref()
             .map(|p| p.entry_price * Decimal::from(p.shares))
             .unwrap_or(Decimal::ZERO);
@@ -604,9 +614,7 @@ impl DomainAgent for RLCryptoAgent {
         }
 
         match event {
-            DomainEvent::Crypto(crypto_event) => {
-                Ok(self.process_crypto_event(&crypto_event))
-            }
+            DomainEvent::Crypto(crypto_event) => Ok(self.process_crypto_event(&crypto_event)),
             DomainEvent::QuoteUpdate(update) => {
                 // Update quote cache
                 if update.domain == Domain::Crypto {
@@ -628,10 +636,8 @@ impl DomainAgent for RLCryptoAgent {
             }
             DomainEvent::Tick(now) => {
                 // Update time features
-                self.current_obs.update_time_features(
-                    now.hour(),
-                    now.weekday().num_days_from_monday(),
-                );
+                self.current_obs
+                    .update_time_features(now.hour(), now.weekday().num_days_from_monday());
 
                 // Update position prices
                 self.update_position_prices();
@@ -671,7 +677,11 @@ impl DomainAgent for RLCryptoAgent {
     }
 
     fn position_count(&self) -> usize {
-        if self.position.is_some() { 1 } else { 0 }
+        if self.position.is_some() {
+            1
+        } else {
+            0
+        }
     }
 
     fn total_exposure(&self) -> Decimal {
@@ -688,7 +698,12 @@ mod tests {
     use super::*;
     use crate::platform::types::{CryptoEvent, QuoteData};
 
-    fn make_crypto_event(symbol: &str, spot: Decimal, up_ask: Decimal, down_ask: Decimal) -> CryptoEvent {
+    fn make_crypto_event(
+        symbol: &str,
+        spot: Decimal,
+        up_ask: Decimal,
+        down_ask: Decimal,
+    ) -> CryptoEvent {
         CryptoEvent {
             symbol: symbol.to_string(),
             spot_price: spot,

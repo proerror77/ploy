@@ -188,7 +188,10 @@ impl IdempotencyManager {
         .execute(self.store.pool())
         .await?;
 
-        debug!("Marked idempotency key {} as completed (order: {})", key, order_id);
+        debug!(
+            "Marked idempotency key {} as completed (order: {})",
+            key, order_id
+        );
         Ok(())
     }
 
@@ -211,7 +214,10 @@ impl IdempotencyManager {
         .execute(self.store.pool())
         .await?;
 
-        warn!("Marked idempotency key {} as failed: {}", key, error_message);
+        warn!(
+            "Marked idempotency key {} as failed: {}",
+            key, error_message
+        );
         Ok(())
     }
 

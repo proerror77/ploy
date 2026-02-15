@@ -160,7 +160,9 @@ impl EventEdgeCore {
                         );
                     }
                 }
-                Err(e) => warn!("EventEdgeCore: registry query failed, falling back to config: {e}"),
+                Err(e) => {
+                    warn!("EventEdgeCore: registry query failed, falling back to config: {e}")
+                }
             }
         }
 
@@ -261,7 +263,9 @@ impl EventEdgeCore {
             event_id: scan.event_id.clone(),
             outcome: r.outcome.clone(),
             token_id: r.yes_token_id.clone(),
-            market_slug: String::new(),
+            // Event-level strategies may not expose per-outcome market slugs directly.
+            // Use a stable non-empty market key for routing/risk/position grouping.
+            market_slug: scan.event_id.clone(),
             side: crate::domain::Side::Up,
             shares: self.cfg.shares,
             limit_price: ask,

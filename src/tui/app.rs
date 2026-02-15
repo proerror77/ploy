@@ -82,13 +82,13 @@ impl TuiApp {
         up_size: Decimal,
         down_size: Decimal,
     ) {
-        self.market = MarketState::from_quotes(
-            up_bid, up_ask, down_bid, down_ask, up_size, down_size
-        );
+        self.market =
+            MarketState::from_quotes(up_bid, up_ask, down_bid, down_ask, up_size, down_size);
 
         // Update position-related market stats
         let (up_shares, down_shares, total_pnl) = self.calculate_position_stats();
-        self.market.with_positions(up_shares, down_shares, total_pnl);
+        self.market
+            .with_positions(up_shares, down_shares, total_pnl);
 
         self.last_update = Utc::now();
     }
@@ -111,21 +111,26 @@ impl TuiApp {
     }
 
     /// Update or add a position
-    pub fn update_position(&mut self, side: Side, shares: u64, current_price: Decimal, avg_price: Decimal) {
+    pub fn update_position(
+        &mut self,
+        side: Side,
+        shares: u64,
+        current_price: Decimal,
+        avg_price: Decimal,
+    ) {
         // Remove existing position for this side
         self.positions.retain(|p| p.side != side);
 
         if shares > 0 {
-            self.positions.push(DisplayPosition::new(side, shares, current_price, avg_price));
+            self.positions
+                .push(DisplayPosition::new(side, shares, current_price, avg_price));
         }
 
         // Re-sort: UP first, then DOWN
-        self.positions.sort_by(|a, b| {
-            match (&a.side, &b.side) {
-                (Side::Up, Side::Down) => std::cmp::Ordering::Less,
-                (Side::Down, Side::Up) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            }
+        self.positions.sort_by(|a, b| match (&a.side, &b.side) {
+            (Side::Up, Side::Down) => std::cmp::Ordering::Less,
+            (Side::Down, Side::Up) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
         });
     }
 
@@ -215,7 +220,8 @@ impl TuiApp {
     /// Switch to next market
     pub fn next_market(&mut self) {
         if !self.available_markets.is_empty() {
-            self.selected_market_idx = (self.selected_market_idx + 1) % self.available_markets.len();
+            self.selected_market_idx =
+                (self.selected_market_idx + 1) % self.available_markets.len();
             self.selected_market = self.available_markets[self.selected_market_idx].clone();
         }
     }
@@ -250,16 +256,23 @@ impl TuiApp {
 
         // Demo market
         self.market = MarketState::from_quotes(
-            dec!(0.4780), dec!(0.4816),
-            dec!(0.5380), dec!(0.5423),
-            dec!(1000), dec!(1200),
+            dec!(0.4780),
+            dec!(0.4816),
+            dec!(0.5380),
+            dec!(0.5423),
+            dec!(1000),
+            dec!(1200),
         );
         self.market.with_positions(36598, 36317, dec!(2417));
 
         // Demo transactions
         for i in 0..10 {
             let side = if i % 2 == 0 { Side::Up } else { Side::Down };
-            let price = if side == Side::Up { dec!(0.4602) } else { dec!(0.4983) };
+            let price = if side == Side::Up {
+                dec!(0.4602)
+            } else {
+                dec!(0.4983)
+            };
             self.transactions.push(DisplayTransaction::new(
                 Utc::now() - chrono::Duration::seconds(i * 5),
                 side,

@@ -66,12 +66,18 @@ impl OrderBookState {
 
     /// Get best bid price
     pub fn best_bid(&self) -> Option<Decimal> {
-        self.bids.keys().next_back().map(|&p| Decimal::from(p) / Decimal::from(100))
+        self.bids
+            .keys()
+            .next_back()
+            .map(|&p| Decimal::from(p) / Decimal::from(100))
     }
 
     /// Get best ask price
     pub fn best_ask(&self) -> Option<Decimal> {
-        self.asks.keys().next().map(|&p| Decimal::from(p) / Decimal::from(100))
+        self.asks
+            .keys()
+            .next()
+            .map(|&p| Decimal::from(p) / Decimal::from(100))
     }
 
     /// Get mid price
@@ -177,8 +183,7 @@ impl LobCache {
         let mut books = self.books.write().await;
         let book = books.entry(update.symbol.clone()).or_default();
 
-        let ts = DateTime::from_timestamp_millis(update.event_time)
-            .unwrap_or_else(Utc::now);
+        let ts = DateTime::from_timestamp_millis(update.event_time).unwrap_or_else(Utc::now);
 
         // Apply bid updates
         for (price_str, qty_str) in &update.bids {
@@ -325,13 +330,10 @@ impl BinanceDepthStream {
 
         info!("Connecting to Binance depth stream: {}", url);
 
-        let (ws_stream, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            connect_async(&url),
-        )
-        .await
-        .map_err(|_| PloyError::Internal("Binance WebSocket connection timeout".to_string()))?
-        .map_err(PloyError::WebSocket)?;
+        let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(&url))
+            .await
+            .map_err(|_| PloyError::Internal("Binance WebSocket connection timeout".to_string()))?
+            .map_err(PloyError::WebSocket)?;
 
         info!("Connected to Binance depth stream");
 
@@ -414,11 +416,11 @@ mod tests {
 
         // Add some bids (price in cents)
         book.bids.insert(10000, dec!(100)); // $100.00, qty 100
-        book.bids.insert(9990, dec!(50));   // $99.90, qty 50
+        book.bids.insert(9990, dec!(50)); // $99.90, qty 50
 
         // Add some asks
-        book.asks.insert(10010, dec!(80));  // $100.10, qty 80
-        book.asks.insert(10020, dec!(40));  // $100.20, qty 40
+        book.asks.insert(10010, dec!(80)); // $100.10, qty 80
+        book.asks.insert(10020, dec!(40)); // $100.20, qty 40
 
         // OBI = (150 - 120) / (150 + 120) = 30 / 270 = 0.111...
         let obi = book.calculate_obi(2).unwrap();
@@ -429,7 +431,7 @@ mod tests {
     fn test_mid_price() {
         let mut book = OrderBookState::default();
         book.bids.insert(10000, dec!(100)); // $100.00
-        book.asks.insert(10010, dec!(80));  // $100.10
+        book.asks.insert(10010, dec!(80)); // $100.10
 
         let mid = book.mid_price().unwrap();
         assert_eq!(mid, dec!(100.05));

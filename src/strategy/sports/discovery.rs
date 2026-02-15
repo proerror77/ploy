@@ -57,8 +57,18 @@ impl SportsMarketDiscovery {
     /// Get search keywords for a league
     fn league_keywords(&self, league: SportsLeague) -> Vec<&'static str> {
         match league {
-            SportsLeague::NBA => vec!["NBA", "Lakers", "Celtics", "Warriors", "Knicks", "Bulls", "Heat", "Bucks"],
-            SportsLeague::NFL => vec!["NFL", "Super Bowl", "Chiefs", "Eagles", "Cowboys", "Patriots", "49ers"],
+            SportsLeague::NBA => vec![
+                "NBA", "Lakers", "Celtics", "Warriors", "Knicks", "Bulls", "Heat", "Bucks",
+            ],
+            SportsLeague::NFL => vec![
+                "NFL",
+                "Super Bowl",
+                "Chiefs",
+                "Eagles",
+                "Cowboys",
+                "Patriots",
+                "49ers",
+            ],
             SportsLeague::MLB => vec!["MLB", "World Series", "Yankees", "Dodgers", "Red Sox"],
             SportsLeague::NHL => vec!["NHL", "Stanley Cup", "Bruins", "Rangers", "Maple Leafs"],
             SportsLeague::Soccer => vec!["Premier League", "Champions League", "World Cup", "UEFA"],
@@ -77,7 +87,10 @@ impl SportsMarketDiscovery {
     /// Fetch markets for a specific league
     async fn fetch_league_markets(&self, league: SportsLeague) -> Result<Vec<BinaryMarket>> {
         let keywords = self.league_keywords(league);
-        info!("Searching for {} markets with keywords: {:?}", league, keywords);
+        info!(
+            "Searching for {} markets with keywords: {:?}",
+            league, keywords
+        );
 
         // Fetch all active events from Gamma API
         let events = self.client.get_active_sports_events(&keywords[0]).await?;
@@ -87,7 +100,8 @@ impl SportsMarketDiscovery {
 
         for event in events {
             // Skip events that have already ended
-            let end_time = event.end_date
+            let end_time = event
+                .end_date
                 .as_ref()
                 .and_then(|s| Self::parse_end_date(s))
                 .unwrap_or(now);
@@ -102,7 +116,9 @@ impl SportsMarketDiscovery {
                 None => continue,
             };
             let title_lower = title.to_lowercase();
-            let matches_league = keywords.iter().any(|kw| title_lower.contains(&kw.to_lowercase()));
+            let matches_league = keywords
+                .iter()
+                .any(|kw| title_lower.contains(&kw.to_lowercase()));
 
             if !matches_league {
                 continue;
@@ -134,7 +150,9 @@ impl SportsMarketDiscovery {
                         };
 
                         // Get market question for metadata
-                        let question = gamma_market.question.clone()
+                        let question = gamma_market
+                            .question
+                            .clone()
                             .or_else(|| event.title.clone())
                             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -191,7 +209,8 @@ impl MarketDiscovery for SportsMarketDiscovery {
     async fn get_market(&self, event_id: &str) -> Result<Option<BinaryMarket>> {
         let event_details = self.client.get_event_details(event_id).await?;
 
-        let end_time = event_details.end_date
+        let end_time = event_details
+            .end_date
             .as_ref()
             .and_then(|s| Self::parse_end_date(s))
             .unwrap_or_else(Utc::now);
@@ -213,7 +232,9 @@ impl MarketDiscovery for SportsMarketDiscovery {
                         (second.token_id, first.token_id)
                     };
 
-                    let question = gamma_market.question.clone()
+                    let question = gamma_market
+                        .question
+                        .clone()
                         .or_else(|| event_details.title.clone())
                         .unwrap_or_else(|| "Unknown".to_string());
 

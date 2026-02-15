@@ -27,19 +27,24 @@ pub fn render_transactions(f: &mut Frame, area: Rect, app: &TuiApp) {
     f.render_widget(block, area);
 
     if app.transactions.is_empty() {
-        let no_tx = Paragraph::new("No recent transactions")
-            .style(THEME.inactive_style());
+        let no_tx = Paragraph::new("No recent transactions").style(THEME.inactive_style());
         f.render_widget(no_tx, inner);
         return;
     }
 
     // Header line
     let header = Line::from(vec![
-        Span::styled("  TIME        ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  TIME        ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled("SIDE   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("  PRICE   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("   SIZE   ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(" BTC PRICE  ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " BTC PRICE  ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled("TX HASH", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
@@ -73,11 +78,7 @@ pub fn render_transactions(f: &mut Frame, area: Rect, app: &TuiApp) {
             .content_length(app.transactions.len())
             .position(app.tx_scroll_offset);
 
-        f.render_stateful_widget(
-            scrollbar,
-            area,
-            &mut scrollbar_state,
-        );
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
 

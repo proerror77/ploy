@@ -14,6 +14,10 @@ use crate::domain::{RiskState, Side, StrategyState};
 pub struct MarketSnapshot {
     /// Market/event identifier
     pub market_id: String,
+    /// YES token id for execution (when resolvable)
+    pub yes_token_id: Option<String>,
+    /// NO token id for execution (when resolvable)
+    pub no_token_id: Option<String>,
     /// Human-readable description
     pub description: Option<String>,
     /// Current YES price (best bid)
@@ -44,6 +48,8 @@ impl MarketSnapshot {
     pub fn new(market_id: String) -> Self {
         Self {
             market_id,
+            yes_token_id: None,
+            no_token_id: None,
             description: None,
             yes_bid: None,
             yes_ask: None,
@@ -148,7 +154,11 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
-    pub fn new(market_state: MarketSnapshot, strategy_state: StrategyState, risk_state: RiskState) -> Self {
+    pub fn new(
+        market_state: MarketSnapshot,
+        strategy_state: StrategyState,
+        risk_state: RiskState,
+    ) -> Self {
         Self {
             market_state,
             strategy_state,
@@ -222,19 +232,14 @@ pub enum AgentAction {
         reasoning: String,
     },
     /// Wait and continue monitoring
-    Wait {
-        duration_secs: u64,
-        reason: String,
-    },
+    Wait { duration_secs: u64, reason: String },
     /// Alert the user
     Alert {
         severity: String, // "info", "warning", "critical"
         message: String,
     },
     /// No action needed
-    NoAction {
-        reason: String,
-    },
+    NoAction { reason: String },
 }
 
 /// Response from the Claude agent

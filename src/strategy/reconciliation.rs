@@ -77,7 +77,7 @@ impl Default for ReconciliationConfig {
         Self {
             interval_secs: 30,
             auto_correct_threshold_pct: dec!(0.05), // 5%
-            critical_threshold_pct: dec!(0.20),      // 20%
+            critical_threshold_pct: dec!(0.20),     // 20%
         }
     }
 }
@@ -216,7 +216,10 @@ impl ReconciliationService {
                 }
 
                 // Record discrepancy in database
-                if let Err(e) = self.record_discrepancy(&token_id, local_shares, exchange_shares, severity).await {
+                if let Err(e) = self
+                    .record_discrepancy(&token_id, local_shares, exchange_shares, severity)
+                    .await
+                {
                     warn!("Failed to record discrepancy: {}", e);
                 }
             }
@@ -353,8 +356,20 @@ impl ReconciliationService {
     }
 
     /// Get recent reconciliation history
-    pub async fn get_recent_reconciliations(&self, limit: i32) -> Result<Vec<ReconciliationResult>> {
-        let rows = sqlx::query_as::<_, (DateTime<Utc>, i32, i32, Option<serde_json::Value>, Option<i32>)>(
+    pub async fn get_recent_reconciliations(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<ReconciliationResult>> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                DateTime<Utc>,
+                i32,
+                i32,
+                Option<serde_json::Value>,
+                Option<i32>,
+            ),
+        >(
             r#"
             SELECT timestamp, discrepancies_found, auto_corrections, details, duration_ms
             FROM position_reconciliation_log

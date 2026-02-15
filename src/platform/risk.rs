@@ -6,8 +6,8 @@
 //! - 組合級別風控 (每日損失、連續失敗)
 
 use chrono::{DateTime, NaiveDate, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -74,7 +74,11 @@ pub enum BlockReason {
     /// 超過單筆限額
     ExceedsSingleLimit { limit: Decimal, requested: Decimal },
     /// 超過總暴露
-    ExceedsTotalExposure { limit: Decimal, current: Decimal, requested: Decimal },
+    ExceedsTotalExposure {
+        limit: Decimal,
+        current: Decimal,
+        requested: Decimal,
+    },
     /// 每日損失超限
     DailyLossExceeded { limit: Decimal, current: Decimal },
     /// 市場不允許
@@ -96,8 +100,16 @@ impl std::fmt::Display for BlockReason {
             BlockReason::ExceedsSingleLimit { limit, requested } => {
                 write!(f, "Single order ${} exceeds limit ${}", requested, limit)
             }
-            BlockReason::ExceedsTotalExposure { limit, current, requested } => {
-                write!(f, "Total exposure ${} + ${} exceeds ${}", current, requested, limit)
+            BlockReason::ExceedsTotalExposure {
+                limit,
+                current,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "Total exposure ${} + ${} exceeds ${}",
+                    current, requested, limit
+                )
             }
             BlockReason::DailyLossExceeded { limit, current } => {
                 write!(f, "Daily loss ${} exceeds limit ${}", current, limit)
@@ -264,7 +276,10 @@ impl RiskGate {
             match params_map.get(&intent.agent_id) {
                 Some(p) => p.clone(),
                 None => {
-                    warn!("No risk params for agent {}, using defaults", intent.agent_id);
+                    warn!(
+                        "No risk params for agent {}, using defaults",
+                        intent.agent_id
+                    );
                     AgentRiskParams::default()
                 }
             }
@@ -341,7 +356,8 @@ impl RiskGate {
 
         // 11. 檢查每日損失
         let daily = self.daily_stats.read().await;
-        if daily.total_pnl < Decimal::ZERO && daily.total_pnl.abs() >= self.config.daily_loss_limit {
+        if daily.total_pnl < Decimal::ZERO && daily.total_pnl.abs() >= self.config.daily_loss_limit
+        {
             return RiskCheckResult::Blocked(BlockReason::DailyLossExceeded {
                 limit: self.config.daily_loss_limit,
                 current: daily.total_pnl.abs(),
@@ -435,7 +451,8 @@ impl RiskGate {
 
         // 檢查熔斷
         if global_failures >= self.config.max_consecutive_failures {
-            self.trigger_circuit_breaker("Too many consecutive failures").await;
+            self.trigger_circuit_breaker("Too many consecutive failures")
+                .await;
         } else if global_failures >= self.config.max_consecutive_failures / 2 {
             *self.state.write().await = PlatformRiskState::Elevated;
             warn!("Platform risk elevated due to failures");
@@ -460,7 +477,8 @@ impl RiskGate {
         };
 
         if should_halt {
-            self.trigger_circuit_breaker("Daily loss limit exceeded").await;
+            self.trigger_circuit_breaker("Daily loss limit exceeded")
+                .await;
         }
     }
 
@@ -504,7 +522,12 @@ impl RiskGate {
     pub async fn agent_stats(&self, agent_id: &str) -> Option<(Decimal, Decimal, usize, u32)> {
         let stats_map = self.agent_stats.read().await;
         stats_map.get(agent_id).map(|s| {
-            (s.exposure, s.realized_pnl, s.position_count, s.consecutive_failures)
+            (
+                s.exposure,
+                s.realized_pnl,
+                s.position_count,
+                s.consecutive_failures,
+            )
         })
     }
 
@@ -550,9 +573,9 @@ impl Default for RiskGate {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::Domain;
     use super::*;
     use crate::domain::Side;
-    use super::super::types::Domain;
 
     fn make_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {
         OrderIntent::new(
@@ -572,7 +595,8 @@ mod tests {
         let gate = RiskGate::new(RiskConfig::default());
 
         // 註冊 Agent
-        gate.register_agent("agent1", AgentRiskParams::default()).await;
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
 
         // 正常訂單應該通過
         let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
@@ -608,7 +632,8 @@ mod tests {
 
         // 記錄失敗
         for i in 0..3 {
-            gate.record_failure("agent1", &format!("Failure {}", i)).await;
+            gate.record_failure("agent1", &format!("Failure {}", i))
+                .await;
         }
 
         // 應該觸發熔斷
@@ -627,7 +652,8 @@ mod tests {
         config.critical_bypass_exposure = true;
         let gate = RiskGate::new(config);
 
-        gate.register_agent("agent1", AgentRiskParams::default()).await;
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
 
         // 普通訂單被攔截
         let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());

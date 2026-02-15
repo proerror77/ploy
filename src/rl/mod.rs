@@ -16,23 +16,23 @@
 //! ploy = { features = ["rl"] }
 //! ```
 
+pub mod algorithms;
 pub mod config;
 pub mod core;
-pub mod networks;
-pub mod algorithms;
-pub mod memory;
-pub mod training;
-pub mod integration;
 pub mod environment;
+pub mod integration;
+pub mod memory;
+pub mod networks;
+pub mod training;
 
 // Config exports
-pub use config::{RLConfig, PPOConfig, TrainingConfig, RewardConfig};
+pub use config::{PPOConfig, RLConfig, RewardConfig, TrainingConfig};
 
 // Core exports
 pub use core::{
-    RawObservation, StateEncoder, DefaultStateEncoder, TOTAL_FEATURES,
-    DiscreteAction, ContinuousAction, HybridAction, NUM_DISCRETE_ACTIONS, CONTINUOUS_ACTION_DIM,
-    RewardSignal, RewardFunction, PnLRewardFunction, RewardTransition,
+    ContinuousAction, DefaultStateEncoder, DiscreteAction, HybridAction, PnLRewardFunction,
+    RawObservation, RewardFunction, RewardSignal, RewardTransition, StateEncoder,
+    CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS, TOTAL_FEATURES,
 };
 
 // Memory exports
@@ -42,4 +42,6 @@ pub use memory::ReplayBuffer;
 pub use integration::RLStrategy;
 
 // Environment exports
-pub use environment::{TradingEnvironment, TradingEnvConfig, SimulatedMarket, MarketConfig, StepResult, EnvAction};
+pub use environment::{
+    EnvAction, MarketConfig, SimulatedMarket, StepResult, TradingEnvConfig, TradingEnvironment,
+};

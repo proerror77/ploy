@@ -4,8 +4,8 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::adapters::PostgresStore;
-use crate::api::{create_router, AppState};
 use crate::api::state::StrategyConfigState;
+use crate::api::{create_router, AppState};
 use crate::error::Result;
 
 /// Start the API server
@@ -33,9 +33,7 @@ pub async fn start_api_server_background(
     port: u16,
     config: StrategyConfigState,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
-    let handle = tokio::spawn(async move {
-        start_api_server(store, port, config).await
-    });
+    let handle = tokio::spawn(async move { start_api_server(store, port, config).await });
 
     Ok(handle)
 }

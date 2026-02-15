@@ -1,8 +1,9 @@
-use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
-use chrono::{DateTime, Utc};
 use crate::adapters::PostgresStore;
 use crate::api::types::WsMessage;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
 
 /// Shared application state for API handlers
 #[derive(Clone)]
@@ -48,7 +49,7 @@ impl SystemRunStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StrategyConfigState {
     pub symbols: Vec<String>,
     pub min_move: f64,
@@ -60,10 +61,7 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
-    pub fn new(
-        store: Arc<PostgresStore>,
-        config: StrategyConfigState,
-    ) -> Self {
+    pub fn new(store: Arc<PostgresStore>, config: StrategyConfigState) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
 
         Self {

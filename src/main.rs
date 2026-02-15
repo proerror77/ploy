@@ -1,11 +1,17 @@
 use clap::Parser;
+#[cfg(feature = "api")]
+use ploy::adapters::start_api_server_background;
 use ploy::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
 // Use legacy CLI module for backward compatibility
-use ploy::cli::legacy::{self as cli, Cli, Commands, CryptoCommands, SportsCommands, PoliticsCommands, TerminalUI};
+#[cfg(feature = "api")]
+use ploy::api::state::StrategyConfigState;
 #[cfg(feature = "rl")]
 use ploy::cli::legacy::RlCommands;
+use ploy::cli::legacy::{
+    self as cli, Cli, Commands, CryptoCommands, PoliticsCommands, SportsCommands, TerminalUI,
+};
 use ploy::config::AppConfig;
-use ploy::error::Result;
+use ploy::error::{PloyError, Result};
 use ploy::services::{DataCollector, HealthServer, HealthState, Metrics};
 use ploy::strategy::{OrderExecutor, StrategyEngine};
 use std::sync::Arc;
@@ -43,11 +49,22 @@ async fn main() -> Result<()> {
             init_logging_simple();
             run_watch_mode(&cli, token.as_deref(), series.as_deref()).await?;
         }
-        Some(Commands::Trade { series, shares, move_pct, sum_target, dry_run }) => {
+        Some(Commands::Trade {
+            series,
+            shares,
+            move_pct,
+            sum_target,
+            dry_run,
+        }) => {
             init_logging();
             run_trade_mode(series, *shares, *move_pct, *sum_target, *dry_run).await?;
         }
-        Some(Commands::Scan { series, sum_target, move_pct, watch }) => {
+        Some(Commands::Scan {
+            series,
+            sum_target,
+            move_pct,
+            watch,
+        }) => {
             init_logging();
             run_scan_mode(series, *sum_target, *move_pct, *watch).await?;
         }
@@ -55,11 +72,41 @@ async fn main() -> Result<()> {
             init_logging();
             run_analyze_mode(event).await?;
         }
+        Some(Commands::EventEdge {
+            event,
+            title,
+            min_edge,
+            max_entry,
+            shares,
+            interval_secs,
+            watch,
+            trade,
+            dry_run,
+        }) => {
+            init_logging();
+            run_event_edge_mode(
+                event.as_deref(),
+                title.as_deref(),
+                *min_edge,
+                *max_entry,
+                *shares,
+                *interval_secs,
+                *watch,
+                *trade,
+                *dry_run,
+            )
+            .await?;
+        }
         Some(Commands::Account { orders, positions }) => {
             init_logging_simple();
             run_account_mode(*orders, *positions).await?;
         }
-        Some(Commands::Ev { price, probability, hours, table }) => {
+        Some(Commands::Ev {
+            price,
+            probability,
+            hours,
+            table,
+        }) => {
             init_logging_simple();
             cli::calculate_ev(*price, *probability, *hours, *table).await?;
         }
@@ -67,6 +114,10 @@ async fn main() -> Result<()> {
             init_logging_simple();
             let client = PolymarketClient::new("https://clob.polymarket.com", true)?;
             cli::analyze_market_making(&client, token, *detail).await?;
+        }
+        Some(Commands::Rpc) => {
+            init_logging_simple();
+            ploy::cli::rpc::run_rpc(&cli.config).await?;
         }
         Some(Commands::Momentum {
             symbols,
@@ -81,6 +132,9 @@ async fn main() -> Result<()> {
             predictive,
             min_time,
             max_time,
+            vwap_confirm,
+            vwap_lookback,
+            vwap_min_dev,
         }) => {
             init_logging();
             run_momentum_mode(
@@ -96,6 +150,9 @@ async fn main() -> Result<()> {
                 *predictive,
                 *min_time,
                 *max_time,
+                *vwap_confirm,
+                *vwap_lookback,
+                *vwap_min_dev,
             )
             .await?;
         }
@@ -150,10 +207,15 @@ async fn main() -> Result<()> {
                 ploy::tui::run_demo().await?;
             } else {
                 init_logging();
-                ploy::tui::run_dashboard_auto(series.as_deref(), cli.dry_run).await?;
+                ploy::tui::run_dashboard_auto(series.as_deref(), cli.dry_run.unwrap_or(true))
+                    .await?;
             }
         }
-        Some(Commands::Collect { symbols, markets, duration }) => {
+        Some(Commands::Collect {
+            symbols,
+            markets,
+            duration,
+        }) => {
             init_logging();
             run_collect_mode(symbols, markets.as_deref(), *duration).await?;
         }
@@ -178,11 +240,20 @@ async fn main() -> Result<()> {
             init_logging();
             run_rl_command(rl_cmd).await?;
         }
-        Some(Commands::Claim { check_only, min_size, interval }) => {
+        Some(Commands::Claim {
+            check_only,
+            min_size,
+            interval,
+        }) => {
             init_logging();
             run_claimer(*check_only, *min_size, *interval).await?;
         }
-        Some(Commands::History { limit, symbol, stats_only, open_only }) => {
+        Some(Commands::History {
+            limit,
+            symbol,
+            stats_only,
+            open_only,
+        }) => {
             run_history(*limit, symbol.clone(), *stats_only, *open_only).await?;
         }
         Some(Commands::Paper {
@@ -199,7 +270,30 @@ async fn main() -> Result<()> {
                 *min_price_edge,
                 log_file.clone(),
                 *stats_interval,
-            ).await?;
+            )
+            .await?;
+        }
+        Some(Commands::Platform {
+            action,
+            crypto,
+            sports,
+            politics,
+            dry_run,
+            pause,
+            resume,
+        }) => {
+            init_logging();
+            run_platform_mode(
+                action,
+                *crypto,
+                *sports,
+                *politics,
+                *dry_run,
+                pause.clone(),
+                resume.clone(),
+                &cli,
+            )
+            .await?;
         }
         Some(Commands::Run) | None => {
             init_logging();
@@ -219,7 +313,10 @@ async fn run_claimer(check_only: bool, min_size: f64, interval: u64) -> Result<(
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
-    info!("Starting auto-claimer (check_only={}, min_size={}, interval={}s)", check_only, min_size, interval);
+    info!(
+        "Starting auto-claimer (check_only={}, min_size={}, interval={}s)",
+        check_only, min_size, interval
+    );
 
     // Get private key from environment
     let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
@@ -242,13 +339,15 @@ async fn run_claimer(check_only: bool, min_size: f64, interval: u64) -> Result<(
             wallet,
             funder_addr,
             false, // neg_risk
-        ).await?
+        )
+        .await?
     } else {
         PolymarketClient::new_authenticated(
             "https://clob.polymarket.com",
             wallet,
             false, // neg_risk
-        ).await?
+        )
+        .await?
     };
 
     // Configure claimer
@@ -285,20 +384,89 @@ async fn run_claimer(check_only: bool, min_size: f64, interval: u64) -> Result<(
                 let results = claimer.check_and_claim().await?;
                 for result in results {
                     if result.success {
-                        info!("✅ Claimed ${:.2} from {} | tx: {}", result.amount_claimed, result.condition_id, result.tx_hash);
+                        info!(
+                            "✅ Claimed ${:.2} from {} | tx: {}",
+                            result.amount_claimed, result.condition_id, result.tx_hash
+                        );
                     } else {
-                        error!("❌ Failed to claim {}: {:?}", result.condition_id, result.error);
+                        error!(
+                            "❌ Failed to claim {}: {:?}",
+                            result.condition_id, result.error
+                        );
                     }
                 }
             }
         }
     } else {
         // Continuous mode: run as background service
-        info!("Starting continuous claiming service (interval: {}s)...", interval);
+        info!(
+            "Starting continuous claiming service (interval: {}s)...",
+            interval
+        );
         claimer.start().await?;
     }
 
     Ok(())
+}
+
+/// Run the multi-agent platform (Coordinator + Agents)
+async fn run_platform_mode(
+    action: &str,
+    crypto: bool,
+    sports: bool,
+    politics: bool,
+    dry_run: bool,
+    pause: Option<String>,
+    resume: Option<String>,
+    cli: &Cli,
+) -> Result<()> {
+    use ploy::adapters::PolymarketClient;
+    use ploy::config::AppConfig;
+    use ploy::coordinator::bootstrap::{
+        start_platform, PlatformBootstrapConfig, PlatformStartControl,
+    };
+
+    let app_config = AppConfig::load_from(&cli.config).unwrap_or_else(|e| {
+        warn!("Failed to load config: {}, using defaults", e);
+        AppConfig::default_config(true, "btc-price-series-15m")
+    });
+
+    if action != "start" {
+        return Err(PloyError::Validation(format!(
+            "unsupported platform action '{}'; only 'start' is supported",
+            action
+        )));
+    }
+
+    let mut platform_cfg = PlatformBootstrapConfig::from_app_config(&app_config);
+
+    // If any domain flags are specified, treat them as an explicit selection
+    // (e.g. `--sports` means sports-only, not "sports plus config defaults").
+    let explicit_selection = crypto || sports || politics;
+    if explicit_selection {
+        platform_cfg.enable_crypto = crypto;
+        platform_cfg.enable_sports = sports;
+        platform_cfg.enable_politics = politics;
+    }
+    if dry_run {
+        platform_cfg.dry_run = true;
+    }
+
+    // If no agents explicitly enabled via CLI, use config defaults
+    // (from_app_config already sets these based on config sections)
+
+    info!(
+        "Platform mode: crypto={} sports={} politics={} dry_run={}",
+        platform_cfg.enable_crypto,
+        platform_cfg.enable_sports,
+        platform_cfg.enable_politics,
+        platform_cfg.dry_run,
+    );
+
+    let pm_client = PolymarketClient::new(&app_config.market.rest_url, platform_cfg.dry_run)?;
+
+    let control = PlatformStartControl { pause, resume };
+    start_platform(platform_cfg, pm_client, &app_config, control).await
 }
 
 /// Run paper trading with real market data but no execution
@@ -310,9 +478,9 @@ async fn run_paper_trading(
     stats_interval: u64,
 ) -> Result<()> {
     use ploy::adapters::PolymarketClient;
-    use ploy::strategy::{PaperTradingConfig, run_paper_trading, VolatilityArbConfig};
-    use rust_decimal::Decimal;
+    use ploy::strategy::{run_paper_trading, PaperTradingConfig, VolatilityArbConfig};
     use rust_decimal::prelude::*;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     // Parse symbols
@@ -322,21 +490,20 @@ async fn run_paper_trading(
         .collect();
 
     // Build series IDs from symbols
-    let series_ids: Vec<String> = symbols.iter()
-        .filter_map(|s| {
-            match s.trim_end_matches("USDT") {
-                "BTC" => Some("btc-price-series-15m".into()),
-                "ETH" => Some("eth-price-series-15m".into()),
-                "SOL" => Some("sol-price-series-15m".into()),
-                _ => None,
-            }
+    let series_ids: Vec<String> = symbols
+        .iter()
+        .filter_map(|s| match s.trim_end_matches("USDT") {
+            "BTC" => Some("btc-price-series-15m".into()),
+            "ETH" => Some("eth-price-series-15m".into()),
+            "SOL" => Some("sol-price-series-15m".into()),
+            _ => None,
         })
         .collect();
 
     let mut vol_arb_config = VolatilityArbConfig::default();
     vol_arb_config.min_vol_edge_pct = min_vol_edge / 100.0;
-    vol_arb_config.min_price_edge = Decimal::from_f64_retain(min_price_edge / 100.0)
-        .unwrap_or(dec!(0.02));
+    vol_arb_config.min_price_edge =
+        Decimal::from_f64_retain(min_price_edge / 100.0).unwrap_or(dec!(0.02));
     vol_arb_config.symbols = symbols.clone();
 
     let config = PaperTradingConfig {
@@ -355,7 +522,12 @@ async fn run_paper_trading(
 }
 
 /// View trading history and statistics
-async fn run_history(limit: usize, symbol: Option<String>, stats_only: bool, open_only: bool) -> Result<()> {
+async fn run_history(
+    limit: usize,
+    symbol: Option<String>,
+    stats_only: bool,
+    open_only: bool,
+) -> Result<()> {
     use ploy::strategy::TradeLogger;
     use std::path::PathBuf;
 
@@ -479,7 +651,8 @@ async fn run_trade_mode(
             "https://clob.polymarket.com",
             wallet,
             true, // neg_risk for UP/DOWN markets
-        ).await?
+        )
+        .await?
     };
 
     println!("\x1b[32m✓ Client initialized\x1b[0m");
@@ -495,11 +668,14 @@ async fn run_trade_mode(
     // Track current market tokens
     let current_tokens: Arc<tokio::sync::RwLock<Vec<String>>> =
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
-    let token_to_side: Arc<tokio::sync::RwLock<std::collections::HashMap<String, ploy::domain::Side>>> =
-        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let token_to_side: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, ploy::domain::Side>>,
+    > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
     // WebSocket client
-    let ws = Arc::new(PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market"));
+    let ws = Arc::new(PolymarketWebSocket::new(
+        "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    ));
 
     // Market rotation checker
     let rotation_handle = {
@@ -519,9 +695,8 @@ async fn run_trade_mode(
 
                 match client.get_current_market_tokens(&series_id).await {
                     Ok(Some((title, market))) => {
-                        let new_tokens: Vec<String> = market.tokens.iter()
-                            .map(|t| t.token_id.clone())
-                            .collect();
+                        let new_tokens: Vec<String> =
+                            market.tokens.iter().map(|t| t.token_id.clone()).collect();
 
                         let tokens_read = current_tokens.read().await;
                         let tokens_changed = *tokens_read != new_tokens;
@@ -544,7 +719,8 @@ async fn run_trade_mode(
                                 side_map.insert(token.token_id.clone(), side);
 
                                 let price_str = token.price.as_deref().unwrap_or("N/A");
-                                println!("  {} ({}...): {}",
+                                println!(
+                                    "  {} ({}...): {}",
                                     token.outcome,
                                     &token.token_id[..20.min(token.token_id.len())],
                                     price_str
@@ -577,9 +753,7 @@ async fn run_trade_mode(
         Some((title, market)) => {
             println!("\x1b[32mCurrent market:\x1b[0m {}", title);
 
-            let token_ids: Vec<String> = market.tokens.iter()
-                .map(|t| t.token_id.clone())
-                .collect();
+            let token_ids: Vec<String> = market.tokens.iter().map(|t| t.token_id.clone()).collect();
 
             let mut side_map = token_to_side.write().await;
             for token in &market.tokens {
@@ -591,7 +765,8 @@ async fn run_trade_mode(
                 side_map.insert(token.token_id.clone(), side);
 
                 let price_str = token.price.as_deref().unwrap_or("N/A");
-                println!("  {} ({}...): {}",
+                println!(
+                    "  {} ({}...): {}",
                     token.outcome,
                     &token.token_id[..20.min(token.token_id.len())],
                     price_str
@@ -666,12 +841,22 @@ async fn run_trade_mode(
             let mut current_round: Option<String> = None;
             let mut position: Option<TradePosition> = None;
 
-            println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-            println!("\x1b[36m║  Trading Active: move={:.1}%, window=3s, target={:.4}       ║\x1b[0m",
-                move_pct * 100.0, sum_target);
-            println!("\x1b[36m║  Shares: {}  |  Mode: {}                              ║\x1b[0m",
-                shares, if dry_run { "DRY RUN" } else { "LIVE" });
-            println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+            println!(
+                "\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+            );
+            println!(
+                "\x1b[36m║  Trading Active: move={:.1}%, window=3s, target={:.4}       ║\x1b[0m",
+                move_pct * 100.0,
+                sum_target
+            );
+            println!(
+                "\x1b[36m║  Shares: {}  |  Mode: {}                              ║\x1b[0m",
+                shares,
+                if dry_run { "DRY RUN" } else { "LIVE" }
+            );
+            println!(
+                "\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n"
+            );
 
             while running.load(Ordering::Relaxed) {
                 match updates.recv().await {
@@ -686,27 +871,29 @@ async fn run_trade_mode(
                         let ask = update.quote.best_ask.unwrap_or_default();
 
                         // Print quote update
-                        println!(
-                            "[{}] {} Bid: {:.4} | Ask: {:.4}",
-                            now, side_str, bid, ask
-                        );
+                        println!("[{}] {} Bid: {:.4} | Ask: {:.4}", now, side_str, bid, ask);
 
                         // Check for dump signal (only if no active position)
                         if position.is_none() {
-                            if let Some(signal) = detector.update(&update.quote, current_round.as_deref()) {
+                            if let Some(signal) =
+                                detector.update(&update.quote, current_round.as_deref())
+                            {
                                 println!("\n\x1b[41;97m ══════════════════════════════════════════════════════════ \x1b[0m");
                                 println!("\x1b[41;97m  🚨 DUMP SIGNAL - EXECUTING LEG1                          \x1b[0m");
                                 println!("\x1b[41;97m ══════════════════════════════════════════════════════════ \x1b[0m");
                                 println!("  Side: {:?}", signal.side);
-                                println!("  Drop: {:.2}% ({:.4} → {:.4})",
+                                println!(
+                                    "  Drop: {:.2}% ({:.4} → {:.4})",
                                     signal.drop_pct * Decimal::from(100),
                                     signal.reference_price,
-                                    signal.trigger_price);
+                                    signal.trigger_price
+                                );
                                 println!("  Spread: {} bps", signal.spread_bps);
 
                                 // Get token ID for this side
                                 let side_map = token_to_side.read().await;
-                                let token_id = side_map.iter()
+                                let token_id = side_map
+                                    .iter()
                                     .find(|(_, &s)| s == signal.side)
                                     .map(|(id, _)| id.clone());
                                 drop(side_map);
@@ -723,7 +910,10 @@ async fn run_trade_mode(
                                     println!("\n  Submitting Leg1 order...");
                                     match client.submit_order(&order).await {
                                         Ok(resp) => {
-                                            println!("\x1b[32m  ✓ Order submitted: {}\x1b[0m", resp.id);
+                                            println!(
+                                                "\x1b[32m  ✓ Order submitted: {}\x1b[0m",
+                                                resp.id
+                                            );
 
                                             // Record position
                                             position = Some(TradePosition {
@@ -759,15 +949,24 @@ async fn run_trade_mode(
                                         println!("\n\x1b[42;97m ══════════════════════════════════════════════════════════ \x1b[0m");
                                         println!("\x1b[42;97m  ✅ LEG2 OPPORTUNITY - EXECUTING                           \x1b[0m");
                                         println!("\x1b[42;97m ══════════════════════════════════════════════════════════ \x1b[0m");
-                                        println!("  Leg1 ({:?}): {:.4}", pos.leg1_side, pos.leg1_price);
-                                        println!("  Leg2 ({:?}): {:.4}", opposite_side, opposite_ask);
+                                        println!(
+                                            "  Leg1 ({:?}): {:.4}",
+                                            pos.leg1_side, pos.leg1_price
+                                        );
+                                        println!(
+                                            "  Leg2 ({:?}): {:.4}",
+                                            opposite_side, opposite_ask
+                                        );
                                         println!("  Sum: {:.4} <= Target: {:.4}", sum, target);
-                                        println!("  Potential Profit: {:.2}%",
-                                            (Decimal::ONE - sum) * Decimal::from(100));
+                                        println!(
+                                            "  Potential Profit: {:.2}%",
+                                            (Decimal::ONE - sum) * Decimal::from(100)
+                                        );
 
                                         // Get token ID for opposite side
                                         let side_map = token_to_side.read().await;
-                                        let token_id = side_map.iter()
+                                        let token_id = side_map
+                                            .iter()
                                             .find(|(_, &s)| s == opposite_side)
                                             .map(|(id, _)| id.clone());
                                         drop(side_map);
@@ -783,7 +982,10 @@ async fn run_trade_mode(
                                             println!("\n  Submitting Leg2 order...");
                                             match client.submit_order(&order).await {
                                                 Ok(resp) => {
-                                                    println!("\x1b[32m  ✓ Order submitted: {}\x1b[0m", resp.id);
+                                                    println!(
+                                                        "\x1b[32m  ✓ Order submitted: {}\x1b[0m",
+                                                        resp.id
+                                                    );
                                                     println!("\x1b[32m  ✓ CYCLE COMPLETE!\x1b[0m");
 
                                                     // Clear position and reset detector
@@ -791,7 +993,10 @@ async fn run_trade_mode(
                                                     detector.reset(current_round.as_deref());
                                                 }
                                                 Err(e) => {
-                                                    println!("\x1b[31m  ✗ Order failed: {}\x1b[0m", e);
+                                                    println!(
+                                                        "\x1b[31m  ✗ Order failed: {}\x1b[0m",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -863,7 +1068,9 @@ async fn run_scan_mode(
     println!("\x1b[0m");
 
     let client = PolymarketClient::new("https://clob.polymarket.com", true)?;
-    let ws = Arc::new(PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market"));
+    let ws = Arc::new(PolymarketWebSocket::new(
+        "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    ));
 
     // Strategy configuration
     let config = StrategyConfig {
@@ -879,7 +1086,10 @@ async fn run_scan_mode(
     println!("  Series: {}", series_id);
     println!("  Sum target: {:.4}", sum_target);
     println!("  Move threshold: {:.1}%", move_pct * 100.0);
-    println!("  Mode: {}", if continuous { "Continuous" } else { "One-shot" });
+    println!(
+        "  Mode: {}",
+        if continuous { "Continuous" } else { "One-shot" }
+    );
     println!();
 
     // Create multi-event monitor
@@ -890,11 +1100,18 @@ async fn run_scan_mode(
     let token_ids = monitor.refresh_events(&client).await?;
 
     if token_ids.is_empty() {
-        println!("\x1b[31mNo active events found in series {}.\x1b[0m", series_id);
+        println!(
+            "\x1b[31mNo active events found in series {}.\x1b[0m",
+            series_id
+        );
         return Ok(());
     }
 
-    println!("\x1b[32m✓ Found {} active events ({} tokens)\x1b[0m\n", monitor.event_count(), token_ids.len());
+    println!(
+        "\x1b[32m✓ Found {} active events ({} tokens)\x1b[0m\n",
+        monitor.event_count(),
+        token_ids.len()
+    );
 
     // Display discovered events
     println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
@@ -902,12 +1119,18 @@ async fn run_scan_mode(
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m");
 
     for summary in monitor.summary() {
-        let time_str = format!("{}m {}s",
+        let time_str = format!(
+            "{}m {}s",
             summary.time_remaining.num_minutes(),
             summary.time_remaining.num_seconds() % 60
         );
-        println!("  {} - {} remaining",
-            if summary.event_slug.is_empty() { &summary.event_id } else { &summary.event_slug },
+        println!(
+            "  {} - {} remaining",
+            if summary.event_slug.is_empty() {
+                &summary.event_id
+            } else {
+                &summary.event_slug
+            },
             time_str
         );
     }
@@ -962,7 +1185,10 @@ async fn run_scan_mode(
 
     println!("\x1b[33mStarting WebSocket connection...\x1b[0m\n");
     println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Scanning for arbitrage opportunities (sum <= {:.4})         ║\x1b[0m", sum_target);
+    println!(
+        "\x1b[36m║  Scanning for arbitrage opportunities (sum <= {:.4})         ║\x1b[0m",
+        sum_target
+    );
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
     // Process quote updates
@@ -974,8 +1200,10 @@ async fn run_scan_mode(
 
         tokio::spawn(async move {
             let mut last_summary_time = std::time::Instant::now();
-            let mut up_quotes: std::collections::HashMap<String, rust_decimal::Decimal> = std::collections::HashMap::new();
-            let mut down_quotes: std::collections::HashMap<String, rust_decimal::Decimal> = std::collections::HashMap::new();
+            let mut up_quotes: std::collections::HashMap<String, rust_decimal::Decimal> =
+                std::collections::HashMap::new();
+            let mut down_quotes: std::collections::HashMap<String, rust_decimal::Decimal> =
+                std::collections::HashMap::new();
 
             while running.load(Ordering::Relaxed) {
                 match updates.recv().await {
@@ -1119,10 +1347,22 @@ async fn run_analyze_mode(event_id: &str) -> Result<()> {
     // Show summary of all outcomes
     println!("\n\x1b[36m=== Outcome Summary ===\x1b[0m");
     for summary in monitor.summary() {
-        let yes_str = summary.yes_price.map(|p| format!("{:.2}¢", p * dec!(100))).unwrap_or("-".into());
-        let no_str = summary.no_price.map(|p| format!("{:.2}¢", p * dec!(100))).unwrap_or("-".into());
-        let prob_str = summary.implied_prob_pct.map(|p| format!("{:.1}%", p)).unwrap_or("-".into());
-        println!("  {} | Yes: {} | No: {} | Prob: {}", summary.name, yes_str, no_str, prob_str);
+        let yes_str = summary
+            .yes_price
+            .map(|p| format!("{:.2}¢", p * dec!(100)))
+            .unwrap_or("-".into());
+        let no_str = summary
+            .no_price
+            .map(|p| format!("{:.2}¢", p * dec!(100)))
+            .unwrap_or("-".into());
+        let prob_str = summary
+            .implied_prob_pct
+            .map(|p| format!("{:.1}%", p))
+            .unwrap_or("-".into());
+        println!(
+            "  {} | Yes: {} | No: {} | Prob: {}",
+            summary.name, yes_str, no_str, prob_str
+        );
     }
 
     // Find arbitrage opportunities
@@ -1141,6 +1381,78 @@ async fn run_analyze_mode(event_id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Scan a Polymarket event for external-data-driven mispricing and optionally trade.
+async fn run_event_edge_mode(
+    event_id: Option<&str>,
+    title: Option<&str>,
+    min_edge: f64,
+    max_entry: f64,
+    shares: u64,
+    interval_secs: u64,
+    watch: bool,
+    trade: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+    use ploy::signing::Wallet;
+    use ploy::strategy::{run_event_edge, EventEdgeConfig};
+    use rust_decimal::prelude::FromPrimitive;
+    use std::time::Duration;
+
+    let client = if trade && !dry_run {
+        // Authenticated trading client (requires env vars).
+        let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+        let funder = std::env::var("POLYMARKET_FUNDER").ok();
+        if let Some(funder_addr) = funder {
+            PolymarketClient::new_authenticated_proxy(
+                "https://clob.polymarket.com",
+                wallet,
+                &funder_addr,
+                true,
+            )
+            .await?
+        } else {
+            PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true).await?
+        }
+    } else {
+        // Read-only client is enough for scanning and dry-run execution.
+        PolymarketClient::new("https://clob.polymarket.com", true)?
+    };
+
+    let cfg = EventEdgeConfig {
+        event_id: event_id.map(|s| s.to_string()),
+        title: title.map(|s| s.to_string()),
+        min_edge: rust_decimal::Decimal::from_f64(min_edge)
+            .ok_or_else(|| anyhow::anyhow!("Invalid min_edge"))?,
+        max_entry: rust_decimal::Decimal::from_f64(max_entry)
+            .ok_or_else(|| anyhow::anyhow!("Invalid max_entry"))?,
+        shares,
+        interval: Duration::from_secs(interval_secs.max(5)),
+        watch,
+        trade,
+        dry_run,
+    };
+
+    run_event_edge(&client, cfg).await
+}
+
+async fn create_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClient> {
+    use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+    use ploy::signing::Wallet;
+
+    if dry_run {
+        return PolymarketClient::new(rest_url, true);
+    }
+
+    let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+    let funder = std::env::var("POLYMARKET_FUNDER").ok();
+    if let Some(funder_addr) = funder {
+        PolymarketClient::new_authenticated_proxy(rest_url, wallet, &funder_addr, true).await
+    } else {
+        PolymarketClient::new_authenticated(rest_url, wallet, true).await
+    }
 }
 
 /// Show account balance, positions, and orders
@@ -1169,14 +1481,12 @@ async fn run_account_mode(show_orders: bool, show_positions: bool) -> Result<()>
                     wallet,
                     &funder_addr,
                     true,
-                ).await
+                )
+                .await
             } else {
                 // Use regular EOA authentication
-                PolymarketClient::new_authenticated(
-                    "https://clob.polymarket.com",
-                    wallet,
-                    true,
-                ).await
+                PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true)
+                    .await
             };
 
             match auth_result {
@@ -1223,11 +1533,12 @@ async fn run_watch_mode(cli: &Cli, token: Option<&str>, series: Option<&str>) ->
     }
 
     // Fallback to search mode (one-shot)
-    println!("Searching for market: {}\n", cli.market);
-    let markets = client.search_markets(&cli.market).await?;
+    let market_query = cli.market.as_deref().unwrap_or("btc-price-series-15m");
+    println!("Searching for market: {}\n", market_query);
+    let markets = client.search_markets(market_query).await?;
 
     if markets.is_empty() {
-        println!("\x1b[31mNo markets found for: {}\x1b[0m", cli.market);
+        println!("\x1b[31mNo markets found for: {}\x1b[0m", market_query);
         return Ok(());
     }
 
@@ -1259,7 +1570,9 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
         Arc::new(tokio::sync::RwLock::new(String::new()));
 
     // WebSocket client
-    let ws = Arc::new(PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market"));
+    let ws = Arc::new(PolymarketWebSocket::new(
+        "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    ));
 
     // Spawn market rotation checker (checks every 30 seconds)
     let rotation_handle = {
@@ -1279,9 +1592,8 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
 
                 match client.get_current_market_tokens(&series_id).await {
                     Ok(Some((title, market))) => {
-                        let new_tokens: Vec<String> = market.tokens.iter()
-                            .map(|t| t.token_id.clone())
-                            .collect();
+                        let new_tokens: Vec<String> =
+                            market.tokens.iter().map(|t| t.token_id.clone()).collect();
 
                         let tokens_read = current_tokens.read().await;
                         let tokens_changed = *tokens_read != new_tokens;
@@ -1304,7 +1616,8 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
                                 ws.register_token(&token.token_id, side).await;
 
                                 let price_str = token.price.as_deref().unwrap_or("N/A");
-                                println!("  {} ({}...): {}",
+                                println!(
+                                    "  {} ({}...): {}",
                                     token.outcome,
                                     &token.token_id[..20.min(token.token_id.len())],
                                     price_str
@@ -1341,9 +1654,7 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
         Some((title, market)) => {
             println!("\x1b[32mCurrent market:\x1b[0m {}", title);
 
-            let token_ids: Vec<String> = market.tokens.iter()
-                .map(|t| t.token_id.clone())
-                .collect();
+            let token_ids: Vec<String> = market.tokens.iter().map(|t| t.token_id.clone()).collect();
 
             for token in &market.tokens {
                 let side = match token.outcome.to_lowercase().as_str() {
@@ -1353,7 +1664,8 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
                 ws.register_token(&token.token_id, side).await;
 
                 let price_str = token.price.as_deref().unwrap_or("N/A");
-                println!("  {} ({}...): {}",
+                println!(
+                    "  {} ({}...): {}",
                     token.outcome,
                     &token.token_id[..20.min(token.token_id.len())],
                     price_str
@@ -1424,8 +1736,8 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
             let config = StrategyConfig {
                 shares: 20,
                 window_min: 2,
-                move_pct: dec!(0.05),      // 5% drop triggers (test mode)
-                sum_target: dec!(0.98),    // Target sum for leg2
+                move_pct: dec!(0.05),   // 5% drop triggers (test mode)
+                sum_target: dec!(0.98), // Target sum for leg2
                 fee_buffer: dec!(0.005),
                 slippage_buffer: dec!(0.01),
                 profit_buffer: dec!(0.005),
@@ -1434,10 +1746,18 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
             let mut current_round: Option<String> = None;
             let mut leg1_price: Option<(ploy::domain::Side, rust_decimal::Decimal)> = None;
 
-            println!("\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-            println!("\x1b[36m║  Signal Detection: move_pct=5%, window=10s, target=0.98     ║\x1b[0m");
-            println!("\x1b[36m║  (Test mode - production uses 15%/3s)                       ║\x1b[0m");
-            println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+            println!(
+                "\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+            );
+            println!(
+                "\x1b[36m║  Signal Detection: move_pct=5%, window=10s, target=0.98     ║\x1b[0m"
+            );
+            println!(
+                "\x1b[36m║  (Test mode - production uses 15%/3s)                       ║\x1b[0m"
+            );
+            println!(
+                "\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n"
+            );
 
             while running.load(Ordering::Relaxed) {
                 match updates.recv().await {
@@ -1460,15 +1780,19 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
                         );
 
                         // Check for dump signal
-                        if let Some(signal) = detector.update(&update.quote, current_round.as_deref()) {
+                        if let Some(signal) =
+                            detector.update(&update.quote, current_round.as_deref())
+                        {
                             println!("\n\x1b[41;97m ══════════════════════════════════════════════════════════ \x1b[0m");
                             println!("\x1b[41;97m  🚨 DUMP SIGNAL DETECTED!                                  \x1b[0m");
                             println!("\x1b[41;97m ══════════════════════════════════════════════════════════ \x1b[0m");
                             println!("  Side: {:?}", signal.side);
-                            println!("  Drop: {:.2}% ({:.4} → {:.4})",
+                            println!(
+                                "  Drop: {:.2}% ({:.4} → {:.4})",
                                 signal.drop_pct * rust_decimal::Decimal::from(100),
                                 signal.reference_price,
-                                signal.trigger_price);
+                                signal.trigger_price
+                            );
                             println!("  Spread: {} bps", signal.spread_bps);
                             println!("\x1b[41;97m ══════════════════════════════════════════════════════════ \x1b[0m\n");
 
@@ -1495,10 +1819,16 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
                                         println!("\x1b[42;97m  ✅ LEG2 OPPORTUNITY!                                       \x1b[0m");
                                         println!("\x1b[42;97m ══════════════════════════════════════════════════════════ \x1b[0m");
                                         println!("  Leg1 ({:?}): {:.4}", leg1_side, l1_price);
-                                        println!("  Leg2 ({:?}): {:.4}", opposite_side, opposite_ask);
+                                        println!(
+                                            "  Leg2 ({:?}): {:.4}",
+                                            opposite_side, opposite_ask
+                                        );
                                         println!("  Sum: {:.4} <= Target: {:.4}", sum, target);
-                                        println!("  Potential Profit: {:.2}%",
-                                            (rust_decimal::Decimal::ONE - sum) * rust_decimal::Decimal::from(100));
+                                        println!(
+                                            "  Potential Profit: {:.2}%",
+                                            (rust_decimal::Decimal::ONE - sum)
+                                                * rust_decimal::Decimal::from(100)
+                                        );
                                         println!("\x1b[42;97m ══════════════════════════════════════════════════════════ \x1b[0m\n");
 
                                         // Clear leg1 after successful leg2 (in real trading, we'd execute)
@@ -1540,7 +1870,10 @@ async fn run_series_watch_mode(client: &PolymarketClient, series_id: &str) -> Re
 }
 
 /// Watch a single market (one-shot mode)
-async fn run_single_market_watch(client: &PolymarketClient, market_info: ploy::adapters::MarketResponse) -> Result<()> {
+async fn run_single_market_watch(
+    client: &PolymarketClient,
+    market_info: ploy::adapters::MarketResponse,
+) -> Result<()> {
     println!("Tokens:");
     for token in &market_info.tokens {
         println!(
@@ -1564,8 +1897,14 @@ async fn run_single_market_watch(client: &PolymarketClient, market_info: ploy::a
     println!("\n\x1b[33mStarting WebSocket connection...\x1b[0m");
     println!("Press Ctrl+C to stop.\n");
 
-    let ws = Arc::new(PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market"));
-    let token_ids: Vec<String> = market_info.tokens.iter().map(|t| t.token_id.clone()).collect();
+    let ws = Arc::new(PolymarketWebSocket::new(
+        "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    ));
+    let token_ids: Vec<String> = market_info
+        .tokens
+        .iter()
+        .map(|t| t.token_id.clone())
+        .collect();
 
     for token in &market_info.tokens {
         let side = match token.outcome.to_lowercase().as_str() {
@@ -1630,15 +1969,22 @@ async fn run_bot(cli: &Cli) -> Result<()> {
     let config = match AppConfig::load_from(&cli.config) {
         Ok(mut c) => {
             // Override with CLI flags
-            c.dry_run.enabled = cli.dry_run;
-            c.market.market_slug = cli.market.clone();
+            if let Some(dry_run) = cli.dry_run {
+                c.dry_run.enabled = dry_run;
+            }
+            if let Some(ref market) = cli.market {
+                c.market.market_slug = market.clone();
+            }
             c
         }
         Err(e) => {
             error!("Failed to load configuration: {}", e);
             // Use defaults
             info!("Using default configuration");
-            AppConfig::default_config(cli.dry_run, &cli.market)
+            AppConfig::default_config(
+                cli.dry_run.unwrap_or(true),
+                cli.market.as_deref().unwrap_or("btc-price-series-15m"),
+            )
         }
     };
 
@@ -1648,20 +1994,31 @@ async fn run_bot(cli: &Cli) -> Result<()> {
     );
 
     // Check if we can connect to database
-    let store = match PostgresStore::new(&config.database.url, config.database.max_connections).await
-    {
-        Ok(s) => {
-            if let Err(e) = s.migrate().await {
-                error!("Database migration failed: {}", e);
+    let store =
+        match PostgresStore::new(&config.database.url, config.database.max_connections).await {
+            Ok(s) => {
+                if let Err(e) = s.migrate().await {
+                    error!("Database migration failed: {}", e);
+                }
+                info!("Database connected");
+                Some(s)
             }
-            info!("Database connected");
-            Some(s)
-        }
-        Err(e) => {
-            error!("Database connection failed: {} - running without persistence", e);
-            None
-        }
-    };
+            Err(e) => {
+                if config.dry_run.enabled {
+                    warn!(
+                    "Database connection failed in dry-run mode: {} - falling back to simple mode",
+                    e
+                );
+                    None
+                } else {
+                    error!(
+                        "Database connection failed in live mode: {} - aborting startup",
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+        };
 
     // Crash recovery check
     if let Some(ref store) = store {
@@ -1696,6 +2053,17 @@ async fn run_full_bot(
     ws_client: Arc<PolymarketWebSocket>,
     metrics: Arc<Metrics>,
 ) -> Result<()> {
+    // Safety: never start live trading when the DB indicates trading was halted.
+    // (Crash recovery may have been skipped/failed; this enforces the invariant anyway.)
+    if !config.dry_run.enabled {
+        let today = chrono::Utc::now().date_naive();
+        if store.is_trading_halted(today).await? {
+            return Err(PloyError::Internal(
+                "Trading halted - check daily_metrics for halt_reason".to_string(),
+            ));
+        }
+    }
+
     // Initialize order executor
     let executor = OrderExecutor::new(clob_client.clone(), config.execution.clone());
 
@@ -1722,7 +2090,7 @@ async fn run_full_bot(
     let health_state = Arc::new(
         HealthState::new()
             .with_risk_manager(engine.risk_manager())
-            .with_metrics(Arc::clone(&metrics))
+            .with_metrics(Arc::clone(&metrics)),
     );
     let health_port = config.health_port.unwrap_or(8080);
     let health_server = HealthServer::new(Arc::clone(&health_state), health_port);
@@ -1735,6 +2103,39 @@ async fn run_full_bot(
             }
         })
     };
+
+    #[cfg(feature = "api")]
+    let api_handle = {
+        use rust_decimal::prelude::ToPrimitive;
+
+        let api_port = config.api_port.unwrap_or(8081);
+        let api_config = StrategyConfigState {
+            symbols: vec![config.market.market_slug.clone()],
+            min_move: config.strategy.move_pct.to_f64().unwrap_or(0.0),
+            max_entry: config.strategy.sum_target.to_f64().unwrap_or(1.0),
+            shares: i32::try_from(config.strategy.shares).unwrap_or(i32::MAX),
+            predictive: false,
+            take_profit: None,
+            stop_loss: None,
+        };
+
+        match start_api_server_background(Arc::new(store.clone()), api_port, api_config).await {
+            Ok(handle) => {
+                info!("API server started on port {}", api_port);
+                Some(handle)
+            }
+            Err(e) => {
+                if config.dry_run.enabled {
+                    warn!("API server failed to start in dry-run mode: {}", e);
+                    None
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    };
+    #[cfg(not(feature = "api"))]
+    let api_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
     // Spawn WebSocket connection
     let ws_handle = {
@@ -1803,6 +2204,59 @@ async fn run_full_bot(
         })
     };
 
+    // Spawn always-on event-edge agent (optional)
+    let event_edge_handle = if let Some(agent_cfg) = config.event_edge_agent.clone() {
+        if agent_cfg.enabled {
+            use ploy::services::{
+                EventEdgeAgent, EventEdgeClaudeFrameworkAgent, EventEdgeEventDrivenAgent,
+            };
+            let rest_url = config.market.rest_url.clone();
+            let global_dry_run = config.dry_run.enabled;
+            tokio::spawn(async move {
+                let dry_run = global_dry_run;
+                let can_trade = agent_cfg.trade && !dry_run;
+                let client = match create_pm_client(&rest_url, !can_trade).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!(
+                            "EventEdgeAgent: failed to build client (trade={}): {}",
+                            can_trade, e
+                        );
+                        return;
+                    }
+                };
+
+                match agent_cfg.framework.as_str() {
+                    "claude_agent_sdk" => {
+                        let agent = EventEdgeClaudeFrameworkAgent::new(client, agent_cfg);
+                        if let Err(e) = agent.run_forever().await {
+                            error!("EventEdgeClaudeFrameworkAgent error: {}", e);
+                        }
+                    }
+                    "event_driven" => match EventEdgeEventDrivenAgent::new(client, agent_cfg).await
+                    {
+                        Ok(agent) => {
+                            if let Err(e) = agent.run_forever().await {
+                                error!("EventEdgeEventDrivenAgent error: {}", e);
+                            }
+                        }
+                        Err(e) => error!("EventEdgeEventDrivenAgent init error: {}", e),
+                    },
+                    _ => {
+                        let agent = EventEdgeAgent::new(client, agent_cfg);
+                        if let Err(e) = agent.run_forever().await {
+                            error!("EventEdgeAgent error: {}", e);
+                        }
+                    }
+                }
+            })
+        } else {
+            tokio::spawn(async {})
+        }
+    } else {
+        tokio::spawn(async {})
+    };
+
     // Wait for shutdown signal
     info!("Bot is running. Press Ctrl+C to stop.");
     shutdown_signal().await;
@@ -1812,11 +2266,15 @@ async fn run_full_bot(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     health_handle.abort();
+    if let Some(api_handle) = api_handle {
+        api_handle.abort();
+    }
     ws_handle.abort();
     collector_handle.abort();
     engine_handle.abort();
     round_handle.abort();
     status_handle.abort();
+    event_edge_handle.abort();
 
     info!("Shutdown complete");
     Ok(())
@@ -1853,7 +2311,11 @@ async fn run_simple_bot(
         info!("Registered {} token: {}", token.outcome, token.token_id);
     }
 
-    let token_ids: Vec<String> = market_info.tokens.iter().map(|t| t.token_id.clone()).collect();
+    let token_ids: Vec<String> = market_info
+        .tokens
+        .iter()
+        .map(|t| t.token_id.clone())
+        .collect();
 
     // Spawn WebSocket
     let ws_clone = Arc::clone(&ws_client);
@@ -1888,11 +2350,65 @@ async fn run_simple_bot(
         }
     });
 
+    // Spawn always-on event-edge agent (optional)
+    let event_edge_handle = if let Some(agent_cfg) = config.event_edge_agent.clone() {
+        if agent_cfg.enabled {
+            use ploy::services::{
+                EventEdgeAgent, EventEdgeClaudeFrameworkAgent, EventEdgeEventDrivenAgent,
+            };
+            let rest_url = config.market.rest_url.clone();
+            let global_dry_run = config.dry_run.enabled;
+            tokio::spawn(async move {
+                let dry_run = global_dry_run;
+                let can_trade = agent_cfg.trade && !dry_run;
+                let client = match create_pm_client(&rest_url, !can_trade).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!(
+                            "EventEdgeAgent: failed to build client (trade={}): {}",
+                            can_trade, e
+                        );
+                        return;
+                    }
+                };
+
+                match agent_cfg.framework.as_str() {
+                    "claude_agent_sdk" => {
+                        let agent = EventEdgeClaudeFrameworkAgent::new(client, agent_cfg);
+                        if let Err(e) = agent.run_forever().await {
+                            error!("EventEdgeClaudeFrameworkAgent error: {}", e);
+                        }
+                    }
+                    "event_driven" => match EventEdgeEventDrivenAgent::new(client, agent_cfg).await
+                    {
+                        Ok(agent) => {
+                            if let Err(e) = agent.run_forever().await {
+                                error!("EventEdgeEventDrivenAgent error: {}", e);
+                            }
+                        }
+                        Err(e) => error!("EventEdgeEventDrivenAgent init error: {}", e),
+                    },
+                    _ => {
+                        let agent = EventEdgeAgent::new(client, agent_cfg);
+                        if let Err(e) = agent.run_forever().await {
+                            error!("EventEdgeAgent error: {}", e);
+                        }
+                    }
+                }
+            })
+        } else {
+            tokio::spawn(async {})
+        }
+    } else {
+        tokio::spawn(async {})
+    };
+
     info!("Bot is running in simple mode. Press Ctrl+C to stop.");
     shutdown_signal().await;
 
     ws_handle.abort();
     print_handle.abort();
+    event_edge_handle.abort();
 
     info!("Shutdown complete");
     Ok(())
@@ -1906,8 +2422,7 @@ fn init_logging() {
         .unwrap_or_else(|_| EnvFilter::new("info,ploy=debug,sqlx=warn"));
 
     // Check if we should write to file (LOG_DIR env var or /var/log/ploy exists)
-    let log_dir = std::env::var("LOG_DIR")
-        .unwrap_or_else(|_| "/var/log/ploy".to_string());
+    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "/var/log/ploy".to_string());
 
     // Try to create log directory
     let file_layer = if std::fs::create_dir_all(&log_dir).is_ok() {
@@ -1921,11 +2436,14 @@ fn init_logging() {
         Some(
             tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)
-                .with_ansi(false)  // No color codes in file
-                .with_target(true)
+                .with_ansi(false) // No color codes in file
+                .with_target(true),
         )
     } else {
-        eprintln!("Warning: Could not create log directory {}, file logging disabled", log_dir);
+        eprintln!(
+            "Warning: Could not create log directory {}, file logging disabled",
+            log_dir
+        );
         None
     };
 
@@ -1965,7 +2483,9 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut stream) => { stream.recv().await; }
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
             Err(e) => error!("Failed to install SIGTERM handler: {}", e),
         }
     };
@@ -1992,7 +2512,10 @@ async fn graceful_shutdown<F: std::future::Future>(
 
     match timeout(Duration::from_secs(timeout_secs), shutdown_future).await {
         Ok(_) => info!("{} shutdown completed gracefully", name),
-        Err(_) => warn!("{} shutdown timed out after {}s, forcing", name, timeout_secs),
+        Err(_) => warn!(
+            "{} shutdown timed out after {}s, forcing",
+            name, timeout_secs
+        ),
     }
 }
 
@@ -2063,7 +2586,10 @@ async fn perform_crash_recovery(store: &PostgresStore) -> Result<()> {
                     cycle.cycle_id, remaining
                 );
                 store
-                    .abort_cycle(cycle.cycle_id, "Insufficient time remaining after crash recovery")
+                    .abort_cycle(
+                        cycle.cycle_id,
+                        "Insufficient time remaining after crash recovery",
+                    )
                     .await?;
             } else {
                 warn!(
@@ -2071,7 +2597,10 @@ async fn perform_crash_recovery(store: &PostgresStore) -> Result<()> {
                     cycle.cycle_id, cycle.state, remaining
                 );
                 store
-                    .abort_cycle(cycle.cycle_id, "Aborted during crash recovery - manual resume not implemented")
+                    .abort_cycle(
+                        cycle.cycle_id,
+                        "Aborted during crash recovery - manual resume not implemented",
+                    )
                     .await?;
             }
         }
@@ -2104,6 +2633,9 @@ async fn run_momentum_mode(
     predictive: bool,
     min_time: u64,
     max_time: u64,
+    vwap_confirm: bool,
+    vwap_lookback: u64,
+    vwap_min_dev: f64,
 ) -> Result<()> {
     use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket};
     use ploy::signing::Wallet;
@@ -2116,7 +2648,10 @@ async fn run_momentum_mode(
     info!("Starting momentum strategy mode");
 
     // Parse symbols
-    let symbols_vec: Vec<String> = symbols.split(',').map(|s| s.trim().to_uppercase()).collect();
+    let symbols_vec: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .collect();
     info!("Trading symbols: {:?}", symbols_vec);
 
     // Determine mode settings
@@ -2130,10 +2665,10 @@ async fn run_momentum_mode(
 
     // Build baseline volatility map for each symbol
     let mut baseline_volatility = std::collections::HashMap::new();
-    baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005));  // 0.05%
-    baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008));  // 0.08%
-    baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015));  // 0.15%
-    baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012));  // 0.12%
+    baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005)); // 0.05%
+    baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008)); // 0.08%
+    baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015)); // 0.15%
+    baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012)); // 0.12%
 
     // Build momentum config
     let momentum_config = MomentumConfig {
@@ -2141,13 +2676,12 @@ async fn run_momentum_mode(
             .unwrap_or(dec!(0.0005)),
         max_entry_price: Decimal::from_str(&format!("{:.6}", max_entry / 100.0))
             .unwrap_or(dec!(0.35)),
-        min_edge: Decimal::from_str(&format!("{:.6}", min_edge / 100.0))
-            .unwrap_or(dec!(0.03)),
+        min_edge: Decimal::from_str(&format!("{:.6}", min_edge / 100.0)).unwrap_or(dec!(0.03)),
         lookback_secs: 5,
         // Multi-timeframe momentum (always enabled) with volatility adjustment
         use_volatility_adjustment: true, // Adjust threshold by current volatility
         baseline_volatility,
-        volatility_lookback_secs: 60,   // 60-second rolling volatility
+        volatility_lookback_secs: 60, // 60-second rolling volatility
         shares_per_trade: shares,
         max_positions,
         cooldown_secs: 60,
@@ -2158,17 +2692,23 @@ async fn run_momentum_mode(
         min_time_remaining_secs: min_time_remaining,
         max_time_remaining_secs: max_time_remaining,
         // Cross-symbol risk control
-        max_window_exposure_usd: dec!(25),   // Max $25 total per 15-min window
-        best_edge_only: true,                // Only take highest edge signal
-        signal_collection_delay_ms: 2000,    // 2 second delay to collect signals
+        max_window_exposure_usd: dec!(25), // Max $25 total per 15-min window
+        best_edge_only: true,              // Only take highest edge signal
+        signal_collection_delay_ms: 2000,  // 2 second delay to collect signals
         // === ENHANCED MOMENTUM DETECTION ===
-        require_mtf_agreement: true,         // Require all timeframes to agree on direction
-        min_obi_confirmation: dec!(0.05),    // 5% OBI confirmation
-        use_kline_volatility: true,          // Use K-line historical volatility
-        time_decay_factor: dec!(0.30),       // 30% decay in later window
-        use_price_to_beat: true,             // Consider price-to-beat from market question
-        dynamic_position_sizing: true,       // Scale position by confidence
-        min_confidence: 0.5,                 // Minimum 50% confidence
+        require_mtf_agreement: true, // Require all timeframes to agree on direction
+        min_obi_confirmation: dec!(0.05), // 5% OBI confirmation
+        use_kline_volatility: true,  // Use K-line historical volatility
+        time_decay_factor: dec!(0.30), // 30% decay in later window
+        use_price_to_beat: true,     // Consider price-to-beat from market question
+        dynamic_position_sizing: true, // Scale position by confidence
+        min_confidence: 0.5,         // Minimum 50% confidence
+
+        // VWAP confirmation (optional)
+        require_vwap_confirmation: vwap_confirm,
+        vwap_lookback_secs: vwap_lookback,
+        min_vwap_deviation: Decimal::from_str(&format!("{:.6}", vwap_min_dev / 100.0))
+            .unwrap_or(dec!(0)),
     };
 
     // Build exit config
@@ -2185,8 +2725,10 @@ async fn run_momentum_mode(
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
     if predictive {
         println!("\x1b[33m║       PREDICTIVE MODE 📈 (Early Entry + TP/SL)              ║\x1b[0m");
-        println!("\x1b[33m║   Entry: {}-{}s before resolution | Exit: TP/SL           ║\x1b[0m",
-            min_time_remaining, max_time_remaining);
+        println!(
+            "\x1b[33m║   Entry: {}-{}s before resolution | Exit: TP/SL           ║\x1b[0m",
+            min_time_remaining, max_time_remaining
+        );
     } else {
         println!("\x1b[36m║       CRYINGLITTLEBABY CONFIRMATORY MODE 🎯                  ║\x1b[0m");
         println!("\x1b[36m║   (Buy confirmed winners near resolution → collect $1)       ║\x1b[0m");
@@ -2266,17 +2808,17 @@ async fn run_momentum_mode(
     // Position sizing: use percentage of available balance per trade
     // With 4 symbols and max 1 position each, 20% = up to 80% deployed
     let risk_config = ploy::config::RiskConfig {
-        max_single_exposure_usd: dec!(50),     // Max $50 per single trade
+        max_single_exposure_usd: dec!(50), // Max $50 per single trade
         min_remaining_seconds: 30,
         max_consecutive_failures: 3,
-        daily_loss_limit_usd: dec!(100),       // Stop trading after $100 daily loss
+        daily_loss_limit_usd: dec!(100), // Stop trading after $100 daily loss
         leg2_force_close_seconds: 20,
         // Fund management settings
-        max_positions: max_positions as u32,   // Limit concurrent positions
-        max_positions_per_symbol: 1,           // Only 1 position per symbol (BTC, ETH, etc.)
-        position_size_pct: Some(dec!(0.20)),   // 20% of available balance per trade
-        fixed_amount_usd: None,                // Use percentage-based sizing instead
-        min_balance_usd: dec!(5),              // Keep $5 minimum reserve
+        max_positions: max_positions as u32, // Limit concurrent positions
+        max_positions_per_symbol: 1,         // Only 1 position per symbol (BTC, ETH, etc.)
+        position_size_pct: Some(dec!(0.20)), // 20% of available balance per trade
+        fixed_amount_usd: None,              // Use percentage-based sizing instead
+        min_balance_usd: dec!(5),            // Keep $5 minimum reserve
     };
 
     // Create momentum engine with fund management
@@ -2301,7 +2843,10 @@ async fn run_momentum_mode(
 
     if token_ids.is_empty() {
         warn!("No active events found for the specified symbols");
-        warn!("Make sure there are active UP/DOWN markets for: {:?}", symbols_vec);
+        warn!(
+            "Make sure there are active UP/DOWN markets for: {:?}",
+            symbols_vec
+        );
         return Ok(());
     }
 
@@ -2321,7 +2866,10 @@ async fn run_momentum_mode(
     for (token_id, side) in &token_mappings {
         pm_ws.register_token(token_id, *side).await;
     }
-    info!("Registered {} tokens with UP/DOWN mappings", token_mappings.len());
+    info!(
+        "Registered {} tokens with UP/DOWN mappings",
+        token_mappings.len()
+    );
     let pm_cache = pm_ws.quote_cache().clone();
     // Subscribe BEFORE spawning the task
     let pm_rx = pm_ws.subscribe_updates();
@@ -2347,7 +2895,10 @@ async fn run_momentum_mode(
 
     // Spawn engine task
     let engine_handle = tokio::spawn(async move {
-        if let Err(e) = engine.run(binance_rx, pm_rx, &binance_cache, &pm_cache).await {
+        if let Err(e) = engine
+            .run(binance_rx, pm_rx, &binance_cache, &pm_cache)
+            .await
+        {
             error!("Momentum engine error: {}", e);
         }
     });
@@ -2455,7 +3006,8 @@ async fn run_split_arb_mode(
             "https://clob.polymarket.com",
             wallet,
             true, // neg_risk for UP/DOWN markets
-        ).await?
+        )
+        .await?
     };
 
     // Initialize executor with default config
@@ -2477,12 +3029,11 @@ async fn run_agent_mode(
     enable_trading: bool,
     chat: bool,
 ) -> Result<()> {
-    use ploy::agent::{
-        AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient,
-        protocol::{AgentContext, DailyStats, MarketSnapshot},
-        SportsAnalyst,
-    };
     use ploy::agent::autonomous::AutonomyLevel;
+    use ploy::agent::{
+        protocol::{AgentContext, DailyStats, MarketSnapshot},
+        AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient, SportsAnalyst,
+    };
     use ploy::domain::{RiskState, StrategyState};
     use rust_decimal::Decimal;
     use std::io::{self, BufRead, Write};
@@ -2599,7 +3150,8 @@ async fn run_agent_mode(
                     AutonomyLevel::AdvisoryOnly
                 },
                 max_trade_size: Decimal::from_f64_retain(max_trade).unwrap_or(Decimal::from(50)),
-                max_total_exposure: Decimal::from_f64_retain(max_exposure).unwrap_or(Decimal::from(200)),
+                max_total_exposure: Decimal::from_f64_retain(max_exposure)
+                    .unwrap_or(Decimal::from(200)),
                 min_confidence: 0.75,
                 trading_enabled: enable_trading,
                 analysis_interval_secs: 30,
@@ -2612,7 +3164,10 @@ async fn run_agent_mode(
             println!("  Max Trade Size: ${}", config.max_trade_size);
             println!("  Max Exposure: ${}", config.max_total_exposure);
             println!("  Trading Enabled: {}", config.trading_enabled);
-            println!("  Min Confidence: {}%", (config.min_confidence * 100.0) as u32);
+            println!(
+                "  Min Confidence: {}%",
+                (config.min_confidence * 100.0) as u32
+            );
 
             if !enable_trading {
                 println!("\n\x1b[33m⚠️  Trading is disabled. Use --enable-trading to execute trades.\x1b[0m");
@@ -2622,6 +3177,15 @@ async fn run_agent_mode(
             use ploy::agent::AgentClientConfig;
             let client = ClaudeAgentClient::with_config(AgentClientConfig::for_autonomous());
             let mut agent = AutonomousAgent::new(client, config);
+
+            if enable_trading {
+                println!("  Trading backend: initializing authenticated Polymarket client...");
+                let trading_client = create_pm_client("https://clob.polymarket.com", false).await?;
+                println!("  Trading backend: \x1b[32m✓ Ready (live orders enabled)\x1b[0m");
+                agent = agent.with_trading_client(trading_client);
+            } else {
+                println!("  Trading backend: \x1b[33mdisabled\x1b[0m");
+            }
 
             // Add Grok for real-time search if configured
             use ploy::agent::{GrokClient, GrokConfig};
@@ -2635,7 +3199,9 @@ async fn run_agent_mode(
             }
 
             // Get market slug for context provider
-            let market_slug = market.map(|s| s.to_string()).unwrap_or_else(|| "demo-market".to_string());
+            let market_slug = market
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "demo-market".to_string());
             let market_slug_clone = market_slug.clone();
 
             // Fetch initial market data
@@ -2673,14 +3239,15 @@ async fn run_agent_mode(
                         Err(_) => MarketSnapshot::new(slug),
                     };
 
-                    let ctx = AgentContext::new(market_snapshot, StrategyState::Idle, RiskState::Normal)
-                        .with_daily_stats(DailyStats {
-                            realized_pnl: Decimal::ZERO,
-                            trade_count: 0,
-                            cycle_count: 0,
-                            win_rate: None,
-                            avg_profit: None,
-                        });
+                    let ctx =
+                        AgentContext::new(market_snapshot, StrategyState::Idle, RiskState::Normal)
+                            .with_daily_stats(DailyStats {
+                                realized_pnl: Decimal::ZERO,
+                                trade_count: 0,
+                                cycle_count: 0,
+                                win_rate: None,
+                                avg_profit: None,
+                            });
                     Ok(ctx)
                 }
             };
@@ -2750,15 +3317,30 @@ async fn run_agent_mode(
                     println!("\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n");
 
                     // Teams
-                    println!("\x1b[36mMatchup:\x1b[0m {} vs {}", analysis.teams.0, analysis.teams.1);
+                    println!(
+                        "\x1b[36mMatchup:\x1b[0m {} vs {}",
+                        analysis.teams.0, analysis.teams.1
+                    );
 
                     // Market odds
                     println!("\n\x1b[36mMarket Odds (Polymarket):\x1b[0m");
-                    println!("  {} YES: {:.1}%", analysis.teams.0,
-                        analysis.market_odds.team1_yes_price.to_string().parse::<f64>().unwrap_or(0.0) * 100.0);
+                    println!(
+                        "  {} YES: {:.1}%",
+                        analysis.teams.0,
+                        analysis
+                            .market_odds
+                            .team1_yes_price
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0)
+                            * 100.0
+                    );
                     if let Some(p) = analysis.market_odds.team2_yes_price {
-                        println!("  {} YES: {:.1}%", analysis.teams.1,
-                            p.to_string().parse::<f64>().unwrap_or(0.0) * 100.0);
+                        println!(
+                            "  {} YES: {:.1}%",
+                            analysis.teams.1,
+                            p.to_string().parse::<f64>().unwrap_or(0.0) * 100.0
+                        );
                     }
 
                     // Structured data (from Grok)
@@ -2766,7 +3348,10 @@ async fn run_agent_mode(
                         let sentiment = &data.sentiment;
                         println!("\n\x1b[36mPublic Sentiment (Grok):\x1b[0m");
                         println!("  Expert pick: {}", sentiment.expert_pick);
-                        println!("  Expert confidence: {:.0}%", sentiment.expert_confidence * 100.0);
+                        println!(
+                            "  Expert confidence: {:.0}%",
+                            sentiment.expert_confidence * 100.0
+                        );
                         println!("  Public bet: {:.0}%", sentiment.public_bet_percentage);
                         println!("  Sharp money: {}", sentiment.sharp_money_side);
                         println!("  Social sentiment: {}", sentiment.social_sentiment);
@@ -2780,11 +3365,20 @@ async fn run_agent_mode(
 
                     // Claude prediction
                     println!("\n\x1b[36mClaude Opus Prediction:\x1b[0m");
-                    println!("  {} win probability: \x1b[32m{:.1}%\x1b[0m",
-                        analysis.teams.0, analysis.prediction.team1_win_prob * 100.0);
-                    println!("  {} win probability: \x1b[32m{:.1}%\x1b[0m",
-                        analysis.teams.1, analysis.prediction.team2_win_prob * 100.0);
-                    println!("  Confidence: {:.0}%", analysis.prediction.confidence * 100.0);
+                    println!(
+                        "  {} win probability: \x1b[32m{:.1}%\x1b[0m",
+                        analysis.teams.0,
+                        analysis.prediction.team1_win_prob * 100.0
+                    );
+                    println!(
+                        "  {} win probability: \x1b[32m{:.1}%\x1b[0m",
+                        analysis.teams.1,
+                        analysis.prediction.team2_win_prob * 100.0
+                    );
+                    println!(
+                        "  Confidence: {:.0}%",
+                        analysis.prediction.confidence * 100.0
+                    );
                     println!("\n  Reasoning: {}", analysis.prediction.reasoning);
                     if !analysis.prediction.key_factors.is_empty() {
                         println!("\n  Key factors:");
@@ -2801,10 +3395,16 @@ async fn run_agent_mode(
                         ploy::agent::sports_analyst::TradeAction::Hold => "\x1b[33m",
                         ploy::agent::sports_analyst::TradeAction::Avoid => "\x1b[31m",
                     };
-                    println!("  Action: {}{:?}\x1b[0m", action_color, analysis.recommendation.action);
+                    println!(
+                        "  Action: {}{:?}\x1b[0m",
+                        action_color, analysis.recommendation.action
+                    );
                     println!("  Side: {}", analysis.recommendation.side);
                     println!("  Edge: {:.1}%", analysis.recommendation.edge);
-                    println!("  Suggested size: {}% of bankroll", analysis.recommendation.suggested_size);
+                    println!(
+                        "  Suggested size: {}% of bankroll",
+                        analysis.recommendation.suggested_size
+                    );
                     println!("  Reasoning: {}", analysis.recommendation.reasoning);
 
                     println!("\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m");
@@ -2825,9 +3425,7 @@ async fn run_agent_mode(
 }
 
 /// Fetch market data from Polymarket and create a populated MarketSnapshot
-async fn fetch_market_snapshot(
-    market_slug: &str,
-) -> Result<ploy::agent::protocol::MarketSnapshot> {
+async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::agent::protocol::MarketSnapshot> {
     use chrono::{DateTime, Utc};
     use ploy::agent::protocol::MarketSnapshot;
     use ploy::error::PloyError;
@@ -2858,7 +3456,10 @@ async fn fetch_market_snapshot(
     let mut snapshot = MarketSnapshot::new(market_slug.to_string());
 
     // Set description from event title
-    snapshot.description = event.get("title").and_then(|v| v.as_str()).map(String::from);
+    snapshot.description = event
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // Parse end date
     if let Some(end_str) = event.get("endDate").and_then(|v| v.as_str()) {
@@ -2899,6 +3500,8 @@ async fn fetch_market_snapshot(
 
                     // For first market, set as primary prices
                     if first_market {
+                        snapshot.yes_token_id = Some(token_ids[0].clone());
+                        snapshot.no_token_id = Some(token_ids[1].clone());
                         // Use outcome prices as approximate bid/ask
                         snapshot.yes_bid = yes_price;
                         snapshot.yes_ask = yes_price;
@@ -2931,14 +3534,22 @@ async fn fetch_market_snapshot(
     Ok(snapshot)
 }
 
+fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
+    match coin_or_series.trim().to_uppercase().as_str() {
+        // Prefer 5m; include 15m as fallback (e.g. ETH 5m can be absent).
+        "BTC" => vec!["10684".to_string(), "10192".to_string()], // btc-up-or-down-5m, btc-up-or-down-15m
+        "ETH" => vec!["10683".to_string(), "10191".to_string()], // eth-up-or-down-5m, eth-up-or-down-15m
+        "SOL" => vec!["10686".to_string(), "10423".to_string()], // sol-up-or-down-5m, sol-up-or-down-15m
+        "XRP" => vec!["10685".to_string(), "10422".to_string()], // xrp-up-or-down-5m, xrp-up-or-down-15m
+        _ => vec![coin_or_series.trim().to_string()], // Allow raw series IDs
+    }
+}
+
 /// Handle crypto subcommands
 async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
     use ploy::signing::Wallet;
-    use ploy::strategy::{
-        CryptoSplitArbConfig, run_crypto_split_arb,
-        core::SplitArbConfig,
-    };
+    use ploy::strategy::{core::SplitArbConfig, run_crypto_split_arb, CryptoSplitArbConfig};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::str::FromStr;
@@ -2960,12 +3571,7 @@ async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             // Map coins to series IDs
             let series_ids: Vec<String> = coins
                 .split(',')
-                .map(|c| match c.trim().to_uppercase().as_str() {
-                    "SOL" => "10423".to_string(),
-                    "ETH" => "10191".to_string(),
-                    "BTC" => "41".to_string(),
-                    _ => c.to_string(), // Allow raw series IDs
-                })
+                .flat_map(map_crypto_coin_to_series_ids)
                 .collect();
 
             // Create config
@@ -2995,7 +3601,8 @@ async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
                     "https://clob.polymarket.com",
                     wallet,
                     true, // neg_risk for UP/DOWN markets
-                ).await?
+                )
+                .await?
             };
 
             // Initialize executor with default config
@@ -3019,8 +3626,7 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
     use ploy::signing::Wallet;
     use ploy::strategy::{
-        SportsSplitArbConfig, SportsLeague, run_sports_split_arb,
-        core::SplitArbConfig,
+        core::SplitArbConfig, run_sports_split_arb, SportsLeague, SportsSplitArbConfig,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -3081,7 +3687,8 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                     "https://clob.polymarket.com",
                     wallet,
                     true, // neg_risk
-                ).await?
+                )
+                .await?
             };
 
             // Initialize executor with default config
@@ -3095,8 +3702,12 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
             // TODO: Implement monitoring mode
             println!("Sports monitoring mode not yet implemented");
         }
-        SportsCommands::Draftkings { sport, min_edge, all } => {
-            use ploy::agent::{OddsProvider, Sport, Market};
+        SportsCommands::Draftkings {
+            sport,
+            min_edge,
+            all,
+        } => {
+            use ploy::agent::{Market, OddsProvider, Sport};
 
             println!("\n\x1b[33m{}\x1b[0m", "═".repeat(63));
             println!("\x1b[33m           DRAFTKINGS ODDS SCANNER\x1b[0m");
@@ -3124,7 +3735,10 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                 }
             };
 
-            println!("\nFetching {} odds from DraftKings...\n", sport.to_uppercase());
+            println!(
+                "\nFetching {} odds from DraftKings...\n",
+                sport.to_uppercase()
+            );
 
             // Fetch odds
             match provider.get_odds(sport_enum, Market::Moneyline).await {
@@ -3138,8 +3752,11 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
 
                     for event in &events {
                         if let Some(best) = event.best_odds() {
-                            let edge_pct = (rust_decimal::Decimal::ONE - best.total_implied).to_string()
-                                .parse::<f64>().unwrap_or(0.0) * 100.0;
+                            let edge_pct = (rust_decimal::Decimal::ONE - best.total_implied)
+                                .to_string()
+                                .parse::<f64>()
+                                .unwrap_or(0.0)
+                                * 100.0;
 
                             // Filter by min_edge unless --all
                             if !*all && edge_pct.abs() < *min_edge {
@@ -3147,19 +3764,32 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                             }
 
                             println!("\x1b[36m{} vs {}\x1b[0m", event.home_team, event.away_team);
-                            println!("  \x1b[32m{}\x1b[0m @ {} ({:.1}%)",
+                            println!(
+                                "  \x1b[32m{}\x1b[0m @ {} ({:.1}%)",
                                 event.home_team,
                                 format!("{:+.0}", best.home_american_odds),
-                                best.home_implied_prob.to_string().parse::<f64>().unwrap_or(0.0) * 100.0
+                                best.home_implied_prob
+                                    .to_string()
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0)
+                                    * 100.0
                             );
-                            println!("  \x1b[32m{}\x1b[0m @ {} ({:.1}%)",
+                            println!(
+                                "  \x1b[32m{}\x1b[0m @ {} ({:.1}%)",
                                 event.away_team,
                                 format!("{:+.0}", best.away_american_odds),
-                                best.away_implied_prob.to_string().parse::<f64>().unwrap_or(0.0) * 100.0
+                                best.away_implied_prob
+                                    .to_string()
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0)
+                                    * 100.0
                             );
 
                             if best.has_arbitrage() {
-                                println!("  \x1b[32m🎯 Arbitrage: {:.2}% profit!\x1b[0m", best.arbitrage_profit());
+                                println!(
+                                    "  \x1b[32m🎯 Arbitrage: {:.2}% profit!\x1b[0m",
+                                    best.arbitrage_profit()
+                                );
                             }
 
                             println!();
@@ -3172,7 +3802,7 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
             }
         }
         SportsCommands::Analyze { url, team1, team2 } => {
-            use ploy::agent::{SportsAnalyst, SportsAnalysisWithDK};
+            use ploy::agent::{SportsAnalysisWithDK, SportsAnalyst};
 
             println!("\n\x1b[33m{}\x1b[0m", "═".repeat(63));
             println!("\x1b[33m        SPORTS ANALYSIS WITH DRAFTKINGS COMPARISON\x1b[0m");
@@ -3200,7 +3830,10 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                     // Build URL from team names
                     let t1_slug = t1.to_lowercase().replace(' ', "-");
                     let t2_slug = t2.to_lowercase().replace(' ', "-");
-                    format!("https://polymarket.com/event/nba-{}-vs-{}", t1_slug, t2_slug)
+                    format!(
+                        "https://polymarket.com/event/nba-{}-vs-{}",
+                        t1_slug, t2_slug
+                    )
                 }
                 _ => unreachable!("Validated by earlier check"),
             };
@@ -3212,28 +3845,42 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                 Ok(analysis) => {
                     let base = &analysis.base;
 
-                    println!("\x1b[36mMatchup: {} vs {}\x1b[0m", base.teams.0, base.teams.1);
+                    println!(
+                        "\x1b[36mMatchup: {} vs {}\x1b[0m",
+                        base.teams.0, base.teams.1
+                    );
                     println!();
 
                     // Claude prediction
                     println!("\x1b[33mClaude Opus Prediction:\x1b[0m");
-                    println!("  {} win: {:.1}%", base.teams.0, base.prediction.team1_win_prob * 100.0);
-                    println!("  {} win: {:.1}%", base.teams.1, base.prediction.team2_win_prob * 100.0);
+                    println!(
+                        "  {} win: {:.1}%",
+                        base.teams.0,
+                        base.prediction.team1_win_prob * 100.0
+                    );
+                    println!(
+                        "  {} win: {:.1}%",
+                        base.teams.1,
+                        base.prediction.team2_win_prob * 100.0
+                    );
                     println!("  Confidence: {:.0}%", base.prediction.confidence * 100.0);
                     println!();
 
                     // DraftKings comparison
                     if let Some(ref dk) = analysis.draftkings {
                         println!("\x1b[33mDraftKings Comparison:\x1b[0m");
-                        println!("  DK {} implied: {:.1}%",
+                        println!(
+                            "  DK {} implied: {:.1}%",
                             dk.home_team,
                             dk.dk_home_prob.to_string().parse::<f64>().unwrap_or(0.0) * 100.0
                         );
-                        println!("  DK {} implied: {:.1}%",
+                        println!(
+                            "  DK {} implied: {:.1}%",
                             dk.away_team,
                             dk.dk_away_prob.to_string().parse::<f64>().unwrap_or(0.0) * 100.0
                         );
-                        println!("  Edge on {}: {:.1}%",
+                        println!(
+                            "  Edge on {}: {:.1}%",
                             dk.recommended_side,
                             dk.edge.to_string().parse::<f64>().unwrap_or(0.0) * 100.0
                         );
@@ -3246,7 +3893,10 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                     // Best opportunity
                     let (best_side, best_edge) = analysis.best_edge();
                     println!("\x1b[32mRecommendation:\x1b[0m");
-                    println!("  Best bet: \x1b[32m{}\x1b[0m ({:+.1}% edge)", best_side, best_edge);
+                    println!(
+                        "  Best bet: \x1b[32m{}\x1b[0m ({:+.1}% edge)",
+                        best_side, best_edge
+                    );
 
                     if analysis.has_arbitrage() {
                         println!("  \x1b[32m🎯 Potential arbitrage detected!\x1b[0m");
@@ -3257,14 +3907,38 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                 }
             }
         }
-        SportsCommands::Polymarket { league, search, compare_dk, min_edge, live } => {
-            cli::show_polymarket_sports(league, search.as_deref(), *compare_dk, *min_edge, *live).await?;
+        SportsCommands::Polymarket {
+            league,
+            search,
+            compare_dk,
+            min_edge,
+            live,
+        } => {
+            cli::show_polymarket_sports(league, search.as_deref(), *compare_dk, *min_edge, *live)
+                .await?;
         }
-        SportsCommands::Chain { team1, team2, sport, execute, amount } => {
+        SportsCommands::Chain {
+            team1,
+            team2,
+            sport,
+            execute,
+            amount,
+        } => {
             cli::run_sports_chain(team1, team2, sport, *execute, *amount).await?;
         }
-        SportsCommands::LiveScan { sport, min_edge, interval, spreads, moneyline, props, alert } => {
-            cli::run_live_edge_scanner(sport, *min_edge, *interval, *spreads, *moneyline, *props, *alert).await?;
+        SportsCommands::LiveScan {
+            sport,
+            min_edge,
+            interval,
+            spreads,
+            moneyline,
+            props,
+            alert,
+        } => {
+            cli::run_live_edge_scanner(
+                sport, *min_edge, *interval, *spreads, *moneyline, *props, *alert,
+            )
+            .await?;
         }
     }
 
@@ -3274,7 +3948,11 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
 /// Handle politics subcommands
 async fn run_politics_command(cmd: &PoliticsCommands) -> Result<()> {
     match cmd {
-        PoliticsCommands::Markets { category, search, high_volume } => {
+        PoliticsCommands::Markets {
+            category,
+            search,
+            high_volume,
+        } => {
             cli::show_polymarket_politics(category, search.as_deref(), *high_volume).await?;
         }
         PoliticsCommands::Search { query } => {
@@ -3297,10 +3975,12 @@ async fn run_politics_command(cmd: &PoliticsCommands) -> Result<()> {
 /// RL strategy commands
 #[cfg(feature = "rl")]
 async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
-    use ploy::rl::{RLConfig, PPOConfig, TrainingConfig, RLStrategy, TradingEnvConfig, MarketConfig};
-    use ploy::rl::training::{TrainingLoop, Checkpointer, train_simulated, summarize_results};
-    use ploy::rl::training::checkpointing::episode_name;
     use ploy::rl::algorithms::ppo::{PPOTrainer, PPOTrainerConfig};
+    use ploy::rl::training::checkpointing::episode_name;
+    use ploy::rl::training::{summarize_results, train_simulated, Checkpointer, TrainingLoop};
+    use ploy::rl::{
+        MarketConfig, PPOConfig, RLConfig, RLStrategy, TradingEnvConfig, TrainingConfig,
+    };
     use ploy::strategy::Strategy; // Import Strategy trait for id() method
     use std::path::Path;
 
@@ -3320,14 +4000,35 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║               Ploy RL Training Mode                          ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Episodes:       {:>6}                                       ║", episodes);
-            println!("║  Learning Rate:  {:>10.6}                                  ║", lr);
-            println!("║  Batch Size:     {:>6}                                       ║", batch_size);
-            println!("║  Update Freq:    {:>6}                                       ║", update_freq);
-            println!("║  Symbol:         {:>10}                                    ║", symbol);
-            println!("║  Checkpoint:     {}                                          ║", checkpoint);
+            println!(
+                "║  Episodes:       {:>6}                                       ║",
+                episodes
+            );
+            println!(
+                "║  Learning Rate:  {:>10.6}                                  ║",
+                lr
+            );
+            println!(
+                "║  Batch Size:     {:>6}                                       ║",
+                batch_size
+            );
+            println!(
+                "║  Update Freq:    {:>6}                                       ║",
+                update_freq
+            );
+            println!(
+                "║  Symbol:         {:>10}                                    ║",
+                symbol
+            );
+            println!(
+                "║  Checkpoint:     {}                                          ║",
+                checkpoint
+            );
             if let Some(series_id) = series {
-                println!("║  Series:         {}                                          ║", series_id);
+                println!(
+                    "║  Series:         {}                                          ║",
+                    series_id
+                );
             }
             println!("╚══════════════════════════════════════════════════════════════╝");
 
@@ -3394,7 +4095,10 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                 stop_loss: 0.03,
             };
 
-            println!("\nStarting simulated training with {} episodes...", episodes);
+            println!(
+                "\nStarting simulated training with {} episodes...",
+                episodes
+            );
 
             // Train using simulated environment
             let results = train_simulated(&mut ppo_trainer, env_config, *episodes, *verbose);
@@ -3403,19 +4107,42 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             let summary = summarize_results(&results);
 
             // Save final checkpoint
-            let final_name = checkpointer.latest_checkpoint().unwrap_or_else(|| "ppo_final".to_string());
+            let final_name = checkpointer
+                .latest_checkpoint()
+                .unwrap_or_else(|| "ppo_final".to_string());
             let final_path = checkpointer.checkpoint_path(&final_name);
 
             println!("\n╔══════════════════════════════════════════════════════════════╗");
             println!("║               Training Complete                              ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Episodes:       {:>6}                                       ║", summary.num_episodes);
-            println!("║  Avg Reward:     {:>10.2}                                    ║", summary.avg_reward);
-            println!("║  Avg PnL:        {:>10.2}                                    ║", summary.avg_pnl);
-            println!("║  Avg Length:     {:>10.1}                                    ║", summary.avg_episode_length);
-            println!("║  Avg Trades:     {:>10.1}                                    ║", summary.avg_trades);
-            println!("║  Win Rate:       {:>9.1}%                                    ║", summary.avg_win_rate * 100.0);
-            println!("║  Profit Factor:  {:>10.2}                                    ║", summary.profit_factor);
+            println!(
+                "║  Episodes:       {:>6}                                       ║",
+                summary.num_episodes
+            );
+            println!(
+                "║  Avg Reward:     {:>10.2}                                    ║",
+                summary.avg_reward
+            );
+            println!(
+                "║  Avg PnL:        {:>10.2}                                    ║",
+                summary.avg_pnl
+            );
+            println!(
+                "║  Avg Length:     {:>10.1}                                    ║",
+                summary.avg_episode_length
+            );
+            println!(
+                "║  Avg Trades:     {:>10.1}                                    ║",
+                summary.avg_trades
+            );
+            println!(
+                "║  Win Rate:       {:>9.1}%                                    ║",
+                summary.avg_win_rate * 100.0
+            );
+            println!(
+                "║  Profit Factor:  {:>10.2}                                    ║",
+                summary.profit_factor
+            );
             println!("╚══════════════════════════════════════════════════════════════╝");
             println!("Final checkpoint: {:?}", final_path);
         }
@@ -3432,13 +4159,31 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║               Ploy RL Strategy Mode                          ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Series:         {}                                          ║", series);
-            println!("║  Symbol:         {:>10}                                    ║", symbol);
-            println!("║  Exploration:    {:>6.2}                                      ║", exploration);
-            println!("║  Online Learn:   {:>5}                                       ║", online_learning);
-            println!("║  Dry Run:        {:>5}                                       ║", dry_run);
+            println!(
+                "║  Series:         {}                                          ║",
+                series
+            );
+            println!(
+                "║  Symbol:         {:>10}                                    ║",
+                symbol
+            );
+            println!(
+                "║  Exploration:    {:>6.2}                                      ║",
+                exploration
+            );
+            println!(
+                "║  Online Learn:   {:>5}                                       ║",
+                online_learning
+            );
+            println!(
+                "║  Dry Run:        {:>5}                                       ║",
+                dry_run
+            );
             if let Some(model_path) = model {
-                println!("║  Model:          {}                                          ║", model_path);
+                println!(
+                    "║  Model:          {}                                          ║",
+                    model_path
+                );
             }
             println!("╚══════════════════════════════════════════════════════════════╝");
 
@@ -3498,22 +4243,33 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║               Ploy RL Evaluation Mode                        ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Model:          {}                                          ║", model);
-            println!("║  Data:           {}                                          ║", data);
-            println!("║  Episodes:       {:>6}                                       ║", episodes);
+            println!(
+                "║  Model:          {}                                          ║",
+                model
+            );
+            println!(
+                "║  Data:           {}                                          ║",
+                data
+            );
+            println!(
+                "║  Episodes:       {:>6}                                       ║",
+                episodes
+            );
             println!("╚══════════════════════════════════════════════════════════════╝");
 
             // Verify data file exists
             if !Path::new(data).exists() {
                 return Err(ploy::error::PloyError::Validation(format!(
-                    "Data file not found: {}", data
+                    "Data file not found: {}",
+                    data
                 )));
             }
 
             // Verify model file exists
             if !Path::new(model).exists() {
                 return Err(ploy::error::PloyError::Validation(format!(
-                    "Model file not found: {}", model
+                    "Model file not found: {}",
+                    model
                 )));
             }
 
@@ -3539,7 +4295,12 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                 }
 
                 if ep % 10 == 0 {
-                    println!("  Episode {}/{}: reward = {:.2}", ep + 1, episodes, ep_reward);
+                    println!(
+                        "  Episode {}/{}: reward = {:.2}",
+                        ep + 1,
+                        episodes,
+                        ep_reward
+                    );
                 }
             }
 
@@ -3574,7 +4335,8 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
             if !Path::new(model).exists() {
                 return Err(ploy::error::PloyError::Validation(format!(
-                    "Model file not found: {}", model
+                    "Model file not found: {}",
+                    model
                 )));
             }
 
@@ -3604,7 +4366,8 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
             if !Path::new(model).exists() {
                 return Err(ploy::error::PloyError::Validation(format!(
-                    "Model file not found: {}", model
+                    "Model file not found: {}",
+                    model
                 )));
             }
 
@@ -3617,12 +4380,16 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                     println!("\nModel configuration exported to: {}", output);
                 }
                 "onnx" | "torch" => {
-                    println!("\nExport to {} format requires additional dependencies.", format);
+                    println!(
+                        "\nExport to {} format requires additional dependencies.",
+                        format
+                    );
                     println!("This feature is planned for a future release.");
                 }
                 _ => {
                     return Err(ploy::error::PloyError::Validation(format!(
-                        "Unsupported export format: {}. Use 'json', 'onnx', or 'torch'.", format
+                        "Unsupported export format: {}. Use 'json', 'onnx', or 'torch'.",
+                        format
                     )));
                 }
             }
@@ -3636,17 +4403,32 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             capital,
             verbose,
         } => {
-            use ploy::rl::training::{train_backtest, summarize_backtest_results};
+            use ploy::rl::training::{summarize_backtest_results, train_backtest};
 
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║               Ploy RL Backtest Mode                          ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Episodes:       {:>10}                                    ║", episodes);
-            println!("║  Duration:       {:>10} mins                               ║", duration);
-            println!("║  Volatility:     {:>10.4}                                    ║", volatility);
-            println!("║  Initial Capital: {:>9.2}                                   ║", capital);
+            println!(
+                "║  Episodes:       {:>10}                                    ║",
+                episodes
+            );
+            println!(
+                "║  Duration:       {:>10} mins                               ║",
+                duration
+            );
+            println!(
+                "║  Volatility:     {:>10.4}                                    ║",
+                volatility
+            );
+            println!(
+                "║  Initial Capital: {:>9.2}                                   ║",
+                capital
+            );
             if let Some(r) = round {
-                println!("║  Round ID:       {:>10}                                    ║", r);
+                println!(
+                    "║  Round ID:       {:>10}                                    ║",
+                    r
+                );
             }
             println!("╚══════════════════════════════════════════════════════════════╝\n");
 
@@ -3686,14 +4468,38 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             println!("\n╔══════════════════════════════════════════════════════════════╗");
             println!("║               Backtest Summary                               ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Episodes:        {:>10}                                   ║", summary.num_episodes);
-            println!("║  Avg PnL:         {:>10.2}                                   ║", summary.avg_pnl);
-            println!("║  Total PnL:       {:>10.2}                                   ║", summary.total_pnl);
-            println!("║  Avg Trades:      {:>10.1}                                   ║", summary.avg_trades);
-            println!("║  Win Rate:        {:>9.1}%                                   ║", summary.avg_win_rate * 100.0);
-            println!("║  Episode Win %:   {:>9.1}%                                   ║", summary.episode_win_rate * 100.0);
-            println!("║  Profit Factor:   {:>10.2}                                   ║", summary.profit_factor);
-            println!("║  Max Drawdown:    {:>9.1}%                                   ║", summary.max_drawdown * 100.0);
+            println!(
+                "║  Episodes:        {:>10}                                   ║",
+                summary.num_episodes
+            );
+            println!(
+                "║  Avg PnL:         {:>10.2}                                   ║",
+                summary.avg_pnl
+            );
+            println!(
+                "║  Total PnL:       {:>10.2}                                   ║",
+                summary.total_pnl
+            );
+            println!(
+                "║  Avg Trades:      {:>10.1}                                   ║",
+                summary.avg_trades
+            );
+            println!(
+                "║  Win Rate:        {:>9.1}%                                   ║",
+                summary.avg_win_rate * 100.0
+            );
+            println!(
+                "║  Episode Win %:   {:>9.1}%                                   ║",
+                summary.episode_win_rate * 100.0
+            );
+            println!(
+                "║  Profit Factor:   {:>10.2}                                   ║",
+                summary.profit_factor
+            );
+            println!(
+                "║  Max Drawdown:    {:>9.1}%                                   ║",
+                summary.max_drawdown * 100.0
+            );
             println!("╚══════════════════════════════════════════════════════════════╝");
 
             // Phase analysis
@@ -3705,7 +4511,8 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
                 for (i, phase) in results.chunks(phase_size).enumerate() {
                     let phase_summary = summarize_backtest_results(phase);
-                    println!("║  Phase {}: pnl={:>7.2}, trades={:>5.1}, win={:>5.1}%           ║",
+                    println!(
+                        "║  Phase {}: pnl={:>7.2}, trades={:>5.1}, win={:>5.1}%           ║",
                         i + 1,
                         phase_summary.avg_pnl,
                         phase_summary.avg_trades,
@@ -3725,17 +4532,34 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             checkpoint,
             verbose,
         } => {
+            use ploy::rl::environment::{
+                LeadLagAction, LeadLagConfig, LeadLagEnvironment, LobDataPoint,
+            };
             use rust_decimal::Decimal;
-            use ploy::rl::environment::{LeadLagEnvironment, LeadLagConfig, LeadLagAction, LobDataPoint};
 
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║             Ploy Lead-Lag RL Training                        ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Symbol:         {:>10}                                    ║", symbol);
-            println!("║  Episodes:       {:>10}                                    ║", episodes);
-            println!("║  Trade Size:     ${:>9.2}                                   ║", trade_size);
-            println!("║  Max Position:   ${:>9.2}                                   ║", max_position);
-            println!("║  Checkpoint:     {}                                          ║", checkpoint);
+            println!(
+                "║  Symbol:         {:>10}                                    ║",
+                symbol
+            );
+            println!(
+                "║  Episodes:       {:>10}                                    ║",
+                episodes
+            );
+            println!(
+                "║  Trade Size:     ${:>9.2}                                   ║",
+                trade_size
+            );
+            println!(
+                "║  Max Position:   ${:>9.2}                                   ║",
+                max_position
+            );
+            println!(
+                "║  Checkpoint:     {}                                          ║",
+                checkpoint
+            );
             println!("╚══════════════════════════════════════════════════════════════╝\n");
 
             // Create checkpoint directory
@@ -3748,10 +4572,22 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             info!("Loading training data from sync_records...");
 
             // Query historical data
-            let rows = sqlx::query_as::<_, (
-                i64, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal,
-                Option<Decimal>, Option<Decimal>, Option<Decimal>, Option<Decimal>
-            )>(
+            let rows = sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                ),
+            >(
                 r#"
                 SELECT
                     EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as ts_ms,
@@ -3763,7 +4599,7 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                 WHERE symbol = $1
                 ORDER BY timestamp
                 LIMIT 100000
-                "#
+                "#,
             )
             .bind(&symbol.to_uppercase())
             .fetch_all(store.pool())
@@ -3771,15 +4607,19 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
             if rows.is_empty() {
                 println!("No training data found for symbol {}.", symbol);
-                println!("Please run 'ploy collect -s {}' first to gather data.", symbol);
+                println!(
+                    "Please run 'ploy collect -s {}' first to gather data.",
+                    symbol
+                );
                 return Ok(());
             }
 
             println!("Loaded {} data points for training", rows.len());
 
             // Convert to LobDataPoints
-            let data: Vec<LobDataPoint> = rows.iter().map(|r| {
-                LobDataPoint {
+            let data: Vec<LobDataPoint> = rows
+                .iter()
+                .map(|r| LobDataPoint {
                     timestamp_ms: r.0,
                     bn_mid_price: r.1,
                     bn_obi_5: r.2,
@@ -3791,8 +4631,8 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                     momentum_5s: r.8.unwrap_or_default(),
                     pm_yes_price: r.9.unwrap_or(Decimal::new(50, 2)),
                     pm_no_price: r.10.unwrap_or(Decimal::new(50, 2)),
-                }
-            }).collect();
+                })
+                .collect();
 
             // Configure environment
             let env_config = LeadLagConfig {
@@ -3825,9 +4665,12 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                     let action_idx = if rand::random::<f32>() < exploration_rate {
                         rand::random::<usize>() % num_actions
                     } else {
-                        action_values.iter()
+                        action_values
+                            .iter()
                             .enumerate()
-                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                            .max_by(|a, b| {
+                                a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            })
                             .map(|(i, _)| i)
                             .unwrap_or(0)
                     };
@@ -3836,7 +4679,8 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                     let result = env.step(action);
 
                     // Update Q-values (simple TD update)
-                    action_values[action_idx] += learning_rate * (result.reward - action_values[action_idx]);
+                    action_values[action_idx] +=
+                        learning_rate * (result.reward - action_values[action_idx]);
 
                     episode_reward += result.reward;
                     steps += 1;
@@ -3856,31 +4700,68 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                         / total_rewards.len().min(100) as f32;
                     println!(
                         "Episode {:>5}: reward={:>8.2}, steps={:>6}, avg_100={:>8.2}, eps={:.3}",
-                        episode + 1, episode_reward, steps, recent_avg, exploration_rate
+                        episode + 1,
+                        episode_reward,
+                        steps,
+                        recent_avg,
+                        exploration_rate
                     );
                 }
             }
 
             // Final summary
             let final_avg: f32 = total_rewards.iter().sum::<f32>() / total_rewards.len() as f32;
-            let max_reward = total_rewards.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let max_reward = total_rewards
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
             let min_reward = total_rewards.iter().cloned().fold(f32::INFINITY, f32::min);
 
             println!("\n╔══════════════════════════════════════════════════════════════╗");
             println!("║               Training Summary                               ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Total Episodes:  {:>10}                                   ║", episodes);
-            println!("║  Avg Reward:      {:>10.2}                                   ║", final_avg);
-            println!("║  Max Reward:      {:>10.2}                                   ║", max_reward);
-            println!("║  Min Reward:      {:>10.2}                                   ║", min_reward);
-            println!("║  Final Epsilon:   {:>10.4}                                   ║", exploration_rate);
+            println!(
+                "║  Total Episodes:  {:>10}                                   ║",
+                episodes
+            );
+            println!(
+                "║  Avg Reward:      {:>10.2}                                   ║",
+                final_avg
+            );
+            println!(
+                "║  Max Reward:      {:>10.2}                                   ║",
+                max_reward
+            );
+            println!(
+                "║  Min Reward:      {:>10.2}                                   ║",
+                min_reward
+            );
+            println!(
+                "║  Final Epsilon:   {:>10.4}                                   ║",
+                exploration_rate
+            );
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!("║  Action Values:                                              ║");
-            println!("║    Hold:     {:>10.4}                                        ║", action_values[0]);
-            println!("║    BuyYes:   {:>10.4}                                        ║", action_values[1]);
-            println!("║    BuyNo:    {:>10.4}                                        ║", action_values[2]);
-            println!("║    CloseYes: {:>10.4}                                        ║", action_values[3]);
-            println!("║    CloseNo:  {:>10.4}                                        ║", action_values[4]);
+            println!(
+                "║    Hold:     {:>10.4}                                        ║",
+                action_values[0]
+            );
+            println!(
+                "║    BuyYes:   {:>10.4}                                        ║",
+                action_values[1]
+            );
+            println!(
+                "║    BuyNo:    {:>10.4}                                        ║",
+                action_values[2]
+            );
+            println!(
+                "║    CloseYes: {:>10.4}                                        ║",
+                action_values[3]
+            );
+            println!(
+                "║    CloseNo:  {:>10.4}                                        ║",
+                action_values[4]
+            );
             println!("╚══════════════════════════════════════════════════════════════╝");
 
             // Save action values as simple checkpoint
@@ -3893,7 +4774,10 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                 "action_values": action_values,
                 "final_avg_reward": final_avg,
             });
-            std::fs::write(&checkpoint_path, serde_json::to_string_pretty(&checkpoint_data)?)?;
+            std::fs::write(
+                &checkpoint_path,
+                serde_json::to_string_pretty(&checkpoint_data)?,
+            )?;
             println!("\nCheckpoint saved to: {}", checkpoint_path);
         }
 
@@ -3906,36 +4790,60 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             dry_run,
             min_confidence,
         } => {
-            use rust_decimal::Decimal;
             use ploy::collector::{SyncCollector, SyncCollectorConfig};
             use ploy::rl::environment::{LeadLagAction, LobDataPoint};
+            use rust_decimal::Decimal;
 
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║             Ploy Lead-Lag Live Trading                       ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Symbol:         {:>10}                                    ║", symbol);
-            println!("║  Market:         {:>10}                                    ║", market);
-            println!("║  Trade Size:     ${:>9.2}                                   ║", trade_size);
-            println!("║  Max Position:   ${:>9.2}                                   ║", max_position);
-            println!("║  Min Confidence: {:>10.2}                                   ║", min_confidence);
-            println!("║  Dry Run:        {:>10}                                    ║", dry_run);
+            println!(
+                "║  Symbol:         {:>10}                                    ║",
+                symbol
+            );
+            println!(
+                "║  Market:         {:>10}                                    ║",
+                market
+            );
+            println!(
+                "║  Trade Size:     ${:>9.2}                                   ║",
+                trade_size
+            );
+            println!(
+                "║  Max Position:   ${:>9.2}                                   ║",
+                max_position
+            );
+            println!(
+                "║  Min Confidence: {:>10.2}                                   ║",
+                min_confidence
+            );
+            println!(
+                "║  Dry Run:        {:>10}                                    ║",
+                dry_run
+            );
             println!("╚══════════════════════════════════════════════════════════════╝\n");
 
             // Load trained model
             let checkpoint_path = format!("{}/action_values.json", checkpoint);
-            let checkpoint_content = std::fs::read_to_string(&checkpoint_path)
-                .map_err(|e| ploy::error::PloyError::Internal(format!("Failed to load checkpoint: {}", e)))?;
+            let checkpoint_content = std::fs::read_to_string(&checkpoint_path).map_err(|e| {
+                ploy::error::PloyError::Internal(format!("Failed to load checkpoint: {}", e))
+            })?;
             let checkpoint_data: serde_json::Value = serde_json::from_str(&checkpoint_content)?;
 
             let action_values: Vec<f32> = checkpoint_data["action_values"]
                 .as_array()
-                .ok_or_else(|| ploy::error::PloyError::Validation("Invalid checkpoint format".to_string()))?
+                .ok_or_else(|| {
+                    ploy::error::PloyError::Validation("Invalid checkpoint format".to_string())
+                })?
                 .iter()
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
 
             if action_values.len() != LeadLagAction::num_actions() {
-                return Err(ploy::error::PloyError::Validation("Invalid action values in checkpoint".to_string()).into());
+                return Err(ploy::error::PloyError::Validation(
+                    "Invalid action values in checkpoint".to_string(),
+                )
+                .into());
             }
 
             info!("Loaded model from: {}", checkpoint_path);
@@ -4119,17 +5027,19 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             dry_run,
             tick_interval,
         } => {
+            use ploy::adapters::{
+                polymarket_clob::POLYGON_CHAIN_ID, BinanceWebSocket, PolymarketClient,
+                PolymarketWebSocket,
+            };
+            use ploy::domain::Side;
             use ploy::platform::{
-                RLCryptoAgent, RLCryptoAgentConfig, EventRouter, AgentSubscription,
-                Domain, DomainEvent, CryptoEvent, QuoteData, DomainAgent,
-                OrderPlatform, PlatformConfig,
+                AgentSubscription, CryptoEvent, Domain, DomainAgent, DomainEvent, EventRouter,
+                OrderPlatform, PlatformConfig, QuoteData, RLCryptoAgent, RLCryptoAgentConfig,
             };
             use ploy::rl::config::RLConfig;
-            use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket, PolymarketClient, polymarket_clob::POLYGON_CHAIN_ID};
             use ploy::signing::Wallet;
-            use ploy::domain::Side;
-            use rust_decimal::Decimal;
             use rust_decimal::prelude::ToPrimitive;
+            use rust_decimal::Decimal;
             use std::sync::Arc;
             use tokio::sync::RwLock;
             use tracing::debug;
@@ -4137,15 +5047,42 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║           Ploy RL Agent - Order Platform                     ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
-            println!("║  Symbol:         {:>10}                                    ║", symbol);
-            println!("║  Market:         {:>10}                                    ║", market);
-            println!("║  UP Token:       {}...                                    ", &up_token[..up_token.len().min(20)]);
-            println!("║  DOWN Token:     {}...                                    ", &down_token[..down_token.len().min(20)]);
-            println!("║  Shares:         {:>10}                                    ║", shares);
-            println!("║  Max Exposure:   ${:>9.2}                                   ║", max_exposure);
-            println!("║  Exploration:    {:>10.2}                                   ║", exploration);
-            println!("║  Online Learn:   {:>10}                                    ║", online_learning);
-            println!("║  Dry Run:        {:>10}                                    ║", dry_run);
+            println!(
+                "║  Symbol:         {:>10}                                    ║",
+                symbol
+            );
+            println!(
+                "║  Market:         {:>10}                                    ║",
+                market
+            );
+            println!(
+                "║  UP Token:       {}...                                    ",
+                &up_token[..up_token.len().min(20)]
+            );
+            println!(
+                "║  DOWN Token:     {}...                                    ",
+                &down_token[..down_token.len().min(20)]
+            );
+            println!(
+                "║  Shares:         {:>10}                                    ║",
+                shares
+            );
+            println!(
+                "║  Max Exposure:   ${:>9.2}                                   ║",
+                max_exposure
+            );
+            println!(
+                "║  Exploration:    {:>10.2}                                   ║",
+                exploration
+            );
+            println!(
+                "║  Online Learn:   {:>10}                                    ║",
+                online_learning
+            );
+            println!(
+                "║  Dry Run:        {:>10}                                    ║",
+                dry_run
+            );
             println!("╚══════════════════════════════════════════════════════════════╝\n");
 
             // Create RL config
@@ -4164,8 +5101,10 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                 market_slug: market.clone(),
                 default_shares: *shares,
                 risk_params: ploy::platform::AgentRiskParams {
-                    max_order_value: Decimal::try_from(*max_exposure / 2.0).unwrap_or(Decimal::new(50, 0)),
-                    max_total_exposure: Decimal::try_from(*max_exposure).unwrap_or(Decimal::new(100, 0)),
+                    max_order_value: Decimal::try_from(*max_exposure / 2.0)
+                        .unwrap_or(Decimal::new(50, 0)),
+                    max_total_exposure: Decimal::try_from(*max_exposure)
+                        .unwrap_or(Decimal::new(100, 0)),
                     ..Default::default()
                 },
                 rl_config,
@@ -4179,10 +5118,12 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
 
             // Create event router
             let router = Arc::new(EventRouter::new());
-            router.register_agent(
-                Box::new(agent),
-                AgentSubscription::for_domain("rl-crypto-agent", Domain::Crypto),
-            ).await;
+            router
+                .register_agent(
+                    Box::new(agent),
+                    AgentSubscription::for_domain("rl-crypto-agent", Domain::Crypto),
+                )
+                .await;
 
             // Create Binance WebSocket for spot prices
             let symbol_upper = symbol.to_uppercase();
@@ -4210,7 +5151,10 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             let pm_ws_clone = Arc::clone(&pm_ws);
             let pm_ws_handle = tokio::spawn(async move {
                 let token_ids = vec![up_token_ws, down_token_ws];
-                info!("Connecting to Polymarket WebSocket for tokens: {:?}", token_ids);
+                info!(
+                    "Connecting to Polymarket WebSocket for tokens: {:?}",
+                    token_ids
+                );
                 if let Err(e) = pm_ws_clone.run(token_ids).await {
                     error!("Polymarket WS error: {}", e);
                 }
@@ -4229,11 +5173,15 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                     "https://clob.polymarket.com",
                     wallet,
                     true, // neg_risk for UP/DOWN markets
-                ).await?;
+                )
+                .await?;
                 info!("✅ Authenticated with Polymarket CLOB");
 
                 let platform_config = PlatformConfig::default();
-                Some(Arc::new(RwLock::new(OrderPlatform::new(client, platform_config))))
+                Some(Arc::new(RwLock::new(OrderPlatform::new(
+                    client,
+                    platform_config,
+                ))))
             } else {
                 None
             };
@@ -4274,8 +5222,8 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                         };
 
                         // Get real quotes from Polymarket WebSocket
-                        let up_quote = quote_cache.get(up_token.as_str()).await;
-                        let down_quote = quote_cache.get(down_token.as_str()).await;
+                        let up_quote = quote_cache.get(up_token.as_str());
+                        let down_quote = quote_cache.get(down_token.as_str());
 
                         // Build QuoteData from real quotes
                         let quotes = match (&up_quote, &down_quote) {
@@ -4509,4 +5457,35 @@ async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u64) -
 
     info!("Data collection stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_crypto_coin_to_series_ids;
+
+    #[test]
+    fn test_map_crypto_coin_to_series_ids_prefers_5m_with_15m_fallback() {
+        assert_eq!(
+            map_crypto_coin_to_series_ids("BTC"),
+            vec!["10684".to_string(), "10192".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("ETH"),
+            vec!["10683".to_string(), "10191".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("SOL"),
+            vec!["10686".to_string(), "10423".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("XRP"),
+            vec!["10685".to_string(), "10422".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_map_crypto_coin_to_series_ids_accepts_raw_series() {
+        assert_eq!(map_crypto_coin_to_series_ids("10192"), vec!["10192".to_string()]);
+        assert_eq!(map_crypto_coin_to_series_ids("10684"), vec!["10684".to_string()]);
+    }
 }

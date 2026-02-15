@@ -12,21 +12,21 @@
 //! ploy collect-data --live --symbols BTC,ETH,SOL --output ./data/
 //! ```
 
-use chrono::{DateTime, Utc, Duration, Timelike};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions, create_dir_all};
-use std::io::{Write, BufWriter};
+use std::fs::{create_dir_all, File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, sleep};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
+use crate::adapters::PolymarketClient;
 use crate::collector::BinanceKlineClient;
 use crate::error::{PloyError, Result};
-use crate::adapters::PolymarketClient;
 
 // ============================================================================
 // Configuration
@@ -51,11 +51,7 @@ pub struct CollectorConfig {
 impl Default for CollectorConfig {
     fn default() -> Self {
         Self {
-            symbols: vec![
-                "BTCUSDT".into(),
-                "ETHUSDT".into(),
-                "SOLUSDT".into(),
-            ],
+            symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
             output_dir: PathBuf::from("./data"),
             kline_interval_secs: 900, // 15 minutes
             pm_interval_secs: 30,     // 30 seconds
@@ -175,9 +171,10 @@ impl BacktestCollector {
         }
 
         // Calculate end time if not continuous
-        let end_time = self.config.duration_hours.map(|h| {
-            Utc::now() + Duration::hours(h as i64)
-        });
+        let end_time = self
+            .config
+            .duration_hours
+            .map(|h| Utc::now() + Duration::hours(h as i64));
 
         // Spawn collection tasks
         let kline_handle = self.spawn_kline_collector(end_time);
@@ -211,18 +208,21 @@ impl BacktestCollector {
         // K-line CSV
         let kline_path = self.config.output_dir.join("klines.csv");
         if !kline_path.exists() {
-            let mut file = File::create(&kline_path)
-                .map_err(|e| PloyError::Internal(e.to_string()))?;
-            writeln!(file, "timestamp,datetime,symbol,open,high,low,close,volume,trades")
-                .map_err(|e| PloyError::Internal(e.to_string()))?;
+            let mut file =
+                File::create(&kline_path).map_err(|e| PloyError::Internal(e.to_string()))?;
+            writeln!(
+                file,
+                "timestamp,datetime,symbol,open,high,low,close,volume,trades"
+            )
+            .map_err(|e| PloyError::Internal(e.to_string()))?;
             info!("Created {}", kline_path.display());
         }
 
         // PM price CSV
         let pm_path = self.config.output_dir.join("pm_prices.csv");
         if !pm_path.exists() {
-            let mut file = File::create(&pm_path)
-                .map_err(|e| PloyError::Internal(e.to_string()))?;
+            let mut file =
+                File::create(&pm_path).map_err(|e| PloyError::Internal(e.to_string()))?;
             writeln!(file, "timestamp,datetime,market_id,condition_id,symbol,threshold,spot_price,yes_price,no_price,yes_bid,yes_ask,no_bid,no_ask,resolution_time,time_remaining_secs,outcome")
                 .map_err(|e| PloyError::Internal(e.to_string()))?;
             info!("Created {}", pm_path.display());
@@ -232,7 +232,10 @@ impl BacktestCollector {
     }
 
     /// Spawn K-line collection task
-    fn spawn_kline_collector(&self, end_time: Option<DateTime<Utc>>) -> tokio::task::JoinHandle<()> {
+    fn spawn_kline_collector(
+        &self,
+        end_time: Option<DateTime<Utc>>,
+    ) -> tokio::task::JoinHandle<()> {
         let config = self.config.clone();
         let client = BinanceKlineClient::new();
         let stats = self.stats.clone();
@@ -244,7 +247,10 @@ impl BacktestCollector {
             let wait_secs = (next_boundary - now).num_seconds().max(0) as u64;
 
             if wait_secs > 0 {
-                info!("Waiting {}s until next 15-min boundary for K-line collection", wait_secs);
+                info!(
+                    "Waiting {}s until next 15-min boundary for K-line collection",
+                    wait_secs
+                );
                 sleep(std::time::Duration::from_secs(wait_secs)).await;
             }
 
@@ -266,7 +272,9 @@ impl BacktestCollector {
                     match client.fetch_klines(symbol, "15m", 1).await {
                         Ok(klines) => {
                             if let Some(kline) = klines.last() {
-                                if let Err(e) = Self::append_kline(&config.output_dir, symbol, kline).await {
+                                if let Err(e) =
+                                    Self::append_kline(&config.output_dir, symbol, kline).await
+                                {
                                     warn!("Failed to append K-line for {}: {}", symbol, e);
                                 } else {
                                     let mut s = stats.write().await;
@@ -329,11 +337,10 @@ impl BacktestCollector {
                     match Self::fetch_active_markets(client, symbol).await {
                         Ok(markets) => {
                             for market in markets {
-                                if let Err(e) = Self::append_pm_price(
-                                    &config.output_dir,
-                                    &market,
-                                    spot_price,
-                                ).await {
+                                if let Err(e) =
+                                    Self::append_pm_price(&config.output_dir, &market, spot_price)
+                                        .await
+                                {
                                     warn!("Failed to append PM price: {}", e);
                                 } else {
                                     let mut s = stats.write().await;
@@ -342,14 +349,17 @@ impl BacktestCollector {
 
                                     // Track for resolution
                                     let mut tracked = tracked_markets.write().await;
-                                    tracked.insert(market.market_id.clone(), TrackedMarket {
-                                        market_id: market.market_id.clone(),
-                                        condition_id: market.condition_id.clone(),
-                                        symbol: symbol.clone(),
-                                        threshold: market.threshold,
-                                        resolution_time: market.resolution_time,
-                                        recorded_at: Utc::now(),
-                                    });
+                                    tracked.insert(
+                                        market.market_id.clone(),
+                                        TrackedMarket {
+                                            market_id: market.market_id.clone(),
+                                            condition_id: market.condition_id.clone(),
+                                            symbol: symbol.clone(),
+                                            threshold: market.threshold,
+                                            resolution_time: market.resolution_time,
+                                            recorded_at: Utc::now(),
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -365,7 +375,10 @@ impl BacktestCollector {
     }
 
     /// Spawn resolution checking task
-    fn spawn_resolution_checker(&self, end_time: Option<DateTime<Utc>>) -> tokio::task::JoinHandle<()> {
+    fn spawn_resolution_checker(
+        &self,
+        end_time: Option<DateTime<Utc>>,
+    ) -> tokio::task::JoinHandle<()> {
         let config = self.config.clone();
         let pm_client = self.pm_client.clone();
         let stats = self.stats.clone();
@@ -405,9 +418,13 @@ impl BacktestCollector {
 
                 // Update resolved markets
                 for market in resolved {
-                    if let Ok(outcome) = Self::check_resolution(client, &market.condition_id).await {
+                    if let Ok(outcome) = Self::check_resolution(client, &market.condition_id).await
+                    {
                         // Update the CSV with outcome
-                        if let Err(e) = Self::update_outcome(&config.output_dir, &market.market_id, outcome).await {
+                        if let Err(e) =
+                            Self::update_outcome(&config.output_dir, &market.market_id, outcome)
+                                .await
+                        {
                             warn!("Failed to update outcome for {}: {}", market.market_id, e);
                         } else {
                             let mut s = stats.write().await;
@@ -447,7 +464,11 @@ impl BacktestCollector {
     }
 
     /// Append a K-line record to CSV
-    async fn append_kline(output_dir: &Path, symbol: &str, kline: &super::binance_klines::Kline) -> Result<()> {
+    async fn append_kline(
+        output_dir: &Path,
+        symbol: &str,
+        kline: &super::binance_klines::Kline,
+    ) -> Result<()> {
         let path = output_dir.join("klines.csv");
         let file = OpenOptions::new()
             .append(true)
@@ -467,13 +488,18 @@ impl BacktestCollector {
             kline.close,
             kline.volume,
             kline.trades,
-        ).map_err(|e| PloyError::Internal(e.to_string()))?;
+        )
+        .map_err(|e| PloyError::Internal(e.to_string()))?;
 
         Ok(())
     }
 
     /// Append a PM price record to CSV
-    async fn append_pm_price(output_dir: &Path, market: &ActiveMarket, spot_price: Decimal) -> Result<()> {
+    async fn append_pm_price(
+        output_dir: &Path,
+        market: &ActiveMarket,
+        spot_price: Decimal,
+    ) -> Result<()> {
         let path = output_dir.join("pm_prices.csv");
         let file = OpenOptions::new()
             .append(true)
@@ -503,13 +529,17 @@ impl BacktestCollector {
             market.resolution_time.timestamp(),
             time_remaining,
             "pending",
-        ).map_err(|e| PloyError::Internal(e.to_string()))?;
+        )
+        .map_err(|e| PloyError::Internal(e.to_string()))?;
 
         Ok(())
     }
 
     /// Fetch active 15-minute markets for a symbol
-    async fn fetch_active_markets(_client: &PolymarketClient, symbol: &str) -> Result<Vec<ActiveMarket>> {
+    async fn fetch_active_markets(
+        _client: &PolymarketClient,
+        symbol: &str,
+    ) -> Result<Vec<ActiveMarket>> {
         // Map symbol to coin name
         let coin = match symbol {
             "BTCUSDT" => "BTC",
@@ -557,7 +587,8 @@ impl BacktestCollector {
             Utc::now().timestamp(),
             market_id,
             if outcome { "YES" } else { "NO" },
-        ).map_err(|e| PloyError::Internal(e.to_string()))?;
+        )
+        .map_err(|e| PloyError::Internal(e.to_string()))?;
 
         Ok(())
     }
@@ -598,16 +629,21 @@ pub async fn collect_historical_klines(
     let mut total_records = 0u64;
 
     // Create output file with header
-    let mut file = File::create(output_path)
-        .map_err(|e| PloyError::Internal(e.to_string()))?;
-    writeln!(file, "timestamp,datetime,symbol,open,high,low,close,volume,trades")
-        .map_err(|e| PloyError::Internal(e.to_string()))?;
+    let mut file = File::create(output_path).map_err(|e| PloyError::Internal(e.to_string()))?;
+    writeln!(
+        file,
+        "timestamp,datetime,symbol,open,high,low,close,volume,trades"
+    )
+    .map_err(|e| PloyError::Internal(e.to_string()))?;
 
     // Calculate how many 15-min candles we need
     let candles_per_day = 24 * 4; // 96 candles per day
     let total_candles = (days * candles_per_day) as usize;
 
-    info!("Collecting {} days of K-line data ({} candles per symbol)", days, total_candles);
+    info!(
+        "Collecting {} days of K-line data ({} candles per symbol)",
+        days, total_candles
+    );
 
     for symbol in symbols {
         info!("Fetching K-lines for {}...", symbol);
@@ -624,10 +660,13 @@ pub async fn collect_historical_klines(
                 symbol, limit, end_time
             );
 
-            let response = reqwest::get(&url).await
+            let response = reqwest::get(&url)
+                .await
                 .map_err(|e| PloyError::Internal(e.to_string()))?;
 
-            let data: Vec<Vec<serde_json::Value>> = response.json().await
+            let data: Vec<Vec<serde_json::Value>> = response
+                .json()
+                .await
                 .map_err(|e| PloyError::Internal(e.to_string()))?;
 
             if data.is_empty() {
@@ -657,7 +696,8 @@ pub async fn collect_historical_klines(
                     row[4].as_str().unwrap_or("0"),
                     row[5].as_str().unwrap_or("0"),
                     row[8].as_u64().unwrap_or(0),
-                ).map_err(|e| PloyError::Internal(e.to_string()))?;
+                )
+                .map_err(|e| PloyError::Internal(e.to_string()))?;
 
                 total_records += 1;
             }
@@ -688,18 +728,36 @@ pub fn print_collector_status(stats: &CollectorStats) {
 
     if let Some(start) = stats.start_time {
         let duration = Utc::now() - start;
-        println!("║ Running for: {:>10} minutes                             ║", duration.num_minutes());
+        println!(
+            "║ Running for: {:>10} minutes                             ║",
+            duration.num_minutes()
+        );
     }
 
-    println!("║ K-lines collected:     {:>10}                           ║", stats.klines_collected);
-    println!("║ PM prices collected:   {:>10}                           ║", stats.pm_prices_collected);
-    println!("║ Markets resolved:      {:>10}                           ║", stats.markets_resolved);
+    println!(
+        "║ K-lines collected:     {:>10}                           ║",
+        stats.klines_collected
+    );
+    println!(
+        "║ PM prices collected:   {:>10}                           ║",
+        stats.pm_prices_collected
+    );
+    println!(
+        "║ Markets resolved:      {:>10}                           ║",
+        stats.markets_resolved
+    );
 
     if let Some(last) = stats.last_kline_time {
-        println!("║ Last K-line:           {}              ║", last.format("%H:%M:%S"));
+        println!(
+            "║ Last K-line:           {}              ║",
+            last.format("%H:%M:%S")
+        );
     }
     if let Some(last) = stats.last_pm_time {
-        println!("║ Last PM price:         {}              ║", last.format("%H:%M:%S"));
+        println!(
+            "║ Last PM price:         {}              ║",
+            last.format("%H:%M:%S")
+        );
     }
 
     println!("╚══════════════════════════════════════════════════════════════╝\n");

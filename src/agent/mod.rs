@@ -22,20 +22,20 @@ pub mod sports_data;
 
 pub use advisor::AdvisoryAgent;
 pub use autonomous::{AutonomousAgent, AutonomousConfig};
-pub use client::{ClaudeAgentClient, AgentClientConfig};
+pub use client::{AgentClientConfig, ClaudeAgentClient};
 pub use grok::{GrokClient, GrokConfig, SearchResult, Sentiment};
-pub use protocol::{
-    AgentAction, AgentContext, AgentResponse, MarketSnapshot,
-    PositionInfo, RiskAssessment, TradeRecord,
-};
-pub use odds_provider::{OddsProvider, OddsProviderConfig, GameEvent, Sport, Market, EdgeAnalysis};
-pub use sports_analyst::{SportsAnalyst, SportsAnalysis, SportsAnalysisWithDK};
-pub use sports_data::{SportsDataFetcher, StructuredGameData};
-pub use polymarket_sports::{
-    PolymarketSportsClient, PolymarketSportsMarket, SportsMarketDetails, PolymarketEdgeAnalysis,
-    EventDetails, LiveGameEvent, LiveGameMarket, NBA_SERIES_ID,
-};
+pub use odds_provider::{EdgeAnalysis, GameEvent, Market, OddsProvider, OddsProviderConfig, Sport};
 pub use polymarket_politics::{
-    PolymarketPoliticsClient, PolymarketPoliticsMarket, PoliticsMarketDetails,
-    PoliticsEdgeAnalysis, PoliticalEventDetails, PoliticalCategory, POLITICS_KEYWORDS,
+    PoliticalCategory, PoliticalEventDetails, PoliticsEdgeAnalysis, PoliticsMarketDetails,
+    PolymarketPoliticsClient, PolymarketPoliticsMarket, POLITICS_KEYWORDS,
 };
+pub use polymarket_sports::{
+    EventDetails, LiveGameEvent, LiveGameMarket, PolymarketEdgeAnalysis, PolymarketSportsClient,
+    PolymarketSportsMarket, SportsMarketDetails, NBA_SERIES_ID,
+};
+pub use protocol::{
+    AgentAction, AgentContext, AgentResponse, MarketSnapshot, PositionInfo, RiskAssessment,
+    TradeRecord,
+};
+pub use sports_analyst::{SportsAnalysis, SportsAnalysisWithDK, SportsAnalyst};
+pub use sports_data::{SportsDataFetcher, StructuredGameData};

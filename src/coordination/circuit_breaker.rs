@@ -3,12 +3,12 @@
 //! Implements circuit breaker pattern for trading operations to prevent
 //! cascading failures and protect against adverse market conditions.
 
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use chrono::{DateTime, Utc};
 
 /// Circuit breaker states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl Default for TradingCircuitBreakerConfig {
         Self {
             failure_threshold: 5,
             daily_loss_limit_usd: Decimal::from(100),
-            recovery_timeout_secs: 300,        // 5 minutes
+            recovery_timeout_secs: 300, // 5 minutes
             quote_staleness_secs: 30,
             ws_disconnect_threshold_secs: 120, // 2 minutes
             half_open_success_threshold: 1,
@@ -185,7 +185,9 @@ impl TradingCircuitBreaker {
             }
         }
 
-        if self.config.half_open_max_exposure_usd > Decimal::ZERO && proposed_exposure_usd > Decimal::ZERO {
+        if self.config.half_open_max_exposure_usd > Decimal::ZERO
+            && proposed_exposure_usd > Decimal::ZERO
+        {
             let current = *self.half_open_exposure_usd.read().await;
             if current + proposed_exposure_usd > self.config.half_open_max_exposure_usd {
                 return Err("HalfOpen exposure limit reached".to_string());
@@ -270,7 +272,8 @@ impl TradingCircuitBreaker {
     /// Check WebSocket connection status
     pub async fn check_websocket_status(&self, disconnect_duration_secs: u64) -> bool {
         if disconnect_duration_secs > self.config.ws_disconnect_threshold_secs {
-            self.trip(TripReason::WebSocketDisconnect(disconnect_duration_secs)).await;
+            self.trip(TripReason::WebSocketDisconnect(disconnect_duration_secs))
+                .await;
             false
         } else {
             true

@@ -4,11 +4,7 @@ use axum::{
 };
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::api::{
-    handlers,
-    state::AppState,
-    websocket::websocket_handler,
-};
+use crate::api::{handlers, state::AppState, websocket::websocket_handler};
 
 pub fn create_router(state: AppState) -> Router {
     // CORS configuration

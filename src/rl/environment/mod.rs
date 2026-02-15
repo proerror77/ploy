@@ -3,18 +3,18 @@
 //! This module provides a gym-like environment for training RL agents
 //! on simulated market data without risking real capital.
 
-mod market;
-mod trading;
 mod backtest;
 mod leadlag;
+mod market;
+mod trading;
 
-pub use market::{MarketConfig, SimulatedMarket, MarketState};
-pub use trading::{TradingEnvironment, TradingEnvConfig, StepResult, EnvAction};
 pub use backtest::{
-    BacktestEnvironment, BacktestStepResult, BacktestInfo,
-    HistoricalData, TickData, generate_sample_data,
+    generate_sample_data, BacktestEnvironment, BacktestInfo, BacktestStepResult, HistoricalData,
+    TickData,
 };
 pub use leadlag::{
-    LeadLagEnvironment, LeadLagConfig, LeadLagAction, LeadLagStepResult,
-    LobObservation, LobDataPoint, LeadLagInfo,
+    LeadLagAction, LeadLagConfig, LeadLagEnvironment, LeadLagInfo, LeadLagStepResult, LobDataPoint,
+    LobObservation,
 };
+pub use market::{MarketConfig, MarketState, SimulatedMarket};
+pub use trading::{EnvAction, StepResult, TradingEnvConfig, TradingEnvironment};

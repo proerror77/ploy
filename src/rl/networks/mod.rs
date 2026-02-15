@@ -2,10 +2,10 @@
 //!
 //! Actor and Critic networks for policy gradient methods.
 
-pub mod encoder;
 pub mod actor;
 pub mod critic;
+pub mod encoder;
 
-pub use encoder::StateEncoderNetwork;
 pub use actor::Actor;
 pub use critic::Critic;
+pub use encoder::StateEncoderNetwork;

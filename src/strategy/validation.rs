@@ -3,7 +3,7 @@
 //! Consolidates validation logic from risk.rs, signal.rs, and engine.rs
 //! into reusable, composable validators.
 
-use crate::domain::{Round, RiskState};
+use crate::domain::{RiskState, Round};
 use crate::error::{PloyError, Result};
 use rust_decimal::Decimal;
 use std::fmt;
@@ -397,12 +397,7 @@ impl SumTargetValidator {
         }
     }
 
-    pub fn with_buffers(
-        mut self,
-        fee: Decimal,
-        slippage: Decimal,
-        profit: Decimal,
-    ) -> Self {
+    pub fn with_buffers(mut self, fee: Decimal, slippage: Decimal, profit: Decimal) -> Self {
         self.fee_buffer = fee;
         self.slippage_buffer = slippage;
         self.profit_buffer = profit;
@@ -549,12 +544,11 @@ pub fn leg2_entry_chain(
     slippage_buffer: Decimal,
     profit_buffer: Decimal,
 ) -> ValidationChain {
-    ValidationChain::new()
-        .add(SumTargetValidator::new(sum_target).with_buffers(
-            fee_buffer,
-            slippage_buffer,
-            profit_buffer,
-        ))
+    ValidationChain::new().add(SumTargetValidator::new(sum_target).with_buffers(
+        fee_buffer,
+        slippage_buffer,
+        profit_buffer,
+    ))
 }
 
 // =============================================================================
@@ -607,8 +601,8 @@ mod tests {
 
     #[test]
     fn test_sum_target_validator() {
-        let validator = SumTargetValidator::new(dec!(1.0))
-            .with_buffers(dec!(0.005), dec!(0.02), dec!(0.01));
+        let validator =
+            SumTargetValidator::new(dec!(1.0)).with_buffers(dec!(0.005), dec!(0.02), dec!(0.01));
 
         // effective = 1 - 0.005 - 0.02 - 0.01 = 0.965
 

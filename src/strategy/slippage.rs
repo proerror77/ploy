@@ -8,10 +8,10 @@
 //! trades to execute at any price. This could result in significant losses,
 //! especially for large orders or in illiquid markets.
 
+use crate::error::{PloyError, Result};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use crate::error::{PloyError, Result};
 
 /// Slippage protection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,9 +293,10 @@ impl SlippageProtection {
 
         match check {
             SlippageCheck::Approved { limit_price, .. } => Ok(limit_price),
-            SlippageCheck::Rejected { reason, .. } => {
-                Err(PloyError::Validation(format!("Slippage check failed: {}", reason)))
-            }
+            SlippageCheck::Rejected { reason, .. } => Err(PloyError::Validation(format!(
+                "Slippage check failed: {}",
+                reason
+            ))),
         }
     }
 
@@ -339,7 +340,10 @@ mod tests {
         let check = protection.check_buy_order(&depth, dec!(100), dec!(0.515));
 
         match check {
-            SlippageCheck::Approved { limit_price, estimated_slippage_pct } => {
+            SlippageCheck::Approved {
+                limit_price,
+                estimated_slippage_pct,
+            } => {
                 // Limit price should be slightly above best ask
                 assert!(limit_price >= depth.best_ask);
                 assert!(limit_price < depth.best_ask * dec!(1.01));
@@ -347,7 +351,9 @@ mod tests {
                 // Slippage should be small (less than 1%)
                 assert!(estimated_slippage_pct < dec!(0.01));
             }
-            SlippageCheck::Rejected { reason, .. } => panic!("Order should be approved: {}", reason),
+            SlippageCheck::Rejected { reason, .. } => {
+                panic!("Order should be approved: {}", reason)
+            }
         }
     }
 
@@ -361,7 +367,10 @@ mod tests {
 
         match check {
             SlippageCheck::Approved { .. } => panic!("Order should be rejected"),
-            SlippageCheck::Rejected { reason, estimated_slippage_pct } => {
+            SlippageCheck::Rejected {
+                reason,
+                estimated_slippage_pct,
+            } => {
                 assert!(reason.contains("Slippage too high"));
                 assert!(estimated_slippage_pct > dec!(0.01)); // More than 1%
             }
@@ -393,7 +402,10 @@ mod tests {
         let check = protection.check_sell_order(&depth, dec!(100), dec!(0.483));
 
         match check {
-            SlippageCheck::Approved { limit_price, estimated_slippage_pct } => {
+            SlippageCheck::Approved {
+                limit_price,
+                estimated_slippage_pct,
+            } => {
                 // Limit price should be slightly below best bid
                 assert!(limit_price <= depth.best_bid);
                 assert!(limit_price > depth.best_bid * dec!(0.99));
@@ -401,7 +413,9 @@ mod tests {
                 // Slippage should be small (less than 1%)
                 assert!(estimated_slippage_pct < dec!(0.01));
             }
-            SlippageCheck::Rejected { reason, .. } => panic!("Order should be approved: {}", reason),
+            SlippageCheck::Rejected { reason, .. } => {
+                panic!("Order should be approved: {}", reason)
+            }
         }
     }
 
@@ -415,7 +429,10 @@ mod tests {
 
         match check {
             SlippageCheck::Approved { .. } => panic!("Order should be rejected"),
-            SlippageCheck::Rejected { reason, estimated_slippage_pct } => {
+            SlippageCheck::Rejected {
+                reason,
+                estimated_slippage_pct,
+            } => {
                 assert!(reason.contains("Slippage too high"));
                 assert!(estimated_slippage_pct > dec!(0.01)); // More than 1%
             }
@@ -478,7 +495,9 @@ mod tests {
             SlippageCheck::Approved { .. } => {
                 // Should be approved with higher tolerance
             }
-            SlippageCheck::Rejected { reason, .. } => panic!("Should be approved with 5% tolerance: {}", reason),
+            SlippageCheck::Rejected { reason, .. } => {
+                panic!("Should be approved with 5% tolerance: {}", reason)
+            }
         }
     }
 }

@@ -12,8 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{
-    BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PriceCache,
-    QuoteCache,
+    BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PriceCache, QuoteCache,
 };
 use crate::domain::Side;
 use crate::error::Result;
@@ -170,7 +169,8 @@ impl DashboardRunner {
                 up_size,
                 down_size,
             } => {
-                self.app.update_quotes(up_bid, up_ask, down_bid, down_ask, up_size, down_size);
+                self.app
+                    .update_quotes(up_bid, up_ask, down_bid, down_ask, up_size, down_size);
                 self.app.set_strategy_state("watching");
             }
             AppEvent::Fill {
@@ -191,7 +191,8 @@ impl DashboardRunner {
                 current_price,
                 avg_price,
             } => {
-                self.app.update_position(side, shares, current_price, avg_price);
+                self.app
+                    .update_position(side, shares, current_price, avg_price);
             }
             AppEvent::RoundEndTime(end_time) => {
                 self.app.set_round_end_time(end_time);
@@ -363,7 +364,10 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
     // Determine which series to monitor - resolve slug to numeric ID
     let series_input = series.unwrap_or("sol-15m");
     let series_id = resolve_series_id(series_input);
-    info!("Looking for active markets in series: {} (resolved from '{}')", series_id, series_input);
+    info!(
+        "Looking for active markets in series: {} (resolved from '{}')",
+        series_id, series_input
+    );
 
     // Get tokens for the series
     let token_ids = match client.get_series_all_tokens(series_id).await {
@@ -387,11 +391,11 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
 
     // Determine which Binance symbol to track based on series
     let binance_symbol = if series_id.starts_with("104") {
-        "SOLUSDT"  // SOL series
+        "SOLUSDT" // SOL series
     } else if series_id.starts_with("101") || series_id.starts_with("103") {
-        "ETHUSDT"  // ETH series
+        "ETHUSDT" // ETH series
     } else {
-        "BTCUSDT"  // Default to BTC
+        "BTCUSDT" // Default to BTC
     };
 
     let config = DashboardConfig {

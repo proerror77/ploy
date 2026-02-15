@@ -72,7 +72,10 @@ impl NonceManager {
         // Update cache
         *self.cached_nonce.lock().await = Some(nonce);
 
-        debug!("Allocated nonce {} for wallet {}", nonce, self.wallet_address);
+        debug!(
+            "Allocated nonce {} for wallet {}",
+            nonce, self.wallet_address
+        );
         Ok(nonce)
     }
 

@@ -112,8 +112,8 @@ impl PPOTrainer {
         Self {
             config: config.ppo,
             step_count: 0,
-            exploration_rate: 1.0,  // Start with full exploration
-            exploration_decay: 0.998,  // Slower decay for longer training
+            exploration_rate: 1.0,    // Start with full exploration
+            exploration_decay: 0.998, // Slower decay for longer training
             exploration_min: 0.05,
         }
     }
@@ -222,8 +222,8 @@ impl PPOTrainer {
 
     /// Decay exploration rate (call after each episode)
     pub fn decay_exploration(&mut self) {
-        self.exploration_rate = (self.exploration_rate * self.exploration_decay)
-            .max(self.exploration_min);
+        self.exploration_rate =
+            (self.exploration_rate * self.exploration_decay).max(self.exploration_min);
     }
 
     /// Get current exploration rate

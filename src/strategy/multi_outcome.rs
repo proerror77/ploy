@@ -54,7 +54,11 @@ impl ExpectedValue {
     /// * `entry_price` - Price to buy Yes shares (e.g., 0.95 for 95¢)
     /// * `true_probability` - Your estimate of true win probability (e.g., 0.97)
     /// * `fee_rate` - Platform fee (default: POLYMARKET_FEE_RATE = 0.02)
-    pub fn calculate(entry_price: Decimal, true_probability: Decimal, fee_rate: Option<Decimal>) -> Self {
+    pub fn calculate(
+        entry_price: Decimal,
+        true_probability: Decimal,
+        fee_rate: Option<Decimal>,
+    ) -> Self {
         let fee = fee_rate.unwrap_or(POLYMARKET_FEE_RATE);
         let win_payout = Decimal::ONE; // $1 per share on win
 
@@ -67,9 +71,9 @@ impl ExpectedValue {
 
         // Expected value = P(win) * profit - P(lose) * loss
         let gross_ev = true_probability * gross_profit_on_win
-                     - (Decimal::ONE - true_probability) * loss_on_lose;
-        let net_ev = true_probability * net_profit_on_win
-                   - (Decimal::ONE - true_probability) * loss_on_lose;
+            - (Decimal::ONE - true_probability) * loss_on_lose;
+        let net_ev =
+            true_probability * net_profit_on_win - (Decimal::ONE - true_probability) * loss_on_lose;
 
         // ROI = EV / cost
         let roi = if entry_price > Decimal::ZERO {
@@ -113,7 +117,10 @@ impl ExpectedValue {
     }
 
     /// Calculate minimum probability needed for +EV at a given price
-    pub fn min_probability_for_positive_ev(entry_price: Decimal, fee_rate: Option<Decimal>) -> Decimal {
+    pub fn min_probability_for_positive_ev(
+        entry_price: Decimal,
+        fee_rate: Option<Decimal>,
+    ) -> Decimal {
         let fee = fee_rate.unwrap_or(POLYMARKET_FEE_RATE);
         let profit_on_win = (Decimal::ONE - entry_price) * (Decimal::ONE - fee);
         let loss_on_lose = entry_price;
@@ -272,7 +279,10 @@ pub struct MarketMakingOpportunity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MarketMakingAction {
     /// Post both bid and ask, capture spread
-    PostBothSides { yes_quote: (Decimal, Decimal), no_quote: (Decimal, Decimal) },
+    PostBothSides {
+        yes_quote: (Decimal, Decimal),
+        no_quote: (Decimal, Decimal),
+    },
     /// Split and sell both sides
     SplitAndSell,
     /// Buy both and merge
@@ -397,7 +407,11 @@ pub enum ArbitrageType {
 impl std::fmt::Display for ArbitrageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ArbitrageType::MonotonicityViolation { outcome_a, outcome_b, .. } => {
+            ArbitrageType::MonotonicityViolation {
+                outcome_a,
+                outcome_b,
+                ..
+            } => {
                 write!(f, "Monotonicity Violation: {} vs {}", outcome_a, outcome_b)
             }
             ArbitrageType::SpreadArbitrage { outcome, .. } => {
@@ -432,7 +446,7 @@ pub struct MultiOutcomeMonitor {
     /// All outcomes indexed by token_id
     outcomes: HashMap<String, Outcome>,
     /// Outcomes sorted by price level (for monotonicity checks)
-    up_outcomes: Vec<String>,   // token_ids sorted by price level ascending
+    up_outcomes: Vec<String>, // token_ids sorted by price level ascending
     down_outcomes: Vec<String>, // token_ids sorted by price level descending
 }
 
@@ -541,9 +555,10 @@ impl MultiOutcomeMonitor {
             if let (Some(outcome_a), Some(outcome_b)) =
                 (self.outcomes.get(token_a), self.outcomes.get(token_b))
             {
-                if let (Some(prob_a), Some(prob_b)) =
-                    (outcome_a.implied_probability(), outcome_b.implied_probability())
-                {
+                if let (Some(prob_a), Some(prob_b)) = (
+                    outcome_a.implied_probability(),
+                    outcome_b.implied_probability(),
+                ) {
                     // For UP: lower target should have >= probability
                     // If prob_a < prob_b, that's a violation
                     if prob_a < prob_b {
@@ -576,9 +591,10 @@ impl MultiOutcomeMonitor {
             if let (Some(outcome_a), Some(outcome_b)) =
                 (self.outcomes.get(token_a), self.outcomes.get(token_b))
             {
-                if let (Some(prob_a), Some(prob_b)) =
-                    (outcome_a.implied_probability(), outcome_b.implied_probability())
-                {
+                if let (Some(prob_a), Some(prob_b)) = (
+                    outcome_a.implied_probability(),
+                    outcome_b.implied_probability(),
+                ) {
                     // For DOWN: higher target should have >= probability
                     // If prob_a < prob_b, that's a violation
                     if prob_a < prob_b {
@@ -646,7 +662,9 @@ impl MultiOutcomeMonitor {
 
     /// Get summary of all outcomes
     pub fn summary(&self) -> Vec<OutcomeSummary> {
-        let mut summaries: Vec<_> = self.outcomes.values()
+        let mut summaries: Vec<_> = self
+            .outcomes
+            .values()
             .map(|o| OutcomeSummary {
                 name: o.name.clone(),
                 direction: o.direction,
@@ -661,8 +679,12 @@ impl MultiOutcomeMonitor {
         // Sort by direction then price level
         summaries.sort_by(|a, b| {
             match (&a.direction, &b.direction) {
-                (Some(OutcomeDirection::Up), Some(OutcomeDirection::Down)) => std::cmp::Ordering::Less,
-                (Some(OutcomeDirection::Down), Some(OutcomeDirection::Up)) => std::cmp::Ordering::Greater,
+                (Some(OutcomeDirection::Up), Some(OutcomeDirection::Down)) => {
+                    std::cmp::Ordering::Less
+                }
+                (Some(OutcomeDirection::Down), Some(OutcomeDirection::Up)) => {
+                    std::cmp::Ordering::Greater
+                }
                 (Some(OutcomeDirection::Up), Some(OutcomeDirection::Up)) => {
                     b.price_level.cmp(&a.price_level) // Descending for UP
                 }
@@ -703,7 +725,9 @@ pub async fn fetch_multi_outcome_event(
     // Each market represents one price level outcome (e.g., "↑ 104,000")
     for market in &event.markets {
         // Get the outcome name from groupItemTitle or question
-        let outcome_name = market.group_item_title.clone()
+        let outcome_name = market
+            .group_item_title
+            .clone()
             .or_else(|| market.question.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -718,18 +742,10 @@ pub async fn fetch_multi_outcome_event(
                     // Parse initial prices if available
                     if let Some(prices_str) = &market.outcome_prices {
                         if let Ok(prices) = serde_json::from_str::<Vec<String>>(prices_str) {
-                            let yes_price = prices.first()
-                                .and_then(|p| Decimal::from_str(p).ok());
-                            let no_price = prices.get(1)
-                                .and_then(|p| Decimal::from_str(p).ok());
+                            let yes_price = prices.first().and_then(|p| Decimal::from_str(p).ok());
+                            let no_price = prices.get(1).and_then(|p| Decimal::from_str(p).ok());
 
-                            monitor.update_quote(
-                                yes_token_id,
-                                yes_price,
-                                no_price,
-                                None,
-                                None,
-                            );
+                            monitor.update_quote(yes_token_id, yes_price, no_price, None, None);
                         }
                     }
                 }
@@ -814,13 +830,11 @@ pub fn analyze_market_making_opportunity(
     config: &MarketMakingConfig,
 ) -> MarketMakingOpportunity {
     let current_spread = yes_ask + no_ask;
-    let spread_in_range = current_spread >= config.target_spread_min
-        && current_spread <= config.target_spread_max;
+    let spread_in_range =
+        current_spread >= config.target_spread_min && current_spread <= config.target_spread_max;
 
     // Check for immediate Split/Merge opportunities
-    let split_merge = detect_split_merge_opportunity(
-        yes_bid, yes_ask, no_bid, no_ask, dec!(0.005)
-    );
+    let split_merge = detect_split_merge_opportunity(yes_bid, yes_ask, no_bid, no_ask, dec!(0.005));
 
     // Calculate market making quotes
     // Goal: Yes_quote + No_quote = target_spread (e.g., 1.05)
@@ -850,22 +864,28 @@ pub fn analyze_market_making_opportunity(
             SplitMergeType::SplitAndSell => MarketMakingAction::SplitAndSell,
             SplitMergeType::BuyAndMerge => MarketMakingAction::BuyAndMerge,
         }
-    } else if spread_in_range && estimated_profit >= config.min_profit_margin * config.max_exposure_per_outcome {
+    } else if spread_in_range
+        && estimated_profit >= config.min_profit_margin * config.max_exposure_per_outcome
+    {
         MarketMakingAction::PostBothSides {
             yes_quote: (our_yes_bid, our_yes_ask),
             no_quote: (our_no_bid, our_no_ask),
         }
     } else if current_spread < config.target_spread_min {
         MarketMakingAction::Wait {
-            reason: format!("Spread {:.2}% too tight (min {:.2}%)",
+            reason: format!(
+                "Spread {:.2}% too tight (min {:.2}%)",
                 (current_spread - Decimal::ONE) * dec!(100),
-                (config.target_spread_min - Decimal::ONE) * dec!(100)),
+                (config.target_spread_min - Decimal::ONE) * dec!(100)
+            ),
         }
     } else {
         MarketMakingAction::Wait {
-            reason: format!("Spread {:.2}% too wide (max {:.2}%)",
+            reason: format!(
+                "Spread {:.2}% too wide (max {:.2}%)",
                 (current_spread - Decimal::ONE) * dec!(100),
-                (config.target_spread_max - Decimal::ONE) * dec!(100)),
+                (config.target_spread_max - Decimal::ONE) * dec!(100)
+            ),
         }
     };
 
@@ -973,34 +993,65 @@ pub fn analyze_near_settlement(
 /// Display EV calculation details
 impl std::fmt::Display for ExpectedValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EV Analysis @ {:.1}¢ (Est. {:.1}% true prob):\n",
+        write!(
+            f,
+            "EV Analysis @ {:.1}¢ (Est. {:.1}% true prob):\n",
             self.entry_price * dec!(100),
-            self.true_probability * dec!(100))?;
-        write!(f, "  Gross EV: {:.4}  Net EV: {:.4}\n", self.gross_ev, self.net_ev)?;
-        write!(f, "  ROI: {:.2}%  Kelly: {:.1}%\n",
+            self.true_probability * dec!(100)
+        )?;
+        write!(
+            f,
+            "  Gross EV: {:.4}  Net EV: {:.4}\n",
+            self.gross_ev, self.net_ev
+        )?;
+        write!(
+            f,
+            "  ROI: {:.2}%  Kelly: {:.1}%\n",
             self.roi * dec!(100),
-            self.kelly_fraction * dec!(100))?;
-        write!(f, "  Breakeven: {:.1}%  +EV: {}",
+            self.kelly_fraction * dec!(100)
+        )?;
+        write!(
+            f,
+            "  Breakeven: {:.1}%  +EV: {}",
             self.breakeven_prob * dec!(100),
-            if self.is_positive_ev { "YES" } else { "NO" })
+            if self.is_positive_ev { "YES" } else { "NO" }
+        )
     }
 }
 
 /// EV calculation table for different price/probability scenarios
 pub fn generate_ev_table() -> Vec<(Decimal, Vec<(Decimal, ExpectedValue)>)> {
     let prices = vec![
-        dec!(0.90), dec!(0.92), dec!(0.94), dec!(0.95), dec!(0.96), dec!(0.97), dec!(0.98), dec!(0.99)
+        dec!(0.90),
+        dec!(0.92),
+        dec!(0.94),
+        dec!(0.95),
+        dec!(0.96),
+        dec!(0.97),
+        dec!(0.98),
+        dec!(0.99),
     ];
     let true_probs = vec![
-        dec!(0.92), dec!(0.94), dec!(0.95), dec!(0.96), dec!(0.97), dec!(0.98), dec!(0.99), dec!(0.995)
+        dec!(0.92),
+        dec!(0.94),
+        dec!(0.95),
+        dec!(0.96),
+        dec!(0.97),
+        dec!(0.98),
+        dec!(0.99),
+        dec!(0.995),
     ];
 
-    prices.iter().map(|&price| {
-        let evs: Vec<_> = true_probs.iter()
-            .map(|&prob| (prob, ExpectedValue::calculate(price, prob, None)))
-            .collect();
-        (price, evs)
-    }).collect()
+    prices
+        .iter()
+        .map(|&price| {
+            let evs: Vec<_> = true_probs
+                .iter()
+                .map(|&prob| (prob, ExpectedValue::calculate(price, prob, None)))
+                .collect();
+            (price, evs)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1016,8 +1067,14 @@ mod tests {
 
     #[test]
     fn test_direction_parsing() {
-        assert_eq!(OutcomeDirection::from_symbol("↑ 94,000"), Some(OutcomeDirection::Up));
-        assert_eq!(OutcomeDirection::from_symbol("↓ 86,000"), Some(OutcomeDirection::Down));
+        assert_eq!(
+            OutcomeDirection::from_symbol("↑ 94,000"),
+            Some(OutcomeDirection::Up)
+        );
+        assert_eq!(
+            OutcomeDirection::from_symbol("↓ 86,000"),
+            Some(OutcomeDirection::Down)
+        );
     }
 
     #[test]
@@ -1037,6 +1094,9 @@ mod tests {
         monitor.update_quote("token4", Some(dec!(0.013)), None, None, None); // 80k: 1.3% - VIOLATION!
 
         let violations = monitor.find_monotonicity_violations();
-        assert!(!violations.is_empty(), "Should detect monotonicity violation");
+        assert!(
+            !violations.is_empty(),
+            "Should detect monotonicity violation"
+        );
     }
 }

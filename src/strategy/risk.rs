@@ -1,6 +1,6 @@
 use crate::config::RiskConfig;
 use crate::domain::{RiskState, Round};
-use crate::error::{RiskError, Result};
+use crate::error::{Result, RiskError};
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -13,6 +13,8 @@ pub struct RiskManager {
     config: RiskConfig,
     /// Current risk state
     state: Arc<RwLock<RiskState>>,
+    /// Last halt reason (when circuit breaker is triggered)
+    halt_reason: Arc<RwLock<Option<String>>>,
     /// Consecutive failures counter
     consecutive_failures: AtomicU32,
     /// Daily PnL tracker
@@ -33,6 +35,7 @@ impl RiskManager {
         Self {
             config,
             state: Arc::new(RwLock::new(RiskState::Normal)),
+            halt_reason: Arc::new(RwLock::new(None)),
             consecutive_failures: AtomicU32::new(0),
             daily_pnl: Arc::new(RwLock::new(DailyPnL::default())),
         }
@@ -56,12 +59,7 @@ impl RiskManager {
     // ==================== Pre-Trade Checks ====================
 
     /// Check if we can enter Leg1
-    pub async fn check_leg1_entry(
-        &self,
-        shares: u64,
-        price: Decimal,
-        round: &Round,
-    ) -> Result<()> {
+    pub async fn check_leg1_entry(&self, shares: u64, price: Decimal, round: &Round) -> Result<()> {
         // Check risk state
         if !self.can_trade().await {
             return Err(RiskError::TradingHalted {
@@ -130,6 +128,13 @@ impl RiskManager {
             pnl, daily.total_pnl
         );
 
+        // Enforce daily loss limit on net PnL (only triggers on losses).
+        if daily.total_pnl <= Decimal::ZERO - self.config.daily_loss_limit_usd {
+            drop(daily); // Release lock before triggering
+            self.trigger_circuit_breaker("Daily loss limit exceeded")
+                .await;
+        }
+
         // Check if we should reduce risk state
         if *self.state.read().await == RiskState::Elevated {
             *self.state.write().await = RiskState::Normal;
@@ -153,7 +158,8 @@ impl RiskManager {
 
         // Check for circuit breaker
         if failures >= self.config.max_consecutive_failures {
-            self.trigger_circuit_breaker("Too many consecutive failures").await;
+            self.trigger_circuit_breaker("Too many consecutive failures")
+                .await;
         } else if failures >= self.config.max_consecutive_failures / 2 {
             // Elevate risk state
             *self.state.write().await = RiskState::Elevated;
@@ -168,9 +174,10 @@ impl RiskManager {
         daily.total_pnl -= loss.abs();
 
         // Check daily loss limit
-        if daily.total_pnl.abs() >= self.config.daily_loss_limit_usd {
+        if daily.total_pnl <= Decimal::ZERO - self.config.daily_loss_limit_usd {
             drop(daily); // Release lock before triggering
-            self.trigger_circuit_breaker("Daily loss limit exceeded").await;
+            self.trigger_circuit_breaker("Daily loss limit exceeded")
+                .await;
         }
     }
 
@@ -178,6 +185,7 @@ impl RiskManager {
     pub async fn trigger_circuit_breaker(&self, reason: &str) {
         error!("CIRCUIT BREAKER TRIGGERED: {}", reason);
         *self.state.write().await = RiskState::Halted;
+        *self.halt_reason.write().await = Some(reason.to_string());
     }
 
     /// Reset circuit breaker (manual intervention)
@@ -185,6 +193,12 @@ impl RiskManager {
         info!("Circuit breaker reset");
         *self.state.write().await = RiskState::Normal;
         self.consecutive_failures.store(0, Ordering::SeqCst);
+        *self.halt_reason.write().await = None;
+    }
+
+    /// Get the last halt reason (if any)
+    pub async fn halt_reason(&self) -> Option<String> {
+        self.halt_reason.read().await.clone()
     }
 
     // ==================== Helpers ====================
@@ -296,11 +310,16 @@ mod tests {
         // Should be halted
         assert_eq!(risk.state().await, RiskState::Halted);
         assert!(!risk.can_trade().await);
+        assert_eq!(
+            risk.halt_reason().await.as_deref(),
+            Some("Too many consecutive failures")
+        );
 
         // Reset
         risk.reset_circuit_breaker().await;
         assert_eq!(risk.state().await, RiskState::Normal);
         assert!(risk.can_trade().await);
+        assert_eq!(risk.halt_reason().await, None);
     }
 
     #[tokio::test]

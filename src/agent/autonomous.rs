@@ -3,14 +3,14 @@
 //! This agent operates with configurable autonomy levels,
 //! from fully autonomous to requiring human confirmation for trades.
 
+use crate::adapters::PolymarketClient;
 use crate::agent::client::ClaudeAgentClient;
 use crate::agent::grok::{GrokClient, SearchResult};
-use crate::agent::protocol::{
-    AgentAction, AgentContext, AgentResponse,
-    PositionInfo,
-};
-use crate::domain::RiskState;
-use crate::error::Result;
+use crate::agent::protocol::{AgentAction, AgentContext, AgentResponse, PositionInfo};
+use crate::domain::{OrderRequest, RiskState, Side};
+use crate::error::{PloyError, Result};
+use chrono::Utc;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -124,6 +124,8 @@ pub struct AutonomousAgent {
     grok: Option<GrokClient>,
     /// Last time Grok was called (for rate limiting)
     last_grok_call: std::sync::Mutex<Option<Instant>>,
+    /// Optional trading client for real order execution
+    pm_client: Option<PolymarketClient>,
 }
 
 impl AutonomousAgent {
@@ -140,6 +142,7 @@ impl AutonomousAgent {
             action_tx,
             grok: None,
             last_grok_call: std::sync::Mutex::new(None),
+            pm_client: None,
         }
     }
 
@@ -149,9 +152,18 @@ impl AutonomousAgent {
         self
     }
 
+    /// Add a Polymarket client for real order execution.
+    pub fn with_trading_client(mut self, pm_client: PolymarketClient) -> Self {
+        self.pm_client = Some(pm_client);
+        self
+    }
+
     /// Check if Grok is available
     pub fn has_grok(&self) -> bool {
-        self.grok.as_ref().map(|g| g.is_configured()).unwrap_or(false)
+        self.grok
+            .as_ref()
+            .map(|g| g.is_configured())
+            .unwrap_or(false)
     }
 
     /// Fetch real-time context from Grok
@@ -192,8 +204,7 @@ impl AutonomousAgent {
 
     /// Check if trading is allowed
     pub fn can_trade(&self) -> bool {
-        self.config.trading_enabled
-            && self.config.autonomy_level != AutonomyLevel::AdvisoryOnly
+        self.config.trading_enabled && self.config.autonomy_level != AutonomyLevel::AdvisoryOnly
     }
 
     /// Request shutdown
@@ -203,10 +214,7 @@ impl AutonomousAgent {
     }
 
     /// Run the autonomous trading loop
-    pub async fn run<F, Fut>(
-        &self,
-        context_provider: F,
-    ) -> Result<()>
+    pub async fn run<F, Fut>(&self, context_provider: F) -> Result<()>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<AgentContext>>,
@@ -256,7 +264,9 @@ impl AutonomousAgent {
     /// Analyze current state and determine actions
     async fn analyze_and_act(&self, context: &AgentContext) -> Result<Vec<AgentAction>> {
         // Fetch real-time context from Grok if available
-        let grok_context = self.fetch_realtime_context(&context.market_state.market_id).await;
+        let grok_context = self
+            .fetch_realtime_context(&context.market_state.market_id)
+            .await;
 
         let prompt = self.build_analysis_prompt(context, grok_context.as_ref());
 
@@ -300,19 +310,26 @@ impl AutonomousAgent {
     }
 
     /// Build analysis prompt based on current state
-    fn build_analysis_prompt(&self, _context: &AgentContext, grok_context: Option<&SearchResult>) -> String {
+    fn build_analysis_prompt(
+        &self,
+        _context: &AgentContext,
+        grok_context: Option<&SearchResult>,
+    ) -> String {
         let strategies = self.config.allowed_strategies.join(", ");
 
         let realtime_info = if let Some(search) = grok_context {
             let sentiment = Self::sanitize_for_prompt(
-                &search.sentiment
+                &search
+                    .sentiment
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
             );
             let key_points = if search.key_points.is_empty() {
                 "None available".to_string()
             } else {
-                search.key_points.iter()
+                search
+                    .key_points
+                    .iter()
                     .take(5)
                     .map(|p| format!("  - {}", Self::sanitize_for_prompt(p)))
                     .collect::<Vec<_>>()
@@ -374,7 +391,9 @@ Prioritize capital preservation while seeking profitable opportunities."#,
 
         for action in &response.recommended_actions {
             match action {
-                AgentAction::EnterPosition { shares, max_price, .. } => {
+                AgentAction::EnterPosition {
+                    shares, max_price, ..
+                } => {
                     let trade_value = Decimal::from(*shares) * *max_price;
 
                     // Check trade size limit
@@ -415,7 +434,10 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                 | AgentAction::NoAction { .. } => {
                     valid_actions.push(action.clone());
                 }
-                AgentAction::AdjustRisk { new_state, reasoning: _ } => {
+                AgentAction::AdjustRisk {
+                    new_state,
+                    reasoning: _,
+                } => {
                     // Only allow risk increases (more conservative)
                     if *new_state == RiskState::Halted
                         || (*new_state == RiskState::Elevated
@@ -440,7 +462,7 @@ Prioritize capital preservation while seeking profitable opportunities."#,
     async fn execute_action(
         &self,
         action: &AgentAction,
-        _context: &AgentContext,
+        context: &AgentContext,
     ) -> Result<ExecutionResult> {
         match action {
             AgentAction::EnterPosition {
@@ -454,16 +476,47 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                     side, shares, max_price, reasoning
                 );
 
-                // TODO: Integrate with actual order executor
-                // For now, just track the exposure
+                let pm_client = self.pm_client.as_ref().ok_or_else(|| {
+                    PloyError::Validation(
+                        "autonomous trading client not configured (set --enable-trading with valid auth env)"
+                            .to_string(),
+                    )
+                })?;
+
+                let token_id = match side {
+                    Side::Up => context.market_state.yes_token_id.clone(),
+                    Side::Down => context.market_state.no_token_id.clone(),
+                }
+                .ok_or_else(|| {
+                    PloyError::Validation(format!(
+                        "missing token id for side {:?} on market {}",
+                        side, context.market_state.market_id
+                    ))
+                })?;
+
+                let order = OrderRequest::buy_limit(token_id.clone(), *side, *shares, *max_price);
+                let order_resp = pm_client.submit_order(&order).await?;
+
                 let trade_value = Decimal::from(*shares) * *max_price;
                 *self.current_exposure.write().await += trade_value;
+                self.positions.write().await.push(PositionInfo {
+                    token_id: token_id.clone(),
+                    side: *side,
+                    shares: Decimal::from(*shares),
+                    avg_entry_price: *max_price,
+                    current_price: None,
+                    unrealized_pnl: None,
+                    opened_at: Utc::now(),
+                });
 
                 Ok(ExecutionResult {
                     action: action.clone(),
                     success: true,
-                    message: format!("Entered {:?} position", side),
-                    trade_id: Some(format!("agent-{}", chrono::Utc::now().timestamp())),
+                    message: format!(
+                        "Entered {:?} position token={} shares={} @ {} (order_id={})",
+                        side, token_id, shares, max_price, order_resp.id
+                    ),
+                    trade_id: Some(order_resp.id),
                 })
             }
             AgentAction::ExitPosition {
@@ -476,19 +529,64 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                     token_id, min_price, reasoning
                 );
 
-                // TODO: Integrate with actual order executor
-                // Reduce exposure (simplified)
-                let current = *self.current_exposure.read().await;
-                *self.current_exposure.write().await = current * Decimal::from(80) / Decimal::from(100);
+                let pm_client = self.pm_client.as_ref().ok_or_else(|| {
+                    PloyError::Validation(
+                        "autonomous trading client not configured (set --enable-trading with valid auth env)"
+                            .to_string(),
+                    )
+                })?;
+
+                let pos = self
+                    .positions
+                    .read()
+                    .await
+                    .iter()
+                    .find(|p| p.token_id == *token_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PloyError::Validation(format!(
+                            "cannot exit token {}: no tracked position found",
+                            token_id
+                        ))
+                    })?;
+
+                let shares = pos.shares.to_u64().ok_or_else(|| {
+                    PloyError::Validation(format!(
+                        "invalid tracked share amount for token {}: {}",
+                        token_id, pos.shares
+                    ))
+                })?;
+
+                let limit_price = min_price
+                    .or(pos.current_price)
+                    .unwrap_or(pos.avg_entry_price);
+                let order =
+                    OrderRequest::sell_limit(token_id.clone(), pos.side, shares, limit_price);
+                let order_resp = pm_client.submit_order(&order).await?;
+
+                let reduce_value = Decimal::from(shares) * limit_price;
+                let mut exposure = self.current_exposure.write().await;
+                *exposure = (*exposure - reduce_value).max(Decimal::ZERO);
+                drop(exposure);
+                self.positions
+                    .write()
+                    .await
+                    .retain(|p| p.token_id != *token_id);
 
                 Ok(ExecutionResult {
                     action: action.clone(),
                     success: true,
-                    message: format!("Exited position {}", token_id),
-                    trade_id: Some(format!("agent-exit-{}", chrono::Utc::now().timestamp())),
+                    message: format!(
+                        "Exited position {} shares={} @ {} (order_id={})",
+                        token_id, shares, limit_price, order_resp.id
+                    ),
+                    trade_id: Some(order_resp.id),
                 })
             }
-            AgentAction::Wait { duration_secs, reason } => {
+            AgentAction::Wait {
+                duration_secs,
+                reason,
+            } => {
                 debug!("Agent waiting {} seconds: {}", duration_secs, reason);
                 Ok(ExecutionResult {
                     action: action.clone(),
@@ -510,7 +608,10 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                     trade_id: None,
                 })
             }
-            AgentAction::AdjustRisk { new_state, reasoning } => {
+            AgentAction::AdjustRisk {
+                new_state,
+                reasoning,
+            } => {
                 warn!("Risk adjustment to {:?}: {}", new_state, reasoning);
                 // TODO: Integrate with RiskManager
                 Ok(ExecutionResult {

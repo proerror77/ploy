@@ -30,7 +30,8 @@ pub fn render_market_analysis(f: &mut Frame, area: Rect, app: &TuiApp) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // Prices line
         Constraint::Length(1), // Stats line
-    ]).split(inner);
+    ])
+    .split(inner);
 
     // Line 1: UP/DOWN prices and combined
     let spread_style = if market.spread_pct <= dec!(0) {

@@ -72,6 +72,8 @@ pub mod nba_filters;
 pub mod nba_state_machine;
 pub mod nba_winprob;
 pub mod paper_runner;
+#[cfg(feature = "analysis")]
+pub mod parquet_analysis;
 pub mod position_manager;
 pub mod reconciliation;
 pub mod risk;
@@ -133,7 +135,6 @@ pub use dump_hedge::{
 };
 pub use event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 pub use event_edge::{run_event_edge, EventEdgeConfig};
-pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
@@ -164,6 +165,7 @@ pub use reconciliation::{
     DiscrepancySeverity, PositionDiscrepancy, ReconciliationConfig, ReconciliationResult,
     ReconciliationService,
 };
+pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
 pub use risk::RiskManager;
 pub use signal::SignalDetector;
 pub use slippage::{MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection};

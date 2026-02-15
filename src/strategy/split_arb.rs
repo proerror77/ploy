@@ -35,7 +35,8 @@ impl PriceCache {
     }
 
     pub fn update(&mut self, token_id: &str, bid: Option<Decimal>, ask: Option<Decimal>) {
-        self.prices.insert(token_id.to_string(), (bid, ask, Utc::now()));
+        self.prices
+            .insert(token_id.to_string(), (bid, ask, Utc::now()));
     }
 
     pub fn get_ask(&self, token_id: &str) -> Option<Decimal> {
@@ -79,13 +80,13 @@ pub struct SplitArbConfig {
 impl Default for SplitArbConfig {
     fn default() -> Self {
         Self {
-            max_entry_price: dec!(0.35),      // Max 35¢ per side
-            target_total_cost: dec!(0.70),    // Target 70¢ total (30¢ profit)
-            min_profit_margin: dec!(0.05),    // Min 5¢ profit
-            max_hedge_wait_secs: 900,         // 15 minutes max wait
-            shares_per_trade: 100,            // ~$35 per leg
-            max_unhedged_positions: 3,        // Max 3 unhedged at once
-            unhedged_stop_loss: dec!(0.15),   // 15% stop loss on unhedged
+            max_entry_price: dec!(0.35),    // Max 35¢ per side
+            target_total_cost: dec!(0.70),  // Target 70¢ total (30¢ profit)
+            min_profit_margin: dec!(0.05),  // Min 5¢ profit
+            max_hedge_wait_secs: 900,       // 15 minutes max wait
+            shares_per_trade: 100,          // ~$35 per leg
+            max_unhedged_positions: 3,      // Max 3 unhedged at once
+            unhedged_stop_loss: dec!(0.15), // 15% stop loss on unhedged
             series_ids: vec![
                 "10423".into(), // SOL 15m
                 "10191".into(), // ETH 15m
@@ -305,7 +306,8 @@ impl SplitArbEngine {
                 };
 
                 // Parse end time
-                let end_time = details.end_date
+                let end_time = details
+                    .end_date
                     .as_ref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc))
@@ -327,7 +329,11 @@ impl SplitArbEngine {
             }
         }
 
-        info!("Monitoring {} markets, {} tokens", markets.len(), all_token_ids.len());
+        info!(
+            "Monitoring {} markets, {} tokens",
+            markets.len(),
+            all_token_ids.len()
+        );
         Ok(all_token_ids)
     }
 
@@ -380,9 +386,9 @@ impl SplitArbEngine {
         let cache = self.price_cache.read().await;
 
         // Find which market this token belongs to
-        let market = markets.values().find(|m| {
-            m.up_token_id == token_id || m.down_token_id == token_id
-        });
+        let market = markets
+            .values()
+            .find(|m| m.up_token_id == token_id || m.down_token_id == token_id);
 
         let market = match market {
             Some(m) => m.clone(),
@@ -409,7 +415,8 @@ impl SplitArbEngine {
 
         if has_partial {
             // Check for hedge opportunity
-            self.check_hedge(&market.condition_id, up_ask, down_ask).await;
+            self.check_hedge(&market.condition_id, up_ask, down_ask)
+                .await;
         } else {
             // Check for new entry opportunity
             self.check_new_entry(&market, up_ask, down_ask).await;
@@ -425,10 +432,21 @@ impl SplitArbEngine {
         }
 
         // Check if either side is cheap enough
-        let (side, entry_price, token_id, other_token_id) = if up_ask <= self.config.max_entry_price {
-            (ArbSide::Up, up_ask, &market.up_token_id, &market.down_token_id)
+        let (side, entry_price, token_id, other_token_id) = if up_ask <= self.config.max_entry_price
+        {
+            (
+                ArbSide::Up,
+                up_ask,
+                &market.up_token_id,
+                &market.down_token_id,
+            )
         } else if down_ask <= self.config.max_entry_price {
-            (ArbSide::Down, down_ask, &market.down_token_id, &market.up_token_id)
+            (
+                ArbSide::Down,
+                down_ask,
+                &market.down_token_id,
+                &market.up_token_id,
+            )
         } else {
             return; // Neither side is cheap enough
         };
@@ -437,7 +455,11 @@ impl SplitArbEngine {
         let max_hedge_price = self.config.target_total_cost - entry_price;
 
         // Check if hedge is even possible (other side not already too expensive)
-        let other_ask = if side == ArbSide::Up { down_ask } else { up_ask };
+        let other_ask = if side == ArbSide::Up {
+            down_ask
+        } else {
+            up_ask
+        };
         if other_ask > max_hedge_price + dec!(0.10) {
             // Other side is way too expensive, unlikely to get hedge
             debug!(
@@ -466,12 +488,22 @@ impl SplitArbEngine {
 
         // Execute entry
         if self.dry_run {
-            info!("  [DRY RUN] Would buy {} shares of {}", self.config.shares_per_trade, side);
+            info!(
+                "  [DRY RUN] Would buy {} shares of {}",
+                self.config.shares_per_trade, side
+            );
         } else {
             // Place order
-            match self.execute_buy(token_id, entry_price, self.config.shares_per_trade).await {
+            match self
+                .execute_buy(token_id, entry_price, self.config.shares_per_trade)
+                .await
+            {
                 Ok(_) => {
-                    info!("  ✓ Order placed for {} @ {}¢", side, entry_price * dec!(100));
+                    info!(
+                        "  ✓ Order placed for {} @ {}¢",
+                        side,
+                        entry_price * dec!(100)
+                    );
                 }
                 Err(e) => {
                     error!("  ✗ Order failed: {}", e);
@@ -554,7 +586,10 @@ impl SplitArbEngine {
                 position.shares, hedge_side
             );
         } else {
-            match self.execute_buy(&position.other_token_id, hedge_price, position.shares).await {
+            match self
+                .execute_buy(&position.other_token_id, hedge_price, position.shares)
+                .await
+            {
                 Ok(_) => {
                     info!("  ✓ Hedge order placed");
                 }
@@ -696,7 +731,10 @@ impl SplitArbEngine {
 
         if !self.dry_run {
             // Place sell order
-            if let Err(e) = self.execute_sell(&position.first_token_id, exit_price, position.shares).await {
+            if let Err(e) = self
+                .execute_sell(&position.first_token_id, exit_price, position.shares)
+                .await
+            {
                 error!("  ✗ Exit order failed: {}", e);
             }
         }
@@ -727,12 +765,8 @@ impl SplitArbEngine {
 
     /// Execute a sell order
     async fn execute_sell(&self, token_id: &str, price: Decimal, shares: u64) -> Result<()> {
-        let order = crate::domain::OrderRequest::sell_limit(
-            token_id.to_string(),
-            Side::Up,
-            shares,
-            price,
-        );
+        let order =
+            crate::domain::OrderRequest::sell_limit(token_id.to_string(), Side::Up, shares, price);
 
         self.executor.execute(&order).await?;
         Ok(())
@@ -762,7 +796,10 @@ impl SplitArbEngine {
         info!("───────────────────────────────────────────");
         info!("Total profit:        ${:.2}", stats.total_profit);
         info!("Total loss:          ${:.2}", stats.total_loss);
-        info!("Net P&L:             ${:.2}", stats.total_profit - stats.total_loss);
+        info!(
+            "Net P&L:             ${:.2}",
+            stats.total_profit - stats.total_loss
+        );
         info!("═══════════════════════════════════════════");
     }
 }

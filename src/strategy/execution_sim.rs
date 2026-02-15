@@ -11,11 +11,11 @@
 //! leading to unrealistically optimistic results. This simulator models
 //! real-world execution constraints.
 
-use rust_decimal::Decimal;
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc, Duration};
 
 /// Execution simulation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +47,7 @@ impl Default for ExecutionSimConfig {
             spread_pct: dec!(0.02), // 2% spread
             enable_partial_fills: true,
             depth_multiple: dec!(5.0), // 5x typical order
-            min_fill_pct: dec!(0.5), // At least 50% fill
+            min_fill_pct: dec!(0.5),   // At least 50% fill
             enable_fill_delay: true,
             avg_fill_delay_secs: 5, // 5 second average delay
             enable_market_impact: true,
@@ -243,7 +243,8 @@ impl ExecutionSimulator {
         }
 
         // Typical order size for depth calculation
-        let typical_order = (depth as f64 / self.config.depth_multiple.to_f64().unwrap_or(5.0)) as u64;
+        let typical_order =
+            (depth as f64 / self.config.depth_multiple.to_f64().unwrap_or(5.0)) as u64;
         let typical_order = typical_order.max(100); // At least 100 shares
 
         if requested <= typical_order {
@@ -252,12 +253,14 @@ impl ExecutionSimulator {
         } else if requested <= depth {
             // Medium order - partial fill based on depth
             let fill_ratio = (depth as f64 / requested as f64).min(1.0);
-            let min_fill = (requested as f64 * self.config.min_fill_pct.to_f64().unwrap_or(0.5)) as u64;
+            let min_fill =
+                (requested as f64 * self.config.min_fill_pct.to_f64().unwrap_or(0.5)) as u64;
             let filled = ((requested as f64 * fill_ratio) as u64).max(min_fill);
             (filled.min(requested), filled < requested)
         } else {
             // Large order - fill up to depth
-            let filled = depth.max((requested as f64 * self.config.min_fill_pct.to_f64().unwrap_or(0.5)) as u64);
+            let filled = depth
+                .max((requested as f64 * self.config.min_fill_pct.to_f64().unwrap_or(0.5)) as u64);
             (filled.min(requested), true)
         }
     }

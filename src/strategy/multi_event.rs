@@ -89,12 +89,10 @@ impl EventTracker {
     /// Get the combined ask sum (up_ask + down_ask)
     pub fn ask_sum(&self) -> Option<Decimal> {
         match (&self.up_quote, &self.down_quote) {
-            (Some(up), Some(down)) => {
-                match (up.best_ask, down.best_ask) {
-                    (Some(up_ask), Some(down_ask)) => Some(up_ask + down_ask),
-                    _ => None,
-                }
-            }
+            (Some(up), Some(down)) => match (up.best_ask, down.best_ask) {
+                (Some(up_ask), Some(down_ask)) => Some(up_ask + down_ask),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -197,7 +195,8 @@ impl MultiEventMonitor {
         }
 
         // Mark expired events as inactive and clean up
-        let expired_events: Vec<String> = self.events
+        let expired_events: Vec<String> = self
+            .events
             .iter()
             .filter(|(_, tracker)| tracker.end_time <= now)
             .map(|(id, _)| id.clone())
@@ -205,7 +204,10 @@ impl MultiEventMonitor {
 
         for event_id in expired_events {
             if let Some(tracker) = self.events.remove(&event_id) {
-                info!("Removed expired event: {} ({})", tracker.event_slug, event_id);
+                info!(
+                    "Removed expired event: {} ({})",
+                    tracker.event_slug, event_id
+                );
                 self.token_to_event.remove(&tracker.up_token_id);
                 self.token_to_event.remove(&tracker.down_token_id);
             }
@@ -238,14 +240,20 @@ impl MultiEventMonitor {
         }
 
         // Update signal detector
-        let signal = tracker.signal_detector.update(quote, Some(&tracker.event_slug))?;
+        let signal = tracker
+            .signal_detector
+            .update(quote, Some(&tracker.event_slug))?;
 
         // Build opportunity if we have both quotes
         self.build_opportunity(&event_id, signal)
     }
 
     /// Build an arbitrage opportunity from a signal
-    fn build_opportunity(&self, event_id: &str, signal: DumpSignal) -> Option<ArbitrageOpportunity> {
+    fn build_opportunity(
+        &self,
+        event_id: &str,
+        signal: DumpSignal,
+    ) -> Option<ArbitrageOpportunity> {
         let tracker = self.events.get(event_id)?;
 
         let up_quote = tracker.up_quote.clone()?;
@@ -388,7 +396,12 @@ mod tests {
             markets: vec![],
         };
 
-        let tracker = EventTracker::new(&event, "up-token".to_string(), "down-token".to_string(), test_config());
+        let tracker = EventTracker::new(
+            &event,
+            "up-token".to_string(),
+            "down-token".to_string(),
+            test_config(),
+        );
 
         assert!(tracker.time_remaining() > Duration::minutes(9));
         assert!(tracker.time_remaining() < Duration::minutes(11));
@@ -415,26 +428,37 @@ mod tests {
             markets: vec![],
         };
 
-        let mut tracker = EventTracker::new(&event, "up-token".to_string(), "down-token".to_string(), test_config());
+        let mut tracker = EventTracker::new(
+            &event,
+            "up-token".to_string(),
+            "down-token".to_string(),
+            test_config(),
+        );
 
         // Set quotes
-        tracker.update_quote("up-token", Quote {
-            side: Side::Up,
-            best_bid: Some(dec!(0.44)),
-            best_ask: Some(dec!(0.45)),
-            bid_size: Some(dec!(100)),
-            ask_size: Some(dec!(100)),
-            timestamp: Utc::now(),
-        });
+        tracker.update_quote(
+            "up-token",
+            Quote {
+                side: Side::Up,
+                best_bid: Some(dec!(0.44)),
+                best_ask: Some(dec!(0.45)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: Utc::now(),
+            },
+        );
 
-        tracker.update_quote("down-token", Quote {
-            side: Side::Down,
-            best_bid: Some(dec!(0.49)),
-            best_ask: Some(dec!(0.50)),
-            bid_size: Some(dec!(100)),
-            ask_size: Some(dec!(100)),
-            timestamp: Utc::now(),
-        });
+        tracker.update_quote(
+            "down-token",
+            Quote {
+                side: Side::Down,
+                best_bid: Some(dec!(0.49)),
+                best_ask: Some(dec!(0.50)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: Utc::now(),
+            },
+        );
 
         let sum = tracker.ask_sum().unwrap();
         assert_eq!(sum, dec!(0.95)); // 0.45 + 0.50 = 0.95

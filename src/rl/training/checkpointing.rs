@@ -2,12 +2,12 @@
 //!
 //! Save and load model weights for persistence.
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use burn::prelude::*;
 use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Checkpointer for saving and loading models
 pub struct Checkpointer {

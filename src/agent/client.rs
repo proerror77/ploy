@@ -139,7 +139,10 @@ impl ClaudeAgentClient {
                     last_error = Some(e);
 
                     if attempts < self.config.max_retries {
-                        let delay = Duration::from_secs(1u64.saturating_mul(2u64.saturating_pow(attempts as u32 - 1)).min(30));
+                        let delay = Duration::from_secs(
+                            1u64.saturating_mul(2u64.saturating_pow(attempts as u32 - 1))
+                                .min(30),
+                        );
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -200,9 +203,9 @@ Respond ONLY with valid JSON."#,
         }
 
         debug!("Spawning claude process");
-        let mut child = cmd.spawn().map_err(|e| {
-            PloyError::Internal(format!("Failed to spawn claude process: {}", e))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| PloyError::Internal(format!("Failed to spawn claude process: {}", e)))?;
 
         // Write prompt to stdin
         if let Some(mut stdin) = child.stdin.take() {
@@ -245,9 +248,9 @@ Respond ONLY with valid JSON."#,
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| {
-            PloyError::Internal(format!("Failed to spawn claude process: {}", e))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| PloyError::Internal(format!("Failed to spawn claude process: {}", e)))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await.map_err(|e| {
@@ -332,7 +335,9 @@ fn parse_flexible_response(json_str: &str) -> Result<AgentResponse> {
         .map_err(|e| PloyError::Internal(format!("Failed to parse agent response: {}", e)))?;
 
     // Convert recommended_actions to AgentAction
-    let actions: Vec<AgentAction> = flexible.recommended_actions.iter()
+    let actions: Vec<AgentAction> = flexible
+        .recommended_actions
+        .iter()
         .filter_map(|v| convert_to_agent_action(v))
         .collect();
 
@@ -361,20 +366,23 @@ fn convert_to_agent_action(value: &serde_json::Value) -> Option<AgentAction> {
     let obj = value.as_object()?;
 
     // Extract action type (could be "action", "type", or infer from fields)
-    let action_type = obj.get("action")
+    let action_type = obj
+        .get("action")
         .or_else(|| obj.get("type"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_uppercase();
 
-    let details = obj.get("details")
+    let details = obj
+        .get("details")
         .or_else(|| obj.get("message"))
         .or_else(|| obj.get("reason"))
         .and_then(|v| v.as_str())
         .unwrap_or("No details provided")
         .to_string();
 
-    let priority = obj.get("priority")
+    let priority = obj
+        .get("priority")
         .and_then(|v| v.as_str())
         .unwrap_or("MEDIUM");
 
@@ -387,27 +395,19 @@ fn convert_to_agent_action(value: &serde_json::Value) -> Option<AgentAction> {
                 message: format!("Entry signal: {}", details),
             })
         }
-        "EXIT" | "EXIT_POSITION" | "SELL" => {
-            Some(AgentAction::Alert {
-                severity: priority_to_severity(priority),
-                message: format!("Exit signal: {}", details),
-            })
-        }
-        "WAIT" | "HOLD" | "NO_TRADE" => {
-            Some(AgentAction::Wait {
-                duration_secs: 60,
-                reason: details,
-            })
-        }
-        "ALERT" | "WARNING" | "CRITICAL" => {
-            Some(AgentAction::Alert {
-                severity: priority_to_severity(priority),
-                message: details,
-            })
-        }
-        "NO_ACTION" | "NONE" => {
-            Some(AgentAction::NoAction { reason: details })
-        }
+        "EXIT" | "EXIT_POSITION" | "SELL" => Some(AgentAction::Alert {
+            severity: priority_to_severity(priority),
+            message: format!("Exit signal: {}", details),
+        }),
+        "WAIT" | "HOLD" | "NO_TRADE" => Some(AgentAction::Wait {
+            duration_secs: 60,
+            reason: details,
+        }),
+        "ALERT" | "WARNING" | "CRITICAL" => Some(AgentAction::Alert {
+            severity: priority_to_severity(priority),
+            message: details,
+        }),
+        "NO_ACTION" | "NONE" => Some(AgentAction::NoAction { reason: details }),
         _ => {
             // Default: create an alert with the information
             Some(AgentAction::Alert {

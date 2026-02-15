@@ -7,13 +7,13 @@
 //! - Graceful shutdown handling
 
 pub mod circuit_breaker;
+pub mod emergency_stop;
 pub mod lifecycle;
 pub mod shutdown;
-pub mod emergency_stop;
 
-pub use circuit_breaker::{TradingCircuitBreaker, TradingCircuitBreakerConfig, CircuitState};
-pub use lifecycle::{ComponentState, LifecycleManager, LifecycleEvent};
-pub use shutdown::{GracefulShutdown, ShutdownSignal};
+pub use circuit_breaker::{CircuitState, TradingCircuitBreaker, TradingCircuitBreakerConfig};
 pub use emergency_stop::{
-    EmergencyStopManager, EmergencyStopConfig, EmergencyState, EmergencyReason,
+    EmergencyReason, EmergencyState, EmergencyStopConfig, EmergencyStopManager,
 };
+pub use lifecycle::{ComponentState, LifecycleEvent, LifecycleManager};
+pub use shutdown::{GracefulShutdown, ShutdownSignal};

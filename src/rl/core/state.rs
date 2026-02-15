@@ -242,7 +242,9 @@ impl StateEncoder for DefaultStateEncoder {
 
         // Pad or truncate price history to PRICE_HISTORY_LEN
         for i in 0..PRICE_HISTORY_LEN {
-            let price = obs.price_history.get(i)
+            let price = obs
+                .price_history
+                .get(i)
                 .map(|p| Self::decimal_to_f32(Some(*p)))
                 .unwrap_or(0.0);
             features.push(price);
@@ -293,8 +295,13 @@ impl StateEncoder for DefaultStateEncoder {
         features.push(obs.day_cos);
 
         // Ensure we have exactly TOTAL_FEATURES
-        debug_assert_eq!(features.len(), TOTAL_FEATURES,
-            "Feature count mismatch: {} vs {}", features.len(), TOTAL_FEATURES);
+        debug_assert_eq!(
+            features.len(),
+            TOTAL_FEATURES,
+            "Feature count mismatch: {} vs {}",
+            features.len(),
+            TOTAL_FEATURES
+        );
 
         features
     }

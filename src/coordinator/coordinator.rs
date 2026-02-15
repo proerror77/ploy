@@ -1,0 +1,586 @@
+//! Coordinator — central orchestrator for multi-agent trading
+//!
+//! The Coordinator owns the order queue, risk gate, and position aggregator.
+//! Agents communicate with it via `CoordinatorHandle` (clone-friendly).
+//! The main `run()` loop uses `tokio::select!` to:
+//!   - Process incoming order intents (risk check → enqueue)
+//!   - Process agent state updates (heartbeats)
+//!   - Periodically drain the queue and execute orders
+//!   - Periodically refresh GlobalState from aggregators
+
+use chrono::Utc;
+use rust_decimal::Decimal;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, warn};
+
+use sqlx::PgPool;
+
+use crate::domain::OrderRequest;
+use crate::error::Result;
+use crate::platform::{
+    AgentRiskParams, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult, RiskGate,
+};
+use crate::strategy::executor::OrderExecutor;
+
+use super::command::CoordinatorCommand;
+use super::config::CoordinatorConfig;
+use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
+
+/// Clonable handle given to agents for submitting orders and state updates
+#[derive(Clone)]
+pub struct CoordinatorHandle {
+    order_tx: mpsc::Sender<OrderIntent>,
+    state_tx: mpsc::Sender<AgentSnapshot>,
+    global_state: Arc<RwLock<GlobalState>>,
+}
+
+impl CoordinatorHandle {
+    /// Submit an order intent to the coordinator for risk checking and execution
+    pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
+        self.order_tx.send(intent).await.map_err(|_| {
+            crate::error::PloyError::Internal("coordinator order channel closed".into())
+        })
+    }
+
+    /// Report agent state (heartbeat + position/PnL snapshot)
+    pub async fn update_agent_state(&self, snapshot: AgentSnapshot) -> Result<()> {
+        self.state_tx.send(snapshot).await.map_err(|_| {
+            crate::error::PloyError::Internal("coordinator state channel closed".into())
+        })
+    }
+
+    /// Read the current global state (non-blocking snapshot)
+    pub async fn read_state(&self) -> GlobalState {
+        self.global_state.read().await.clone()
+    }
+}
+
+/// The Coordinator — owns shared infrastructure and runs the main event loop
+pub struct Coordinator {
+    config: CoordinatorConfig,
+    risk_gate: Arc<RiskGate>,
+    order_queue: Arc<RwLock<OrderQueue>>,
+    positions: Arc<PositionAggregator>,
+    executor: Arc<OrderExecutor>,
+    global_state: Arc<RwLock<GlobalState>>,
+    execution_log_pool: Option<PgPool>,
+
+    // Channels
+    order_tx: mpsc::Sender<OrderIntent>,
+    order_rx: mpsc::Receiver<OrderIntent>,
+    state_tx: mpsc::Sender<AgentSnapshot>,
+    state_rx: mpsc::Receiver<AgentSnapshot>,
+
+    // Per-agent command channels
+    agent_commands: HashMap<String, mpsc::Sender<CoordinatorCommand>>,
+}
+
+impl Coordinator {
+    pub fn new(config: CoordinatorConfig, executor: Arc<OrderExecutor>) -> Self {
+        let (order_tx, order_rx) = mpsc::channel(256);
+        let (state_tx, state_rx) = mpsc::channel(128);
+
+        let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
+        let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
+        let positions = Arc::new(PositionAggregator::new());
+        let global_state = Arc::new(RwLock::new(GlobalState::new()));
+
+        Self {
+            config,
+            risk_gate,
+            order_queue,
+            positions,
+            executor,
+            global_state,
+            execution_log_pool: None,
+            order_tx,
+            order_rx,
+            state_tx,
+            state_rx,
+            agent_commands: HashMap::new(),
+        }
+    }
+
+    /// Enable DB logging for order execution outcomes (including dry-run).
+    pub fn set_execution_log_pool(&mut self, pool: PgPool) {
+        self.execution_log_pool = Some(pool);
+    }
+
+    /// Create a clonable handle for agents
+    pub fn handle(&self) -> CoordinatorHandle {
+        CoordinatorHandle {
+            order_tx: self.order_tx.clone(),
+            state_tx: self.state_tx.clone(),
+            global_state: self.global_state.clone(),
+        }
+    }
+
+    /// Shared global state reference (for TUI)
+    pub fn global_state(&self) -> Arc<RwLock<GlobalState>> {
+        self.global_state.clone()
+    }
+
+    /// Position aggregator reference
+    pub fn positions(&self) -> Arc<PositionAggregator> {
+        self.positions.clone()
+    }
+
+    /// Register an agent and return its command receiver
+    pub fn register_agent(
+        &mut self,
+        agent_id: String,
+        risk_params: AgentRiskParams,
+    ) -> mpsc::Receiver<CoordinatorCommand> {
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        self.agent_commands.insert(agent_id.clone(), cmd_tx);
+
+        // Register with risk gate (fire-and-forget via spawn since we're not async here)
+        let risk_gate = self.risk_gate.clone();
+        let id = agent_id.clone();
+        tokio::spawn(async move {
+            risk_gate.register_agent(&id, risk_params).await;
+        });
+
+        info!(agent_id, "agent registered with coordinator");
+        cmd_rx
+    }
+
+    /// Send a command to a specific agent
+    pub async fn send_command(&self, agent_id: &str, cmd: CoordinatorCommand) -> Result<()> {
+        if let Some(tx) = self.agent_commands.get(agent_id) {
+            tx.send(cmd).await.map_err(|_| {
+                crate::error::PloyError::Internal(format!(
+                    "agent {} command channel closed",
+                    agent_id
+                ))
+            })
+        } else {
+            Err(crate::error::PloyError::Internal(format!(
+                "agent {} not registered",
+                agent_id
+            )))
+        }
+    }
+
+    /// Pause all agents
+    pub async fn pause_all(&self) {
+        for (id, tx) in &self.agent_commands {
+            if let Err(e) = tx.send(CoordinatorCommand::Pause).await {
+                warn!(agent_id = %id, error = %e, "failed to send pause");
+            }
+        }
+    }
+
+    /// Resume all agents
+    pub async fn resume_all(&self) {
+        for (id, tx) in &self.agent_commands {
+            if let Err(e) = tx.send(CoordinatorCommand::Resume).await {
+                warn!(agent_id = %id, error = %e, "failed to send resume");
+            }
+        }
+    }
+
+    /// Shutdown all agents gracefully
+    pub async fn shutdown(&self) {
+        info!("coordinator: sending shutdown to all agents");
+        for (id, tx) in &self.agent_commands {
+            if let Err(e) = tx.send(CoordinatorCommand::Shutdown).await {
+                warn!(agent_id = %id, error = %e, "failed to send shutdown");
+            }
+        }
+    }
+
+    /// Main coordinator loop — blocks until shutdown
+    pub async fn run(mut self, mut shutdown_rx: tokio::sync::broadcast::Receiver<()>) {
+        info!(
+            agents = self.agent_commands.len(),
+            "coordinator starting main loop"
+        );
+
+        let drain_interval = tokio::time::Duration::from_millis(self.config.queue_drain_ms);
+        let refresh_interval = tokio::time::Duration::from_millis(self.config.state_refresh_ms);
+
+        let mut drain_tick = tokio::time::interval(drain_interval);
+        let mut refresh_tick = tokio::time::interval(refresh_interval);
+
+        // Don't burst-fire missed ticks
+        drain_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                // --- Incoming order intents ---
+                Some(intent) = self.order_rx.recv() => {
+                    self.handle_order_intent(intent).await;
+                }
+
+                // --- Agent state updates (heartbeats) ---
+                Some(snapshot) = self.state_rx.recv() => {
+                    self.handle_state_update(snapshot).await;
+                }
+
+                // --- Periodic: drain queue and execute ---
+                _ = drain_tick.tick() => {
+                    self.drain_and_execute().await;
+                }
+
+                // --- Periodic: refresh global state ---
+                _ = refresh_tick.tick() => {
+                    self.refresh_global_state().await;
+                }
+
+                // --- Shutdown signal ---
+                _ = shutdown_rx.recv() => {
+                    info!("coordinator: shutdown signal received");
+                    self.shutdown().await;
+                    break;
+                }
+            }
+        }
+
+        info!("coordinator: main loop exited");
+    }
+
+    /// Risk-check an incoming order intent and enqueue if passed
+    async fn handle_order_intent(&self, intent: OrderIntent) {
+        let agent_id = intent.agent_id.clone();
+        let intent_id = intent.intent_id;
+
+        match self.risk_gate.check_order(&intent).await {
+            RiskCheckResult::Passed => {
+                let mut queue = self.order_queue.write().await;
+                match queue.enqueue(intent) {
+                    Ok(()) => {
+                        debug!(
+                            %agent_id, %intent_id,
+                            "order enqueued"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
+                    }
+                }
+            }
+            RiskCheckResult::Blocked(reason) => {
+                warn!(
+                    %agent_id, %intent_id,
+                    reason = ?reason,
+                    "order blocked by risk gate"
+                );
+                self.risk_gate
+                    .record_failure(&agent_id, &format!("{:?}", reason))
+                    .await;
+            }
+            RiskCheckResult::Adjusted(suggestion) => {
+                info!(
+                    %agent_id, %intent_id,
+                    max_shares = suggestion.max_shares,
+                    reason = %suggestion.reason,
+                    "order adjusted by risk gate — dropping (agent should resubmit)"
+                );
+            }
+        }
+    }
+
+    /// Update agent snapshot in global state
+    async fn handle_state_update(&self, snapshot: AgentSnapshot) {
+        let agent_id = snapshot.agent_id.clone();
+
+        // Update risk gate with latest exposure data
+        self.risk_gate
+            .update_agent_exposure(
+                &agent_id,
+                snapshot.exposure,
+                snapshot.unrealized_pnl,
+                snapshot.position_count,
+                0, // unhedged count not tracked in snapshot
+            )
+            .await;
+
+        // Store snapshot
+        let mut state = self.global_state.write().await;
+        state.agents.insert(agent_id, snapshot);
+    }
+
+    /// Drain the order queue and execute via OrderExecutor
+    async fn drain_and_execute(&self) {
+        let batch = {
+            let mut queue = self.order_queue.write().await;
+            queue.cleanup_expired();
+            queue.dequeue_batch(self.config.batch_size)
+        };
+
+        if batch.is_empty() {
+            return;
+        }
+
+        debug!(count = batch.len(), "draining order queue");
+
+        for intent in batch {
+            let agent_id = intent.agent_id.clone();
+            let intent_id = intent.intent_id;
+
+            // Convert OrderIntent → OrderRequest for the executor
+            let request = Self::intent_to_request(&intent);
+
+            match self.executor.execute(&request).await {
+                Ok(result) => {
+                    info!(
+                        %agent_id, %intent_id,
+                        order_id = %result.order_id,
+                        filled = result.filled_shares,
+                        "order executed successfully"
+                    );
+
+                    self.persist_execution(&intent, &request, Some(&result), None)
+                        .await;
+
+                    // Record success with risk gate
+                    self.risk_gate
+                        .record_success(&agent_id, Decimal::ZERO)
+                        .await;
+
+                    // Open position in aggregator if filled
+                    if result.filled_shares > 0 {
+                        let _pos_id = self
+                            .positions
+                            .open_position(
+                                &agent_id,
+                                intent.domain.clone(),
+                                &intent.market_slug,
+                                &intent.token_id,
+                                intent.side.clone(),
+                                result.filled_shares,
+                                result.avg_fill_price.unwrap_or(intent.limit_price),
+                            )
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        %agent_id, %intent_id,
+                        error = %e,
+                        "order execution failed"
+                    );
+
+                    self.persist_execution(&intent, &request, None, Some(e.to_string()))
+                        .await;
+
+                    self.risk_gate
+                        .record_failure(&agent_id, &e.to_string())
+                        .await;
+                }
+            }
+        }
+    }
+
+    async fn persist_execution(
+        &self,
+        intent: &OrderIntent,
+        request: &OrderRequest,
+        result: Option<&crate::strategy::executor::ExecutionResult>,
+        error_message: Option<String>,
+    ) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let dry_run = self.executor.is_dry_run();
+
+        let (order_id, status, filled_shares, avg_fill_price, elapsed_ms) = match result {
+            Some(r) => (
+                Some(r.order_id.clone()),
+                format!("{:?}", r.status),
+                r.filled_shares as i64,
+                r.avg_fill_price,
+                Some(r.elapsed_ms as i64),
+            ),
+            None => (
+                None,
+                format!("{:?}", crate::domain::OrderStatus::Failed),
+                0,
+                None,
+                None,
+            ),
+        };
+
+        let metadata = serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let query = sqlx::query(
+            r#"
+            INSERT INTO agent_order_executions (
+                agent_id,
+                intent_id,
+                domain,
+                market_slug,
+                token_id,
+                market_side,
+                is_buy,
+                shares,
+                limit_price,
+                order_id,
+                status,
+                filled_shares,
+                avg_fill_price,
+                elapsed_ms,
+                dry_run,
+                error,
+                intent_created_at,
+                metadata
+            )
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+            )
+            ON CONFLICT (intent_id) DO UPDATE SET
+                order_id = EXCLUDED.order_id,
+                status = EXCLUDED.status,
+                filled_shares = EXCLUDED.filled_shares,
+                avg_fill_price = EXCLUDED.avg_fill_price,
+                elapsed_ms = EXCLUDED.elapsed_ms,
+                dry_run = EXCLUDED.dry_run,
+                error = EXCLUDED.error,
+                metadata = EXCLUDED.metadata,
+                executed_at = NOW()
+            "#,
+        )
+        .bind(&intent.agent_id)
+        .bind(intent.intent_id)
+        .bind(intent.domain.to_string())
+        .bind(&intent.market_slug)
+        .bind(&intent.token_id)
+        .bind(intent.side.as_str())
+        .bind(intent.is_buy)
+        .bind(intent.shares as i64)
+        .bind(request.limit_price)
+        .bind(order_id)
+        .bind(status)
+        .bind(filled_shares)
+        .bind(avg_fill_price)
+        .bind(elapsed_ms)
+        .bind(dry_run)
+        .bind(error_message)
+        .bind(intent.created_at)
+        .bind(sqlx::types::Json(metadata));
+
+        if let Err(e) = query.execute(pool).await {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist agent order execution"
+            );
+        }
+    }
+
+    /// Refresh GlobalState from aggregators
+    async fn refresh_global_state(&self) {
+        let portfolio = self.positions.aggregate().await;
+        let risk_state = self.risk_gate.state().await;
+        let queue_stats = self.order_queue.read().await.stats();
+        let total_realized = self.positions.total_realized_pnl().await;
+
+        let mut state = self.global_state.write().await;
+        state.portfolio = portfolio;
+        state.risk_state = risk_state;
+        state.queue_stats = QueueStatsSnapshot::from(queue_stats);
+        state.total_realized_pnl = total_realized;
+        state.last_refresh = Utc::now();
+
+        // Check for stale agents
+        let timeout = chrono::Duration::milliseconds(self.config.heartbeat_timeout_ms as i64);
+        let now = Utc::now();
+        for (id, agent) in state.agents.iter_mut() {
+            if now - agent.last_heartbeat > timeout
+                && matches!(agent.status, crate::platform::AgentStatus::Running)
+            {
+                warn!(agent_id = %id, "agent heartbeat stale");
+                agent.error_message = Some("heartbeat timeout".into());
+            }
+        }
+    }
+
+    /// Convert an OrderIntent into an OrderRequest for the executor
+    fn intent_to_request(intent: &OrderIntent) -> OrderRequest {
+        use crate::domain::OrderSide;
+
+        let order_side = if intent.is_buy {
+            OrderSide::Buy
+        } else {
+            OrderSide::Sell
+        };
+
+        OrderRequest {
+            client_order_id: intent.intent_id.to_string(),
+            idempotency_key: Some(intent.intent_id.to_string()),
+            token_id: intent.token_id.clone(),
+            market_side: intent.side.clone(),
+            order_side,
+            shares: intent.shares,
+            limit_price: intent.limit_price,
+            order_type: crate::domain::OrderType::Limit,
+            time_in_force: crate::domain::TimeInForce::GTC,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
+    use rust_decimal_macros::dec;
+
+    fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
+        AgentSnapshot {
+            agent_id: agent_id.into(),
+            name: agent_id.into(),
+            domain: Domain::Crypto,
+            status: AgentStatus::Running,
+            position_count: 1,
+            exposure: dec!(100),
+            daily_pnl: dec!(5),
+            unrealized_pnl: dec!(2),
+            last_heartbeat: Utc::now(),
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn test_global_state_defaults() {
+        let state = GlobalState::new();
+        assert_eq!(state.active_agent_count(), 0);
+        assert_eq!(state.total_exposure(), Decimal::ZERO);
+        assert_eq!(state.total_unrealized_pnl(), Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_global_state_active_count() {
+        let mut state = GlobalState::new();
+        state.agents.insert("a".into(), mock_snapshot("a"));
+        state.agents.insert("b".into(), {
+            let mut s = mock_snapshot("b");
+            s.status = AgentStatus::Paused;
+            s
+        });
+        assert_eq!(state.active_agent_count(), 1);
+    }
+
+    #[test]
+    fn test_queue_stats_snapshot_from() {
+        let qs = QueueStats {
+            current_size: 5,
+            max_size: 100,
+            enqueued_total: 50,
+            dequeued_total: 45,
+            expired_total: 3,
+            critical_count: 1,
+            high_count: 2,
+            normal_count: 1,
+            low_count: 1,
+        };
+        let snap = QueueStatsSnapshot::from(qs);
+        assert_eq!(snap.current_size, 5);
+        assert_eq!(snap.enqueued_total, 50);
+    }
+}

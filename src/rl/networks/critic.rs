@@ -108,8 +108,8 @@ impl QCriticConfig {
     /// Initialize Q-critic network
     pub fn init<B: Backend>(&self, device: &B::Device) -> QCritic<B> {
         let encoder = self.encoder.init(device);
-        let fc_hidden = LinearConfig::new(ENCODER_OUTPUT_DIM + self.action_dim, self.hidden_dim)
-            .init(device);
+        let fc_hidden =
+            LinearConfig::new(ENCODER_OUTPUT_DIM + self.action_dim, self.hidden_dim).init(device);
         let q_head = LinearConfig::new(self.hidden_dim, 1).init(device);
 
         QCritic {

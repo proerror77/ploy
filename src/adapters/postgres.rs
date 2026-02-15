@@ -956,11 +956,9 @@ impl RecoverySummary {
             );
         }
     }
-
 }
 
 impl PostgresStore {
-
     // ==================== NBA Comeback Stats ====================
 
     /// Load all team stats for a given season
@@ -1004,7 +1002,7 @@ impl PostgresStore {
                 offensive_rating: r.get("offensive_rating"),
                 defensive_rating: r.get("defensive_rating"),
             })
-        .collect();
+            .collect();
 
         Ok(stats)
     }
@@ -1237,15 +1235,12 @@ impl PostgresStore {
             .fetch_optional(&self.pool)
             .await?;
 
-        let row = row.ok_or_else(|| {
-            PloyError::Validation(format!("event_registry id={id} not found"))
-        })?;
+        let row =
+            row.ok_or_else(|| PloyError::Validation(format!("event_registry id={id} not found")))?;
 
         let current_str: String = row.get("status");
         let current = crate::strategy::registry::EventStatus::from_str(&current_str)
-            .ok_or_else(|| {
-                PloyError::Validation(format!("unknown status in DB: {current_str}"))
-            })?;
+            .ok_or_else(|| PloyError::Validation(format!("unknown status in DB: {current_str}")))?;
 
         if !current.can_transition_to(new_status) {
             return Err(PloyError::InvalidStateTransition {
@@ -1254,13 +1249,11 @@ impl PostgresStore {
             });
         }
 
-        sqlx::query(
-            "UPDATE event_registry SET status = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(new_status.as_str())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE event_registry SET status = $1, updated_at = NOW() WHERE id = $2")
+            .bind(new_status.as_str())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

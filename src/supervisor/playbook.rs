@@ -12,7 +12,10 @@ pub enum RecoveryAction {
     /// Log the issue only
     LogOnly,
     /// Send alert notification
-    Alert { level: AlertSeverity, message: String },
+    Alert {
+        level: AlertSeverity,
+        message: String,
+    },
     /// Restart a specific component
     RestartComponent { name: String },
     /// Trip the circuit breaker
@@ -50,7 +53,10 @@ pub enum AlertSeverity {
 #[derive(Debug, Clone)]
 pub enum FailureScenario {
     /// Component stopped sending heartbeats
-    ComponentStale { component: String, duration_secs: u64 },
+    ComponentStale {
+        component: String,
+        duration_secs: u64,
+    },
     /// Component crashed or failed
     ComponentCrash { component: String, error: String },
     /// WebSocket disconnected
@@ -111,9 +117,10 @@ impl RecoveryPlaybook {
                 self.handle_component_crash(component, error)
             }
 
-            FailureScenario::WebSocketDisconnect { name, duration_secs } => {
-                self.handle_websocket_disconnect(name, *duration_secs)
-            }
+            FailureScenario::WebSocketDisconnect {
+                name,
+                duration_secs,
+            } => self.handle_websocket_disconnect(name, *duration_secs),
 
             FailureScenario::StaleQuotes { age_secs } => self.handle_stale_quotes(*age_secs),
 
@@ -121,9 +128,10 @@ impl RecoveryPlaybook {
                 self.handle_trade_failures(*count)
             }
 
-            FailureScenario::DailyLossLimit { current_loss, limit } => {
-                self.handle_daily_loss_limit(current_loss, limit)
-            }
+            FailureScenario::DailyLossLimit {
+                current_loss,
+                limit,
+            } => self.handle_daily_loss_limit(current_loss, limit),
 
             FailureScenario::CircuitBreakerTripped { reason } => {
                 self.handle_circuit_breaker_tripped(reason)

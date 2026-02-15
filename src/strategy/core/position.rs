@@ -82,7 +82,7 @@ pub struct PartialPosition {
 
     /// Maximum price we can pay for hedge to hit target profit
     pub max_hedge_price: Decimal,
-    
+
     /// Human-readable labels for logging
     pub first_side_label: String,
     pub other_side_label: String,
@@ -110,7 +110,7 @@ impl HedgedPosition {
     pub fn profit_per_share(&self) -> Decimal {
         self.locked_profit
     }
-    
+
     /// Calculate total profit in dollars
     pub fn total_profit(&self) -> Decimal {
         self.locked_profit * Decimal::from(self.shares)

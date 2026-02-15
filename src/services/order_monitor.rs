@@ -5,12 +5,12 @@
 //! - Order status reconciliation with exchange
 //! - Position tracking updates
 
-use crate::adapters::{PostgresStore, PolymarketClient};
+use crate::adapters::{PolymarketClient, PostgresStore};
 use crate::domain::OrderStatus;
 use crate::error::Result;
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -193,7 +193,9 @@ impl OrderMonitor {
                 .filter(|o| {
                     matches!(
                         o.status,
-                        OrderStatus::Pending | OrderStatus::Submitted | OrderStatus::PartiallyFilled
+                        OrderStatus::Pending
+                            | OrderStatus::Submitted
+                            | OrderStatus::PartiallyFilled
                     )
                 })
                 .take(config.max_orders_per_cycle)
@@ -271,7 +273,10 @@ impl OrderMonitor {
             if let Some(exchange_id) = &order.exchange_order_id {
                 match client.get_order(exchange_id).await {
                     Ok(response) => {
-                        let new_status = PolymarketClient::parse_order_status(&response.status);
+                        let new_status = PolymarketClient::infer_order_status(&response);
+                        let (filled_shares, avg_price) =
+                            PolymarketClient::calculate_fill(&response);
+                        let filled_u64 = filled_shares.to_u64().unwrap_or(0);
 
                         if new_status != order.status {
                             info!(
@@ -292,35 +297,35 @@ impl OrderMonitor {
                             // Update database
                             if let Some(store) = store {
                                 let _ = store
-                                    .update_order_status(&order.client_order_id, new_status.clone(), None)
+                                    .update_order_status(
+                                        &order.client_order_id,
+                                        new_status.clone(),
+                                        None,
+                                    )
                                     .await;
 
-                                // If filled, update fill info
-                                if new_status == OrderStatus::Filled {
-                                    let (filled_shares, avg_price) =
-                                        PolymarketClient::calculate_fill(&response);
-                                    if avg_price > Decimal::ZERO {
-                                        let filled_u64 = filled_shares.to_u64().unwrap_or(0);
-                                        let _ = store
-                                            .update_order_fill(
-                                                &order.client_order_id,
-                                                filled_u64,
-                                                avg_price,
-                                                OrderStatus::Filled,
-                                            )
-                                            .await;
-                                    }
-                                    filled += 1;
+                                // Update fill info whenever we can observe it.
+                                // This also persists partial fills for later reconciliation.
+                                if filled_u64 > 0 && avg_price > Decimal::ZERO {
+                                    let _ = store
+                                        .update_order_fill(
+                                            &order.client_order_id,
+                                            filled_u64,
+                                            avg_price,
+                                            new_status,
+                                        )
+                                        .await;
                                 }
                             }
 
                             // Remove from tracking if terminal state
-                            if matches!(
-                                new_status,
-                                OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Expired
-                            ) {
+                            if new_status.is_terminal() {
                                 let mut orders = tracked_orders.write().await;
                                 orders.remove(&order.client_order_id);
+                            }
+
+                            if new_status == OrderStatus::Filled {
+                                filled += 1;
                             }
                         } else {
                             // Just update last checked time
@@ -328,6 +333,20 @@ impl OrderMonitor {
                             if let Some(tracked) = orders.get_mut(&order.client_order_id) {
                                 tracked.last_checked = now;
                                 tracked.check_count += 1;
+                            }
+
+                            // Status didn't change, but fills might have progressed (partial fills).
+                            if let Some(store) = store {
+                                if filled_u64 > 0 && avg_price > Decimal::ZERO {
+                                    let _ = store
+                                        .update_order_fill(
+                                            &order.client_order_id,
+                                            filled_u64,
+                                            avg_price,
+                                            new_status,
+                                        )
+                                        .await;
+                                }
                             }
                         }
                     }
@@ -376,18 +395,15 @@ impl OrderMonitor {
         result.tracked_order_count = tracked.len();
 
         // Build lookup map
-        let exchange_order_map: HashMap<_, _> = exchange_orders
-            .iter()
-            .map(|o| (o.id.clone(), o))
-            .collect();
+        let exchange_order_map: HashMap<_, _> =
+            exchange_orders.iter().map(|o| (o.id.clone(), o)).collect();
 
         // Check each tracked order
         for (client_id, tracked_order) in tracked.iter() {
             if let Some(exchange_id) = &tracked_order.exchange_order_id {
                 if let Some(exchange_order) = exchange_order_map.get(exchange_id) {
                     // Order exists on exchange, check status
-                    let exchange_status =
-                        PolymarketClient::parse_order_status(&exchange_order.status);
+                    let exchange_status = PolymarketClient::infer_order_status(exchange_order);
                     if exchange_status != tracked_order.status {
                         result.status_mismatches.push((
                             client_id.clone(),
@@ -410,7 +426,9 @@ impl OrderMonitor {
 
         for exchange_order in &exchange_orders {
             if !tracked_exchange_ids.contains(&exchange_order.id) {
-                result.untracked_exchange_orders.push(exchange_order.id.clone());
+                result
+                    .untracked_exchange_orders
+                    .push(exchange_order.id.clone());
             }
         }
 

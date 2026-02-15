@@ -105,27 +105,23 @@ impl Default for VolatilityArbConfig {
             min_price_edge: dec!(0.03),  // 3% price edge minimum
 
             // Time windows (seconds)
-            min_time_remaining_secs: 120,  // 2 minutes minimum
-            max_time_remaining_secs: 600,  // 10 minutes maximum
+            min_time_remaining_secs: 120,   // 2 minutes minimum
+            max_time_remaining_secs: 600,   // 10 minutes maximum
             optimal_time_range: (180, 420), // 3-7 minutes optimal
 
             // Risk management
             max_position_usd: dec!(50),
-            kelly_fraction: 0.25,          // Quarter Kelly
+            kelly_fraction: 0.25, // Quarter Kelly
             high_vol_threshold: default_high_vol_threshold(),
             high_vol_kelly_multiplier: default_high_vol_kelly_multiplier(),
             max_symbol_exposure_usd: dec!(100),
-            cooldown_secs: 300,            // 5 minute cooldown
+            cooldown_secs: 300, // 5 minute cooldown
 
             // Fees
             pm_fee_rate: dec!(0.02),
 
             // Default symbols
-            symbols: vec![
-                "BTCUSDT".into(),
-                "ETHUSDT".into(),
-                "SOLUSDT".into(),
-            ],
+            symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
         }
     }
 }
@@ -343,11 +339,7 @@ fn norm_inv(p: f64) -> f64 {
 /// - buffer: (spot - threshold) / threshold as decimal (positive = above threshold)
 /// - volatility: 15-minute volatility as decimal (e.g., 0.003 = 0.3%)
 /// - time_remaining_fraction: fraction of 15-min window remaining (0.0 - 1.0)
-pub fn calculate_fair_yes_price(
-    buffer: f64,
-    volatility: f64,
-    time_remaining_fraction: f64,
-) -> f64 {
+pub fn calculate_fair_yes_price(buffer: f64, volatility: f64, time_remaining_fraction: f64) -> f64 {
     if volatility <= 0.0 || time_remaining_fraction <= 0.0 {
         // Edge case: no volatility or no time
         return if buffer > 0.0 { 1.0 } else { 0.0 };
@@ -445,10 +437,7 @@ pub fn calculate_implied_volatility(
 /// where p = win probability, q = 1 - p, b = odds
 ///
 /// For binary options: b = (1 - entry_price) / entry_price for YES
-pub fn calculate_kelly_fraction(
-    win_probability: f64,
-    entry_price: f64,
-) -> f64 {
+pub fn calculate_kelly_fraction(win_probability: f64, entry_price: f64) -> f64 {
     if entry_price <= 0.0 || entry_price >= 1.0 {
         return 0.0;
     }
@@ -521,7 +510,10 @@ impl VolatilityArbEngine {
         // Combine vols by blending variances (more stable than linear vol blending).
         let weight_sum = self.config.kline_weight + self.config.tick_weight;
         let (wk, wt) = if weight_sum > 0.0 {
-            (self.config.kline_weight / weight_sum, self.config.tick_weight / weight_sum)
+            (
+                self.config.kline_weight / weight_sum,
+                self.config.tick_weight / weight_sum,
+            )
         } else {
             (0.5, 0.5)
         };
@@ -529,9 +521,17 @@ impl VolatilityArbEngine {
 
         // Confidence based on data availability
         let mut confidence = if self.kline_vol_cache.contains_key(symbol) {
-            if tick_volatility.is_some() { 0.9 } else { 0.7 }
+            if tick_volatility.is_some() {
+                0.9
+            } else {
+                0.7
+            }
         } else {
-            if tick_volatility.is_some() { 0.5 } else { 0.3 }
+            if tick_volatility.is_some() {
+                0.5
+            } else {
+                0.3
+            }
         };
 
         // Penalize confidence when kline/tick disagree (proxy for vol-of-vol / instability).
@@ -609,27 +609,23 @@ impl VolatilityArbEngine {
         let yes_price_f64 = yes_price.to_f64().unwrap_or(0.5);
         let buffer_f64 = buffer_pct.to_f64().unwrap_or(0.0);
 
-        let implied_vol = calculate_implied_volatility(
-            yes_price_f64,
-            buffer_f64,
-            time_fraction,
-        )?;
+        let implied_vol = calculate_implied_volatility(yes_price_f64, buffer_f64, time_fraction)?;
 
         // Calculate our fair value
-        let fair_value_f64 = calculate_fair_yes_price(
-            buffer_f64,
-            vol_estimate.combined_vol,
-            time_fraction,
-        );
-        let fair_value = Decimal::from_f64(fair_value_f64)
-            .unwrap_or(dec!(0.5));
+        let fair_value_f64 =
+            calculate_fair_yes_price(buffer_f64, vol_estimate.combined_vol, time_fraction);
+        let fair_value = Decimal::from_f64(fair_value_f64).unwrap_or(dec!(0.5));
 
         // Calculate volatility edge
         let vol_edge_pct = (vol_estimate.combined_vol - implied_vol).abs() / implied_vol;
 
         // Check minimum volatility edge
         if vol_edge_pct < self.config.min_vol_edge_pct {
-            debug!(vol_edge_pct, min = self.config.min_vol_edge_pct, "Insufficient vol edge");
+            debug!(
+                vol_edge_pct,
+                min = self.config.min_vol_edge_pct,
+                "Insufficient vol edge"
+            );
             return None;
         }
 
@@ -661,10 +657,15 @@ impl VolatilityArbEngine {
         } else {
             0.7
         };
-        let confidence = (vol_estimate.confidence * time_confidence * (1.0 + vol_edge_pct)).min(1.0);
+        let confidence =
+            (vol_estimate.confidence * time_confidence * (1.0 + vol_edge_pct)).min(1.0);
 
         // Calculate position size using Kelly criterion
-        let win_prob = if buy_yes { fair_value_f64 } else { 1.0 - fair_value_f64 };
+        let win_prob = if buy_yes {
+            fair_value_f64
+        } else {
+            1.0 - fair_value_f64
+        };
         let kelly = calculate_kelly_fraction(win_prob, entry_price.to_f64().unwrap_or(0.5));
         let mut adjusted_kelly = kelly * self.config.kelly_fraction * confidence;
         if vol_estimate.combined_vol > self.config.high_vol_threshold {
@@ -699,7 +700,11 @@ impl VolatilityArbEngine {
             condition_id: condition_id.to_string(),
             buy_yes,
             fair_value,
-            market_price: if buy_yes { yes_ask } else { Decimal::ONE - yes_price },
+            market_price: if buy_yes {
+                yes_ask
+            } else {
+                Decimal::ONE - yes_price
+            },
             price_edge,
             vol_edge_pct,
             position_size,
@@ -736,9 +741,14 @@ impl VolatilityArbEngine {
         };
 
         self.positions.insert(signal.market_id.clone(), position);
-        self.last_trade_time.insert(signal.market_id.clone(), Utc::now());
+        self.last_trade_time
+            .insert(signal.market_id.clone(), Utc::now());
         self.stats.total_trades += 1;
-        *self.stats.trades_by_symbol.entry(signal.symbol.clone()).or_insert(0) += 1;
+        *self
+            .stats
+            .trades_by_symbol
+            .entry(signal.symbol.clone())
+            .or_insert(0) += 1;
     }
 
     /// Record trade resolution
@@ -758,11 +768,16 @@ impl VolatilityArbEngine {
             }
             self.stats.total_pnl += pnl;
             self.stats.total_volume += cost;
-            *self.stats.pnl_by_symbol.entry(position.symbol.clone()).or_insert(Decimal::ZERO) += pnl;
+            *self
+                .stats
+                .pnl_by_symbol
+                .entry(position.symbol.clone())
+                .or_insert(Decimal::ZERO) += pnl;
 
             // Update win rate
             if self.stats.total_trades > 0 {
-                self.stats.win_rate = self.stats.winning_trades as f64 / self.stats.total_trades as f64;
+                self.stats.win_rate =
+                    self.stats.winning_trades as f64 / self.stats.total_trades as f64;
             }
 
             // Record trade
@@ -889,12 +904,12 @@ mod tests {
             "BTCUSDT",
             "market_123",
             "condition_456",
-            dec!(94500),    // Spot
-            dec!(94000),    // Threshold
-            dec!(0.70),     // YES price
-            dec!(0.71),     // YES ask
-            300,            // 5 minutes remaining
-            Some(0.0025),   // Tick volatility
+            dec!(94500),  // Spot
+            dec!(94000),  // Threshold
+            dec!(0.70),   // YES price
+            dec!(0.71),   // YES ask
+            300,          // 5 minutes remaining
+            Some(0.0025), // Tick volatility
         );
 
         // Signal should exist if there's vol edge

@@ -336,7 +336,12 @@ pub struct ExecutionReport {
 }
 
 impl ExecutionReport {
-    pub fn success(intent: &OrderIntent, order_id: String, filled: u64, avg_price: Decimal) -> Self {
+    pub fn success(
+        intent: &OrderIntent,
+        order_id: String,
+        filled: u64,
+        avg_price: Decimal,
+    ) -> Self {
         Self {
             intent_id: intent.intent_id,
             agent_id: intent.agent_id.clone(),
@@ -386,6 +391,9 @@ impl ExecutionReport {
     }
 
     pub fn is_success(&self) -> bool {
-        matches!(self.status, ExecutionStatus::Filled | ExecutionStatus::PartiallyFilled)
+        matches!(
+            self.status,
+            ExecutionStatus::Filled | ExecutionStatus::PartiallyFilled
+        )
     }
 }

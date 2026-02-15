@@ -319,16 +319,20 @@ impl LeadLagEnvironment {
                 reward += self.config.hold_penalty;
             }
             LeadLagAction::BuyYes => {
-                if self.position.can_buy(self.config.trade_size_usd, self.config.max_position_usd)
+                if self
+                    .position
+                    .can_buy(self.config.trade_size_usd, self.config.max_position_usd)
                     && yes_price > Decimal::ZERO
                 {
                     let shares = self.config.trade_size_usd / yes_price;
-                    let cost = self.config.trade_size_usd * (Decimal::ONE + self.config.transaction_cost);
+                    let cost =
+                        self.config.trade_size_usd * (Decimal::ONE + self.config.transaction_cost);
 
                     // Update average entry
                     let total_shares = self.position.yes_shares + shares;
                     if total_shares > Decimal::ZERO {
-                        self.position.yes_avg_entry = (self.position.yes_usd + cost) / total_shares * yes_price / cost;
+                        self.position.yes_avg_entry =
+                            (self.position.yes_usd + cost) / total_shares * yes_price / cost;
                     }
 
                     self.position.yes_shares += shares;
@@ -340,15 +344,19 @@ impl LeadLagEnvironment {
                 }
             }
             LeadLagAction::BuyNo => {
-                if self.position.can_buy(self.config.trade_size_usd, self.config.max_position_usd)
+                if self
+                    .position
+                    .can_buy(self.config.trade_size_usd, self.config.max_position_usd)
                     && no_price > Decimal::ZERO
                 {
                     let shares = self.config.trade_size_usd / no_price;
-                    let cost = self.config.trade_size_usd * (Decimal::ONE + self.config.transaction_cost);
+                    let cost =
+                        self.config.trade_size_usd * (Decimal::ONE + self.config.transaction_cost);
 
                     let total_shares = self.position.no_shares + shares;
                     if total_shares > Decimal::ZERO {
-                        self.position.no_avg_entry = (self.position.no_usd + cost) / total_shares * no_price / cost;
+                        self.position.no_avg_entry =
+                            (self.position.no_usd + cost) / total_shares * no_price / cost;
                     }
 
                     self.position.no_shares += shares;
@@ -361,7 +369,8 @@ impl LeadLagEnvironment {
             }
             LeadLagAction::CloseYes => {
                 if self.position.yes_shares > Decimal::ZERO && yes_price > Decimal::ZERO {
-                    let proceeds = self.position.yes_shares * yes_price
+                    let proceeds = self.position.yes_shares
+                        * yes_price
                         * (Decimal::ONE - self.config.transaction_cost);
                     let pnl = proceeds - self.position.yes_usd;
 
@@ -385,7 +394,8 @@ impl LeadLagEnvironment {
             }
             LeadLagAction::CloseNo => {
                 if self.position.no_shares > Decimal::ZERO && no_price > Decimal::ZERO {
-                    let proceeds = self.position.no_shares * no_price
+                    let proceeds = self.position.no_shares
+                        * no_price
                         * (Decimal::ONE - self.config.transaction_cost);
                     let pnl = proceeds - self.position.no_usd;
 
@@ -483,7 +493,7 @@ impl LeadLagEnvironment {
             yes_avg_entry: decimal_to_f32(self.position.yes_avg_entry),
             no_avg_entry: decimal_to_f32(self.position.no_avg_entry),
             total_exposure_pct: decimal_to_f32(
-                self.position.total_exposure() / self.config.max_position_usd
+                self.position.total_exposure() / self.config.max_position_usd,
             ),
             yes_unrealized_pnl: if self.position.yes_shares > Decimal::ZERO {
                 decimal_to_f32(self.position.yes_shares * yes_price - self.position.yes_usd)

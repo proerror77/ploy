@@ -13,14 +13,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::error::Result;
+use super::momentum::{Direction, ExitConfig, MomentumConfig};
 use super::traits::{
-    Strategy, MarketUpdate, OrderUpdate, StrategyAction,
-    StrategyStateInfo, PositionInfo, StrategyEvent, StrategyEventType,
-    AlertLevel, DataFeed,
+    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyEvent, StrategyEventType, StrategyStateInfo,
 };
-use super::momentum::{MomentumConfig, ExitConfig, Direction};
-use crate::domain::{Side, OrderRequest};
+use crate::domain::{OrderRequest, Side};
+use crate::error::Result;
 
 // ============================================================================
 // Momentum Strategy Adapter
@@ -99,7 +98,8 @@ impl CexPriceState {
     fn get_price_at(&self, seconds_ago: u64) -> Option<Decimal> {
         let target_time = self.timestamp - chrono::Duration::seconds(seconds_ago as i64);
         // Find the closest price at or before target_time
-        self.history.iter()
+        self.history
+            .iter()
             .filter(|e| e.timestamp <= target_time)
             .last()
             .map(|e| e.price)
@@ -141,12 +141,7 @@ struct MomentumPosition {
 
 impl MomentumStrategyAdapter {
     /// Create a new momentum strategy adapter
-    pub fn new(
-        id: String,
-        config: MomentumConfig,
-        exit_config: ExitConfig,
-        dry_run: bool,
-    ) -> Self {
+    pub fn new(id: String, config: MomentumConfig, exit_config: ExitConfig, dry_run: bool) -> Self {
         Self {
             id,
             config,
@@ -167,8 +162,8 @@ impl MomentumStrategyAdapter {
     pub fn from_toml(id: String, config_str: &str, dry_run: bool) -> Result<Self> {
         use toml::Value;
 
-        let config: Value = toml::from_str(config_str)
-            .map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
+        let config: Value =
+            toml::from_str(config_str).map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
 
         let empty_table = Value::Table(Default::default());
         let entry = config.get("entry").unwrap_or(&empty_table);
@@ -177,90 +172,191 @@ impl MomentumStrategyAdapter {
         let risk = config.get("risk").unwrap_or(&empty_table);
         let strategy = config.get("strategy").unwrap_or(&empty_table);
 
-        let mode = strategy.get("mode")
+        let mode = strategy
+            .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("predictive");
 
         let hold_to_resolution = mode == "confirmatory";
 
-        let symbols: Vec<String> = entry.get("symbols")
+        let symbols: Vec<String> = entry
+            .get("symbols")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_else(|| vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into(), "XRPUSDT".into()]);
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    "BTCUSDT".into(),
+                    "ETHUSDT".into(),
+                    "SOLUSDT".into(),
+                    "XRPUSDT".into(),
+                ]
+            });
 
         // Build baseline volatility map
         let mut baseline_volatility = std::collections::HashMap::new();
-        baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005));  // 0.05%
-        baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008));  // 0.08%
-        baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015));  // 0.15%
-        baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012));  // 0.12%
+        baseline_volatility.insert("BTCUSDT".into(), dec!(0.0005)); // 0.05%
+        baseline_volatility.insert("ETHUSDT".into(), dec!(0.0008)); // 0.08%
+        baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015)); // 0.15%
+        baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012)); // 0.12%
 
         let momentum_config = MomentumConfig {
             min_move_pct: Decimal::try_from(
-                entry.get("min_move").and_then(|v| v.as_float()).unwrap_or(0.05) / 100.0
-            ).unwrap_or(dec!(0.0005)),
+                entry
+                    .get("min_move")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.05)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.0005)),
             max_entry_price: Decimal::try_from(
-                entry.get("max_entry").and_then(|v| v.as_float()).unwrap_or(45.0) / 100.0
-            ).unwrap_or(dec!(0.45)),
+                entry
+                    .get("max_entry")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(45.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.45)),
             min_edge: Decimal::try_from(
-                entry.get("min_edge").and_then(|v| v.as_float()).unwrap_or(5.0) / 100.0
-            ).unwrap_or(dec!(0.05)),
+                entry
+                    .get("min_edge")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(5.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.05)),
             lookback_secs: 5,
             // Multi-timeframe momentum (always enabled) with volatility adjustment
-            use_volatility_adjustment: entry.get("use_volatility_adjustment")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
+            use_volatility_adjustment: entry
+                .get("use_volatility_adjustment")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             baseline_volatility,
-            volatility_lookback_secs: entry.get("volatility_lookback")
-                .and_then(|v| v.as_integer()).unwrap_or(60) as u64,
-            shares_per_trade: risk.get("shares").and_then(|v| v.as_integer()).unwrap_or(100) as u64,
-            max_positions: risk.get("max_positions").and_then(|v| v.as_integer()).unwrap_or(5) as usize,
+            volatility_lookback_secs: entry
+                .get("volatility_lookback")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(60) as u64,
+            shares_per_trade: risk
+                .get("shares")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(100) as u64,
+            max_positions: risk
+                .get("max_positions")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(5) as usize,
             cooldown_secs: 60,
             max_daily_trades: 50,
             symbols,
             hold_to_resolution,
-            min_time_remaining_secs: timing.get("min_time_remaining")
-                .and_then(|v| v.as_integer()).unwrap_or(300) as u64,
-            max_time_remaining_secs: timing.get("max_time_remaining")
-                .and_then(|v| v.as_integer()).unwrap_or(900) as u64,
+            min_time_remaining_secs: timing
+                .get("min_time_remaining")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(300) as u64,
+            max_time_remaining_secs: timing
+                .get("max_time_remaining")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(900) as u64,
             // Cross-symbol risk control
             max_window_exposure_usd: Decimal::try_from(
-                risk.get("max_window_exposure").and_then(|v| v.as_float()).unwrap_or(25.0)
-            ).unwrap_or(dec!(25)),
-            best_edge_only: risk.get("best_edge_only")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
-            signal_collection_delay_ms: risk.get("signal_delay_ms")
-                .and_then(|v| v.as_integer()).unwrap_or(2000) as u64,
+                risk.get("max_window_exposure")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(25.0),
+            )
+            .unwrap_or(dec!(25)),
+            best_edge_only: risk
+                .get("best_edge_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            signal_collection_delay_ms: risk
+                .get("signal_delay_ms")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(2000) as u64,
             // === ENHANCED MOMENTUM DETECTION ===
-            require_mtf_agreement: entry.get("require_mtf_agreement")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
+            require_mtf_agreement: entry
+                .get("require_mtf_agreement")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             min_obi_confirmation: Decimal::try_from(
-                entry.get("min_obi_confirmation").and_then(|v| v.as_float()).unwrap_or(5.0) / 100.0
-            ).unwrap_or(dec!(0.05)),
-            use_kline_volatility: entry.get("use_kline_volatility")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
+                entry
+                    .get("min_obi_confirmation")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(5.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.05)),
+            use_kline_volatility: entry
+                .get("use_kline_volatility")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             time_decay_factor: Decimal::try_from(
-                entry.get("time_decay_factor").and_then(|v| v.as_float()).unwrap_or(30.0) / 100.0
-            ).unwrap_or(dec!(0.30)),
-            use_price_to_beat: entry.get("use_price_to_beat")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
-            dynamic_position_sizing: risk.get("dynamic_position_sizing")
-                .and_then(|v| v.as_bool()).unwrap_or(true),
-            min_confidence: entry.get("min_confidence")
-                .and_then(|v| v.as_float()).unwrap_or(0.5),
+                entry
+                    .get("time_decay_factor")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(30.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.30)),
+            use_price_to_beat: entry
+                .get("use_price_to_beat")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            dynamic_position_sizing: risk
+                .get("dynamic_position_sizing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            min_confidence: entry
+                .get("min_confidence")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.5),
+
+            // VWAP confirmation (legacy momentum config)
+            require_vwap_confirmation: entry
+                .get("require_vwap_confirmation")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            vwap_lookback_secs: entry
+                .get("vwap_lookback_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(60) as u64,
+            min_vwap_deviation: Decimal::try_from(
+                entry
+                    .get("min_vwap_deviation")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0)),
         };
 
         let exit_config = ExitConfig {
             take_profit_pct: Decimal::try_from(
-                exit.get("take_profit").and_then(|v| v.as_float()).unwrap_or(20.0) / 100.0
-            ).unwrap_or(dec!(0.20)),
+                exit.get("take_profit")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(20.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.20)),
             stop_loss_pct: Decimal::try_from(
-                exit.get("stop_loss").and_then(|v| v.as_float()).unwrap_or(12.0) / 100.0
-            ).unwrap_or(dec!(0.12)),
+                exit.get("stop_loss")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(12.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.12)),
             trailing_stop_pct: Decimal::try_from(
-                exit.get("trailing_stop").and_then(|v| v.as_float()).unwrap_or(10.0) / 100.0
-            ).unwrap_or(dec!(0.10)),
-            exit_before_resolution_secs: exit.get("exit_before_resolution")
-                .and_then(|v| v.as_integer()).unwrap_or(30) as u64,
+                exit.get("trailing_stop")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(10.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.10)),
+            exit_before_resolution_secs: exit
+                .get("exit_before_resolution")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(30) as u64,
         };
 
         Ok(Self::new(id, momentum_config, exit_config, dry_run))
@@ -316,7 +412,12 @@ impl MomentumStrategyAdapter {
         if count % 100 == 0 {
             debug!(
                 "[{}] {} momentum: {:.4}% (base: ${:.2}, now: ${:.2}, lookback: {}s)",
-                self.id, symbol, move_pct * dec!(100), base_price, state.price, self.config.lookback_secs
+                self.id,
+                symbol,
+                move_pct * dec!(100),
+                base_price,
+                state.price,
+                self.config.lookback_secs
             );
         }
 
@@ -328,7 +429,12 @@ impl MomentumStrategyAdapter {
             };
             info!(
                 "[{}] 🚀 MOMENTUM SIGNAL: {} {} {:.2}% (${:.2} → ${:.2})",
-                self.id, symbol, direction, move_pct.abs() * dec!(100), base_price, state.price
+                self.id,
+                symbol,
+                direction,
+                move_pct.abs() * dec!(100),
+                base_price,
+                state.price
             );
             Some((direction, move_pct.abs()))
         } else {
@@ -352,7 +458,12 @@ impl MomentumStrategyAdapter {
     }
 
     /// Generate entry order action
-    async fn generate_entry(&self, symbol: &str, direction: Direction, entry_price: Decimal) -> Option<StrategyAction> {
+    async fn generate_entry(
+        &self,
+        symbol: &str,
+        direction: Direction,
+        entry_price: Decimal,
+    ) -> Option<StrategyAction> {
         let events = self.events.read().await;
         let event = events.get(symbol)?;
 
@@ -361,7 +472,8 @@ impl MomentumStrategyAdapter {
             Direction::Down => event.down_token_id.clone(),
         };
 
-        let client_order_id = format!("{}_{}_{}_{}",
+        let client_order_id = format!(
+            "{}_{}_{}_{}",
             self.id,
             symbol,
             direction.to_string().to_lowercase(),
@@ -381,8 +493,14 @@ impl MomentumStrategyAdapter {
             entry_price,
         );
 
-        info!("[{}] Entry signal: {} {} @ {:.2}¢ ({} shares)",
-            self.id, direction, symbol, entry_price * dec!(100), self.config.shares_per_trade);
+        info!(
+            "[{}] Entry signal: {} {} @ {:.2}¢ ({} shares)",
+            self.id,
+            direction,
+            symbol,
+            entry_price * dec!(100),
+            self.config.shares_per_trade
+        );
 
         Some(StrategyAction::SubmitOrder {
             client_order_id,
@@ -419,9 +537,7 @@ impl Strategy for MomentumStrategyAdapter {
                     "10422".into(), // XRP 15m
                 ],
             },
-            DataFeed::Tick {
-                interval_ms: 1000,
-            },
+            DataFeed::Tick { interval_ms: 1000 },
         ]
     }
 
@@ -429,15 +545,20 @@ impl Strategy for MomentumStrategyAdapter {
         let mut actions = Vec::new();
 
         match update {
-            MarketUpdate::BinancePrice { symbol, price, timestamp } => {
+            MarketUpdate::BinancePrice {
+                symbol,
+                price,
+                timestamp,
+            } => {
                 // Update CEX price state with history
                 let mut prices = self.cex_prices.write().await;
                 if let Some(state) = prices.get_mut(symbol) {
                     state.update(*price, *timestamp, self.config.lookback_secs);
                 } else {
-                    prices.insert(symbol.clone(), CexPriceState::new(
-                        symbol.clone(), *price, *timestamp
-                    ));
+                    prices.insert(
+                        symbol.clone(),
+                        CexPriceState::new(symbol.clone(), *price, *timestamp),
+                    );
                 }
                 drop(prices);
 
@@ -474,7 +595,9 @@ impl Strategy for MomentumStrategyAdapter {
                         Some(entry_price) => {
                             // Check entry conditions
                             if entry_price <= self.config.max_entry_price {
-                                if let Some(action) = self.generate_entry(symbol, direction, entry_price).await {
+                                if let Some(action) =
+                                    self.generate_entry(symbol, direction, entry_price).await
+                                {
                                     // Update cooldown
                                     let mut cooldowns = self.cooldowns.write().await;
                                     cooldowns.insert(symbol.clone(), Utc::now());
@@ -483,16 +606,26 @@ impl Strategy for MomentumStrategyAdapter {
                                     actions.push(StrategyAction::LogEvent {
                                         event: StrategyEvent::new(
                                             StrategyEventType::SignalDetected,
-                                            format!("{} {} signal: {:.2}% move, entry {:.0}¢",
-                                                symbol, direction, move_pct * dec!(100), entry_price * dec!(100))
+                                            format!(
+                                                "{} {} signal: {:.2}% move, entry {:.0}¢",
+                                                symbol,
+                                                direction,
+                                                move_pct * dec!(100),
+                                                entry_price * dec!(100)
+                                            ),
                                         ),
                                     });
 
                                     actions.push(action);
                                 }
                             } else {
-                                debug!("[{}] Entry price {:.0}¢ > max {:.0}¢ for {}",
-                                    self.id, entry_price * dec!(100), self.config.max_entry_price * dec!(100), symbol);
+                                debug!(
+                                    "[{}] Entry price {:.0}¢ > max {:.0}¢ for {}",
+                                    self.id,
+                                    entry_price * dec!(100),
+                                    self.config.max_entry_price * dec!(100),
+                                    symbol
+                                );
                             }
                         }
                         None => {
@@ -505,9 +638,17 @@ impl Strategy for MomentumStrategyAdapter {
                                     Direction::Down => &event.down_token_id,
                                 };
                                 if let Some(q) = quotes.get(token_id) {
-                                    debug!("[{}] Quote has no best_ask for {} (bid={:?})", self.id, direction, q.best_bid);
+                                    debug!(
+                                        "[{}] Quote has no best_ask for {} (bid={:?})",
+                                        self.id, direction, q.best_bid
+                                    );
                                 } else {
-                                    debug!("[{}] No quote for token {} ({})", self.id, &token_id[..8], direction);
+                                    debug!(
+                                        "[{}] No quote for token {} ({})",
+                                        self.id,
+                                        &token_id[..8],
+                                        direction
+                                    );
                                 }
                             } else {
                                 debug!("[{}] No event mapped for symbol {}", self.id, symbol);
@@ -517,16 +658,24 @@ impl Strategy for MomentumStrategyAdapter {
                 }
             }
 
-            MarketUpdate::PolymarketQuote { token_id, quote, timestamp, .. } => {
+            MarketUpdate::PolymarketQuote {
+                token_id,
+                quote,
+                timestamp,
+                ..
+            } => {
                 // Update quote state
                 let mut quotes = self.pm_quotes.write().await;
                 let is_new = !quotes.contains_key(token_id);
-                quotes.insert(token_id.clone(), PmQuoteState {
-                    token_id: token_id.clone(),
-                    best_bid: quote.best_bid,
-                    best_ask: quote.best_ask,
-                    timestamp: timestamp.clone(),
-                });
+                quotes.insert(
+                    token_id.clone(),
+                    PmQuoteState {
+                        token_id: token_id.clone(),
+                        best_bid: quote.best_bid,
+                        best_ask: quote.best_ask,
+                        timestamp: timestamp.clone(),
+                    },
+                );
                 drop(quotes);
 
                 // Log LOB updates (first update or significant changes)
@@ -535,8 +684,14 @@ impl Strategy for MomentumStrategyAdapter {
                         "[{}] 📊 LOB: token {} bid: {}¢ ask: {}¢",
                         self.id,
                         &token_id[..8],
-                        quote.best_bid.map(|b| (b * dec!(100)).to_string()).unwrap_or("-".into()),
-                        quote.best_ask.map(|a| (a * dec!(100)).to_string()).unwrap_or("-".into())
+                        quote
+                            .best_bid
+                            .map(|b| (b * dec!(100)).to_string())
+                            .unwrap_or("-".into()),
+                        quote
+                            .best_ask
+                            .map(|a| (a * dec!(100)).to_string())
+                            .unwrap_or("-".into())
                     );
                 }
 
@@ -550,10 +705,18 @@ impl Strategy for MomentumStrategyAdapter {
                                 let pnl_pct = (current - pos.entry_price) / pos.entry_price;
 
                                 if pnl_pct >= self.exit_config.take_profit_pct {
-                                    info!("[{}] Take profit triggered: {:.1}%", self.id, pnl_pct * dec!(100));
+                                    info!(
+                                        "[{}] Take profit triggered: {:.1}%",
+                                        self.id,
+                                        pnl_pct * dec!(100)
+                                    );
                                     // Would generate exit order
                                 } else if pnl_pct <= -self.exit_config.stop_loss_pct {
-                                    warn!("[{}] Stop loss triggered: {:.1}%", self.id, pnl_pct * dec!(100));
+                                    warn!(
+                                        "[{}] Stop loss triggered: {:.1}%",
+                                        self.id,
+                                        pnl_pct * dec!(100)
+                                    );
                                     // Would generate exit order
                                 }
                             }
@@ -562,7 +725,13 @@ impl Strategy for MomentumStrategyAdapter {
                 }
             }
 
-            MarketUpdate::EventDiscovered { event_id, series_id, up_token, down_token, end_time } => {
+            MarketUpdate::EventDiscovered {
+                event_id,
+                series_id,
+                up_token,
+                down_token,
+                end_time,
+            } => {
                 // Map series to symbol
                 let symbol = match series_id.as_str() {
                     "10192" => "BTCUSDT",
@@ -573,15 +742,21 @@ impl Strategy for MomentumStrategyAdapter {
                 };
 
                 let mut events = self.events.write().await;
-                events.insert(symbol.to_string(), EventState {
-                    event_id: event_id.clone(),
-                    symbol: symbol.to_string(),
-                    up_token_id: up_token.clone(),
-                    down_token_id: down_token.clone(),
-                    end_time: *end_time,
-                });
+                events.insert(
+                    symbol.to_string(),
+                    EventState {
+                        event_id: event_id.clone(),
+                        symbol: symbol.to_string(),
+                        up_token_id: up_token.clone(),
+                        down_token_id: down_token.clone(),
+                        end_time: *end_time,
+                    },
+                );
 
-                debug!("[{}] Event discovered: {} for {}", self.id, event_id, symbol);
+                debug!(
+                    "[{}] Event discovered: {} for {}",
+                    self.id, event_id, symbol
+                );
             }
 
             MarketUpdate::EventExpired { event_id } => {
@@ -598,8 +773,10 @@ impl Strategy for MomentumStrategyAdapter {
 
         match update.status {
             crate::domain::OrderStatus::Filled => {
-                info!("[{}] Order filled: {} @ {:?}",
-                    self.id, update.order_id, update.avg_fill_price);
+                info!(
+                    "[{}] Order filled: {} @ {:?}",
+                    self.id, update.order_id, update.avg_fill_price
+                );
 
                 // Increment daily trade counter
                 let mut trades = self.daily_trades.write().await;
@@ -608,7 +785,7 @@ impl Strategy for MomentumStrategyAdapter {
                 actions.push(StrategyAction::LogEvent {
                     event: StrategyEvent::new(
                         StrategyEventType::OrderFilled,
-                        format!("Order {} filled", update.order_id)
+                        format!("Order {} filled", update.order_id),
                     ),
                 });
             }
@@ -616,8 +793,10 @@ impl Strategy for MomentumStrategyAdapter {
                 warn!("[{}] Order cancelled: {}", self.id, update.order_id);
             }
             crate::domain::OrderStatus::Failed => {
-                warn!("[{}] Order failed: {} - {:?}",
-                    self.id, update.order_id, update.error);
+                warn!(
+                    "[{}] Order failed: {} - {:?}",
+                    self.id, update.order_id, update.error
+                );
 
                 actions.push(StrategyAction::Alert {
                     level: AlertLevel::Warning,
@@ -649,8 +828,15 @@ impl Strategy for MomentumStrategyAdapter {
             last_update: Utc::now(),
             metrics: {
                 let mut m = HashMap::new();
-                m.insert("mode".into(),
-                    if self.config.hold_to_resolution { "confirmatory" } else { "predictive" }.into());
+                m.insert(
+                    "mode".into(),
+                    if self.config.hold_to_resolution {
+                        "confirmatory"
+                    } else {
+                        "predictive"
+                    }
+                    .into(),
+                );
                 m.insert("dry_run".into(), self.dry_run.to_string());
                 m
             },
@@ -677,8 +863,10 @@ impl Strategy for MomentumStrategyAdapter {
         if !self.config.hold_to_resolution {
             let positions = self.positions.read().await;
             for pos in positions.values() {
-                info!("[{}] Closing position: {} {} shares @ {:?}",
-                    self.id, pos.token_id, pos.shares, pos.current_price);
+                info!(
+                    "[{}] Closing position: {} {} shares @ {:?}",
+                    self.id, pos.token_id, pos.shares, pos.current_price
+                );
 
                 // Would generate sell order here
             }
@@ -687,7 +875,7 @@ impl Strategy for MomentumStrategyAdapter {
         actions.push(StrategyAction::LogEvent {
             event: StrategyEvent::new(
                 StrategyEventType::StateChanged,
-                "Strategy shutdown initiated"
+                "Strategy shutdown initiated",
             ),
         });
 
@@ -801,8 +989,8 @@ impl SplitArbStrategyAdapter {
     pub fn from_toml(id: String, config_str: &str, dry_run: bool) -> Result<Self> {
         use toml::Value;
 
-        let config: Value = toml::from_str(config_str)
-            .map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
+        let config: Value =
+            toml::from_str(config_str).map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
 
         let empty_table = Value::Table(Default::default());
         let _strategy = config.get("strategy").unwrap_or(&empty_table);
@@ -815,27 +1003,31 @@ impl SplitArbStrategyAdapter {
         // New: target_sum = same meaning, max_entry = single side max
 
         // Get target total cost (YES + NO combined)
-        let target_sum = entry.get("target_sum")
+        let target_sum = entry
+            .get("target_sum")
             .or_else(|| entry.get("max_combined_price"))
             .and_then(|v| v.as_float())
             .map(|v| if v > 1.0 { v / 100.0 } else { v }) // Handle both cents and decimal
             .unwrap_or(0.98);
 
         // Max entry for single side (default to half of target_sum)
-        let max_entry = entry.get("max_entry")
+        let max_entry = entry
+            .get("max_entry")
             .and_then(|v| v.as_float())
             .map(|v| if v > 1.0 { v / 100.0 } else { v })
             .unwrap_or(target_sum / 2.0);
 
         // min_profit (new) or min_spread (legacy)
-        let min_profit = entry.get("min_profit")
+        let min_profit = entry
+            .get("min_profit")
             .or_else(|| entry.get("min_spread"))
             .and_then(|v| v.as_float())
             .map(|v| if v > 1.0 { v / 100.0 } else { v })
             .unwrap_or(0.02);
 
         // shares: risk.shares (new) or position.shares_per_side (legacy)
-        let shares = risk.get("shares")
+        let shares = risk
+            .get("shares")
             .or_else(|| position.get("shares_per_side"))
             .and_then(|v| v.as_integer())
             .unwrap_or(50) as u64;
@@ -844,15 +1036,23 @@ impl SplitArbStrategyAdapter {
             max_entry_price: Decimal::try_from(max_entry).unwrap_or(dec!(0.49)),
             target_total_cost: Decimal::try_from(target_sum).unwrap_or(dec!(0.98)),
             min_profit_margin: Decimal::try_from(min_profit).unwrap_or(dec!(0.02)),
-            max_hedge_wait_secs: risk.get("max_hedge_wait")
-                .and_then(|v| v.as_integer()).unwrap_or(30) as u64,
+            max_hedge_wait_secs: risk
+                .get("max_hedge_wait")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(30) as u64,
             shares_per_trade: shares,
-            max_unhedged_positions: risk.get("max_unhedged")
+            max_unhedged_positions: risk
+                .get("max_unhedged")
                 .or_else(|| position.get("max_positions"))
-                .and_then(|v| v.as_integer()).unwrap_or(3) as usize,
+                .and_then(|v| v.as_integer())
+                .unwrap_or(3) as usize,
             unhedged_stop_loss: Decimal::try_from(
-                risk.get("unhedged_stop").and_then(|v| v.as_float()).unwrap_or(10.0) / 100.0
-            ).unwrap_or(dec!(0.10)),
+                risk.get("unhedged_stop")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(10.0)
+                    / 100.0,
+            )
+            .unwrap_or(dec!(0.10)),
         };
 
         Ok(Self::new(id, split_config, dry_run))
@@ -885,7 +1085,12 @@ impl SplitArbStrategyAdapter {
     }
 
     /// Generate entry order for first leg
-    async fn generate_first_leg(&self, market_id: &str, side: Side, price: Decimal) -> Option<StrategyAction> {
+    async fn generate_first_leg(
+        &self,
+        market_id: &str,
+        side: Side,
+        price: Decimal,
+    ) -> Option<StrategyAction> {
         let markets = self.markets.read().await;
         let market = markets.get(market_id)?;
 
@@ -894,22 +1099,23 @@ impl SplitArbStrategyAdapter {
             Side::Down => market.no_token_id.clone(),
         };
 
-        let client_order_id = format!("{}_leg1_{}_{}",
+        let client_order_id = format!(
+            "{}_leg1_{}_{}",
             self.id,
             market_id,
             Utc::now().timestamp_millis()
         );
 
-        let order = OrderRequest::buy_limit(
-            token_id.clone(),
-            side,
-            self.config.shares_per_trade,
-            price,
-        );
+        let order =
+            OrderRequest::buy_limit(token_id.clone(), side, self.config.shares_per_trade, price);
 
-        info!("[{}] First leg entry: {} @ {:.2}¢ ({} shares)",
-            self.id, if side == Side::Up { "YES" } else { "NO" },
-            price * dec!(100), self.config.shares_per_trade);
+        info!(
+            "[{}] First leg entry: {} @ {:.2}¢ ({} shares)",
+            self.id,
+            if side == Side::Up { "YES" } else { "NO" },
+            price * dec!(100),
+            self.config.shares_per_trade
+        );
 
         // Track order -> market mapping so we can associate fills with positions
         {
@@ -954,7 +1160,9 @@ impl Strategy for SplitArbStrategyAdapter {
         let mut actions = Vec::new();
 
         match update {
-            MarketUpdate::PolymarketQuote { token_id, quote, .. } => {
+            MarketUpdate::PolymarketQuote {
+                token_id, quote, ..
+            } => {
                 // Update price cache
                 let mut prices = self.prices.write().await;
                 prices.insert(token_id.clone(), (quote.best_bid, quote.best_ask));
@@ -967,7 +1175,8 @@ impl Strategy for SplitArbStrategyAdapter {
                 // Find which market this token belongs to
                 let market_id = {
                     let markets = self.markets.read().await;
-                    markets.iter()
+                    markets
+                        .iter()
                         .find(|(_, m)| &m.yes_token_id == token_id || &m.no_token_id == token_id)
                         .map(|(id, _)| id.clone())
                 };
@@ -1006,7 +1215,9 @@ impl Strategy for SplitArbStrategyAdapter {
 
                                         let client_order_id = format!(
                                             "{}_leg2_{}_{}",
-                                            self.id, partial_market_id, Utc::now().timestamp_millis()
+                                            self.id,
+                                            partial_market_id,
+                                            Utc::now().timestamp_millis()
                                         );
 
                                         let order = OrderRequest::buy_limit(
@@ -1019,7 +1230,10 @@ impl Strategy for SplitArbStrategyAdapter {
                                         // Track hedge order -> market mapping
                                         {
                                             let mut map = self.order_market_map.write().await;
-                                            map.insert(client_order_id.clone(), (partial_market_id.clone(), hedge_side));
+                                            map.insert(
+                                                client_order_id.clone(),
+                                                (partial_market_id.clone(), hedge_side),
+                                            );
                                         }
 
                                         info!(
@@ -1060,15 +1274,20 @@ impl Strategy for SplitArbStrategyAdapter {
                             drop(partials);
 
                             if let Some((side, price)) = self.check_opportunity(&market_id).await {
-                                if let Some(action) = self.generate_first_leg(&market_id, side, price).await {
+                                if let Some(action) =
+                                    self.generate_first_leg(&market_id, side, price).await
+                                {
                                     let mut stats = self.stats.write().await;
                                     stats.signals_detected += 1;
 
                                     actions.push(StrategyAction::LogEvent {
                                         event: StrategyEvent::new(
                                             StrategyEventType::SignalDetected,
-                                            format!("Split arb opportunity: {} @ {:.0}¢",
-                                                market_id, price * dec!(100))
+                                            format!(
+                                                "Split arb opportunity: {} @ {:.0}¢",
+                                                market_id,
+                                                price * dec!(100)
+                                            ),
                                         ),
                                     });
 
@@ -1080,18 +1299,29 @@ impl Strategy for SplitArbStrategyAdapter {
                 }
             }
 
-            MarketUpdate::EventDiscovered { event_id, series_id, up_token, down_token, end_time } => {
+            MarketUpdate::EventDiscovered {
+                event_id,
+                series_id,
+                up_token,
+                down_token,
+                end_time,
+            } => {
                 let mut markets = self.markets.write().await;
-                markets.insert(event_id.clone(), MonitoredMarket {
-                    market_id: event_id.clone(),
-                    yes_token_id: up_token.clone(),
-                    no_token_id: down_token.clone(),
-                    description: format!("Series {}", series_id),
-                    end_time: *end_time,
-                });
+                markets.insert(
+                    event_id.clone(),
+                    MonitoredMarket {
+                        market_id: event_id.clone(),
+                        yes_token_id: up_token.clone(),
+                        no_token_id: down_token.clone(),
+                        description: format!("Series {}", series_id),
+                        end_time: *end_time,
+                    },
+                );
 
-                debug!("[{}] Market added: {} (YES={}, NO={})",
-                    self.id, event_id, up_token, down_token);
+                debug!(
+                    "[{}] Market added: {} (YES={}, NO={})",
+                    self.id, event_id, up_token, down_token
+                );
             }
 
             MarketUpdate::EventExpired { event_id } => {
@@ -1110,11 +1340,15 @@ impl Strategy for SplitArbStrategyAdapter {
 
         match update.status {
             crate::domain::OrderStatus::Filled => {
-                info!("[{}] Order filled: {} @ {:?}",
-                    self.id, update.order_id, update.avg_fill_price);
+                info!(
+                    "[{}] Order filled: {} @ {:?}",
+                    self.id, update.order_id, update.avg_fill_price
+                );
 
                 // Look up which market/side this order belongs to
-                let order_key = update.client_order_id.clone()
+                let order_key = update
+                    .client_order_id
+                    .clone()
                     .unwrap_or_else(|| update.order_id.clone());
                 let mapping = {
                     let map = self.order_market_map.read().await;
@@ -1131,10 +1365,13 @@ impl Strategy for SplitArbStrategyAdapter {
                     if !has_partial {
                         // First leg fill -- create a partial position
                         let markets = self.markets.read().await;
-                        let token_id = markets.get(&market_id).map(|m| match side {
-                            Side::Up => m.yes_token_id.clone(),
-                            Side::Down => m.no_token_id.clone(),
-                        }).unwrap_or_default();
+                        let token_id = markets
+                            .get(&market_id)
+                            .map(|m| match side {
+                                Side::Up => m.yes_token_id.clone(),
+                                Side::Down => m.no_token_id.clone(),
+                            })
+                            .unwrap_or_default();
                         drop(markets);
 
                         let partial = SplitPosition {
@@ -1153,10 +1390,13 @@ impl Strategy for SplitArbStrategyAdapter {
                         let mut stats = self.stats.write().await;
                         stats.first_leg_entries += 1;
 
-                        info!("[{}] First leg tracked: {} {} @ {:.2}c",
-                            self.id, market_id,
+                        info!(
+                            "[{}] First leg tracked: {} {} @ {:.2}c",
+                            self.id,
+                            market_id,
                             if side == Side::Up { "YES" } else { "NO" },
-                            fill_price * dec!(100));
+                            fill_price * dec!(100)
+                        );
                     } else {
                         // Hedge leg fill -- complete the arb cycle
                         let mut partials = self.partial_positions.write().await;
@@ -1169,16 +1409,25 @@ impl Strategy for SplitArbStrategyAdapter {
                                 if let Some(m) = markets.get(&market_id) {
                                     match partial.first_side {
                                         Side::Up => (
-                                            m.yes_token_id.clone(), m.no_token_id.clone(),
-                                            partial.entry_price, fill_price,
+                                            m.yes_token_id.clone(),
+                                            m.no_token_id.clone(),
+                                            partial.entry_price,
+                                            fill_price,
                                         ),
                                         Side::Down => (
-                                            m.yes_token_id.clone(), m.no_token_id.clone(),
-                                            fill_price, partial.entry_price,
+                                            m.yes_token_id.clone(),
+                                            m.no_token_id.clone(),
+                                            fill_price,
+                                            partial.entry_price,
                                         ),
                                     }
                                 } else {
-                                    (String::new(), String::new(), partial.entry_price, fill_price)
+                                    (
+                                        String::new(),
+                                        String::new(),
+                                        partial.entry_price,
+                                        fill_price,
+                                    )
                                 };
                             drop(markets);
 
@@ -1219,13 +1468,15 @@ impl Strategy for SplitArbStrategyAdapter {
                 actions.push(StrategyAction::LogEvent {
                     event: StrategyEvent::new(
                         StrategyEventType::OrderFilled,
-                        format!("Split arb leg filled: {}", update.order_id)
+                        format!("Split arb leg filled: {}", update.order_id),
                     ),
                 });
             }
             crate::domain::OrderStatus::Cancelled | crate::domain::OrderStatus::Failed => {
-                warn!("[{}] Order {} - {:?}",
-                    self.id, update.order_id, update.error);
+                warn!(
+                    "[{}] Order {} - {:?}",
+                    self.id, update.order_id, update.error
+                );
             }
             _ => {}
         }
@@ -1250,7 +1501,10 @@ impl Strategy for SplitArbStrategyAdapter {
 
         // Exit timed out positions
         for market_id in timed_out {
-            warn!("[{}] Hedge timeout for {}, exiting unhedged", self.id, market_id);
+            warn!(
+                "[{}] Hedge timeout for {}, exiting unhedged",
+                self.id, market_id
+            );
 
             let mut partials = self.partial_positions.write().await;
             if let Some(pos) = partials.remove(&market_id) {
@@ -1261,12 +1515,14 @@ impl Strategy for SplitArbStrategyAdapter {
                 let urgency_buffer = dec!(0.01);
                 let exit_price = pos.entry_price - urgency_buffer;
                 // Floor at 1 cent to avoid nonsensical prices
-                let exit_price = if exit_price < dec!(0.01) { dec!(0.01) } else { exit_price };
+                let exit_price = if exit_price < dec!(0.01) {
+                    dec!(0.01)
+                } else {
+                    exit_price
+                };
 
-                let client_order_id = format!(
-                    "{}_exit_{}_{}",
-                    self.id, market_id, now.timestamp_millis()
-                );
+                let client_order_id =
+                    format!("{}_exit_{}_{}", self.id, market_id, now.timestamp_millis());
 
                 let order = OrderRequest::sell_limit(
                     pos.first_token_id.clone(),
@@ -1277,8 +1533,13 @@ impl Strategy for SplitArbStrategyAdapter {
 
                 info!(
                     "[{}] Unhedged exit: {} {} @ {:.2}c ({} shares)",
-                    self.id, market_id,
-                    if pos.first_side == Side::Up { "YES" } else { "NO" },
+                    self.id,
+                    market_id,
+                    if pos.first_side == Side::Up {
+                        "YES"
+                    } else {
+                        "NO"
+                    },
                     exit_price * dec!(100),
                     pos.shares,
                 );
@@ -1314,7 +1575,10 @@ impl Strategy for SplitArbStrategyAdapter {
             metrics: {
                 let mut m = HashMap::new();
                 m.insert("dry_run".into(), self.dry_run.to_string());
-                m.insert("target_sum".into(), format!("{:.0}¢", self.config.target_total_cost * dec!(100)));
+                m.insert(
+                    "target_sum".into(),
+                    format!("{:.0}¢", self.config.target_total_cost * dec!(100)),
+                );
                 m
             },
         }
@@ -1337,7 +1601,11 @@ impl Strategy for SplitArbStrategyAdapter {
         // Log any open positions that need attention
         let partials = self.partial_positions.read().await;
         if !partials.is_empty() {
-            warn!("[{}] {} unhedged positions at shutdown!", self.id, partials.len());
+            warn!(
+                "[{}] {} unhedged positions at shutdown!",
+                self.id,
+                partials.len()
+            );
             actions.push(StrategyAction::Alert {
                 level: AlertLevel::Error,
                 message: format!("{} unhedged positions at shutdown", partials.len()),
@@ -1347,7 +1615,7 @@ impl Strategy for SplitArbStrategyAdapter {
         actions.push(StrategyAction::LogEvent {
             event: StrategyEvent::new(
                 StrategyEventType::StateChanged,
-                "Split arb strategy shutdown"
+                "Split arb strategy shutdown",
             ),
         });
 
@@ -1371,12 +1639,8 @@ mod tests {
     fn test_momentum_adapter_creation() {
         let config = MomentumConfig::default();
         let exit_config = ExitConfig::default();
-        let adapter = MomentumStrategyAdapter::new(
-            "test_momentum".into(),
-            config,
-            exit_config,
-            true,
-        );
+        let adapter =
+            MomentumStrategyAdapter::new("test_momentum".into(), config, exit_config, true);
 
         assert_eq!(adapter.id(), "test_momentum");
         assert_eq!(adapter.name(), "Momentum Strategy");
@@ -1407,11 +1671,7 @@ shares = 100
 max_positions = 5
 "#;
 
-        let adapter = MomentumStrategyAdapter::from_toml(
-            "test".into(),
-            toml,
-            true,
-        ).unwrap();
+        let adapter = MomentumStrategyAdapter::from_toml("test".into(), toml, true).unwrap();
 
         assert_eq!(adapter.config.symbols.len(), 2);
         assert!(!adapter.config.hold_to_resolution);
@@ -1420,11 +1680,7 @@ max_positions = 5
     #[test]
     fn test_split_arb_adapter_creation() {
         let config = CoreSplitArbConfig::default();
-        let adapter = SplitArbStrategyAdapter::new(
-            "test_split".into(),
-            config,
-            true,
-        );
+        let adapter = SplitArbStrategyAdapter::new("test_split".into(), config, true);
 
         assert_eq!(adapter.id(), "test_split");
         assert_eq!(adapter.name(), "Split Arbitrage Strategy");
@@ -1448,11 +1704,7 @@ max_unhedged = 3
 unhedged_stop = 10
 "#;
 
-        let adapter = SplitArbStrategyAdapter::from_toml(
-            "test".into(),
-            toml,
-            true,
-        ).unwrap();
+        let adapter = SplitArbStrategyAdapter::from_toml("test".into(), toml, true).unwrap();
 
         assert_eq!(adapter.config.max_entry_price, dec!(0.35));
         assert_eq!(adapter.config.target_total_cost, dec!(0.70));
@@ -1475,11 +1727,7 @@ shares_per_side = 50
 max_positions = 10
 "#;
 
-        let adapter = SplitArbStrategyAdapter::from_toml(
-            "test".into(),
-            toml,
-            true,
-        ).unwrap();
+        let adapter = SplitArbStrategyAdapter::from_toml("test".into(), toml, true).unwrap();
 
         // max_combined_price maps to target_total_cost
         assert_eq!(adapter.config.target_total_cost, dec!(0.98));

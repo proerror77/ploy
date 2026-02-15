@@ -9,8 +9,8 @@
 use crate::adapters::PolymarketClient;
 use crate::config::RiskConfig;
 use crate::error::Result;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -51,7 +51,11 @@ impl FundManager {
     const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// Create a new fund manager with specified symbol count
-    pub fn new_with_symbols(client: PolymarketClient, config: RiskConfig, total_symbols: u32) -> Self {
+    pub fn new_with_symbols(
+        client: PolymarketClient,
+        config: RiskConfig,
+        total_symbols: u32,
+    ) -> Self {
         Self {
             client,
             config,
@@ -103,16 +107,19 @@ impl FundManager {
         if self.config.max_positions > 0 {
             let positions = self.active_positions.read().await;
             if positions.len() >= self.config.max_positions as usize {
-                return Ok(PositionSizeResult::Rejected(
-                    format!("Max positions reached ({}/{})", positions.len(), self.config.max_positions)
-                ));
+                return Ok(PositionSizeResult::Rejected(format!(
+                    "Max positions reached ({}/{})",
+                    positions.len(),
+                    self.config.max_positions
+                )));
             }
 
             // Check if already in this event
             if positions.contains(event_id) {
-                return Ok(PositionSizeResult::Rejected(
-                    format!("Already have position in event {}", &event_id[..8.min(event_id.len())])
-                ));
+                return Ok(PositionSizeResult::Rejected(format!(
+                    "Already have position in event {}",
+                    &event_id[..8.min(event_id.len())]
+                )));
             }
         }
 
@@ -121,10 +128,10 @@ impl FundManager {
             let symbol_positions = self.positions_per_symbol.read().await;
             let current_count = symbol_positions.get(symbol).copied().unwrap_or(0);
             if current_count >= self.config.max_positions_per_symbol {
-                return Ok(PositionSizeResult::Rejected(
-                    format!("{} already has {} positions (max: {})",
-                        symbol, current_count, self.config.max_positions_per_symbol)
-                ));
+                return Ok(PositionSizeResult::Rejected(format!(
+                    "{} already has {} positions (max: {})",
+                    symbol, current_count, self.config.max_positions_per_symbol
+                )));
             }
         }
 
@@ -133,9 +140,10 @@ impl FundManager {
 
         // 4. Check minimum balance requirement
         if balance < self.config.min_balance_usd {
-            return Ok(PositionSizeResult::Rejected(
-                format!("Balance ${:.2} below minimum ${:.2}", balance, self.config.min_balance_usd)
-            ));
+            return Ok(PositionSizeResult::Rejected(format!(
+                "Balance ${:.2} below minimum ${:.2}",
+                balance, self.config.min_balance_usd
+            )));
         }
 
         // 5. Check per-symbol allocation (dynamic fund distribution)
@@ -144,39 +152,42 @@ impl FundManager {
         let remaining_allocation = (per_symbol_allocation - current_exposure).max(Decimal::ZERO);
 
         if remaining_allocation < dec!(1) {
-            return Ok(PositionSizeResult::Rejected(
-                format!("{} allocation exhausted: ${:.2} used of ${:.2} ({}% of funds)",
-                    symbol, current_exposure, per_symbol_allocation,
-                    (Decimal::from(100) / Decimal::from(self.total_symbols)).round())
-            ));
+            return Ok(PositionSizeResult::Rejected(format!(
+                "{} allocation exhausted: ${:.2} used of ${:.2} ({}% of funds)",
+                symbol,
+                current_exposure,
+                per_symbol_allocation,
+                (Decimal::from(100) / Decimal::from(self.total_symbols)).round()
+            )));
         }
 
         // 6. Calculate position size (respecting per-symbol allocation)
-        let (amount_usd, shares) = self.calculate_position_size_with_limit(
-            balance, price, remaining_allocation
-        )?;
+        let (amount_usd, shares) =
+            self.calculate_position_size_with_limit(balance, price, remaining_allocation)?;
 
         // 7. Check if we have enough after min balance
         let available = balance - self.config.min_balance_usd;
         if amount_usd > available {
-            return Ok(PositionSizeResult::Rejected(
-                format!("Order ${:.2} exceeds available ${:.2} (keeping ${:.2} reserve)",
-                    amount_usd, available, self.config.min_balance_usd)
-            ));
+            return Ok(PositionSizeResult::Rejected(format!(
+                "Order ${:.2} exceeds available ${:.2} (keeping ${:.2} reserve)",
+                amount_usd, available, self.config.min_balance_usd
+            )));
         }
 
         // 6. Ensure minimum order requirements
         // Polymarket: minimum 5 shares AND $1 order value
         if shares < 5 {
-            return Ok(PositionSizeResult::Rejected(
-                format!("Calculated shares ({}) below minimum 5", shares)
-            ));
+            return Ok(PositionSizeResult::Rejected(format!(
+                "Calculated shares ({}) below minimum 5",
+                shares
+            )));
         }
 
         if amount_usd < dec!(1) {
-            return Ok(PositionSizeResult::Rejected(
-                format!("Order value ${:.2} below minimum $1", amount_usd)
-            ));
+            return Ok(PositionSizeResult::Rejected(format!(
+                "Order value ${:.2} below minimum $1",
+                amount_usd
+            )));
         }
 
         info!(
@@ -279,11 +290,17 @@ impl FundManager {
 
     /// Record that a position was opened
     pub async fn record_position_opened(&self, event_id: &str, symbol: &str) {
-        self.record_position_opened_with_amount(event_id, symbol, Decimal::ZERO).await;
+        self.record_position_opened_with_amount(event_id, symbol, Decimal::ZERO)
+            .await;
     }
 
     /// Record that a position was opened with exposure amount
-    pub async fn record_position_opened_with_amount(&self, event_id: &str, symbol: &str, amount_usd: Decimal) {
+    pub async fn record_position_opened_with_amount(
+        &self,
+        event_id: &str,
+        symbol: &str,
+        amount_usd: Decimal,
+    ) {
         // Track by event
         let mut positions = self.active_positions.write().await;
         positions.insert(event_id.to_string());
@@ -305,7 +322,10 @@ impl FundManager {
         drop(exposure);
 
         // Get allocation for logging
-        let allocation = self.get_per_symbol_allocation().await.unwrap_or(Decimal::ZERO);
+        let allocation = self
+            .get_per_symbol_allocation()
+            .await
+            .unwrap_or(Decimal::ZERO);
 
         info!(
             "📊 Position opened: {} {} | exposure: ${:.2}/${:.2} ({}%) | positions: {}/{} | total: {}",
@@ -326,11 +346,17 @@ impl FundManager {
 
     /// Record that a position was closed
     pub async fn record_position_closed(&self, event_id: &str, symbol: &str) {
-        self.record_position_closed_with_amount(event_id, symbol, Decimal::ZERO).await;
+        self.record_position_closed_with_amount(event_id, symbol, Decimal::ZERO)
+            .await;
     }
 
     /// Record that a position was closed with exposure amount released
-    pub async fn record_position_closed_with_amount(&self, event_id: &str, symbol: &str, amount_usd: Decimal) {
+    pub async fn record_position_closed_with_amount(
+        &self,
+        event_id: &str,
+        symbol: &str,
+        amount_usd: Decimal,
+    ) {
         // Remove from event tracking
         let mut positions = self.active_positions.write().await;
         positions.remove(event_id);
@@ -389,7 +415,10 @@ impl FundManager {
         let position_count = self.position_count().await;
         let max_positions = self.config.max_positions;
         let available = (balance - self.config.min_balance_usd).max(Decimal::ZERO);
-        let per_symbol_allocation = self.get_per_symbol_allocation().await.unwrap_or(Decimal::ZERO);
+        let per_symbol_allocation = self
+            .get_per_symbol_allocation()
+            .await
+            .unwrap_or(Decimal::ZERO);
 
         // Get symbol exposures
         let exposures = self.symbol_exposure.read().await.clone();
@@ -454,11 +483,7 @@ impl std::fmt::Display for FundStatus {
         writeln!(
             f,
             "Balance: ${:.2} | Available: ${:.2} | Positions: {}/{} | Reserve: ${:.2}",
-            self.balance,
-            self.available,
-            self.position_count,
-            self.max_positions,
-            self.min_balance
+            self.balance, self.available, self.position_count, self.max_positions, self.min_balance
         )?;
         writeln!(
             f,
@@ -487,11 +512,7 @@ impl FundStatus {
     pub fn one_line(&self) -> String {
         format!(
             "Balance: ${:.2} | Available: ${:.2} | Positions: {}/{} | Reserve: ${:.2}",
-            self.balance,
-            self.available,
-            self.position_count,
-            self.max_positions,
-            self.min_balance
+            self.balance, self.available, self.position_count, self.max_positions, self.min_balance
         )
     }
 }

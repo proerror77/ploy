@@ -59,9 +59,9 @@ fn scale_price_to_u128(price: Decimal) -> Result<u128> {
     let scaled = (price * Decimal::from(1_000_000u64))
         .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero);
 
-    scaled.to_u128().ok_or_else(|| {
-        PloyError::OrderSubmission(format!("Invalid price: {}", price))
-    })
+    scaled
+        .to_u128()
+        .ok_or_else(|| PloyError::OrderSubmission(format!("Invalid price: {}", price)))
 }
 
 /// Order data structure for EIP-712 signing
@@ -281,8 +281,7 @@ impl SignedOrder {
             }
         });
 
-        serde_json::to_string(&json)
-            .map_err(|e| PloyError::Json(e))
+        serde_json::to_string(&json).map_err(|e| PloyError::Json(e))
     }
 }
 
@@ -327,15 +326,7 @@ mod tests {
         let maker = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
             .parse()
             .unwrap();
-        let order = OrderData::new_buy(
-            maker,
-            maker,
-            "12345",
-            dec!(0.50),
-            100,
-            1,
-        )
-        .unwrap();
+        let order = OrderData::new_buy(maker, maker, "12345", dec!(0.50), 100, 1).unwrap();
 
         assert_eq!(order.side, OrderSide::Buy as u8);
         assert_eq!(order.nonce, U256::from(1));
@@ -347,15 +338,7 @@ mod tests {
         let maker = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
             .parse()
             .unwrap();
-        let order = OrderData::new_buy(
-            maker,
-            maker,
-            "12345",
-            dec!(0.1234567),
-            1,
-            1,
-        )
-        .unwrap();
+        let order = OrderData::new_buy(maker, maker, "12345", dec!(0.1234567), 1, 1).unwrap();
 
         // 0.1234567 * 1_000_000 = 123456.7 -> rounds to 123457
         assert_eq!(order.maker_amount, U256::from(123457u128));
@@ -366,14 +349,7 @@ mod tests {
         let maker = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
             .parse()
             .unwrap();
-        let result = OrderData::new_sell(
-            maker,
-            maker,
-            "12345",
-            dec!(-0.01),
-            1,
-            1,
-        );
+        let result = OrderData::new_sell(maker, maker, "12345", dec!(-0.01), 1, 1);
 
         assert!(result.is_err());
     }
