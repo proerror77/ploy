@@ -126,6 +126,17 @@ Already implemented in the Rust core:
 - DB: `grok_unified_decisions` table with full audit trail
 - 9 unit tests passing
 
+### Phase 1.5: Kelly-Proportional Scaling-In ✅
+
+Dynamic position sizing that adds to positions when price drops but fundamentals remain strong:
+- `core.rs`: `PositionEntry`, `GamePosition` types, `record_position_entry()`, `can_scale_in()`, `kelly_scaling_shares()`
+- `grok_decision.rs`: `EspnScaleIn` trigger variant with existing position context in Grok prompt
+- `sports.rs`: Scaling loop in ESPN poll path, position recording on all order paths
+- `config.rs`: 6 new scaling config fields (enabled, max_adds, min_price_drop, max_exposure, comeback_retention, min_time)
+- 6 new unit tests (31 total NBA comeback tests passing)
+- **Key**: Scale-in requires Grok LLM confirmation (no rule-based fallback) — concentrating risk demands oversight
+- **Formula**: `kelly_fraction = edge / (1 - price)`, capped at 25%, target = fraction × max_game_exposure
+
 ### Phase 2: Agent SDK Sidecar (Future)
 
 - Claude Agent SDK TypeScript/Python sidecar process
@@ -150,6 +161,18 @@ Already implemented in the Rust core:
 | `src/cli/strategy.rs` | +new config fields |
 | `src/platform/agents/nba_agent.rs` | +new config fields |
 
+## Files Modified (Phase 1.5 — Kelly Scaling-In)
+
+| File | Changes |
+|------|---------|
+| `src/strategy/nba_comeback/core.rs` | +PositionEntry, +GamePosition, +game_positions state, +record_position_entry, +can_scale_in (5 guards), +kelly_scaling_shares, +6 tests |
+| `src/strategy/nba_comeback/grok_decision.rs` | +EspnScaleIn trigger with position context in prompt |
+| `src/strategy/nba_comeback/mod.rs` | +GamePosition, +PositionEntry re-exports |
+| `src/agents/sports.rs` | +position recording on all order paths, +scaling-in loop in ESPN poll, +Grok-only confirmation for scale-in |
+| `src/config.rs` | +scaling_enabled, +scaling_max_adds, +scaling_min_price_drop_pct, +scaling_max_game_exposure_usd, +scaling_min_comeback_retention, +scaling_min_time_remaining_mins |
+| `src/cli/strategy.rs` | +scaling config defaults |
+| `src/platform/agents/nba_agent.rs` | +scaling config defaults in test |
+
 ## Key Design Decisions
 
 1. **4x minimum reward-to-risk**: Conservative threshold that limits entries to price ≤ $0.20. Natural fit for NBA comeback scenarios where trailing teams are heavily discounted.
@@ -158,4 +181,9 @@ Already implemented in the Rust core:
 
 3. **Dual fair value**: Both Claude's statistical model and Grok's X.com-informed estimate are recorded. Agreement signals higher confidence; disagreement flags uncertainty.
 
+4. **Kelly position sizing**: Caps at 25% of bankroll even when Kelly suggests more. Combined with the 4x RR filter, this creates a conservative risk envelope.
+
+5. **Kelly scaling-in requires LLM confirmation**: Unlike initial entries (which can fall back to rule-based), scale-in has no fallback. Adding to an existing position concentrates risk, so Grok must approve every add.
+
+6. **Five scaling guards**: max_adds (3), min_price_drop (5%), comeback_retention (70%), min_time_remaining (8 min), max_game_exposure ($50). All must pass before even querying Grok.
 4. **Kelly position sizing**: Caps at 25% of bankroll even when Kelly suggests more. Combined with the 4x RR filter, this creates a conservative risk envelope.
