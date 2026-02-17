@@ -35,7 +35,12 @@ start() {
   ensure_dirs
 
   # Build (incremental; ensures the binary includes latest strategy changes).
-  cargo build --release >/dev/null
+  local features="${PLOY_CARGO_FEATURES:-onnx}"
+  if [[ -n "$features" ]]; then
+    cargo build --release --features "$features" >/dev/null
+  else
+    cargo build --release >/dev/null
+  fi
 
   # Ensure file-logging doesn't try to use /var/log/ploy on dev machines.
   local logs_dir

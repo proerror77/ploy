@@ -52,7 +52,12 @@ start() {
 
   # Build if needed (fast path when already built).
   if [[ ! -x target/release/ploy ]]; then
-    cargo build --release >/dev/null
+    local features="${PLOY_CARGO_FEATURES:-onnx}"
+    if [[ -n "$features" ]]; then
+      cargo build --release --features "$features" >/dev/null
+    else
+      cargo build --release >/dev/null
+    fi
   fi
 
   # Start detached, log to file, store pid.

@@ -233,10 +233,18 @@ cd "$REMOTE_ROOT"
 #
 # NOTE: This host is intentionally small; release LTO + single codegen unit
 # can OOM and stall deploys. Prefer faster/lower-memory release settings.
-CARGO_PROFILE_RELEASE_LTO=off \
-  CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-  CARGO_BUILD_JOBS=2 \
-  cargo build --release --bin ploy
+features="${PLOY_CARGO_FEATURES:-onnx}"
+if [[ -n "$features" ]]; then
+  CARGO_PROFILE_RELEASE_LTO=off \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    CARGO_BUILD_JOBS=2 \
+    cargo build --release --bin ploy --features "$features"
+else
+  CARGO_PROFILE_RELEASE_LTO=off \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    CARGO_BUILD_JOBS=2 \
+    cargo build --release --bin ploy
+fi
 
 if ! id -u ploy >/dev/null 2>&1; then
   sudo useradd --system --home "$REMOTE_ROOT" --shell /usr/sbin/nologin --no-create-home ploy

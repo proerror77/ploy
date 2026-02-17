@@ -88,7 +88,8 @@ git clone https://github.com/your-repo/ploy.git /opt/ploy/src
 cd /opt/ploy/src
 
 # Build
-cargo build --release --features rl
+features="${PLOY_CARGO_FEATURES:-rl,onnx}"
+cargo build --release --features "$features"
 
 # Create env file
 cat > /opt/ploy/.env <<'ENVEOF'

@@ -13,8 +13,13 @@ if [[ -z "$EC2_HOST" ]]; then
     exit 1
 fi
 
-echo "==> Building release binary..."
-cargo build --release
+PLOY_CARGO_FEATURES="${PLOY_CARGO_FEATURES:-onnx}"
+echo "==> Building release binary (features: ${PLOY_CARGO_FEATURES:-none})..."
+if [[ -n "${PLOY_CARGO_FEATURES}" ]]; then
+    cargo build --release --features "$PLOY_CARGO_FEATURES"
+else
+    cargo build --release
+fi
 
 echo "==> Uploading binary to $EC2_HOST..."
 scp target/release/ploy "$EC2_HOST:/tmp/ploy"
