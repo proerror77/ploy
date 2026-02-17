@@ -17,6 +17,15 @@ When instructions mention Claude Code tools, map them like this in Codex:
 - WebFetch/WebSearch: use `curl` (and Context7 for library docs when relevant)
 - Parallel: use `multi_tool_use.parallel` for parallel shell reads/searches
 
+## Git / Atomic Commits
+
+Prefer **atomic commits**:
+
+- One commit should represent one logical change.
+- Keep refactors, formatting, and behavior changes in separate commits.
+- Each commit should build (and run relevant tests when available).
+- Avoid WIP commits on shared branches.
+
 ## Skills
 
 Skills are local instruction sets stored in `SKILL.md` files (usually under
@@ -33,4 +42,3 @@ When using a skill:
 - Prefer referenced scripts/templates over retyping.
 - Keep context small: load only what you need.
 - If a skill is missing/unreadable, state that and continue with best fallback.
-
