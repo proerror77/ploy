@@ -300,6 +300,12 @@ mod tests {
             min_reward_risk_ratio: 4.0,
             min_expected_value: 0.05,
             kelly_fraction_cap: 0.25,
+            scaling_enabled: false,
+            scaling_max_adds: 3,
+            scaling_min_price_drop_pct: 5.0,
+            scaling_max_game_exposure_usd: dec!(50),
+            scaling_min_comeback_retention: 0.70,
+            scaling_min_time_remaining_mins: 8.0,
         };
 
         // Test status transitions without DB

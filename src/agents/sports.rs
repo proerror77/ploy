@@ -1662,7 +1662,14 @@ impl TradingAgent for SportsTradingAgent {
                                                 let intent_id = intent.intent_id;
                                                 order_submitted = ctx.submit_order(intent).await.is_ok();
                                                 if order_submitted {
-                                                    pending_intents.insert(intent_id, opp);
+                                                    pending_intents.insert(intent_id, opp.clone());
+                                                    // Record for Kelly scaling-in tracking
+                                                    self.core.record_position_entry(
+                                                        &game_id,
+                                                        opp.market_price,
+                                                        self.core.cfg.shares,
+                                                        opp.comeback_rate,
+                                                    );
                                                 }
                                             }
                                             GrokDecision::Pass { reasoning, .. } => {
@@ -1709,6 +1716,12 @@ impl TradingAgent for SportsTradingAgent {
                                             if let Err(e) = ctx.submit_order(intent).await {
                                                 warn!(agent = self.config.agent_id, error = %e, "failed to submit fallback order");
                                             } else {
+                                                self.core.record_position_entry(
+                                                    &game_id,
+                                                    opp.market_price,
+                                                    self.core.cfg.shares,
+                                                    opp.comeback_rate,
+                                                );
                                                 pending_intents.insert(intent_id, opp);
                                             }
                                         } else {
@@ -1733,9 +1746,218 @@ impl TradingAgent for SportsTradingAgent {
                                 if let Err(e) = ctx.submit_order(intent).await {
                                     warn!(agent = self.config.agent_id, error = %e, "failed to submit");
                                 } else {
+                                    self.core.record_position_entry(
+                                        &game_id,
+                                        opp.market_price,
+                                        self.core.cfg.shares,
+                                        opp.comeback_rate,
+                                    );
                                     pending_intents.insert(intent_id, opp);
                                 }
                             }
+                        }
+                    }
+
+                    // --- Kelly scaling-in check for existing positions ---
+                    if self.core.cfg.scaling_enabled && trade_gate_open {
+                        for candidate in &candidates {
+                            let game_id = &candidate.game.espn_game_id;
+
+                            if !calendar_ids_for_trade.contains(game_id) {
+                                continue;
+                            }
+
+                            // Only scale into games we already have a position in
+                            let has_position = self.core.state.game_positions.contains_key(game_id);
+                            if !has_position {
+                                continue;
+                            }
+
+                            // Get current market data
+                            let market_input = market_inputs.get(game_id);
+                            let current_price = match market_input.and_then(|m| m.trailing_price) {
+                                Some(p) => p,
+                                None => continue,
+                            };
+
+                            // Check all scaling guards
+                            if !self.core.can_scale_in(
+                                game_id,
+                                current_price,
+                                candidate.comeback_rate,
+                                candidate.game.time_remaining_mins,
+                            ) {
+                                continue;
+                            }
+
+                            // Calculate Kelly optimal shares to add
+                            let delta_shares = match self.core.kelly_scaling_shares(
+                                game_id,
+                                current_price,
+                                candidate.adjusted_win_prob,
+                            ) {
+                                Some(s) => s,
+                                None => continue,
+                            };
+
+                            // Check daily spend limit
+                            let add_cost = current_price * Decimal::from(delta_shares);
+                            if !self.core.can_spend(add_cost) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    "scaling: daily spend limit would be exceeded"
+                                );
+                                continue;
+                            }
+
+                            let market_price_f64 = current_price.to_string().parse::<f64>().unwrap_or(0.0);
+                            let risk_metrics = RiskMetrics::calculate(candidate.adjusted_win_prob, market_price_f64);
+
+                            // Risk metrics must still pass filter for scale-in
+                            if !risk_metrics.passes_filter(
+                                self.core.cfg.min_reward_risk_ratio,
+                                self.core.cfg.min_expected_value,
+                            ) {
+                                continue;
+                            }
+
+                            // Check decision cooldown
+                            if self.is_on_cooldown(game_id) {
+                                continue;
+                            }
+
+                            let pos = self.core.state.game_positions.get(game_id).unwrap();
+                            let add_number = pos.entries.len() as u32; // 1-based (entry 0 was initial)
+                            let existing_shares = pos.total_shares;
+                            let existing_cost = pos.total_cost.to_string().parse::<f64>().unwrap_or(0.0);
+
+                            let market_slug = market_input
+                                .and_then(|m| m.market_slug.clone())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "nba-{}-vs-{}",
+                                        candidate.game.away_abbrev.to_lowercase(),
+                                        candidate.game.home_abbrev.to_lowercase()
+                                    )
+                                });
+                            let token_id = market_input
+                                .and_then(|m| m.trailing_token_id.clone())
+                                .unwrap_or_else(|| {
+                                    format!("{}-win-yes", candidate.trailing_abbrev.to_lowercase())
+                                });
+
+                            let req = UnifiedDecisionRequest {
+                                request_id: Uuid::new_v4(),
+                                trigger: DecisionTrigger::EspnScaleIn {
+                                    add_number,
+                                    existing_shares,
+                                    existing_cost_usd: existing_cost,
+                                },
+                                game: candidate.game.clone(),
+                                trailing_team: candidate.trailing_team.clone(),
+                                trailing_abbrev: candidate.trailing_abbrev.clone(),
+                                deficit: candidate.deficit,
+                                comeback: Some(ComebackSnapshot {
+                                    comeback_rate: candidate.comeback_rate,
+                                    adjusted_win_prob: candidate.adjusted_win_prob,
+                                    statistical_edge: candidate.adjusted_win_prob - market_price_f64,
+                                }),
+                                grok_intel: self.grok_cache.get(game_id).cloned(),
+                                market: MarketSnapshot {
+                                    market_slug,
+                                    token_id,
+                                    market_price: current_price,
+                                    yes_best_bid: None,
+                                    yes_best_ask: None,
+                                },
+                                risk_metrics,
+                            };
+
+                            info!(
+                                agent = self.config.agent_id,
+                                game_id = %game_id,
+                                add_number,
+                                delta_shares,
+                                existing_shares,
+                                price = %current_price,
+                                "scaling: Kelly recommends adding to position"
+                            );
+
+                            // Route through Grok unified decision (or fallback)
+                            if let Some(grok) = self.grok.as_ref() {
+                                match grok_decision::request_unified_decision(grok, &req).await {
+                                    Ok((decision, raw_prompt, raw_response)) => {
+                                        let mut order_submitted = false;
+
+                                        match &decision {
+                                            GrokDecision::Trade { edge, confidence, .. } => {
+                                                info!(
+                                                    agent = self.config.agent_id,
+                                                    game_id = %game_id,
+                                                    add_number,
+                                                    delta_shares,
+                                                    edge = format!("{:.3}", edge),
+                                                    confidence = format!("{:.2}", confidence),
+                                                    "grok approved scale-in"
+                                                );
+                                                let intent = Self::decision_to_intent(
+                                                    &self.config.agent_id,
+                                                    &req,
+                                                    &decision,
+                                                    delta_shares,
+                                                    &config_hash,
+                                                );
+                                                order_submitted = ctx.submit_order(intent).await.is_ok();
+                                                if order_submitted {
+                                                    self.core.record_position_entry(
+                                                        game_id,
+                                                        current_price,
+                                                        delta_shares,
+                                                        candidate.comeback_rate,
+                                                    );
+                                                    self.core.record_trade(game_id, add_cost);
+                                                }
+                                            }
+                                            GrokDecision::Pass { reasoning, .. } => {
+                                                info!(
+                                                    agent = self.config.agent_id,
+                                                    game_id = %game_id,
+                                                    "grok passed on scale-in: {}", reasoning
+                                                );
+                                            }
+                                        }
+
+                                        self.set_cooldown(game_id);
+
+                                        if let Some(pool) = self.observation_pool.as_ref() {
+                                            Self::persist_unified_decision(
+                                                pool,
+                                                &self.config.account_id,
+                                                &self.config.agent_id,
+                                                &req,
+                                                &decision,
+                                                &raw_prompt,
+                                                &raw_response,
+                                                order_submitted,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // For scale-in, we do NOT fall back to rule-based.
+                                        // Adding to an existing position is higher risk than
+                                        // the initial entry, so we require LLM confirmation.
+                                        warn!(
+                                            agent = self.config.agent_id,
+                                            game_id = %game_id,
+                                            error = %e,
+                                            "grok unavailable for scale-in, skipping (no fallback)"
+                                        );
+                                    }
+                                }
+                            }
+                            // No fallback for scale-in when Grok is not configured
                         }
                     }
                 }

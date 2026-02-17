@@ -29,6 +29,15 @@ use crate::strategy::nba_comeback::grok_intel::{
 pub enum DecisionTrigger {
     /// ESPN 30s poll detected a comeback opportunity
     EspnComeback,
+    /// ESPN poll detected scaling-in opportunity for existing position
+    EspnScaleIn {
+        /// Which add this is (1st, 2nd, 3rd, etc.)
+        add_number: u32,
+        /// Current total shares held
+        existing_shares: u64,
+        /// Current total cost of position
+        existing_cost_usd: f64,
+    },
     /// Grok 5-min tick produced a trade signal
     GrokSignal(GrokSignalType),
 }
@@ -37,6 +46,7 @@ impl std::fmt::Display for DecisionTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EspnComeback => write!(f, "espn_comeback"),
+            Self::EspnScaleIn { add_number, .. } => write!(f, "espn_scale_in_{}", add_number),
             Self::GrokSignal(s) => write!(f, "grok_signal_{}", s),
         }
     }
@@ -273,6 +283,26 @@ RISK METRICS (pre-computed):
         ev = req.risk_metrics.expected_value * 100.0,
         kelly = req.risk_metrics.kelly_fraction * 100.0,
     ));
+
+    // Position context for scale-in decisions
+    if let DecisionTrigger::EspnScaleIn {
+        add_number,
+        existing_shares,
+        existing_cost_usd,
+    } = &req.trigger
+    {
+        prompt.push_str(&format!(
+            r#"EXISTING POSITION (scale-in #{add_number}):
+- Already holding {existing_shares} shares (cost: ${existing_cost:.2})
+- This would be add #{add_number} to the position
+- Consider whether adding increases or concentrates risk
+
+"#,
+            add_number = add_number,
+            existing_shares = existing_shares,
+            existing_cost = existing_cost_usd,
+        ));
+    }
 
     prompt.push_str(&format!(
         r#"TRIGGER: {trigger}

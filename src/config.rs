@@ -267,6 +267,27 @@ pub struct NbaComebackConfig {
     /// Limits position sizing even when Kelly suggests larger bets.
     #[serde(default = "default_kelly_fraction_cap")]
     pub kelly_fraction_cap: f64,
+    // ── Kelly scaling-in ─────────────────────────────────────────
+    /// Enable Kelly-proportional scaling-in (add to positions when price drops
+    /// but fundamentals remain strong). Each cycle recalculates Kelly optimal
+    /// total exposure and adds the delta if conditions are met.
+    #[serde(default)]
+    pub scaling_enabled: bool,
+    /// Maximum number of additional entries per game beyond the initial (default 3)
+    #[serde(default = "default_scaling_max_adds")]
+    pub scaling_max_adds: u32,
+    /// Minimum price drop (%) from last entry before adding (default 5.0)
+    #[serde(default = "default_scaling_min_price_drop_pct")]
+    pub scaling_min_price_drop_pct: f64,
+    /// Maximum total exposure per game in USD (default 50)
+    #[serde(default = "default_scaling_max_game_exposure")]
+    pub scaling_max_game_exposure_usd: Decimal,
+    /// Comeback rate must retain this fraction of initial rate to scale in (default 0.70)
+    #[serde(default = "default_scaling_min_comeback_retention")]
+    pub scaling_min_comeback_retention: f64,
+    /// Minimum game time remaining in minutes for scaling-in (default 8.0)
+    #[serde(default = "default_scaling_min_time_remaining")]
+    pub scaling_min_time_remaining_mins: f64,
 }
 
 fn default_nba_comeback_min_edge() -> Decimal {
@@ -333,6 +354,26 @@ fn default_min_expected_value() -> f64 {
 
 fn default_kelly_fraction_cap() -> f64 {
     0.25
+}
+
+fn default_scaling_max_adds() -> u32 {
+    3
+}
+
+fn default_scaling_min_price_drop_pct() -> f64 {
+    5.0 // 5%
+}
+
+fn default_scaling_max_game_exposure() -> Decimal {
+    Decimal::new(50, 0) // $50
+}
+
+fn default_scaling_min_comeback_retention() -> f64 {
+    0.70 // 70% of initial comeback rate
+}
+
+fn default_scaling_min_time_remaining() -> f64 {
+    8.0 // 8 minutes
 }
 
 /// Event registry discovery service configuration

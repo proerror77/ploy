@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -33,12 +34,31 @@ pub struct ComebackOpportunity {
     pub token_id: String,
 }
 
+/// A single entry in a game position (for Kelly scaling-in tracking)
+#[derive(Debug, Clone)]
+pub struct PositionEntry {
+    pub entry_price: Decimal,
+    pub shares: u64,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Tracks all entries for a single game (for Kelly scaling-in)
+#[derive(Debug, Clone)]
+pub struct GamePosition {
+    pub entries: Vec<PositionEntry>,
+    pub initial_comeback_rate: f64,
+    pub total_shares: u64,
+    pub total_cost: Decimal,
+}
+
 /// Mutable state across scan cycles
 #[derive(Debug, Clone)]
 pub struct NbaComebackState {
     pub traded_games: HashMap<String, DateTime<Utc>>,
     pub daily_spend_usd: Decimal,
     pub daily_spend_day: NaiveDate,
+    /// Per-game position tracking for Kelly scaling-in
+    pub game_positions: HashMap<String, GamePosition>,
 }
 
 impl Default for NbaComebackState {
@@ -47,6 +67,7 @@ impl Default for NbaComebackState {
             traded_games: HashMap::new(),
             daily_spend_usd: Decimal::ZERO,
             daily_spend_day: Utc::now().date_naive(),
+            game_positions: HashMap::new(),
         }
     }
 }
@@ -100,6 +121,200 @@ impl NbaComebackCore {
             .traded_games
             .insert(game_id.to_string(), Utc::now());
         self.state.daily_spend_usd += spend;
+    }
+
+    // ── Kelly scaling-in ──────────────────────────────────────────
+
+    /// Record a new position entry for scaling-in tracking.
+    /// Call this after a successful order submission (initial or scale-in).
+    pub fn record_position_entry(
+        &mut self,
+        game_id: &str,
+        entry_price: Decimal,
+        shares: u64,
+        comeback_rate: f64,
+    ) {
+        let cost = entry_price * Decimal::from(shares);
+        let entry = PositionEntry {
+            entry_price,
+            shares,
+            timestamp: Utc::now(),
+        };
+
+        let pos = self
+            .state
+            .game_positions
+            .entry(game_id.to_string())
+            .or_insert_with(|| GamePosition {
+                entries: Vec::new(),
+                initial_comeback_rate: comeback_rate,
+                total_shares: 0,
+                total_cost: Decimal::ZERO,
+            });
+
+        pos.entries.push(entry);
+        pos.total_shares += shares;
+        pos.total_cost += cost;
+    }
+
+    /// Check whether scaling-in guards pass for a game.
+    ///
+    /// Guards:
+    /// 1. Existing position exists and hasn't exceeded max adds
+    /// 2. Price dropped >= min_price_drop_pct from last entry
+    /// 3. Comeback rate retained >= min_comeback_retention of initial
+    /// 4. Enough game time remaining
+    /// 5. Total exposure under max_game_exposure_usd
+    pub fn can_scale_in(
+        &self,
+        game_id: &str,
+        current_price: Decimal,
+        current_comeback_rate: f64,
+        time_remaining_mins: f64,
+    ) -> bool {
+        let pos = match self.state.game_positions.get(game_id) {
+            Some(p) => p,
+            None => return false, // no existing position → use initial entry path
+        };
+
+        // Guard 1: max adds not exceeded
+        // entries includes the initial entry, so add count = entries.len() - 1
+        let add_count = pos.entries.len().saturating_sub(1) as u32;
+        if add_count >= self.cfg.scaling_max_adds {
+            debug!(game_id, adds = add_count, "scaling: max adds reached");
+            return false;
+        }
+
+        // Guard 2: price drop from last entry
+        if let Some(last_entry) = pos.entries.last() {
+            let drop_pct = if last_entry.entry_price > Decimal::ZERO {
+                let drop = last_entry.entry_price - current_price;
+                (drop * dec!(100) / last_entry.entry_price)
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            if drop_pct < self.cfg.scaling_min_price_drop_pct {
+                debug!(
+                    game_id,
+                    drop_pct = format!("{:.1}%", drop_pct),
+                    min = format!("{:.1}%", self.cfg.scaling_min_price_drop_pct),
+                    "scaling: insufficient price drop"
+                );
+                return false;
+            }
+        }
+
+        // Guard 3: comeback rate retention
+        let retention = if pos.initial_comeback_rate > 0.0 {
+            current_comeback_rate / pos.initial_comeback_rate
+        } else {
+            0.0
+        };
+        if retention < self.cfg.scaling_min_comeback_retention {
+            debug!(
+                game_id,
+                retention = format!("{:.0}%", retention * 100.0),
+                min = format!("{:.0}%", self.cfg.scaling_min_comeback_retention * 100.0),
+                "scaling: comeback rate degraded too much"
+            );
+            return false;
+        }
+
+        // Guard 4: time remaining
+        if time_remaining_mins < self.cfg.scaling_min_time_remaining_mins {
+            debug!(
+                game_id,
+                time_remaining = format!("{:.1}m", time_remaining_mins),
+                min = format!("{:.1}m", self.cfg.scaling_min_time_remaining_mins),
+                "scaling: not enough time remaining"
+            );
+            return false;
+        }
+
+        // Guard 5: total exposure cap
+        if pos.total_cost >= self.cfg.scaling_max_game_exposure_usd {
+            debug!(
+                game_id,
+                exposure = %pos.total_cost,
+                max = %self.cfg.scaling_max_game_exposure_usd,
+                "scaling: max game exposure reached"
+            );
+            return false;
+        }
+
+        true
+    }
+
+    /// Calculate the number of shares to add for Kelly-proportional scaling.
+    ///
+    /// Returns `Some(shares)` if we should add, `None` if Kelly says hold/reduce.
+    ///
+    /// Formula:
+    ///   kelly_fraction = edge / (1 - price)
+    ///   capped_fraction = min(kelly_fraction, kelly_fraction_cap)
+    ///   target_exposure = capped_fraction * max_game_exposure_usd
+    ///   delta = target_exposure - current_exposure
+    ///   shares = floor(delta / current_price)
+    pub fn kelly_scaling_shares(
+        &self,
+        game_id: &str,
+        current_price: Decimal,
+        fair_value: f64,
+    ) -> Option<u64> {
+        let pos = self.state.game_positions.get(game_id)?;
+
+        let price_f64 = current_price
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+            .clamp(0.001, 0.999);
+
+        let edge = fair_value - price_f64;
+        if edge <= 0.0 {
+            return None; // no edge → don't add
+        }
+
+        let kelly_fraction = edge / (1.0 - price_f64);
+        let capped = kelly_fraction.min(self.cfg.kelly_fraction_cap);
+
+        let max_exposure_f64 = self
+            .cfg
+            .scaling_max_game_exposure_usd
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(50.0);
+
+        let target_exposure = capped * max_exposure_f64;
+        let current_exposure = pos
+            .total_cost
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0);
+
+        let delta = target_exposure - current_exposure;
+        if delta <= 0.0 {
+            return None; // already at or above optimal
+        }
+
+        let delta_shares = (delta / price_f64).floor() as u64;
+        if delta_shares == 0 {
+            return None;
+        }
+
+        // Don't exceed max game exposure
+        let add_cost = price_f64 * delta_shares as f64;
+        if current_exposure + add_cost > max_exposure_f64 {
+            let clamped = ((max_exposure_f64 - current_exposure) / price_f64).floor() as u64;
+            if clamped == 0 {
+                return None;
+            }
+            return Some(clamped);
+        }
+
+        Some(delta_shares)
     }
 
     // ── Scan cycle ──────────────────────────────────────────────
@@ -341,5 +556,187 @@ mod tests {
         // Should be on cooldown (just traded)
         let elapsed = (Utc::now() - *state.traded_games.get("game1").unwrap()).num_seconds();
         assert!(elapsed < 300); // 5 min cooldown
+    }
+
+    fn scaling_cfg() -> crate::config::NbaComebackConfig {
+        crate::config::NbaComebackConfig {
+            enabled: true,
+            min_edge: dec!(0.05),
+            max_entry_price: dec!(0.75),
+            shares: 50,
+            cooldown_secs: 300,
+            max_daily_spend_usd: dec!(100),
+            min_deficit: 1,
+            max_deficit: 15,
+            target_quarter: 3,
+            espn_poll_interval_secs: 30,
+            min_comeback_rate: 0.15,
+            season: "2025-26".to_string(),
+            grok_enabled: false,
+            grok_interval_secs: 300,
+            grok_min_edge: dec!(0.08),
+            grok_min_confidence: 0.6,
+            grok_decision_cooldown_secs: 60,
+            grok_fallback_enabled: true,
+            min_reward_risk_ratio: 4.0,
+            min_expected_value: 0.05,
+            kelly_fraction_cap: 0.25,
+            scaling_enabled: true,
+            scaling_max_adds: 3,
+            scaling_min_price_drop_pct: 5.0,
+            scaling_max_game_exposure_usd: dec!(50),
+            scaling_min_comeback_retention: 0.70,
+            scaling_min_time_remaining_mins: 8.0,
+        }
+    }
+
+    #[test]
+    fn test_record_position_entry() {
+        let cfg = scaling_cfg();
+        let mut state = NbaComebackState::default();
+        // Can't construct full NbaComebackCore without DB, so test state directly
+        let game_id = "game1";
+
+        // Record initial entry
+        let entry = PositionEntry {
+            entry_price: dec!(0.15),
+            shares: 50,
+            timestamp: Utc::now(),
+        };
+        let pos = state
+            .game_positions
+            .entry(game_id.to_string())
+            .or_insert_with(|| GamePosition {
+                entries: Vec::new(),
+                initial_comeback_rate: 0.22,
+                total_shares: 0,
+                total_cost: Decimal::ZERO,
+            });
+        pos.entries.push(entry);
+        pos.total_shares += 50;
+        pos.total_cost += dec!(0.15) * dec!(50);
+
+        let pos = state.game_positions.get(game_id).unwrap();
+        assert_eq!(pos.entries.len(), 1);
+        assert_eq!(pos.total_shares, 50);
+        assert_eq!(pos.total_cost, dec!(7.5));
+        assert!((pos.initial_comeback_rate - 0.22).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_scaling_guards_max_adds() {
+        let cfg = scaling_cfg();
+        let mut state = NbaComebackState::default();
+        let game_id = "game1";
+
+        // Create a position with 4 entries (initial + 3 adds = max_adds reached)
+        let pos = state
+            .game_positions
+            .entry(game_id.to_string())
+            .or_insert_with(|| GamePosition {
+                entries: Vec::new(),
+                initial_comeback_rate: 0.25,
+                total_shares: 0,
+                total_cost: Decimal::ZERO,
+            });
+        for i in 0..4 {
+            pos.entries.push(PositionEntry {
+                entry_price: dec!(0.15) - Decimal::from(i) * dec!(0.01),
+                shares: 50,
+                timestamp: Utc::now(),
+            });
+            pos.total_shares += 50;
+            pos.total_cost += dec!(7.5);
+        }
+
+        // add_count = 4 - 1 = 3, which equals scaling_max_adds → should fail
+        let add_count = pos.entries.len().saturating_sub(1) as u32;
+        assert_eq!(add_count, 3);
+        assert!(add_count >= cfg.scaling_max_adds);
+    }
+
+    #[test]
+    fn test_scaling_guards_price_drop() {
+        let cfg = scaling_cfg();
+
+        // Last entry at $0.20, current at $0.18 → 10% drop → passes 5% threshold
+        let drop_pct = ((dec!(0.20) - dec!(0.18)) * dec!(100) / dec!(0.20))
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        assert!(drop_pct >= cfg.scaling_min_price_drop_pct);
+
+        // Last entry at $0.20, current at $0.195 → 2.5% drop → fails 5% threshold
+        let drop_pct2 = ((dec!(0.20) - dec!(0.195)) * dec!(100) / dec!(0.20))
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        assert!(drop_pct2 < cfg.scaling_min_price_drop_pct);
+    }
+
+    #[test]
+    fn test_scaling_guards_comeback_retention() {
+        let cfg = scaling_cfg();
+
+        // Initial comeback rate 0.25, current 0.20 → retention 80% → passes 70%
+        let retention = 0.20 / 0.25;
+        assert!(retention >= cfg.scaling_min_comeback_retention);
+
+        // Current 0.15 → retention 60% → fails 70%
+        let retention2 = 0.15 / 0.25;
+        assert!(retention2 < cfg.scaling_min_comeback_retention);
+    }
+
+    #[test]
+    fn test_kelly_scaling_shares_basic() {
+        // Manually test the Kelly math:
+        // fair_value=0.35, price=0.12, max_exposure=$50, cap=0.25
+        // edge = 0.35 - 0.12 = 0.23
+        // kelly = 0.23 / (1 - 0.12) = 0.2614
+        // capped = min(0.2614, 0.25) = 0.25
+        // target = 0.25 * 50 = $12.50
+        // current = $6.00 (50 shares at $0.12)
+        // delta = $6.50
+        // shares = floor(6.50 / 0.12) = 54
+
+        let mut state = NbaComebackState::default();
+        let pos = state
+            .game_positions
+            .entry("game1".to_string())
+            .or_insert_with(|| GamePosition {
+                entries: vec![PositionEntry {
+                    entry_price: dec!(0.12),
+                    shares: 50,
+                    timestamp: Utc::now(),
+                }],
+                initial_comeback_rate: 0.22,
+                total_shares: 50,
+                total_cost: dec!(6),
+            });
+
+        let cfg = scaling_cfg();
+        let price_f64 = 0.12_f64;
+        let fair_value = 0.35_f64;
+        let edge = fair_value - price_f64;
+        let kelly = edge / (1.0 - price_f64);
+        let capped = kelly.min(cfg.kelly_fraction_cap);
+        let max_exp = 50.0_f64;
+        let target = capped * max_exp;
+        let current = 6.0_f64;
+        let delta = target - current;
+        let shares = (delta / price_f64).floor() as u64;
+
+        assert_eq!(capped, 0.25); // kelly 0.2614 capped at 0.25
+        assert!((target - 12.5).abs() < 0.01);
+        assert_eq!(shares, 54);
+    }
+
+    #[test]
+    fn test_kelly_scaling_no_edge() {
+        // fair_value=0.10, price=0.15 → negative edge → no scaling
+        let price_f64 = 0.15_f64;
+        let fair_value = 0.10_f64;
+        let edge = fair_value - price_f64;
+        assert!(edge <= 0.0);
     }
 }
