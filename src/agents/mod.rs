@@ -5,12 +5,14 @@
 
 pub mod context;
 pub mod crypto;
+pub mod crypto_lob_ml;
 pub mod politics;
 pub mod sports;
 pub mod traits;
 
 pub use context::AgentContext;
 pub use crypto::{CryptoTradingAgent, CryptoTradingConfig};
+pub use crypto_lob_ml::{CryptoLobMlAgent, CryptoLobMlConfig, LobMlWeights};
 pub use politics::{PoliticsTradingAgent, PoliticsTradingConfig};
 pub use sports::{SportsTradingAgent, SportsTradingConfig};
 pub use traits::{AgentConfig, TradingAgent};

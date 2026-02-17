@@ -3,6 +3,8 @@
 This runbook deploys two always-on workloads on one EC2 host:
 - `ploy-sports-pm.service` (Sports PM / NBA comeback)
 - `ploy-crypto-dryrun.service` (Crypto trading agents dry-run)
+- `ploy-orderbook-history.service` (Polymarket L2 orderbook-history backfill collector)
+- `ploy-maintenance.timer` (DB + log retention)
 
 ## 1) Deploy to EC2
 
@@ -12,7 +14,7 @@ Run from your local machine:
 scripts/aws_ec2_deploy.sh \
   --host <EC2_PUBLIC_IP> \
   --key ~/.ssh/<your-key>.pem \
-  --services ploy-sports-pm,ploy-crypto-dryrun
+  --services ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer
 ```
 
 Optional:
@@ -24,11 +26,16 @@ scripts/aws_ec2_deploy.sh \
   --key ~/.ssh/<your-key>.pem \
   --start true \
   --enable true \
-  --services ploy-sports-pm,ploy-crypto-dryrun
+  --services ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer
 ```
 
 What it installs:
-- systemd units: `ploy-sports-pm.service`, `ploy-crypto-dryrun.service`
+- systemd units:
+  - `ploy-sports-pm.service`
+  - `ploy-crypto-dryrun.service`
+  - `ploy-orderbook-history.service`
+  - `ploy-maintenance.service`
+  - `ploy-maintenance.timer`
 - config files:
   - `/opt/ploy/config/sports_pm.toml`
   - `/opt/ploy/config/crypto_dry_run.toml`
@@ -68,7 +75,7 @@ Sports PM needs `nba_team_stats` data before signals are generated.
 
 ```bash
 cd /opt/ploy
-./target/release/ploy --config /opt/ploy/config/sports_pm.toml strategy nba-seed-stats --season 2025-26
+/opt/ploy/bin/ploy --config /opt/ploy/config/sports_pm.toml strategy nba-seed-stats --season 2025-26
 ```
 
 ## 4) Service Verification
@@ -76,11 +83,15 @@ cd /opt/ploy
 ```bash
 sudo systemctl status ploy-sports-pm
 sudo systemctl status ploy-crypto-dryrun
+sudo systemctl status ploy-orderbook-history
+sudo systemctl status ploy-maintenance.timer
 ```
 
 ```bash
 sudo journalctl -u ploy-sports-pm -f
 sudo journalctl -u ploy-crypto-dryrun -f
+sudo journalctl -u ploy-orderbook-history -f
+sudo journalctl -u ploy-maintenance -n 200 --no-pager
 ```
 
 ## 5) OpenClaw Remote Control (SSH Forced Command)

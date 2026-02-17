@@ -1,3 +1,4 @@
+use chrono::Utc;
 use clap::Parser;
 #[cfg(feature = "api")]
 use ploy::adapters::start_api_server_background;
@@ -218,6 +219,34 @@ async fn main() -> Result<()> {
         }) => {
             init_logging();
             run_collect_mode(symbols, markets.as_deref(), *duration).await?;
+        }
+        Some(Commands::OrderbookHistory {
+            asset_ids,
+            start_ms,
+            end_ms,
+            lookback_secs,
+            levels,
+            sample_ms,
+            limit,
+            max_pages,
+            base_url,
+            resume_from_db,
+        }) => {
+            init_logging();
+            run_orderbook_history_mode(
+                &cli.config,
+                asset_ids,
+                *start_ms,
+                *end_ms,
+                *lookback_secs,
+                *levels,
+                *sample_ms,
+                *limit,
+                *max_pages,
+                base_url,
+                *resume_from_db,
+            )
+            .await?;
         }
         Some(Commands::Crypto(crypto_cmd)) => {
             init_logging();
@@ -2421,24 +2450,47 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,ploy=debug,sqlx=warn"));
 
-    // Check if we should write to file (LOG_DIR env var or /var/log/ploy exists)
-    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "/var/log/ploy".to_string());
+    // Check if we should write to file (prefer PLOY_LOG_DIR, fallback to LOG_DIR or /var/log/ploy).
+    let log_dir = std::env::var("PLOY_LOG_DIR")
+        .or_else(|_| std::env::var("LOG_DIR"))
+        .unwrap_or_else(|_| "/var/log/ploy".to_string());
 
-    // Try to create log directory
+    // Try to create log directory.
+    //
+    // Important: `tracing_appender::rolling::daily` will panic (and in our release build,
+    // abort) if it can't create the initial log file. So we must preflight writability.
     let file_layer = if std::fs::create_dir_all(&log_dir).is_ok() {
-        // Daily rotating file appender
-        let file_appender = tracing_appender::rolling::daily(&log_dir, "ploy.log");
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        let test_path = std::path::Path::new(&log_dir).join(".ploy_write_test");
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&test_path)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&test_path);
 
-        // Keep the guard alive by leaking it (acceptable for long-running process)
-        Box::leak(Box::new(_guard));
+                // Daily rotating file appender
+                let file_appender = tracing_appender::rolling::daily(&log_dir, "ploy.log");
+                let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-        Some(
-            tracing_subscriber::fmt::layer()
-                .with_writer(non_blocking)
-                .with_ansi(false) // No color codes in file
-                .with_target(true),
-        )
+                // Keep the guard alive by leaking it (acceptable for long-running process)
+                Box::leak(Box::new(_guard));
+
+                Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false) // No color codes in file
+                        .with_target(true),
+                )
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Could not write to log directory {} ({}), file logging disabled",
+                    log_dir, e
+                );
+                None
+            }
+        }
     } else {
         eprintln!(
             "Warning: Could not create log directory {}, file logging disabled",
@@ -2455,13 +2507,14 @@ fn init_logging() {
         .with_line_number(false);
 
     // Combine layers
+    let file_logging_enabled = file_layer.is_some();
     tracing_subscriber::registry()
         .with(filter)
         .with(console_layer)
         .with(file_layer)
         .init();
 
-    if std::path::Path::new(&log_dir).exists() {
+    if file_logging_enabled {
         eprintln!("Logging to: {}/ploy.log", log_dir);
     }
 }
@@ -3541,7 +3594,7 @@ fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
         "ETH" => vec!["10683".to_string(), "10191".to_string()], // eth-up-or-down-5m, eth-up-or-down-15m
         "SOL" => vec!["10686".to_string(), "10423".to_string()], // sol-up-or-down-5m, sol-up-or-down-15m
         "XRP" => vec!["10685".to_string(), "10422".to_string()], // xrp-up-or-down-5m, xrp-up-or-down-15m
-        _ => vec![coin_or_series.trim().to_string()], // Allow raw series IDs
+        _ => vec![coin_or_series.trim().to_string()],            // Allow raw series IDs
     }
 }
 
@@ -5459,6 +5512,90 @@ async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u64) -
     Ok(())
 }
 
+async fn run_orderbook_history_mode(
+    config_path: &str,
+    asset_ids: &str,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    lookback_secs: u64,
+    levels: usize,
+    sample_ms: i64,
+    limit: usize,
+    max_pages: usize,
+    base_url: &str,
+    resume_from_db: bool,
+) -> Result<()> {
+    use ploy::collector::{OrderbookHistoryCollector, OrderbookHistoryCollectorConfig};
+
+    let ids: Vec<String> = asset_ids
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if ids.is_empty() {
+        return Err(PloyError::Validation(
+            "--asset-ids must contain at least one token id".to_string(),
+        ));
+    }
+
+    // Load config for database URL.
+    let cfg = AppConfig::load_from(config_path)?;
+    let store = PostgresStore::new(&cfg.database.url, 5).await?;
+
+    let mut col_cfg = OrderbookHistoryCollectorConfig::default();
+    col_cfg.clob_base_url = base_url.trim_end_matches('/').to_string();
+    col_cfg.levels = levels;
+    col_cfg.sample_ms = sample_ms;
+    col_cfg.page_limit = limit;
+    col_cfg.max_pages = max_pages;
+
+    let collector = OrderbookHistoryCollector::new(store.pool().clone(), col_cfg);
+    collector.ensure_tables().await?;
+
+    let now_ms: i64 = Utc::now().timestamp_millis();
+    let end_ms = end_ms.unwrap_or(now_ms);
+
+    for asset_id in &ids {
+        let fallback_start_ms =
+            start_ms.unwrap_or_else(|| end_ms.saturating_sub(lookback_secs as i64 * 1000));
+        let start_ms = if resume_from_db {
+            let last_ms = collector.last_ts_ms_for_asset(asset_id).await?;
+            let resumed_ms = last_ms.saturating_add(1);
+
+            // Safety: if there is no history for this asset yet, or the resume point is
+            // far in the past, clamp to a sane lookback window instead of requesting
+            // from the unix epoch (which can trigger huge backfills / rate limiting).
+            if last_ms <= 0 || resumed_ms < fallback_start_ms {
+                fallback_start_ms
+            } else {
+                resumed_ms
+            }
+        } else {
+            fallback_start_ms
+        };
+
+        info!(
+            asset_id = asset_id.as_str(),
+            start_ms,
+            end_ms,
+            levels,
+            sample_ms,
+            limit,
+            max_pages,
+            "starting orderbook-history backfill"
+        );
+
+        let inserted = collector.backfill_asset(asset_id, start_ms, end_ms).await?;
+        info!(
+            asset_id = asset_id.as_str(),
+            inserted, "orderbook-history backfill done"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::map_crypto_coin_to_series_ids;
@@ -5485,7 +5622,13 @@ mod tests {
 
     #[test]
     fn test_map_crypto_coin_to_series_ids_accepts_raw_series() {
-        assert_eq!(map_crypto_coin_to_series_ids("10192"), vec!["10192".to_string()]);
-        assert_eq!(map_crypto_coin_to_series_ids("10684"), vec!["10684".to_string()]);
+        assert_eq!(
+            map_crypto_coin_to_series_ids("10192"),
+            vec!["10192".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("10684"),
+            vec!["10684".to_string()]
+        );
     }
 }

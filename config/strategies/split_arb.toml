@@ -1,0 +1,40 @@
+# Split Arbitrage Strategy Configuration
+# Trades YES/NO splits when combined price < $1
+
+[strategy]
+name = "split_arb"
+enabled = true
+mode = "arbitrage"
+
+[entry]
+# Maximum combined price for YES+NO (cents)
+# Below 100 cents means guaranteed profit at resolution
+max_combined_price = 98
+
+# Minimum spread required (cents)
+min_spread = 2
+
+# Minimum liquidity on each side
+min_liquidity = 100
+
+[position]
+# Amount to trade on each side (shares)
+shares_per_side = 50
+
+# Maximum concurrent positions
+max_positions = 10
+
+[timing]
+# Minimum time to resolution (seconds)
+min_time_remaining = 60
+
+# Maximum time to resolution (seconds)
+max_time_remaining = 3600
+
+[risk]
+# Maximum exposure per market (USD)
+max_exposure = 500
+
+# Stop if daily loss exceeds this (USD)
+daily_loss_limit = 100
+

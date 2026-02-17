@@ -731,6 +731,8 @@ impl Strategy for MomentumStrategyAdapter {
                 up_token,
                 down_token,
                 end_time,
+                price_to_beat: _,
+                title: _,
             } => {
                 // Map series to symbol
                 let symbol = match series_id.as_str() {
@@ -763,6 +765,8 @@ impl Strategy for MomentumStrategyAdapter {
                 let mut events = self.events.write().await;
                 events.retain(|_, e| &e.event_id != event_id);
             }
+
+            MarketUpdate::BinanceKline { .. } => {}
         }
 
         Ok(actions)
@@ -1305,6 +1309,8 @@ impl Strategy for SplitArbStrategyAdapter {
                 up_token,
                 down_token,
                 end_time,
+                price_to_beat: _,
+                title: _,
             } => {
                 let mut markets = self.markets.write().await;
                 markets.insert(

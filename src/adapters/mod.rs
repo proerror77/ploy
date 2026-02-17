@@ -1,5 +1,6 @@
 #[cfg(feature = "api")]
 pub mod api_server;
+pub mod binance_kline_ws;
 pub mod binance_ws;
 pub mod feishu;
 pub mod nonce_manager;
@@ -12,6 +13,7 @@ pub mod transaction_manager;
 
 #[cfg(feature = "api")]
 pub use api_server::{start_api_server, start_api_server_background};
+pub use binance_kline_ws::{BinanceKlineBar, BinanceKlineWebSocket, KlineUpdate};
 pub use binance_ws::{BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice};
 pub use feishu::FeishuNotifier;
 pub use nonce_manager::{NonceManager, NonceStats};

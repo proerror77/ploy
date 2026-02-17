@@ -291,6 +291,12 @@ mod tests {
             espn_poll_interval_secs: 30,
             min_comeback_rate: 0.15,
             season: "2025-26".to_string(),
+            grok_enabled: false,
+            grok_interval_secs: 300,
+            grok_min_edge: dec!(0.08),
+            grok_min_confidence: 0.6,
+            grok_decision_cooldown_secs: 60,
+            grok_fallback_enabled: true,
         };
 
         // Test status transitions without DB

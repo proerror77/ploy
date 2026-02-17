@@ -12,7 +12,7 @@ if ! id -u ploy >/dev/null 2>&1; then
 fi
 
 # Ensure required directories exist
-sudo mkdir -p /opt/ploy/{config,env,data,logs,deployment}
+sudo mkdir -p /opt/ploy/{config,env,data,logs,deployment,run}
 sudo chown -R ploy:ploy /opt/ploy
 
 # Copy service files
@@ -25,6 +25,15 @@ if [[ -f /opt/ploy/deployment/ploy-sports-pm.service ]]; then
 fi
 if [[ -f /opt/ploy/deployment/ploy-crypto-dryrun.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-crypto-dryrun.service /etc/systemd/system/ploy-crypto-dryrun.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service /etc/systemd/system/ploy-strategy-pattern-memory-dryrun.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-strategy-momentum-dryrun.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-momentum-dryrun.service /etc/systemd/system/ploy-strategy-momentum-dryrun.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-strategy-split-arb-dryrun.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-split-arb-dryrun.service /etc/systemd/system/ploy-strategy-split-arb-dryrun.service
 fi
 
 # Install workload configs/env templates if missing

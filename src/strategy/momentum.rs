@@ -410,6 +410,20 @@ impl EventMatcher {
 
     /// Get all tradeable events for a symbol
     pub async fn get_events(&self, symbol: &str) -> Vec<EventInfo> {
+        // Preserve historical behavior for trading: keep a 60s safety buffer.
+        self.get_events_with_min_remaining(symbol, 60).await
+    }
+
+    /// Get events for a symbol with a configurable time-remaining threshold.
+    ///
+    /// `min_remaining_secs` is compared against `time_remaining().num_seconds()`:
+    /// - `60` keeps a 60s buffer (safer for trading)
+    /// - `0` includes events up to their end time (better for data collection)
+    pub async fn get_events_with_min_remaining(
+        &self,
+        symbol: &str,
+        min_remaining_secs: i64,
+    ) -> Vec<EventInfo> {
         let series_ids = match self.symbol_to_series.get(symbol) {
             Some(ids) => ids,
             None => return vec![],
@@ -421,7 +435,7 @@ impl EventMatcher {
         for series_id in series_ids {
             if let Some(series_events) = events.get(series_id) {
                 for event in series_events {
-                    if event.is_tradeable(60) {
+                    if event.time_remaining().num_seconds() > min_remaining_secs {
                         result.push(event.clone());
                     }
                 }
@@ -433,19 +447,32 @@ impl EventMatcher {
 
     /// Refresh active events from Polymarket API
     pub async fn refresh(&self) -> Result<()> {
-        let mut events = self.active_events.write().await;
+        // IMPORTANT: do not hold the write lock while doing network I/O.
+        // Otherwise, readers (e.g., trade collectors) can be starved for long periods.
 
-        for (_, series_ids) in &self.symbol_to_series {
-            for series_id in series_ids {
-                match self.fetch_series_events(series_id).await {
-                    Ok(series_events) => {
-                        events.insert(series_id.clone(), series_events);
-                    }
-                    Err(e) => {
-                        warn!("Failed to fetch events for {}: {}", series_id, e);
-                    }
-                }
+        // Build a stable, de-duplicated list of series IDs to refresh.
+        let mut series_ids: Vec<String> =
+            self.symbol_to_series.values().flatten().cloned().collect();
+        series_ids.sort();
+        series_ids.dedup();
+
+        // Fetch updates without holding the lock.
+        let mut updates: Vec<(String, Vec<EventInfo>)> = Vec::with_capacity(series_ids.len());
+        for series_id in series_ids {
+            match self.fetch_series_events(&series_id).await {
+                Ok(series_events) => updates.push((series_id, series_events)),
+                Err(e) => warn!("Failed to fetch events for {}: {}", series_id, e),
             }
+        }
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        // Apply updates atomically.
+        let mut events = self.active_events.write().await;
+        for (series_id, series_events) in updates {
+            events.insert(series_id, series_events);
         }
 
         Ok(())
@@ -1754,6 +1781,14 @@ impl MomentumEngine {
                         continue;
                     }
 
+                    if !self.market_is_settled(&market) {
+                        debug!(
+                            "{} market closed but not settled yet (outcome prices not 1/0), waiting...",
+                            symbol
+                        );
+                        continue;
+                    }
+
                     // Determine win/loss by checking token prices
                     // Winner token price = 1.0, loser = 0.0
                     let won = self.check_if_won(&pos, &market);
@@ -1863,6 +1898,36 @@ impl MomentumEngine {
         (won_count, lost_count, total_payout)
     }
 
+    fn market_is_settled(&self, market: &crate::adapters::MarketResponse) -> bool {
+        use rust_decimal::Decimal;
+        use rust_decimal_macros::dec;
+
+        // Avoid prematurely treating a market as resolved just because prices move close to 1/0.
+        // We only accept settlement once the market is actually closed.
+        if !market.closed {
+            return false;
+        }
+
+        let mut prices = Vec::new();
+        for t in &market.tokens {
+            let Some(ref price_str) = t.price else {
+                continue;
+            };
+            if let Ok(p) = price_str.parse::<Decimal>() {
+                prices.push(p);
+            }
+        }
+
+        if prices.is_empty() {
+            return false;
+        }
+
+        // Official settlement: exactly one winner ~1, all losers ~0.
+        let winners = prices.iter().filter(|p| **p >= dec!(0.99)).count();
+        let losers = prices.iter().filter(|p| **p <= dec!(0.01)).count();
+        winners == 1 && losers == prices.len().saturating_sub(1)
+    }
+
     /// Check if we won based on market outcome prices
     fn check_if_won(&self, pos: &Position, market: &crate::adapters::MarketResponse) -> bool {
         // Find our token in the market tokens
@@ -1871,7 +1936,7 @@ impl MomentumEngine {
                 // Parse the price - winner has price = 1.0
                 if let Some(ref price_str) = token.price {
                     if let Ok(price) = price_str.parse::<f64>() {
-                        return price > 0.5; // Winner = 1.0, Loser = 0.0
+                        return price >= 0.99; // Winner = 1.0, Loser = 0.0
                     }
                 }
             }

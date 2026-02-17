@@ -47,6 +47,7 @@ pub use manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus
 pub mod core;
 pub mod crypto;
 pub mod nba_comeback;
+pub mod pattern_memory;
 pub mod sports;
 
 // =============================================================================

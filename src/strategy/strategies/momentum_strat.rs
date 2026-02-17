@@ -613,6 +613,8 @@ impl Strategy for MomentumStrategy {
                 up_token,
                 down_token,
                 end_time,
+                price_to_beat: _,
+                title: _,
             } => {
                 // Find which symbol this series belongs to
                 for mapping in SeriesMapping::standard_mappings() {

@@ -68,6 +68,16 @@ pub enum DataFeed {
     /// Binance spot prices for specific symbols
     BinanceSpot { symbols: Vec<String> },
 
+    /// Binance Kline (candlestick) updates (WebSocket).
+    ///
+    /// Intervals use Binance strings like "1m", "5m", "15m", "1h".
+    BinanceKlines {
+        symbols: Vec<String>,
+        intervals: Vec<String>,
+        /// If true, only emit closed bars.
+        closed_only: bool,
+    },
+
     /// Polymarket event metadata (for series monitoring)
     PolymarketEvents { series_ids: Vec<String> },
 
@@ -78,6 +88,20 @@ pub enum DataFeed {
 // ============================================================================
 // Market Updates
 // ============================================================================
+
+/// A single closed (or in-progress) kline bar.
+#[derive(Debug, Clone)]
+pub struct KlineBar {
+    pub open_time: DateTime<Utc>,
+    pub close_time: DateTime<Utc>,
+    pub open: Decimal,
+    pub high: Decimal,
+    pub low: Decimal,
+    pub close: Decimal,
+    pub volume: Decimal,
+    /// Whether this bar is final.
+    pub is_closed: bool,
+}
 
 /// Market data update event
 #[derive(Debug, Clone)]
@@ -97,6 +121,14 @@ pub enum MarketUpdate {
         timestamp: DateTime<Utc>,
     },
 
+    /// Closed kline bar from Binance
+    BinanceKline {
+        symbol: String,
+        interval: String,
+        kline: KlineBar,
+        timestamp: DateTime<Utc>,
+    },
+
     /// New event discovered
     EventDiscovered {
         event_id: String,
@@ -104,6 +136,10 @@ pub enum MarketUpdate {
         up_token: String,
         down_token: String,
         end_time: DateTime<Utc>,
+        /// Parsed from event title/question when available (Objective B).
+        price_to_beat: Option<Decimal>,
+        /// Optional human title for logging/debugging.
+        title: Option<String>,
     },
 
     /// Event expired/closed
@@ -115,6 +151,7 @@ impl MarketUpdate {
         match self {
             MarketUpdate::PolymarketQuote { timestamp, .. } => *timestamp,
             MarketUpdate::BinancePrice { timestamp, .. } => *timestamp,
+            MarketUpdate::BinanceKline { timestamp, .. } => *timestamp,
             MarketUpdate::EventDiscovered { .. } => Utc::now(),
             MarketUpdate::EventExpired { .. } => Utc::now(),
         }

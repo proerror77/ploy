@@ -425,6 +425,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(adapter))
             }
+            "pattern_memory" => {
+                let strat = super::pattern_memory::PatternMemoryStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
@@ -441,6 +449,11 @@ impl StrategyFactory {
                 name: "split_arb".to_string(),
                 description: "Split arbitrage when YES+NO prices < $1".to_string(),
                 config_template: "split_arb_default.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "pattern_memory".to_string(),
+                description: "Associative memory on Binance klines for 5m UP/DOWN".to_string(),
+                config_template: "pattern_memory_default.toml".to_string(),
             },
         ]
     }

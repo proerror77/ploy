@@ -12,7 +12,7 @@ use tracing::debug;
 // ── Public types ────────────────────────────────────────────────
 
 /// Game status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum GameStatus {
     Scheduled,
     InProgress,
@@ -21,14 +21,14 @@ pub enum GameStatus {
 }
 
 /// Per-quarter score
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QuarterScore {
     pub period: u8,
     pub points: f64,
 }
 
 /// A live NBA game parsed from ESPN data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LiveGame {
     pub espn_game_id: String,
     pub home_team: String,
@@ -150,17 +150,17 @@ impl EspnClient {
         self.fetch_games_for_date_internal(Some(date)).await
     }
 
-    async fn fetch_games_for_date_internal(&self, date: Option<NaiveDate>) -> Result<Vec<LiveGame>> {
+    async fn fetch_games_for_date_internal(
+        &self,
+        date: Option<NaiveDate>,
+    ) -> Result<Vec<LiveGame>> {
         let mut req = self.http.get(ESPN_SCOREBOARD_URL);
         if let Some(d) = date {
             req = req.query(&[("dates", d.format("%Y%m%d").to_string())]);
         }
 
         // ESPN supports date-scoped scoreboard queries via `dates=YYYYMMDD`.
-        let resp = req
-            .send()
-            .await
-            .context("ESPN scoreboard request failed")?;
+        let resp = req.send().await.context("ESPN scoreboard request failed")?;
 
         let data: EspnResponse = resp
             .json()

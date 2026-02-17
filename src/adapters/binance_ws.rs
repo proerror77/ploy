@@ -495,7 +495,10 @@ impl PriceCache {
         if let Some(spot) = prices.get_mut(symbol) {
             spot.update(price, quantity, timestamp);
         } else {
-            prices.insert(symbol.to_string(), SpotPrice::new(price, quantity, timestamp));
+            prices.insert(
+                symbol.to_string(),
+                SpotPrice::new(price, quantity, timestamp),
+            );
         }
     }
 
@@ -706,15 +709,25 @@ impl BinanceWebSocket {
     async fn handle_message(&self, text: &str) {
         // Try parsing as aggregated trade
         if let Ok(trade) = serde_json::from_str::<BinanceAggTrade>(text) {
-            self.process_trade(&trade.symbol, &trade.price, &trade.quantity, trade.trade_time)
-                .await;
+            self.process_trade(
+                &trade.symbol,
+                &trade.price,
+                &trade.quantity,
+                trade.trade_time,
+            )
+            .await;
             return;
         }
 
         // Try parsing as regular trade
         if let Ok(trade) = serde_json::from_str::<BinanceTrade>(text) {
-            self.process_trade(&trade.symbol, &trade.price, &trade.quantity, trade.trade_time)
-                .await;
+            self.process_trade(
+                &trade.symbol,
+                &trade.price,
+                &trade.quantity,
+                trade.trade_time,
+            )
+            .await;
             return;
         }
 

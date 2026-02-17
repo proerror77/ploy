@@ -8,24 +8,40 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::agent::grok::GrokClient;
 use crate::agent::polymarket_sports::{OrderBookLevel as SportsOrderBookLevel, SportsOrderBook};
 use crate::agent::{EventDetails, LiveGameMarket, PolymarketSportsClient, NBA_SERIES_ID};
 use crate::agents::{AgentContext, TradingAgent};
+use crate::collector::{
+    ensure_collector_token_targets_table, upsert_collector_token_targets, CollectorTokenTarget,
+};
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
-use crate::strategy::nba_comeback::core::{ComebackCandidate, ComebackOpportunity, NbaComebackCore};
+use crate::strategy::nba_comeback::core::{
+    ComebackCandidate, ComebackOpportunity, NbaComebackCore,
+};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
+use crate::strategy::nba_comeback::grok_decision::{
+    self, ComebackSnapshot, DecisionTrigger, GrokDecision, MarketSnapshot, UnifiedDecisionRequest,
+};
+use crate::strategy::nba_comeback::grok_intel::{
+    self, GrokGameIntel, GrokSignalEvaluator, GrokTradeSignal,
+};
 
 /// Configuration for the SportsTradingAgent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SportsTradingConfig {
+    /// DB account scope (single DB multi-account).
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
     pub agent_id: String,
     pub name: String,
     pub poll_interval_secs: u64,
@@ -36,6 +52,7 @@ pub struct SportsTradingConfig {
 impl Default for SportsTradingConfig {
     fn default() -> Self {
         Self {
+            account_id: default_account_id(),
             agent_id: "sports".into(),
             name: "NBA Comeback".into(),
             poll_interval_secs: 30,
@@ -45,12 +62,20 @@ impl Default for SportsTradingConfig {
     }
 }
 
+fn default_account_id() -> String {
+    "default".to_string()
+}
+
 /// Pull-based sports trading agent wrapping NbaComebackCore
 pub struct SportsTradingAgent {
     config: SportsTradingConfig,
     core: NbaComebackCore,
     observation_pool: Option<PgPool>,
     pm_sports: Option<PolymarketSportsClient>,
+    grok: Option<GrokClient>,
+    grok_cache: HashMap<String, GrokGameIntel>,
+    /// Per-game cooldown for unified Grok decision requests (game_id → last decision time)
+    decision_cooldown: HashMap<String, std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,9 +117,9 @@ const CALENDAR_LOOKAHEAD_DAYS: i64 = 7;
 const CALENDAR_SYNC_INTERVAL_SECS: i64 = 30 * 60; // 30 minutes
 
 const NBA_TEAM_ABBREVS: &[&str] = &[
-    "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW", "HOU", "IND",
-    "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK", "OKC", "ORL", "PHI", "PHX",
-    "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
+    "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW", "HOU", "IND", "LAC",
+    "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK", "OKC", "ORL", "PHI", "PHX", "POR", "SAC",
+    "SAS", "TOR", "UTA", "WAS",
 ];
 
 impl SportsTradingAgent {
@@ -104,10 +129,17 @@ impl SportsTradingAgent {
             core,
             observation_pool: None,
             pm_sports: None,
+            grok: None,
+            grok_cache: HashMap::new(),
+            decision_cooldown: HashMap::new(),
         }
     }
 
-    pub fn with_observability(mut self, observation_pool: PgPool, pm_sports: PolymarketSportsClient) -> Self {
+    pub fn with_observability(
+        mut self,
+        observation_pool: PgPool,
+        pm_sports: PolymarketSportsClient,
+    ) -> Self {
         self.observation_pool = Some(observation_pool);
         self.pm_sports = Some(pm_sports);
         self
@@ -120,6 +152,11 @@ impl SportsTradingAgent {
 
     pub fn with_pm_sports(mut self, pm_sports: PolymarketSportsClient) -> Self {
         self.pm_sports = Some(pm_sports);
+        self
+    }
+
+    pub fn with_grok(mut self, grok: GrokClient) -> Self {
+        self.grok = Some(grok);
         self
     }
 
@@ -164,13 +201,20 @@ impl SportsTradingAgent {
             || (title_norm.contains(home_abbrev.trim()) && title_norm.contains(away_abbrev.trim()))
     }
 
-    fn find_matching_pm_event<'a>(game: &LiveGame, pm_events: &'a [EventDetails]) -> Option<&'a EventDetails> {
+    fn find_matching_pm_event<'a>(
+        game: &LiveGame,
+        pm_events: &'a [EventDetails],
+    ) -> Option<&'a EventDetails> {
         pm_events
             .iter()
             .find(|event| Self::event_matches_game(event, game))
     }
 
-    fn select_trailing_side(market: &LiveGameMarket, trailing_team: &str, trailing_abbrev: &str) -> Option<usize> {
+    fn select_trailing_side(
+        market: &LiveGameMarket,
+        trailing_team: &str,
+        trailing_abbrev: &str,
+    ) -> Option<usize> {
         let outcomes = market
             .outcomes
             .as_ref()
@@ -221,7 +265,9 @@ impl SportsTradingAgent {
             tokens = Some((yes_token, no_token));
         }
 
-        if let (Some(pm_client), Some((yes_token, no_token))) = (self.pm_sports.as_ref(), tokens.as_ref()) {
+        if let (Some(pm_client), Some((yes_token, no_token))) =
+            (self.pm_sports.as_ref(), tokens.as_ref())
+        {
             if let Ok(book) = pm_client.get_order_book(yes_token).await {
                 obs.pm_yes_best_bid = book.best_bid();
                 obs.pm_yes_best_ask = book.best_ask();
@@ -259,6 +305,99 @@ impl SportsTradingAgent {
         }
 
         obs
+    }
+
+    async fn upsert_today_nba_token_targets(&self, pm_events: &[EventDetails]) {
+        let Some(pool) = self.observation_pool.as_ref() else {
+            return;
+        };
+
+        let today = Utc::now().date_naive();
+        let mut targets: Vec<CollectorTokenTarget> = Vec::new();
+        targets.reserve(pm_events.len().saturating_mul(2));
+
+        for ev in pm_events {
+            let Some(moneyline) = ev.moneyline() else {
+                continue;
+            };
+            let Some((yes_token, no_token)) = moneyline.get_token_ids() else {
+                continue;
+            };
+
+            let parsed_date = ev
+                .event_date
+                .as_deref()
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                .unwrap_or(today);
+
+            let start_ts = ev
+                .start_time
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            let expires_at = start_ts
+                .map(|dt| dt + chrono::Duration::hours(8))
+                .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(24));
+
+            let mut common = serde_json::json!({
+                "event_id": ev.id,
+                "slug": ev.slug,
+                "title": ev.title,
+                "source": "pm_gamma",
+                "market_type": "moneyline"
+            });
+            if let Some(cid) = moneyline.condition_id.as_deref() {
+                if let Some(obj) = common.as_object_mut() {
+                    obj.insert(
+                        "condition_id".to_string(),
+                        serde_json::Value::String(cid.to_string()),
+                    );
+                }
+            }
+
+            targets.push(
+                CollectorTokenTarget::new(yes_token, "SPORTS_NBA")
+                    .with_target_date(Some(parsed_date))
+                    .with_expires_at(Some(expires_at))
+                    .with_metadata({
+                        let mut v = common.clone();
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert(
+                                "outcome".to_string(),
+                                serde_json::Value::String("YES".to_string()),
+                            );
+                        }
+                        v
+                    }),
+            );
+            targets.push(
+                CollectorTokenTarget::new(no_token, "SPORTS_NBA")
+                    .with_target_date(Some(parsed_date))
+                    .with_expires_at(Some(expires_at))
+                    .with_metadata({
+                        let mut v = common;
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert(
+                                "outcome".to_string(),
+                                serde_json::Value::String("NO".to_string()),
+                            );
+                        }
+                        v
+                    }),
+            );
+        }
+
+        if targets.is_empty() {
+            return;
+        }
+
+        if let Err(e) = upsert_collector_token_targets(pool, &targets).await {
+            warn!(
+                agent = self.config.agent_id,
+                error = %e,
+                "failed to upsert collector token targets (NBA)"
+            );
+        }
     }
 
     fn status_text(status: GameStatus) -> &'static str {
@@ -377,6 +516,7 @@ impl SportsTradingAgent {
             r#"
             CREATE TABLE IF NOT EXISTS nba_live_observations (
                 id BIGSERIAL PRIMARY KEY,
+                account_id TEXT NOT NULL DEFAULT 'default',
                 agent_id TEXT NOT NULL,
                 espn_game_id TEXT NOT NULL,
                 home_team TEXT NOT NULL,
@@ -414,6 +554,12 @@ impl SportsTradingAgent {
                 recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "ALTER TABLE nba_live_observations ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
         )
         .execute(pool)
         .await?;
@@ -470,7 +616,7 @@ impl SportsTradingAgent {
         let result = sqlx::query(
             r#"
             INSERT INTO nba_live_observations (
-                agent_id, espn_game_id, home_team, away_team, home_abbrev, away_abbrev,
+                account_id, agent_id, espn_game_id, home_team, away_team, home_abbrev, away_abbrev,
                 home_score, away_score, quarter, clock, time_remaining_mins, game_status,
                 trailing_team, trailing_abbrev, deficit, comeback_rate, adjusted_win_prob,
                 pm_event_id, pm_event_title, pm_event_slug, pm_live_status,
@@ -480,17 +626,18 @@ impl SportsTradingAgent {
                 edge, is_trade_candidate
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, $11, $12,
-                $13, $14, $15, $16, $17,
-                $18, $19, $20, $21,
-                $22, $23, $24, $25,
-                $26, $27, $28, $29,
-                $30, $31, $32,
-                $33, $34
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18,
+                $19, $20, $21, $22,
+                $23, $24, $25, $26,
+                $27, $28, $29, $30,
+                $31, $32, $33,
+                $34, $35
             )
             "#,
         )
+        .bind(&self.config.account_id)
         .bind(&self.config.agent_id)
         .bind(&game.espn_game_id)
         .bind(&game.home_team)
@@ -547,13 +694,21 @@ impl SportsTradingAgent {
             .unwrap_or(default)
     }
 
-    fn parse_depth_levels(levels: &[SportsOrderBookLevel], is_bid: bool, max_levels: usize) -> Vec<DepthLevelJson> {
+    fn parse_depth_levels(
+        levels: &[SportsOrderBookLevel],
+        is_bid: bool,
+        max_levels: usize,
+    ) -> Vec<DepthLevelJson> {
         use rust_decimal::Decimal;
 
         let mut parsed: Vec<(Decimal, Decimal)> = Vec::with_capacity(levels.len());
         for lvl in levels {
-            let Ok(price) = lvl.price.parse::<Decimal>() else { continue };
-            let Ok(size) = lvl.size.parse::<Decimal>() else { continue };
+            let Ok(price) = lvl.price.parse::<Decimal>() else {
+                continue;
+            };
+            let Ok(size) = lvl.size.parse::<Decimal>() else {
+                continue;
+            };
             parsed.push((price, size));
         }
 
@@ -588,28 +743,14 @@ impl SportsTradingAgent {
 
         // Persist YES book snapshot (if available)
         if let Some(book) = market_obs.pm_yes_book.as_ref() {
-            self.persist_one_orderbook_snapshot(
-                pool,
-                book,
-                "YES",
-                game,
-                market_obs,
-                max_levels,
-            )
-            .await;
+            self.persist_one_orderbook_snapshot(pool, book, "YES", game, market_obs, max_levels)
+                .await;
         }
 
         // Persist NO book snapshot (if available)
         if let Some(book) = market_obs.pm_no_book.as_ref() {
-            self.persist_one_orderbook_snapshot(
-                pool,
-                book,
-                "NO",
-                game,
-                market_obs,
-                max_levels,
-            )
-            .await;
+            self.persist_one_orderbook_snapshot(pool, book, "NO", game, market_obs, max_levels)
+                .await;
         }
     }
 
@@ -680,6 +821,7 @@ impl SportsTradingAgent {
         agent_id: &str,
         opp: &ComebackOpportunity,
         shares: u64,
+        config_hash: &str,
     ) -> OrderIntent {
         OrderIntent::new(
             agent_id,
@@ -698,6 +840,412 @@ impl SportsTradingAgent {
         .with_metadata("deficit", &opp.deficit.to_string())
         .with_metadata("comeback_rate", &format!("{:.3}", opp.comeback_rate))
         .with_metadata("edge", &format!("{:.3}", opp.edge))
+        .with_metadata("signal_type", "nba_comeback_entry")
+        .with_metadata("signal_confidence", &format!("{:.6}", opp.comeback_rate))
+        .with_metadata(
+            "signal_fair_value",
+            &format!("{:.6}", opp.adjusted_win_prob),
+        )
+        .with_metadata("signal_market_price", &opp.market_price.to_string())
+        .with_metadata("signal_edge", &format!("{:.6}", opp.edge))
+        .with_metadata("config_hash", config_hash)
+    }
+
+    async fn ensure_grok_intel_table(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS grok_game_intel (
+                id BIGSERIAL PRIMARY KEY,
+                account_id TEXT NOT NULL DEFAULT 'default',
+                agent_id TEXT NOT NULL,
+                espn_game_id TEXT NOT NULL,
+                home_team TEXT NOT NULL,
+                away_team TEXT NOT NULL,
+                quarter INTEGER NOT NULL,
+                clock TEXT NOT NULL,
+                score TEXT NOT NULL,
+                momentum_direction TEXT NOT NULL,
+                home_sentiment_score DOUBLE PRECISION,
+                away_sentiment_score DOUBLE PRECISION,
+                grok_home_win_prob DOUBLE PRECISION,
+                grok_confidence DOUBLE PRECISION,
+                injury_updates JSONB DEFAULT '[]',
+                key_factors JSONB DEFAULT '[]',
+                signal_type TEXT,
+                signal_edge DOUBLE PRECISION,
+                signal_acted_on BOOLEAN NOT NULL DEFAULT FALSE,
+                raw_response TEXT,
+                query_duration_ms INTEGER,
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "ALTER TABLE grok_game_intel ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_grok_game_intel_game_time ON grok_game_intel(espn_game_id, recorded_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_grok_game_intel_signals ON grok_game_intel(signal_type, recorded_at DESC) WHERE signal_type IS NOT NULL",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn persist_grok_intel(
+        pool: &PgPool,
+        account_id: &str,
+        agent_id: &str,
+        game: &LiveGame,
+        intel: &GrokGameIntel,
+        signal: Option<&GrokTradeSignal>,
+        acted_on: bool,
+    ) {
+        let score_text = format!(
+            "{} {}-{} {}",
+            game.away_abbrev, game.away_score, game.home_score, game.home_abbrev
+        );
+        let momentum_str = match intel.momentum_direction {
+            grok_intel::MomentumDirection::HomeTeamSurge => "home_surge",
+            grok_intel::MomentumDirection::AwayTeamSurge => "away_surge",
+            grok_intel::MomentumDirection::Neutral => "neutral",
+        };
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO grok_game_intel (
+                account_id, agent_id, espn_game_id, home_team, away_team,
+                quarter, clock, score,
+                momentum_direction, home_sentiment_score, away_sentiment_score,
+                grok_home_win_prob, grok_confidence,
+                injury_updates, key_factors,
+                signal_type, signal_edge, signal_acted_on,
+                raw_response
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8,
+                $9, $10, $11,
+                $12, $13,
+                $14, $15,
+                $16, $17, $18,
+                $19
+            )
+            "#,
+        )
+        .bind(account_id)
+        .bind(agent_id)
+        .bind(&game.espn_game_id)
+        .bind(&game.home_team)
+        .bind(&game.away_team)
+        .bind(game.quarter as i32)
+        .bind(&game.clock)
+        .bind(&score_text)
+        .bind(momentum_str)
+        .bind(intel.home_sentiment_score)
+        .bind(intel.away_sentiment_score)
+        .bind(intel.grok_home_win_prob)
+        .bind(intel.grok_confidence)
+        .bind(sqlx::types::Json(&intel.injury_updates))
+        .bind(sqlx::types::Json(&intel.key_factors))
+        .bind(signal.map(|s| s.signal_type.to_string()))
+        .bind(signal.map(|s| s.edge))
+        .bind(acted_on)
+        .bind(&intel.raw_response)
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent = agent_id,
+                game_id = %game.espn_game_id,
+                error = %e,
+                "failed to persist grok game intel"
+            );
+        }
+    }
+
+    /// Check if a game is still on decision cooldown
+    fn is_on_cooldown(&self, game_id: &str) -> bool {
+        self.decision_cooldown
+            .get(game_id)
+            .map(|t| t.elapsed().as_secs() < self.core.cfg.grok_decision_cooldown_secs)
+            .unwrap_or(false)
+    }
+
+    /// Mark a game as having just received a decision
+    fn set_cooldown(&mut self, game_id: &str) {
+        self.decision_cooldown
+            .insert(game_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Convert a GrokDecision::Trade into an OrderIntent
+    fn decision_to_intent(
+        agent_id: &str,
+        req: &UnifiedDecisionRequest,
+        decision: &GrokDecision,
+        shares: u64,
+        config_hash: &str,
+    ) -> OrderIntent {
+        let (fair_value, edge, confidence) = match decision {
+            GrokDecision::Trade {
+                fair_value,
+                edge,
+                confidence,
+                ..
+            } => (*fair_value, *edge, *confidence),
+            _ => (0.0, 0.0, 0.0),
+        };
+
+        OrderIntent::new(
+            agent_id,
+            Domain::Sports,
+            &req.market.market_slug,
+            &req.market.token_id,
+            Side::Up,
+            true,
+            shares,
+            req.market.market_price,
+        )
+        .with_priority(OrderPriority::Normal)
+        .with_metadata("strategy", "grok_unified_decision")
+        .with_metadata("game_id", &req.game.espn_game_id)
+        .with_metadata("trailing_team", &req.trailing_abbrev)
+        .with_metadata("deficit", &req.deficit.to_string())
+        .with_metadata("trigger", &req.trigger.to_string())
+        .with_metadata("signal_confidence", &format!("{:.6}", confidence))
+        .with_metadata("signal_fair_value", &format!("{:.6}", fair_value))
+        .with_metadata("signal_market_price", &req.market.market_price.to_string())
+        .with_metadata("signal_edge", &format!("{:.6}", edge))
+        .with_metadata("config_hash", config_hash)
+    }
+
+    async fn ensure_grok_unified_decisions_table(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS grok_unified_decisions (
+                id BIGSERIAL PRIMARY KEY,
+                request_id UUID NOT NULL UNIQUE,
+                account_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                espn_game_id TEXT NOT NULL,
+                home_team TEXT NOT NULL,
+                away_team TEXT NOT NULL,
+                trailing_team TEXT NOT NULL,
+                trailing_abbrev TEXT NOT NULL,
+                deficit INTEGER NOT NULL,
+                quarter INTEGER NOT NULL,
+                clock TEXT NOT NULL,
+                score TEXT NOT NULL,
+                trigger_type TEXT NOT NULL,
+                comeback_rate DOUBLE PRECISION,
+                adjusted_win_prob DOUBLE PRECISION,
+                statistical_edge DOUBLE PRECISION,
+                grok_momentum TEXT,
+                grok_home_win_prob DOUBLE PRECISION,
+                grok_confidence DOUBLE PRECISION,
+                grok_sentiment_home DOUBLE PRECISION,
+                grok_sentiment_away DOUBLE PRECISION,
+                injury_updates JSONB,
+                market_slug TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                market_price DOUBLE PRECISION NOT NULL,
+                best_bid DOUBLE PRECISION,
+                best_ask DOUBLE PRECISION,
+                decision TEXT NOT NULL,
+                decision_fair_value DOUBLE PRECISION,
+                decision_edge DOUBLE PRECISION,
+                decision_confidence DOUBLE PRECISION,
+                decision_reasoning TEXT,
+                decision_risk_factors JSONB,
+                raw_prompt TEXT,
+                raw_response TEXT,
+                query_duration_ms INTEGER,
+                order_submitted BOOLEAN NOT NULL DEFAULT FALSE,
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_grok_decisions_game_time ON grok_unified_decisions(espn_game_id, recorded_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_grok_decisions_trades ON grok_unified_decisions(decision, recorded_at DESC) WHERE decision = 'trade'",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn persist_unified_decision(
+        pool: &PgPool,
+        account_id: &str,
+        agent_id: &str,
+        req: &UnifiedDecisionRequest,
+        decision: &GrokDecision,
+        raw_prompt: &str,
+        raw_response: &str,
+        order_submitted: bool,
+    ) {
+        let score_text = format!(
+            "{} {}-{} {}",
+            req.game.away_abbrev, req.game.away_score, req.game.home_score, req.game.home_abbrev
+        );
+
+        let (decision_str, d_fair_value, d_edge, d_confidence, d_reasoning, d_risk_factors) =
+            match decision {
+                GrokDecision::Trade {
+                    fair_value,
+                    edge,
+                    confidence,
+                    reasoning,
+                    risk_factors,
+                    ..
+                } => (
+                    "trade",
+                    Some(*fair_value),
+                    Some(*edge),
+                    Some(*confidence),
+                    Some(reasoning.as_str()),
+                    Some(risk_factors.clone()),
+                ),
+                GrokDecision::Pass { reasoning, .. } => {
+                    ("pass", None, None, None, Some(reasoning.as_str()), None)
+                }
+            };
+
+        let momentum_str = req
+            .grok_intel
+            .as_ref()
+            .map(|intel| match intel.momentum_direction {
+                grok_intel::MomentumDirection::HomeTeamSurge => "home_surge",
+                grok_intel::MomentumDirection::AwayTeamSurge => "away_surge",
+                grok_intel::MomentumDirection::Neutral => "neutral",
+            });
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO grok_unified_decisions (
+                request_id, account_id, agent_id,
+                espn_game_id, home_team, away_team,
+                trailing_team, trailing_abbrev, deficit,
+                quarter, clock, score,
+                trigger_type,
+                comeback_rate, adjusted_win_prob, statistical_edge,
+                grok_momentum, grok_home_win_prob, grok_confidence,
+                grok_sentiment_home, grok_sentiment_away,
+                injury_updates,
+                market_slug, token_id, market_price,
+                best_bid, best_ask,
+                decision, decision_fair_value, decision_edge,
+                decision_confidence, decision_reasoning, decision_risk_factors,
+                raw_prompt, raw_response,
+                order_submitted
+            )
+            VALUES (
+                $1, $2, $3,
+                $4, $5, $6,
+                $7, $8, $9,
+                $10, $11, $12,
+                $13,
+                $14, $15, $16,
+                $17, $18, $19,
+                $20, $21,
+                $22,
+                $23, $24, $25,
+                $26, $27,
+                $28, $29, $30,
+                $31, $32, $33,
+                $34, $35,
+                $36
+            )
+            "#,
+        )
+        .bind(req.request_id)
+        .bind(account_id)
+        .bind(agent_id)
+        .bind(&req.game.espn_game_id)
+        .bind(&req.game.home_team)
+        .bind(&req.game.away_team)
+        .bind(&req.trailing_team)
+        .bind(&req.trailing_abbrev)
+        .bind(req.deficit)
+        .bind(req.game.quarter as i32)
+        .bind(&req.game.clock)
+        .bind(&score_text)
+        .bind(req.trigger.to_string())
+        .bind(req.comeback.as_ref().map(|c| c.comeback_rate))
+        .bind(req.comeback.as_ref().map(|c| c.adjusted_win_prob))
+        .bind(req.comeback.as_ref().map(|c| c.statistical_edge))
+        .bind(momentum_str)
+        .bind(req.grok_intel.as_ref().and_then(|i| i.grok_home_win_prob))
+        .bind(req.grok_intel.as_ref().map(|i| i.grok_confidence))
+        .bind(req.grok_intel.as_ref().map(|i| i.home_sentiment_score))
+        .bind(req.grok_intel.as_ref().map(|i| i.away_sentiment_score))
+        .bind(
+            req.grok_intel
+                .as_ref()
+                .map(|i| sqlx::types::Json(&i.injury_updates)),
+        )
+        .bind(&req.market.market_slug)
+        .bind(&req.market.token_id)
+        .bind(
+            req.market
+                .market_price
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0),
+        )
+        .bind(
+            req.market
+                .yes_best_bid
+                .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)),
+        )
+        .bind(
+            req.market
+                .yes_best_ask
+                .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)),
+        )
+        .bind(decision_str)
+        .bind(d_fair_value)
+        .bind(d_edge)
+        .bind(d_confidence)
+        .bind(d_reasoning)
+        .bind(d_risk_factors.map(|rf| sqlx::types::Json(rf)))
+        .bind(raw_prompt)
+        .bind(raw_response)
+        .bind(order_submitted)
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent = agent_id,
+                request_id = %req.request_id,
+                game_id = %req.game.espn_game_id,
+                error = %e,
+                "failed to persist grok unified decision"
+            );
+        }
     }
 }
 
@@ -721,6 +1269,12 @@ impl TradingAgent for SportsTradingAgent {
 
     async fn run(mut self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "sports agent starting");
+        let config_hash = {
+            let payload = serde_json::to_vec(&self.config).unwrap_or_default();
+            let mut hasher = Sha256::new();
+            hasher.update(payload);
+            format!("{:x}", hasher.finalize())
+        };
 
         // Load historical stats
         if let Err(e) = self.core.stats.load_all().await {
@@ -733,8 +1287,21 @@ impl TradingAgent for SportsTradingAgent {
             if let Err(e) = Self::ensure_observation_table(pool).await {
                 warn!(agent = self.config.agent_id, error = %e, "failed to ensure nba_live_observations table");
             }
-            if let Err(e) = crate::coordinator::bootstrap::ensure_clob_orderbook_snapshots_table(pool).await {
+            if let Err(e) = ensure_collector_token_targets_table(pool).await {
+                warn!(agent = self.config.agent_id, error = %e, "failed to ensure collector_token_targets table");
+            }
+            if let Err(e) =
+                crate::coordinator::bootstrap::ensure_clob_orderbook_snapshots_table(pool).await
+            {
                 warn!(agent = self.config.agent_id, error = %e, "failed to ensure clob_orderbook_snapshots table");
+            }
+            if self.grok.is_some() {
+                if let Err(e) = Self::ensure_grok_intel_table(pool).await {
+                    warn!(agent = self.config.agent_id, error = %e, "failed to ensure grok_game_intel table");
+                }
+                if let Err(e) = Self::ensure_grok_unified_decisions_table(pool).await {
+                    warn!(agent = self.config.agent_id, error = %e, "failed to ensure grok_unified_decisions table");
+                }
             }
         } else {
             warn!(
@@ -749,16 +1316,31 @@ impl TradingAgent for SportsTradingAgent {
         let total_exposure = Decimal::ZERO;
         let daily_pnl = Decimal::ZERO;
         let mut last_calendar_sync_at: Option<chrono::DateTime<Utc>> = None;
+        let pm_events_refresh_secs: u64 = std::env::var("PM_SPORTS_EVENTS_REFRESH_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300)
+            .max(30);
+        let mut last_pm_sync_at: Option<chrono::DateTime<Utc>> = None;
+        let mut pm_events_cache: Vec<EventDetails> = Vec::new();
         // Persist sports observations at a bounded cadence to keep DB volume sane.
         // Key: espn_game_id, Value: UTC minute bucket (unix_ts / 60).
         let mut last_observation_minute: HashMap<String, i64> = HashMap::new();
 
         let poll_dur = tokio::time::Duration::from_secs(self.config.poll_interval_secs);
         let heartbeat_dur = tokio::time::Duration::from_secs(self.config.heartbeat_interval_secs);
+        let grok_interval_secs = self.core.cfg.grok_interval_secs;
+        let grok_dur = tokio::time::Duration::from_secs(grok_interval_secs);
         let mut poll_tick = tokio::time::interval(poll_dur);
         let mut heartbeat_tick = tokio::time::interval(heartbeat_dur);
+        let mut grok_tick = tokio::time::interval(grok_dur);
         poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        grok_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // Cached state shared between ESPN poll and Grok tick
+        let mut live_games_cache: Vec<LiveGame> = Vec::new();
+        let mut market_inputs_cache: HashMap<String, MarketInput> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -837,7 +1419,6 @@ impl TradingAgent for SportsTradingAgent {
 
                     if live_games.is_empty() {
                         debug!(agent = self.config.agent_id, "no valid NBA games in live feed this cycle");
-                        continue;
                     }
                     let candidates = self.core.scan_games(&live_games);
                     let candidates_by_game: HashMap<String, ComebackCandidate> = candidates
@@ -845,17 +1426,36 @@ impl TradingAgent for SportsTradingAgent {
                         .map(|c| (c.game.espn_game_id.clone(), c.clone()))
                         .collect();
 
-                    let pm_events = if let Some(pm_client) = self.pm_sports.as_ref() {
-                        match pm_client.fetch_todays_games_with_details(NBA_SERIES_ID).await {
-                            Ok(events) => events,
-                            Err(e) => {
-                                warn!(agent = self.config.agent_id, error = %e, "failed to fetch PM NBA game details");
-                                Vec::new()
+                    // Keep the orderbook-history collector scoped to "today NBA" without relying on
+                    // live-game state. Refresh PM event details on a slower cadence than ESPN polls.
+                    let now = Utc::now();
+                    let should_refresh_pm = last_pm_sync_at
+                        .map(|t| (now - t).num_seconds() >= pm_events_refresh_secs as i64)
+                        .unwrap_or(true);
+                    if should_refresh_pm {
+                        pm_events_cache = if let Some(pm_client) = self.pm_sports.as_ref() {
+                            match pm_client.fetch_todays_games_with_details(NBA_SERIES_ID).await {
+                                Ok(events) => events,
+                                Err(e) => {
+                                    warn!(
+                                        agent = self.config.agent_id,
+                                        error = %e,
+                                        "failed to fetch PM NBA game details"
+                                    );
+                                    Vec::new()
+                                }
                             }
-                        }
-                    } else {
-                        Vec::new()
-                    };
+                        } else {
+                            Vec::new()
+                        };
+                        last_pm_sync_at = Some(now);
+                        self.upsert_today_nba_token_targets(&pm_events_cache).await;
+                    }
+                    let pm_events: &[EventDetails] = pm_events_cache.as_slice();
+
+                    if live_games.is_empty() {
+                        continue;
+                    }
 
                     let mut market_inputs: HashMap<String, MarketInput> = HashMap::new();
                     let min_edge_f64 = self.core.cfg.min_edge.to_string().parse::<f64>().unwrap_or(0.05);
@@ -920,6 +1520,10 @@ impl TradingAgent for SportsTradingAgent {
                         );
                     }
 
+                    // Update caches for Grok tick to use
+                    live_games_cache = live_games.clone();
+                    market_inputs_cache = market_inputs.clone();
+
                     if candidates.is_empty() {
                         debug!(agent = self.config.agent_id, games = live_games.len(), "no NBA candidates this cycle");
                         continue;
@@ -960,20 +1564,337 @@ impl TradingAgent for SportsTradingAgent {
                         if let Some(opp) = self.core.evaluate_opportunity(
                             candidate,
                             market_price,
-                            market_slug,
-                            token_id,
+                            market_slug.clone(),
+                            token_id.clone(),
                         ) {
-                            let intent = Self::opportunity_to_intent(
-                                &self.config.agent_id,
-                                &opp,
-                                self.core.cfg.shares,
-                            );
-                            let intent_id = intent.intent_id;
+                            let game_id = opp.game.espn_game_id.clone();
 
-                            if let Err(e) = ctx.submit_order(intent).await {
-                                warn!(agent = self.config.agent_id, error = %e, "failed to submit");
+                            // Build unified decision request with all available context
+                            let req = UnifiedDecisionRequest {
+                                request_id: Uuid::new_v4(),
+                                trigger: DecisionTrigger::EspnComeback,
+                                game: opp.game.clone(),
+                                trailing_team: opp.trailing_team.clone(),
+                                trailing_abbrev: opp.trailing_abbrev.clone(),
+                                deficit: opp.deficit,
+                                comeback: Some(ComebackSnapshot {
+                                    comeback_rate: opp.comeback_rate,
+                                    adjusted_win_prob: opp.adjusted_win_prob,
+                                    statistical_edge: opp.edge,
+                                }),
+                                grok_intel: self.grok_cache.get(&game_id).cloned(),
+                                market: MarketSnapshot {
+                                    market_slug: opp.market_slug.clone(),
+                                    token_id: opp.token_id.clone(),
+                                    market_price: opp.market_price,
+                                    yes_best_bid: market_input.and_then(|_| None),
+                                    yes_best_ask: market_input.and_then(|_| None),
+                                },
+                            };
+
+                            // Check decision cooldown
+                            if self.is_on_cooldown(&game_id) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    "skipping ESPN decision: on cooldown"
+                                );
+                                continue;
+                            }
+
+                            // Route through Grok unified decision
+                            if let Some(grok) = self.grok.as_ref() {
+                                match grok_decision::request_unified_decision(grok, &req).await {
+                                    Ok((decision, raw_prompt, raw_response)) => {
+                                        let mut order_submitted = false;
+
+                                        match &decision {
+                                            GrokDecision::Trade { edge, confidence, .. } => {
+                                                info!(
+                                                    agent = self.config.agent_id,
+                                                    game_id = %game_id,
+                                                    edge = format!("{:.3}", edge),
+                                                    confidence = format!("{:.2}", confidence),
+                                                    "grok approved ESPN comeback trade"
+                                                );
+                                                let intent = Self::decision_to_intent(
+                                                    &self.config.agent_id,
+                                                    &req,
+                                                    &decision,
+                                                    self.core.cfg.shares,
+                                                    &config_hash,
+                                                );
+                                                let intent_id = intent.intent_id;
+                                                order_submitted = ctx.submit_order(intent).await.is_ok();
+                                                if order_submitted {
+                                                    pending_intents.insert(intent_id, opp);
+                                                }
+                                            }
+                                            GrokDecision::Pass { reasoning, .. } => {
+                                                info!(
+                                                    agent = self.config.agent_id,
+                                                    game_id = %game_id,
+                                                    "grok passed on ESPN comeback: {}", reasoning
+                                                );
+                                            }
+                                        }
+
+                                        self.set_cooldown(&game_id);
+
+                                        if let Some(pool) = self.observation_pool.as_ref() {
+                                            Self::persist_unified_decision(
+                                                pool,
+                                                &self.config.account_id,
+                                                &self.config.agent_id,
+                                                &req,
+                                                &decision,
+                                                &raw_prompt,
+                                                &raw_response,
+                                                order_submitted,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // FALLBACK: ESPN comeback has its own statistical model
+                                        if self.core.cfg.grok_fallback_enabled {
+                                            warn!(
+                                                agent = self.config.agent_id,
+                                                game_id = %game_id,
+                                                error = %e,
+                                                "grok unavailable, falling back to rule-based for ESPN signal"
+                                            );
+                                            let intent = Self::opportunity_to_intent(
+                                                &self.config.agent_id,
+                                                &opp,
+                                                self.core.cfg.shares,
+                                                &config_hash,
+                                            );
+                                            let intent_id = intent.intent_id;
+                                            if let Err(e) = ctx.submit_order(intent).await {
+                                                warn!(agent = self.config.agent_id, error = %e, "failed to submit fallback order");
+                                            } else {
+                                                pending_intents.insert(intent_id, opp);
+                                            }
+                                        } else {
+                                            warn!(
+                                                agent = self.config.agent_id,
+                                                game_id = %game_id,
+                                                error = %e,
+                                                "grok unavailable and fallback disabled, skipping"
+                                            );
+                                        }
+                                    }
+                                }
                             } else {
-                                pending_intents.insert(intent_id, opp);
+                                // No Grok configured — fall back to rule-based
+                                let intent = Self::opportunity_to_intent(
+                                    &self.config.agent_id,
+                                    &opp,
+                                    self.core.cfg.shares,
+                                    &config_hash,
+                                );
+                                let intent_id = intent.intent_id;
+                                if let Err(e) = ctx.submit_order(intent).await {
+                                    warn!(agent = self.config.agent_id, error = %e, "failed to submit");
+                                } else {
+                                    pending_intents.insert(intent_id, opp);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Grok live search tick ---
+                _ = grok_tick.tick() => {
+                    if self.grok.is_none() || !self.core.cfg.grok_enabled {
+                        continue;
+                    }
+                    if !matches!(status, AgentStatus::Running) {
+                        continue;
+                    }
+                    if live_games_cache.is_empty() {
+                        continue;
+                    }
+
+                    let grok_min_edge = self.core.cfg.grok_min_edge.to_string().parse::<f64>().unwrap_or(0.08);
+                    let grok_min_confidence = self.core.cfg.grok_min_confidence;
+
+                    for game in &live_games_cache {
+                        if game.status != GameStatus::InProgress {
+                            continue;
+                        }
+
+                        // Query Grok for this game (borrow grok ref in limited scope)
+                        let intel = {
+                            let grok = self.grok.as_ref().unwrap();
+                            match grok_intel::query_grok_for_game(grok, game).await {
+                                Ok(intel) => intel,
+                                Err(e) => {
+                                    warn!(
+                                        agent = self.config.agent_id,
+                                        game_id = %game.espn_game_id,
+                                        error = %e,
+                                        "grok query failed, skipping game"
+                                    );
+                                    continue;
+                                }
+                            }
+                        };
+                        self.grok_cache.insert(game.espn_game_id.clone(), intel.clone());
+
+                        // Determine trailing team for signal evaluation
+                        let trailing = match game.trailing_team() {
+                            Some((_, abbrev, _)) => abbrev,
+                            None => continue, // Tied — skip
+                        };
+
+                        // Look up market data from cached ESPN poll
+                        let market_input = market_inputs_cache.get(&game.espn_game_id);
+                        let trailing_price = market_input.and_then(|m| m.trailing_price);
+
+                        // Evaluate for independent trading signal
+                        let signal = trailing_price.and_then(|price| {
+                            GrokSignalEvaluator::evaluate(
+                                &intel,
+                                game,
+                                &trailing,
+                                price,
+                                grok_min_edge,
+                                grok_min_confidence,
+                            )
+                        });
+
+                        // Persist to DB
+                        if let Some(pool) = self.observation_pool.as_ref() {
+                            Self::persist_grok_intel(
+                                pool,
+                                &self.config.account_id,
+                                &self.config.agent_id,
+                                game,
+                                &intel,
+                                signal.as_ref(),
+                                signal.is_some(),
+                            )
+                            .await;
+                        }
+
+                        // If signal found, route through unified Grok decision
+                        if let Some(ref sig) = signal {
+                            let game_id = game.espn_game_id.clone();
+                            let market_slug = market_input
+                                .and_then(|m| m.market_slug.clone())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "nba-{}-vs-{}",
+                                        game.away_abbrev.to_lowercase(),
+                                        game.home_abbrev.to_lowercase()
+                                    )
+                                });
+                            let token_id = market_input
+                                .and_then(|m| m.trailing_token_id.clone())
+                                .unwrap_or_else(|| {
+                                    format!("{}-win-yes", sig.target_team_abbrev.to_lowercase())
+                                });
+
+                            let (trailing_team, trailing_abbrev, deficit) = match game.trailing_team() {
+                                Some(t) => t,
+                                None => continue,
+                            };
+
+                            // Check decision cooldown
+                            if self.is_on_cooldown(&game_id) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    "skipping Grok signal decision: on cooldown"
+                                );
+                                continue;
+                            }
+
+                            let req = UnifiedDecisionRequest {
+                                request_id: Uuid::new_v4(),
+                                trigger: DecisionTrigger::GrokSignal(sig.signal_type),
+                                game: game.clone(),
+                                trailing_team,
+                                trailing_abbrev,
+                                deficit,
+                                comeback: None, // no statistical model for this trigger
+                                grok_intel: Some(intel.clone()),
+                                market: MarketSnapshot {
+                                    market_slug,
+                                    token_id,
+                                    market_price: sig.market_price,
+                                    yes_best_bid: None,
+                                    yes_best_ask: None,
+                                },
+                            };
+
+                            match grok_decision::request_unified_decision(self.grok.as_ref().unwrap(), &req).await {
+                                Ok((decision, raw_prompt, raw_response)) => {
+                                    let mut order_submitted = false;
+
+                                    match &decision {
+                                        GrokDecision::Trade { edge, confidence, .. } => {
+                                            info!(
+                                                agent = self.config.agent_id,
+                                                game_id = %game_id,
+                                                signal_type = %sig.signal_type,
+                                                edge = format!("{:.3}", edge),
+                                                confidence = format!("{:.2}", confidence),
+                                                "grok approved grok-signal trade"
+                                            );
+                                            let intent = Self::decision_to_intent(
+                                                &self.config.agent_id,
+                                                &req,
+                                                &decision,
+                                                self.core.cfg.shares,
+                                                &config_hash,
+                                            );
+                                            let intent_id = intent.intent_id;
+                                            order_submitted = ctx.submit_order(intent).await.is_ok();
+                                            if order_submitted {
+                                                info!(
+                                                    agent = self.config.agent_id,
+                                                    intent_id = %intent_id,
+                                                    "grok-signal unified order submitted"
+                                                );
+                                            }
+                                        }
+                                        GrokDecision::Pass { reasoning, .. } => {
+                                            info!(
+                                                agent = self.config.agent_id,
+                                                game_id = %game_id,
+                                                "grok passed on grok signal: {}", reasoning
+                                            );
+                                        }
+                                    }
+
+                                    self.set_cooldown(&game_id);
+
+                                    if let Some(pool) = self.observation_pool.as_ref() {
+                                        Self::persist_unified_decision(
+                                            pool,
+                                            &self.config.account_id,
+                                            &self.config.agent_id,
+                                            &req,
+                                            &decision,
+                                            &raw_prompt,
+                                            &raw_response,
+                                            order_submitted,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    // NO FALLBACK: Grok signal path has no independent model
+                                    warn!(
+                                        agent = self.config.agent_id,
+                                        game_id = %game_id,
+                                        error = %e,
+                                        "grok unavailable for grok signal, skipping (no fallback)"
+                                    );
+                                }
                             }
                         }
                     }

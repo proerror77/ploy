@@ -11,6 +11,7 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -60,6 +61,7 @@ impl CoordinatorHandle {
 /// The Coordinator — owns shared infrastructure and runs the main event loop
 pub struct Coordinator {
     config: CoordinatorConfig,
+    account_id: String,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
     positions: Arc<PositionAggregator>,
@@ -78,7 +80,11 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    pub fn new(config: CoordinatorConfig, executor: Arc<OrderExecutor>) -> Self {
+    pub fn new(
+        config: CoordinatorConfig,
+        executor: Arc<OrderExecutor>,
+        account_id: String,
+    ) -> Self {
         let (order_tx, order_rx) = mpsc::channel(256);
         let (state_tx, state_rx) = mpsc::channel(128);
 
@@ -86,9 +92,15 @@ impl Coordinator {
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
+        let account_id = if account_id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            account_id
+        };
 
         Self {
             config,
+            account_id,
             risk_gate,
             order_queue,
             positions,
@@ -248,8 +260,15 @@ impl Coordinator {
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
 
+        self.persist_signal_from_intent(&intent).await;
+        if !intent.is_buy {
+            self.persist_exit_reason_intent(&intent).await;
+        }
+
         match self.risk_gate.check_order(&intent).await {
             RiskCheckResult::Passed => {
+                self.persist_risk_decision(&intent, "PASSED", None, None)
+                    .await;
                 let mut queue = self.order_queue.write().await;
                 match queue.enqueue(intent) {
                     Ok(()) => {
@@ -264,6 +283,8 @@ impl Coordinator {
                 }
             }
             RiskCheckResult::Blocked(reason) => {
+                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
+                    .await;
                 warn!(
                     %agent_id, %intent_id,
                     reason = ?reason,
@@ -274,6 +295,13 @@ impl Coordinator {
                     .await;
             }
             RiskCheckResult::Adjusted(suggestion) => {
+                self.persist_risk_decision(
+                    &intent,
+                    "ADJUSTED",
+                    None,
+                    Some((suggestion.max_shares, suggestion.reason.clone())),
+                )
+                .await;
                 info!(
                     %agent_id, %intent_id,
                     max_shares = suggestion.max_shares,
@@ -321,6 +349,11 @@ impl Coordinator {
         for intent in batch {
             let agent_id = intent.agent_id.clone();
             let intent_id = intent.intent_id;
+            let execute_started_at = Utc::now();
+            let queue_delay_ms = execute_started_at
+                .signed_duration_since(intent.created_at)
+                .num_milliseconds()
+                .max(0);
 
             // Convert OrderIntent → OrderRequest for the executor
             let request = Self::intent_to_request(&intent);
@@ -334,8 +367,14 @@ impl Coordinator {
                         "order executed successfully"
                     );
 
-                    self.persist_execution(&intent, &request, Some(&result), None)
-                        .await;
+                    self.persist_execution(
+                        &intent,
+                        &request,
+                        Some(&result),
+                        None,
+                        Some(queue_delay_ms),
+                    )
+                    .await;
 
                     // Record success with risk gate
                     self.risk_gate
@@ -365,8 +404,14 @@ impl Coordinator {
                         "order execution failed"
                     );
 
-                    self.persist_execution(&intent, &request, None, Some(e.to_string()))
-                        .await;
+                    self.persist_execution(
+                        &intent,
+                        &request,
+                        None,
+                        Some(e.to_string()),
+                        Some(queue_delay_ms),
+                    )
+                    .await;
 
                     self.risk_gate
                         .record_failure(&agent_id, &e.to_string())
@@ -382,6 +427,7 @@ impl Coordinator {
         request: &OrderRequest,
         result: Option<&crate::strategy::executor::ExecutionResult>,
         error_message: Option<String>,
+        queue_delay_ms: Option<i64>,
     ) {
         let Some(pool) = self.execution_log_pool.as_ref() else {
             return;
@@ -406,11 +452,14 @@ impl Coordinator {
             ),
         };
 
-        let metadata = serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+        let config_hash = intent.metadata.get("config_hash").cloned();
 
         let query = sqlx::query(
             r#"
             INSERT INTO agent_order_executions (
+                account_id,
                 agent_id,
                 intent_id,
                 domain,
@@ -431,7 +480,7 @@ impl Coordinator {
                 metadata
             )
             VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
             )
             ON CONFLICT (intent_id) DO UPDATE SET
                 order_id = EXCLUDED.order_id,
@@ -445,6 +494,7 @@ impl Coordinator {
                 executed_at = NOW()
             "#,
         )
+        .bind(&self.account_id)
         .bind(&intent.agent_id)
         .bind(intent.intent_id)
         .bind(intent.domain.to_string())
@@ -460,7 +510,7 @@ impl Coordinator {
         .bind(avg_fill_price)
         .bind(elapsed_ms)
         .bind(dry_run)
-        .bind(error_message)
+        .bind(error_message.clone())
         .bind(intent.created_at)
         .bind(sqlx::types::Json(metadata));
 
@@ -470,6 +520,404 @@ impl Coordinator {
                 intent_id = %intent.intent_id,
                 error = %e,
                 "failed to persist agent order execution"
+            );
+        }
+
+        self.persist_execution_analysis(intent, request, result, queue_delay_ms, config_hash)
+            .await;
+
+        if !intent.is_buy {
+            self.persist_exit_reason_execution(intent, result, error_message)
+                .await;
+        }
+    }
+
+    fn metadata_decimal(intent: &OrderIntent, key: &str) -> Option<Decimal> {
+        intent
+            .metadata
+            .get(key)
+            .and_then(|v| Decimal::from_str(v).ok())
+    }
+
+    async fn persist_signal_from_intent(&self, intent: &OrderIntent) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let strategy_id = intent
+            .metadata
+            .get("strategy")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let signal_type = intent
+            .metadata
+            .get("signal_type")
+            .cloned()
+            .unwrap_or_else(|| {
+                if intent.is_buy {
+                    "entry_intent".to_string()
+                } else {
+                    "exit_intent".to_string()
+                }
+            });
+        let symbol = intent.metadata.get("symbol").cloned();
+        let confidence = Self::metadata_decimal(intent, "signal_confidence");
+        let momentum_value = Self::metadata_decimal(intent, "signal_momentum_value");
+        let short_ma = Self::metadata_decimal(intent, "signal_short_ma");
+        let long_ma = Self::metadata_decimal(intent, "signal_long_ma");
+        let rolling_volatility = Self::metadata_decimal(intent, "signal_rolling_volatility");
+        let fair_value = Self::metadata_decimal(intent, "signal_fair_value");
+        let market_price = Self::metadata_decimal(intent, "signal_market_price");
+        let edge = Self::metadata_decimal(intent, "signal_edge");
+        let config_hash = intent.metadata.get("config_hash").cloned();
+        let context =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO signal_history (
+                account_id, intent_id, agent_id, strategy_id, domain, signal_type, market_slug, token_id,
+                symbol, side, confidence, momentum_value, short_ma, long_ma, rolling_volatility,
+                fair_value, market_price, edge, config_hash, context
+            )
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,
+                $9,$10,$11,$12,$13,$14,$15,
+                $16,$17,$18,$19,$20
+            )
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(intent.intent_id)
+        .bind(&intent.agent_id)
+        .bind(&strategy_id)
+        .bind(intent.domain.to_string())
+        .bind(&signal_type)
+        .bind(&intent.market_slug)
+        .bind(&intent.token_id)
+        .bind(symbol)
+        .bind(intent.side.as_str())
+        .bind(confidence)
+        .bind(momentum_value)
+        .bind(short_ma)
+        .bind(long_ma)
+        .bind(rolling_volatility)
+        .bind(fair_value)
+        .bind(market_price)
+        .bind(edge)
+        .bind(config_hash)
+        .bind(sqlx::types::Json(context))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist signal history"
+            );
+        }
+    }
+
+    async fn persist_risk_decision(
+        &self,
+        intent: &OrderIntent,
+        decision: &str,
+        block_reason: Option<String>,
+        adjusted: Option<(u64, String)>,
+    ) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let (suggestion_max_shares, suggestion_reason) = adjusted
+            .map(|(shares, reason)| (Some(shares as i64), Some(reason)))
+            .unwrap_or((None, None));
+        let config_hash = intent.metadata.get("config_hash").cloned();
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO risk_gate_decisions (
+                account_id, intent_id, agent_id, domain, decision, block_reason, suggestion_max_shares,
+                suggestion_reason, notional_value, config_hash, metadata
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            ON CONFLICT (intent_id) DO UPDATE SET
+                decision = EXCLUDED.decision,
+                block_reason = EXCLUDED.block_reason,
+                suggestion_max_shares = EXCLUDED.suggestion_max_shares,
+                suggestion_reason = EXCLUDED.suggestion_reason,
+                notional_value = EXCLUDED.notional_value,
+                config_hash = EXCLUDED.config_hash,
+                metadata = EXCLUDED.metadata,
+                decided_at = NOW()
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(intent.intent_id)
+        .bind(&intent.agent_id)
+        .bind(intent.domain.to_string())
+        .bind(decision)
+        .bind(block_reason)
+        .bind(suggestion_max_shares)
+        .bind(suggestion_reason)
+        .bind(intent.notional_value())
+        .bind(config_hash)
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist risk gate decision"
+            );
+        }
+    }
+
+    async fn persist_exit_reason_intent(&self, intent: &OrderIntent) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let reason_code = intent
+            .metadata
+            .get("exit_reason")
+            .or_else(|| intent.metadata.get("reason_code"))
+            .cloned()
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        let reason_detail = intent.metadata.get("exit_detail").cloned();
+        let entry_price = Self::metadata_decimal(intent, "entry_price");
+        let pnl_pct = Self::metadata_decimal(intent, "pnl_pct");
+        let config_hash = intent.metadata.get("config_hash").cloned();
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO exit_reasons (
+                account_id, intent_id, agent_id, domain, market_slug, token_id, market_side, reason_code,
+                reason_detail, entry_price, pnl_pct, status, config_hash, metadata
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'INTENT_SUBMITTED',$12,$13)
+            ON CONFLICT (intent_id) DO UPDATE SET
+                reason_code = EXCLUDED.reason_code,
+                reason_detail = EXCLUDED.reason_detail,
+                entry_price = COALESCE(EXCLUDED.entry_price, exit_reasons.entry_price),
+                pnl_pct = COALESCE(EXCLUDED.pnl_pct, exit_reasons.pnl_pct),
+                status = EXCLUDED.status,
+                config_hash = EXCLUDED.config_hash,
+                metadata = EXCLUDED.metadata,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(intent.intent_id)
+        .bind(&intent.agent_id)
+        .bind(intent.domain.to_string())
+        .bind(&intent.market_slug)
+        .bind(&intent.token_id)
+        .bind(intent.side.as_str())
+        .bind(reason_code)
+        .bind(reason_detail)
+        .bind(entry_price)
+        .bind(pnl_pct)
+        .bind(config_hash)
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist exit reason intent"
+            );
+        }
+    }
+
+    async fn persist_exit_reason_execution(
+        &self,
+        intent: &OrderIntent,
+        result: Option<&crate::strategy::executor::ExecutionResult>,
+        error_message: Option<String>,
+    ) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let executed_price = result.and_then(|r| r.avg_fill_price);
+        let status = result
+            .map(|r| format!("{:?}", r.status))
+            .unwrap_or_else(|| "Failed".to_string());
+        let reason_detail = error_message.or_else(|| {
+            intent
+                .metadata
+                .get("exit_detail")
+                .cloned()
+                .or_else(|| intent.metadata.get("error").cloned())
+        });
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO exit_reasons (
+                account_id, intent_id, agent_id, domain, market_slug, token_id, market_side, reason_code,
+                reason_detail, entry_price, exit_price, pnl_pct, status, config_hash, metadata
+            )
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,
+                $9,$10,$11,$12,$13,$14,$15
+            )
+            ON CONFLICT (intent_id) DO UPDATE SET
+                reason_detail = COALESCE(EXCLUDED.reason_detail, exit_reasons.reason_detail),
+                exit_price = COALESCE(EXCLUDED.exit_price, exit_reasons.exit_price),
+                pnl_pct = COALESCE(EXCLUDED.pnl_pct, exit_reasons.pnl_pct),
+                status = EXCLUDED.status,
+                config_hash = COALESCE(EXCLUDED.config_hash, exit_reasons.config_hash),
+                metadata = EXCLUDED.metadata,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(intent.intent_id)
+        .bind(&intent.agent_id)
+        .bind(intent.domain.to_string())
+        .bind(&intent.market_slug)
+        .bind(&intent.token_id)
+        .bind(intent.side.as_str())
+        .bind(
+            intent
+                .metadata
+                .get("exit_reason")
+                .or_else(|| intent.metadata.get("reason_code"))
+                .cloned()
+                .unwrap_or_else(|| "UNKNOWN".to_string()),
+        )
+        .bind(reason_detail)
+        .bind(Self::metadata_decimal(intent, "entry_price"))
+        .bind(executed_price)
+        .bind(Self::metadata_decimal(intent, "pnl_pct"))
+        .bind(status)
+        .bind(intent.metadata.get("config_hash").cloned())
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist exit reason execution"
+            );
+        }
+    }
+
+    async fn persist_execution_analysis(
+        &self,
+        intent: &OrderIntent,
+        request: &OrderRequest,
+        result: Option<&crate::strategy::executor::ExecutionResult>,
+        queue_delay_ms: Option<i64>,
+        config_hash: Option<String>,
+    ) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let expected_price = request.limit_price;
+        let executed_price = result.and_then(|r| r.avg_fill_price);
+        let execution_latency_ms = result.map(|r| r.elapsed_ms as i64);
+        let total_latency_ms = match (queue_delay_ms, execution_latency_ms) {
+            (Some(q), Some(e)) => Some(q + e),
+            (Some(q), None) => Some(q),
+            (None, Some(e)) => Some(e),
+            (None, None) => None,
+        };
+
+        let actual_slippage_bps = executed_price.and_then(|fill| {
+            if expected_price.is_zero() {
+                return None;
+            }
+            let signed = if intent.is_buy {
+                (fill - expected_price) / expected_price
+            } else {
+                (expected_price - fill) / expected_price
+            };
+            Some(signed * Decimal::from(10_000))
+        });
+
+        let expected_slippage_bps = Self::metadata_decimal(intent, "expected_slippage_bps")
+            .or_else(|| Self::metadata_decimal(intent, "signal_expected_slippage_bps"));
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+        let status = result
+            .map(|r| format!("{:?}", r.status))
+            .unwrap_or_else(|| "Failed".to_string());
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO execution_analysis (
+                account_id, intent_id, agent_id, domain, market_slug, token_id, is_buy,
+                expected_price, executed_price, expected_slippage_bps, actual_slippage_bps,
+                queue_delay_ms, execution_latency_ms, total_latency_ms,
+                status, dry_run, config_hash, metadata
+            )
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,
+                $8,$9,$10,$11,
+                $12,$13,$14,
+                $15,$16,$17,$18
+            )
+            ON CONFLICT (intent_id) DO UPDATE SET
+                executed_price = EXCLUDED.executed_price,
+                expected_slippage_bps = EXCLUDED.expected_slippage_bps,
+                actual_slippage_bps = EXCLUDED.actual_slippage_bps,
+                queue_delay_ms = EXCLUDED.queue_delay_ms,
+                execution_latency_ms = EXCLUDED.execution_latency_ms,
+                total_latency_ms = EXCLUDED.total_latency_ms,
+                status = EXCLUDED.status,
+                dry_run = EXCLUDED.dry_run,
+                config_hash = EXCLUDED.config_hash,
+                metadata = EXCLUDED.metadata,
+                recorded_at = NOW()
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(intent.intent_id)
+        .bind(&intent.agent_id)
+        .bind(intent.domain.to_string())
+        .bind(&intent.market_slug)
+        .bind(&intent.token_id)
+        .bind(intent.is_buy)
+        .bind(expected_price)
+        .bind(executed_price)
+        .bind(expected_slippage_bps)
+        .bind(actual_slippage_bps)
+        .bind(queue_delay_ms)
+        .bind(execution_latency_ms)
+        .bind(total_latency_ms)
+        .bind(status)
+        .bind(self.executor.is_dry_run())
+        .bind(config_hash)
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist execution analysis"
             );
         }
     }

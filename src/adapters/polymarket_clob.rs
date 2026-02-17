@@ -8,14 +8,14 @@ use crate::error::{PloyError, Result};
 use crate::signing::Wallet;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use polymarket_client_sdk::clob::types::{
     request::{BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest},
     AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType as SdkSignatureType,
 };
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma::types::request::{
-    EventByIdRequest, EventsRequest, MarketByIdRequest, SearchRequest, SeriesByIdRequest,
+    EventByIdRequest, MarketsRequest, SearchRequest, SeriesByIdRequest,
 };
 use polymarket_client_sdk::gamma::types::response::Event as SdkEvent;
 use polymarket_client_sdk::gamma::Client as GammaClient;
@@ -119,6 +119,31 @@ where
         Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
         Some(other) => Ok(Some(other.to_string())),
     }
+}
+
+fn parse_json_array_strings(input: &str) -> std::result::Result<Vec<String>, serde_json::Error> {
+    let s = input.trim();
+    if s.is_empty() || s == "null" {
+        return Ok(Vec::new());
+    }
+
+    // Common case: JSON array of strings.
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(s) {
+        return Ok(v);
+    }
+
+    // Fallback: JSON array of numbers/values.
+    let vals = serde_json::from_str::<Vec<serde_json::Value>>(s)?;
+    Ok(vals
+        .into_iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        })
+        .collect())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -552,29 +577,103 @@ impl PolymarketClient {
 
     // ==================== Gamma API Methods ====================
 
-    /// Get market by condition ID
+    /// Get the raw Gamma market (SDK type) by CLOB token id.
+    ///
+    /// This is useful for official settlement/outcome checks without relying on
+    /// undocumented endpoints.
     #[instrument(skip(self))]
-    pub async fn get_market(&self, condition_id: &str) -> Result<MarketResponse> {
-        let req = MarketByIdRequest::builder().id(condition_id).build();
+    pub async fn get_gamma_market_by_token_id(
+        &self,
+        token_id: &str,
+    ) -> Result<polymarket_client_sdk::gamma::types::response::Market> {
+        let req = MarketsRequest::builder()
+            .clob_token_ids(vec![token_id.to_string()])
+            .limit(1)
+            .build();
 
-        let market = self
+        let markets = self
             .gamma_client
-            .market_by_id(&req)
+            .markets(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to get market: {}", e)))?;
 
-        // Convert SDK Market to our MarketResponse
+        markets.into_iter().next().ok_or_else(|| {
+            PloyError::MarketDataUnavailable(format!("Market not found for token_id={}", token_id))
+        })
+    }
+
+    /// Get market by condition ID
+    #[instrument(skip(self))]
+    pub async fn get_market(&self, condition_id: &str) -> Result<MarketResponse> {
+        // Gamma's `market_by_id` is keyed by Gamma market id, not `condition_id`.
+        // Use `markets?condition_ids=...` to fetch by condition id.
+        let req = MarketsRequest::builder()
+            .condition_ids(vec![condition_id.to_string()])
+            .limit(1)
+            .build();
+
+        let markets = self
+            .gamma_client
+            .markets(&req)
+            .await
+            .map_err(|e| PloyError::Internal(format!("Failed to get market: {}", e)))?;
+
+        let market = markets.into_iter().next().ok_or_else(|| {
+            PloyError::MarketDataUnavailable(format!(
+                "Market not found for condition_id={}",
+                condition_id
+            ))
+        })?;
+
+        let token_ids: Vec<String> = market
+            .clob_token_ids
+            .as_deref()
+            .and_then(|s| parse_json_array_strings(s).ok())
+            .unwrap_or_default();
+        let outcomes: Vec<String> = market
+            .outcomes
+            .as_deref()
+            .and_then(|s| parse_json_array_strings(s).ok())
+            .unwrap_or_default();
+        let prices: Vec<String> = market
+            .outcome_prices
+            .as_deref()
+            .and_then(|s| parse_json_array_strings(s).ok())
+            .unwrap_or_default();
+
+        let mut tokens = Vec::new();
+        for (i, token_id) in token_ids.iter().enumerate() {
+            let outcome = outcomes.get(i).cloned().unwrap_or_default();
+            let price = prices.get(i).cloned();
+            tokens.push(TokenInfo {
+                token_id: token_id.clone(),
+                outcome,
+                price,
+                extra: HashMap::new(),
+            });
+        }
+
         Ok(MarketResponse {
             condition_id: market
                 .condition_id
+                .clone()
                 .unwrap_or_else(|| condition_id.to_string()),
-            question_id: None,
-            tokens: vec![], // Tokens need to be fetched separately from CLOB
-            minimum_order_size: None,
-            minimum_tick_size: None,
+            question_id: market.question_id.clone(),
+            tokens,
+            minimum_order_size: market
+                .order_min_size
+                .as_ref()
+                .map(|d| serde_json::json!(d.to_string())),
+            minimum_tick_size: market
+                .order_price_min_tick_size
+                .as_ref()
+                .map(|d| serde_json::json!(d.to_string())),
             active: market.active.unwrap_or(true),
-            closed: false,
-            end_date_iso: market.end_date.map(|d| d.to_rfc3339()),
+            closed: market.closed.unwrap_or(false),
+            end_date_iso: market
+                .end_date_iso
+                .clone()
+                .or_else(|| market.end_date.map(|d| d.to_rfc3339())),
             neg_risk: None,
             extra: HashMap::new(),
         })
@@ -696,29 +795,33 @@ impl PolymarketClient {
     /// Get current (active, not closed) event from a series
     #[instrument(skip(self))]
     pub async fn get_current_event(&self, series_id: &str) -> Result<Option<GammaEventInfo>> {
-        // Fetch active events and filter by series
-        let req = EventsRequest::builder().active(true).closed(false).build();
+        // The Gamma `/events` endpoint has historically been inconsistent about including
+        // series membership. Prefer the direct `/series/{id}` endpoint and pick the
+        // soonest-ending active event in the future.
+        let events = self.get_all_active_events(series_id).await?;
+        let now = Utc::now();
 
-        let events = self
-            .gamma_client
-            .events(&req)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get events: {}", e)))?;
+        let mut best: Option<(DateTime<Utc>, GammaEventInfo)> = None;
+        for e in events {
+            let Some(end_str) = &e.end_date else {
+                continue;
+            };
+            let Ok(end) = DateTime::parse_from_rfc3339(end_str).map(|dt| dt.with_timezone(&Utc))
+            else {
+                continue;
+            };
+            if end <= now {
+                continue;
+            }
 
-        // Find the first event that belongs to this series
-        let event = events
-            .into_iter()
-            .filter(|e| !e.closed.unwrap_or(false))
-            .find(|e| {
-                e.series
-                    .as_ref()
-                    .map_or(false, |series| series.iter().any(|s| s.id == series_id))
-            });
-
-        match event {
-            Some(e) => Ok(Some(self.convert_sdk_event(&e))),
-            None => Ok(None),
+            match best.as_ref() {
+                None => best = Some((end, e)),
+                Some((best_end, _)) if end < *best_end => best = Some((end, e)),
+                _ => {}
+            }
         }
+
+        Ok(best.map(|(_, e)| e))
     }
 
     /// Get event details by ID
@@ -741,20 +844,23 @@ impl PolymarketClient {
         &self,
         series_id: &str,
     ) -> Result<Option<(String, MarketResponse)>> {
-        let event = self.get_current_event(series_id).await?;
+        let Some(event) = self.get_current_event(series_id).await? else {
+            return Ok(None);
+        };
 
-        match event {
-            Some(e) if !e.markets.is_empty() => {
-                let market = &e.markets[0];
-                if let Some(condition_id) = &market.condition_id {
-                    let market_resp = self.get_market(condition_id).await?;
-                    return Ok(Some((e.id, market_resp)));
-                }
-            }
-            _ => {}
-        }
+        // `/series/{id}` events are lightweight; fetch full event details to access markets.
+        let details = self.get_event_details(&event.id).await?;
+        let market = match details.markets.first() {
+            Some(m) => m,
+            None => return Ok(None),
+        };
 
-        Ok(None)
+        let Some(condition_id) = &market.condition_id else {
+            return Ok(None);
+        };
+
+        let market_resp = self.get_market(condition_id).await?;
+        Ok(Some((details.id, market_resp)))
     }
 
     /// Get all active events from a series

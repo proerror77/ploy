@@ -8,12 +8,10 @@ set -euo pipefail
 # command="/path/to/repo/scripts/ssh_ployctl.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty <SSH_PUBKEY>
 #
 # Then from a remote controller (e.g., OpenClaw gateway):
-#   ssh ploy@TRADING_HOST "status"
-#   ssh ploy@TRADING_HOST "start false true"
-#   ssh ploy@TRADING_HOST "start false true 123,456"
-#   ssh ploy@TRADING_HOST "logs 200"
+#   ssh ploy@TRADING_HOST "svc-status sports"
+#   ssh ploy@TRADING_HOST "svc-restart crypto"
+#   ssh ploy@TRADING_HOST "svc-logs obh 200"
 #   cat request.json | ssh ploy@TRADING_HOST "rpc"
-#   ssh ploy@TRADING_HOST "stop"
 #
 # This script only allows a small allowlist of subcommands and never echoes secrets.
 
@@ -40,69 +38,33 @@ resolve_service() {
   case "$input" in
     sports|ploy-sports-pm) echo "ploy-sports-pm" ;;
     crypto|ploy-crypto-dryrun) echo "ploy-crypto-dryrun" ;;
+    obh|orderbook-history|collector|ploy-orderbook-history) echo "ploy-orderbook-history" ;;
+    maint|maintenance|ploy-maintenance.timer) echo "ploy-maintenance.timer" ;;
     core|ploy) echo "ploy" ;;
     *)
       echo "invalid service: $input" >&2
-      echo "allowed: sports|crypto|core" >&2
+      echo "allowed: sports|crypto|obh|maint|core" >&2
       return 1
       ;;
   esac
 }
 
 case "$cmd" in
-  status)
-    exec scripts/event_edge_daemon.sh status
-    ;;
-  stop)
-    exec scripts/event_edge_daemon.sh stop
-    ;;
   rpc)
     if [[ -n "${arg1:-}" || -n "${arg2:-}" ]]; then
       echo "rpc takes no arguments; pass JSON-RPC via stdin" >&2
       exit 2
     fi
-    if [[ ! -x target/release/ploy ]]; then
-      echo "ploy binary not found at target/release/ploy (build it first)" >&2
+    ctl_cfg="${PLOY_CTL_CONFIG:-/opt/ploy/config/crypto_dry_run.toml}"
+    if [[ ! -x /opt/ploy/bin/ploy ]]; then
+      echo "ploy binary not found at /opt/ploy/bin/ploy" >&2
       exit 2
     fi
-    exec ./target/release/ploy rpc
-    ;;
-  logs)
-    # Optional: logs [n]
-    if [[ -n "${arg1:-}" ]]; then
-      [[ "$arg1" =~ ^[0-9]+$ ]] || { echo "logs: n must be integer" >&2; exit 2; }
-      exec scripts/event_edge_daemon.sh logs "$arg1"
-    fi
-    exec scripts/event_edge_daemon.sh logs 200
-    ;;
-  start)
-    # start [trade] [dry_run] [event_ids_csv]
-    # trade: true|false
-    # dry_run: true|false
-    if [[ -z "${arg1:-}" || -z "${arg2:-}" ]]; then
-      echo "start requires: start <trade:true|false> <dry_run:true|false>" >&2
-      exit 2
-    fi
-    if [[ "$arg1" != "true" && "$arg1" != "false" ]]; then
-      echo "start: trade must be true|false" >&2
-      exit 2
-    fi
-    if [[ "$arg2" != "true" && "$arg2" != "false" ]]; then
-      echo "start: dry_run must be true|false" >&2
-      exit 2
-    fi
-    if [[ -n "${arg3:-}" ]]; then
-      if ! [[ "$arg3" =~ ^[A-Za-z0-9,_-]+$ ]]; then
-        echo "start: event_ids must match [A-Za-z0-9,_-]+" >&2
-        exit 2
-      fi
-      exec scripts/event_edge_daemon.sh start "$arg1" "$arg2" "$arg3"
-    fi
-    exec scripts/event_edge_daemon.sh start "$arg1" "$arg2"
+    exec /opt/ploy/bin/ploy --config "$ctl_cfg" rpc
     ;;
   svc-status)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-status requires: svc-status <sports|crypto|core>" >&2
+      echo "svc-status requires: svc-status <sports|crypto|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -110,7 +72,7 @@ case "$cmd" in
     ;;
   svc-start)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-start requires: svc-start <sports|crypto|core>" >&2
+      echo "svc-start requires: svc-start <sports|crypto|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -118,7 +80,7 @@ case "$cmd" in
     ;;
   svc-stop)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-stop requires: svc-stop <sports|crypto|core>" >&2
+      echo "svc-stop requires: svc-stop <sports|crypto|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -126,7 +88,7 @@ case "$cmd" in
     ;;
   svc-restart)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-restart requires: svc-restart <sports|crypto|core>" >&2
+      echo "svc-restart requires: svc-restart <sports|crypto|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -134,7 +96,7 @@ case "$cmd" in
     ;;
   svc-logs)
     if [[ -z "${arg1:-}" ]]; then
-      echo "svc-logs requires: svc-logs <sports|crypto|core> [lines]" >&2
+      echo "svc-logs requires: svc-logs <sports|crypto|obh|maint|core> [lines]" >&2
       exit 2
     fi
     if [[ -n "${arg2:-}" ]] && ! [[ "$arg2" =~ ^[0-9]+$ ]]; then
@@ -147,7 +109,7 @@ case "$cmd" in
     ;;
   *)
     echo "unsupported command" >&2
-    echo "allowed: status | start <trade> <dry_run> [event_ids_csv] | logs [n] | rpc | stop | svc-status <sports|crypto|core> | svc-start <sports|crypto|core> | svc-stop <sports|crypto|core> | svc-restart <sports|crypto|core> | svc-logs <sports|crypto|core> [n]" >&2
+    echo "allowed: rpc | svc-status <sports|crypto|obh|maint|core> | svc-start <sports|crypto|obh|maint|core> | svc-stop <sports|crypto|obh|maint|core> | svc-restart <sports|crypto|obh|maint|core> | svc-logs <sports|crypto|obh|maint|core> [n]" >&2
     exit 2
     ;;
 esac

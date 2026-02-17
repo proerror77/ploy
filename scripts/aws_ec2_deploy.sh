@@ -9,7 +9,7 @@ USER_NAME="ubuntu"
 SSH_KEY=""
 START_AFTER_DEPLOY="true"
 ENABLE_ON_BOOT="true"
-SERVICES="ploy-sports-pm,ploy-crypto-dryrun,ploy-maintenance.timer"
+SERVICES="ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer"
 
 usage() {
   cat <<'USAGE'
@@ -23,8 +23,8 @@ Options:
   --start <true|false>     Start services after deploy (default: true)
   --enable <true|false>    Enable services on boot (default: true)
   --services <csv>         Services to enable/start
-                           allowed: ploy,ploy-sports-pm,ploy-crypto-dryrun,ploy-maintenance.timer
-                           default: ploy-sports-pm,ploy-crypto-dryrun,ploy-maintenance.timer
+                           allowed: ploy,ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
+                           default: ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer
   -h, --help               Show help
 
 Examples:
@@ -44,7 +44,8 @@ USAGE
 
 is_allowed_service() {
   case "$1" in
-    ploy|ploy-sports-pm|ploy-crypto-dryrun|ploy-maintenance.timer) return 0 ;;
+    ploy|ploy-sports-pm|ploy-crypto-dryrun|ploy-orderbook-history|ploy-maintenance.timer) return 0 ;;
+    ploy-strategy-pattern-memory-dryrun|ploy-strategy-momentum-dryrun|ploy-strategy-split-arb-dryrun) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -59,7 +60,7 @@ normalize_services_csv() {
     [[ -n "$svc" ]] || continue
     if ! is_allowed_service "$svc"; then
       echo "invalid service in --services: $svc" >&2
-      echo "allowed: ploy, ploy-sports-pm, ploy-crypto-dryrun, ploy-maintenance.timer" >&2
+      echo "allowed: ploy, ploy-sports-pm, ploy-crypto-dryrun, ploy-orderbook-history, ploy-maintenance.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
       exit 2
     fi
     out+=("$svc")
@@ -247,6 +248,13 @@ sudo mkdir -p "$REMOTE_ROOT"/{bin,config,env,data,logs}
 # (large) Cargo target directory, which can be cleaned to keep the disk healthy.
 sudo install -o ploy -g ploy -m 0755 "$REMOTE_ROOT/target/release/ploy" "$REMOTE_ROOT/bin/ploy"
 
+# Install auxiliary runtime scripts (optional).
+if [[ -f "$REMOTE_ROOT/deployment/bin/ploy-orderbook-history-collector.sh" ]]; then
+  sudo install -o ploy -g ploy -m 0755 \
+    "$REMOTE_ROOT/deployment/bin/ploy-orderbook-history-collector.sh" \
+    "$REMOTE_ROOT/bin/ploy-orderbook-history-collector.sh"
+fi
+
 # Keep disk usage bounded on small hosts.
 sudo rm -rf "$REMOTE_ROOT/target"
 sudo chown -R ploy:ploy "$REMOTE_ROOT"
@@ -257,6 +265,10 @@ for unit in \
   "$REMOTE_ROOT/deployment/ploy@.service" \
   "$REMOTE_ROOT/deployment/ploy-sports-pm.service" \
   "$REMOTE_ROOT/deployment/ploy-crypto-dryrun.service" \
+  "$REMOTE_ROOT/deployment/ploy-strategy-pattern-memory-dryrun.service" \
+  "$REMOTE_ROOT/deployment/ploy-strategy-momentum-dryrun.service" \
+  "$REMOTE_ROOT/deployment/ploy-strategy-split-arb-dryrun.service" \
+  "$REMOTE_ROOT/deployment/ploy-orderbook-history.service" \
   "$REMOTE_ROOT/deployment/ploy-maintenance.service" \
   "$REMOTE_ROOT/deployment/ploy-maintenance.timer"
 do
@@ -334,3 +346,4 @@ echo "  3) Seed NBA stats: /opt/ploy/bin/ploy --config /opt/ploy/config/sports_p
 echo "  4) Check logs:"
 echo "     sudo journalctl -u ploy-sports-pm -f"
 echo "     sudo journalctl -u ploy-crypto-dryrun -f"
+echo "     sudo journalctl -u ploy-orderbook-history -f"

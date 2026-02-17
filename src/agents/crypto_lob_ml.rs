@@ -1,10 +1,15 @@
-//! CryptoTradingAgent — pull-based agent for crypto 15-min UP/DOWN markets
+//! CryptoLobMlAgent — pull-based agent that uses Binance LOB features to estimate
+//! a short-horizon UP probability (BTC 5m focus by default) and trade Polymarket
+//! UP/DOWN markets accordingly.
 //!
-//! Owns Binance + Polymarket WebSocket feeds. Reuses signal logic from
-//! the existing CryptoAgent (sum_of_asks threshold + momentum direction).
+//! This is intentionally lightweight: it provides a deployable baseline for
+//! collecting training data and running a probabilistic strategy *without*
+//! requiring the optional `rl` feature gate. RL integration can replace the
+//! `estimate_p_up()` function later.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -16,57 +21,108 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate};
 use crate::agents::{AgentContext, TradingAgent};
+use crate::collector::{LobCache, LobSnapshot};
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
-/// Configuration for the CryptoTradingAgent
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CryptoTradingConfig {
+pub struct LobMlWeights {
+    pub bias: f64,
+    pub w_obi_5: f64,
+    pub w_obi_10: f64,
+    pub w_momentum_1s: f64,
+    pub w_momentum_5s: f64,
+    pub w_spread_bps: f64,
+}
+
+impl Default for LobMlWeights {
+    fn default() -> Self {
+        // Reasonable starting point; tune via env-config + backtests.
+        // Typical ranges:
+        // - OBI: [-1, 1]
+        // - momentum_1s: ~[-0.002, 0.002] in calm markets
+        // - spread_bps: single digits
+        Self {
+            bias: 0.0,
+            w_obi_5: 1.5,
+            w_obi_10: 0.5,
+            w_momentum_1s: 150.0,
+            w_momentum_5s: 50.0,
+            w_spread_bps: -0.01,
+        }
+    }
+}
+
+/// Configuration for the CryptoLobMlAgent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoLobMlConfig {
     pub agent_id: String,
     pub name: String,
     pub coins: Vec<String>,
-    pub sum_threshold: Decimal,
-    pub min_momentum_1s: f64,
+
     /// Refresh interval for Gamma event discovery (seconds)
     pub event_refresh_secs: u64,
+
     /// Minimum time remaining for selected event (seconds)
     pub min_time_remaining_secs: u64,
+
     /// Maximum time remaining for selected event (seconds)
     pub max_time_remaining_secs: u64,
-    /// Prefer events closest to end (confirmatory mode)
+
+    /// If true, prefer events closest to end (confirmatory mode).
+    /// If false, prefer events with more time remaining (predictive mode).
     pub prefer_close_to_end: bool,
+
     pub default_shares: u64,
     pub take_profit: Decimal,
     pub stop_loss: Decimal,
+
+    /// Minimum expected-value edge required to enter.
+    /// UP edge = p_up - up_ask; DOWN edge = (1 - p_up) - down_ask.
+    pub min_edge: Decimal,
+
+    /// Max ask price to pay for entry (YES/NO).
+    pub max_entry_price: Decimal,
+
+    /// Minimum seconds between entries per symbol (avoid thrash).
+    pub cooldown_secs: u64,
+
+    /// Reject LOB snapshots older than this age (seconds).
+    pub max_lob_snapshot_age_secs: u64,
+
+    pub weights: LobMlWeights,
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
 }
 
-impl Default for CryptoTradingConfig {
+impl Default for CryptoLobMlConfig {
     fn default() -> Self {
         Self {
-            agent_id: "crypto".into(),
-            name: "Crypto Momentum".into(),
-            coins: vec!["BTC".into(), "ETH".into(), "SOL".into()],
-            sum_threshold: dec!(0.96),
-            min_momentum_1s: 0.001,
-            event_refresh_secs: 30,
-            min_time_remaining_secs: 60,
-            max_time_remaining_secs: 900,
-            prefer_close_to_end: true,
-            default_shares: 100,
+            agent_id: "crypto_lob_ml".into(),
+            name: "Crypto LOB ML".into(),
+            coins: vec!["BTC".into()],
+            event_refresh_secs: 15,
+            // By default, focus on 5m markets and enter early (predictive mode).
+            min_time_remaining_secs: 240,
+            max_time_remaining_secs: 300,
+            prefer_close_to_end: false,
+            default_shares: 50,
             take_profit: dec!(0.02),
             stop_loss: dec!(0.05),
+            min_edge: dec!(0.02),
+            max_entry_price: dec!(0.70),
+            cooldown_secs: 30,
+            max_lob_snapshot_age_secs: 2,
+            weights: LobMlWeights::default(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }
     }
 }
 
-/// Internal position tracking
 #[derive(Debug, Clone)]
 struct TrackedPosition {
     market_slug: String,
@@ -75,31 +131,31 @@ struct TrackedPosition {
     side: Side,
     shares: u64,
     entry_price: Decimal,
-    #[allow(dead_code)]
     entry_time: DateTime<Utc>,
-    is_hedged: bool,
 }
 
-/// Pull-based crypto trading agent
-pub struct CryptoTradingAgent {
-    config: CryptoTradingConfig,
+pub struct CryptoLobMlAgent {
+    config: CryptoLobMlConfig,
     binance_ws: Arc<BinanceWebSocket>,
     pm_ws: Arc<PolymarketWebSocket>,
     event_matcher: Arc<EventMatcher>,
+    lob_cache: LobCache,
 }
 
-impl CryptoTradingAgent {
+impl CryptoLobMlAgent {
     pub fn new(
-        config: CryptoTradingConfig,
+        config: CryptoLobMlConfig,
         binance_ws: Arc<BinanceWebSocket>,
         pm_ws: Arc<PolymarketWebSocket>,
         event_matcher: Arc<EventMatcher>,
+        lob_cache: LobCache,
     ) -> Self {
         Self {
             config,
             binance_ws,
             pm_ws,
             event_matcher,
+            lob_cache,
         }
     }
 
@@ -110,45 +166,34 @@ impl CryptoTradingAgent {
         format!("{:x}", hasher.finalize())
     }
 
-    fn estimate_fair_value(momentum: Decimal) -> Decimal {
-        (dec!(0.50) + momentum.abs() * dec!(10))
-            .max(dec!(0.05))
-            .min(dec!(0.95))
+    fn sigmoid(x: f64) -> f64 {
+        1.0 / (1.0 + (-x).exp())
     }
 
-    fn signal_confidence(
-        sum_of_asks: Decimal,
-        sum_threshold: Decimal,
-        momentum_1s: Decimal,
-        short_momentum: Decimal,
-        long_momentum: Decimal,
-        min_momentum: Decimal,
-    ) -> Decimal {
-        let min_mom = min_momentum.max(dec!(0.0001));
-        let momentum_strength = (momentum_1s.abs() / min_mom).min(dec!(3));
-        let momentum_score = (momentum_strength / dec!(3)) * dec!(0.50);
+    /// Estimate p(UP) from LOB snapshot + short-horizon momentum.
+    fn estimate_p_up(&self, lob: &LobSnapshot, momentum_1s: Decimal, momentum_5s: Decimal) -> f64 {
+        let w = &self.config.weights;
 
-        let dislocation = if sum_threshold > Decimal::ZERO {
-            ((sum_threshold - sum_of_asks).max(Decimal::ZERO) / sum_threshold).min(Decimal::ONE)
-        } else {
-            Decimal::ZERO
-        };
-        let dislocation_score = dislocation * dec!(0.30);
+        let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
+        let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
+        let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
+        let m1 = momentum_1s.to_f64().unwrap_or(0.0);
+        let m5 = momentum_5s.to_f64().unwrap_or(0.0);
 
-        let trend_aligned = (short_momentum >= Decimal::ZERO && long_momentum >= Decimal::ZERO)
-            || (short_momentum <= Decimal::ZERO && long_momentum <= Decimal::ZERO);
-        let trend_score = if trend_aligned {
-            dec!(0.20)
-        } else {
-            dec!(0.10)
-        };
+        let z = w.bias
+            + w.w_obi_5 * obi5
+            + w.w_obi_10 * obi10
+            + w.w_momentum_1s * m1
+            + w.w_momentum_5s * m5
+            + w.w_spread_bps * spread;
 
-        (momentum_score + dislocation_score + trend_score).min(Decimal::ONE)
+        // Avoid exact 0/1 probabilities.
+        Self::sigmoid(z).clamp(0.001, 0.999)
     }
 }
 
 #[async_trait]
-impl TradingAgent for CryptoTradingAgent {
+impl TradingAgent for CryptoLobMlAgent {
     fn id(&self) -> &str {
         &self.config.agent_id
     }
@@ -166,13 +211,15 @@ impl TradingAgent for CryptoTradingAgent {
     }
 
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
-        info!(agent = self.config.agent_id, "crypto agent starting");
+        info!(agent = self.config.agent_id, "crypto lob-ml agent starting");
         let config_hash = self.config_hash();
 
         let mut status = AgentStatus::Running;
-        let mut positions: HashMap<String, TrackedPosition> = HashMap::new();
+        let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
         let mut active_events: HashMap<String, EventInfo> = HashMap::new(); // symbol -> event
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
+        let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
+
         let daily_pnl = Decimal::ZERO;
         let mut total_exposure = Decimal::ZERO;
 
@@ -180,12 +227,12 @@ impl TradingAgent for CryptoTradingAgent {
         let mut binance_rx: broadcast::Receiver<PriceUpdate> = self.binance_ws.subscribe();
         let mut pm_rx: broadcast::Receiver<QuoteUpdate> = self.pm_ws.subscribe_updates();
 
-        // Periodic refresh of active events
-        let refresh_dur = tokio::time::Duration::from_secs(self.config.event_refresh_secs);
+        let refresh_dur = tokio::time::Duration::from_secs(self.config.event_refresh_secs.max(1));
         let mut refresh_tick = tokio::time::interval(refresh_dur);
         refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let heartbeat_dur = tokio::time::Duration::from_secs(self.config.heartbeat_interval_secs);
+        let heartbeat_dur =
+            tokio::time::Duration::from_secs(self.config.heartbeat_interval_secs.max(1));
         let mut heartbeat_tick = tokio::time::interval(heartbeat_dur);
         heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -215,6 +262,7 @@ impl TradingAgent for CryptoTradingAgent {
 
                     active_events = refreshed_events;
 
+                    // Ensure we are subscribed to the latest token set.
                     let mut desired_tokens: HashSet<String> = HashSet::new();
                     for event in active_events.values() {
                         desired_tokens.insert(event.up_token_id.clone());
@@ -227,7 +275,6 @@ impl TradingAgent for CryptoTradingAgent {
                                 .register_tokens(&event.up_token_id, &event.down_token_id)
                                 .await;
                         }
-
                         self.pm_ws.request_resubscribe();
                         info!(
                             agent = self.config.agent_id,
@@ -238,7 +285,7 @@ impl TradingAgent for CryptoTradingAgent {
                     }
                 }
 
-                // --- Binance price updates ---
+                // --- Binance price updates (entry decisions) ---
                 result = binance_rx.recv() => {
                     let update = match result {
                         Ok(u) => u,
@@ -256,13 +303,11 @@ impl TradingAgent for CryptoTradingAgent {
                         continue;
                     }
 
-                    // Check if this coin is in our watchlist
                     let coin = update.symbol.replace("USDT", "");
                     if !self.config.coins.iter().any(|c| c == &coin) {
                         continue;
                     }
 
-                    // Find the active UP/DOWN event for this symbol
                     let event = match active_events.get(&update.symbol) {
                         Some(e) => e,
                         None => {
@@ -271,7 +316,19 @@ impl TradingAgent for CryptoTradingAgent {
                         }
                     };
 
-                    // Get PM quotes for UP/DOWN token IDs
+                    // Do not re-enter the same event.
+                    if positions.contains_key(&event.slug) {
+                        continue;
+                    }
+
+                    // Cooldown per symbol.
+                    if let Some(last) = last_trade_by_symbol.get(&update.symbol) {
+                        if Utc::now().signed_duration_since(*last).num_seconds() < self.config.cooldown_secs as i64 {
+                            continue;
+                        }
+                    }
+
+                    // Pull latest PM quotes.
                     let quote_cache = self.pm_ws.quote_cache();
                     let up = quote_cache.get(&event.up_token_id);
                     let down = quote_cache.get(&event.down_token_id);
@@ -284,70 +341,43 @@ impl TradingAgent for CryptoTradingAgent {
                         ),
                         _ => continue,
                     };
-
                     if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
                         continue;
                     }
 
-                    // Check momentum from binance price cache
+                    // Pull LOB snapshot (feature vector).
+                    let lob = match self.lob_cache.get_snapshot(&update.symbol).await {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
+                    if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
+                        continue;
+                    }
+
+                    // Momentum from trade-tick cache.
                     let spot_cache = self.binance_ws.price_cache();
-                    let momentum = spot_cache.momentum(&update.symbol, 1).await;
-                    let short_momentum = spot_cache
-                        .momentum(&update.symbol, 5)
-                        .await
-                        .unwrap_or(Decimal::ZERO);
-                    let long_momentum = spot_cache
-                        .momentum(&update.symbol, 30)
-                        .await
-                        .unwrap_or(Decimal::ZERO);
-                    let rolling_volatility = spot_cache
-                        .volatility(&update.symbol, 60)
-                        .await
-                        .unwrap_or(Decimal::ZERO);
+                    let momentum_1s = spot_cache.momentum(&update.symbol, 1).await.unwrap_or(Decimal::ZERO);
+                    let momentum_5s = spot_cache.momentum(&update.symbol, 5).await.unwrap_or(Decimal::ZERO);
 
-                    // Signal detection: sum_of_asks < threshold
-                    let sum_of_asks = up_ask + down_ask;
-                    if sum_of_asks >= self.config.sum_threshold {
-                        continue;
-                    }
+                    let p_up = self.estimate_p_up(&lob, momentum_1s, momentum_5s);
+                    let p_up_dec = Decimal::from_f64_retain(p_up).unwrap_or(dec!(0.5));
 
-                    // Already have a position in this market
-                    if positions.contains_key(&event.slug) {
-                        continue;
-                    }
+                    let up_edge = p_up_dec - up_ask;
+                    let down_edge = (Decimal::ONE - p_up_dec) - down_ask;
 
-                    // Check momentum threshold
-                    let mom_ok = momentum
-                        .map(|m| m.abs() >= Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)))
-                        .unwrap_or(true);
-
-                    if !mom_ok {
-                        continue;
-                    }
-
-                    // Determine side from momentum direction
-                    let side = if momentum.map(|m| m > Decimal::ZERO).unwrap_or(true) {
-                        Side::Up
+                    let (side, token_id, limit_price, edge, confidence) = if up_edge >= down_edge {
+                        (Side::Up, event.up_token_id.clone(), up_ask, up_edge, p_up_dec)
                     } else {
-                        Side::Down
+                        (Side::Down, event.down_token_id.clone(), down_ask, down_edge, Decimal::ONE - p_up_dec)
                     };
 
-                    let (token_id, limit_price) = match side {
-                        Side::Up => (event.up_token_id.clone(), up_ask),
-                        Side::Down => (event.down_token_id.clone(), down_ask),
-                    };
-
-                    let momentum_1s = momentum.unwrap_or(Decimal::ZERO);
-                    let fair_value = Self::estimate_fair_value(momentum_1s);
-                    let signal_edge = fair_value - limit_price;
-                    let confidence = Self::signal_confidence(
-                        sum_of_asks,
-                        self.config.sum_threshold,
-                        momentum_1s,
-                        short_momentum,
-                        long_momentum,
-                        Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)),
-                    );
+                    if edge < self.config.min_edge {
+                        continue;
+                    }
+                    if limit_price > self.config.max_entry_price {
+                        continue;
+                    }
 
                     let intent = OrderIntent::new(
                         &self.config.agent_id,
@@ -356,50 +386,58 @@ impl TradingAgent for CryptoTradingAgent {
                         &token_id,
                         side,
                         true,
-                        self.config.default_shares,
+                        self.config.default_shares.max(1),
                         limit_price,
                     )
                     .with_priority(OrderPriority::Normal)
-                    .with_metadata("strategy", "crypto_momentum")
+                    .with_metadata("strategy", "crypto_lob_ml")
+                    .with_metadata("signal_type", "crypto_lob_ml_entry")
                     .with_metadata("coin", &coin)
+                    .with_metadata("symbol", &update.symbol)
                     .with_metadata("condition_id", &event.condition_id)
                     .with_metadata("event_end_time", &event.end_time.to_rfc3339())
-                    .with_metadata("sum_of_asks", &sum_of_asks.to_string())
                     .with_metadata("event_title", &event.title)
-                    .with_metadata("signal_type", "crypto_momentum_entry")
+                    .with_metadata("p_up", &format!("{p_up:.6}"))
+                    .with_metadata("signal_edge", &edge.to_string())
                     .with_metadata("signal_confidence", &confidence.to_string())
-                    .with_metadata("signal_momentum_value", &momentum_1s.to_string())
-                    .with_metadata("signal_short_ma", &short_momentum.to_string())
-                    .with_metadata("signal_long_ma", &long_momentum.to_string())
-                    .with_metadata("signal_rolling_volatility", &rolling_volatility.to_string())
-                    .with_metadata("signal_fair_value", &fair_value.to_string())
-                    .with_metadata("signal_market_price", &limit_price.to_string())
-                    .with_metadata("signal_edge", &signal_edge.to_string())
+                    .with_metadata("pm_up_ask", &up_ask.to_string())
+                    .with_metadata("pm_down_ask", &down_ask.to_string())
+                    .with_metadata("lob_best_bid", &lob.best_bid.to_string())
+                    .with_metadata("lob_best_ask", &lob.best_ask.to_string())
+                    .with_metadata("lob_mid_price", &lob.mid_price.to_string())
+                    .with_metadata("lob_spread_bps", &lob.spread_bps.to_string())
+                    .with_metadata("lob_obi_5", &lob.obi_5.to_string())
+                    .with_metadata("lob_obi_10", &lob.obi_10.to_string())
+                    .with_metadata("lob_bid_volume_5", &lob.bid_volume_5.to_string())
+                    .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
+                    .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
+                    .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
                     .with_metadata("config_hash", &config_hash);
 
                     info!(
                         agent = self.config.agent_id,
                         slug = %event.slug,
-                        %sum_of_asks,
                         %side,
                         %limit_price,
-                        "signal detected, submitting order"
+                        %edge,
+                        p_up = %p_up,
+                        "lob-ml signal detected, submitting order"
                     );
 
                     if let Err(e) = ctx.submit_order(intent).await {
                         warn!(agent = self.config.agent_id, error = %e, "failed to submit order");
+                        continue;
                     }
 
-                    // Track position locally
+                    last_trade_by_symbol.insert(update.symbol.clone(), Utc::now());
                     positions.insert(event.slug.clone(), TrackedPosition {
                         market_slug: event.slug.clone(),
                         symbol: update.symbol.clone(),
                         token_id,
                         side,
-                        shares: self.config.default_shares,
+                        shares: self.config.default_shares.max(1),
                         entry_price: limit_price,
                         entry_time: Utc::now(),
-                        is_hedged: false,
                     });
 
                     total_exposure = positions.values()
@@ -407,7 +445,7 @@ impl TradingAgent for CryptoTradingAgent {
                         .sum();
                 }
 
-                // --- Polymarket quote updates ---
+                // --- Polymarket quote updates (exit decisions) ---
                 result = pm_rx.recv() => {
                     let update = match result {
                         Ok(u) => u,
@@ -429,7 +467,7 @@ impl TradingAgent for CryptoTradingAgent {
                         continue;
                     };
 
-                    // Check TP/SL on any tracked position matching this token.
+                    // Find position by token id.
                     let position_key = positions
                         .iter()
                         .find_map(|(slug, pos)| (pos.token_id == update.token_id).then(|| slug.clone()));
@@ -469,8 +507,8 @@ impl TradingAgent for CryptoTradingAgent {
                         best_bid,
                     )
                     .with_priority(priority)
-                    .with_metadata("strategy", "crypto_momentum")
-                    .with_metadata("signal_type", "crypto_momentum_exit")
+                    .with_metadata("strategy", "crypto_lob_ml")
+                    .with_metadata("signal_type", "crypto_lob_ml_exit")
                     .with_metadata("symbol", &pos.symbol)
                     .with_metadata("exit_reason", exit_reason)
                     .with_metadata("entry_price", &pos.entry_price.to_string())
@@ -534,11 +572,11 @@ impl TradingAgent for CryptoTradingAgent {
                                     pos.side,
                                     false,
                                     pos.shares,
-                                    bid, // best-effort sell
+                                    bid,
                                 )
                                 .with_priority(OrderPriority::Critical)
-                                .with_metadata("strategy", "crypto_momentum")
-                                .with_metadata("signal_type", "crypto_momentum_exit")
+                                .with_metadata("strategy", "crypto_lob_ml")
+                                .with_metadata("signal_type", "crypto_lob_ml_exit")
                                 .with_metadata("symbol", &pos.symbol)
                                 .with_metadata("exit_reason", "force_close")
                                 .with_metadata("entry_price", &pos.entry_price.to_string())
@@ -599,7 +637,7 @@ impl TradingAgent for CryptoTradingAgent {
             }
         }
 
-        info!(agent = self.config.agent_id, "crypto agent stopped");
+        info!(agent = self.config.agent_id, "crypto lob-ml agent stopped");
         Ok(())
     }
 }
@@ -610,9 +648,39 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let cfg = CryptoTradingConfig::default();
-        assert_eq!(cfg.agent_id, "crypto");
-        assert_eq!(cfg.coins.len(), 3);
-        assert_eq!(cfg.sum_threshold, dec!(0.96));
+        let cfg = CryptoLobMlConfig::default();
+        assert_eq!(cfg.agent_id, "crypto_lob_ml");
+        assert_eq!(cfg.coins, vec!["BTC".to_string()]);
+        assert_eq!(cfg.max_time_remaining_secs, 300);
+        assert!(!cfg.prefer_close_to_end);
+    }
+
+    #[test]
+    fn test_probability_clamps() {
+        // Minimal snapshot just for the estimator.
+        let snap = LobSnapshot {
+            timestamp: Utc::now(),
+            symbol: "BTCUSDT".into(),
+            best_bid: dec!(1),
+            best_ask: dec!(1),
+            mid_price: dec!(1),
+            spread_bps: dec!(1),
+            obi_5: dec!(0),
+            obi_10: dec!(0),
+            bid_volume_5: dec!(1),
+            ask_volume_5: dec!(1),
+            update_id: 1,
+        };
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+        };
+        let p = agent.estimate_p_up(&snap, Decimal::ZERO, Decimal::ZERO);
+        assert!(p > 0.0 && p < 1.0);
     }
 }

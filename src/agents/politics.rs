@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::agents::{AgentContext, TradingAgent};
@@ -80,6 +81,12 @@ impl TradingAgent for PoliticsTradingAgent {
 
     async fn run(mut self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "politics agent starting");
+        let config_hash = {
+            let payload = serde_json::to_vec(&self.config).unwrap_or_default();
+            let mut hasher = Sha256::new();
+            hasher.update(payload);
+            format!("{:x}", hasher.finalize())
+        };
 
         if self.core.targets_empty() {
             warn!(
@@ -154,7 +161,13 @@ impl TradingAgent for PoliticsTradingAgent {
                                 .with_metadata("event_id", &decision.event_id)
                                 .with_metadata("outcome", &decision.outcome)
                                 .with_metadata("edge", &decision.edge.to_string())
-                                .with_metadata("p_true", &decision.p_true.to_string());
+                                .with_metadata("p_true", &decision.p_true.to_string())
+                                .with_metadata("signal_type", "event_edge_entry")
+                                .with_metadata("signal_confidence", &decision.p_true.to_string())
+                                .with_metadata("signal_fair_value", &decision.p_true.to_string())
+                                .with_metadata("signal_market_price", &decision.limit_price.to_string())
+                                .with_metadata("signal_edge", &decision.edge.to_string())
+                                .with_metadata("config_hash", &config_hash);
 
                                 info!(
                                     agent = self.config.agent_id,

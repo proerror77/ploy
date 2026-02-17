@@ -103,6 +103,41 @@ pub enum StrategyCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Report prediction accuracy using Polymarket official settlement (token pays 1/0)
+    Accuracy {
+        /// Lookback window in hours (scopes which entry intents are scored)
+        #[arg(long, default_value = "12")]
+        lookback_hours: u64,
+
+        /// Filter by domain: crypto|sports|politics
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Filter by account_id (defaults to all)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Filter by agent_id (defaults to all)
+        #[arg(long)]
+        agent_id: Option<String>,
+
+        /// Only include live orders (exclude dry-run)
+        #[arg(long)]
+        live_only: bool,
+
+        /// Max number of intents to print (latest first)
+        #[arg(long, default_value = "200")]
+        limit: usize,
+
+        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
+        #[arg(long)]
+        no_refresh: bool,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
 }
 
 impl StrategyCommands {
@@ -124,6 +159,28 @@ impl StrategyCommands {
                 database_url,
             } => seed_nba_stats(&season, database_url).await,
             Self::NbaComeback { config, dry_run } => run_nba_comeback(config, dry_run).await,
+            Self::Accuracy {
+                lookback_hours,
+                domain,
+                account_id,
+                agent_id,
+                live_only,
+                limit,
+                no_refresh,
+                database_url,
+            } => {
+                report_accuracy_pm_settlement(
+                    lookback_hours,
+                    domain,
+                    account_id,
+                    agent_id,
+                    live_only,
+                    limit,
+                    no_refresh,
+                    database_url,
+                )
+                .await
+            }
         }
     }
 }
@@ -221,14 +278,24 @@ async fn start_strategy(
 ) -> Result<()> {
     info!("Starting strategy: {}", name);
 
-    // Check if already running
-    if let StrategyStatus::Running(pid) = get_strategy_status(name) {
-        println!(
-            "\x1b[33m⚠ Strategy '{}' is already running (PID: {})\x1b[0m",
-            name, pid
-        );
-        println!("  Use 'ploy strategy stop {}' first", name);
-        return Ok(());
+    // Check if already running.
+    //
+    // NOTE: when invoked as a systemd service (ExecStart), the unit can appear "active"
+    // while we are starting. In that case, `get_strategy_status()` would detect the unit
+    // and we'd exit immediately, causing a restart loop. Skip the check under systemd.
+    let under_systemd = std::env::var_os("INVOCATION_ID").is_some()
+        || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
+        || std::env::var_os("JOURNAL_STREAM").is_some();
+
+    if !under_systemd {
+        if let StrategyStatus::Running(pid) = get_strategy_status(name) {
+            println!(
+                "\x1b[33m⚠ Strategy '{}' is already running (PID: {})\x1b[0m",
+                name, pid
+            );
+            println!("  Use 'ploy strategy stop {}' first", name);
+            return Ok(());
+        }
     }
 
     // Find config file
@@ -361,25 +428,66 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
         .await
         .expect("Action receiver should be available");
 
-    // Extract symbols from feeds for Binance
-    let binance_symbols: Vec<String> = required_feeds
-        .iter()
-        .filter_map(|f| match f {
-            crate::strategy::DataFeed::BinanceSpot { symbols } => Some(symbols.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
+    // Extract Binance feed requirements from strategy feeds
+    let mut binance_spot_symbols: Vec<String> = Vec::new();
+    let mut binance_kline_symbols: Vec<String> = Vec::new();
+    let mut binance_kline_intervals: Vec<String> = Vec::new();
+    let mut binance_kline_closed_only: bool = true;
+
+    for f in &required_feeds {
+        match f {
+            crate::strategy::DataFeed::BinanceSpot { symbols } => {
+                binance_spot_symbols.extend(symbols.clone());
+            }
+            crate::strategy::DataFeed::BinanceKlines {
+                symbols,
+                intervals,
+                closed_only,
+            } => {
+                binance_kline_symbols.extend(symbols.clone());
+                binance_kline_intervals.extend(intervals.clone());
+                if !*closed_only {
+                    binance_kline_closed_only = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    binance_spot_symbols.sort();
+    binance_spot_symbols.dedup();
+    binance_kline_symbols.sort();
+    binance_kline_symbols.dedup();
+    binance_kline_intervals.sort();
+    binance_kline_intervals.dedup();
 
     // Create data feed manager with required feeds
     let mut feed_manager = DataFeedManager::new(manager.clone());
 
-    if !binance_symbols.is_empty() {
+    if !binance_spot_symbols.is_empty() {
         println!(
-            "  \x1b[36mConfiguring Binance feed: {:?}\x1b[0m",
-            binance_symbols
+            "  \x1b[36mConfiguring Binance spot feed: {:?}\x1b[0m",
+            binance_spot_symbols
         );
-        feed_manager = feed_manager.with_binance(binance_symbols);
+        feed_manager = feed_manager.with_binance(binance_spot_symbols);
+    }
+
+    if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
+        let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(300);
+
+        println!(
+            "  \x1b[36mConfiguring Binance kline feed: symbols={:?} intervals={:?} closed_only={} backfill_limit={}\x1b[0m",
+            binance_kline_symbols, binance_kline_intervals, binance_kline_closed_only, backfill_limit
+        );
+        feed_manager = feed_manager.with_binance_klines(
+            binance_kline_symbols,
+            binance_kline_intervals,
+            binance_kline_closed_only,
+            backfill_limit,
+        );
     }
 
     // Configure Polymarket if needed
@@ -683,6 +791,7 @@ async fn show_status(name: Option<&str>) -> Result<()> {
         vec![
             "momentum".into(),
             "split_arb".into(),
+            "pattern_memory".into(),
             "sports".into(),
             "politics".into(),
         ]
@@ -698,10 +807,19 @@ async fn show_status(name: Option<&str>) -> Result<()> {
         let status = get_strategy_status(&strat_name);
         match status {
             StrategyStatus::Running(pid) => {
-                let uptime = get_process_uptime(pid).unwrap_or_else(|| "unknown".into());
+                let pid_str = if pid == 0 {
+                    "-".to_string()
+                } else {
+                    pid.to_string()
+                };
+                let uptime = if pid == 0 {
+                    "unknown".into()
+                } else {
+                    get_process_uptime(pid).unwrap_or_else(|| "unknown".into())
+                };
                 println!(
                     "  {:<15} \x1b[32m{:<12}\x1b[0m {:<10} {}",
-                    strat_name, "● running", pid, uptime
+                    strat_name, "● running", pid_str, uptime
                 );
             }
             StrategyStatus::Stopped => {
@@ -806,28 +924,34 @@ enum StrategyStatus {
 fn get_strategy_status(name: &str) -> StrategyStatus {
     let pid_file = run_dir().join(format!("{}.pid", name));
 
-    if !pid_file.exists() {
-        return StrategyStatus::Stopped;
+    if pid_file.exists() {
+        match fs::read_to_string(&pid_file) {
+            Ok(content) => match content.trim().parse::<u32>() {
+                Ok(pid) => {
+                    if is_process_running(pid) {
+                        return StrategyStatus::Running(pid);
+                    }
+                    // Stale PID file: fall through to other detection paths.
+                    let _ = fs::remove_file(&pid_file);
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&pid_file);
+                }
+            },
+            Err(e) => return StrategyStatus::Error(e.to_string()),
+        }
     }
 
-    match fs::read_to_string(&pid_file) {
-        Ok(content) => {
-            match content.trim().parse::<u32>() {
-                Ok(pid) => {
-                    // Check if process is actually running
-                    if is_process_running(pid) {
-                        StrategyStatus::Running(pid)
-                    } else {
-                        // Stale PID file
-                        let _ = fs::remove_file(&pid_file);
-                        StrategyStatus::Stopped
-                    }
-                }
-                Err(_) => StrategyStatus::Error("Invalid PID file".into()),
-            }
+    // If the strategy is run under systemd (recommended on EC2), we won't have pidfiles.
+    // Detect `ploy-strategy-<name>-dryrun.service` (and a few variants) and show it as running.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(status) = systemd_strategy_status(name) {
+            return status;
         }
-        Err(e) => StrategyStatus::Error(e.to_string()),
     }
+
+    StrategyStatus::Stopped
 }
 
 fn is_process_running(pid: u32) -> bool {
@@ -849,10 +973,73 @@ fn get_process_uptime(_pid: u32) -> Option<String> {
     Some("--".into())
 }
 
+#[cfg(target_os = "linux")]
+fn systemd_strategy_status(name: &str) -> Option<StrategyStatus> {
+    if Command::new("systemctl")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
+        return None;
+    }
+
+    let slug = name.replace('_', "-");
+    let mut candidates = vec![
+        format!("ploy-strategy-{}-dryrun.service", slug),
+        format!("ploy-strategy-{}.service", slug),
+        // Back-compat (older units may have kept underscores).
+        format!("ploy-strategy-{}-dryrun.service", name),
+        format!("ploy-strategy-{}.service", name),
+    ];
+    candidates.dedup();
+
+    for unit in candidates {
+        let out = Command::new("systemctl")
+            .arg("is-active")
+            .arg(&unit)
+            .output()
+            .ok()?;
+
+        let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        match state.as_str() {
+            "active" | "activating" | "reloading" | "deactivating" => {
+                // MainPID can be 0 for some unit types; treat as running anyway.
+                let pid_out = Command::new("systemctl")
+                    .arg("show")
+                    .arg(&unit)
+                    .arg("--property=MainPID")
+                    .arg("--value")
+                    .output()
+                    .ok();
+
+                let pid = pid_out
+                    .as_ref()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+
+                return Some(StrategyStatus::Running(pid));
+            }
+            "failed" => {
+                return Some(StrategyStatus::Error(format!(
+                    "systemd unit failed: {}",
+                    unit
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn create_default_config(name: &str, path: &PathBuf) -> Result<()> {
     let config = match name {
         "momentum" => include_str!("../../config/strategies/momentum_default.toml"),
         "split_arb" => include_str!("../../config/strategies/split_arb_default.toml"),
+        "pattern_memory" => include_str!("../../config/strategies/pattern_memory_default.toml"),
         _ => return Ok(()), // No default for unknown strategies
     };
 
@@ -1003,6 +1190,481 @@ async fn seed_nba_stats(season: &str, database_url: Option<String>) -> Result<()
     Ok(())
 }
 
+async fn report_accuracy_pm_settlement(
+    lookback_hours: u64,
+    domain: Option<String>,
+    account_id: Option<String>,
+    agent_id: Option<String>,
+    live_only: bool,
+    limit: usize,
+    no_refresh: bool,
+    database_url: Option<String>,
+) -> Result<()> {
+    use crate::adapters::PostgresStore;
+    use anyhow::bail;
+    use chrono::{DateTime, Utc};
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use sqlx::Row;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    let account_id = account_id.or_else(|| std::env::var("PLOY_ACCOUNT__ID").ok());
+
+    let db_url = database_url
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| std::env::var("PLOY_DATABASE__URL").ok())
+        .unwrap_or_else(|| "postgres://localhost/ploy".to_string());
+
+    let domain_norm = domain
+        .as_deref()
+        .map(|d| d.trim().to_lowercase())
+        .filter(|d| !d.is_empty());
+    if let Some(ref d) = domain_norm {
+        if !matches!(d.as_str(), "crypto" | "sports" | "politics") {
+            bail!("invalid --domain: {d} (expected crypto|sports|politics)");
+        }
+    }
+
+    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[36m║  Accuracy Report (Polymarket Settlement)                      ║\x1b[0m");
+    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+    println!(
+        "  lookback_hours={} domain={} account_id={} agent_id={} live_only={} limit={} refresh={}",
+        lookback_hours,
+        domain_norm.as_deref().unwrap_or("all"),
+        account_id.as_deref().unwrap_or("all"),
+        agent_id.as_deref().unwrap_or("all"),
+        live_only,
+        limit,
+        !no_refresh
+    );
+
+    let store = PostgresStore::new(&db_url, 5)
+        .await
+        .context("Failed to connect to database")?;
+
+    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
+        .await
+        .context("Failed to ensure pm_token_settlements table")?;
+
+    // Pull latest entry intents within lookback window.
+    //
+    // NOTE:
+    // - Some strategies express "DOWN" exposure via sells (short) rather than buys,
+    //   so we can't filter to `is_buy = TRUE`.
+    // - Prefer the explicit signal_type suffix when present.
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            executed_at,
+            intent_id,
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            market_side,
+            is_buy,
+            limit_price,
+            dry_run,
+            filled_shares,
+            metadata
+        FROM agent_order_executions
+        WHERE executed_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
+          AND filled_shares > 0
+          AND (
+                (metadata ? 'signal_type' AND RIGHT(metadata->>'signal_type', 6) = '_entry')
+             OR (NOT (metadata ? 'signal_type') AND is_buy = TRUE)
+          )
+          AND ($2::text IS NULL OR LOWER(domain) = $2)
+          AND ($3::text IS NULL OR account_id = $3)
+          AND ($4::text IS NULL OR agent_id = $4)
+          AND ($5::bool = FALSE OR dry_run = FALSE)
+        ORDER BY executed_at DESC
+        LIMIT $6
+        "#,
+    )
+    .bind(lookback_hours as i64)
+    .bind(domain_norm.as_deref())
+    .bind(account_id.as_deref())
+    .bind(agent_id.as_deref())
+    .bind(live_only)
+    .bind(limit as i64)
+    .fetch_all(store.pool())
+    .await
+    .context("Failed to query agent_order_executions")?;
+
+    if rows.is_empty() {
+        println!("\n  No filled entry intents found in this window.\n");
+        return Ok(());
+    }
+
+    let mut token_ids: Vec<String> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let token_id: String = row.get("token_id");
+        token_ids.push(token_id);
+    }
+    token_ids.sort();
+    token_ids.dedup();
+
+    if !no_refresh {
+        let existing = sqlx::query(
+            r#"
+            SELECT token_id, resolved
+            FROM pm_token_settlements
+            WHERE token_id = ANY($1)
+            "#,
+        )
+        .bind(&token_ids)
+        .fetch_all(store.pool())
+        .await
+        .context("Failed to query pm_token_settlements")?;
+
+        let mut resolved_map: HashMap<String, bool> = HashMap::new();
+        for row in existing {
+            let token_id: String = row.get("token_id");
+            let resolved: bool = row.get("resolved");
+            resolved_map.insert(token_id, resolved);
+        }
+
+        let mut to_refresh: Vec<String> = token_ids
+            .iter()
+            .filter(|t| !resolved_map.get(*t).copied().unwrap_or(false))
+            .cloned()
+            .collect();
+
+        // Avoid hammering Gamma on large windows; refresh a bounded set.
+        const MAX_REFRESH: usize = 500;
+        if to_refresh.len() > MAX_REFRESH {
+            to_refresh.truncate(MAX_REFRESH);
+        }
+
+        if !to_refresh.is_empty() {
+            println!(
+                "\n  Refreshing settlement status for {} token(s) via Gamma...",
+                to_refresh.len()
+            );
+        }
+
+        let pm = PolymarketClient::new("https://clob.polymarket.com", true)
+            .context("Failed to create Polymarket client")?;
+
+        let mut refreshed_markets = 0usize;
+        let mut refreshed_tokens = 0usize;
+        let mut seen_conditions: HashSet<String> = HashSet::new();
+
+        for token_id in to_refresh {
+            let market = match pm.get_gamma_market_by_token_id(&token_id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(token_id = %token_id, error = %e, "failed to fetch gamma market for token");
+                    continue;
+                }
+            };
+
+            if let Some(ref cond) = market.condition_id {
+                if !seen_conditions.insert(cond.clone()) {
+                    continue;
+                }
+            }
+
+            let clob_ids = market
+                .clob_token_ids
+                .as_deref()
+                .and_then(|s| parse_json_array_strings(s).ok())
+                .unwrap_or_default();
+            let outcomes = market
+                .outcomes
+                .as_deref()
+                .and_then(|s| parse_json_array_strings(s).ok())
+                .unwrap_or_default();
+            let price_strs = market
+                .outcome_prices
+                .as_deref()
+                .and_then(|s| parse_json_array_strings(s).ok())
+                .unwrap_or_default();
+
+            if clob_ids.is_empty() || price_strs.is_empty() {
+                tracing::debug!(
+                    token_id = %token_id,
+                    market_id = %market.id,
+                    "gamma market missing clob_token_ids or outcome_prices; skipping"
+                );
+                continue;
+            }
+
+            let mut prices: Vec<Decimal> = Vec::new();
+            for s in &price_strs {
+                if let Ok(p) = s.parse::<Decimal>() {
+                    prices.push(p);
+                }
+            }
+
+            // Treat as "officially settled" only once the market is closed and prices are 1/0.
+            let resolved = market.closed.unwrap_or(false) && is_market_resolved(&prices);
+            let resolved_at: Option<DateTime<Utc>> = resolved.then(|| Utc::now());
+            let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
+
+            let market_slug = market.slug.clone();
+            let condition_id = market.condition_id.clone();
+
+            for (i, tid) in clob_ids.iter().enumerate() {
+                let outcome = outcomes.get(i).cloned();
+                let settled_price = price_strs.get(i).and_then(|s| s.parse::<Decimal>().ok());
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO pm_token_settlements (
+                        token_id,
+                        condition_id,
+                        market_id,
+                        market_slug,
+                        outcome,
+                        settled_price,
+                        resolved,
+                        resolved_at,
+                        fetched_at,
+                        raw_market
+                    )
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
+                    ON CONFLICT (token_id) DO UPDATE SET
+                        condition_id = EXCLUDED.condition_id,
+                        market_id = EXCLUDED.market_id,
+                        market_slug = EXCLUDED.market_slug,
+                        outcome = EXCLUDED.outcome,
+                        settled_price = EXCLUDED.settled_price,
+                        resolved = EXCLUDED.resolved,
+                        resolved_at = COALESCE(pm_token_settlements.resolved_at, EXCLUDED.resolved_at),
+                        fetched_at = NOW(),
+                        raw_market = EXCLUDED.raw_market
+                    "#,
+                )
+                .bind(tid)
+                .bind(condition_id.as_deref())
+                .bind(&market.id)
+                .bind(market_slug.as_deref())
+                .bind(outcome.as_deref())
+                .bind(settled_price)
+                .bind(resolved)
+                .bind(resolved_at)
+                .bind(sqlx::types::Json(raw_market.clone()))
+                .execute(store.pool())
+                .await
+                .context("Failed to upsert pm_token_settlements row")?;
+
+                refreshed_tokens += 1;
+            }
+
+            refreshed_markets += 1;
+        }
+
+        if refreshed_markets > 0 {
+            println!(
+                "  ✓ Refreshed {} market(s), {} token rows",
+                refreshed_markets, refreshed_tokens
+            );
+        }
+    }
+
+    // Final join for scoring.
+    let scored_rows = sqlx::query(
+        r#"
+        SELECT
+            e.executed_at,
+            e.intent_id,
+            e.agent_id,
+            e.domain,
+            e.market_slug,
+            e.token_id,
+            e.market_side,
+            e.is_buy,
+            e.limit_price,
+            e.dry_run,
+            e.metadata,
+            s.resolved as pm_resolved,
+            s.settled_price as pm_settled_price,
+            s.outcome as pm_outcome
+        FROM agent_order_executions e
+        LEFT JOIN pm_token_settlements s
+          ON s.token_id = e.token_id
+        WHERE e.executed_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
+          AND e.filled_shares > 0
+          AND (
+                (e.metadata ? 'signal_type' AND RIGHT(e.metadata->>'signal_type', 6) = '_entry')
+             OR (NOT (e.metadata ? 'signal_type') AND e.is_buy = TRUE)
+          )
+          AND ($2::text IS NULL OR LOWER(e.domain) = $2)
+          AND ($3::text IS NULL OR e.account_id = $3)
+          AND ($4::text IS NULL OR e.agent_id = $4)
+          AND ($5::bool = FALSE OR e.dry_run = FALSE)
+        ORDER BY e.executed_at DESC
+        LIMIT $6
+        "#,
+    )
+    .bind(lookback_hours as i64)
+    .bind(domain_norm.as_deref())
+    .bind(account_id.as_deref())
+    .bind(agent_id.as_deref())
+    .bind(live_only)
+    .bind(limit as i64)
+    .fetch_all(store.pool())
+    .await
+    .context("Failed to query joined accuracy rows")?;
+
+    let mut total = 0usize;
+    let mut scored = 0usize;
+    let mut wins = 0usize;
+    let mut pending = 0usize;
+    let mut by_agent: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // scored, wins
+
+    for row in &scored_rows {
+        total += 1;
+        let resolved: Option<bool> = row.try_get("pm_resolved").ok();
+        let settled_price: Option<Decimal> = row.try_get("pm_settled_price").ok();
+        let is_resolved = resolved.unwrap_or(false) && settled_price.is_some();
+
+        if !is_resolved {
+            pending += 1;
+            continue;
+        }
+
+        scored += 1;
+        let is_buy: bool = row.get("is_buy");
+        let sp = settled_price.unwrap_or(Decimal::ZERO);
+        let won = if is_buy {
+            sp > dec!(0.5)
+        } else {
+            sp < dec!(0.5)
+        };
+        if won {
+            wins += 1;
+        }
+
+        let agent: String = row.get("agent_id");
+        let entry = by_agent.entry(agent).or_insert((0, 0));
+        entry.0 += 1;
+        if won {
+            entry.1 += 1;
+        }
+    }
+
+    let losses = scored.saturating_sub(wins);
+    let acc = if scored > 0 {
+        100.0 * (wins as f64) / (scored as f64)
+    } else {
+        0.0
+    };
+
+    println!("\n  Summary:");
+    println!("  - intents_total:    {}", total);
+    println!("  - intents_scored:   {}", scored);
+    println!("  - wins:             {}", wins);
+    println!("  - losses:           {}", losses);
+    println!("  - pending:          {}", pending);
+    println!("  - accuracy:         {:.2}%", acc);
+
+    if !by_agent.is_empty() {
+        println!("\n  By agent (scored, wins, accuracy):");
+        for (agent, (a_scored, a_wins)) in by_agent.iter() {
+            let a_acc = if *a_scored > 0 {
+                100.0 * (*a_wins as f64) / (*a_scored as f64)
+            } else {
+                0.0
+            };
+            println!(
+                "  - {:<20} scored={:<5} wins={:<5} acc={:.2}%",
+                agent, a_scored, a_wins, a_acc
+            );
+        }
+    }
+
+    println!("\n  Latest intents:");
+    println!("  Time (UTC)          Agent              Side  Dir   Entry  Settled Outcome        Result  Intent");
+    println!("  ------------------  ------------------  ----  ----  -----  ------ -------------  ------  ------------------------------------");
+
+    for row in &scored_rows {
+        let executed_at: DateTime<Utc> = row.get("executed_at");
+        let agent: String = row.get("agent_id");
+        let side: String = row.get("market_side");
+        let is_buy: bool = row.get("is_buy");
+        let entry_price: Decimal = row.get("limit_price");
+        let intent_id: uuid::Uuid = row.get("intent_id");
+
+        let resolved: Option<bool> = row.try_get("pm_resolved").ok();
+        let settled_price: Option<Decimal> = row.try_get("pm_settled_price").ok();
+        let outcome: Option<String> = row.try_get("pm_outcome").ok();
+
+        let (settled_str, outcome_str, result_str) =
+            if resolved.unwrap_or(false) && settled_price.is_some() {
+                let sp = settled_price.unwrap_or(Decimal::ZERO);
+                let won = if is_buy {
+                    sp > dec!(0.5)
+                } else {
+                    sp < dec!(0.5)
+                };
+                (
+                    format!("{:.3}", sp),
+                    outcome.unwrap_or_else(|| "-".to_string()),
+                    if won { "WIN" } else { "LOSE" }.to_string(),
+                )
+            } else {
+                ("-".to_string(), "-".to_string(), "PENDING".to_string())
+            };
+
+        println!(
+            "  {}  {:<18}  {:<4}  {:<4}  {:>5.1}¢  {:>6} {:<13}  {:<6}  {}",
+            executed_at.format("%Y-%m-%d %H:%M"),
+            agent,
+            side,
+            if is_buy { "BUY" } else { "SELL" },
+            entry_price * dec!(100),
+            settled_str,
+            outcome_str,
+            result_str,
+            intent_id
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+fn parse_json_array_strings(input: &str) -> std::result::Result<Vec<String>, serde_json::Error> {
+    let s = input.trim();
+    if s.is_empty() || s == "null" {
+        return Ok(Vec::new());
+    }
+
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(s) {
+        return Ok(v);
+    }
+    let vals = serde_json::from_str::<Vec<serde_json::Value>>(s)?;
+    Ok(vals
+        .into_iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        })
+        .collect())
+}
+
+fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
+    if prices.is_empty() {
+        return false;
+    }
+    let winners = prices
+        .iter()
+        .filter(|p| **p >= rust_decimal_macros::dec!(0.99))
+        .count();
+    let losers = prices
+        .iter()
+        .filter(|p| **p <= rust_decimal_macros::dec!(0.01))
+        .count();
+    winners == 1 && losers == prices.len().saturating_sub(1)
+}
+
 /// Run the NBA comeback agent standalone
 async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
     use crate::platform::DomainAgent;
@@ -1028,6 +1690,12 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
             espn_poll_interval_secs: 30,
             min_comeback_rate: 0.15,
             season: "2025-26".to_string(),
+            grok_enabled: false,
+            grok_interval_secs: 300,
+            grok_min_edge: rust_decimal::Decimal::new(8, 2),
+            grok_min_confidence: 0.6,
+            grok_decision_cooldown_secs: 60,
+            grok_fallback_enabled: true,
         }
     });
 

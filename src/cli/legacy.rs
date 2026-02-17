@@ -303,6 +303,51 @@ pub enum Commands {
         duration: u64,
     },
 
+    /// Backfill Polymarket L2 orderbook history via `clob.polymarket.com/orderbook-history`
+    ///
+    /// This can replace custom infra that previously captured realtime books.
+    OrderbookHistory {
+        /// Asset IDs (token IDs) to backfill (comma-separated)
+        #[arg(long)]
+        asset_ids: String,
+
+        /// Start timestamp (milliseconds since epoch). If omitted, uses now - lookback_secs.
+        #[arg(long)]
+        start_ms: Option<i64>,
+
+        /// End timestamp (milliseconds since epoch). If omitted, uses now.
+        #[arg(long)]
+        end_ms: Option<i64>,
+
+        /// Lookback window (seconds) when start_ms is omitted.
+        #[arg(long, default_value = "300")]
+        lookback_secs: u64,
+
+        /// Max depth levels to persist per side (bids/asks).
+        #[arg(long, default_value = "20")]
+        levels: usize,
+
+        /// Sampling cadence (milliseconds). Set 0 to persist every snapshot returned.
+        #[arg(long, default_value = "1000")]
+        sample_ms: i64,
+
+        /// Page size for API requests.
+        #[arg(long, default_value = "500")]
+        limit: usize,
+
+        /// Max pages per backfill call (safety guard).
+        #[arg(long, default_value = "50")]
+        max_pages: usize,
+
+        /// Override API base URL (default: https://clob.polymarket.com).
+        #[arg(long, default_value = "https://clob.polymarket.com")]
+        base_url: String,
+
+        /// Resume from DB high-water mark per asset (ignores start_ms when set).
+        #[arg(long)]
+        resume_from_db: bool,
+    },
+
     /// Crypto market strategies (BTC, ETH, SOL UP/DOWN)
     #[command(subcommand)]
     Crypto(CryptoCommands),

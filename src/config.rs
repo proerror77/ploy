@@ -6,6 +6,9 @@ use std::path::Path;
 /// Main configuration structure
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
+    /// Execution/account scope (single DB, multiple accounts)
+    #[serde(default)]
+    pub account: AccountConfig,
     pub market: MarketConfig,
     pub strategy: StrategyConfig,
     pub execution: ExecutionConfig,
@@ -29,6 +32,33 @@ pub struct AppConfig {
     /// Optional event registry discovery service
     #[serde(default)]
     pub event_registry: Option<DiscoveryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountConfig {
+    /// A stable identifier for scoping DB writes (e.g. "default", "acct1", "tango21").
+    #[serde(default = "default_account_id")]
+    pub id: String,
+    /// Optional address metadata (for human ops/debugging).
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+    /// Optional label (e.g. "Main", "Paper", "Sports").
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl Default for AccountConfig {
+    fn default() -> Self {
+        Self {
+            id: default_account_id(),
+            wallet_address: None,
+            label: None,
+        }
+    }
+}
+
+fn default_account_id() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -202,6 +232,28 @@ pub struct NbaComebackConfig {
     /// Season string for DB lookups (e.g. "2025-26")
     #[serde(default = "default_nba_comeback_season")]
     pub season: String,
+    /// Enable Grok live search as independent signal source
+    #[serde(default)]
+    pub grok_enabled: bool,
+    /// Grok query interval in seconds (default 300 = 5 min)
+    #[serde(default = "default_grok_interval")]
+    pub grok_interval_secs: u64,
+    /// Minimum edge from Grok signal to trigger trade
+    #[serde(default = "default_grok_min_edge")]
+    pub grok_min_edge: Decimal,
+    /// Minimum Grok confidence to act on signal (0.0 to 1.0)
+    #[serde(default = "default_grok_min_confidence")]
+    pub grok_min_confidence: f64,
+    /// Decision cooldown per game in seconds (default 60).
+    /// Separate from the trade cooldown — prevents spamming Grok with
+    /// redundant decision requests for the same game within a minute.
+    #[serde(default = "default_grok_decision_cooldown")]
+    pub grok_decision_cooldown_secs: u64,
+    /// Enable rule-based fallback when Grok is unavailable for ESPN signals.
+    /// ESPN comeback path has its own statistical model, so it can operate
+    /// independently. Grok signal path has NO fallback.
+    #[serde(default = "default_grok_fallback_enabled")]
+    pub grok_fallback_enabled: bool,
 }
 
 fn default_nba_comeback_min_edge() -> Decimal {
@@ -236,6 +288,26 @@ fn default_nba_comeback_min_rate() -> f64 {
 }
 fn default_nba_comeback_season() -> String {
     "2025-26".to_string()
+}
+
+fn default_grok_interval() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_grok_min_edge() -> Decimal {
+    Decimal::new(8, 2) // 0.08 = 8%
+}
+
+fn default_grok_min_confidence() -> f64 {
+    0.6
+}
+
+fn default_grok_decision_cooldown() -> u64 {
+    60 // 1 minute
+}
+
+fn default_grok_fallback_enabled() -> bool {
+    true
 }
 
 /// Event registry discovery service configuration
@@ -480,6 +552,7 @@ impl AppConfig {
         use rust_decimal_macros::dec;
 
         Self {
+            account: AccountConfig::default(),
             market: MarketConfig {
                 ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
                 rest_url: "https://clob.polymarket.com".to_string(),
@@ -576,6 +649,32 @@ impl AppConfig {
     fn apply_env_overrides(&mut self) {
         if let Some(v) = env_bool(&["PLOY_DRY_RUN__ENABLED", "PLOY__DRY_RUN__ENABLED"]) {
             self.dry_run.enabled = v;
+        }
+
+        if let Some(v) = env_string(&["PLOY_ACCOUNT__ID", "PLOY__ACCOUNT__ID", "PLOY_ACCOUNT_ID"]) {
+            if !v.trim().is_empty() {
+                self.account.id = v;
+            }
+        }
+
+        if let Some(v) = env_string(&[
+            "PLOY_ACCOUNT__WALLET_ADDRESS",
+            "PLOY__ACCOUNT__WALLET_ADDRESS",
+            "PLOY_ACCOUNT_WALLET_ADDRESS",
+        ]) {
+            if !v.trim().is_empty() {
+                self.account.wallet_address = Some(v);
+            }
+        }
+
+        if let Some(v) = env_string(&[
+            "PLOY_ACCOUNT__LABEL",
+            "PLOY__ACCOUNT__LABEL",
+            "PLOY_ACCOUNT_LABEL",
+        ]) {
+            if !v.trim().is_empty() {
+                self.account.label = Some(v);
+            }
         }
 
         if let Some(v) = env_string(&["PLOY_MARKET__MARKET_SLUG", "PLOY__MARKET__MARKET_SLUG"]) {

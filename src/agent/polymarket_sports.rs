@@ -31,6 +31,21 @@ where
     }
 }
 
+/// Gamma sometimes returns booleans as `null` for scheduled events.
+fn deserialize_bool_from_null<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
+}
+
+fn parse_trailing_slug_date(slug: &str) -> Option<chrono::NaiveDate> {
+    if slug.len() < 10 {
+        return None;
+    }
+    chrono::NaiveDate::parse_from_str(&slug[slug.len().saturating_sub(10)..], "%Y-%m-%d").ok()
+}
+
 /// Sports keywords for filtering markets
 pub const SPORTS_KEYWORDS: &[&str] = &[
     // NBA teams
@@ -229,14 +244,14 @@ pub struct EventDetails {
     /// Live score (e.g., "124-87")
     pub score: Option<String>,
     /// Whether game is currently live
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_from_null")]
     pub live: bool,
     /// Current period (e.g., "Q4", "Q3", "1H", "2H")
     pub period: Option<String>,
     /// Time elapsed/remaining in period (e.g., "02:38")
     pub elapsed: Option<String>,
     /// Whether game has ended
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_from_null")]
     pub ended: bool,
     /// External game ID for data provider
     #[serde(rename = "gameId")]
@@ -833,29 +848,65 @@ impl PolymarketSportsClient {
         &self,
         series_id: &str,
     ) -> Result<Vec<EventDetails>> {
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let now = chrono::Utc::now();
+        let today = now.date_naive();
+        // "Today NBA" should include the pre-game window and games in progress.
+        // We use a time window rather than strict calendar matching to avoid UTC/Eastern date drift.
+        let window_start = now - chrono::Duration::hours(18);
+        let window_end = now + chrono::Duration::hours(36);
+
         let events = self.fetch_series_events(series_id).await?;
         let mut games = Vec::new();
 
         for event in events {
-            if event.slug.contains(&today) || event.slug.contains(&today.replace("-", "")) {
-                let details = self.get_event_details(&event.id).await?;
+            if let Some(slug_date) = parse_trailing_slug_date(&event.slug) {
+                // Limit network calls; open series can include many out-of-range events.
+                if slug_date < today - chrono::Duration::days(2)
+                    || slug_date > today + chrono::Duration::days(2)
+                {
+                    continue;
+                }
+            }
+
+            let details = match self.get_event_details(&event.id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    debug!(event_id = %event.id, error = %e, "failed to fetch PM event details");
+                    continue;
+                }
+            };
+
+            let start_ts = details
+                .start_time
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+            let include = if details.live && !details.ended {
+                true
+            } else if let Some(start_ts) = start_ts {
+                start_ts >= window_start && start_ts <= window_end
+            } else {
+                details
+                    .event_date
+                    .as_deref()
+                    .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                    .map(|d| d == today || d == (today - chrono::Duration::days(1)))
+                    .unwrap_or(false)
+            };
+
+            if include {
                 games.push(details);
             }
         }
 
-        // Also check for games from yesterday that might still be live
-        let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string();
-        for event in self.fetch_series_events(series_id).await? {
-            if event.slug.contains(&yesterday) {
-                let details = self.get_event_details(&event.id).await?;
-                if details.live && !details.ended {
-                    games.push(details);
-                }
-            }
-        }
+        games.sort_by_key(|g| {
+            g.start_time
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp())
+                .unwrap_or(i64::MAX)
+        });
 
         info!("Found {} games for today/live", games.len());
         Ok(games)
@@ -1098,5 +1149,28 @@ mod tests {
 
         let prices = market.get_prices();
         assert!(prices.is_some());
+    }
+
+    #[test]
+    fn test_event_details_null_bools() {
+        let raw = r#"
+        {
+          "id": "207673",
+          "title": "Nets vs. Cavaliers",
+          "slug": "nba-bkn-cle-2026-02-19",
+          "closed": false,
+          "live": null,
+          "ended": null,
+          "period": "NS",
+          "eventDate": "2026-02-19",
+          "startTime": "2026-02-20T00:00:00Z",
+          "markets": []
+        }
+        "#;
+
+        let event: EventDetails = serde_json::from_str(raw).expect("should parse EventDetails");
+        assert!(!event.live);
+        assert!(!event.ended);
+        assert_eq!(event.event_date.as_deref(), Some("2026-02-19"));
     }
 }

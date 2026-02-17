@@ -718,8 +718,7 @@ impl PolymarketWebSocket {
     ///
     /// The current connection loop will reconnect and apply the latest token set.
     pub fn request_resubscribe(&self) {
-        self.resubscribe_requested
-            .store(true, Ordering::SeqCst);
+        self.resubscribe_requested.store(true, Ordering::SeqCst);
     }
 
     /// Register token ID to side mapping
@@ -738,6 +737,47 @@ impl PolymarketWebSocket {
         let mut mapping = self.token_to_side.write().await;
         mapping.insert(token_id.to_string(), side);
         debug!("Registered token: {} as {:?}", token_id, side);
+    }
+
+    /// Reconcile the internal token->side mapping to exactly match `desired`.
+    ///
+    /// This is used by data-collection workloads to keep the WebSocket subscription set bounded,
+    /// instead of growing without limit as new markets rotate throughout the day.
+    ///
+    /// Returns `(added, removed, updated, total)`.
+    pub async fn reconcile_token_sides(
+        &self,
+        desired: &HashMap<String, Side>,
+    ) -> (usize, usize, usize, usize) {
+        let mut mapping = self.token_to_side.write().await;
+
+        let mut added: usize = 0;
+        let mut updated: usize = 0;
+        for (token_id, side) in desired {
+            match mapping.get(token_id) {
+                None => {
+                    mapping.insert(token_id.clone(), *side);
+                    added = added.saturating_add(1);
+                }
+                Some(prev) if prev != side => {
+                    mapping.insert(token_id.clone(), *side);
+                    updated = updated.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
+        let mut removed: usize = 0;
+        mapping.retain(|token_id, _| {
+            let keep = desired.contains_key(token_id);
+            if !keep {
+                removed = removed.saturating_add(1);
+            }
+            keep
+        });
+
+        let total = mapping.len();
+        (added, removed, updated, total)
     }
 
     /// Get side for a token ID

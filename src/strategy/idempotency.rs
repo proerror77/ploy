@@ -34,6 +34,7 @@ use tracing::{debug, info, warn};
 /// ```
 pub struct IdempotencyManager {
     store: PostgresStore,
+    account_id: String,
     ttl_seconds: i64,
 }
 
@@ -43,8 +44,14 @@ impl IdempotencyManager {
     /// # Arguments
     /// * `store` - Database store for persistence
     pub fn new(store: PostgresStore) -> Self {
+        Self::new_with_account(store, "default")
+    }
+
+    /// Create a new idempotency manager scoped to a specific DB account.
+    pub fn new_with_account(store: PostgresStore, account_id: impl Into<String>) -> Self {
         Self {
             store,
+            account_id: account_id.into(),
             ttl_seconds: 3600, // 1 hour TTL
         }
     }
@@ -103,12 +110,13 @@ impl IdempotencyManager {
         let result = sqlx::query(
             r#"
             INSERT INTO order_idempotency
-            (idempotency_key, request_hash, status, expires_at)
-            VALUES ($1, $2, 'pending', $3)
-            ON CONFLICT (idempotency_key) DO NOTHING
+            (account_id, idempotency_key, request_hash, status, expires_at)
+            VALUES ($1, $2, $3, 'pending', $4)
+            ON CONFLICT (account_id, idempotency_key) DO NOTHING
             RETURNING idempotency_key
             "#,
         )
+        .bind(&self.account_id)
         .bind(key)
         .bind(&hash)
         .bind(expires_at)
@@ -143,9 +151,10 @@ impl IdempotencyManager {
             r#"
             SELECT order_id, status, response_data, error_message
             FROM order_idempotency
-            WHERE idempotency_key = $1
+            WHERE account_id = $1 AND idempotency_key = $2
             "#,
         )
+        .bind(&self.account_id)
         .bind(key)
         .fetch_one(self.store.pool())
         .await?;
@@ -179,12 +188,13 @@ impl IdempotencyManager {
             SET order_id = $2,
                 status = 'completed',
                 response_data = $3
-            WHERE idempotency_key = $1
+            WHERE account_id = $1 AND idempotency_key = $4
             "#,
         )
-        .bind(key)
+        .bind(&self.account_id)
         .bind(order_id)
         .bind(&response_json)
+        .bind(key)
         .execute(self.store.pool())
         .await?;
 
@@ -206,11 +216,12 @@ impl IdempotencyManager {
             UPDATE order_idempotency
             SET status = 'failed',
                 error_message = $2
-            WHERE idempotency_key = $1
+            WHERE account_id = $1 AND idempotency_key = $3
             "#,
         )
-        .bind(key)
+        .bind(&self.account_id)
         .bind(error_message)
+        .bind(key)
         .execute(self.store.pool())
         .await?;
 
