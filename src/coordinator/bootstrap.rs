@@ -13,9 +13,9 @@ use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket};
 use crate::agent::PolymarketSportsClient;
 use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
-    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
-    TradingAgent,
+    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoRlPolicyAgent, CryptoRlPolicyConfig,
+    CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent, PoliticsTradingConfig,
+    SportsTradingAgent, SportsTradingConfig, TradingAgent,
 };
 use crate::config::AppConfig;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
@@ -2397,12 +2397,19 @@ fn spawn_clob_orderbook_persistence(
 pub struct PlatformBootstrapConfig {
     pub coordinator: CoordinatorConfig,
     pub enable_crypto: bool,
+    #[serde(default)]
+    pub enable_crypto_momentum: bool,
+    #[serde(default)]
     pub enable_crypto_lob_ml: bool,
+    #[serde(default)]
+    pub enable_crypto_rl_policy: bool,
     pub enable_sports: bool,
     pub enable_politics: bool,
     pub dry_run: bool,
     pub crypto: CryptoTradingConfig,
     pub crypto_lob_ml: CryptoLobMlConfig,
+    #[serde(default)]
+    pub crypto_rl_policy: CryptoRlPolicyConfig,
     pub sports: SportsTradingConfig,
     pub politics: PoliticsTradingConfig,
 }
@@ -2412,12 +2419,15 @@ impl Default for PlatformBootstrapConfig {
         Self {
             coordinator: CoordinatorConfig::default(),
             enable_crypto: true,
+            enable_crypto_momentum: true,
             enable_crypto_lob_ml: false,
+            enable_crypto_rl_policy: false,
             enable_sports: false,
             enable_politics: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
             crypto_lob_ml: CryptoLobMlConfig::default(),
+            crypto_rl_policy: CryptoRlPolicyConfig::default(),
             sports: SportsTradingConfig::default(),
             politics: PoliticsTradingConfig::default(),
         }
@@ -2462,6 +2472,13 @@ impl PlatformBootstrapConfig {
         cfg.crypto.risk_params.max_unhedged_positions = app.risk.max_positions_per_symbol.max(1);
 
         // Environment overrides for crypto agent tuning (service-level).
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENABLED") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.enable_crypto_momentum = true,
+                "0" | "false" | "no" | "off" => cfg.enable_crypto_momentum = false,
+                _ => {}
+            }
+        }
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__COINS") {
             let coins: Vec<String> = raw
                 .split(',')
@@ -2670,6 +2687,115 @@ impl PlatformBootstrapConfig {
             }
         }
 
+        // Optional RL policy crypto agent (disabled by default).
+        // Default to the same risk envelope as the momentum agent unless overridden.
+        cfg.crypto_rl_policy.default_shares = cfg.crypto.default_shares;
+        cfg.crypto_rl_policy.risk_params = cfg.crypto.risk_params.clone();
+        cfg.crypto_rl_policy.heartbeat_interval_secs = cfg.crypto.heartbeat_interval_secs;
+
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__ENABLED") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.enable_crypto_rl_policy = true,
+                "0" | "false" | "no" | "off" => cfg.enable_crypto_rl_policy = false,
+                _ => {}
+            }
+        }
+
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__COINS") {
+            let coins: Vec<String> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_uppercase())
+                .collect();
+            if !coins.is_empty() {
+                cfg.crypto_rl_policy.coins = coins;
+            }
+        }
+
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_PATH") {
+            let v = raw.trim();
+            if !v.is_empty() {
+                cfg.crypto_rl_policy.policy_model_path = Some(v.to_string());
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__POLICY_OUTPUT") {
+            let v = raw.trim().to_ascii_lowercase();
+            if !v.is_empty() {
+                cfg.crypto_rl_policy.policy_output = v;
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_VERSION") {
+            let v = raw.trim();
+            if !v.is_empty() {
+                cfg.crypto_rl_policy.policy_model_version = Some(v.to_string());
+            }
+        }
+
+        cfg.crypto_rl_policy.default_shares = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__DEFAULT_SHARES",
+            cfg.crypto_rl_policy.default_shares,
+        )
+        .max(1);
+        cfg.crypto_rl_policy.max_entry_price = env_decimal(
+            "PLOY_CRYPTO_RL_POLICY__MAX_ENTRY_PRICE",
+            cfg.crypto_rl_policy.max_entry_price,
+        );
+        cfg.crypto_rl_policy.cooldown_secs = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__COOLDOWN_SECS",
+            cfg.crypto_rl_policy.cooldown_secs,
+        );
+        cfg.crypto_rl_policy.max_lob_snapshot_age_secs = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__MAX_LOB_SNAPSHOT_AGE_SECS",
+            cfg.crypto_rl_policy.max_lob_snapshot_age_secs,
+        )
+        .max(1);
+        cfg.crypto_rl_policy.decision_interval_ms = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__DECISION_INTERVAL_MS",
+            cfg.crypto_rl_policy.decision_interval_ms,
+        )
+        .max(50);
+        cfg.crypto_rl_policy.observation_version = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__OBS_VERSION",
+            cfg.crypto_rl_policy.observation_version as u64,
+        ) as u32;
+        cfg.crypto_rl_policy.event_refresh_secs = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__EVENT_REFRESH_SECS",
+            cfg.crypto_rl_policy.event_refresh_secs,
+        )
+        .max(1);
+        cfg.crypto_rl_policy.min_time_remaining_secs = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__MIN_TIME_REMAINING_SECS",
+            cfg.crypto_rl_policy.min_time_remaining_secs,
+        );
+        cfg.crypto_rl_policy.max_time_remaining_secs = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__MAX_TIME_REMAINING_SECS",
+            cfg.crypto_rl_policy.max_time_remaining_secs,
+        );
+        if cfg.crypto_rl_policy.max_time_remaining_secs < cfg.crypto_rl_policy.min_time_remaining_secs
+        {
+            cfg.crypto_rl_policy.max_time_remaining_secs = cfg.crypto_rl_policy.min_time_remaining_secs;
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__PREFER_CLOSE_TO_END") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_rl_policy.prefer_close_to_end = true,
+                "0" | "false" | "no" | "off" => cfg.crypto_rl_policy.prefer_close_to_end = false,
+                _ => {}
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__EXPLORATION_RATE") {
+            if let Ok(v) = raw.trim().parse::<f32>() {
+                if v.is_finite() {
+                    cfg.crypto_rl_policy.exploration_rate = v.clamp(0.0, 1.0);
+                }
+            }
+        }
+        cfg.crypto_rl_policy.heartbeat_interval_secs = env_u64(
+            "PLOY_CRYPTO_RL_POLICY__HEARTBEAT_INTERVAL_SECS",
+            cfg.crypto_rl_policy.heartbeat_interval_secs,
+        )
+        .max(1);
+
         // Enable sports if NBA comeback config is present and enabled
         if let Some(ref nba) = app.nba_comeback {
             if nba.enabled {
@@ -2716,6 +2842,9 @@ pub async fn start_platform(
     info!(
         account_id = %account_id,
         crypto = config.enable_crypto,
+        crypto_momentum = config.enable_crypto_momentum,
+        crypto_lob_ml = config.enable_crypto_lob_ml,
+        crypto_rl_policy = config.enable_crypto_rl_policy,
         sports = config.enable_sports,
         politics = config.enable_politics,
         dry_run = config.dry_run,
@@ -2778,6 +2907,73 @@ pub async fn start_platform(
     let handle = coordinator.handle();
     let _global_state = coordinator.global_state();
 
+    // 2a. Start API server with platform services (if api feature enabled)
+    #[cfg(feature = "api")]
+    let _api_handle = {
+        use crate::adapters::{start_api_server_platform_background, PostgresStore};
+        use crate::agent::grok::GrokClient;
+        use crate::api::state::StrategyConfigState;
+
+        let api_port = std::env::var("API_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8081);
+
+        // Initialize Grok client if GROK_API_KEY is set
+        let grok_client = std::env::var("GROK_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .and_then(|_| {
+                match GrokClient::from_env() {
+                    Ok(client) => {
+                        info!("Grok client initialized for sidecar endpoints");
+                        Some(Arc::new(client))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to initialize Grok client");
+                        None
+                    }
+                }
+            });
+
+        if let Some(ref pool) = shared_pool {
+            let store = Arc::new(PostgresStore::from_pool(pool.clone()));
+            let api_config = StrategyConfigState {
+                symbols: vec![],
+                min_move: 0.0,
+                max_entry: 1.0,
+                shares: 0,
+                predictive: false,
+                take_profit: None,
+                stop_loss: None,
+            };
+
+            match start_api_server_platform_background(
+                store,
+                api_port,
+                api_config,
+                Some(handle.clone()),
+                grok_client,
+            )
+            .await
+            {
+                Ok(handle) => {
+                    info!(port = api_port, "API server started in platform mode with sidecar endpoints");
+                    Some(handle)
+                }
+                Err(e) => {
+                    warn!(error = %e, "API server failed to start");
+                    None
+                }
+            }
+        } else {
+            warn!("API server not started: no database connection");
+            None
+        }
+    };
+    #[cfg(not(feature = "api"))]
+    let _api_handle: Option<tokio::task::JoinHandle<crate::error::Result<()>>> = None;
+
     // 3. Shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -2786,10 +2982,18 @@ pub async fn start_platform(
 
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
-        let risk_params = crypto_cfg.risk_params.clone();
-        let cmd_rx = coordinator.register_agent(crypto_cfg.agent_id.clone(), risk_params);
+        let momentum_enabled = config.enable_crypto_momentum;
         let lob_cfg = config.crypto_lob_ml.clone();
         let lob_agent_enabled = config.enable_crypto_lob_ml;
+        let rl_cfg = config.crypto_rl_policy.clone();
+        let rl_agent_enabled = config.enable_crypto_rl_policy;
+
+        let cmd_rx_opt = if momentum_enabled {
+            let risk_params = crypto_cfg.risk_params.clone();
+            Some(coordinator.register_agent(crypto_cfg.agent_id.clone(), risk_params))
+        } else {
+            None
+        };
 
         // Discover active crypto events and token IDs (Gamma API) via EventMatcher
         let event_matcher = Arc::new(EventMatcher::new(pm_client.clone()));
@@ -2798,13 +3002,30 @@ pub async fn start_platform(
         }
 
         // Build a unified coin set across all enabled crypto strategies.
-        let mut all_coins = crypto_cfg.coins.clone();
+        let mut all_coins: Vec<String> = Vec::new();
+        if momentum_enabled {
+            for coin in &crypto_cfg.coins {
+                if !all_coins.contains(coin) {
+                    all_coins.push(coin.clone());
+                }
+            }
+        }
         if lob_agent_enabled {
             for coin in &lob_cfg.coins {
                 if !all_coins.contains(coin) {
                     all_coins.push(coin.clone());
                 }
             }
+        }
+        if rl_agent_enabled {
+            for coin in &rl_cfg.coins {
+                if !all_coins.contains(coin) {
+                    all_coins.push(coin.clone());
+                }
+            }
+        }
+        if all_coins.is_empty() {
+            warn!("crypto domain enabled but no crypto agents are active (coins set is empty)");
         }
 
         // Create WebSocket feeds
@@ -3009,7 +3230,7 @@ pub async fn start_platform(
                 event_matcher.clone(),
                 pool.clone(),
                 crypto_cfg.agent_id.clone(),
-                crypto_cfg.coins.clone(),
+                all_coins.clone(),
                 Domain::Crypto,
             );
             info!(
@@ -3019,7 +3240,7 @@ pub async fn start_platform(
         }
 
         // Optional Binance LOB depth stream (for ML/RL feature generation).
-        let mut enable_binance_lob = lob_agent_enabled;
+        let mut enable_binance_lob = lob_agent_enabled || rl_agent_enabled;
         if let Ok(raw) = std::env::var("PLOY_BINANCE_LOB__ENABLED") {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => enable_binance_lob = true,
@@ -3081,26 +3302,34 @@ pub async fn start_platform(
             }
         });
 
-        let agent = CryptoTradingAgent::new(
-            crypto_cfg.clone(),
-            binance_ws.clone(),
-            pm_ws.clone(),
-            event_matcher.clone(),
-        );
-        let ctx = AgentContext::new(
-            crypto_cfg.agent_id.clone(),
-            Domain::Crypto,
-            handle.clone(),
-            cmd_rx,
-        );
+        if momentum_enabled {
+            if let Some(cmd_rx) = cmd_rx_opt {
+                let agent = CryptoTradingAgent::new(
+                    crypto_cfg.clone(),
+                    binance_ws.clone(),
+                    pm_ws.clone(),
+                    event_matcher.clone(),
+                );
+                let ctx = AgentContext::new(
+                    crypto_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                    handle.clone(),
+                    cmd_rx,
+                );
 
-        let jh = tokio::spawn(async move {
-            if let Err(e) = agent.run(ctx).await {
-                error!(agent = "crypto", error = %e, "agent exited with error");
+                let jh = tokio::spawn(async move {
+                    if let Err(e) = agent.run(ctx).await {
+                        error!(agent = "crypto", error = %e, "agent exited with error");
+                    }
+                });
+                agent_handles.push(jh);
+                info!("crypto momentum agent spawned");
+            } else {
+                warn!(agent = crypto_cfg.agent_id, "crypto momentum agent enabled but coordinator cmd_rx is missing");
             }
-        });
-        agent_handles.push(jh);
-        info!("crypto agent spawned");
+        } else {
+            info!(agent = crypto_cfg.agent_id, "crypto momentum agent disabled");
+        }
 
         if lob_agent_enabled {
             if let Some(lob_cache) = lob_cache_opt.clone() {
@@ -3132,6 +3361,40 @@ pub async fn start_platform(
                 warn!(
                     agent = lob_cfg.agent_id,
                     "lob agent enabled but binance depth stream is disabled; skipping agent spawn"
+                );
+            }
+        }
+
+        if rl_agent_enabled {
+            if let Some(lob_cache) = lob_cache_opt.clone() {
+                let risk_params = rl_cfg.risk_params.clone();
+                let cmd_rx = coordinator.register_agent(rl_cfg.agent_id.clone(), risk_params);
+
+                let agent = CryptoRlPolicyAgent::new(
+                    rl_cfg.clone(),
+                    binance_ws.clone(),
+                    pm_ws.clone(),
+                    event_matcher.clone(),
+                    lob_cache,
+                );
+                let ctx = AgentContext::new(
+                    rl_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                    handle.clone(),
+                    cmd_rx,
+                );
+
+                let jh = tokio::spawn(async move {
+                    if let Err(e) = agent.run(ctx).await {
+                        error!(agent = "crypto_rl_policy", error = %e, "agent exited with error");
+                    }
+                });
+                agent_handles.push(jh);
+                info!("crypto RL policy agent spawned");
+            } else {
+                warn!(
+                    agent = rl_cfg.agent_id,
+                    "RL policy agent enabled but binance depth stream is disabled; skipping agent spawn"
                 );
             }
         }
