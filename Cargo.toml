@@ -109,11 +109,15 @@ bincode = { version = "=2.0.0-rc.3", optional = true }
 # DuckDB for offline Parquet analysis (optional)
 duckdb = { version = "1.4", features = ["bundled"], optional = true }
 
+# ONNX inference (optional; prefer pure-Rust `tract` for deploy simplicity)
+tract-onnx = { version = "0.22.0", optional = true }
+
 [features]
 default = []
 api = []  # Enable API module with SQLx compile-time checks (requires DATABASE_URL)
 rl = ["burn", "burn-ndarray", "bincode"]
 analysis = ["duckdb"]
+onnx = ["tract-onnx"]
 
 [dev-dependencies]
 tokio-test = "0.4"

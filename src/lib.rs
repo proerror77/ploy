@@ -10,6 +10,7 @@ pub mod coordination;
 pub mod coordinator;
 pub mod domain;
 pub mod error;
+pub mod ml;
 pub mod persistence;
 pub mod platform;
 pub mod services;
