@@ -60,6 +60,44 @@ pub struct MarketSnapshot {
     pub yes_best_ask: Option<Decimal>,
 }
 
+/// Pre-computed risk metrics for filtering and prompt context
+#[derive(Debug, Clone, Serialize)]
+pub struct RiskMetrics {
+    /// (1 - price) / price — potential gain divided by potential loss
+    pub reward_risk_ratio: f64,
+    /// fair_value - market_price (positive = underpriced)
+    pub expected_value: f64,
+    /// Kelly criterion fraction: edge / (1 - price)
+    pub kelly_fraction: f64,
+}
+
+impl RiskMetrics {
+    /// Calculate risk metrics from fair value estimate and market price.
+    /// `fair_value` is the estimated win probability (0.0 to 1.0).
+    /// `market_price` is the current YES share price (0.0 to 1.0).
+    pub fn calculate(fair_value: f64, market_price: f64) -> Self {
+        let price = market_price.clamp(0.001, 0.999); // avoid division by zero
+        let reward_risk_ratio = (1.0 - price) / price;
+        let expected_value = fair_value - price;
+        let kelly_fraction = if (1.0 - price).abs() > f64::EPSILON {
+            expected_value / (1.0 - price)
+        } else {
+            0.0
+        };
+
+        Self {
+            reward_risk_ratio,
+            expected_value,
+            kelly_fraction: kelly_fraction.max(0.0),
+        }
+    }
+
+    /// Check if this opportunity passes the minimum reward-to-risk filter
+    pub fn passes_filter(&self, min_ratio: f64, min_ev: f64) -> bool {
+        self.reward_risk_ratio >= min_ratio && self.expected_value >= min_ev
+    }
+}
+
 /// Everything Grok needs to make a final trade decision
 #[derive(Debug, Clone, Serialize)]
 pub struct UnifiedDecisionRequest {
@@ -75,6 +113,8 @@ pub struct UnifiedDecisionRequest {
     pub grok_intel: Option<GrokGameIntel>,
     /// Market data at decision time
     pub market: MarketSnapshot,
+    /// Pre-computed risk metrics (reward-to-risk ratio, EV, Kelly)
+    pub risk_metrics: RiskMetrics,
 }
 
 /// Grok's final decision
@@ -83,6 +123,8 @@ pub enum GrokDecision {
     Trade {
         request_id: Uuid,
         fair_value: f64,
+        /// Grok's own independent win probability estimate (from X.com search)
+        own_fair_value: f64,
         edge: f64,
         confidence: f64,
         reasoning: String,
@@ -102,6 +144,9 @@ struct GrokDecisionJson {
     decision: String,
     #[serde(default)]
     fair_value: f64,
+    /// Grok's own independent probability estimate (may differ from Claude's)
+    #[serde(default)]
+    own_fair_value: f64,
     #[serde(default)]
     edge: f64,
     #[serde(default)]
@@ -213,22 +258,41 @@ MARKET:
 - Current price for {trailing} YES: ${market_price}
 - Best bid: ${best_bid}, Best ask: ${best_ask}
 
-TRIGGER: {trigger}
+RISK METRICS (pre-computed):
+- Reward-to-risk ratio: {rr:.1}x (gain ${gain:.2} / risk ${risk:.2})
+- Expected value: {ev:+.1}%
+- Kelly fraction: {kelly:.1}%
+"#,
+        trailing = req.trailing_team,
+        market_price = req.market.market_price,
+        best_bid = best_bid_str,
+        best_ask = best_ask_str,
+        rr = req.risk_metrics.reward_risk_ratio,
+        gain = 1.0 - req.market.market_price.to_string().parse::<f64>().unwrap_or(0.0),
+        risk = req.market.market_price.to_string().parse::<f64>().unwrap_or(0.0),
+        ev = req.risk_metrics.expected_value * 100.0,
+        kelly = req.risk_metrics.kelly_fraction * 100.0,
+    ));
+
+    prompt.push_str(&format!(
+        r#"TRIGGER: {trigger}
 
 Decide: should we BUY YES shares on {trailing} winning?
+
+IMPORTANT: Also provide your OWN independent win probability estimate (own_fair_value)
+based on your X.com search. If it disagrees with the statistical model by >5%, explain why.
+
 Respond ONLY in JSON:
 {{
   "decision": "trade" or "pass",
-  "fair_value": 0.0-1.0,
+  "fair_value": 0.0-1.0 (statistical model estimate),
+  "own_fair_value": 0.0-1.0 (YOUR independent estimate from X.com intel),
   "edge": fair_value minus market_price,
   "confidence": 0.0-1.0,
   "reasoning": "2-3 sentences",
   "risk_factors": ["factor1", "factor2"]
 }}"#,
         trailing = req.trailing_team,
-        market_price = req.market.market_price,
-        best_bid = best_bid_str,
-        best_ask = best_ask_str,
         trigger = req.trigger,
     ));
 
@@ -248,6 +312,7 @@ pub fn parse_decision_response(request_id: Uuid, raw: &str) -> GrokDecision {
                 GrokDecision::Trade {
                     request_id,
                     fair_value: parsed.fair_value.clamp(0.0, 1.0),
+                    own_fair_value: parsed.own_fair_value.clamp(0.0, 1.0),
                     edge: parsed.edge,
                     confidence: parsed.confidence.clamp(0.0, 1.0),
                     reasoning: parsed.reasoning,
@@ -358,6 +423,7 @@ mod tests {
                 yes_best_bid: Some(dec!(0.24)),
                 yes_best_ask: Some(dec!(0.26)),
             },
+            risk_metrics: RiskMetrics::calculate(0.35, 0.25),
         }
     }
 
@@ -382,6 +448,11 @@ mod tests {
         assert!(prompt.contains("0.25"));
         assert!(prompt.contains("0.24"));
         assert!(prompt.contains("0.26"));
+
+        // Risk metrics
+        assert!(prompt.contains("Reward-to-risk ratio: 3.0x"));
+        assert!(prompt.contains("Expected value: +10.0%"));
+        assert!(prompt.contains("own_fair_value"));
 
         // Trigger
         assert!(prompt.contains("espn_comeback"));
@@ -437,6 +508,7 @@ mod tests {
 {
   "decision": "trade",
   "fair_value": 0.38,
+  "own_fair_value": 0.40,
   "edge": 0.13,
   "confidence": 0.75,
   "reasoning": "Statistical model shows edge with momentum confirmation.",
@@ -448,12 +520,14 @@ mod tests {
         match decision {
             GrokDecision::Trade {
                 fair_value,
+                own_fair_value,
                 edge,
                 confidence,
                 risk_factors,
                 ..
             } => {
                 assert!((fair_value - 0.38).abs() < f64::EPSILON);
+                assert!((own_fair_value - 0.40).abs() < f64::EPSILON);
                 assert!((edge - 0.13).abs() < f64::EPSILON);
                 assert!((confidence - 0.75).abs() < f64::EPSILON);
                 assert_eq!(risk_factors.len(), 2);
@@ -496,18 +570,53 @@ mod tests {
 
     #[test]
     fn test_fair_value_clamped() {
-        let raw = r#"{"decision": "trade", "fair_value": 1.5, "edge": 0.5, "confidence": 2.0, "reasoning": "test", "risk_factors": []}"#;
+        let raw = r#"{"decision": "trade", "fair_value": 1.5, "own_fair_value": 1.8, "edge": 0.5, "confidence": 2.0, "reasoning": "test", "risk_factors": []}"#;
         let decision = parse_decision_response(Uuid::nil(), raw);
         match decision {
             GrokDecision::Trade {
                 fair_value,
+                own_fair_value,
                 confidence,
                 ..
             } => {
                 assert!(fair_value <= 1.0, "fair_value should be clamped to 1.0");
+                assert!(own_fair_value <= 1.0, "own_fair_value should be clamped to 1.0");
                 assert!(confidence <= 1.0, "confidence should be clamped to 1.0");
             }
             GrokDecision::Pass { .. } => panic!("expected Trade"),
         }
+    }
+
+    #[test]
+    fn test_risk_metrics_calculation() {
+        // Price $0.20: gain $0.80, risk $0.20 → ratio 4.0x
+        let m = RiskMetrics::calculate(0.35, 0.20);
+        assert!((m.reward_risk_ratio - 4.0).abs() < 0.01);
+        assert!((m.expected_value - 0.15).abs() < 0.01);
+        assert!(m.passes_filter(4.0, 0.05));
+
+        // Price $0.25: ratio 3.0x → fails 4.0x filter
+        let m2 = RiskMetrics::calculate(0.35, 0.25);
+        assert!((m2.reward_risk_ratio - 3.0).abs() < 0.01);
+        assert!(!m2.passes_filter(4.0, 0.05));
+        assert!(m2.passes_filter(3.0, 0.05)); // would pass at 3.0x
+
+        // Price $0.10: ratio 9.0x → easily passes
+        let m3 = RiskMetrics::calculate(0.20, 0.10);
+        assert!((m3.reward_risk_ratio - 9.0).abs() < 0.01);
+        assert!(m3.passes_filter(4.0, 0.05));
+    }
+
+    #[test]
+    fn test_risk_metrics_edge_cases() {
+        // Very low price → clamped to avoid div-by-zero
+        let m = RiskMetrics::calculate(0.5, 0.0);
+        assert!(m.reward_risk_ratio > 100.0); // 0.999/0.001
+
+        // Negative expected value → kelly is 0
+        let m2 = RiskMetrics::calculate(0.10, 0.30);
+        assert!(m2.expected_value < 0.0);
+        assert!((m2.kelly_fraction - 0.0).abs() < f64::EPSILON);
+        assert!(!m2.passes_filter(4.0, 0.05));
     }
 }

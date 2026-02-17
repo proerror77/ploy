@@ -13,5 +13,5 @@ pub mod grok_intel;
 pub use comeback_stats::{ComebackStatsProvider, TeamComebackProfile};
 pub use core::{ComebackOpportunity, NbaComebackCore, NbaComebackState};
 pub use espn::{EspnClient, GameStatus, LiveGame, QuarterScore};
-pub use grok_decision::{GrokDecision, UnifiedDecisionRequest};
+pub use grok_decision::{GrokDecision, RiskMetrics, UnifiedDecisionRequest};
 pub use grok_intel::{GrokGameIntel, GrokSignalEvaluator, GrokTradeSignal};

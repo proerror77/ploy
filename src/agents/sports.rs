@@ -30,7 +30,8 @@ use crate::strategy::nba_comeback::core::{
 };
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
-    self, ComebackSnapshot, DecisionTrigger, GrokDecision, MarketSnapshot, UnifiedDecisionRequest,
+    self, ComebackSnapshot, DecisionTrigger, GrokDecision, MarketSnapshot, RiskMetrics,
+    UnifiedDecisionRequest,
 };
 use crate::strategy::nba_comeback::grok_intel::{
     self, GrokGameIntel, GrokSignalEvaluator, GrokTradeSignal,
@@ -1029,6 +1030,9 @@ impl SportsTradingAgent {
         .with_metadata("signal_fair_value", &format!("{:.6}", fair_value))
         .with_metadata("signal_market_price", &req.market.market_price.to_string())
         .with_metadata("signal_edge", &format!("{:.6}", edge))
+        .with_metadata("reward_risk_ratio", &format!("{:.2}", req.risk_metrics.reward_risk_ratio))
+        .with_metadata("expected_value", &format!("{:.6}", req.risk_metrics.expected_value))
+        .with_metadata("kelly_fraction", &format!("{:.6}", req.risk_metrics.kelly_fraction))
         .with_metadata("config_hash", config_hash)
     }
 
@@ -1066,10 +1070,14 @@ impl SportsTradingAgent {
                 best_ask DOUBLE PRECISION,
                 decision TEXT NOT NULL,
                 decision_fair_value DOUBLE PRECISION,
+                decision_own_fair_value DOUBLE PRECISION,
                 decision_edge DOUBLE PRECISION,
                 decision_confidence DOUBLE PRECISION,
                 decision_reasoning TEXT,
                 decision_risk_factors JSONB,
+                reward_risk_ratio DOUBLE PRECISION,
+                expected_value DOUBLE PRECISION,
+                kelly_fraction DOUBLE PRECISION,
                 raw_prompt TEXT,
                 raw_response TEXT,
                 query_duration_ms INTEGER,
@@ -1111,10 +1119,11 @@ impl SportsTradingAgent {
             req.game.away_abbrev, req.game.away_score, req.game.home_score, req.game.home_abbrev
         );
 
-        let (decision_str, d_fair_value, d_edge, d_confidence, d_reasoning, d_risk_factors) =
+        let (decision_str, d_fair_value, d_own_fair_value, d_edge, d_confidence, d_reasoning, d_risk_factors) =
             match decision {
                 GrokDecision::Trade {
                     fair_value,
+                    own_fair_value,
                     edge,
                     confidence,
                     reasoning,
@@ -1123,13 +1132,14 @@ impl SportsTradingAgent {
                 } => (
                     "trade",
                     Some(*fair_value),
+                    Some(*own_fair_value),
                     Some(*edge),
                     Some(*confidence),
                     Some(reasoning.as_str()),
                     Some(risk_factors.clone()),
                 ),
                 GrokDecision::Pass { reasoning, .. } => {
-                    ("pass", None, None, None, Some(reasoning.as_str()), None)
+                    ("pass", None, None, None, None, Some(reasoning.as_str()), None)
                 }
             };
 
@@ -1156,8 +1166,9 @@ impl SportsTradingAgent {
                 injury_updates,
                 market_slug, token_id, market_price,
                 best_bid, best_ask,
-                decision, decision_fair_value, decision_edge,
+                decision, decision_fair_value, decision_own_fair_value, decision_edge,
                 decision_confidence, decision_reasoning, decision_risk_factors,
+                reward_risk_ratio, expected_value, kelly_fraction,
                 raw_prompt, raw_response,
                 order_submitted
             )
@@ -1173,10 +1184,11 @@ impl SportsTradingAgent {
                 $22,
                 $23, $24, $25,
                 $26, $27,
-                $28, $29, $30,
-                $31, $32, $33,
-                $34, $35,
-                $36
+                $28, $29, $30, $31,
+                $32, $33, $34,
+                $35, $36, $37,
+                $38, $39,
+                $40
             )
             "#,
         )
@@ -1227,10 +1239,14 @@ impl SportsTradingAgent {
         )
         .bind(decision_str)
         .bind(d_fair_value)
+        .bind(d_own_fair_value)
         .bind(d_edge)
         .bind(d_confidence)
         .bind(d_reasoning)
         .bind(d_risk_factors.map(|rf| sqlx::types::Json(rf)))
+        .bind(req.risk_metrics.reward_risk_ratio)
+        .bind(req.risk_metrics.expected_value)
+        .bind(req.risk_metrics.kelly_fraction)
         .bind(raw_prompt)
         .bind(raw_response)
         .bind(order_submitted)
@@ -1568,6 +1584,24 @@ impl TradingAgent for SportsTradingAgent {
                             token_id.clone(),
                         ) {
                             let game_id = opp.game.espn_game_id.clone();
+                            let market_price_f64 = opp.market_price.to_string().parse::<f64>().unwrap_or(0.0);
+
+                            // Calculate risk metrics and pre-filter on reward-to-risk ratio
+                            let risk_metrics = RiskMetrics::calculate(opp.adjusted_win_prob, market_price_f64);
+                            if !risk_metrics.passes_filter(
+                                self.core.cfg.min_reward_risk_ratio,
+                                self.core.cfg.min_expected_value,
+                            ) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    rr = format!("{:.1}x", risk_metrics.reward_risk_ratio),
+                                    ev = format!("{:.1}%", risk_metrics.expected_value * 100.0),
+                                    min_rr = self.core.cfg.min_reward_risk_ratio,
+                                    "skipping: reward-to-risk ratio below threshold"
+                                );
+                                continue;
+                            }
 
                             // Build unified decision request with all available context
                             let req = UnifiedDecisionRequest {
@@ -1590,6 +1624,7 @@ impl TradingAgent for SportsTradingAgent {
                                     yes_best_bid: market_input.and_then(|_| None),
                                     yes_best_ask: market_input.and_then(|_| None),
                                 },
+                                risk_metrics,
                             };
 
                             // Check decision cooldown
@@ -1812,6 +1847,28 @@ impl TradingAgent for SportsTradingAgent {
                                 continue;
                             }
 
+                            let sig_price_f64 = sig.market_price.to_string().parse::<f64>().unwrap_or(0.0);
+                            // For Grok signal path, use grok_home_win_prob as fair value estimate
+                            let grok_fair_value = if trailing == game.home_abbrev {
+                                intel.grok_home_win_prob.unwrap_or(sig_price_f64)
+                            } else {
+                                intel.grok_home_win_prob.map(|p| 1.0 - p).unwrap_or(sig_price_f64)
+                            };
+                            let risk_metrics = RiskMetrics::calculate(grok_fair_value, sig_price_f64);
+
+                            if !risk_metrics.passes_filter(
+                                self.core.cfg.min_reward_risk_ratio,
+                                self.core.cfg.min_expected_value,
+                            ) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    rr = format!("{:.1}x", risk_metrics.reward_risk_ratio),
+                                    "skipping grok signal: reward-to-risk ratio below threshold"
+                                );
+                                continue;
+                            }
+
                             let req = UnifiedDecisionRequest {
                                 request_id: Uuid::new_v4(),
                                 trigger: DecisionTrigger::GrokSignal(sig.signal_type),
@@ -1828,6 +1885,7 @@ impl TradingAgent for SportsTradingAgent {
                                     yes_best_bid: None,
                                     yes_best_ask: None,
                                 },
+                                risk_metrics,
                             };
 
                             match grok_decision::request_unified_decision(self.grok.as_ref().unwrap(), &req).await {
