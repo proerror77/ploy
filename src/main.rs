@@ -5079,6 +5079,9 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             online_learning,
             dry_run,
             tick_interval,
+            policy_onnx,
+            policy_output,
+            policy_version,
         } => {
             use ploy::adapters::{
                 polymarket_clob::POLYGON_CHAIN_ID, BinanceWebSocket, PolymarketClient,
@@ -5163,6 +5166,9 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                 rl_config,
                 online_learning: *online_learning,
                 exploration_rate: *exploration,
+                policy_model_path: policy_onnx.clone(),
+                policy_output: policy_output.clone(),
+                policy_model_version: policy_version.clone(),
             };
 
             // Create agent

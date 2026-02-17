@@ -15,6 +15,8 @@ use tracing::{debug, info, warn};
 
 use crate::domain::Side;
 use crate::error::Result;
+#[cfg(feature = "onnx")]
+use crate::ml::OnnxModel;
 use crate::platform::{
     AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent,
     OrderPriority,
@@ -22,9 +24,13 @@ use crate::platform::{
 use crate::rl::config::RLConfig;
 use crate::rl::core::{
     ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
-    RewardFunction, StateEncoder,
+    RewardFunction, StateEncoder, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS, TOTAL_FEATURES,
 };
 use crate::rl::memory::ReplayBuffer;
+
+fn default_policy_output() -> String {
+    "continuous".to_string()
+}
 
 /// RL Crypto Agent configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +59,27 @@ pub struct RLCryptoAgentConfig {
     pub online_learning: bool,
     /// Initial exploration rate
     pub exploration_rate: f32,
+
+    /// Optional ONNX policy model path for action selection.
+    ///
+    /// If set, the agent will use this model (when built with `--features onnx`) instead of the
+    /// rule-based baseline policy.
+    #[serde(default)]
+    pub policy_model_path: Option<String>,
+
+    /// How to interpret the policy model output.
+    ///
+    /// Supported values:
+    /// - "continuous" (default): expects >= 5 floats: position_delta, side_preference, urgency, tp_adjustment, sl_adjustment
+    /// - "continuous_mean_logstd": expects >= 10 floats: mean(5) then log_std(5), uses mean only
+    /// - "discrete_logits": expects 5 floats, logits for [Hold, BuyUp, BuyDown, SellPosition, EnterHedge]
+    /// - "discrete_probs": expects 5 floats, probabilities for the same discrete actions
+    #[serde(default = "default_policy_output")]
+    pub policy_output: String,
+
+    /// Optional policy model version label recorded in order metadata.
+    #[serde(default)]
+    pub policy_model_version: Option<String>,
 }
 
 impl Default for RLCryptoAgentConfig {
@@ -70,6 +97,9 @@ impl Default for RLCryptoAgentConfig {
             rl_config: RLConfig::default(),
             online_learning: true,
             exploration_rate: 0.1,
+            policy_model_path: None,
+            policy_output: default_policy_output(),
+            policy_model_version: None,
         }
     }
 }
@@ -130,8 +160,12 @@ pub struct RLCryptoAgent {
     total_exposure: Decimal,
     step_count: u64,
     last_action: Option<ContinuousAction>,
+    last_action_source: Option<String>,
     exploration_rate: f32,
     consecutive_failures: u32,
+
+    #[cfg(feature = "onnx")]
+    policy_model: Option<OnnxModel>,
 }
 
 impl RLCryptoAgent {
@@ -141,6 +175,44 @@ impl RLCryptoAgent {
 
         let buffer_size = config.rl_config.training.buffer_size;
         let exploration = config.exploration_rate;
+
+        #[cfg(feature = "onnx")]
+        let policy_model: Option<OnnxModel> = match config.policy_model_path.as_deref() {
+            Some(path) if !path.trim().is_empty() => match OnnxModel::load_for_vec_input(path, TOTAL_FEATURES) {
+                Ok(m) => {
+                    info!(
+                        agent = %config.id,
+                        policy_path = %path,
+                        input_dim = m.input_dim(),
+                        output_dim = m.output_dim(),
+                        policy_output = %config.policy_output,
+                        "loaded RL policy ONNX model"
+                    );
+                    Some(m)
+                }
+                Err(e) => {
+                    warn!(
+                        agent = %config.id,
+                        policy_path = %path,
+                        error = %e,
+                        "failed to load RL policy ONNX model; falling back to rule-based policy"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+
+        #[cfg(not(feature = "onnx"))]
+        if let Some(path) = config.policy_model_path.as_deref() {
+            if !path.trim().is_empty() {
+                warn!(
+                    agent = %config.id,
+                    policy_path = %path,
+                    "policy_model_path is set but binary is built without --features onnx; using rule-based policy"
+                );
+            }
+        }
 
         Self {
             config,
@@ -155,8 +227,11 @@ impl RLCryptoAgent {
             total_exposure: Decimal::ZERO,
             step_count: 0,
             last_action: None,
+            last_action_source: None,
             exploration_rate: exploration,
             consecutive_failures: 0,
+            #[cfg(feature = "onnx")]
+            policy_model,
         }
     }
 
@@ -228,27 +303,176 @@ impl RLCryptoAgent {
     /// Select action using RL policy
     fn select_action(&mut self) -> ContinuousAction {
         // Encode current state
-        let _state_vec = self.encoder.encode(&self.current_obs);
+        let state_vec = self.encoder.encode(&self.current_obs);
 
-        // Use rule-based policy as placeholder
-        // In production, this would query the PPO actor network
-        let action = self.rule_based_policy();
+        let mut action: Option<ContinuousAction> = None;
+        let mut source: Option<&str> = None;
 
-        // Apply exploration noise
-        let action = if rand::random::<f32>() < self.exploration_rate {
-            ContinuousAction::new(
-                rand::random::<f32>() * 2.0 - 1.0,
-                rand::random::<f32>() * 2.0 - 1.0,
-                rand::random::<f32>(),
-                0.0,
-                0.0,
+        #[cfg(feature = "onnx")]
+        if action.is_none() {
+            if let Some(model) = &self.policy_model {
+                match model.predict(&state_vec) {
+                    Ok(out) => match self.action_from_policy_output(&out) {
+                        Some(a) => {
+                            action = Some(a);
+                            source = Some("onnx");
+                        }
+                        None => {
+                            warn!(
+                                agent = %self.config.id,
+                                output_dim = out.len(),
+                                policy_output = %self.config.policy_output,
+                                "RL ONNX policy output could not be interpreted; falling back"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            agent = %self.config.id,
+                            error = %e,
+                            "RL ONNX policy inference failed; falling back"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Use rule-based policy as baseline.
+        let action = action.unwrap_or_else(|| {
+            source = Some("rule_based");
+            self.rule_based_policy()
+        });
+
+        // Apply exploration noise (override the action).
+        let (action, source) = if rand::random::<f32>() < self.exploration_rate {
+            (
+                ContinuousAction::new(
+                    rand::random::<f32>() * 2.0 - 1.0,
+                    rand::random::<f32>() * 2.0 - 1.0,
+                    rand::random::<f32>(),
+                    0.0,
+                    0.0,
+                ),
+                Some("explore"),
             )
         } else {
-            action
+            (action, source)
         };
 
         self.last_action = Some(action);
+        self.last_action_source = source.map(|s| s.to_string());
         action
+    }
+
+    fn map_urgency(raw: f32) -> f32 {
+        if !raw.is_finite() {
+            return 0.5;
+        }
+        if (0.0..=1.0).contains(&raw) {
+            return raw;
+        }
+        if (-1.0..=1.0).contains(&raw) {
+            return (raw + 1.0) * 0.5;
+        }
+        // Sigmoid fallback for unbounded outputs.
+        1.0 / (1.0 + (-raw).exp())
+    }
+
+    fn action_from_discrete(action: DiscreteAction) -> ContinuousAction {
+        match action {
+            DiscreteAction::Hold => ContinuousAction::default(),
+            DiscreteAction::BuyUp => ContinuousAction::new(0.8, 1.0, 0.5, 0.0, 0.0),
+            DiscreteAction::BuyDown => ContinuousAction::new(0.8, -1.0, 0.5, 0.0, 0.0),
+            DiscreteAction::SellPosition => ContinuousAction::new(-0.8, 0.0, 0.8, 0.0, 0.0),
+            DiscreteAction::EnterHedge => ContinuousAction::new(0.8, 0.0, 0.6, 0.0, 0.0),
+        }
+    }
+
+    fn argmax(values: &[f32]) -> Option<usize> {
+        if values.is_empty() {
+            return None;
+        }
+        let mut best_idx = 0usize;
+        let mut best_val = values[0];
+        for (i, &v) in values.iter().enumerate().skip(1) {
+            if v > best_val {
+                best_val = v;
+                best_idx = i;
+            }
+        }
+        Some(best_idx)
+    }
+
+    fn softmax(values: &[f32]) -> Vec<f32> {
+        if values.is_empty() {
+            return Vec::new();
+        }
+        let mut max = f32::NEG_INFINITY;
+        for &v in values {
+            if v.is_finite() && v > max {
+                max = v;
+            }
+        }
+        if !max.is_finite() {
+            return vec![0.0; values.len()];
+        }
+        let mut exps = Vec::with_capacity(values.len());
+        let mut sum = 0.0f32;
+        for &v in values {
+            let x = if v.is_finite() { (v - max).exp() } else { 0.0 };
+            exps.push(x);
+            sum += x;
+        }
+        if sum <= 0.0 {
+            return vec![0.0; values.len()];
+        }
+        for v in &mut exps {
+            *v /= sum;
+        }
+        exps
+    }
+
+    fn action_from_policy_output(&self, output: &[f32]) -> Option<ContinuousAction> {
+        let kind = self.config.policy_output.trim().to_ascii_lowercase();
+
+        match kind.as_str() {
+            "continuous" => {
+                if output.len() < CONTINUOUS_ACTION_DIM {
+                    return None;
+                }
+                let v = &output[..CONTINUOUS_ACTION_DIM];
+                let urgency = Self::map_urgency(v[2]);
+                Some(ContinuousAction::new(v[0], v[1], urgency, v[3], v[4]))
+            }
+            "continuous_mean_logstd" | "mean_logstd" => {
+                if output.len() < CONTINUOUS_ACTION_DIM * 2 {
+                    return None;
+                }
+                let mean = &output[..CONTINUOUS_ACTION_DIM];
+                let urgency = Self::map_urgency(mean[2]);
+                Some(ContinuousAction::new(mean[0].tanh(), mean[1].tanh(), urgency, mean[3].tanh(), mean[4].tanh()))
+            }
+            "discrete_logits" | "discrete" => {
+                if output.len() < NUM_DISCRETE_ACTIONS {
+                    return None;
+                }
+                let logits = &output[..NUM_DISCRETE_ACTIONS];
+                let probs = Self::softmax(logits);
+                let idx = Self::argmax(&probs)?;
+                let act = DiscreteAction::from_index(idx)?;
+                Some(Self::action_from_discrete(act))
+            }
+            "discrete_probs" => {
+                if output.len() < NUM_DISCRETE_ACTIONS {
+                    return None;
+                }
+                let probs = &output[..NUM_DISCRETE_ACTIONS];
+                let idx = Self::argmax(probs)?;
+                let act = DiscreteAction::from_index(idx)?;
+                Some(Self::action_from_discrete(act))
+            }
+            _ => None,
+        }
     }
 
     /// Rule-based policy as baseline (to be replaced by neural network)
@@ -302,6 +526,8 @@ impl RLCryptoAgent {
     fn action_to_intents(&self, action: ContinuousAction) -> Vec<OrderIntent> {
         let discrete = action.to_discrete();
         let mut intents = Vec::new();
+        let policy_source = self.last_action_source.as_deref().unwrap_or("unknown");
+        let policy_version = self.config.policy_model_version.as_deref().unwrap_or("");
 
         match discrete {
             DiscreteAction::Hold => {
@@ -327,7 +553,9 @@ impl RLCryptoAgent {
                     })
                     .with_metadata("strategy", "rl_crypto")
                     .with_metadata("action", "buy_up")
-                    .with_metadata("step", &self.step_count.to_string());
+                    .with_metadata("step", &self.step_count.to_string())
+                    .with_metadata("policy_source", policy_source)
+                    .with_metadata("policy_model_version", policy_version);
 
                     intents.push(intent);
                 }
@@ -352,7 +580,9 @@ impl RLCryptoAgent {
                     })
                     .with_metadata("strategy", "rl_crypto")
                     .with_metadata("action", "buy_down")
-                    .with_metadata("step", &self.step_count.to_string());
+                    .with_metadata("step", &self.step_count.to_string())
+                    .with_metadata("policy_source", policy_source)
+                    .with_metadata("policy_model_version", policy_version);
 
                     intents.push(intent);
                 }
@@ -378,7 +608,9 @@ impl RLCryptoAgent {
                         .with_priority(OrderPriority::High)
                         .with_metadata("strategy", "rl_crypto")
                         .with_metadata("action", "sell")
-                        .with_metadata("exit_reason", "rl_signal");
+                        .with_metadata("exit_reason", "rl_signal")
+                        .with_metadata("policy_source", policy_source)
+                        .with_metadata("policy_model_version", policy_version);
 
                         intents.push(intent);
                     }
@@ -413,7 +645,9 @@ impl RLCryptoAgent {
                             .with_priority(OrderPriority::High)
                             .with_metadata("strategy", "rl_crypto")
                             .with_metadata("action", "hedge")
-                            .with_metadata("locked_profit", &(dec!(1.0) - total_cost).to_string());
+                            .with_metadata("locked_profit", &(dec!(1.0) - total_cost).to_string())
+                            .with_metadata("policy_source", policy_source)
+                            .with_metadata("policy_model_version", policy_version);
 
                             intents.push(intent);
                         }

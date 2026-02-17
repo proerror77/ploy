@@ -2563,6 +2563,25 @@ impl PlatformBootstrapConfig {
             }
         }
 
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_TYPE") {
+            let v = raw.trim().to_ascii_lowercase();
+            if !v.is_empty() {
+                cfg.crypto_lob_ml.model_type = v;
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_PATH") {
+            let v = raw.trim();
+            if !v.is_empty() {
+                cfg.crypto_lob_ml.model_path = Some(v.to_string());
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_VERSION") {
+            let v = raw.trim();
+            if !v.is_empty() {
+                cfg.crypto_lob_ml.model_version = Some(v.to_string());
+            }
+        }
+
         cfg.crypto_lob_ml.default_shares = env_u64(
             "PLOY_CRYPTO_LOB_ML__DEFAULT_SHARES",
             cfg.crypto_lob_ml.default_shares,

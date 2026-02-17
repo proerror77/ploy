@@ -845,6 +845,27 @@ pub enum RlCommands {
         /// Tick interval in milliseconds
         #[arg(long, default_value = "1000")]
         tick_interval: u64,
+
+        /// Optional ONNX policy model path for action selection.
+        ///
+        /// Requires building the binary with `--features onnx`.
+        /// Expected input dim: 42 (RL state vector).
+        #[arg(long)]
+        policy_onnx: Option<String>,
+
+        /// How to interpret the policy model output.
+        ///
+        /// Supported:
+        /// - continuous (default): 5 floats (position_delta, side_preference, urgency, tp_adjustment, sl_adjustment)
+        /// - continuous_mean_logstd: 10 floats (mean(5) + log_std(5), uses mean only)
+        /// - discrete_logits: 5 floats logits for discrete actions
+        /// - discrete_probs: 5 floats probabilities for discrete actions
+        #[arg(long, default_value = "continuous")]
+        policy_output: String,
+
+        /// Optional policy model version label recorded in order metadata.
+        #[arg(long)]
+        policy_version: Option<String>,
     },
 }
 
