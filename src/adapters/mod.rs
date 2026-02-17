@@ -12,7 +12,9 @@ pub mod postgres;
 pub mod transaction_manager;
 
 #[cfg(feature = "api")]
-pub use api_server::{start_api_server, start_api_server_background};
+pub use api_server::{
+    start_api_server, start_api_server_background, start_api_server_platform_background,
+};
 pub use binance_kline_ws::{BinanceKlineBar, BinanceKlineWebSocket, KlineUpdate};
 pub use binance_ws::{BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice};
 pub use feishu::FeishuNotifier;

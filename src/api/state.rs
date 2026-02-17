@@ -1,5 +1,7 @@
 use crate::adapters::PostgresStore;
+use crate::agent::grok::GrokClient;
 use crate::api::types::WsMessage;
+use crate::coordinator::CoordinatorHandle;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::Arc;
@@ -22,6 +24,12 @@ pub struct AppState {
 
     /// Application start time
     pub start_time: DateTime<Utc>,
+
+    /// Coordinator handle for sidecar order submission (optional — only set when platform is running)
+    pub coordinator: Option<CoordinatorHandle>,
+
+    /// Grok client for sidecar unified decisions (optional — only set when GROK_API_KEY is present)
+    pub grok_client: Option<Arc<GrokClient>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +83,33 @@ impl AppState {
             })),
             config: Arc::new(RwLock::new(config)),
             start_time: Utc::now(),
+            coordinator: None,
+            grok_client: None,
+        }
+    }
+
+    /// Create AppState with coordinator and Grok client (for platform mode)
+    pub fn with_platform_services(
+        store: Arc<PostgresStore>,
+        config: StrategyConfigState,
+        coordinator: Option<CoordinatorHandle>,
+        grok_client: Option<Arc<GrokClient>>,
+    ) -> Self {
+        let (ws_tx, _) = broadcast::channel(1000);
+
+        Self {
+            store,
+            ws_tx,
+            system_status: Arc::new(RwLock::new(SystemStatusState {
+                status: SystemRunStatus::Running, // Platform mode starts as Running
+                last_trade_time: None,
+                websocket_connected: false,
+                database_connected: true,
+            })),
+            config: Arc::new(RwLock::new(config)),
+            start_time: Utc::now(),
+            coordinator,
+            grok_client,
         }
     }
 

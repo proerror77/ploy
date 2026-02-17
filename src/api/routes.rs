@@ -32,6 +32,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/config", put(handlers::update_config))
         // Security endpoints
         .route("/api/security/events", get(handlers::get_security_events))
+        // Sidecar endpoints (Claude Agent SDK → Rust backend)
+        .route(
+            "/api/sidecar/grok/decision",
+            post(handlers::sidecar_grok_decision),
+        )
+        .route("/api/sidecar/orders", post(handlers::sidecar_submit_order))
+        .route(
+            "/api/sidecar/positions",
+            get(handlers::sidecar_get_positions),
+        )
+        .route("/api/sidecar/risk", get(handlers::sidecar_get_risk))
         // WebSocket endpoint
         .route("/ws", get(websocket_handler))
         // Add state and CORS

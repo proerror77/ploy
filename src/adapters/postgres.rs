@@ -24,6 +24,11 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
+    /// Create a PostgreSQL store from an existing connection pool (zero-cost reuse)
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
     /// Run migrations
     pub async fn migrate(&self) -> Result<()> {
         sqlx::migrate!("./migrations").run(&self.pool).await?;
