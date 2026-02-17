@@ -254,6 +254,19 @@ pub struct NbaComebackConfig {
     /// independently. Grok signal path has NO fallback.
     #[serde(default = "default_grok_fallback_enabled")]
     pub grok_fallback_enabled: bool,
+    /// Minimum reward-to-risk ratio to consider a trade (default 4.0).
+    /// reward_risk = (1 - price) / price. At 4.0x, max price ≈ $0.20.
+    /// Opportunities below this threshold are filtered before querying Grok.
+    #[serde(default = "default_min_reward_risk_ratio")]
+    pub min_reward_risk_ratio: f64,
+    /// Minimum expected value to consider a trade (default 0.05 = 5%).
+    /// expected_value = fair_value - market_price.
+    #[serde(default = "default_min_expected_value")]
+    pub min_expected_value: f64,
+    /// Kelly criterion fraction cap (default 0.25 = 25% of bankroll).
+    /// Limits position sizing even when Kelly suggests larger bets.
+    #[serde(default = "default_kelly_fraction_cap")]
+    pub kelly_fraction_cap: f64,
 }
 
 fn default_nba_comeback_min_edge() -> Decimal {
@@ -308,6 +321,18 @@ fn default_grok_decision_cooldown() -> u64 {
 
 fn default_grok_fallback_enabled() -> bool {
     true
+}
+
+fn default_min_reward_risk_ratio() -> f64 {
+    4.0
+}
+
+fn default_min_expected_value() -> f64 {
+    0.05
+}
+
+fn default_kelly_fraction_cap() -> f64 {
+    0.25
 }
 
 /// Event registry discovery service configuration

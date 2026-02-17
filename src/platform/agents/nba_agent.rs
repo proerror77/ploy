@@ -297,6 +297,9 @@ mod tests {
             grok_min_confidence: 0.6,
             grok_decision_cooldown_secs: 60,
             grok_fallback_enabled: true,
+            min_reward_risk_ratio: 4.0,
+            min_expected_value: 0.05,
+            kelly_fraction_cap: 0.25,
         };
 
         // Test status transitions without DB
