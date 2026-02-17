@@ -1,218 +1,248 @@
 # Ploy
 
-A high-performance Polymarket trading bot with a cyberpunk-style terminal dashboard.
-
----
-
-## 🎉 最新更新：完整 Web 前端 + NBA Swing Strategy
-
-**新功能**：
-- ✅ 完整的 Web 前端界面（8 個頁面）
-- ✅ NBA Swing Trading Strategy（6 個核心組件）
-- ✅ 實時監控和可視化
-- ✅ 完整的測試套件（33 個測試）
-- ✅ 所有 TypeScript 錯誤已修復
-- ✅ 構建成功，可以正常運行
-
-**快速開始**：
-```bash
-./start_frontend.sh
-```
-
-**文檔導航**：
-- 📖 [快速概覽](QUICK_OVERVIEW.md) - 一目了然
-- 📖 [快速啟動](START_HERE.md) - 立即開始
-- 📖 [完整總結](COMPLETE_SYSTEM_SUMMARY.md) - 詳細說明
-- 📖 [最終報告](FINAL_INTEGRATION_REPORT.md) - 集成完成報告
-- 📖 [主索引](MASTER_INDEX.md) - 所有文檔
-
----
+A high-performance Polymarket trading bot covering crypto, sports, and political prediction markets. Ships with a terminal dashboard, multi-agent coordinator, AI-assisted analysis, and optional reinforcement learning.
 
 ## Features
 
-- **Real-time TUI Dashboard** - Monitor positions, market analysis, and transactions with a cyberpunk aesthetic
-- **Multiple Trading Strategies**
-  - Momentum trading based on CEX price movements
-  - Split arbitrage (time-separated entry for hedged positions)
-  - Two-leg arbitrage for binary markets
-- **Event-Driven Mispricing Scanner** - Auto-scan Polymarket multi-outcome events using public resolution-like data sources (Arena leaderboard)
-- **Claude AI Agent** - AI-powered trading assistance and market analysis
-- **Live Data Feeds**
-  - Polymarket CLOB WebSocket for quotes
-  - Binance WebSocket for BTC prices
-- **Order Execution** - Authenticated order placement with retry logic
+- **Three trading domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds), Politics (elections, approval ratings)
+- **Multiple strategies** -- Momentum, Split-Arb, Event-Edge mispricing scanner, NBA Q3-Q4 comeback, market making
+- **Multi-agent platform** -- Coordinator with central order queue, per-domain agents, risk gate, and position aggregation
+- **Event registry** -- Automated DISCOVER -> RESEARCH -> MONITOR -> TRADE pipeline for new markets
+- **TUI dashboard** -- Ratatui-based terminal UI with live positions, quotes, Binance price feed, and trade log
+- **Claude AI agent** -- Advisory, autonomous, and chat modes for market analysis and trade execution
+- **Reinforcement learning** -- PPO training, lead-lag strategies, ONNX inference (optional `rl` / `onnx` feature flags)
+- **Persistence** -- PostgreSQL event store, checkpoints, dead-letter queue, and crash recovery
+- **Risk management** -- Position limits, circuit breaker, daily loss limit, slippage protection, emergency stop
 
-## 四大策略框架（Strategy Framework）
+## Prerequisites
 
-你提出的四大策略（事件驅動 / 套利 / 動量 / 信息優勢）已在 repo 內有對應落地，但目前以多個執行框架並存（legacy bot loop / StrategyManager / multi-agent）方式存在。
-
-詳細對照與下一步工程化建議：`docs/STRATEGY_FRAMEWORK_4_PILLARS.md`
+- **Rust** 1.75+ (2021 edition)
+- **PostgreSQL** 15+ with an active database for event store, checkpoints, and strategy state
+- **Polymarket account** with API credentials and a funded wallet on Polygon
+- (Optional) `ANTHROPIC_API_KEY` for Claude AI agent commands
+- (Optional) `XAI_API_KEY` for Grok-based sports analysis
 
 ## Installation
 
 ```bash
-# Clone the repository
+# Clone and build
 git clone https://github.com/proerror77/ploy.git
 cd ploy
-
-# Build the project
 cargo build --release
 
-# Run with demo data
-cargo run -- dashboard --demo
+# Build with optional feature flags
+cargo build --release --features rl        # Reinforcement learning (burn + ndarray)
+cargo build --release --features onnx      # ONNX model inference (tract)
+cargo build --release --features analysis  # DuckDB parquet analysis
+```
+
+Run database migrations before first use:
+
+```bash
+export DATABASE_URL="postgres://localhost/ploy"
+sqlx migrate run
 ```
 
 ## Configuration
 
-Set environment variables for live trading:
+### Environment Variables
 
-```bash
-export POLYMARKET_PRIVATE_KEY="your_private_key"
-export POLYMARKET_API_KEY="your_api_key"
-export POLYMARKET_API_SECRET="your_api_secret"
-export POLYMARKET_PASSPHRASE="your_passphrase"
-```
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `POLYMARKET_PRIVATE_KEY` | Yes | Ethereum private key for order signing |
+| `POLYMARKET_API_KEY` | Yes | Polymarket CLOB API key |
+| `POLYMARKET_API_SECRET` | Yes | Polymarket CLOB API secret |
+| `POLYMARKET_PASSPHRASE` | Yes | Polymarket CLOB passphrase |
+| `POLYMARKET_FUNDER` | No | Proxy/Magic wallet address |
+| `DATABASE_URL` | Yes | PostgreSQL connection string (overrides config) |
+| `ANTHROPIC_API_KEY` | No | Required for `agent` and AI-powered commands |
+| `XAI_API_KEY` | No | Required for Grok-based sports analysis |
+
+### Config File
+
+The default configuration lives in `config/default.toml`. Override the path with `--config` / `-c`.
+
+| Section | Key examples |
+|---------|-------------|
+| `[market]` | `ws_url`, `rest_url`, `market_slug` |
+| `[strategy]` | `shares`, `window_min`, `move_pct`, `sum_target`, `fee_buffer`, `slippage_buffer`, `profit_buffer` |
+| `[execution]` | `order_timeout_ms`, `max_retries`, `max_spread_bps`, `poll_interval_ms` |
+| `[risk]` | `max_single_exposure_usd`, `min_remaining_seconds`, `max_consecutive_failures`, `daily_loss_limit_usd`, `leg2_force_close_seconds` |
+| `[database]` | `url`, `max_connections` |
+| `[dry_run]` | `enabled` (defaults to `true`) |
+| `[logging]` | `level`, `json` |
+| `[event_edge_agent]` | `enabled`, `framework`, `trade`, `interval_secs`, `min_edge`, `max_entry`, `shares`, `cooldown_secs`, `max_daily_spend_usd`, `titles` |
+| `[nba_comeback]` | `enabled`, `min_edge`, `max_entry_price`, `shares`, `min_deficit`, `max_deficit`, `target_quarter`, `espn_poll_interval_secs` |
+| `[event_registry]` | `enabled`, `scan_interval_secs`, `sports_keywords`, `general_keywords` |
+
+See the inline comments in `config/default.toml` for a full explanation of every field.
 
 ## Usage
 
-### TUI Dashboard
+### Global Flags
+
+```
+--dry-run  / -d    Override dry-run mode (no real orders)
+--market   / -m    Override market slug from config
+--config   / -c    Config file path (default: config/default.toml)
+```
+
+### Core Commands
 
 ```bash
-# Demo mode with sample data
-ploy dashboard --demo
-
-# Live dashboard monitoring btc-15m series
-ploy dashboard
-
-# Monitor specific series
-ploy dashboard -s btc-15m
+ploy run                                       # Start the main trading loop
+ploy test                                      # Test Polymarket API connectivity
+ploy dashboard --demo                          # TUI dashboard with sample data
+ploy dashboard                                 # TUI dashboard with live data
+ploy search "bitcoin"                          # Search Polymarket for markets
+ploy book <token_id>                           # Show order book for a token
+ploy current <series_id>                       # Show active market for a series
+ploy watch --series 10423                      # Watch live market data in terminal
+ploy account --positions                       # Show account balance and positions
+ploy claim --check-only                        # Check claimable resolved positions
+ploy history --limit 50                        # View recent trading history
+ploy ev --price 95 --probability 97            # Calculate expected value for near-settlement bets
 ```
 
-**Dashboard Layout:**
-```
-┌── POSITIONS ────────────────────────────────────────────────────────┐
-│  ▲ UP   [████████████░░░░░░░]  36,598  @0.4820  PnL: $-36.47       │
-│         Cost: $17,657.51 | Avg: $0.4830                            │
-│  ▼ DOWN [████████████████░░░]  36,317  @0.5420  PnL: $+2,458.33    │
-│         Cost: $17,225.68 | Avg: $0.4743                            │
-├── MARKET ANALYSIS ──────────────────────────────────────────────────┤
-│  UP: $0.4816   DOWN: $0.5423   Combined: $1.0239   Spread: -2.39%  │
-│  Pairs: 36,317 | Delta: +281 | Total PnL: $+2,417.00               │
-├── RECENT TRANSACTIONS ──────────────────────────────────────────────┤
-│  TIME          SIDE      PRICE    SIZE     BTC PRICE   TX HASH     │
-│  09:54:32.12   ▲ UP      $0.4602  287 $    97,136     0x90ba9f5c...│
-│  09:54:27.12   ▼ DOWN    $0.4983  337 $    97,236     0x56af6665...│
-├─────────────────────────────────────────────────────────────────────┤
-│  Trades: 127 │ Volume: $34,902.87 │ ⏱ 0:27 │ DRY RUN │ watching    │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Keyboard Controls:**
-- `q` / `Esc` - Quit
-- `↑` / `k` - Scroll up
-- `↓` / `j` - Scroll down
-- `?` - Help
-
-### Trading Strategies
+### Strategies
 
 ```bash
-# Momentum strategy - trade based on CEX price movements
-ploy momentum -s BTCUSDT --shares 100 --threshold 0.5
+ploy trade --series 10423 --shares 50          # Two-leg arbitrage on a price series
+ploy momentum --symbols BTCUSDT --shares 100   # CEX momentum strategy
+ploy momentum --predictive --min-time 300      # Predictive mode: early entry with TP/SL
+ploy split-arb --max-entry 35 --shares 100     # Split arbitrage (time-separated hedge)
+ploy market-make --token <token_id>            # Market making opportunity analysis
+ploy scan --series 10423 --watch               # Continuous arbitrage scan
+ploy analyze --event <event_id>                # Analyze multi-outcome market
+ploy paper --symbols BTCUSDT,ETHUSDT           # Paper trading mode (signals only)
+```
 
-# Split arbitrage - time-separated hedged entries
-ploy split-arb -s btc-15m --shares 500 --max-entry 0.48
+### Event-Edge Scanner
 
-# Dry run mode (no real orders)
-ploy -d momentum -s BTCUSDT
+```bash
+ploy event-edge --title "Which company has the best AI model?"   # One-shot mispricing scan
+ploy event-edge --title "..." --watch --interval-secs 30         # Continuous monitoring
+ploy event-edge --event <id> --watch --trade --min-edge 0.08     # Auto-trade when +EV
 ```
 
 ### AI Agent
 
 ```bash
-# Advisory mode - get trading recommendations
-ploy agent --mode advisory
-
-# Autonomous mode - AI-controlled trading
-ploy agent --mode autonomous --enable-trading
-
-# Chat mode - interactive conversation
-ploy agent --chat
+ploy agent --mode advisory                     # Get trading recommendations
+ploy agent --mode autonomous --enable-trading  # AI-controlled trading
+ploy agent --chat                              # Interactive conversation
+ploy agent --mode sports --sports-url <url>    # Sports-specific analysis
+ploy rpc                                       # JSON-RPC 2.0 server over stdin/stdout
 ```
 
-### Other Commands
+### Domain: Crypto
 
 ```bash
-# Test API connection
-ploy test
-
-# Search markets
-ploy search "bitcoin"
-
-# Show order book
-ploy book <token_id>
-
-# View account balance and positions
-ploy account
-
-# Scan an external-data-driven market (Arena leaderboard → implied true probabilities)
-# One-shot scan by title (finds best matching Polymarket event via Gamma `title_contains`)
-ploy event-edge --title "Which company has the best AI model end of February?"
-
-# Watch mode (polls both Arena + Polymarket quotes)
-ploy event-edge --title "Which company has the best AI model end of February?" --watch --interval-secs 30
-
-# Place orders when edge/EV thresholds are met (defaults to dry-run prints)
-ploy event-edge --event <event_id> --watch --trade --min-edge 0.08 --max-entry 0.75 --shares 100
-
-# Analyze market making opportunities
-ploy market-make <token_id>
+ploy crypto split-arb --coins SOL,ETH,BTC      # Split-arb on crypto UP/DOWN markets
+ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
 ```
 
-**Notes for `event-edge`:**
-- Fetches Arena text leaderboard via `https://r.jina.ai/https://arena.ai/leaderboard/text` (proxy for JS/CF-protected pages).
-- Trades only when `p_true - best_ask >= min_edge` and price is below `max_entry`.
-- For real order placement, set `POLYMARKET_PRIVATE_KEY` (and `POLYMARKET_FUNDER` if using a proxy/Magic wallet) and run with `--dry-run false`.
+### Domain: Sports
 
-**Always-on (autonomous loop):**
-- Enable `[event_edge_agent]` in `config/default.toml` and run `ploy run`; the agent will scan and trade continuously in the background. See `docs/EVENT_EDGE_AGENT.md`.
+```bash
+ploy sports split-arb --leagues NBA,NFL          # Split-arb on sports markets
+ploy sports monitor --leagues NBA                # Monitor sports markets
+ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
+ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup
+ploy sports polymarket --league nba --live       # Browse Polymarket sports markets
+ploy sports chain --team1 LAL --team2 BOS        # Full decision chain (Grok -> Claude -> DK -> PM)
+ploy sports live-scan --sport nba --min-edge 3   # Continuous live edge scanner
+```
+
+### Domain: Politics
+
+```bash
+ploy politics markets --category presidential   # Browse political markets
+ploy politics search "election"                 # Search political markets
+ploy politics analyze --candidate "Trump"       # Analyze a candidate's markets
+ploy politics trump --market-type favorability  # Trump-specific markets
+ploy politics elections --year 2026             # Election markets by year
+```
+
+### Strategy Management
+
+```bash
+ploy strategy list                              # List all strategies and status
+ploy strategy start momentum --dry-run          # Start a strategy
+ploy strategy stop momentum                     # Stop a running strategy
+ploy strategy status                            # Show status of all strategies
+ploy strategy logs momentum --follow            # Tail strategy logs
+ploy strategy reload momentum                   # Hot-reload strategy config
+ploy strategy nba-seed-stats --season 2025-26   # Seed NBA comeback stats into DB
+ploy strategy nba-comeback --dry-run            # Run NBA comeback agent standalone
+ploy strategy accuracy --lookback-hours 12      # Report prediction accuracy
+```
+
+### Multi-Agent Platform
+
+```bash
+ploy platform start --crypto --sports --politics   # Start all domain agents
+ploy platform start --crypto --dry-run             # Crypto agent only, dry-run
+ploy platform start --sports --pause sports        # Start paused
+```
+
+### RL Commands (requires `--features rl`)
+
+```bash
+ploy rl train --episodes 1000 --series 10423        # Train RL model
+ploy rl run --model ./models/best --series 10423     # Live trading with RL
+ploy rl eval --model ./models/best --data test.csv   # Evaluate model
+ploy rl info --model ./models/best                   # Inspect model stats
+ploy rl export --model ./models/best -o model.onnx   # Export for deployment
+ploy rl backtest --episodes 100                      # Backtest on sample data
+ploy rl lead-lag --episodes 1000 --symbol BTCUSDT    # Train lead-lag RL
+ploy rl lead-lag-live --symbol BTCUSDT --market btc-price-series-15m  # Live lead-lag
+ploy rl agent --symbol BTCUSDT --market btc-price-series-15m \
+    --up-token <id> --down-token <id>                # Full RL agent integration
+```
+
+### Data Collection
+
+```bash
+ploy collect --symbols BTCUSDT --duration 60         # Collect data for lag analysis
+ploy orderbook-history --asset-ids <ids>             # Backfill L2 orderbook history
+```
 
 ## Architecture
 
+Ploy is organized around a multi-domain platform where each prediction market category (crypto, sports, politics) has a dedicated trading agent. The agents submit orders through a central coordinator that applies risk checks, queues orders, and dispatches them to the Polymarket CLOB via authenticated API calls.
+
+Strategies run independently and can be managed as daemons (start/stop/status). The event registry continuously discovers new markets, scores them for edge, and promotes them through a funnel from discovery to active trading. Persistence is handled by PostgreSQL with an event store for auditability, a checkpoint system for crash recovery, and a dead-letter queue for failed operations.
+
 ```
 src/
-├── adapters/          # External service integrations
-│   ├── binance_ws.rs  # Binance WebSocket client
-│   ├── polymarket_clob.rs  # Polymarket CLOB API
-│   └── polymarket_ws.rs    # Polymarket WebSocket
-├── agent/             # Claude AI integration
-│   ├── advisor.rs     # Advisory agent
-│   ├── autonomous.rs  # Autonomous trading agent
-│   └── client.rs      # Claude API client
-├── domain/            # Core domain models
-│   ├── market.rs      # Market, Quote, Round
-│   ├── order.rs       # Order, OrderRequest
-│   └── state.rs       # Strategy states
-├── strategy/          # Trading strategies
-│   ├── momentum.rs    # Momentum trading
-│   ├── split_arb.rs   # Split arbitrage
-│   └── executor.rs    # Order execution
-├── tui/               # Terminal UI
-│   ├── app.rs         # Application state
-│   ├── runner.rs      # Live data integration
-│   ├── widgets/       # UI components
-│   └── theme.rs       # Cyberpunk color scheme
-└── signing/           # Wallet & authentication
-    ├── wallet.rs      # Ethereum wallet
-    └── order.rs       # Order signing
+  adapters/      Polymarket CLOB, WebSocket, Binance WS
+  agents/        Domain trading agents (crypto, sports, politics)
+  agent/         Claude AI agent integration
+  coordinator/   Multi-agent coordinator + order queue
+  domain/        Core types (Market, Order, Quote)
+  persistence/   Event store, checkpoints, DLQ
+  services/      Discovery, metrics, health
+  signing/       Wallet, order signing, nonce manager
+  strategy/      Trading strategies + risk + registry
+  supervisor/    Watchdog, emergency stop, shutdown
+  tui/           Terminal dashboard (ratatui)
+config/          TOML configuration files
+migrations/      PostgreSQL schema migrations
+docs/            Extended documentation
+examples/        Example integrations (OpenClaw RPC)
 ```
 
-## Dependencies
+## Development
 
-- **ratatui** - Terminal UI framework
-- **tokio** - Async runtime
-- **ethers** - Ethereum wallet/signing
-- **reqwest** - HTTP client
-- **tokio-tungstenite** - WebSocket client
+```bash
+cargo test                           # Run test suite
+cargo fmt --check                    # Check formatting
+cargo clippy -- -D warnings          # Lint
+cargo build --features rl,onnx       # Build with all optional features
+```
+
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the contributor guide.
 
 ## License
 
@@ -220,4 +250,4 @@ MIT
 
 ## Disclaimer
 
-This software is for educational purposes only. Trading cryptocurrencies and prediction markets involves substantial risk of loss. Use at your own risk.
+This software is for educational and research purposes only. Trading on prediction markets carries substantial risk of financial loss. Always start with `dry_run.enabled = true` and verify behavior before committing real funds. Use at your own risk.
