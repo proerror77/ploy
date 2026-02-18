@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs/updates the auto-claimer systemd unit on the trading host via AWS SSM.
+# Install/update the auto-claimer systemd unit on the trading host via AWS SSM.
 #
 # Usage:
 #   scripts/install_claimer_service_ssm.sh
@@ -23,15 +23,13 @@ infer_instance_id() {
     echo "$AWS_SSM_INSTANCE_ID"
     return
   fi
+
   local deploy="$ROOT_DIR/deploy_to_tango21.sh"
   if [[ -f "$deploy" ]]; then
-    local id
-    id="$(awk -F '\"' '/^INSTANCE_ID=/{print $2; exit}' "$deploy" 2>/dev/null || true)"
-    if [[ -n "$id" ]]; then
-      echo "$id"
-      return
-    fi
+    awk -F '"' '/^INSTANCE_ID=/{print $2; exit}' "$deploy" 2>/dev/null || true
+    return
   fi
+
   echo ""
 }
 
@@ -47,42 +45,39 @@ if [[ ! -f "$SERVICE_FILE" ]]; then
   exit 2
 fi
 
-SERVICE_CONTENT="$(cat "$SERVICE_FILE")"
-
+export SERVICE_FILE
 CMD_JSON="$(
-  cat <<EOF | python3 - <<'PY'
-import json,sys
-cmds = sys.stdin.read().splitlines()
-print(json.dumps([c for c in cmds if c.strip() != ""]))
+  python3 - <<'PY'
+import base64
+import json
+import os
+from pathlib import Path
+
+service_b64 = base64.b64encode(Path(os.environ["SERVICE_FILE"]).read_bytes()).decode("ascii")
+
+cmds = [
+    "set -euo pipefail",
+    # Install the systemd unit
+    "printf '%s' '" + service_b64 + "' | base64 -d > /etc/systemd/system/ploy-claimer.service",
+    # Ensure env dir exists (optional override file)
+    "mkdir -p /opt/ploy/env",
+    "chown -R ploy:ploy /opt/ploy/env",
+    "chmod 700 /opt/ploy/env",
+    "if [ ! -f /opt/ploy/env/claimer.env ]; then install -o ploy -g ploy -m 600 /dev/null /opt/ploy/env/claimer.env; fi",
+    # Enable + start (only when key exists)
+    "systemctl daemon-reload",
+    "systemctl enable ploy-claimer.service",
+    (
+        "if grep -Eq '^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=' /opt/ploy/.env 2>/dev/null || "
+        "grep -Eq '^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=' /opt/ploy/env/claimer.env 2>/dev/null; then "
+        "systemctl restart ploy-claimer.service; "
+        "systemctl --no-pager --full status ploy-claimer.service | head -n 25; "
+        "else echo 'ploy-claimer installed but NOT started (missing POLYMARKET_PRIVATE_KEY/PRIVATE_KEY).'; fi"
+    ),
+]
+
+print(json.dumps(cmds))
 PY
-set -euo pipefail
-
-cat >/etc/systemd/system/ploy-claimer.service <<'UNIT'
-$SERVICE_CONTENT
-UNIT
-
-mkdir -p /opt/ploy/env
-chown -R ploy:ploy /opt/ploy/env
-chmod 700 /opt/ploy/env
-
-# If an override env file doesn't exist yet, create an empty one.
-# The main /opt/ploy/.env typically already contains keys; this file is optional.
-if [[ ! -f /opt/ploy/env/claimer.env ]]; then
-  install -o ploy -g ploy -m 600 /dev/null /opt/ploy/env/claimer.env
-fi
-
-systemctl daemon-reload
-systemctl enable ploy-claimer.service
-
-# Only start if a key exists somewhere on the host.
-if grep -Eq "^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=" /opt/ploy/.env 2>/dev/null || \
-   grep -Eq "^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=" /opt/ploy/env/claimer.env 2>/dev/null; then
-  systemctl restart ploy-claimer.service
-  systemctl --no-pager --full status ploy-claimer.service | head -n 25
-else
-  echo "ploy-claimer installed but NOT started (missing POLYMARKET_PRIVATE_KEY/PRIVATE_KEY)."
-fi
-EOF
 )"
 
 COMMAND_ID="$(
@@ -101,3 +96,4 @@ aws ssm get-command-invocation \
   --instance-id "$INSTANCE_ID" \
   --query '{Status:Status,Out:StandardOutputContent,Err:StandardErrorContent}' \
   --output json
+
