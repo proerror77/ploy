@@ -164,6 +164,14 @@ impl PlatformRiskState {
     }
 }
 
+/// Circuit breaker state transitions (for UI/audit)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerEvent {
+    pub timestamp: DateTime<Utc>,
+    pub reason: String,
+    pub state: PlatformRiskState,
+}
+
 /// Agent 風控統計
 #[derive(Debug, Clone, Default)]
 struct AgentRiskStats {
@@ -210,6 +218,8 @@ pub struct RiskGate {
     consecutive_failures: AtomicU32,
     /// 每日統計
     daily_stats: Arc<RwLock<DailyStats>>,
+    /// Circuit breaker event history (bounded)
+    circuit_events: Arc<RwLock<Vec<CircuitBreakerEvent>>>,
 }
 
 impl RiskGate {
@@ -223,6 +233,7 @@ impl RiskGate {
             total_exposure: Arc::new(RwLock::new(Decimal::ZERO)),
             consecutive_failures: AtomicU32::new(0),
             daily_stats: Arc::new(RwLock::new(DailyStats::default())),
+            circuit_events: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -486,6 +497,17 @@ impl RiskGate {
     pub async fn trigger_circuit_breaker(&self, reason: &str) {
         error!("CIRCUIT BREAKER TRIGGERED: {}", reason);
         *self.state.write().await = PlatformRiskState::Halted;
+
+        let mut events = self.circuit_events.write().await;
+        events.push(CircuitBreakerEvent {
+            timestamp: Utc::now(),
+            reason: reason.to_string(),
+            state: PlatformRiskState::Halted,
+        });
+        if events.len() > 100 {
+            let drain = events.len() - 100;
+            events.drain(0..drain);
+        }
     }
 
     /// 重置熔斷
@@ -498,6 +520,17 @@ impl RiskGate {
         let mut stats_map = self.agent_stats.write().await;
         for stats in stats_map.values_mut() {
             stats.consecutive_failures = 0;
+        }
+
+        let mut events = self.circuit_events.write().await;
+        events.push(CircuitBreakerEvent {
+            timestamp: Utc::now(),
+            reason: "reset".to_string(),
+            state: PlatformRiskState::Normal,
+        });
+        if events.len() > 100 {
+            let drain = events.len() - 100;
+            events.drain(0..drain);
         }
     }
 
@@ -537,6 +570,16 @@ impl RiskGate {
         (daily.total_pnl, daily.success_count, daily.failure_count)
     }
 
+    /// Daily loss limit (USD)
+    pub fn daily_loss_limit(&self) -> Decimal {
+        self.config.daily_loss_limit
+    }
+
+    /// Circuit breaker event history
+    pub async fn circuit_breaker_events(&self) -> Vec<CircuitBreakerEvent> {
+        self.circuit_events.read().await.clone()
+    }
+
     /// 連續失敗數
     pub fn consecutive_failures(&self) -> u32 {
         self.consecutive_failures.load(Ordering::SeqCst)
@@ -562,6 +605,7 @@ impl RiskGate {
         self.consecutive_failures.store(0, Ordering::SeqCst);
         *self.total_exposure.write().await = Decimal::ZERO;
         *self.daily_stats.write().await = DailyStats::default();
+        self.circuit_events.write().await.clear();
     }
 }
 

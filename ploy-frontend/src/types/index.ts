@@ -89,3 +89,29 @@ export interface PnLDataPoint {
   cumulative_pnl: number;
   trade_count: number;
 }
+
+export interface RunningStrategy {
+  name: string;
+  status: 'running' | 'paused' | 'error';
+  pnl_usd: number;
+  order_count: number;
+  domain: 'crypto' | 'sports' | 'politics';
+}
+
+export interface RiskData {
+  risk_state: 'Normal' | 'Elevated' | 'Halted';
+  daily_pnl_usd: number;
+  daily_loss_limit_usd: number;
+  queue_depth: number;
+  positions: Array<{
+    market: string;
+    side: 'Yes' | 'No';
+    size: number;
+    pnl_usd: number;
+  }>;
+  circuit_breaker_events: Array<{
+    timestamp: string;
+    reason: string;
+    state: string;
+  }>;
+}

@@ -17,8 +17,16 @@ use crate::tui::theme::THEME;
 
 /// Render the transactions panel
 pub fn render_transactions(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let filter = app.filter_input.trim();
+    let mut title = " RECENT TRANSACTIONS ".to_string();
+    if app.filter_mode {
+        title = format!(" RECENT TRANSACTIONS [FILTER: {}_] ", filter);
+    } else if !filter.is_empty() {
+        title = format!(" RECENT TRANSACTIONS [FILTER: {}] ", filter);
+    }
+
     let block = Block::default()
-        .title(" RECENT TRANSACTIONS ")
+        .title(title)
         .title_style(THEME.title_style())
         .borders(Borders::ALL)
         .border_style(THEME.border_style());
@@ -26,8 +34,32 @@ pub fn render_transactions(f: &mut Frame, area: Rect, app: &TuiApp) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.transactions.is_empty() {
-        let no_tx = Paragraph::new("No recent transactions").style(THEME.inactive_style());
+    // Apply optional filter (by tx hash, side, or price string)
+    let filter_lc = filter.to_lowercase();
+    let txs: Vec<&DisplayTransaction> = if filter_lc.is_empty() {
+        app.transactions.iter().collect()
+    } else {
+        app.transactions
+            .iter()
+            .filter(|tx| {
+                tx.tx_hash.to_lowercase().contains(&filter_lc)
+                    || match tx.side {
+                        Side::Up => "up",
+                        Side::Down => "down",
+                    }
+                    .contains(&filter_lc)
+                    || format!("{}", tx.price).to_lowercase().contains(&filter_lc)
+            })
+            .collect()
+    };
+
+    if txs.is_empty() {
+        let msg = if app.transactions.is_empty() {
+            "No recent transactions"
+        } else {
+            "No matching transactions"
+        };
+        let no_tx = Paragraph::new(msg).style(THEME.inactive_style());
         f.render_widget(no_tx, inner);
         return;
     }
@@ -53,9 +85,9 @@ pub fn render_transactions(f: &mut Frame, area: Rect, app: &TuiApp) {
     let visible_rows = (inner.height as usize).saturating_sub(header_height);
 
     // Get slice of transactions to display
-    let start_idx = app.tx_scroll_offset;
-    let end_idx = (start_idx + visible_rows).min(app.transactions.len());
-    let visible_txs = &app.transactions[start_idx..end_idx];
+    let start_idx = app.tx_scroll_offset.min(txs.len().saturating_sub(1));
+    let end_idx = (start_idx + visible_rows).min(txs.len());
+    let visible_txs = &txs[start_idx..end_idx];
 
     // Build lines
     let mut lines: Vec<Line> = vec![header];
@@ -68,15 +100,15 @@ pub fn render_transactions(f: &mut Frame, area: Rect, app: &TuiApp) {
     f.render_widget(paragraph, inner);
 
     // Render scrollbar if needed
-    if app.transactions.len() > visible_rows {
+    if txs.len() > visible_rows {
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some(""))
             .end_symbol(Some(""));
 
         let mut scrollbar_state = ScrollbarState::default()
-            .content_length(app.transactions.len())
-            .position(app.tx_scroll_offset);
+            .content_length(txs.len())
+            .position(start_idx);
 
         f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }

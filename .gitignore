@@ -35,6 +35,9 @@ data/rpc/
 # Local one-off generators / scratch
 gen_parts/
 
+# Generated reports / analytics outputs
+reports/
+
 # Temporary files
 /tmp/
 *.tmp

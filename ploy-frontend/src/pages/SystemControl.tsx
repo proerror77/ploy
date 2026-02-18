@@ -1,19 +1,44 @@
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/services/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
+import { ws } from '@/services/websocket';
+import type { WebSocketEvent } from '@/services/websocket';
 import { formatDuration } from '@/lib/utils';
-import { Play, Square, RotateCw, Activity, Database, Wifi } from 'lucide-react';
+import { Play, Square, RotateCw, Activity, Database, Wifi, WifiOff } from 'lucide-react';
 
 export function SystemControl() {
   const queryClient = useQueryClient();
+  const [wsConnected, setWsConnected] = useState(ws.isConnected());
+  const [realtimeStatus, setRealtimeStatus] = useState<'running' | 'stopped' | 'error' | null>(null);
 
+  // Track WebSocket connection
+  useEffect(() => {
+    const unsub = ws.onConnectionChange(setWsConnected);
+    return unsub;
+  }, []);
+
+  // Subscribe to real-time status events
+  useEffect(() => {
+    const unsub = ws.subscribe('status', (event: WebSocketEvent) => {
+      if (event.type === 'status') {
+        setRealtimeStatus(event.data.status);
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Fallback polling at 30s (in case WebSocket disconnects)
   const { data: status, isLoading } = useQuery({
     queryKey: ['system', 'status'],
     queryFn: () => api.getSystemStatus(),
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
+
+  // Merge real-time status with polled data
+  const effectiveStatus = realtimeStatus ?? status?.status;
 
   const startMutation = useMutation({
     mutationFn: () => api.startSystem(),
@@ -37,28 +62,37 @@ export function SystemControl() {
   });
 
   const getStatusBadge = () => {
-    if (!status) return null;
+    if (!effectiveStatus) return null;
     const variants = {
       running: 'success' as const,
       stopped: 'secondary' as const,
       error: 'destructive' as const,
     };
-    return <Badge variant={variants[status.status]}>{status.status}</Badge>;
+    return <Badge variant={variants[effectiveStatus]}>{effectiveStatus}</Badge>;
   };
 
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-muted-foreground">加载中...</div>
+        <div className="text-muted-foreground">Loading...</div>
       </div>
     );
   }
 
   return (
     <div className="p-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold">系统控制</h1>
-        <p className="text-muted-foreground">启动、停止和监控交易系统</p>
+      <div className="mb-8 flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">System Control</h1>
+          <p className="text-muted-foreground">Start, stop, and monitor the trading system</p>
+        </div>
+        <Badge
+          variant={wsConnected ? 'success' : 'destructive'}
+          className="flex items-center gap-1.5"
+        >
+          {wsConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+          {wsConnected ? 'Live' : 'Polling'}
+        </Badge>
       </div>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
@@ -66,34 +100,34 @@ export function SystemControl() {
           {/* System Status */}
           <Card>
             <CardHeader>
-              <CardTitle>系统状态</CardTitle>
+              <CardTitle>System Status</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">运行状态</span>
+                  <span className="text-muted-foreground">Status</span>
                   {getStatusBadge()}
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">运行时间</span>
+                  <span className="text-muted-foreground">Uptime</span>
                   <span className="font-medium">
                     {status ? formatDuration(status.uptime_seconds) : '-'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">版本</span>
+                  <span className="text-muted-foreground">Version</span>
                   <span className="font-medium">{status?.version ?? '-'}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">当前策略</span>
+                  <span className="text-muted-foreground">Strategy</span>
                   <span className="font-medium">{status?.strategy ?? '-'}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">最后交易时间</span>
+                  <span className="text-muted-foreground">Last Trade</span>
                   <span className="font-medium">
                     {status?.last_trade_time
-                      ? new Date(status.last_trade_time).toLocaleString('zh-CN')
-                      : '无'}
+                      ? new Date(status.last_trade_time).toLocaleString('en-US')
+                      : 'None'}
                   </span>
                 </div>
               </div>
@@ -103,7 +137,7 @@ export function SystemControl() {
           {/* Control Panel */}
           <Card>
             <CardHeader>
-              <CardTitle>控制面板</CardTitle>
+              <CardTitle>Control Panel</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -111,21 +145,21 @@ export function SystemControl() {
                   <Button
                     onClick={() => startMutation.mutate()}
                     disabled={
-                      status?.status === 'running' || startMutation.isPending
+                      effectiveStatus === 'running' || startMutation.isPending
                     }
                     className="w-full"
                   >
                     <Play className="mr-2 h-4 w-4" />
-                    启动
+                    Start
                   </Button>
                   <Button
                     variant="destructive"
                     onClick={() => stopMutation.mutate()}
-                    disabled={status?.status === 'stopped' || stopMutation.isPending}
+                    disabled={effectiveStatus === 'stopped' || stopMutation.isPending}
                     className="w-full"
                   >
                     <Square className="mr-2 h-4 w-4" />
-                    停止
+                    Stop
                   </Button>
                   <Button
                     variant="outline"
@@ -134,12 +168,12 @@ export function SystemControl() {
                     className="w-full"
                   >
                     <RotateCw className="mr-2 h-4 w-4" />
-                    重启
+                    Restart
                   </Button>
                 </div>
                 <div className="rounded-lg bg-muted p-4 text-sm text-muted-foreground">
-                  <p>⚠️ 停止系统将关闭所有活跃仓位</p>
-                  <p>⚠️ 重启系统可能需要 30-60 秒</p>
+                  <p>Warning: Stopping the system will close all active positions</p>
+                  <p>Warning: Restart may take 30-60 seconds</p>
                 </div>
               </div>
             </CardContent>
@@ -150,7 +184,7 @@ export function SystemControl() {
         <div>
           <Card>
             <CardHeader>
-              <CardTitle>连接状态</CardTitle>
+              <CardTitle>Connections</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -161,14 +195,14 @@ export function SystemControl() {
                   </div>
                   <div
                     className={`h-2 w-2 rounded-full ${
-                      status?.websocket_connected ? 'bg-success' : 'bg-destructive'
+                      wsConnected ? 'bg-success' : 'bg-destructive'
                     }`}
                   />
                 </div>
                 <div className="flex items-center justify-between rounded-lg border p-3">
                   <div className="flex items-center gap-2">
                     <Database className="h-4 w-4" />
-                    <span className="text-sm">数据库</span>
+                    <span className="text-sm">Database</span>
                   </div>
                   <div
                     className={`h-2 w-2 rounded-full ${
@@ -179,7 +213,7 @@ export function SystemControl() {
                 <div className="flex items-center justify-between rounded-lg border p-3">
                   <div className="flex items-center gap-2">
                     <Activity className="h-4 w-4" />
-                    <span className="text-sm">1小时错误数</span>
+                    <span className="text-sm">Errors (1h)</span>
                   </div>
                   <span className="text-sm font-medium">
                     {status?.error_count_1h ?? 0}

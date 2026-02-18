@@ -12,6 +12,7 @@
 
 use axum::{extract::State, http::StatusCode, Json};
 use chrono::Utc;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::state::AppState;
+use crate::config::AppConfig;
 use crate::domain::market::Side;
 use crate::platform::{Domain, OrderIntent, OrderPriority};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
@@ -182,18 +184,27 @@ pub struct SidecarPosition {
 /// GET /api/sidecar/risk — response
 #[derive(Debug, Serialize)]
 pub struct SidecarRiskState {
-    pub coordinator_running: bool,
-    pub agents: Vec<SidecarAgentInfo>,
-    pub total_exposure_usd: f64,
+    pub risk_state: String,
+    pub daily_pnl_usd: f64,
+    pub daily_loss_limit_usd: f64,
     pub queue_depth: usize,
+    pub positions: Vec<SidecarRiskPosition>,
+    pub circuit_breaker_events: Vec<SidecarCircuitBreakerEvent>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct SidecarAgentInfo {
-    pub agent_id: String,
-    pub domain: String,
-    pub status: String,
-    pub last_heartbeat: Option<String>,
+pub struct SidecarRiskPosition {
+    pub market: String,
+    pub side: String,
+    pub size: f64,
+    pub pnl_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SidecarCircuitBreakerEvent {
+    pub timestamp: String,
+    pub reason: String,
+    pub state: String,
 }
 
 // ── Handlers ─────────────────────────────────────────────────────
@@ -545,21 +556,35 @@ pub async fn sidecar_submit_order(
 pub async fn sidecar_get_positions(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<Vec<SidecarPosition>>, (StatusCode, String)> {
-    let rows = sqlx::query_as::<_, (i64, String, String, String, i64, f64, Option<f64>, Option<f64>, String, chrono::DateTime<Utc>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            f64,
+            Option<f64>,
+            Option<f64>,
+            String,
+            chrono::DateTime<Utc>,
+        ),
+    >(
         r#"
         SELECT
             id,
-            COALESCE(market_slug, '') as market_slug,
-            COALESCE(token_id, '') as token_id,
-            COALESCE(side, 'up') as side,
-            COALESCE(shares, 0) as shares,
-            COALESCE(avg_price, 0.0) as avg_price,
-            current_value,
-            pnl,
-            COALESCE(status, 'open') as status,
-            COALESCE(opened_at, NOW()) as opened_at
+            event_id as market_slug,
+            token_id,
+            market_side as side,
+            shares,
+            avg_entry_price::double precision as avg_price,
+            amount_usd::double precision as current_value,
+            pnl::double precision as pnl,
+            status,
+            opened_at
         FROM positions
-        WHERE status = 'open'
+        WHERE status = 'OPEN'
         ORDER BY opened_at DESC
         LIMIT 100
         "#,
@@ -602,34 +627,143 @@ pub async fn sidecar_get_risk(
         Some(coordinator) => {
             let global = coordinator.read_state().await;
 
-            let agents: Vec<SidecarAgentInfo> = global
-                .agents
+            // Aggregate exposures per market+side (across agents).
+            let mut by_market: HashMap<(String, String), (f64, f64)> = HashMap::new();
+            for p in &global.positions {
+                let side = match p.side {
+                    crate::domain::Side::Up => "Yes",
+                    crate::domain::Side::Down => "No",
+                }
+                .to_string();
+
+                let key = (p.market_slug.clone(), side);
+                let size = p.notional_value().to_f64().unwrap_or(0.0);
+                let pnl = p.unrealized_pnl().to_f64().unwrap_or(0.0);
+
+                by_market
+                    .entry(key)
+                    .and_modify(|(s, pl)| {
+                        *s += size;
+                        *pl += pnl;
+                    })
+                    .or_insert((size, pnl));
+            }
+
+            let mut positions: Vec<SidecarRiskPosition> = by_market
+                .into_iter()
+                .map(|((market, side), (size, pnl_usd))| SidecarRiskPosition {
+                    market,
+                    side,
+                    size,
+                    pnl_usd,
+                })
+                .collect();
+            positions.sort_by(|a, b| a.market.cmp(&b.market).then_with(|| a.side.cmp(&b.side)));
+
+            let circuit_breaker_events = global
+                .circuit_breaker_events
                 .iter()
-                .map(|(id, snap)| SidecarAgentInfo {
-                    agent_id: id.clone(),
-                    domain: format!("{:?}", snap.domain),
-                    status: format!("{:?}", snap.status),
-                    last_heartbeat: Some(snap.last_heartbeat.to_rfc3339()),
+                .rev()
+                .take(50)
+                .map(|e| SidecarCircuitBreakerEvent {
+                    timestamp: e.timestamp.to_rfc3339(),
+                    reason: e.reason.clone(),
+                    state: format!("{:?}", e.state),
                 })
                 .collect();
 
             Ok(Json(SidecarRiskState {
-                coordinator_running: true,
-                agents,
-                total_exposure_usd: global
-                    .portfolio
-                    .total_exposure
-                    .to_string()
-                    .parse()
-                    .unwrap_or(0.0),
+                risk_state: format!("{:?}", global.risk_state),
+                daily_pnl_usd: global.daily_pnl.to_f64().unwrap_or(0.0),
+                daily_loss_limit_usd: global.daily_loss_limit.to_f64().unwrap_or(0.0),
                 queue_depth: global.queue_stats.current_size,
+                positions,
+                circuit_breaker_events,
             }))
         }
         None => Ok(Json(SidecarRiskState {
-            coordinator_running: false,
-            agents: Vec::new(),
-            total_exposure_usd: 0.0,
+            risk_state: {
+                // Fallback to DB strategy_state / daily_metrics if the platform coordinator isn't running.
+                let halted = sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE",
+                )
+                .fetch_optional(state.store.pool())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+
+                if halted {
+                    "Halted".to_string()
+                } else {
+                    "Normal".to_string()
+                }
+            },
+            daily_pnl_usd: sqlx::query_scalar::<_, Decimal>(
+                "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE",
+            )
+            .fetch_optional(state.store.pool())
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(Decimal::ZERO)
+            .to_f64()
+            .unwrap_or(0.0),
+            daily_loss_limit_usd: AppConfig::load()
+                .ok()
+                .map(|c| c.risk.daily_loss_limit_usd.to_f64().unwrap_or(0.0))
+                .unwrap_or(0.0),
             queue_depth: 0,
+            positions: {
+                // Best-effort exposure table from persistent positions (legacy bot).
+                let rows = sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
+                    r#"
+                    SELECT
+                        event_id as market,
+                        market_side as side,
+                        SUM(amount_usd)::double precision as size,
+                        SUM(pnl)::double precision as pnl_usd
+                    FROM positions
+                    WHERE status = 'OPEN'
+                    GROUP BY event_id, market_side
+                    ORDER BY market, side
+                    "#,
+                )
+                .fetch_all(state.store.pool())
+                .await
+                .unwrap_or_default();
+
+                rows.into_iter()
+                    .map(|(market, side, size, pnl_usd)| SidecarRiskPosition {
+                        market,
+                        side: if side == "UP" { "Yes" } else { "No" }.to_string(),
+                        size,
+                        pnl_usd: pnl_usd.unwrap_or(0.0),
+                    })
+                    .collect()
+            },
+            circuit_breaker_events: {
+                let row = sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
+                    r#"
+                    SELECT halted, halt_reason, updated_at
+                    FROM daily_metrics
+                    WHERE date = CURRENT_DATE
+                    "#,
+                )
+                .fetch_optional(state.store.pool())
+                .await
+                .ok()
+                .flatten();
+
+                match row {
+                    Some((true, reason, updated_at)) => vec![SidecarCircuitBreakerEvent {
+                        timestamp: updated_at.to_rfc3339(),
+                        reason: reason.unwrap_or_else(|| "halted".to_string()),
+                        state: "Halted".to_string(),
+                    }],
+                    _ => Vec::new(),
+                }
+            },
         })),
     }
 }

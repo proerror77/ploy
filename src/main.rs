@@ -1,7 +1,7 @@
 use chrono::Utc;
 use clap::Parser;
 #[cfg(feature = "api")]
-use ploy::adapters::start_api_server_background;
+use ploy::adapters::{start_api_server, start_api_server_background};
 use ploy::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
 // Use legacy CLI module for backward compatibility
 #[cfg(feature = "api")]
@@ -26,6 +26,47 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Some(Commands::Serve { port }) => {
+            init_logging_simple();
+
+            #[cfg(feature = "api")]
+            {
+                use rust_decimal::prelude::ToPrimitive;
+
+                let config = AppConfig::load_from(&cli.config).unwrap_or_else(|e| {
+                    warn!("Failed to load config: {}, using defaults", e);
+                    AppConfig::default_config(true, "btc-price-series-15m")
+                });
+
+                let api_port = (*port)
+                    .or_else(|| std::env::var("API_PORT").ok().and_then(|v| v.parse().ok()))
+                    .or(config.api_port)
+                    .unwrap_or(8081);
+
+                let store =
+                    PostgresStore::new(&config.database.url, config.database.max_connections)
+                        .await?;
+
+                let api_config = StrategyConfigState {
+                    symbols: vec![config.market.market_slug.clone()],
+                    min_move: config.strategy.move_pct.to_f64().unwrap_or(0.0),
+                    max_entry: config.strategy.sum_target.to_f64().unwrap_or(1.0),
+                    shares: i32::try_from(config.strategy.shares).unwrap_or(i32::MAX),
+                    predictive: false,
+                    take_profit: None,
+                    stop_loss: None,
+                };
+
+                start_api_server(Arc::new(store), api_port, api_config).await?;
+            }
+
+            #[cfg(not(feature = "api"))]
+            {
+                return Err(PloyError::Validation(
+                    "API feature not enabled. Rebuild with --features api".to_string(),
+                ));
+            }
+        }
         Some(Commands::Test) => {
             init_logging_simple();
             let client = PolymarketClient::new("https://clob.polymarket.com", true)?;
@@ -2121,6 +2162,25 @@ async fn run_full_bot(
             .with_risk_manager(engine.risk_manager())
             .with_metrics(Arc::clone(&metrics)),
     );
+    // Wire runtime connectivity into /health reporting.
+    ws_client.set_health_state(Arc::clone(&health_state));
+
+    // Periodic DB probe (used by /health components reporting).
+    let db_health_handle = {
+        let store = store.clone();
+        let health = Arc::clone(&health_state);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                let ok = sqlx::query_scalar::<_, i32>("SELECT 1")
+                    .fetch_one(store.pool())
+                    .await
+                    .is_ok();
+                health.record_db_check(ok).await;
+            }
+        })
+    };
     let health_port = config.health_port.unwrap_or(8080);
     let health_server = HealthServer::new(Arc::clone(&health_state), health_port);
 
@@ -2304,6 +2364,7 @@ async fn run_full_bot(
     round_handle.abort();
     status_handle.abort();
     event_edge_handle.abort();
+    db_health_handle.abort();
 
     info!("Shutdown complete");
     Ok(())

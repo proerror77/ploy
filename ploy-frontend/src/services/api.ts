@@ -6,6 +6,8 @@ import type {
   StrategyConfig,
   SecurityEvent,
   PnLDataPoint,
+  RunningStrategy,
+  RiskData,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -100,6 +102,37 @@ class ApiService {
       method: 'PUT',
       body: JSON.stringify(config),
     });
+  }
+
+  // Strategy endpoints
+  async getRunningStrategies(): Promise<RunningStrategy[]> {
+    return this.fetch<RunningStrategy[]>('/strategies/running');
+  }
+
+  async pauseSystem(domain?: string): Promise<{ success: boolean; message: string }> {
+    return this.fetch<{ success: boolean; message: string }>('/system/pause', {
+      method: 'POST',
+      body: domain ? JSON.stringify({ domain }) : undefined,
+    });
+  }
+
+  async resumeSystem(domain?: string): Promise<{ success: boolean; message: string }> {
+    return this.fetch<{ success: boolean; message: string }>('/system/resume', {
+      method: 'POST',
+      body: domain ? JSON.stringify({ domain }) : undefined,
+    });
+  }
+
+  async haltSystem(domain?: string): Promise<{ success: boolean; message: string }> {
+    return this.fetch<{ success: boolean; message: string }>('/system/halt', {
+      method: 'POST',
+      body: domain ? JSON.stringify({ domain }) : undefined,
+    });
+  }
+
+  // Risk endpoints
+  async getRiskData(): Promise<RiskData> {
+    return this.fetch<RiskData>('/sidecar/risk');
   }
 
   // Security endpoints

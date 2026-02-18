@@ -42,6 +42,12 @@ pub struct Cli {
 pub enum Commands {
     /// Run the trading bot
     Run,
+    /// Run the API server only (for dashboards / docker-compose)
+    Serve {
+        /// Port to listen on (default: from config/env, usually 8081)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Watch market data in terminal
     Watch {
         /// Token ID to watch (optional)

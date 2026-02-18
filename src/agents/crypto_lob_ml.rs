@@ -581,6 +581,27 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
+                    let (obi_1, obi_2, obi_3, obi_20) = (
+                        self.lob_cache
+                            .get_obi(&update.symbol, 1)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                        self.lob_cache
+                            .get_obi(&update.symbol, 2)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                        self.lob_cache
+                            .get_obi(&update.symbol, 3)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                        self.lob_cache
+                            .get_obi(&update.symbol, 20)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                    );
+                    let obi_micro = obi_1 - lob.obi_5;
+                    let obi_slope = lob.obi_5 - obi_20;
+
                     let intent = OrderIntent::new(
                         &self.config.agent_id,
                         Domain::Crypto,
@@ -612,6 +633,12 @@ impl TradingAgent for CryptoLobMlAgent {
                     .with_metadata("lob_spread_bps", &lob.spread_bps.to_string())
                     .with_metadata("lob_obi_5", &lob.obi_5.to_string())
                     .with_metadata("lob_obi_10", &lob.obi_10.to_string())
+                    .with_metadata("lob_obi_1", &obi_1.to_string())
+                    .with_metadata("lob_obi_2", &obi_2.to_string())
+                    .with_metadata("lob_obi_3", &obi_3.to_string())
+                    .with_metadata("lob_obi_20", &obi_20.to_string())
+                    .with_metadata("lob_obi_micro", &obi_micro.to_string())
+                    .with_metadata("lob_obi_slope", &obi_slope.to_string())
                     .with_metadata("lob_bid_volume_5", &lob.bid_volume_5.to_string())
                     .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
                     .with_metadata("signal_momentum_1s", &momentum_1s.to_string())

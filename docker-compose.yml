@@ -16,8 +16,37 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ploy -d ploy"]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 5
+
+  ploy-api:
+    build: .
+    command: ["run"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgresql://ploy:ploy@postgres:5432/ploy
+      RUST_LOG: info,ploy=debug,sqlx=warn
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  ploy-frontend:
+    build:
+      context: ploy-frontend
+      dockerfile: Dockerfile.frontend
+    depends_on:
+      ploy-api:
+        condition: service_healthy
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://ploy-api:8081
 
 volumes:
   ploy_pgdata:

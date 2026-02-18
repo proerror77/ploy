@@ -9,6 +9,7 @@ import {
   Power,
   Shield,
   TrendingUp,
+  ShieldAlert,
 } from 'lucide-react';
 
 const navigation = [
@@ -17,6 +18,7 @@ const navigation = [
   { name: '实时日志', href: '/monitor', icon: Activity },
   { name: '策略监控', href: '/monitor-strategy', icon: Target },
   { name: 'NBA Swing', href: '/nba-swing', icon: TrendingUp },
+  { name: 'Risk Monitor', href: '/risk', icon: ShieldAlert },
   { name: '系统控制', href: '/control', icon: Power },
   { name: '安全审计', href: '/security', icon: Shield },
 ];

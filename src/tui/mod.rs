@@ -94,6 +94,57 @@ pub async fn run_tui(mut app: TuiApp) -> io::Result<()> {
         // Handle events with timeout
         if crossterm::event::poll(Duration::from_millis(100))? {
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                // If a modal is open, only accept confirm/dismiss keys.
+                if app.modal.is_some() {
+                    match key.code {
+                        crossterm::event::KeyCode::Char('y') | crossterm::event::KeyCode::Enter => {
+                            if let Some(action) = app.confirm_modal() {
+                                match action {
+                                    app::PendingAction::PauseAgents => {
+                                        app.set_strategy_state("paused");
+                                    }
+                                    app::PendingAction::ResumeAgents => {
+                                        app.set_strategy_state("running");
+                                    }
+                                    app::PendingAction::ForceClose => {
+                                        app.set_strategy_state("halted");
+                                    }
+                                }
+                            }
+                        }
+                        crossterm::event::KeyCode::Char('n') | crossterm::event::KeyCode::Esc => {
+                            app.dismiss_modal();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // If we're editing the filter input, treat keys as text entry.
+                if app.filter_mode {
+                    match key.code {
+                        crossterm::event::KeyCode::Esc => {
+                            app.filter_mode = false;
+                            app.filter_input.clear();
+                        }
+                        crossterm::event::KeyCode::Enter => {
+                            app.filter_mode = false;
+                        }
+                        crossterm::event::KeyCode::Backspace => {
+                            app.filter_input.pop();
+                        }
+                        crossterm::event::KeyCode::Char(c) => {
+                            if key.modifiers.is_empty()
+                                || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                            {
+                                app.filter_input.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 let action = KeyAction::from(key);
                 match action {
                     KeyAction::Quit => {
@@ -105,6 +156,24 @@ pub async fn run_tui(mut app: TuiApp) -> io::Result<()> {
                     KeyAction::Help => app.toggle_help(),
                     KeyAction::NextMarket => app.next_market(),
                     KeyAction::PrevMarket => app.prev_market(),
+                    KeyAction::ToggleTab => app.toggle_tab(),
+                    KeyAction::PauseAgents => app.show_modal(
+                        "Pause ALL agents? [y/N]".to_string(),
+                        app::PendingAction::PauseAgents,
+                    ),
+                    KeyAction::ResumeAgents => app.show_modal(
+                        "Resume ALL agents? [y/N]".to_string(),
+                        app::PendingAction::ResumeAgents,
+                    ),
+                    KeyAction::EmergencyClose => app.show_modal(
+                        "EMERGENCY CLOSE ALL POSITIONS? [y/N]".to_string(),
+                        app::PendingAction::ForceClose,
+                    ),
+                    KeyAction::EnterFilter => {
+                        app.filter_mode = true;
+                        app.filter_input.clear();
+                    }
+                    KeyAction::Confirm | KeyAction::Dismiss => {}
                     KeyAction::None => {}
                 }
             }

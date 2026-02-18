@@ -1,134 +1,147 @@
-#!/bin/bash
-# 快速启动 Ploy Trading 系统（API + 前端）
+#!/usr/bin/env bash
+# Start Ploy Trading System (PostgreSQL + API + Frontend)
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
-echo "🚀 Ploy Trading System - Quick Start"
-echo "===================================="
+PID_FILE=".ploy.pid"
+API_PORT="${API_PORT:-8081}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+DATABASE_URL="${DATABASE_URL:-postgresql://ploy:ploy@localhost:5432/ploy}"
+export DATABASE_URL
+# Keep backend config in sync with the script's port override.
+export PLOY_API_PORT="$API_PORT"
+
+echo "Ploy Trading System - Starting"
+echo "=============================="
 echo ""
 
-# 检查 Docker
-if ! command -v docker &> /dev/null; then
-    echo "❌ Docker not found. Please install Docker first."
-    exit 1
-fi
+# -------------------------------------------------------------------
+# Step 1: Ensure Docker PostgreSQL is running via docker-compose
+# -------------------------------------------------------------------
+echo "[1/5] PostgreSQL..."
 
-# 检查 Node.js
-if ! command -v node &> /dev/null; then
-    echo "❌ Node.js not found. Please install Node.js first."
-    exit 1
-fi
-
-# 检查 Rust
-if ! command -v cargo &> /dev/null; then
-    echo "❌ Rust not found. Please install Rust first."
-    exit 1
-fi
-
-echo "✅ All dependencies found"
-echo ""
-
-# 步骤 1: 启动数据库
-echo "📦 Step 1: Starting PostgreSQL database..."
-if docker ps | grep -q ploy-postgres; then
-    echo "   Database already running"
+if docker compose ps --status running 2>/dev/null | grep -q postgres; then
+    echo "       Already running"
 else
-    docker run -d \
-        --name ploy-postgres \
-        -e POSTGRES_DB=ploy \
-        -e POSTGRES_USER=ploy \
-        -e POSTGRES_PASSWORD=password \
-        -p 5432:5432 \
-        postgres:16-alpine
-
-    echo "   Waiting for database to be ready..."
-    sleep 5
+    docker compose up -d postgres
+    echo "       Container started, waiting for readiness..."
 fi
 
-# 步骤 2: 运行数据库迁移
-echo ""
-echo "🔧 Step 2: Running database migrations..."
-export DATABASE_URL="postgresql://ploy:password@localhost:5432/ploy"
+# Poll pg_isready inside the container (no local postgres tools required)
+TRIES=0
+MAX_TRIES=30
+until docker compose exec -T postgres pg_isready -U ploy -d ploy -q >/dev/null 2>&1; do
+    TRIES=$((TRIES + 1))
+    if [ "$TRIES" -ge "$MAX_TRIES" ]; then
+        echo "       ERROR: PostgreSQL did not become ready in ${MAX_TRIES}s"
+        exit 1
+    fi
+    sleep 1
+done
+echo "       PostgreSQL ready"
 
-if command -v sqlx &> /dev/null; then
-    sqlx migrate run
-    echo "   ✅ Migrations completed"
+# -------------------------------------------------------------------
+# Step 2: Run database migrations
+# -------------------------------------------------------------------
+echo ""
+echo "[2/5] Migrations..."
+
+if command -v sqlx >/dev/null 2>&1; then
+    sqlx migrate run --source ./migrations
+    echo "       Migrations applied"
 else
-    echo "   ⚠️  sqlx-cli not found. Install with: cargo install sqlx-cli"
-    echo "   Skipping migrations..."
+    echo "       sqlx-cli not found (install: cargo install sqlx-cli) -- skipping"
 fi
 
-# 步骤 3: 编译并启动 API 服务器
+# -------------------------------------------------------------------
+# Step 3: Build and start the Rust API server
+# -------------------------------------------------------------------
 echo ""
-echo "🔨 Step 3: Building and starting API server..."
-echo "   This may take a few minutes on first run..."
+echo "[3/5] API server..."
 
-# 在后台启动 API 服务器
-cargo run --example api_server > api_server.log 2>&1 &
-API_PID=$!
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE")
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "       API already running (PID $OLD_PID)"
+    else
+        rm -f "$PID_FILE"
+    fi
+fi
 
-echo "   API server starting (PID: $API_PID)..."
-echo "   Waiting for API server to be ready..."
-sleep 10
+if [ ! -f "$PID_FILE" ]; then
+    cargo run --release --features api -- run > ploy-api.log 2>&1 &
+    API_PID=$!
+    echo "$API_PID" > "$PID_FILE"
+    echo "       Started (PID $API_PID), waiting for /health..."
 
-# 检查 API 服务器是否运行
-if kill -0 $API_PID 2>/dev/null; then
-    echo "   ✅ API server running on http://localhost:8080"
+    TRIES=0
+    MAX_TRIES=120  # Rust compile can be slow on first run
+    until curl -sf "http://localhost:${API_PORT}/health" >/dev/null 2>&1; do
+        TRIES=$((TRIES + 1))
+        if ! kill -0 "$API_PID" 2>/dev/null; then
+            echo "       ERROR: API server process exited. Check ploy-api.log"
+            rm -f "$PID_FILE"
+            exit 1
+        fi
+        if [ "$TRIES" -ge "$MAX_TRIES" ]; then
+            echo "       ERROR: API did not pass /health in ${MAX_TRIES}s"
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "       API healthy"
+fi
+
+# -------------------------------------------------------------------
+# Step 4: Install frontend dependencies if needed
+# -------------------------------------------------------------------
+echo ""
+echo "[4/5] Frontend dependencies..."
+
+if [ -d ploy-frontend ]; then
+    if [ ! -d ploy-frontend/node_modules ]; then
+        (cd ploy-frontend && npm install)
+        echo "       Installed"
+    else
+        echo "       Already present"
+    fi
 else
-    echo "   ❌ API server failed to start. Check api_server.log"
-    exit 1
+    echo "       ploy-frontend/ not found -- skipping"
 fi
 
-# 步骤 4: 安装前端依赖（如果需要）
+# -------------------------------------------------------------------
+# Step 5: Start frontend dev server
+# -------------------------------------------------------------------
 echo ""
-echo "📦 Step 4: Setting up frontend..."
-cd ploy-frontend
+echo "[5/5] Frontend dev server..."
 
-if [ ! -d "node_modules" ]; then
-    echo "   Installing frontend dependencies..."
-    npm install
+if [ -d ploy-frontend ]; then
+    (cd ploy-frontend && npm run dev -- --host 0.0.0.0) > ploy-frontend.log 2>&1 &
+    FRONTEND_PID=$!
+    echo "       Started (PID $FRONTEND_PID)"
 else
-    echo "   Dependencies already installed"
+    FRONTEND_PID=""
 fi
 
-# 步骤 5: 启动前端
+# -------------------------------------------------------------------
+# Done
+# -------------------------------------------------------------------
 echo ""
-echo "🎨 Step 5: Starting frontend..."
-npm run dev > ../frontend.log 2>&1 &
-FRONTEND_PID=$!
-
-echo "   Frontend starting (PID: $FRONTEND_PID)..."
-sleep 5
-
-cd ..
-
-# 完成
+echo "All services ready!"
 echo ""
-echo "✅ System started successfully!"
+echo "  API:       http://localhost:${API_PORT}"
+echo "  Health:    http://localhost:${API_PORT}/health"
+echo "  WebSocket: ws://localhost:${API_PORT}/ws"
+if [ -n "${FRONTEND_PID:-}" ]; then
+    echo "  Frontend:  http://localhost:${FRONTEND_PORT}"
+fi
 echo ""
-echo "📊 Access the dashboard:"
-echo "   Frontend: http://localhost:3000"
-echo "   API:      http://localhost:8080"
-echo "   WebSocket: ws://localhost:8080/ws"
+echo "Logs:"
+echo "  API:      tail -f ploy-api.log"
+if [ -n "${FRONTEND_PID:-}" ]; then
+    echo "  Frontend: tail -f ploy-frontend.log"
+fi
 echo ""
-echo "📝 Logs:"
-echo "   API:      tail -f api_server.log"
-echo "   Frontend: tail -f frontend.log"
-echo ""
-echo "🛑 To stop the system:"
-echo "   kill $API_PID $FRONTEND_PID"
-echo "   docker stop ploy-postgres"
-echo ""
-echo "💡 Test the API:"
-echo "   curl http://localhost:8080/api/system/status"
-echo ""
-
-# 保存 PIDs 到文件
-echo "$API_PID" > .api_pid
-echo "$FRONTEND_PID" > .frontend_pid
-
-echo "Press Ctrl+C to stop monitoring logs..."
-echo ""
-
-# 监控日志
-tail -f api_server.log frontend.log
+echo "Stop: ./stop.sh"

@@ -5,7 +5,10 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::platform::{AgentStatus, AggregatedPosition, Domain, PlatformRiskState, QueueStats};
+use crate::platform::{
+    AgentStatus, AggregatedPosition, CircuitBreakerEvent, Domain, PlatformRiskState, Position,
+    QueueStats,
+};
 
 /// Per-agent snapshot visible to the coordinator and TUI
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,8 +54,16 @@ pub struct GlobalState {
     pub agents: HashMap<String, AgentSnapshot>,
     /// Aggregated portfolio across all agents
     pub portfolio: AggregatedPosition,
+    /// Open positions across all agents (best-effort)
+    pub positions: Vec<Position>,
     /// Current risk state (Normal / Elevated / Halted)
     pub risk_state: PlatformRiskState,
+    /// Daily PnL (risk-gate tracked)
+    pub daily_pnl: Decimal,
+    /// Daily loss limit (risk-gate configured)
+    pub daily_loss_limit: Decimal,
+    /// Circuit breaker event history
+    pub circuit_breaker_events: Vec<CircuitBreakerEvent>,
     /// Order queue statistics
     pub queue_stats: QueueStatsSnapshot,
     /// Total realized PnL across all agents
@@ -69,7 +80,11 @@ impl GlobalState {
         Self {
             agents: HashMap::new(),
             portfolio: AggregatedPosition::default(),
+            positions: Vec::new(),
             risk_state: PlatformRiskState::Normal,
+            daily_pnl: Decimal::ZERO,
+            daily_loss_limit: Decimal::ZERO,
+            circuit_breaker_events: Vec::new(),
             queue_stats: QueueStatsSnapshot::default(),
             total_realized_pnl: Decimal::ZERO,
             started_at: now,

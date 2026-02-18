@@ -226,6 +226,36 @@ impl DisplayAgent {
     }
 }
 
+/// Risk state display data for the TUI risk widget
+#[derive(Debug, Clone)]
+pub struct DisplayRiskState {
+    /// Current platform risk state (Normal/Elevated/Halted)
+    pub state: String,
+    /// Daily loss used so far
+    pub daily_loss_used: Decimal,
+    /// Daily loss limit
+    pub daily_loss_limit: Decimal,
+    /// Queue depth (pending orders)
+    pub queue_depth: usize,
+    /// Circuit breaker state label
+    pub circuit_breaker: String,
+    /// Total position exposure in USD
+    pub total_exposure: Decimal,
+}
+
+impl Default for DisplayRiskState {
+    fn default() -> Self {
+        Self {
+            state: "Normal".to_string(),
+            daily_loss_used: Decimal::ZERO,
+            daily_loss_limit: Decimal::from(500),
+            queue_depth: 0,
+            circuit_breaker: "Closed".to_string(),
+            total_exposure: Decimal::ZERO,
+        }
+    }
+}
+
 impl DashboardStats {
     /// Get remaining time until round end
     pub fn time_remaining(&self) -> Option<i64> {

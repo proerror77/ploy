@@ -7,10 +7,39 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::domain::Side;
-use crate::tui::data::{DashboardStats, DisplayPosition, DisplayTransaction, MarketState};
+use crate::tui::data::{
+    DashboardStats, DisplayAgent, DisplayPosition, DisplayRiskState, DisplayTransaction,
+    MarketState,
+};
 
 /// Maximum number of transactions to keep in history
 const MAX_TRANSACTIONS: usize = 100;
+
+/// Active view tab in the TUI
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveTab {
+    /// Standard portfolio / market view
+    Portfolio,
+    /// Agent monitor view showing coordinator agents
+    AgentMonitor,
+}
+
+/// Pending action to confirm via modal
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAction {
+    PauseAgents,
+    ResumeAgents,
+    ForceClose,
+}
+
+/// Modal dialog state
+#[derive(Debug, Clone)]
+pub enum ModalState {
+    Confirm {
+        message: String,
+        action: PendingAction,
+    },
+}
 
 /// TUI Application state
 pub struct TuiApp {
@@ -36,6 +65,18 @@ pub struct TuiApp {
     pub selected_market_idx: usize,
     /// Currently selected market name
     pub selected_market: String,
+    /// Agent snapshots from coordinator
+    pub agent_snapshots: Vec<DisplayAgent>,
+    /// Risk state from coordinator
+    pub risk_state: DisplayRiskState,
+    /// Current active tab
+    pub active_tab: ActiveTab,
+    /// Modal dialog (confirmation prompts)
+    pub modal: Option<ModalState>,
+    /// Filter/search mode active
+    pub filter_mode: bool,
+    /// Current filter input text
+    pub filter_input: String,
 }
 
 impl Default for TuiApp {
@@ -59,6 +100,12 @@ impl TuiApp {
             available_markets: Vec::new(),
             selected_market_idx: 0,
             selected_market: String::new(),
+            agent_snapshots: Vec::new(),
+            risk_state: DisplayRiskState::default(),
+            active_tab: ActiveTab::Portfolio,
+            modal: None,
+            filter_mode: false,
+            filter_input: String::new(),
         }
     }
 
@@ -238,6 +285,53 @@ impl TuiApp {
         }
     }
 
+    /// Toggle between Portfolio and Agent Monitor tabs
+    pub fn toggle_tab(&mut self) {
+        self.active_tab = match self.active_tab {
+            ActiveTab::Portfolio => ActiveTab::AgentMonitor,
+            ActiveTab::AgentMonitor => ActiveTab::Portfolio,
+        };
+    }
+
+    /// Show a confirmation modal
+    pub fn show_modal(&mut self, message: String, action: PendingAction) {
+        self.modal = Some(ModalState::Confirm { message, action });
+    }
+
+    /// Dismiss modal
+    pub fn dismiss_modal(&mut self) {
+        self.modal = None;
+    }
+
+    /// Get the pending action from the current modal, if any
+    pub fn confirm_modal(&mut self) -> Option<PendingAction> {
+        if let Some(ModalState::Confirm { action, .. }) = &self.modal {
+            let action = *action;
+            self.modal = None;
+            Some(action)
+        } else {
+            None
+        }
+    }
+
+    /// Toggle filter mode
+    pub fn toggle_filter(&mut self) {
+        self.filter_mode = !self.filter_mode;
+        if !self.filter_mode {
+            self.filter_input.clear();
+        }
+    }
+
+    /// Update agent snapshots from coordinator
+    pub fn update_agents(&mut self, agents: Vec<DisplayAgent>) {
+        self.agent_snapshots = agents;
+    }
+
+    /// Update risk state from coordinator
+    pub fn update_risk_state(&mut self, risk: DisplayRiskState) {
+        self.risk_state = risk;
+    }
+
     /// Create demo data for testing
     pub fn with_demo_data(mut self) -> Self {
         // Demo positions
@@ -289,6 +383,53 @@ impl TuiApp {
         self.stats.round_end_time = Some(Utc::now() + chrono::Duration::seconds(27));
         self.stats.dry_run = true;
         self.stats.strategy_state = "watching".to_string();
+
+        // Demo agent snapshots (for Agent Monitor tab)
+        self.agent_snapshots = vec![
+            DisplayAgent {
+                agent_id: "crypto-1".to_string(),
+                name: "Crypto Agent".to_string(),
+                domain: "Crypto".to_string(),
+                status: "Running".to_string(),
+                position_count: 2,
+                exposure: dec!(1250.50),
+                daily_pnl: dec!(12.34),
+                last_heartbeat: Utc::now().format("%H:%M:%S").to_string(),
+                is_healthy: true,
+            },
+            DisplayAgent {
+                agent_id: "sports-1".to_string(),
+                name: "Sports Agent".to_string(),
+                domain: "Sports".to_string(),
+                status: "Paused".to_string(),
+                position_count: 1,
+                exposure: dec!(450.00),
+                daily_pnl: dec!(-3.21),
+                last_heartbeat: Utc::now().format("%H:%M:%S").to_string(),
+                is_healthy: true,
+            },
+            DisplayAgent {
+                agent_id: "politics-1".to_string(),
+                name: "Politics Agent".to_string(),
+                domain: "Politics".to_string(),
+                status: "Error".to_string(),
+                position_count: 0,
+                exposure: dec!(0),
+                daily_pnl: dec!(0),
+                last_heartbeat: Utc::now().format("%H:%M:%S").to_string(),
+                is_healthy: false,
+            },
+        ];
+
+        // Demo risk state (for Risk Status widget + footer)
+        self.risk_state = DisplayRiskState {
+            state: "Elevated".to_string(),
+            daily_loss_used: dec!(120.00),
+            daily_loss_limit: dec!(500.00),
+            queue_depth: 3,
+            circuit_breaker: "Closed".to_string(),
+            total_exposure: dec!(1700.50),
+        };
 
         self
     }

@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::{postgres::Postgres, QueryBuilder, Row};
 use std::str::FromStr;
@@ -62,8 +63,8 @@ pub async fn get_today_stats(
         total_trades,
         successful_trades,
         failed_trades,
-        total_volume,
-        pnl,
+        total_volume: total_volume.to_f64().unwrap_or(0.0),
+        pnl: pnl.to_f64().unwrap_or(0.0),
         win_rate,
         avg_trade_time_ms: avg_trade_time_ms as i64,
         active_positions,
@@ -109,7 +110,7 @@ pub async fn get_pnl_history(
         let trade_count = row.try_get("trade_count").unwrap_or(0_i64);
         result.push(PnLDataPoint {
             timestamp,
-            cumulative_pnl,
+            cumulative_pnl: cumulative_pnl.to_f64().unwrap_or(0.0),
             trade_count,
         });
     }
@@ -203,8 +204,14 @@ pub async fn get_trades(
         let entry_price: Decimal = row
             .try_get("leg1_price")
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let exit_price: Option<Decimal> = row.try_get("leg2_price").ok();
-        let pnl: Option<Decimal> = row.try_get("pnl").ok();
+        let exit_price: Option<f64> = row
+            .try_get::<Decimal, _>("leg2_price")
+            .ok()
+            .and_then(|d| d.to_f64());
+        let pnl: Option<f64> = row
+            .try_get::<Decimal, _>("pnl")
+            .ok()
+            .and_then(|d| d.to_f64());
         let status: String = row
             .try_get("state")
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -217,7 +224,7 @@ pub async fn get_trades(
             token_name: token_id.split('-').next().unwrap_or("Unknown").to_string(),
             side,
             shares,
-            entry_price,
+            entry_price: entry_price.to_f64().unwrap_or(0.0),
             exit_price,
             pnl,
             status,
@@ -280,8 +287,14 @@ pub async fn get_trade_by_id(
     let entry_price: Decimal = trade
         .try_get("leg1_price")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let exit_price: Option<Decimal> = trade.try_get("leg2_price").ok();
-    let pnl: Option<Decimal> = trade.try_get("pnl").ok();
+    let exit_price: Option<f64> = trade
+        .try_get::<Decimal, _>("leg2_price")
+        .ok()
+        .and_then(|d| d.to_f64());
+    let pnl: Option<f64> = trade
+        .try_get::<Decimal, _>("pnl")
+        .ok()
+        .and_then(|d| d.to_f64());
     let status: String = trade
         .try_get("state")
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -294,7 +307,7 @@ pub async fn get_trade_by_id(
         token_name: token_id.split('-').next().unwrap_or("Unknown").to_string(),
         side,
         shares,
-        entry_price,
+        entry_price: entry_price.to_f64().unwrap_or(0.0),
         exit_price,
         pnl,
         status,
@@ -346,15 +359,15 @@ pub async fn get_positions(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         let duration = Utc::now().timestamp() - entry_time.timestamp();
-        let current_price = entry_price;
-        let unrealized_pnl = Decimal::ZERO;
+        let current_price = entry_price.to_f64().unwrap_or(0.0);
+        let unrealized_pnl = 0.0;
 
         position_responses.push(PositionResponse {
             token_id: token_id.clone(),
             token_name: token_id.split('-').next().unwrap_or("Unknown").to_string(),
             side,
             shares,
-            entry_price,
+            entry_price: entry_price.to_f64().unwrap_or(0.0),
             current_price,
             unrealized_pnl,
             entry_time,

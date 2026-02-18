@@ -53,7 +53,21 @@ export const useStore = create<AppState>((set) => ({
 
   // Positions
   positions: [],
-  updatePositions: (positions) => set({ positions }),
+  updatePositions: (positions) =>
+    set((state) => {
+      const merged = [...state.positions];
+      for (const p of positions) {
+        const idx = merged.findIndex(
+          (x) => x.token_id === p.token_id && x.side === p.side
+        );
+        if (idx >= 0) {
+          merged[idx] = p;
+        } else {
+          merged.push(p);
+        }
+      }
+      return { positions: merged.filter((p) => p.shares > 0) };
+    }),
 
   // Market data
   marketData: new Map(),

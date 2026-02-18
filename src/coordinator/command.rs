@@ -19,6 +19,19 @@ pub enum CoordinatorCommand {
     HealthCheck(oneshot::Sender<AgentHealthResponse>),
 }
 
+/// Control commands sent to the coordinator (broadcast to agents)
+#[derive(Debug, Clone)]
+pub enum CoordinatorControlCommand {
+    /// Pause all agents (stop submitting orders, keep feeds alive)
+    PauseAll,
+    /// Resume all agents after pause
+    ResumeAll,
+    /// Force-close all positions and stop agents
+    ForceCloseAll,
+    /// Graceful shutdown for all agents
+    ShutdownAll,
+}
+
 /// Response to a HealthCheck command
 #[derive(Debug, Clone)]
 pub struct AgentHealthResponse {

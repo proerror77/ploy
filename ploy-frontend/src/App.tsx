@@ -9,6 +9,7 @@ import { StrategyMonitor } from '@/pages/StrategyMonitor';
 import { SystemControl } from '@/pages/SystemControl';
 import { SecurityAudit } from '@/pages/SecurityAudit';
 import { NBASwingMonitor } from '@/pages/NBASwingMonitor';
+import { RiskDashboard } from '@/pages/RiskDashboard';
 import { ws } from '@/services/websocket';
 import { useStore } from '@/store';
 
@@ -35,6 +36,11 @@ function App() {
     // Connect to WebSocket
     ws.connect();
 
+    // Track connection state
+    const unsubConnection = ws.onConnectionChange((connected) => {
+      setWsConnected(connected);
+    });
+
     // Subscribe to all events
     const unsubscribe = ws.subscribe('*', (event) => {
       switch (event.type) {
@@ -45,7 +51,6 @@ function App() {
           addTrade(event.data);
           break;
         case 'position':
-          // Update positions list (in real implementation, this would merge/update)
           updatePositions([event.data]);
           break;
         case 'market':
@@ -58,6 +63,7 @@ function App() {
     });
 
     return () => {
+      unsubConnection();
       unsubscribe();
       ws.disconnect();
     };
@@ -80,6 +86,7 @@ function App() {
             <Route path="monitor" element={<LiveMonitor />} />
             <Route path="monitor-strategy" element={<StrategyMonitor />} />
             <Route path="nba-swing" element={<NBASwingMonitor />} />
+            <Route path="risk" element={<RiskDashboard />} />
             <Route path="control" element={<SystemControl />} />
             <Route path="security" element={<SecurityAudit />} />
           </Route>

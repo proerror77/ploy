@@ -14,6 +14,8 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
+        // Health check (top-level, used by docker/scripts for readiness probes)
+        .route("/health", get(handlers::health_handler))
         // Stats endpoints
         .route("/api/stats/today", get(handlers::get_today_stats))
         .route("/api/stats/pnl", get(handlers::get_pnl_history))
@@ -27,9 +29,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/system/start", post(handlers::start_system))
         .route("/api/system/stop", post(handlers::stop_system))
         .route("/api/system/restart", post(handlers::restart_system))
+        .route("/api/system/pause", post(handlers::pause_system))
+        .route("/api/system/resume", post(handlers::resume_system))
+        .route("/api/system/halt", post(handlers::halt_system))
         // Config endpoints
         .route("/api/config", get(handlers::get_config))
         .route("/api/config", put(handlers::update_config))
+        // Strategy status endpoints
+        .route(
+            "/api/strategies/running",
+            get(handlers::get_running_strategies),
+        )
         // Security endpoints
         .route("/api/security/events", get(handlers::get_security_events))
         // Sidecar endpoints (Claude Agent SDK → Rust backend)

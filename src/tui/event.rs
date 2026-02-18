@@ -53,6 +53,17 @@ pub enum AppEvent {
     ConnectionStatus(bool),
     /// Error message from a data source
     Error(String),
+    /// Agent status update from coordinator
+    AgentUpdate(Vec<crate::coordinator::AgentSnapshot>),
+    /// Risk state update from coordinator
+    RiskUpdate {
+        state: crate::platform::PlatformRiskState,
+        daily_loss_used: rust_decimal::Decimal,
+        daily_loss_limit: rust_decimal::Decimal,
+        queue_depth: usize,
+        circuit_breaker: String,
+        total_exposure: rust_decimal::Decimal,
+    },
 }
 
 /// Event handler that manages the event loop
@@ -136,6 +147,20 @@ pub enum KeyAction {
     NextMarket,
     /// Previous market
     PrevMarket,
+    /// Toggle between tabs
+    ToggleTab,
+    /// Pause all agents
+    PauseAgents,
+    /// Resume all agents
+    ResumeAgents,
+    /// Emergency force-close
+    EmergencyClose,
+    /// Enter search/filter mode
+    EnterFilter,
+    /// Confirm (y or Enter in modal)
+    Confirm,
+    /// Dismiss/cancel (n or Esc in modal)
+    Dismiss,
     /// No action
     None,
 }
@@ -150,7 +175,15 @@ impl From<KeyEvent> for KeyAction {
             KeyCode::Char('?') | KeyCode::Char('h') => KeyAction::Help,
             KeyCode::Left | KeyCode::Char('[') => KeyAction::PrevMarket,
             KeyCode::Right | KeyCode::Char(']') => KeyAction::NextMarket,
-            KeyCode::Esc => KeyAction::Quit,
+            KeyCode::Tab => KeyAction::ToggleTab,
+            KeyCode::Char('p') => KeyAction::PauseAgents,
+            KeyCode::Char('r') => KeyAction::ResumeAgents,
+            KeyCode::Char('x') => KeyAction::EmergencyClose,
+            KeyCode::Char('/') => KeyAction::EnterFilter,
+            KeyCode::Char('y') => KeyAction::Confirm,
+            KeyCode::Char('n') => KeyAction::Dismiss,
+            KeyCode::Enter => KeyAction::Confirm,
+            KeyCode::Esc => KeyAction::Dismiss,
             _ => KeyAction::None,
         }
     }

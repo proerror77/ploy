@@ -25,7 +25,7 @@ use crate::platform::{
 };
 use crate::strategy::executor::OrderExecutor;
 
-use super::command::CoordinatorCommand;
+use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
@@ -34,6 +34,7 @@ use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 pub struct CoordinatorHandle {
     order_tx: mpsc::Sender<OrderIntent>,
     state_tx: mpsc::Sender<AgentSnapshot>,
+    control_tx: mpsc::Sender<CoordinatorControlCommand>,
     global_state: Arc<RwLock<GlobalState>>,
 }
 
@@ -50,6 +51,38 @@ impl CoordinatorHandle {
         self.state_tx.send(snapshot).await.map_err(|_| {
             crate::error::PloyError::Internal("coordinator state channel closed".into())
         })
+    }
+
+    /// Pause all agents
+    pub async fn pause_all(&self) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::PauseAll)
+            .await
+            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+    }
+
+    /// Resume all agents
+    pub async fn resume_all(&self) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::ResumeAll)
+            .await
+            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+    }
+
+    /// Force-close all positions and stop agents
+    pub async fn force_close_all(&self) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::ForceCloseAll)
+            .await
+            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+    }
+
+    /// Shutdown all agents gracefully
+    pub async fn shutdown_all(&self) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::ShutdownAll)
+            .await
+            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
     }
 
     /// Read the current global state (non-blocking snapshot)
@@ -74,6 +107,8 @@ pub struct Coordinator {
     order_rx: mpsc::Receiver<OrderIntent>,
     state_tx: mpsc::Sender<AgentSnapshot>,
     state_rx: mpsc::Receiver<AgentSnapshot>,
+    control_tx: mpsc::Sender<CoordinatorControlCommand>,
+    control_rx: mpsc::Receiver<CoordinatorControlCommand>,
 
     // Per-agent command channels
     agent_commands: HashMap<String, mpsc::Sender<CoordinatorCommand>>,
@@ -87,6 +122,7 @@ impl Coordinator {
     ) -> Self {
         let (order_tx, order_rx) = mpsc::channel(256);
         let (state_tx, state_rx) = mpsc::channel(128);
+        let (control_tx, control_rx) = mpsc::channel(32);
 
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
@@ -111,6 +147,8 @@ impl Coordinator {
             order_rx,
             state_tx,
             state_rx,
+            control_tx,
+            control_rx,
             agent_commands: HashMap::new(),
         }
     }
@@ -125,6 +163,7 @@ impl Coordinator {
         CoordinatorHandle {
             order_tx: self.order_tx.clone(),
             state_tx: self.state_tx.clone(),
+            control_tx: self.control_tx.clone(),
             global_state: self.global_state.clone(),
         }
     }
@@ -194,6 +233,16 @@ impl Coordinator {
         }
     }
 
+    /// Force-close all agents (best-effort)
+    pub async fn force_close_all(&self) {
+        info!("coordinator: sending force-close to all agents");
+        for (id, tx) in &self.agent_commands {
+            if let Err(e) = tx.send(CoordinatorCommand::ForceClose).await {
+                warn!(agent_id = %id, error = %e, "failed to send force-close");
+            }
+        }
+    }
+
     /// Shutdown all agents gracefully
     pub async fn shutdown(&self) {
         info!("coordinator: sending shutdown to all agents");
@@ -223,6 +272,16 @@ impl Coordinator {
 
         loop {
             tokio::select! {
+                // --- Control commands (pause/resume/force-close) ---
+                Some(cmd) = self.control_rx.recv() => {
+                    match cmd {
+                        CoordinatorControlCommand::PauseAll => self.pause_all().await,
+                        CoordinatorControlCommand::ResumeAll => self.resume_all().await,
+                        CoordinatorControlCommand::ForceCloseAll => self.force_close_all().await,
+                        CoordinatorControlCommand::ShutdownAll => self.shutdown().await,
+                    }
+                }
+
                 // --- Incoming order intents ---
                 Some(intent) = self.order_rx.recv() => {
                     self.handle_order_intent(intent).await;
@@ -925,13 +984,21 @@ impl Coordinator {
     /// Refresh GlobalState from aggregators
     async fn refresh_global_state(&self) {
         let portfolio = self.positions.aggregate().await;
+        let positions = self.positions.all_positions().await;
         let risk_state = self.risk_gate.state().await;
+        let (daily_pnl, _, _) = self.risk_gate.daily_stats().await;
+        let daily_loss_limit = self.risk_gate.daily_loss_limit();
+        let circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
         let queue_stats = self.order_queue.read().await.stats();
         let total_realized = self.positions.total_realized_pnl().await;
 
         let mut state = self.global_state.write().await;
         state.portfolio = portfolio;
+        state.positions = positions;
         state.risk_state = risk_state;
+        state.daily_pnl = daily_pnl;
+        state.daily_loss_limit = daily_loss_limit;
+        state.circuit_breaker_events = circuit_breaker_events;
         state.queue_stats = QueueStatsSnapshot::from(queue_stats);
         state.total_realized_pnl = total_realized;
         state.last_refresh = Utc::now();

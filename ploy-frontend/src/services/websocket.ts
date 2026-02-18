@@ -1,4 +1,3 @@
-import { io, Socket } from 'socket.io-client';
 import type { LogEntry, Trade, Position, MarketData } from '@/types';
 
 export type WebSocketEvent =
@@ -6,71 +5,114 @@ export type WebSocketEvent =
   | { type: 'trade'; data: Trade }
   | { type: 'position'; data: Position }
   | { type: 'market'; data: MarketData }
-  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } };
+  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } }
+  | { type: 'nba_update'; data: NBAUpdateData };
+
+export interface NBAUpdateData {
+  state: string;
+  game: {
+    gameId: string;
+    homeTeam: string;
+    awayTeam: string;
+    homeScore: number;
+    awayScore: number;
+    quarter: number;
+    timeRemaining: number;
+    possession: string;
+  } | null;
+  prediction: {
+    winProb: number;
+    confidence: number;
+  } | null;
+  marketPrice: number | null;
+}
+
+type ConnectionCallback = (connected: boolean) => void;
+
+function defaultWsUrl(): string {
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${window.location.host}/ws`;
+}
 
 export class WebSocketService {
-  private socket: Socket | null = null;
+  private ws: WebSocket | null = null;
   private listeners: Map<string, Set<(event: WebSocketEvent) => void>> = new Map();
+  private connectionListeners: Set<ConnectionCallback> = new Set();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
+  private reconnectTimer: number | null = null;
+  private manualDisconnect = false;
 
-  connect() {
-    if (this.socket?.connected) {
+  connect(url: string = defaultWsUrl()) {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
-    this.socket = io(window.location.origin, {
-      path: '/ws',
-      transports: ['websocket'],
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-    });
+    this.manualDisconnect = false;
+    this.ws = new WebSocket(url);
 
-    this.socket.on('connect', () => {
+    this.ws.onopen = () => {
       console.log('[WebSocket] Connected');
       this.reconnectAttempts = 0;
-    });
+      this.notifyConnectionChange(true);
+    };
 
-    this.socket.on('disconnect', (reason) => {
-      console.log('[WebSocket] Disconnected:', reason);
-    });
+    this.ws.onclose = (ev) => {
+      console.log('[WebSocket] Disconnected:', ev.code, ev.reason);
+      this.notifyConnectionChange(false);
+      this.ws = null;
 
-    this.socket.on('reconnect_attempt', () => {
-      this.reconnectAttempts++;
-      if (this.reconnectAttempts > this.maxReconnectAttempts) {
-        console.error('[WebSocket] Max reconnect attempts reached');
-        this.socket?.disconnect();
+      if (!this.manualDisconnect) {
+        this.scheduleReconnect(url);
       }
-    });
+    };
 
-    // Subscribe to all event types
-    this.socket.on('log', (data: LogEntry) => {
-      this.emit({ type: 'log', data });
-    });
+    this.ws.onerror = (err) => {
+      console.error('[WebSocket] Error:', err);
+    };
 
-    this.socket.on('trade', (data: Trade) => {
-      this.emit({ type: 'trade', data });
-    });
+    this.ws.onmessage = (ev) => {
+      if (typeof ev.data !== 'string') return;
 
-    this.socket.on('position', (data: Position) => {
-      this.emit({ type: 'position', data });
-    });
+      let parsed: any;
+      try {
+        parsed = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
 
-    this.socket.on('market', (data: MarketData) => {
-      this.emit({ type: 'market', data });
-    });
+      const t = parsed?.type;
+      const data = parsed?.data;
+      if (typeof t !== 'string') return;
 
-    this.socket.on('status', (data: { status: 'running' | 'stopped' | 'error' }) => {
-      this.emit({ type: 'status', data });
-    });
+      if (
+        t === 'log' ||
+        t === 'trade' ||
+        t === 'position' ||
+        t === 'market' ||
+        t === 'status' ||
+        t === 'nba_update'
+      ) {
+        this.emit({ type: t, data } as WebSocketEvent);
+      }
+    };
   }
 
   disconnect() {
-    if (this.socket) {
-      this.socket.disconnect();
-      this.socket = null;
+    this.manualDisconnect = true;
+    if (this.reconnectTimer) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.notifyConnectionChange(false);
   }
 
   subscribe(eventType: string, callback: (event: WebSocketEvent) => void) {
@@ -79,7 +121,6 @@ export class WebSocketService {
     }
     this.listeners.get(eventType)!.add(callback);
 
-    // Return unsubscribe function
     return () => {
       const listeners = this.listeners.get(eventType);
       if (listeners) {
@@ -88,22 +129,48 @@ export class WebSocketService {
     };
   }
 
+  onConnectionChange(callback: ConnectionCallback): () => void {
+    this.connectionListeners.add(callback);
+    callback(this.isConnected());
+    return () => {
+      this.connectionListeners.delete(callback);
+    };
+  }
+
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  private notifyConnectionChange(connected: boolean) {
+    this.connectionListeners.forEach((cb) => cb(connected));
+  }
+
   private emit(event: WebSocketEvent) {
     const listeners = this.listeners.get(event.type);
     if (listeners) {
       listeners.forEach((callback) => callback(event));
     }
 
-    // Also emit to wildcard listeners
     const wildcardListeners = this.listeners.get('*');
     if (wildcardListeners) {
       wildcardListeners.forEach((callback) => callback(event));
     }
   }
 
-  isConnected(): boolean {
-    return this.socket?.connected ?? false;
+  private scheduleReconnect(url: string) {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('[WebSocket] Max reconnect attempts reached');
+      return;
+    }
+
+    const backoffMs = Math.min(1000 * 2 ** this.reconnectAttempts, 10_000);
+    this.reconnectAttempts++;
+
+    this.reconnectTimer = window.setTimeout(() => {
+      this.connect(url);
+    }, backoffMs);
   }
 }
 
 export const ws = new WebSocketService();
+

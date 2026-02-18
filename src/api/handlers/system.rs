@@ -1,10 +1,42 @@
 use axum::{extract::State, http::StatusCode, Json};
+use serde::Deserialize;
 use sqlx::{postgres::Postgres, QueryBuilder, Row};
 
 use crate::api::{
     state::{AppState, SystemRunStatus},
     types::*,
 };
+
+#[derive(Debug, Deserialize)]
+pub struct DomainControlRequest {
+    pub domain: Option<String>,
+}
+
+/// GET /health -- lightweight liveness/readiness probe
+pub async fn health_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<HealthResponse>, (StatusCode, Json<HealthResponse>)> {
+    let db_status = match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(state.store.pool())
+        .await
+    {
+        Ok(_) => "connected".to_string(),
+        Err(_) => "disconnected".to_string(),
+    };
+
+    let ok = db_status == "connected";
+    let resp = HealthResponse {
+        status: if ok { "ok".to_string() } else { "degraded".to_string() },
+        db: db_status,
+        uptime_secs: state.uptime_seconds(),
+    };
+
+    if ok {
+        Ok(Json(resp))
+    } else {
+        Err((StatusCode::SERVICE_UNAVAILABLE, Json(resp)))
+    }
+}
 
 /// GET /api/system/status
 pub async fn get_system_status(
@@ -143,6 +175,90 @@ pub async fn restart_system(
     Ok(Json(SystemControlResponse {
         success: true,
         message: "系统已重启".to_string(),
+    }))
+}
+
+/// POST /api/system/pause
+pub async fn pause_system(
+    State(state): State<AppState>,
+    req: Option<Json<DomainControlRequest>>,
+) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    let _domain = req.and_then(|Json(r)| r.domain);
+    if let Some(coordinator) = state.coordinator.as_ref() {
+        coordinator
+            .pause_all()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        // Fallback for standalone API mode: reflect pause in system status only.
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Stopped;
+        drop(status_state);
+        state.broadcast(WsMessage::Status(StatusUpdate {
+            status: "stopped".to_string(),
+        }));
+    }
+
+    Ok(Json(SystemControlResponse {
+        success: true,
+        message: "已暂停所有策略".to_string(),
+    }))
+}
+
+/// POST /api/system/resume
+pub async fn resume_system(
+    State(state): State<AppState>,
+    req: Option<Json<DomainControlRequest>>,
+) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    let _domain = req.and_then(|Json(r)| r.domain);
+    if let Some(coordinator) = state.coordinator.as_ref() {
+        coordinator
+            .resume_all()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        // Fallback for standalone API mode: reflect resume in system status only.
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Running;
+        drop(status_state);
+        state.broadcast(WsMessage::Status(StatusUpdate {
+            status: "running".to_string(),
+        }));
+    }
+
+    Ok(Json(SystemControlResponse {
+        success: true,
+        message: "已恢复所有策略".to_string(),
+    }))
+}
+
+/// POST /api/system/halt
+///
+/// Force-close all positions and mark the system as stopped.
+pub async fn halt_system(
+    State(state): State<AppState>,
+    req: Option<Json<DomainControlRequest>>,
+) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    let _domain = req.and_then(|Json(r)| r.domain);
+    if let Some(coordinator) = state.coordinator.as_ref() {
+        coordinator
+            .force_close_all()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    // Update system status and broadcast
+    {
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Stopped;
+    }
+    state.broadcast(WsMessage::Status(StatusUpdate {
+        status: "stopped".to_string(),
+    }));
+
+    Ok(Json(SystemControlResponse {
+        success: true,
+        message: "已紧急停止并强制平仓".to_string(),
     }))
 }
 

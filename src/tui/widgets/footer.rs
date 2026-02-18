@@ -22,6 +22,17 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
     // Build status indicators
     let mut indicators = vec![];
 
+    // Risk state indicator
+    let risk_label = format!("[RISK: {}]", app.risk_state.state.to_uppercase());
+    let risk_style = match app.risk_state.state.as_str() {
+        "Normal" => THEME.up_style(),
+        "Elevated" => THEME.highlight_style(),
+        "Halted" => THEME.down_style(),
+        _ => THEME.inactive_style(),
+    };
+    indicators.push(Span::styled(risk_label, risk_style));
+    indicators.push(Span::raw(" "));
+
     if stats.dry_run {
         indicators.push(Span::styled("[DRY RUN]", THEME.highlight_style()));
         indicators.push(Span::raw(" "));

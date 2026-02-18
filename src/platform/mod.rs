@@ -15,7 +15,9 @@ mod types;
 pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
-pub use risk::{BlockReason, PlatformRiskState, RiskCheckResult, RiskConfig, RiskGate};
+pub use risk::{
+    BlockReason, CircuitBreakerEvent, PlatformRiskState, RiskCheckResult, RiskConfig, RiskGate,
+};
 pub use router::{AgentSubscription, EventRouter, RouterStats};
 pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent, SimpleAgent};
 pub use types::{

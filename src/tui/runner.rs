@@ -17,7 +17,7 @@ use crate::adapters::{
 use crate::domain::Side;
 use crate::error::Result;
 use crate::tui::app::TuiApp;
-use crate::tui::data::DisplayTransaction;
+use crate::tui::data::{DisplayAgent, DisplayRiskState, DisplayTransaction};
 use crate::tui::event::{AppEvent, KeyAction};
 use crate::tui::{init_terminal, restore_terminal, ui};
 
@@ -119,6 +119,60 @@ impl DashboardRunner {
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {
                     if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
                         if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                            // If we're editing the filter input, treat keys as text entry.
+                            if self.app.filter_mode {
+                                use crossterm::event::KeyCode;
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        self.app.filter_mode = false;
+                                        self.app.filter_input.clear();
+                                    }
+                                    KeyCode::Enter => {
+                                        self.app.filter_mode = false;
+                                    }
+                                    KeyCode::Backspace => {
+                                        self.app.filter_input.pop();
+                                    }
+                                    KeyCode::Char(c) => {
+                                        // Ignore control/alt combos and only accept plain chars.
+                                        if key.modifiers.is_empty()
+                                            || key.modifiers == crossterm::event::KeyModifiers::SHIFT
+                                        {
+                                            self.app.filter_input.push(c);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
+                            // If a modal is open, only accept confirm/dismiss keys.
+                            if self.app.modal.is_some() {
+                                use crossterm::event::KeyCode;
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Enter => {
+                                        if let Some(action) = self.app.confirm_modal() {
+                                            match action {
+                                                crate::tui::app::PendingAction::PauseAgents => {
+                                                    self.app.set_strategy_state("paused");
+                                                }
+                                                crate::tui::app::PendingAction::ResumeAgents => {
+                                                    self.app.set_strategy_state("running");
+                                                }
+                                                crate::tui::app::PendingAction::ForceClose => {
+                                                    self.app.set_strategy_state("halted");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Esc => {
+                                        self.app.dismiss_modal();
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             let action = KeyAction::from(key);
                             match action {
                                 KeyAction::Quit => {
@@ -131,6 +185,24 @@ impl DashboardRunner {
                                 KeyAction::Help => self.app.toggle_help(),
                                 KeyAction::NextMarket => self.app.next_market(),
                                 KeyAction::PrevMarket => self.app.prev_market(),
+                                KeyAction::ToggleTab => self.app.toggle_tab(),
+                                KeyAction::PauseAgents => self.app.show_modal(
+                                    "Pause ALL agents? [y/N]".to_string(),
+                                    crate::tui::app::PendingAction::PauseAgents,
+                                ),
+                                KeyAction::ResumeAgents => self.app.show_modal(
+                                    "Resume ALL agents? [y/N]".to_string(),
+                                    crate::tui::app::PendingAction::ResumeAgents,
+                                ),
+                                KeyAction::EmergencyClose => self.app.show_modal(
+                                    "EMERGENCY CLOSE ALL POSITIONS? [y/N]".to_string(),
+                                    crate::tui::app::PendingAction::ForceClose,
+                                ),
+                                KeyAction::EnterFilter => {
+                                    self.app.filter_mode = true;
+                                    self.app.filter_input.clear();
+                                }
+                                KeyAction::Confirm | KeyAction::Dismiss => {}
                                 KeyAction::None => {}
                             }
                         }
@@ -208,6 +280,27 @@ impl DashboardRunner {
             }
             AppEvent::Error(msg) => {
                 self.app.set_last_error(msg);
+            }
+            AppEvent::AgentUpdate(snaps) => {
+                let agents = snaps.iter().map(DisplayAgent::from_snapshot).collect();
+                self.app.update_agents(agents);
+            }
+            AppEvent::RiskUpdate {
+                state,
+                daily_loss_used,
+                daily_loss_limit,
+                queue_depth,
+                circuit_breaker,
+                total_exposure,
+            } => {
+                self.app.update_risk_state(DisplayRiskState {
+                    state: format!("{:?}", state),
+                    daily_loss_used,
+                    daily_loss_limit,
+                    queue_depth,
+                    circuit_breaker,
+                    total_exposure,
+                });
             }
             AppEvent::Tick | AppEvent::Key(_) | AppEvent::Resize(_, _) => {
                 // Handled in main loop
