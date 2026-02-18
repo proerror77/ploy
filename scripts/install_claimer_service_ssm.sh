@@ -26,7 +26,7 @@ infer_instance_id() {
   local deploy="$ROOT_DIR/deploy_to_tango21.sh"
   if [[ -f "$deploy" ]]; then
     local id
-    id="$(sed -n 's/^INSTANCE_ID=\"\\([^\"]*\\)\".*/\\1/p' "$deploy" | head -n 1 | tr -d \"\\r\" || true)"
+    id="$(awk -F '\"' '/^INSTANCE_ID=/{print $2; exit}' "$deploy" 2>/dev/null || true)"
     if [[ -n "$id" ]]; then
       echo "$id"
       return
