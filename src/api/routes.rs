@@ -47,6 +47,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/sidecar/grok/decision",
             post(handlers::sidecar_grok_decision),
         )
+        .route("/api/sidecar/intents", post(handlers::sidecar_submit_intent))
         .route("/api/sidecar/orders", post(handlers::sidecar_submit_order))
         .route(
             "/api/sidecar/positions",

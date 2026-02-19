@@ -28,6 +28,7 @@ use polymarket_client_sdk::gamma::Client as GammaClient;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument};
@@ -41,6 +42,10 @@ pub const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
 const CLOB_TERMINAL_CURSOR: &str = "LTE="; // base64("-1"), used by CLOB pagination
 
 type AuthClobClient = ClobClient<Authenticated<Normal>>;
+
+tokio::task_local! {
+    static GATEWAY_EXECUTION_CONTEXT: bool;
+}
 
 /// Polymarket CLOB API client using official SDK
 pub struct PolymarketClient {
@@ -529,6 +534,13 @@ pub struct GammaTokenInfo {
 // ==================== Implementation ====================
 
 impl PolymarketClient {
+    pub async fn with_gateway_execution_context<F, T>(future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        GATEWAY_EXECUTION_CONTEXT.scope(true, future).await
+    }
+
     fn parse_boolish(value: &str) -> bool {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -567,6 +579,34 @@ impl PolymarketClient {
         ]);
 
         explicit_gate || (openclaw_mode && openclaw_hard_disable)
+    }
+
+    fn allow_legacy_direct_submit() -> bool {
+        Self::env_bool(&[
+            "PLOY_ALLOW_LEGACY_DIRECT_SUBMIT",
+            "PLOY_ALLOW_DIRECT_SUBMIT",
+        ])
+    }
+
+    fn gateway_execution_context_active() -> bool {
+        GATEWAY_EXECUTION_CONTEXT
+            .try_with(|v| *v)
+            .unwrap_or(false)
+    }
+
+    fn validate_gateway_execution_context(dry_run: bool) -> Result<()> {
+        if dry_run || Self::allow_legacy_direct_submit() {
+            return Ok(());
+        }
+
+        if Self::gateway_execution_context_active() {
+            return Ok(());
+        }
+
+        Err(PloyError::Validation(
+            "direct order submission is disabled; route writes through coordinator/execution gateway"
+                .to_string(),
+        ))
     }
 
     fn validate_gateway_order_request_inner(request: &OrderRequest, enforce: bool) -> Result<()> {
@@ -1227,6 +1267,7 @@ impl PolymarketClient {
     /// Submit an order
     #[instrument(skip(self))]
     pub async fn submit_order(&self, request: &OrderRequest) -> Result<OrderResponse> {
+        Self::validate_gateway_execution_context(self.dry_run)?;
         if !self.dry_run {
             Self::validate_gateway_order_request(request)?;
         }
@@ -2099,5 +2140,32 @@ mod tests {
         request.idempotency_key = Some("stable-key".to_string());
         let result = PolymarketClient::validate_gateway_order_request_inner(&request, true);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_gateway_execution_context_scope_sets_flag() {
+        assert!(!PolymarketClient::gateway_execution_context_active());
+        let active = PolymarketClient::with_gateway_execution_context(async {
+            PolymarketClient::gateway_execution_context_active()
+        })
+        .await;
+        assert!(active);
+        assert!(!PolymarketClient::gateway_execution_context_active());
+    }
+
+    #[tokio::test]
+    async fn test_gateway_execution_context_rejects_legacy_direct_live_submit() {
+        if PolymarketClient::allow_legacy_direct_submit() {
+            return;
+        }
+
+        let result = PolymarketClient::validate_gateway_execution_context(false);
+        assert!(result.is_err());
+
+        let scoped = PolymarketClient::with_gateway_execution_context(async {
+            PolymarketClient::validate_gateway_execution_context(false)
+        })
+        .await;
+        assert!(scoped.is_ok());
     }
 }

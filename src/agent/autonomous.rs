@@ -7,9 +7,8 @@ use crate::adapters::PolymarketClient;
 use crate::agent::client::ClaudeAgentClient;
 use crate::agent::grok::{GrokClient, SearchResult};
 use crate::agent::protocol::{AgentAction, AgentContext, AgentResponse, PositionInfo};
-use crate::domain::{OrderRequest, RiskState, Side};
+use crate::domain::{RiskState, Side};
 use crate::error::{PloyError, Result};
-use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -476,13 +475,6 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                     side, shares, max_price, reasoning
                 );
 
-                let pm_client = self.pm_client.as_ref().ok_or_else(|| {
-                    PloyError::Validation(
-                        "autonomous trading client not configured (set --enable-trading with valid auth env)"
-                            .to_string(),
-                    )
-                })?;
-
                 let token_id = match side {
                     Side::Up => context.market_state.yes_token_id.clone(),
                     Side::Down => context.market_state.no_token_id.clone(),
@@ -493,31 +485,11 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                         side, context.market_state.market_id
                     ))
                 })?;
-
-                let order = OrderRequest::buy_limit(token_id.clone(), *side, *shares, *max_price);
-                let order_resp = pm_client.submit_order(&order).await?;
-
-                let trade_value = Decimal::from(*shares) * *max_price;
-                *self.current_exposure.write().await += trade_value;
-                self.positions.write().await.push(PositionInfo {
-                    token_id: token_id.clone(),
-                    side: *side,
-                    shares: Decimal::from(*shares),
-                    avg_entry_price: *max_price,
-                    current_price: None,
-                    unrealized_pnl: None,
-                    opened_at: Utc::now(),
-                });
-
-                Ok(ExecutionResult {
-                    action: action.clone(),
-                    success: true,
-                    message: format!(
-                        "Entered {:?} position token={} shares={} @ {} (order_id={})",
-                        side, token_id, shares, max_price, order_resp.id
-                    ),
-                    trade_id: Some(order_resp.id),
-                })
+                let _ = token_id;
+                Err(PloyError::Validation(
+                    "autonomous direct submit is disabled; route orders through coordinator intent ingress"
+                        .to_string(),
+                ))
             }
             AgentAction::ExitPosition {
                 token_id,
@@ -528,13 +500,6 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                     "Executing exit: {} @ min {:?}: {}",
                     token_id, min_price, reasoning
                 );
-
-                let pm_client = self.pm_client.as_ref().ok_or_else(|| {
-                    PloyError::Validation(
-                        "autonomous trading client not configured (set --enable-trading with valid auth env)"
-                            .to_string(),
-                    )
-                })?;
 
                 let pos = self
                     .positions
@@ -560,28 +525,12 @@ Prioritize capital preservation while seeking profitable opportunities."#,
                 let limit_price = min_price
                     .or(pos.current_price)
                     .unwrap_or(pos.avg_entry_price);
-                let order =
-                    OrderRequest::sell_limit(token_id.clone(), pos.side, shares, limit_price);
-                let order_resp = pm_client.submit_order(&order).await?;
-
-                let reduce_value = Decimal::from(shares) * limit_price;
-                let mut exposure = self.current_exposure.write().await;
-                *exposure = (*exposure - reduce_value).max(Decimal::ZERO);
-                drop(exposure);
-                self.positions
-                    .write()
-                    .await
-                    .retain(|p| p.token_id != *token_id);
-
-                Ok(ExecutionResult {
-                    action: action.clone(),
-                    success: true,
-                    message: format!(
-                        "Exited position {} shares={} @ {} (order_id={})",
-                        token_id, shares, limit_price, order_resp.id
-                    ),
-                    trade_id: Some(order_resp.id),
-                })
+                let _ = shares;
+                let _ = limit_price;
+                Err(PloyError::Validation(
+                    "autonomous direct submit is disabled; route orders through coordinator intent ingress"
+                        .to_string(),
+                ))
             }
             AgentAction::Wait {
                 duration_secs,

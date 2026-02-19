@@ -9,7 +9,6 @@ pub mod data_source;
 
 use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::adapters::PolymarketClient;
-use crate::domain::{OrderRequest, Side};
 use crate::error::{PloyError, Result};
 use crate::strategy::event_models::arena_text::{
     fetch_arena_text_snapshot, scores_to_probabilities, ArenaTextSnapshot,
@@ -352,9 +351,6 @@ pub async fn run_event_edge(client: &PolymarketClient, cfg: EventEdgeConfig) -> 
                     }
                 }
 
-                let order =
-                    OrderRequest::buy_limit(r.yes_token_id.clone(), Side::Up, cfg.shares, ask);
-
                 if cfg.dry_run {
                     warn!(
                         "DRY RUN: would BUY {} shares of {} @ {:.2}¢ (edge {:.1}pp)",
@@ -371,8 +367,10 @@ pub async fn run_event_edge(client: &PolymarketClient, cfg: EventEdgeConfig) -> 
                         ask * dec!(100),
                         edge * dec!(100)
                     );
-                    let resp = client.submit_order(&order).await?;
-                    info!("Order submitted: id={} status={}", resp.id, resp.status);
+                    return Err(PloyError::Validation(
+                        "legacy direct order path disabled: submit TradeIntent via coordinator/gateway"
+                            .to_string(),
+                    ));
                 }
 
                 last_trade_at.insert(r.yes_token_id.clone(), now);

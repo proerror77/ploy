@@ -1,13 +1,11 @@
 use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
-use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Deterministic interval-based runner. Standalone mode (no platform).
 pub struct EventEdgeAgent {
@@ -80,25 +78,13 @@ impl EventEdgeAgent {
         self.core.reset_daily_if_needed();
 
         if let Some(d) = self.core.pick_best_trade(&scan) {
-            let notional = Decimal::from(d.shares) * d.limit_price;
-            let order =
-                OrderRequest::buy_limit(d.token_id.clone(), Side::Up, d.shares, d.limit_price);
-
-            match self.core.client.submit_order(&order).await {
-                Ok(resp) => {
-                    info!(
-                        "EventEdgeAgent: BUY outcome=\"{}\" shares={} ask={:.2}¢ edge={:.1}pp order_id={} status={}",
-                        d.outcome, d.shares,
-                        d.limit_price * dec!(100),
-                        d.edge * dec!(100),
-                        resp.id, resp.status
-                    );
-                    self.core.record_trade(&d.token_id, notional);
-                }
-                Err(e) => {
-                    error!("EventEdgeAgent: order submit failed: {}", e);
-                }
-            }
+            warn!(
+                "EventEdgeAgent blocked direct BUY outcome=\"{}\" shares={} ask={:.2}¢ edge={:.1}pp: route through coordinator intent ingress",
+                d.outcome,
+                d.shares,
+                d.limit_price * dec!(100),
+                d.edge * dec!(100),
+            );
         }
 
         Ok(())

@@ -6,6 +6,7 @@
 //!
 //! Endpoints:
 //! - POST /api/sidecar/grok/decision — Unified Grok decision with full context
+//! - POST /api/sidecar/intents      — Unified intent ingress (OpenClaw/RPC/scripts)
 //! - POST /api/sidecar/orders       — Submit order through Coordinator
 //! - GET  /api/sidecar/positions     — Current positions from DB
 //! - GET  /api/sidecar/risk          — Risk state from Coordinator
@@ -163,6 +164,39 @@ pub struct SidecarOrderRequest {
 pub struct SidecarOrderResponse {
     pub success: bool,
     pub intent_id: Option<String>,
+    pub message: String,
+    pub dry_run: bool,
+}
+
+/// POST /api/sidecar/intents — request body (OpenClaw/RPC ingress)
+#[derive(Debug, Deserialize)]
+pub struct SidecarIntentRequest {
+    pub intent_id: Option<String>,
+    pub deployment_id: String,
+    pub agent_id: Option<String>,
+    pub domain: Option<String>,
+    pub market_slug: String,
+    pub token_id: String,
+    pub side: Option<String>,       // "UP"/"DOWN" or "YES"/"NO"
+    pub order_side: Option<String>, // "BUY"/"SELL"
+    pub is_buy: Option<bool>,
+    pub size: u64,
+    pub price_limit: f64,
+    pub idempotency_key: Option<String>,
+    pub reason: Option<String>,
+    pub confidence: Option<f64>,
+    pub edge: Option<f64>,
+    pub priority: Option<String>, // "critical" | "high" | "normal" | "low"
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    pub dry_run: Option<bool>,
+}
+
+/// POST /api/sidecar/intents — response
+#[derive(Debug, Serialize)]
+pub struct SidecarIntentResponse {
+    pub success: bool,
+    pub intent_id: String,
     pub message: String,
     pub dry_run: bool,
 }
@@ -556,6 +590,171 @@ pub async fn sidecar_submit_order(
         success: true,
         intent_id: Some(intent_id),
         message: "Order submitted to coordinator pipeline".to_string(),
+        dry_run: false,
+    }))
+}
+
+fn parse_sidecar_domain(raw: Option<&str>) -> Domain {
+    match raw
+        .unwrap_or("crypto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "sports" => Domain::Sports,
+        "politics" => Domain::Politics,
+        "economics" => Domain::Economics,
+        _ => Domain::Crypto,
+    }
+}
+
+fn parse_binary_side(raw: Option<&str>) -> Side {
+    match raw
+        .unwrap_or("UP")
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "DOWN" | "NO" => Side::Down,
+        _ => Side::Up,
+    }
+}
+
+fn parse_is_buy(order_side: Option<&str>, is_buy: Option<bool>) -> bool {
+    if let Some(v) = is_buy {
+        return v;
+    }
+    match order_side.unwrap_or("BUY").trim().to_ascii_uppercase().as_str() {
+        "SELL" => false,
+        _ => true,
+    }
+}
+
+fn parse_order_priority(raw: Option<&str>) -> OrderPriority {
+    match raw
+        .unwrap_or("normal")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "critical" => OrderPriority::Critical,
+        "high" => OrderPriority::High,
+        "low" => OrderPriority::Low,
+        _ => OrderPriority::Normal,
+    }
+}
+
+/// POST /api/sidecar/intents
+///
+/// Unified ingestion endpoint for external runtimes (OpenClaw/RPC/scripts).
+/// Always routes through Coordinator (risk gate -> duplicate guard -> allocator -> execution).
+pub async fn sidecar_submit_intent(
+    State(state): State<AppState>,
+    Json(req): Json<SidecarIntentRequest>,
+) -> std::result::Result<Json<SidecarIntentResponse>, (StatusCode, String)> {
+    let dry_run = req.dry_run.unwrap_or(false);
+    let price = Decimal::from_str(&format!("{:.6}", req.price_limit))
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid price_limit format".to_string()))?;
+    if price <= Decimal::ZERO || price >= Decimal::ONE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "price_limit must be between 0 and 1 (exclusive)".to_string(),
+        ));
+    }
+    if req.size == 0 {
+        return Err((StatusCode::BAD_REQUEST, "size must be > 0".to_string()));
+    }
+    if req.deployment_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "deployment_id is required".to_string(),
+        ));
+    }
+    if req.market_slug.trim().is_empty() || req.token_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "market_slug and token_id are required".to_string(),
+        ));
+    }
+
+    let domain = parse_sidecar_domain(req.domain.as_deref());
+    let side = parse_binary_side(req.side.as_deref());
+    let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy);
+    let priority = parse_order_priority(req.priority.as_deref());
+    let agent_id = req
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("openclaw_rpc")
+        .to_string();
+
+    let mut metadata = req.metadata;
+    metadata
+        .entry("source".to_string())
+        .or_insert_with(|| "sidecar.intent_ingress".to_string());
+    metadata.insert("deployment_id".to_string(), req.deployment_id.clone());
+    metadata
+        .entry("domain".to_string())
+        .or_insert_with(|| domain.to_string());
+    if let Some(idem) = req.idempotency_key.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        metadata.insert("idempotency_key".to_string(), idem.to_string());
+    }
+    if let Some(reason) = req.reason.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        metadata.insert("intent_reason".to_string(), reason.to_string());
+    }
+    if let Some(edge) = req.edge {
+        metadata.insert("signal_edge".to_string(), format!("{:.6}", edge));
+    }
+    if let Some(conf) = req.confidence {
+        metadata.insert("signal_confidence".to_string(), format!("{:.6}", conf));
+    }
+
+    let mut intent = OrderIntent::new(
+        &agent_id,
+        domain,
+        &req.market_slug,
+        &req.token_id,
+        side,
+        is_buy,
+        req.size,
+        price,
+    );
+    intent.priority = priority;
+    intent.metadata = metadata;
+    if let Some(raw) = req.intent_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let parsed = Uuid::parse_str(raw)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "intent_id must be a UUID".to_string()))?;
+        intent.intent_id = parsed;
+    }
+    let intent_id = intent.intent_id.to_string();
+
+    if dry_run {
+        return Ok(Json(SidecarIntentResponse {
+            success: true,
+            intent_id,
+            message: "Dry-run: intent validated and skipped".to_string(),
+            dry_run: true,
+        }));
+    }
+
+    let coordinator = state.coordinator.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Coordinator not running (platform not started)".to_string(),
+        )
+    })?;
+    coordinator.submit_order(intent).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to submit intent: {}", e),
+        )
+    })?;
+
+    Ok(Json(SidecarIntentResponse {
+        success: true,
+        intent_id,
+        message: "Intent submitted to coordinator pipeline".to_string(),
         dry_run: false,
     }))
 }

@@ -80,8 +80,11 @@ JSON
 注意：
 - `pm.submit_limit` / `pm.cancel_order` / `events.upsert` / `events.update_status` 這類「寫入」操作預設會被拒絕，必須在交易機器環境設 `PLOY_RPC_WRITE_ENABLED=true` 才會放行。
 - 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
+- `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。
+- live 直連 `submit_order` 預設禁用（防旁路風控）；如需暫時回退可設 `PLOY_ALLOW_LEGACY_DIRECT_SUBMIT=true`（不建議 production）。
+- `ploy strategy start ...` 的 legacy live runtime 預設也會被擋下（避免繞過 Coordinator）。如需緊急回退才設 `PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true`。
 - 若你要強制「只有 coordinator/gateway 能送單」，在交易機器加上 `PLOY_GATEWAY_ONLY=true`。
-  在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（RPC/coordinator 已自動帶入）。
+  在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（Coordinator 已自動帶入）。
 - 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
 
 已支援的 method（起步集合）：

@@ -23,6 +23,18 @@ use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};
 
+fn legacy_strategy_live_allowed() -> bool {
+    matches!(
+        std::env::var("PLOY_ALLOW_LEGACY_STRATEGY_LIVE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoLobDatasetFormat {
     Csv,
@@ -556,6 +568,13 @@ async fn start_strategy(
     foreground: bool,
 ) -> Result<()> {
     info!("Starting strategy: {}", name);
+
+    if !dry_run && !legacy_strategy_live_allowed() {
+        let msg = "legacy `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path) or set PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true for explicit override";
+        warn!("{msg}");
+        println!("\x1b[31m✗ {}\x1b[0m", msg);
+        return Err(anyhow::anyhow!(msg));
+    }
 
     // Check if already running.
     //

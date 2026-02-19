@@ -1,6 +1,5 @@
 use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
-use crate::domain::{OrderRequest, Side};
 use crate::error::{PloyError, Result};
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once, EdgeRow};
@@ -356,28 +355,12 @@ fn build_buy_tool(
                     ));
                 }
 
-                let order =
-                    OrderRequest::buy_limit(token_id.clone(), Side::Up, shares, limit_price);
-                let resp = st.core.client.submit_order(&order).await?;
-
-                st.core.record_trade(&token_id, notional);
-
-                Ok(claude_agent_sdk_rs::types::mcp::ToolResult {
-                    content: vec![claude_agent_sdk_rs::types::mcp::ToolResultContent::Text {
-                        text: serde_json::to_string_pretty(&json!({
-                            "ok": true,
-                            "event_id": guard.event_id,
-                            "outcome": guard.outcome,
-                            "shares": shares,
-                            "limit_price": limit_price.to_string(),
-                            "edge_required": guard.min_edge.to_string(),
-                            "order_id": resp.id,
-                            "status": resp.status,
-                            "daily_spend_usd": st.core.state.daily_spend_usd.to_string(),
-                        }))?,
-                    }],
-                    is_error: false,
-                })
+                let _ = token_id;
+                let _ = notional;
+                Ok(tool_err(
+                    "direct_submit_disabled",
+                    "legacy direct submit is disabled; route writes through coordinator intent ingress",
+                ))
             }
         }
     )

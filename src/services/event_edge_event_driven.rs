@@ -1,6 +1,5 @@
 use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
-use crate::domain::{OrderRequest, Side};
 use crate::error::{PloyError, Result};
 use crate::strategy::event_edge::core::{EventEdgeCore, EventEdgeState};
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
@@ -11,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedState {
@@ -139,25 +138,13 @@ impl EventEdgeEventDrivenAgent {
         );
 
         if let Some(d) = self.core.pick_best_trade(&scan) {
-            let notional = Decimal::from(d.shares) * d.limit_price;
-            let order =
-                OrderRequest::buy_limit(d.token_id.clone(), Side::Up, d.shares, d.limit_price);
-
-            match self.core.client.submit_order(&order).await {
-                Ok(resp) => {
-                    info!(
-                        "EventEdgeEventDrivenAgent: BUY outcome=\"{}\" shares={} ask={:.2}¢ edge={:.1}pp order_id={} status={}",
-                        d.outcome, d.shares,
-                        d.limit_price * dec!(100), d.edge * dec!(100),
-                        resp.id, resp.status
-                    );
-                    self.core.record_trade(&d.token_id, notional);
-                    self.save_persisted_state().await?;
-                }
-                Err(e) => {
-                    error!("EventEdgeEventDrivenAgent: order submit failed: {}", e);
-                }
-            }
+            warn!(
+                "EventEdgeEventDrivenAgent blocked direct BUY outcome=\"{}\" shares={} ask={:.2}¢ edge={:.1}pp: route through coordinator intent ingress",
+                d.outcome,
+                d.shares,
+                d.limit_price * dec!(100),
+                d.edge * dec!(100)
+            );
         }
         Ok(())
     }

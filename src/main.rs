@@ -990,34 +990,11 @@ async fn run_trade_mode(
 
                                 if let Some(token_id) = token_id {
                                     // Execute Leg1 order
-                                    let order = OrderRequest::buy_limit(
-                                        token_id.clone(),
-                                        signal.side,
-                                        shares,
-                                        signal.trigger_price,
-                                    );
-
+                                    let _ = token_id;
                                     println!("\n  Submitting Leg1 order...");
-                                    match client.submit_order(&order).await {
-                                        Ok(resp) => {
-                                            println!(
-                                                "\x1b[32m  ✓ Order submitted: {}\x1b[0m",
-                                                resp.id
-                                            );
-
-                                            // Record position
-                                            position = Some(TradePosition {
-                                                leg1_side: signal.side,
-                                                leg1_token_id: token_id,
-                                                leg1_price: signal.trigger_price,
-                                                leg1_order_id: resp.id,
-                                                leg1_shares: shares,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            println!("\x1b[31m  ✗ Order failed: {}\x1b[0m", e);
-                                        }
-                                    }
+                                    println!(
+                                        "\x1b[31m  ✗ Direct submit disabled. Use platform/coordinator intent ingress.\x1b[0m"
+                                    );
                                 }
                                 println!("\x1b[41;97m ══════════════════════════════════════════════════════════ \x1b[0m\n");
                             }
@@ -1062,33 +1039,11 @@ async fn run_trade_mode(
                                         drop(side_map);
 
                                         if let Some(token_id) = token_id {
-                                            let order = OrderRequest::buy_limit(
-                                                token_id,
-                                                opposite_side,
-                                                pos.leg1_shares,
-                                                opposite_ask,
-                                            );
-
+                                            let _ = token_id;
                                             println!("\n  Submitting Leg2 order...");
-                                            match client.submit_order(&order).await {
-                                                Ok(resp) => {
-                                                    println!(
-                                                        "\x1b[32m  ✓ Order submitted: {}\x1b[0m",
-                                                        resp.id
-                                                    );
-                                                    println!("\x1b[32m  ✓ CYCLE COMPLETE!\x1b[0m");
-
-                                                    // Clear position and reset detector
-                                                    position = None;
-                                                    detector.reset(current_round.as_deref());
-                                                }
-                                                Err(e) => {
-                                                    println!(
-                                                        "\x1b[31m  ✗ Order failed: {}\x1b[0m",
-                                                        e
-                                                    );
-                                                }
-                                            }
+                                            println!(
+                                                "\x1b[31m  ✗ Direct submit disabled. Use platform/coordinator intent ingress.\x1b[0m"
+                                            );
                                         }
                                         println!("\x1b[42;97m ══════════════════════════════════════════════════════════ \x1b[0m\n");
                                     } else {

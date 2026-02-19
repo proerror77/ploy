@@ -50,18 +50,20 @@ impl Default for CoordinatorConfig {
             max_platform_exposure: None,
             heartbeat_timeout_ms: 15_000,
             batch_size: 10,
-            duplicate_guard_window_ms: 15_000,
+            duplicate_guard_window_ms: 60_000,
             duplicate_guard_enabled: true,
             crypto_allocator_enabled: true,
             crypto_allocator_total_cap_usd: None,
-            crypto_coin_cap_btc_pct: Decimal::new(45, 2), // 45%
-            crypto_coin_cap_eth_pct: Decimal::new(35, 2), // 35%
-            crypto_coin_cap_sol_pct: Decimal::new(20, 2), // 20%
-            crypto_coin_cap_xrp_pct: Decimal::new(15, 2), // 15%
+            // Conservative baseline allocator (can be overridden by env).
+            // Bias exposure toward 15m markets and cap short-horizon 5m risk.
+            crypto_coin_cap_btc_pct: Decimal::new(40, 2),   // 40%
+            crypto_coin_cap_eth_pct: Decimal::new(30, 2),   // 30%
+            crypto_coin_cap_sol_pct: Decimal::new(20, 2),   // 20%
+            crypto_coin_cap_xrp_pct: Decimal::new(12, 2),   // 12%
             crypto_coin_cap_other_pct: Decimal::new(10, 2), // 10%
-            crypto_horizon_cap_5m_pct: Decimal::new(50, 2), // 50%
-            crypto_horizon_cap_15m_pct: Decimal::new(60, 2), // 60%
-            crypto_horizon_cap_other_pct: Decimal::new(25, 2), // 25%
+            crypto_horizon_cap_5m_pct: Decimal::new(25, 2), // 25%
+            crypto_horizon_cap_15m_pct: Decimal::new(65, 2), // 65%
+            crypto_horizon_cap_other_pct: Decimal::new(20, 2), // 20%
         }
     }
 }

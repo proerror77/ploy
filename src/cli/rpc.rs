@@ -2,19 +2,15 @@ use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::postgres::PostgresStore;
 use crate::adapters::PolymarketClient;
 use crate::config::AppConfig;
-use crate::domain::{OrderRequest, OrderSide, Side};
+use crate::domain::{OrderSide, Side};
 use crate::error::{PloyError, Result};
-use crate::platform::{
-    Domain, OrderIntent, RiskCheckResult, RiskConfig as PlatformRiskConfig, RiskDecision,
-    RiskDecisionStatus, RiskGate, TradeIntent,
-};
+use crate::platform::{Domain, TradeIntent};
 use crate::signing::Wallet;
 use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once};
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
-use crate::strategy::executor::OrderExecutor;
-use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::multi_outcome::fetch_multi_outcome_event;
 use chrono::Utc;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
 
@@ -97,12 +93,6 @@ fn require_write_enabled(id: Option<Value>) -> std::result::Result<(), Value> {
         "write operations disabled (set PLOY_RPC_WRITE_ENABLED=true)",
         None,
     ))
-}
-
-fn parse_bool(v: &Value, key: &str) -> std::result::Result<bool, PloyError> {
-    v.get(key)
-        .and_then(|x| x.as_bool())
-        .ok_or_else(|| PloyError::Validation(format!("missing/invalid boolean param: {key}")))
 }
 
 fn parse_str(v: &Value, key: &str) -> std::result::Result<String, PloyError> {
@@ -186,59 +176,46 @@ fn parse_domain(value: Option<&str>) -> std::result::Result<Domain, PloyError> {
     }
 }
 
-fn build_risk_config(config: &AppConfig) -> PlatformRiskConfig {
-    let max_positions = config.risk.max_positions.max(1);
-    PlatformRiskConfig {
-        max_platform_exposure: config.risk.max_single_exposure_usd * Decimal::from(max_positions),
-        max_consecutive_failures: config.risk.max_consecutive_failures,
-        daily_loss_limit: config.risk.daily_loss_limit_usd,
-        max_spread_bps: config.execution.max_spread_bps,
-        critical_bypass_exposure: true,
-        ..Default::default()
-    }
+fn coordinator_intent_ingress_url() -> String {
+    std::env::var("PLOY_RPC_COORDINATOR_INTENT_URL")
+        .or_else(|_| std::env::var("PLOY_COORDINATOR_INTENT_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8081/api/sidecar/intents".to_string())
 }
 
-fn risk_result_to_decision(result: &RiskCheckResult) -> RiskDecision {
-    match result {
-        RiskCheckResult::Passed => RiskDecision {
-            status: RiskDecisionStatus::Allow,
-            reason_code: None,
-            message: None,
-            suggested_max_size: None,
-        },
-        RiskCheckResult::Blocked(reason) => RiskDecision {
-            status: RiskDecisionStatus::Deny,
-            reason_code: Some("blocked".to_string()),
-            message: Some(reason.to_string()),
-            suggested_max_size: None,
-        },
-        RiskCheckResult::Adjusted(s) => RiskDecision {
-            status: RiskDecisionStatus::Throttle,
-            reason_code: Some("adjusted".to_string()),
-            message: Some(s.reason.clone()),
-            suggested_max_size: Some(s.max_shares),
-        },
-    }
-}
+async fn submit_intent_via_coordinator(payload: &Value) -> Result<Value> {
+    let url = coordinator_intent_ingress_url();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| PloyError::Internal(format!("failed to build http client: {}", e)))?;
 
-async fn execute_order_via_gateway(
-    config: &AppConfig,
-    request: &OrderRequest,
-) -> Result<crate::strategy::executor::ExecutionResult> {
-    let client = build_pm_client(&config.market.rest_url, config.dry_run.enabled).await?;
-    let mut executor = OrderExecutor::new(client, config.execution.clone());
+    let response = client
+        .post(&url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| {
+            PloyError::Internal(format!(
+                "failed to reach coordinator intent ingress {}: {}",
+                url, e
+            ))
+        })?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<empty>".to_string());
 
-    if let Ok(store) =
-        PostgresStore::new(&config.database.url, config.database.max_connections).await
-    {
-        let idem = Arc::new(IdempotencyManager::new_with_account(
-            store,
-            config.account.id.clone(),
-        ));
-        executor = executor.with_idempotency(idem);
+    if !status.is_success() {
+        return Err(PloyError::Internal(format!(
+            "coordinator intent ingress rejected request (status={}): {}",
+            status, text
+        )));
     }
 
-    executor.execute(request).await
+    serde_json::from_str(&text)
+        .or_else(|_| Ok(json!({ "raw": text })))
+        .map_err(|e: serde_json::Error| PloyError::Internal(format!("invalid ingress JSON: {}", e)))
 }
 
 fn is_write_method(method: &str) -> bool {
@@ -1083,46 +1060,30 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                 priority: None,
                 metadata,
             };
-            let order_intent: OrderIntent = trade_intent.clone().into_order_intent();
-            let risk_gate = RiskGate::new(build_risk_config(&config));
-            let risk_result = risk_gate.check_order(&order_intent).await;
-            let risk_decision = risk_result_to_decision(&risk_result);
 
-            if !risk_result.is_passed() {
-                println!(
-                    "{}",
-                    jsonrpc_err(
-                        req.id,
-                        -32012,
-                        "risk check failed",
-                        Some(json!({
-                            "risk_decision": risk_decision,
-                            "deployment_id": deployment_id,
-                            "agent_id": agent_id,
-                        })),
-                    )
-                );
-                return Ok(());
-            }
+            let ingress_payload = json!({
+                "intent_id": trade_intent.intent_id,
+                "deployment_id": trade_intent.deployment_id,
+                "agent_id": trade_intent.agent_id,
+                "domain": trade_intent.domain.to_string(),
+                "market_slug": trade_intent.market_slug,
+                "token_id": trade_intent.token_id,
+                "side": match trade_intent.side { Side::Up => "UP", Side::Down => "DOWN" },
+                "order_side": match order_side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                "size": trade_intent.size,
+                "price_limit": trade_intent.price_limit.to_f64().unwrap_or(0.0),
+                "idempotency_key": idempotency_key,
+                "reason": trade_intent.reason,
+                "confidence": trade_intent.confidence.and_then(|v| v.to_f64()),
+                "edge": trade_intent.edge.and_then(|v| v.to_f64()),
+                "metadata": trade_intent.metadata,
+            });
 
-            let req_order = match order_side {
-                OrderSide::Buy => {
-                    OrderRequest::buy_limit(token_id, market_side, shares, limit_price)
-                }
-                OrderSide::Sell => {
-                    OrderRequest::sell_limit(token_id, market_side, shares, limit_price)
-                }
-            };
-            let mut req_order = req_order;
-            req_order.client_order_id = format!("intent:{}", trade_intent.intent_id);
-            req_order.idempotency_key = Some(idempotency_key);
-
-            match execute_order_via_gateway(&config, &req_order).await {
-                Ok(exec) => jsonrpc_ok(
+            match submit_intent_via_coordinator(&ingress_payload).await {
+                Ok(submission) => jsonrpc_ok(
                     req.id,
                     json!({
-                        "execution": exec,
-                        "risk_decision": risk_decision,
+                        "submission": submission,
                         "intent_id": trade_intent.intent_id,
                         "deployment_id": trade_intent.deployment_id,
                     }),
@@ -1361,47 +1322,29 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                 metadata,
             };
 
-            let order_intent = trade_intent.clone().into_order_intent();
-            let risk_gate = RiskGate::new(build_risk_config(&config));
-            let risk_result = risk_gate.check_order(&order_intent).await;
-            let risk_decision = risk_result_to_decision(&risk_result);
-            if !risk_result.is_passed() {
-                println!(
-                    "{}",
-                    jsonrpc_err(
-                        req.id,
-                        -32012,
-                        "risk check failed",
-                        Some(json!({ "risk_decision": risk_decision })),
-                    )
-                );
-                return Ok(());
-            }
+            let ingress_payload = json!({
+                "intent_id": trade_intent.intent_id,
+                "deployment_id": trade_intent.deployment_id,
+                "agent_id": trade_intent.agent_id,
+                "domain": trade_intent.domain.to_string(),
+                "market_slug": trade_intent.market_slug,
+                "token_id": trade_intent.token_id,
+                "side": match trade_intent.side { Side::Up => "UP", Side::Down => "DOWN" },
+                "order_side": if trade_intent.is_buy { "BUY" } else { "SELL" },
+                "size": trade_intent.size,
+                "price_limit": trade_intent.price_limit.to_f64().unwrap_or(0.0),
+                "idempotency_key": idempotency_key,
+                "reason": trade_intent.reason,
+                "confidence": trade_intent.confidence.and_then(|v| v.to_f64()),
+                "edge": trade_intent.edge.and_then(|v| v.to_f64()),
+                "metadata": trade_intent.metadata,
+            });
 
-            let mut request = if trade_intent.is_buy {
-                OrderRequest::buy_limit(
-                    trade_intent.token_id.clone(),
-                    trade_intent.side,
-                    trade_intent.size,
-                    trade_intent.price_limit,
-                )
-            } else {
-                OrderRequest::sell_limit(
-                    trade_intent.token_id.clone(),
-                    trade_intent.side,
-                    trade_intent.size,
-                    trade_intent.price_limit,
-                )
-            };
-            request.client_order_id = format!("intent:{}", trade_intent.intent_id);
-            request.idempotency_key = Some(idempotency_key);
-
-            match execute_order_via_gateway(&config, &request).await {
-                Ok(exec) => jsonrpc_ok(
+            match submit_intent_via_coordinator(&ingress_payload).await {
+                Ok(submission) => jsonrpc_ok(
                     req.id,
                     json!({
-                        "execution": exec,
-                        "risk_decision": risk_decision,
+                        "submission": submission,
                         "intent_id": trade_intent.intent_id,
                         "deployment_id": trade_intent.deployment_id,
                     }),
