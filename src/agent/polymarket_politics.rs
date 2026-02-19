@@ -3,6 +3,11 @@
 // Based on the sports integration pattern
 
 use crate::error::{PloyError, Result};
+use polymarket_client_sdk::gamma::types::request::{
+    EventByIdRequest, MarketsRequest, SeriesByIdRequest,
+};
+use polymarket_client_sdk::gamma::types::response::{Event as GammaEvent, Market as GammaMarket};
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -511,7 +516,7 @@ impl PoliticsMarketDetails {
 /// Polymarket Politics Client for fetching and trading political markets
 pub struct PolymarketPoliticsClient {
     client: Client,
-    gamma_url: String,
+    gamma_client: GammaClient,
     clob_url: String,
 }
 
@@ -522,43 +527,133 @@ impl PolymarketPoliticsClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| PloyError::Internal(format!("HTTP client error: {}", e)))?;
+        let gamma_client = GammaClient::new(GAMMA_API_URL)
+            .map_err(|e| PloyError::Internal(format!("Gamma client error: {}", e)))?;
 
         Ok(Self {
             client,
-            gamma_url: GAMMA_API_URL.to_string(),
+            gamma_client,
             clob_url: CLOB_API_URL.to_string(),
         })
     }
 
+    fn decimal_to_f64(value: rust_decimal::Decimal) -> Option<f64> {
+        value.to_string().parse::<f64>().ok()
+    }
+
+    fn map_tags(
+        tags: Option<Vec<polymarket_client_sdk::gamma::types::response::Tag>>,
+    ) -> Vec<String> {
+        tags.unwrap_or_default()
+            .into_iter()
+            .filter_map(|t| t.label.or(t.slug))
+            .collect()
+    }
+
+    fn map_political_market_data(market: GammaMarket) -> PoliticalMarketData {
+        let volume = market
+            .volume
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .or_else(|| market.volume_num.and_then(Self::decimal_to_f64));
+
+        PoliticalMarketData {
+            question: market.question.unwrap_or_default(),
+            condition_id: market.condition_id,
+            outcome_prices: market.outcome_prices,
+            clob_token_ids: market.clob_token_ids,
+            volume,
+            outcomes: market.outcomes,
+        }
+    }
+
+    fn map_political_event(event: GammaEvent) -> PoliticalEvent {
+        PoliticalEvent {
+            id: event.id,
+            title: event.title.unwrap_or_default(),
+            slug: event.slug.unwrap_or_default(),
+            closed: event.closed.unwrap_or(false),
+            markets: event
+                .markets
+                .unwrap_or_default()
+                .into_iter()
+                .map(Self::map_political_market_data)
+                .collect(),
+        }
+    }
+
+    fn map_political_event_details(event: GammaEvent) -> PoliticalEventDetails {
+        let end_date = event.end_date.map(|ts| ts.to_rfc3339());
+        let volume = event
+            .volume
+            .and_then(Self::decimal_to_f64)
+            .or_else(|| event.volume_24hr.and_then(Self::decimal_to_f64));
+
+        PoliticalEventDetails {
+            id: event.id,
+            title: event.title.unwrap_or_default(),
+            slug: event.slug.unwrap_or_default(),
+            closed: event.closed.unwrap_or(false),
+            markets: event
+                .markets
+                .unwrap_or_default()
+                .into_iter()
+                .map(Self::map_political_market_data)
+                .collect(),
+            end_date,
+            volume,
+            description: event.description,
+        }
+    }
+
+    fn map_politics_market(market: GammaMarket) -> PolymarketPoliticsMarket {
+        let volume = market
+            .volume
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .or_else(|| market.volume_num.and_then(Self::decimal_to_f64));
+
+        let liquidity = market
+            .liquidity
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .or_else(|| market.liquidity_num.and_then(Self::decimal_to_f64));
+
+        PolymarketPoliticsMarket {
+            condition_id: market.condition_id.unwrap_or_default(),
+            question: market.question,
+            slug: market.slug,
+            active: market.active.unwrap_or(true),
+            closed: market.closed.unwrap_or(false),
+            end_date: market
+                .end_date_iso
+                .or_else(|| market.end_date.map(|d| d.to_rfc3339())),
+            clob_token_ids: market.clob_token_ids,
+            outcome_prices: market.outcome_prices,
+            volume,
+            liquidity,
+            description: market.description,
+            tags: Self::map_tags(market.tags),
+        }
+    }
+
     /// Fetch all active markets from Gamma API
     pub async fn fetch_all_markets(&self, limit: u32) -> Result<Vec<PolymarketPoliticsMarket>> {
-        let url = format!("{}/markets", self.gamma_url);
-
-        let resp = self
-            .client
-            .get(&url)
-            .query(&[
-                ("limit", limit.to_string()),
-                ("active", "true".to_string()),
-                ("closed", "false".to_string()),
-            ])
-            .send()
+        let req = MarketsRequest::builder()
+            .limit(i32::try_from(limit).unwrap_or(i32::MAX))
+            .closed(false)
+            .build();
+        let markets = self
+            .gamma_client
+            .markets(&req)
             .await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
+            .map_err(|e| PloyError::Internal(format!("Gamma markets fetch failed: {}", e)))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!(
-                "Gamma API error {}: {}",
-                status, text
-            )));
-        }
-
-        let markets: Vec<PolymarketPoliticsMarket> = resp
-            .json()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
+        let markets: Vec<PolymarketPoliticsMarket> = markets
+            .into_iter()
+            .filter(|m| m.active.unwrap_or(true) && !m.closed.unwrap_or(false))
+            .map(Self::map_politics_market)
+            .collect();
 
         debug!("Fetched {} total markets", markets.len());
         Ok(markets)
@@ -666,31 +761,20 @@ impl PolymarketPoliticsClient {
 
     /// Fetch all events from a political series
     pub async fn fetch_series_events(&self, series_id: &str) -> Result<Vec<PoliticalEvent>> {
-        let url = format!("{}/series/{}", self.gamma_url, series_id);
-
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        let req = SeriesByIdRequest::builder().id(series_id).build();
+        let series = self
+            .gamma_client
+            .series_by_id(&req)
             .await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
+            .map_err(|e| PloyError::Internal(format!("Gamma series fetch failed: {}", e)))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!(
-                "Series API error {}: {}",
-                status, text
-            )));
-        }
-
-        let series: PoliticalSeriesResponse = resp
-            .json()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
-
-        let open_events: Vec<PoliticalEvent> =
-            series.events.into_iter().filter(|e| !e.closed).collect();
+        let open_events: Vec<PoliticalEvent> = series
+            .events
+            .unwrap_or_default()
+            .into_iter()
+            .map(Self::map_political_event)
+            .filter(|e| !e.closed)
+            .collect();
 
         info!(
             "Found {} open events in series {}",
@@ -712,28 +796,13 @@ impl PolymarketPoliticsClient {
 
     /// Get full event details
     pub async fn get_event_details(&self, event_id: &str) -> Result<PoliticalEventDetails> {
-        let url = format!("{}/events/{}", self.gamma_url, event_id);
-
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        let req = EventByIdRequest::builder().id(event_id).build();
+        let event = self
+            .gamma_client
+            .event_by_id(&req)
             .await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!(
-                "Event API error {}: {}",
-                status, text
-            )));
-        }
-
-        let event: PoliticalEventDetails = resp
-            .json()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
+            .map_err(|e| PloyError::Internal(format!("Gamma event fetch failed: {}", e)))?;
+        let event = Self::map_political_event_details(event);
 
         debug!("Event {} has {} markets", event.title, event.markets.len());
         Ok(event)
