@@ -22,6 +22,8 @@ use crate::error::Result;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
+const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
+
 /// Configuration for the CryptoTradingAgent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoTradingConfig {
@@ -86,6 +88,22 @@ pub struct CryptoTradingAgent {
     binance_ws: Arc<BinanceWebSocket>,
     pm_ws: Arc<PolymarketWebSocket>,
     event_matcher: Arc<EventMatcher>,
+}
+
+fn should_skip_entry(
+    event_slug: &str,
+    positions: &HashMap<String, TrackedPosition>,
+    traded_events: &HashMap<String, DateTime<Utc>>,
+) -> bool {
+    positions.contains_key(event_slug) || traded_events.contains_key(event_slug)
+}
+
+fn prune_stale_traded_events(
+    traded_events: &mut HashMap<String, DateTime<Utc>>,
+    now: DateTime<Utc>,
+) {
+    let retention = chrono::Duration::hours(TRADED_EVENT_RETENTION_HOURS);
+    traded_events.retain(|_, entered_at| now.signed_duration_since(*entered_at) < retention);
 }
 
 impl CryptoTradingAgent {
@@ -173,6 +191,7 @@ impl TradingAgent for CryptoTradingAgent {
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new();
         let mut active_events: HashMap<String, EventInfo> = HashMap::new(); // symbol -> event
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
+        let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
         let daily_pnl = Decimal::ZERO;
         let mut total_exposure = Decimal::ZERO;
 
@@ -197,6 +216,7 @@ impl TradingAgent for CryptoTradingAgent {
                         warn!(agent = self.config.agent_id, error = %e, "event refresh failed");
                         continue;
                     }
+                    prune_stale_traded_events(&mut traded_events, Utc::now());
 
                     let mut refreshed_events: HashMap<String, EventInfo> = HashMap::new();
                     for coin in &self.config.coins {
@@ -311,8 +331,9 @@ impl TradingAgent for CryptoTradingAgent {
                         continue;
                     }
 
-                    // Already have a position in this market
-                    if positions.contains_key(&event.slug) {
+                    // Allow at most one entry per event slug to avoid repeated trades on
+                    // the same 5m/15m contract after a fast TP/SL exit.
+                    if should_skip_entry(&event.slug, &positions, &traded_events) {
                         continue;
                     }
 
@@ -388,9 +409,12 @@ impl TradingAgent for CryptoTradingAgent {
 
                     if let Err(e) = ctx.submit_order(intent).await {
                         warn!(agent = self.config.agent_id, error = %e, "failed to submit order");
+                        continue;
                     }
 
                     // Track position locally
+                    let now = Utc::now();
+                    traded_events.insert(event.slug.clone(), now);
                     positions.insert(event.slug.clone(), TrackedPosition {
                         market_slug: event.slug.clone(),
                         symbol: update.symbol.clone(),
@@ -398,7 +422,7 @@ impl TradingAgent for CryptoTradingAgent {
                         side,
                         shares: self.config.default_shares,
                         entry_price: limit_price,
-                        entry_time: Utc::now(),
+                        entry_time: now,
                         is_hedged: false,
                     });
 
@@ -614,5 +638,34 @@ mod tests {
         assert_eq!(cfg.agent_id, "crypto");
         assert_eq!(cfg.coins.len(), 3);
         assert_eq!(cfg.sum_threshold, dec!(0.96));
+    }
+
+    #[test]
+    fn test_should_skip_entry_when_slug_already_traded() {
+        let positions: HashMap<String, TrackedPosition> = HashMap::new();
+        let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        traded_events.insert("btc-updown-5m-1".to_string(), Utc::now());
+
+        assert!(should_skip_entry(
+            "btc-updown-5m-1",
+            &positions,
+            &traded_events
+        ));
+    }
+
+    #[test]
+    fn test_prune_stale_traded_events() {
+        let now = Utc::now();
+        let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        traded_events.insert(
+            "stale".to_string(),
+            now - chrono::Duration::hours(TRADED_EVENT_RETENTION_HOURS + 1),
+        );
+        traded_events.insert("fresh".to_string(), now);
+
+        prune_stale_traded_events(&mut traded_events, now);
+
+        assert!(!traded_events.contains_key("stale"));
+        assert!(traded_events.contains_key("fresh"));
     }
 }

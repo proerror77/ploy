@@ -31,6 +31,8 @@ use crate::ml::OnnxModel;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
+const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobMlWeights {
     pub bias: f64,
@@ -168,6 +170,40 @@ pub struct CryptoLobMlAgent {
     onnx_model: Option<OnnxModel>,
 }
 
+fn should_skip_entry(
+    event_slug: &str,
+    symbol: &str,
+    now: DateTime<Utc>,
+    positions: &HashMap<String, TrackedPosition>,
+    traded_events: &HashMap<String, DateTime<Utc>>,
+    last_trade_by_symbol: &HashMap<String, DateTime<Utc>>,
+    cooldown_secs: u64,
+) -> bool {
+    if positions.contains_key(event_slug) {
+        return true;
+    }
+
+    if traded_events.contains_key(event_slug) {
+        return true;
+    }
+
+    if let Some(last) = last_trade_by_symbol.get(symbol) {
+        if now.signed_duration_since(*last).num_seconds() < cooldown_secs as i64 {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn prune_stale_traded_events(
+    traded_events: &mut HashMap<String, DateTime<Utc>>,
+    now: DateTime<Utc>,
+) {
+    let retention = chrono::Duration::hours(TRADED_EVENT_RETENTION_HOURS);
+    traded_events.retain(|_, entered_at| now.signed_duration_since(*entered_at) < retention);
+}
+
 impl CryptoLobMlAgent {
     pub fn new(
         config: CryptoLobMlConfig,
@@ -218,29 +254,31 @@ impl CryptoLobMlAgent {
         #[cfg(feature = "onnx")]
         let onnx_model: Option<OnnxModel> = if model_type == "onnx" {
             match config.model_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => match OnnxModel::load_for_vec_input(path, 7) {
-                    Ok(m) => {
-                        info!(
-                            agent = config.agent_id,
-                            model_type = "onnx",
-                            model_path = %path,
-                            input_dim = m.input_dim(),
-                            output_dim = m.output_dim(),
-                            "loaded lob-ml onnx model"
-                        );
-                        Some(m)
+                Some(path) if !path.trim().is_empty() => {
+                    match OnnxModel::load_for_vec_input(path, 7) {
+                        Ok(m) => {
+                            info!(
+                                agent = config.agent_id,
+                                model_type = "onnx",
+                                model_path = %path,
+                                input_dim = m.input_dim(),
+                                output_dim = m.output_dim(),
+                                "loaded lob-ml onnx model"
+                            );
+                            Some(m)
+                        }
+                        Err(e) => {
+                            warn!(
+                                agent = config.agent_id,
+                                model_type = "onnx",
+                                model_path = %path,
+                                error = %e,
+                                "failed to load lob-ml onnx model; falling back to logistic"
+                            );
+                            None
+                        }
                     }
-                    Err(e) => {
-                        warn!(
-                            agent = config.agent_id,
-                            model_type = "onnx",
-                            model_path = %path,
-                            error = %e,
-                            "failed to load lob-ml onnx model; falling back to logistic"
-                        );
-                        None
-                    }
-                },
+                }
                 _ => {
                     warn!(
                         agent = config.agent_id,
@@ -334,7 +372,15 @@ impl CryptoLobMlAgent {
             #[cfg(feature = "onnx")]
             {
                 if let Some(m) = &self.onnx_model {
-                    let features = [obi5 as f32, obi10 as f32, spread as f32, bidv5 as f32, askv5 as f32, m1 as f32, m5 as f32];
+                    let features = [
+                        obi5 as f32,
+                        obi10 as f32,
+                        spread as f32,
+                        bidv5 as f32,
+                        askv5 as f32,
+                        m1 as f32,
+                        m5 as f32,
+                    ];
                     match m.predict_scalar(&features) {
                         Ok(raw) if raw.is_finite() => {
                             // Prefer probability output, but tolerate logits.
@@ -421,6 +467,7 @@ impl TradingAgent for CryptoLobMlAgent {
         let mut active_events: HashMap<String, EventInfo> = HashMap::new(); // symbol -> event
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         let daily_pnl = Decimal::ZERO;
         let mut total_exposure = Decimal::ZERO;
@@ -446,6 +493,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         warn!(agent = self.config.agent_id, error = %e, "event refresh failed");
                         continue;
                     }
+                    prune_stale_traded_events(&mut traded_events, Utc::now());
 
                     let mut refreshed_events: HashMap<String, EventInfo> = HashMap::new();
                     for coin in &self.config.coins {
@@ -518,16 +566,16 @@ impl TradingAgent for CryptoLobMlAgent {
                         }
                     };
 
-                    // Do not re-enter the same event.
-                    if positions.contains_key(&event.slug) {
+                    if should_skip_entry(
+                        &event.slug,
+                        &update.symbol,
+                        Utc::now(),
+                        &positions,
+                        &traded_events,
+                        &last_trade_by_symbol,
+                        self.config.cooldown_secs,
+                    ) {
                         continue;
-                    }
-
-                    // Cooldown per symbol.
-                    if let Some(last) = last_trade_by_symbol.get(&update.symbol) {
-                        if Utc::now().signed_duration_since(*last).num_seconds() < self.config.cooldown_secs as i64 {
-                            continue;
-                        }
                     }
 
                     // Pull latest PM quotes.
@@ -661,7 +709,9 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    last_trade_by_symbol.insert(update.symbol.clone(), Utc::now());
+                    let now = Utc::now();
+                    last_trade_by_symbol.insert(update.symbol.clone(), now);
+                    traded_events.insert(event.slug.clone(), now);
                     positions.insert(event.slug.clone(), TrackedPosition {
                         market_slug: event.slug.clone(),
                         symbol: update.symbol.clone(),
@@ -669,7 +719,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         side,
                         shares: self.config.default_shares.max(1),
                         entry_price: limit_price,
-                        entry_time: Utc::now(),
+                        entry_time: now,
                     });
 
                     total_exposure = positions.values()
@@ -917,5 +967,66 @@ mod tests {
         };
         let (p, _model) = agent.estimate_p_up(&snap, Decimal::ZERO, Decimal::ZERO);
         assert!(p > 0.0 && p < 1.0);
+    }
+
+    #[test]
+    fn test_should_skip_entry_when_event_already_traded() {
+        let mut positions: HashMap<String, TrackedPosition> = HashMap::new();
+        let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let now = Utc::now();
+
+        traded_events.insert("btc-updown-5m-1".to_string(), now);
+
+        let skip = should_skip_entry(
+            "btc-updown-5m-1",
+            "BTCUSDT",
+            now,
+            &positions,
+            &traded_events,
+            &last_trade_by_symbol,
+            30,
+        );
+        assert!(skip);
+
+        positions.insert(
+            "btc-updown-5m-2".to_string(),
+            TrackedPosition {
+                market_slug: "btc-updown-5m-2".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                token_id: "token".to_string(),
+                side: Side::Up,
+                shares: 1,
+                entry_price: dec!(0.5),
+                entry_time: now,
+            },
+        );
+
+        let skip_open_position = should_skip_entry(
+            "btc-updown-5m-2",
+            "BTCUSDT",
+            now,
+            &positions,
+            &traded_events,
+            &last_trade_by_symbol,
+            30,
+        );
+        assert!(skip_open_position);
+    }
+
+    #[test]
+    fn test_prune_stale_traded_events() {
+        let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let now = Utc::now();
+        traded_events.insert(
+            "stale".to_string(),
+            now - chrono::Duration::hours(TRADED_EVENT_RETENTION_HOURS + 1),
+        );
+        traded_events.insert("fresh".to_string(), now);
+
+        prune_stale_traded_events(&mut traded_events, now);
+
+        assert!(!traded_events.contains_key("stale"));
+        assert!(traded_events.contains_key("fresh"));
     }
 }
