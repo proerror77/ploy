@@ -1,4 +1,4 @@
-//! CryptoTradingAgent — pull-based agent for crypto 15-min UP/DOWN markets
+//! CryptoTradingAgent — pull-based agent for crypto 5m/15m UP/DOWN markets
 //!
 //! Owns Binance + Polymarket WebSocket feeds. Reuses signal logic from
 //! the existing CryptoAgent (sum_of_asks threshold + momentum direction).
@@ -43,6 +43,10 @@ pub struct CryptoTradingConfig {
     pub default_shares: u64,
     pub take_profit: Decimal,
     pub stop_loss: Decimal,
+    /// Optional mark-to-market TP/SL exits (disabled by default for binary options)
+    pub enable_price_exits: bool,
+    /// Minimum hold time before TP/SL exits are allowed (seconds)
+    pub min_hold_secs: u64,
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
 }
@@ -52,7 +56,7 @@ impl Default for CryptoTradingConfig {
         Self {
             agent_id: "crypto".into(),
             name: "Crypto Momentum".into(),
-            coins: vec!["BTC".into(), "ETH".into(), "SOL".into()],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             sum_threshold: dec!(0.96),
             min_momentum_1s: 0.001,
             event_refresh_secs: 30,
@@ -62,6 +66,8 @@ impl Default for CryptoTradingConfig {
             default_shares: 100,
             take_profit: dec!(0.02),
             stop_loss: dec!(0.05),
+            enable_price_exits: false,
+            min_hold_secs: 20,
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }
@@ -73,11 +79,12 @@ impl Default for CryptoTradingConfig {
 struct TrackedPosition {
     market_slug: String,
     symbol: String,
+    horizon: String,
+    series_id: String,
     token_id: String,
     side: Side,
     shares: u64,
     entry_price: Decimal,
-    #[allow(dead_code)]
     entry_time: DateTime<Utc>,
     is_hedged: bool,
 }
@@ -189,7 +196,7 @@ impl TradingAgent for CryptoTradingAgent {
 
         let mut status = AgentStatus::Running;
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new();
-        let mut active_events: HashMap<String, EventInfo> = HashMap::new(); // symbol -> event
+        let mut active_events: HashMap<String, Vec<EventInfo>> = HashMap::new(); // symbol -> events
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
         let daily_pnl = Decimal::ZERO;
@@ -218,34 +225,47 @@ impl TradingAgent for CryptoTradingAgent {
                     }
                     prune_stale_traded_events(&mut traded_events, Utc::now());
 
-                    let mut refreshed_events: HashMap<String, EventInfo> = HashMap::new();
+                    let mut refreshed_events: HashMap<String, Vec<EventInfo>> = HashMap::new();
                     for coin in &self.config.coins {
                         let symbol = format!("{}USDT", coin.to_uppercase());
-                        let ev = self.event_matcher.find_event_with_timing(
-                            &symbol,
-                            self.config.min_time_remaining_secs,
-                            self.config.max_time_remaining_secs as i64,
-                            self.config.prefer_close_to_end,
-                        ).await;
+                        let mut events = self
+                            .event_matcher
+                            .get_events_with_min_remaining(
+                                &symbol,
+                                self.config.min_time_remaining_secs as i64,
+                            )
+                            .await;
 
-                        if let Some(event) = ev {
-                            refreshed_events.insert(symbol, event);
+                        events.retain(|e| {
+                            e.time_remaining().num_seconds()
+                                <= self.config.max_time_remaining_secs as i64
+                        });
+                        events.sort_by_key(|e| e.time_remaining().num_seconds());
+                        if !self.config.prefer_close_to_end {
+                            events.reverse();
+                        }
+                        if !events.is_empty() {
+                            refreshed_events.insert(symbol, events);
                         }
                     }
 
                     active_events = refreshed_events;
 
                     let mut desired_tokens: HashSet<String> = HashSet::new();
-                    for event in active_events.values() {
-                        desired_tokens.insert(event.up_token_id.clone());
-                        desired_tokens.insert(event.down_token_id.clone());
+                    for events in active_events.values() {
+                        for event in events {
+                            desired_tokens.insert(event.up_token_id.clone());
+                            desired_tokens.insert(event.down_token_id.clone());
+                        }
                     }
 
                     if desired_tokens != subscribed_tokens {
-                        for event in active_events.values() {
-                            self.pm_ws
-                                .register_tokens(&event.up_token_id, &event.down_token_id)
-                                .await;
+                        for events in active_events.values() {
+                            for event in events {
+                                self.pm_ws
+                                    .register_tokens(&event.up_token_id, &event.down_token_id)
+                                    .await;
+                            }
                         }
 
                         self.pm_ws.request_resubscribe();
@@ -282,32 +302,15 @@ impl TradingAgent for CryptoTradingAgent {
                         continue;
                     }
 
-                    // Find the active UP/DOWN event for this symbol
-                    let event = match active_events.get(&update.symbol) {
-                        Some(e) => e,
+                    // Find active UP/DOWN events for this symbol (5m/15m can both be present).
+                    let events = match active_events.get(&update.symbol) {
+                        Some(e) if !e.is_empty() => e.clone(),
                         None => {
                             debug!(agent = self.config.agent_id, symbol = %update.symbol, "no active event yet");
                             continue;
                         }
-                    };
-
-                    // Get PM quotes for UP/DOWN token IDs
-                    let quote_cache = self.pm_ws.quote_cache();
-                    let up = quote_cache.get(&event.up_token_id);
-                    let down = quote_cache.get(&event.down_token_id);
-                    let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
-                        (Some(uq), Some(dq)) => (
-                            uq.best_bid.unwrap_or(Decimal::ZERO),
-                            uq.best_ask.unwrap_or(Decimal::ZERO),
-                            dq.best_bid.unwrap_or(Decimal::ZERO),
-                            dq.best_ask.unwrap_or(Decimal::ZERO),
-                        ),
                         _ => continue,
                     };
-
-                    if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
-                        continue;
-                    }
 
                     // Check momentum from binance price cache
                     let spot_cache = self.binance_ws.price_cache();
@@ -325,18 +328,6 @@ impl TradingAgent for CryptoTradingAgent {
                         .await
                         .unwrap_or(Decimal::ZERO);
 
-                    // Signal detection: sum_of_asks < threshold
-                    let sum_of_asks = up_ask + down_ask;
-                    if sum_of_asks >= self.config.sum_threshold {
-                        continue;
-                    }
-
-                    // Allow at most one entry per event slug to avoid repeated trades on
-                    // the same 5m/15m contract after a fast TP/SL exit.
-                    if should_skip_entry(&event.slug, &positions, &traded_events) {
-                        continue;
-                    }
-
                     // Check momentum threshold
                     let mom_ok = momentum
                         .map(|m| m.abs() >= Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)))
@@ -346,89 +337,199 @@ impl TradingAgent for CryptoTradingAgent {
                         continue;
                     }
 
-                    // Determine side from momentum direction
                     let side = if momentum.map(|m| m > Decimal::ZERO).unwrap_or(true) {
                         Side::Up
                     } else {
                         Side::Down
                     };
-
-                    let (token_id, limit_price) = match side {
-                        Side::Up => (event.up_token_id.clone(), up_ask),
-                        Side::Down => (event.down_token_id.clone(), down_ask),
-                    };
-
                     let momentum_1s = momentum.unwrap_or(Decimal::ZERO);
-                    let fair_value = Self::estimate_fair_value(momentum_1s);
-                    let signal_edge = fair_value - limit_price;
-                    let confidence = Self::signal_confidence(
-                        sum_of_asks,
-                        self.config.sum_threshold,
-                        momentum_1s,
-                        short_momentum,
-                        long_momentum,
-                        Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)),
-                    );
+                    let quote_cache = self.pm_ws.quote_cache();
+                    let mut flipped_slugs: Vec<String> = Vec::new();
 
-                    let intent = OrderIntent::new(
-                        &self.config.agent_id,
-                        Domain::Crypto,
-                        event.slug.as_str(),
-                        &token_id,
-                        side,
-                        true,
-                        self.config.default_shares,
-                        limit_price,
-                    )
-                    .with_priority(OrderPriority::Normal)
-                    .with_metadata("strategy", "crypto_momentum")
-                    .with_metadata("coin", &coin)
-                    .with_metadata("condition_id", &event.condition_id)
-                    .with_metadata("event_end_time", &event.end_time.to_rfc3339())
-                    .with_metadata("sum_of_asks", &sum_of_asks.to_string())
-                    .with_metadata("event_title", &event.title)
-                    .with_metadata("signal_type", "crypto_momentum_entry")
-                    .with_metadata("signal_confidence", &confidence.to_string())
-                    .with_metadata("signal_momentum_value", &momentum_1s.to_string())
-                    .with_metadata("signal_short_ma", &short_momentum.to_string())
-                    .with_metadata("signal_long_ma", &long_momentum.to_string())
-                    .with_metadata("signal_rolling_volatility", &rolling_volatility.to_string())
-                    .with_metadata("signal_fair_value", &fair_value.to_string())
-                    .with_metadata("signal_market_price", &limit_price.to_string())
-                    .with_metadata("signal_edge", &signal_edge.to_string())
-                    .with_metadata("config_hash", &config_hash);
+                    // Binary options default: exit on signal flip instead of TP/SL.
+                    for (slug, pos) in &positions {
+                        if pos.symbol != update.symbol || pos.side == side {
+                            continue;
+                        }
 
-                    info!(
-                        agent = self.config.agent_id,
-                        slug = %event.slug,
-                        %sum_of_asks,
-                        %side,
-                        %limit_price,
-                        "signal detected, submitting order"
-                    );
+                        let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                        if held_secs < self.config.min_hold_secs as i64 {
+                            continue;
+                        }
 
-                    if let Err(e) = ctx.submit_order(intent).await {
-                        warn!(agent = self.config.agent_id, error = %e, "failed to submit order");
-                        continue;
+                        let Some(best_bid) = quote_cache.get(&pos.token_id).and_then(|q| q.best_bid) else {
+                            continue;
+                        };
+                        if best_bid <= Decimal::ZERO {
+                            continue;
+                        }
+
+                        let intent = OrderIntent::new(
+                            &self.config.agent_id,
+                            Domain::Crypto,
+                            &pos.market_slug,
+                            &pos.token_id,
+                            pos.side,
+                            false,
+                            pos.shares,
+                            best_bid,
+                        )
+                        .with_priority(OrderPriority::High)
+                        .with_metadata("strategy", "crypto_momentum")
+                        .with_metadata("signal_type", "crypto_momentum_exit")
+                        .with_metadata("coin", &pos.symbol.replace("USDT", ""))
+                        .with_metadata("symbol", &pos.symbol)
+                        .with_metadata("series_id", &pos.series_id)
+                        .with_metadata("event_series_id", &pos.series_id)
+                        .with_metadata("horizon", &pos.horizon)
+                        .with_metadata("exit_reason", "signal_flip")
+                        .with_metadata("entry_price", &pos.entry_price.to_string())
+                        .with_metadata("exit_price", &best_bid.to_string())
+                        .with_metadata("held_secs", &held_secs.to_string())
+                        .with_metadata("signal_momentum_value", &momentum_1s.to_string())
+                        .with_metadata("config_hash", &config_hash);
+
+                        match ctx.submit_order(intent).await {
+                            Ok(()) => {
+                                info!(
+                                    agent = self.config.agent_id,
+                                    slug = %slug,
+                                    old_side = %pos.side,
+                                    new_side = %side,
+                                    held_secs,
+                                    "signal flip detected, submitting sell order"
+                                );
+                                flipped_slugs.push(slug.clone());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    agent = self.config.agent_id,
+                                    slug = %slug,
+                                    error = %e,
+                                    "failed to submit signal-flip exit order"
+                                );
+                            }
+                        }
                     }
 
-                    // Track position locally
-                    let now = Utc::now();
-                    traded_events.insert(event.slug.clone(), now);
-                    positions.insert(event.slug.clone(), TrackedPosition {
-                        market_slug: event.slug.clone(),
-                        symbol: update.symbol.clone(),
-                        token_id,
-                        side,
-                        shares: self.config.default_shares,
-                        entry_price: limit_price,
-                        entry_time: now,
-                        is_hedged: false,
-                    });
+                    if !flipped_slugs.is_empty() {
+                        for slug in flipped_slugs {
+                            positions.remove(&slug);
+                        }
+                        total_exposure = positions
+                            .values()
+                            .map(|p| p.entry_price * Decimal::from(p.shares))
+                            .sum();
+                    }
 
-                    total_exposure = positions.values()
-                        .map(|p| p.entry_price * Decimal::from(p.shares))
-                        .sum();
+                    for event in events {
+                        if should_skip_entry(&event.slug, &positions, &traded_events) {
+                            continue;
+                        }
+
+                        let up = quote_cache.get(&event.up_token_id);
+                        let down = quote_cache.get(&event.down_token_id);
+                        let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
+                            (Some(uq), Some(dq)) => (
+                                uq.best_bid.unwrap_or(Decimal::ZERO),
+                                uq.best_ask.unwrap_or(Decimal::ZERO),
+                                dq.best_bid.unwrap_or(Decimal::ZERO),
+                                dq.best_ask.unwrap_or(Decimal::ZERO),
+                            ),
+                            _ => continue,
+                        };
+
+                        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+                            continue;
+                        }
+
+                        let sum_of_asks = up_ask + down_ask;
+                        if sum_of_asks >= self.config.sum_threshold {
+                            continue;
+                        }
+
+                        let (token_id, limit_price) = match side {
+                            Side::Up => (event.up_token_id.clone(), up_ask),
+                            Side::Down => (event.down_token_id.clone(), down_ask),
+                        };
+
+                        let fair_value = Self::estimate_fair_value(momentum_1s);
+                        let signal_edge = fair_value - limit_price;
+                        let confidence = Self::signal_confidence(
+                            sum_of_asks,
+                            self.config.sum_threshold,
+                            momentum_1s,
+                            short_momentum,
+                            long_momentum,
+                            Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)),
+                        );
+
+                        let intent = OrderIntent::new(
+                            &self.config.agent_id,
+                            Domain::Crypto,
+                            event.slug.as_str(),
+                            &token_id,
+                            side,
+                            true,
+                            self.config.default_shares,
+                            limit_price,
+                        )
+                        .with_priority(OrderPriority::Normal)
+                        .with_metadata("strategy", "crypto_momentum")
+                        .with_metadata("coin", &coin)
+                        .with_metadata("condition_id", &event.condition_id)
+                        .with_metadata("series_id", &event.series_id)
+                        .with_metadata("event_series_id", &event.series_id)
+                        .with_metadata("horizon", &event.horizon)
+                        .with_metadata("event_end_time", &event.end_time.to_rfc3339())
+                        .with_metadata("sum_of_asks", &sum_of_asks.to_string())
+                        .with_metadata("event_title", &event.title)
+                        .with_metadata("signal_type", "crypto_momentum_entry")
+                        .with_metadata("signal_confidence", &confidence.to_string())
+                        .with_metadata("signal_momentum_value", &momentum_1s.to_string())
+                        .with_metadata("signal_short_ma", &short_momentum.to_string())
+                        .with_metadata("signal_long_ma", &long_momentum.to_string())
+                        .with_metadata("signal_rolling_volatility", &rolling_volatility.to_string())
+                        .with_metadata("signal_fair_value", &fair_value.to_string())
+                        .with_metadata("signal_market_price", &limit_price.to_string())
+                        .with_metadata("signal_edge", &signal_edge.to_string())
+                        .with_metadata("config_hash", &config_hash);
+
+                        info!(
+                            agent = self.config.agent_id,
+                            slug = %event.slug,
+                            horizon = %event.horizon,
+                            %sum_of_asks,
+                            %side,
+                            %limit_price,
+                            "signal detected, submitting order"
+                        );
+
+                        if let Err(e) = ctx.submit_order(intent).await {
+                            warn!(agent = self.config.agent_id, error = %e, "failed to submit order");
+                            continue;
+                        }
+
+                        // Track position locally
+                        let now = Utc::now();
+                        traded_events.insert(event.slug.clone(), now);
+                        positions.insert(event.slug.clone(), TrackedPosition {
+                            market_slug: event.slug.clone(),
+                            symbol: update.symbol.clone(),
+                            horizon: event.horizon.clone(),
+                            series_id: event.series_id.clone(),
+                            token_id,
+                            side,
+                            shares: self.config.default_shares,
+                            entry_price: limit_price,
+                            entry_time: now,
+                            is_hedged: false,
+                        });
+
+                        total_exposure = positions.values()
+                            .map(|p| p.entry_price * Decimal::from(p.shares))
+                            .sum();
+                    }
                 }
 
                 // --- Polymarket quote updates ---
@@ -449,6 +550,10 @@ impl TradingAgent for CryptoTradingAgent {
                         continue;
                     }
 
+                    if !self.config.enable_price_exits {
+                        continue;
+                    }
+
                     let Some(best_bid) = update.quote.best_bid else {
                         continue;
                     };
@@ -466,6 +571,11 @@ impl TradingAgent for CryptoTradingAgent {
                     };
 
                     if pos.entry_price <= Decimal::ZERO {
+                        continue;
+                    }
+
+                    let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                    if held_secs < self.config.min_hold_secs as i64 {
                         continue;
                     }
 
@@ -495,11 +605,16 @@ impl TradingAgent for CryptoTradingAgent {
                     .with_priority(priority)
                     .with_metadata("strategy", "crypto_momentum")
                     .with_metadata("signal_type", "crypto_momentum_exit")
+                    .with_metadata("coin", &pos.symbol.replace("USDT", ""))
                     .with_metadata("symbol", &pos.symbol)
+                    .with_metadata("series_id", &pos.series_id)
+                    .with_metadata("event_series_id", &pos.series_id)
+                    .with_metadata("horizon", &pos.horizon)
                     .with_metadata("exit_reason", exit_reason)
                     .with_metadata("entry_price", &pos.entry_price.to_string())
                     .with_metadata("exit_price", &best_bid.to_string())
                     .with_metadata("pnl_pct", &pnl_pct.to_string())
+                    .with_metadata("held_secs", &held_secs.to_string())
                     .with_metadata("config_hash", &config_hash);
 
                     match ctx.submit_order(intent).await {
@@ -563,7 +678,11 @@ impl TradingAgent for CryptoTradingAgent {
                                 .with_priority(OrderPriority::Critical)
                                 .with_metadata("strategy", "crypto_momentum")
                                 .with_metadata("signal_type", "crypto_momentum_exit")
+                                .with_metadata("coin", &pos.symbol.replace("USDT", ""))
                                 .with_metadata("symbol", &pos.symbol)
+                                .with_metadata("series_id", &pos.series_id)
+                                .with_metadata("event_series_id", &pos.series_id)
+                                .with_metadata("horizon", &pos.horizon)
                                 .with_metadata("exit_reason", "force_close")
                                 .with_metadata("entry_price", &pos.entry_price.to_string())
                                 .with_metadata("config_hash", &config_hash);
@@ -590,6 +709,7 @@ impl TradingAgent for CryptoTradingAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
+                                metrics: HashMap::new(),
                                 last_heartbeat: Utc::now(),
                                 error_message: None,
                             };
@@ -636,8 +756,10 @@ mod tests {
     fn test_config_defaults() {
         let cfg = CryptoTradingConfig::default();
         assert_eq!(cfg.agent_id, "crypto");
-        assert_eq!(cfg.coins.len(), 3);
+        assert_eq!(cfg.coins.len(), 4);
         assert_eq!(cfg.sum_threshold, dec!(0.96));
+        assert!(!cfg.enable_price_exits);
+        assert_eq!(cfg.min_hold_secs, 20);
     }
 
     #[test]

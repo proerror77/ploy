@@ -1,5 +1,5 @@
 //! CryptoLobMlAgent — pull-based agent that uses Binance LOB features to estimate
-//! a short-horizon UP probability (BTC 5m focus by default) and trade Polymarket
+//! a short-horizon UP probability across crypto 5m/15m markets and trade Polymarket
 //! UP/DOWN markets accordingly.
 //!
 //! This is intentionally lightweight: it provides a deployable baseline for
@@ -84,6 +84,10 @@ pub struct CryptoLobMlConfig {
     pub default_shares: u64,
     pub take_profit: Decimal,
     pub stop_loss: Decimal,
+    /// Optional mark-to-market TP/SL exits (disabled by default for binary options)
+    pub enable_price_exits: bool,
+    /// Minimum hold time before TP/SL exits are allowed (seconds)
+    pub min_hold_secs: u64,
 
     /// Minimum expected-value edge required to enter.
     /// UP edge = p_up - up_ask; DOWN edge = (1 - p_up) - down_ask.
@@ -125,15 +129,17 @@ impl Default for CryptoLobMlConfig {
         Self {
             agent_id: "crypto_lob_ml".into(),
             name: "Crypto LOB ML".into(),
-            coins: vec!["BTC".into()],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             event_refresh_secs: 15,
-            // By default, focus on 5m markets and enter early (predictive mode).
-            min_time_remaining_secs: 240,
-            max_time_remaining_secs: 300,
-            prefer_close_to_end: false,
+            // Cover both 5m + 15m windows by default.
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 900,
+            prefer_close_to_end: true,
             default_shares: 50,
             take_profit: dec!(0.02),
             stop_loss: dec!(0.05),
+            enable_price_exits: false,
+            min_hold_secs: 20,
             min_edge: dec!(0.02),
             max_entry_price: dec!(0.70),
             cooldown_secs: 30,
@@ -152,6 +158,8 @@ impl Default for CryptoLobMlConfig {
 struct TrackedPosition {
     market_slug: String,
     symbol: String,
+    horizon: String,
+    series_id: String,
     token_id: String,
     side: Side,
     shares: u64,
@@ -464,7 +472,7 @@ impl TradingAgent for CryptoLobMlAgent {
 
         let mut status = AgentStatus::Running;
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
-        let mut active_events: HashMap<String, EventInfo> = HashMap::new(); // symbol -> event
+        let mut active_events: HashMap<String, Vec<EventInfo>> = HashMap::new(); // symbol -> events
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -495,18 +503,26 @@ impl TradingAgent for CryptoLobMlAgent {
                     }
                     prune_stale_traded_events(&mut traded_events, Utc::now());
 
-                    let mut refreshed_events: HashMap<String, EventInfo> = HashMap::new();
+                    let mut refreshed_events: HashMap<String, Vec<EventInfo>> = HashMap::new();
                     for coin in &self.config.coins {
                         let symbol = format!("{}USDT", coin.to_uppercase());
-                        let ev = self.event_matcher.find_event_with_timing(
-                            &symbol,
-                            self.config.min_time_remaining_secs,
-                            self.config.max_time_remaining_secs as i64,
-                            self.config.prefer_close_to_end,
-                        ).await;
-
-                        if let Some(event) = ev {
-                            refreshed_events.insert(symbol, event);
+                        let mut events = self
+                            .event_matcher
+                            .get_events_with_min_remaining(
+                                &symbol,
+                                self.config.min_time_remaining_secs as i64,
+                            )
+                            .await;
+                        events.retain(|e| {
+                            e.time_remaining().num_seconds()
+                                <= self.config.max_time_remaining_secs as i64
+                        });
+                        events.sort_by_key(|e| e.time_remaining().num_seconds());
+                        if !self.config.prefer_close_to_end {
+                            events.reverse();
+                        }
+                        if !events.is_empty() {
+                            refreshed_events.insert(symbol, events);
                         }
                     }
 
@@ -514,16 +530,20 @@ impl TradingAgent for CryptoLobMlAgent {
 
                     // Ensure we are subscribed to the latest token set.
                     let mut desired_tokens: HashSet<String> = HashSet::new();
-                    for event in active_events.values() {
-                        desired_tokens.insert(event.up_token_id.clone());
-                        desired_tokens.insert(event.down_token_id.clone());
+                    for events in active_events.values() {
+                        for event in events {
+                            desired_tokens.insert(event.up_token_id.clone());
+                            desired_tokens.insert(event.down_token_id.clone());
+                        }
                     }
 
                     if desired_tokens != subscribed_tokens {
-                        for event in active_events.values() {
-                            self.pm_ws
-                                .register_tokens(&event.up_token_id, &event.down_token_id)
-                                .await;
+                        for events in active_events.values() {
+                            for event in events {
+                                self.pm_ws
+                                    .register_tokens(&event.up_token_id, &event.down_token_id)
+                                    .await;
+                            }
                         }
                         self.pm_ws.request_resubscribe();
                         info!(
@@ -558,42 +578,14 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    let event = match active_events.get(&update.symbol) {
-                        Some(e) => e,
+                    let events = match active_events.get(&update.symbol) {
+                        Some(e) if !e.is_empty() => e.clone(),
                         None => {
                             debug!(agent = self.config.agent_id, symbol = %update.symbol, "no active event yet");
                             continue;
                         }
-                    };
-
-                    if should_skip_entry(
-                        &event.slug,
-                        &update.symbol,
-                        Utc::now(),
-                        &positions,
-                        &traded_events,
-                        &last_trade_by_symbol,
-                        self.config.cooldown_secs,
-                    ) {
-                        continue;
-                    }
-
-                    // Pull latest PM quotes.
-                    let quote_cache = self.pm_ws.quote_cache();
-                    let up = quote_cache.get(&event.up_token_id);
-                    let down = quote_cache.get(&event.down_token_id);
-                    let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
-                        (Some(uq), Some(dq)) => (
-                            uq.best_bid.unwrap_or(Decimal::ZERO),
-                            uq.best_ask.unwrap_or(Decimal::ZERO),
-                            dq.best_bid.unwrap_or(Decimal::ZERO),
-                            dq.best_ask.unwrap_or(Decimal::ZERO),
-                        ),
                         _ => continue,
                     };
-                    if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
-                        continue;
-                    }
 
                     // Pull LOB snapshot (feature vector).
                     let lob = match self.lob_cache.get_snapshot(&update.symbol).await {
@@ -612,22 +604,6 @@ impl TradingAgent for CryptoLobMlAgent {
 
                     let (p_up, model_type_used) = self.estimate_p_up(&lob, momentum_1s, momentum_5s);
                     let p_up_dec = Decimal::from_f64_retain(p_up).unwrap_or(dec!(0.5));
-
-                    let up_edge = p_up_dec - up_ask;
-                    let down_edge = (Decimal::ONE - p_up_dec) - down_ask;
-
-                    let (side, token_id, limit_price, edge, confidence) = if up_edge >= down_edge {
-                        (Side::Up, event.up_token_id.clone(), up_ask, up_edge, p_up_dec)
-                    } else {
-                        (Side::Down, event.down_token_id.clone(), down_ask, down_edge, Decimal::ONE - p_up_dec)
-                    };
-
-                    if edge < self.config.min_edge {
-                        continue;
-                    }
-                    if limit_price > self.config.max_entry_price {
-                        continue;
-                    }
 
                     let (obi_1, obi_2, obi_3, obi_20) = (
                         self.lob_cache
@@ -650,81 +626,200 @@ impl TradingAgent for CryptoLobMlAgent {
                     let obi_micro = obi_1 - lob.obi_5;
                     let obi_slope = lob.obi_5 - obi_20;
 
-                    let intent = OrderIntent::new(
-                        &self.config.agent_id,
-                        Domain::Crypto,
-                        event.slug.as_str(),
-                        &token_id,
-                        side,
-                        true,
-                        self.config.default_shares.max(1),
-                        limit_price,
-                    )
-                    .with_priority(OrderPriority::Normal)
-                    .with_metadata("strategy", "crypto_lob_ml")
-                    .with_metadata("signal_type", "crypto_lob_ml_entry")
-                    .with_metadata("coin", &coin)
-                    .with_metadata("symbol", &update.symbol)
-                    .with_metadata("condition_id", &event.condition_id)
-                    .with_metadata("event_end_time", &event.end_time.to_rfc3339())
-                    .with_metadata("event_title", &event.title)
-                    .with_metadata("p_up", &format!("{p_up:.6}"))
-                    .with_metadata("model_type", model_type_used)
-                    .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
-                    .with_metadata("signal_edge", &edge.to_string())
-                    .with_metadata("signal_confidence", &confidence.to_string())
-                    .with_metadata("pm_up_ask", &up_ask.to_string())
-                    .with_metadata("pm_down_ask", &down_ask.to_string())
-                    .with_metadata("lob_best_bid", &lob.best_bid.to_string())
-                    .with_metadata("lob_best_ask", &lob.best_ask.to_string())
-                    .with_metadata("lob_mid_price", &lob.mid_price.to_string())
-                    .with_metadata("lob_spread_bps", &lob.spread_bps.to_string())
-                    .with_metadata("lob_obi_5", &lob.obi_5.to_string())
-                    .with_metadata("lob_obi_10", &lob.obi_10.to_string())
-                    .with_metadata("lob_obi_1", &obi_1.to_string())
-                    .with_metadata("lob_obi_2", &obi_2.to_string())
-                    .with_metadata("lob_obi_3", &obi_3.to_string())
-                    .with_metadata("lob_obi_20", &obi_20.to_string())
-                    .with_metadata("lob_obi_micro", &obi_micro.to_string())
-                    .with_metadata("lob_obi_slope", &obi_slope.to_string())
-                    .with_metadata("lob_bid_volume_5", &lob.bid_volume_5.to_string())
-                    .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
-                    .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
-                    .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
-                    .with_metadata("config_hash", &config_hash);
+                    let quote_cache = self.pm_ws.quote_cache();
+                    for event in events {
+                        let up = quote_cache.get(&event.up_token_id);
+                        let down = quote_cache.get(&event.down_token_id);
+                        let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
+                            (Some(uq), Some(dq)) => (
+                                uq.best_bid.unwrap_or(Decimal::ZERO),
+                                uq.best_ask.unwrap_or(Decimal::ZERO),
+                                dq.best_bid.unwrap_or(Decimal::ZERO),
+                                dq.best_ask.unwrap_or(Decimal::ZERO),
+                            ),
+                            _ => continue,
+                        };
+                        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+                            continue;
+                        }
 
-                    info!(
-                        agent = self.config.agent_id,
-                        slug = %event.slug,
-                        %side,
-                        %limit_price,
-                        %edge,
-                        p_up = %p_up,
-                        model = model_type_used,
-                        "lob-ml signal detected, submitting order"
-                    );
+                        let up_edge = p_up_dec - up_ask;
+                        let down_edge = (Decimal::ONE - p_up_dec) - down_ask;
+                        let (side, token_id, limit_price, edge, confidence) = if up_edge >= down_edge {
+                            (Side::Up, event.up_token_id.clone(), up_ask, up_edge, p_up_dec)
+                        } else {
+                            (Side::Down, event.down_token_id.clone(), down_ask, down_edge, Decimal::ONE - p_up_dec)
+                        };
 
-                    if let Err(e) = ctx.submit_order(intent).await {
-                        warn!(agent = self.config.agent_id, error = %e, "failed to submit order");
-                        continue;
+                        if edge < self.config.min_edge {
+                            continue;
+                        }
+                        if limit_price > self.config.max_entry_price {
+                            continue;
+                        }
+
+                        if let Some(pos) = positions.get(&event.slug).cloned() {
+                            if pos.side != side {
+                                let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                                if held_secs >= self.config.min_hold_secs as i64 {
+                                    let exit_price = quote_cache
+                                        .get(&pos.token_id)
+                                        .and_then(|q| q.best_bid)
+                                        .unwrap_or(Decimal::ZERO);
+
+                                    if exit_price > Decimal::ZERO {
+                                        let exit_intent = OrderIntent::new(
+                                            &self.config.agent_id,
+                                            Domain::Crypto,
+                                            &pos.market_slug,
+                                            &pos.token_id,
+                                            pos.side,
+                                            false,
+                                            pos.shares,
+                                            exit_price,
+                                        )
+                                        .with_priority(OrderPriority::High)
+                                        .with_metadata("strategy", "crypto_lob_ml")
+                                        .with_metadata("signal_type", "crypto_lob_ml_exit")
+                                        .with_metadata("coin", &pos.symbol.replace("USDT", ""))
+                                        .with_metadata("symbol", &pos.symbol)
+                                        .with_metadata("series_id", &pos.series_id)
+                                        .with_metadata("event_series_id", &pos.series_id)
+                                        .with_metadata("horizon", &pos.horizon)
+                                        .with_metadata("exit_reason", "signal_flip")
+                                        .with_metadata("entry_price", &pos.entry_price.to_string())
+                                        .with_metadata("exit_price", &exit_price.to_string())
+                                        .with_metadata("held_secs", &held_secs.to_string())
+                                        .with_metadata("p_up", &format!("{p_up:.6}"))
+                                        .with_metadata("signal_edge", &edge.to_string())
+                                        .with_metadata("config_hash", &config_hash);
+
+                                        match ctx.submit_order(exit_intent).await {
+                                            Ok(()) => {
+                                                info!(
+                                                    agent = self.config.agent_id,
+                                                    slug = %event.slug,
+                                                    old_side = %pos.side,
+                                                    new_side = %side,
+                                                    held_secs,
+                                                    p_up = %p_up,
+                                                    "signal flip detected, submitting sell order"
+                                                );
+                                                positions.remove(&event.slug);
+                                                total_exposure = positions
+                                                    .values()
+                                                    .map(|p| p.entry_price * Decimal::from(p.shares))
+                                                    .sum();
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    agent = self.config.agent_id,
+                                                    slug = %event.slug,
+                                                    error = %e,
+                                                    "failed to submit signal-flip exit order"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        if should_skip_entry(
+                            &event.slug,
+                            &update.symbol,
+                            Utc::now(),
+                            &positions,
+                            &traded_events,
+                            &last_trade_by_symbol,
+                            self.config.cooldown_secs,
+                        ) {
+                            continue;
+                        }
+
+                        let intent = OrderIntent::new(
+                            &self.config.agent_id,
+                            Domain::Crypto,
+                            event.slug.as_str(),
+                            &token_id,
+                            side,
+                            true,
+                            self.config.default_shares.max(1),
+                            limit_price,
+                        )
+                        .with_priority(OrderPriority::Normal)
+                        .with_metadata("strategy", "crypto_lob_ml")
+                        .with_metadata("signal_type", "crypto_lob_ml_entry")
+                        .with_metadata("coin", &coin)
+                        .with_metadata("symbol", &update.symbol)
+                        .with_metadata("condition_id", &event.condition_id)
+                        .with_metadata("series_id", &event.series_id)
+                        .with_metadata("event_series_id", &event.series_id)
+                        .with_metadata("horizon", &event.horizon)
+                        .with_metadata("event_end_time", &event.end_time.to_rfc3339())
+                        .with_metadata("event_title", &event.title)
+                        .with_metadata("p_up", &format!("{p_up:.6}"))
+                        .with_metadata("model_type", model_type_used)
+                        .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
+                        .with_metadata("signal_edge", &edge.to_string())
+                        .with_metadata("signal_confidence", &confidence.to_string())
+                        .with_metadata("pm_up_ask", &up_ask.to_string())
+                        .with_metadata("pm_down_ask", &down_ask.to_string())
+                        .with_metadata("lob_best_bid", &lob.best_bid.to_string())
+                        .with_metadata("lob_best_ask", &lob.best_ask.to_string())
+                        .with_metadata("lob_mid_price", &lob.mid_price.to_string())
+                        .with_metadata("lob_spread_bps", &lob.spread_bps.to_string())
+                        .with_metadata("lob_obi_5", &lob.obi_5.to_string())
+                        .with_metadata("lob_obi_10", &lob.obi_10.to_string())
+                        .with_metadata("lob_obi_1", &obi_1.to_string())
+                        .with_metadata("lob_obi_2", &obi_2.to_string())
+                        .with_metadata("lob_obi_3", &obi_3.to_string())
+                        .with_metadata("lob_obi_20", &obi_20.to_string())
+                        .with_metadata("lob_obi_micro", &obi_micro.to_string())
+                        .with_metadata("lob_obi_slope", &obi_slope.to_string())
+                        .with_metadata("lob_bid_volume_5", &lob.bid_volume_5.to_string())
+                        .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
+                        .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
+                        .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
+                        .with_metadata("config_hash", &config_hash);
+
+                        info!(
+                            agent = self.config.agent_id,
+                            slug = %event.slug,
+                            horizon = %event.horizon,
+                            %side,
+                            %limit_price,
+                            %edge,
+                            p_up = %p_up,
+                            model = model_type_used,
+                            "lob-ml signal detected, submitting order"
+                        );
+
+                        if let Err(e) = ctx.submit_order(intent).await {
+                            warn!(agent = self.config.agent_id, error = %e, "failed to submit order");
+                            continue;
+                        }
+
+                        let now = Utc::now();
+                        last_trade_by_symbol.insert(update.symbol.clone(), now);
+                        traded_events.insert(event.slug.clone(), now);
+                        positions.insert(event.slug.clone(), TrackedPosition {
+                            market_slug: event.slug.clone(),
+                            symbol: update.symbol.clone(),
+                            horizon: event.horizon.clone(),
+                            series_id: event.series_id.clone(),
+                            token_id,
+                            side,
+                            shares: self.config.default_shares.max(1),
+                            entry_price: limit_price,
+                            entry_time: now,
+                        });
+
+                        total_exposure = positions.values()
+                            .map(|p| p.entry_price * Decimal::from(p.shares))
+                            .sum();
                     }
-
-                    let now = Utc::now();
-                    last_trade_by_symbol.insert(update.symbol.clone(), now);
-                    traded_events.insert(event.slug.clone(), now);
-                    positions.insert(event.slug.clone(), TrackedPosition {
-                        market_slug: event.slug.clone(),
-                        symbol: update.symbol.clone(),
-                        token_id,
-                        side,
-                        shares: self.config.default_shares.max(1),
-                        entry_price: limit_price,
-                        entry_time: now,
-                    });
-
-                    total_exposure = positions.values()
-                        .map(|p| p.entry_price * Decimal::from(p.shares))
-                        .sum();
                 }
 
                 // --- Polymarket quote updates (exit decisions) ---
@@ -745,6 +840,10 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
+                    if !self.config.enable_price_exits {
+                        continue;
+                    }
+
                     let Some(best_bid) = update.quote.best_bid else {
                         continue;
                     };
@@ -762,6 +861,11 @@ impl TradingAgent for CryptoLobMlAgent {
                     };
 
                     if pos.entry_price <= Decimal::ZERO {
+                        continue;
+                    }
+
+                    let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                    if held_secs < self.config.min_hold_secs as i64 {
                         continue;
                     }
 
@@ -791,11 +895,16 @@ impl TradingAgent for CryptoLobMlAgent {
                     .with_priority(priority)
                     .with_metadata("strategy", "crypto_lob_ml")
                     .with_metadata("signal_type", "crypto_lob_ml_exit")
+                    .with_metadata("coin", &pos.symbol.replace("USDT", ""))
                     .with_metadata("symbol", &pos.symbol)
+                    .with_metadata("series_id", &pos.series_id)
+                    .with_metadata("event_series_id", &pos.series_id)
+                    .with_metadata("horizon", &pos.horizon)
                     .with_metadata("exit_reason", exit_reason)
                     .with_metadata("entry_price", &pos.entry_price.to_string())
                     .with_metadata("exit_price", &best_bid.to_string())
                     .with_metadata("pnl_pct", &pnl_pct.to_string())
+                    .with_metadata("held_secs", &held_secs.to_string())
                     .with_metadata("config_hash", &config_hash);
 
                     match ctx.submit_order(intent).await {
@@ -859,7 +968,11 @@ impl TradingAgent for CryptoLobMlAgent {
                                 .with_priority(OrderPriority::Critical)
                                 .with_metadata("strategy", "crypto_lob_ml")
                                 .with_metadata("signal_type", "crypto_lob_ml_exit")
+                                .with_metadata("coin", &pos.symbol.replace("USDT", ""))
                                 .with_metadata("symbol", &pos.symbol)
+                                .with_metadata("series_id", &pos.series_id)
+                                .with_metadata("event_series_id", &pos.series_id)
+                                .with_metadata("horizon", &pos.horizon)
                                 .with_metadata("exit_reason", "force_close")
                                 .with_metadata("entry_price", &pos.entry_price.to_string())
                                 .with_metadata("config_hash", &config_hash);
@@ -886,6 +999,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
+                                metrics: HashMap::new(),
                                 last_heartbeat: Utc::now(),
                                 error_message: None,
                             };
@@ -932,9 +1046,11 @@ mod tests {
     fn test_config_defaults() {
         let cfg = CryptoLobMlConfig::default();
         assert_eq!(cfg.agent_id, "crypto_lob_ml");
-        assert_eq!(cfg.coins, vec!["BTC".to_string()]);
-        assert_eq!(cfg.max_time_remaining_secs, 300);
-        assert!(!cfg.prefer_close_to_end);
+        assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
+        assert_eq!(cfg.max_time_remaining_secs, 900);
+        assert!(!cfg.enable_price_exits);
+        assert_eq!(cfg.min_hold_secs, 20);
+        assert!(cfg.prefer_close_to_end);
     }
 
     #[test]
@@ -994,6 +1110,8 @@ mod tests {
             TrackedPosition {
                 market_slug: "btc-updown-5m-2".to_string(),
                 symbol: "BTCUSDT".to_string(),
+                horizon: "5m".to_string(),
+                series_id: "10684".to_string(),
                 token_id: "token".to_string(),
                 side: Side::Up,
                 shares: 1,

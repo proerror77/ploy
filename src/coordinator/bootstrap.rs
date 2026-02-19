@@ -7,16 +7,18 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket};
 use crate::agent::PolymarketSportsClient;
 use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoRlPolicyAgent, CryptoRlPolicyConfig,
-    CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent, PoliticsTradingConfig,
-    SportsTradingAgent, SportsTradingConfig, TradingAgent,
+    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
+    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
+    TradingAgent,
 };
+#[cfg(feature = "rl")]
+use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
 use crate::domain::Side;
@@ -27,6 +29,9 @@ use crate::strategy::executor::OrderExecutor;
 use crate::strategy::momentum::EventMatcher;
 use chrono::Utc;
 use futures_util::StreamExt;
+use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
+use polymarket_client_sdk::data::types::MarketFilter as DataMarketFilter;
+use polymarket_client_sdk::data::Client as DataApiClient;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1326,48 +1331,6 @@ fn spawn_binance_lob_persistence(
     });
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DataApiTrade {
-    proxy_wallet: Option<String>,
-    side: String,
-    asset: String,
-    #[serde(rename = "conditionId")]
-    condition_id: String,
-    #[serde(deserialize_with = "deserialize_decimal")]
-    size: rust_decimal::Decimal,
-    #[serde(deserialize_with = "deserialize_decimal")]
-    price: rust_decimal::Decimal,
-    timestamp: i64,
-    transaction_hash: String,
-    title: Option<String>,
-    slug: Option<String>,
-    outcome: Option<String>,
-    outcome_index: Option<i32>,
-}
-
-fn deserialize_decimal<'de, D>(
-    deserializer: D,
-) -> std::result::Result<rust_decimal::Decimal, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize as _;
-    let value: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::String(s) => s
-            .parse::<rust_decimal::Decimal>()
-            .map_err(serde::de::Error::custom),
-        serde_json::Value::Number(n) => n
-            .to_string()
-            .parse::<rust_decimal::Decimal>()
-            .map_err(serde::de::Error::custom),
-        other => Err(serde::de::Error::custom(format!(
-            "invalid decimal value: {other:?}"
-        ))),
-    }
-}
-
 type InsertedTradeTickRow = (
     String,                // token_id
     String,                // side
@@ -1467,9 +1430,20 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-#[instrument(skip(http, pool, last_seen_by_market))]
+fn env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+#[instrument(skip(data_client, pool, last_seen_by_market))]
 async fn collect_trades_for_market(
-    http: &reqwest::Client,
+    data_client: &DataApiClient,
     pool: &PgPool,
     condition_id: &str,
     domain: &str,
@@ -1514,55 +1488,77 @@ async fn collect_trades_for_market(
     let target_min_ts = last_seen_ts.saturating_sub(overlap_secs.max(0));
 
     let mut max_ts_seen: i64 = last_seen_ts;
+    let page_limit_i32 = i32::try_from(page_limit).unwrap_or(1000);
 
     for page in 0..max_pages {
         let offset = page.saturating_mul(page_limit);
-
-        let resp = http
-            .get("https://data-api.polymarket.com/trades")
-            .query(&[
-                ("market", condition_id),
-                ("limit", &page_limit.to_string()),
-                ("offset", &offset.to_string()),
-            ])
-            .send()
-            .await;
-
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    condition_id,
-                    error = %e,
-                    "failed to fetch polymarket data-api trades"
-                );
-                return;
-            }
-        };
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            warn!(
+        if offset > 10_000 {
+            debug!(
                 condition_id,
-                status = %status,
-                body = %text,
-                "polymarket data-api trades request failed"
+                offset, "stopping data-api trades pagination at offset > 10000 (SDK bound)"
             );
-            return;
+            break;
         }
-
-        let trades: Vec<DataApiTrade> = match resp.json().await {
+        let offset_i32 = match i32::try_from(offset) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
                     condition_id,
                     error = %e,
-                    "failed to parse polymarket data-api trades response"
+                    offset,
+                    "failed to convert pagination offset for data-api trades"
                 );
                 return;
             }
         };
+
+        let req_builder = DataTradesRequest::builder()
+            .filter(DataMarketFilter::markets([condition_id.to_string()]));
+        let req_builder = match req_builder.limit(page_limit_i32) {
+            Ok(builder) => builder,
+            Err(e) => {
+                warn!(
+                    condition_id,
+                    error = %e,
+                    limit = page_limit_i32,
+                    "invalid data-api trades limit"
+                );
+                return;
+            }
+        };
+        let req_builder = match req_builder.offset(offset_i32) {
+            Ok(builder) => builder,
+            Err(e) => {
+                warn!(
+                    condition_id,
+                    error = %e,
+                    offset = offset_i32,
+                    "invalid data-api trades offset"
+                );
+                return;
+            }
+        };
+        let req = req_builder.build();
+
+        let trades =
+            match tokio::time::timeout(Duration::from_secs(15), data_client.trades(&req)).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    warn!(
+                        condition_id,
+                        error = %e,
+                        "failed to fetch polymarket data-api trades via SDK"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    warn!(
+                        condition_id,
+                        "timed out fetching polymarket data-api trades via SDK"
+                    );
+                    return;
+                }
+            };
 
         if trades.is_empty() {
             break;
@@ -1572,7 +1568,8 @@ async fn collect_trades_for_market(
         let mut max_ts_in_page: i64 = i64::MIN;
 
         // Prepare rows for insertion (filter to a time window to avoid spamming duplicates).
-        let mut rows: Vec<&DataApiTrade> = Vec::with_capacity(trades.len());
+        let mut rows: Vec<&polymarket_client_sdk::data::types::response::Trade> =
+            Vec::with_capacity(trades.len());
         for t in &trades {
             min_ts_in_page = min_ts_in_page.min(t.timestamp);
             max_ts_in_page = max_ts_in_page.max(t.timestamp);
@@ -1609,17 +1606,19 @@ async fn collect_trades_for_market(
 
             qb.push_values(rows.into_iter(), |mut b, t| {
                 let trade_ts = Utc.timestamp_opt(t.timestamp, 0).single();
+                let side = t.side.to_string();
+                let proxy_wallet = format!("{:#x}", t.proxy_wallet);
 
                 b.push_bind(domain)
                     .push_bind(&t.condition_id)
                     .push_bind(&t.asset)
-                    .push_bind(&t.side)
+                    .push_bind(side)
                     .push_bind(t.size)
                     .push_bind(t.price)
                     .push_bind(trade_ts.unwrap_or_else(Utc::now))
                     .push_bind(t.timestamp)
                     .push_bind(&t.transaction_hash)
-                    .push_bind(&t.proxy_wallet)
+                    .push_bind(proxy_wallet)
                     .push_bind(&t.title)
                     .push_bind(&t.slug)
                     .push_bind(&t.outcome)
@@ -1948,21 +1947,7 @@ fn spawn_polymarket_trade_persistence(
             return;
         }
 
-        let http = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent("Mozilla/5.0 (ploy)")
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(
-                    agent = agent_label,
-                    error = %e,
-                    "failed to build reqwest client for polymarket data-api; trade persistence disabled"
-                );
-                return;
-            }
-        };
+        let data_client = Arc::new(DataApiClient::default());
 
         let poll_secs = env_u64("PM_TRADES_POLL_SECS", 10).max(1);
         let page_limit = env_usize("PM_TRADES_PAGE_LIMIT", 200).clamp(1, 1000);
@@ -2039,7 +2024,7 @@ fn spawn_polymarket_trade_persistence(
 
             let domain_str = domain.to_string();
             let pool_ref = pool.clone();
-            let http_ref = http.clone();
+            let data_client_ref = data_client.clone();
             let last_seen = last_seen_by_market.clone();
             let alert_cfg_ref = alert_cfg.clone();
             let alert_state_ref = alert_state.clone();
@@ -2047,14 +2032,14 @@ fn spawn_polymarket_trade_persistence(
             futures_util::stream::iter(markets)
                 .for_each_concurrent(max_concurrency, |condition_id| {
                     let pool = pool_ref.clone();
-                    let http = http_ref.clone();
+                    let data_client = data_client_ref.clone();
                     let domain = domain_str.clone();
                     let last_seen = last_seen.clone();
                     let alert_cfg = alert_cfg_ref.clone();
                     let alert_state = alert_state_ref.clone();
                     async move {
                         collect_trades_for_market(
-                            &http,
+                            data_client.as_ref(),
                             &pool,
                             &condition_id,
                             &domain,
@@ -2090,21 +2075,7 @@ fn spawn_polymarket_trade_persistence_from_collector_targets(
             return;
         }
 
-        let http = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent("Mozilla/5.0 (ploy)")
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(
-                    agent = agent_label,
-                    error = %e,
-                    "failed to build reqwest client for polymarket data-api; trade persistence disabled"
-                );
-                return;
-            }
-        };
+        let data_client = Arc::new(DataApiClient::default());
 
         let poll_secs = env_u64("PM_TRADES_POLL_SECS", 10).max(1);
         let page_limit = env_usize("PM_TRADES_PAGE_LIMIT", 200).clamp(1, 1000);
@@ -2180,7 +2151,7 @@ fn spawn_polymarket_trade_persistence_from_collector_targets(
 
             let domain_str = domain.to_string();
             let pool_ref = pool.clone();
-            let http_ref = http.clone();
+            let data_client_ref = data_client.clone();
             let last_seen = last_seen_by_market.clone();
             let alert_cfg_ref = alert_cfg.clone();
             let alert_state_ref = alert_state.clone();
@@ -2188,14 +2159,14 @@ fn spawn_polymarket_trade_persistence_from_collector_targets(
             futures_util::stream::iter(markets)
                 .for_each_concurrent(max_concurrency, |condition_id| {
                     let pool = pool_ref.clone();
-                    let http = http_ref.clone();
+                    let data_client = data_client_ref.clone();
                     let domain = domain_str.clone();
                     let last_seen = last_seen.clone();
                     let alert_cfg = alert_cfg_ref.clone();
                     let alert_state = alert_state_ref.clone();
                     async move {
                         collect_trades_for_market(
-                            &http,
+                            data_client.as_ref(),
                             &pool,
                             &condition_id,
                             &domain,
@@ -2279,6 +2250,12 @@ fn env_decimal(name: &str, default: rust_decimal::Decimal) -> rust_decimal::Deci
         .ok()
         .and_then(|v| v.parse::<rust_decimal::Decimal>().ok())
         .unwrap_or(default)
+}
+
+fn env_decimal_opt(name: &str) -> Option<rust_decimal::Decimal> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<rust_decimal::Decimal>().ok())
 }
 
 fn spawn_clob_orderbook_persistence(
@@ -2402,6 +2379,7 @@ pub struct PlatformBootstrapConfig {
     #[serde(default)]
     pub enable_crypto_lob_ml: bool,
     #[serde(default)]
+    #[cfg(feature = "rl")]
     pub enable_crypto_rl_policy: bool,
     pub enable_sports: bool,
     pub enable_politics: bool,
@@ -2409,6 +2387,7 @@ pub struct PlatformBootstrapConfig {
     pub crypto: CryptoTradingConfig,
     pub crypto_lob_ml: CryptoLobMlConfig,
     #[serde(default)]
+    #[cfg(feature = "rl")]
     pub crypto_rl_policy: CryptoRlPolicyConfig,
     pub sports: SportsTradingConfig,
     pub politics: PoliticsTradingConfig,
@@ -2421,12 +2400,14 @@ impl Default for PlatformBootstrapConfig {
             enable_crypto: true,
             enable_crypto_momentum: true,
             enable_crypto_lob_ml: false,
+            #[cfg(feature = "rl")]
             enable_crypto_rl_policy: false,
             enable_sports: false,
             enable_politics: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
             crypto_lob_ml: CryptoLobMlConfig::default(),
+            #[cfg(feature = "rl")]
             crypto_rl_policy: CryptoRlPolicyConfig::default(),
             sports: SportsTradingConfig::default(),
             politics: PoliticsTradingConfig::default(),
@@ -2448,7 +2429,115 @@ impl PlatformBootstrapConfig {
             daily_loss_limit: app.risk.daily_loss_limit_usd,
             max_spread_bps: 500,
             critical_bypass_exposure: true,
+            ..Default::default()
         };
+
+        // Optional domain-level risk splits.
+        // Example:
+        // - PLOY_RISK__CRYPTO_ALLOCATION_PCT=0.5
+        // - PLOY_RISK__SPORTS_ALLOCATION_PCT=0.5
+        // - PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD=45
+        // - PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD=45
+        let normalize_pct = |v: rust_decimal::Decimal| {
+            if v >= rust_decimal::Decimal::ZERO && v <= rust_decimal::Decimal::ONE {
+                Some(v)
+            } else {
+                None
+            }
+        };
+
+        let crypto_alloc_pct =
+            env_decimal_opt("PLOY_RISK__CRYPTO_ALLOCATION_PCT").and_then(normalize_pct);
+        let sports_alloc_pct =
+            env_decimal_opt("PLOY_RISK__SPORTS_ALLOCATION_PCT").and_then(normalize_pct);
+        let politics_alloc_pct =
+            env_decimal_opt("PLOY_RISK__POLITICS_ALLOCATION_PCT").and_then(normalize_pct);
+        let economics_alloc_pct =
+            env_decimal_opt("PLOY_RISK__ECONOMICS_ALLOCATION_PCT").and_then(normalize_pct);
+
+        let alloc_base = cfg.coordinator.risk.max_platform_exposure;
+
+        cfg.coordinator.risk.crypto_max_exposure =
+            env_decimal_opt("PLOY_RISK__CRYPTO_MAX_EXPOSURE_USD")
+                .or_else(|| crypto_alloc_pct.map(|p| alloc_base * p));
+        cfg.coordinator.risk.sports_max_exposure =
+            env_decimal_opt("PLOY_RISK__SPORTS_MAX_EXPOSURE_USD")
+                .or_else(|| sports_alloc_pct.map(|p| alloc_base * p));
+        cfg.coordinator.risk.politics_max_exposure =
+            env_decimal_opt("PLOY_RISK__POLITICS_MAX_EXPOSURE_USD")
+                .or_else(|| politics_alloc_pct.map(|p| alloc_base * p));
+        cfg.coordinator.risk.economics_max_exposure =
+            env_decimal_opt("PLOY_RISK__ECONOMICS_MAX_EXPOSURE_USD")
+                .or_else(|| economics_alloc_pct.map(|p| alloc_base * p));
+
+        cfg.coordinator.risk.crypto_daily_loss_limit =
+            env_decimal_opt("PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD");
+        cfg.coordinator.risk.sports_daily_loss_limit =
+            env_decimal_opt("PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD");
+        cfg.coordinator.risk.politics_daily_loss_limit =
+            env_decimal_opt("PLOY_RISK__POLITICS_DAILY_LOSS_LIMIT_USD");
+        cfg.coordinator.risk.economics_daily_loss_limit =
+            env_decimal_opt("PLOY_RISK__ECONOMICS_DAILY_LOSS_LIMIT_USD");
+
+        cfg.coordinator.duplicate_guard_enabled = env_bool(
+            "PLOY_COORDINATOR__DUPLICATE_GUARD_ENABLED",
+            cfg.coordinator.duplicate_guard_enabled,
+        );
+        cfg.coordinator.duplicate_guard_window_ms = env_u64(
+            "PLOY_COORDINATOR__DUPLICATE_GUARD_WINDOW_MS",
+            cfg.coordinator.duplicate_guard_window_ms,
+        )
+        .max(100);
+
+        cfg.coordinator.crypto_allocator_enabled = env_bool(
+            "PLOY_COORDINATOR__CRYPTO_ALLOCATOR_ENABLED",
+            cfg.coordinator.crypto_allocator_enabled,
+        );
+        cfg.coordinator.crypto_allocator_total_cap_usd =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_ALLOCATOR_TOTAL_CAP_USD")
+                .or(cfg.coordinator.crypto_allocator_total_cap_usd);
+
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_BTC_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_coin_cap_btc_pct = v;
+        }
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_ETH_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_coin_cap_eth_pct = v;
+        }
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_SOL_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_coin_cap_sol_pct = v;
+        }
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_XRP_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_coin_cap_xrp_pct = v;
+        }
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_OTHER_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_coin_cap_other_pct = v;
+        }
+
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_HORIZON_CAP_5M_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_horizon_cap_5m_pct = v;
+        }
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_HORIZON_CAP_15M_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_horizon_cap_15m_pct = v;
+        }
+        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__CRYPTO_HORIZON_CAP_OTHER_PCT")
+            .and_then(normalize_pct)
+        {
+            cfg.coordinator.crypto_horizon_cap_other_pct = v;
+        }
 
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
@@ -2530,6 +2619,17 @@ impl PlatformBootstrapConfig {
         cfg.crypto.take_profit =
             env_decimal("PLOY_CRYPTO_AGENT__TAKE_PROFIT", cfg.crypto.take_profit);
         cfg.crypto.stop_loss = env_decimal("PLOY_CRYPTO_AGENT__STOP_LOSS", cfg.crypto.stop_loss);
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENABLE_PRICE_EXITS") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto.enable_price_exits = true,
+                "0" | "false" | "no" | "off" => cfg.crypto.enable_price_exits = false,
+                _ => {}
+            }
+        }
+        cfg.crypto.min_hold_secs = env_u64(
+            "PLOY_CRYPTO_AGENT__MIN_HOLD_SECS",
+            cfg.crypto.min_hold_secs,
+        );
         cfg.crypto.heartbeat_interval_secs = env_u64(
             "PLOY_CRYPTO_AGENT__HEARTBEAT_INTERVAL_SECS",
             cfg.crypto.heartbeat_interval_secs,
@@ -2580,30 +2680,30 @@ impl PlatformBootstrapConfig {
             }
         }
 
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_TYPE") {
-            let v = raw.trim().to_ascii_lowercase();
-            if !v.is_empty() {
-                cfg.crypto_lob_ml.model_type = v;
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_PATH") {
-            let v = raw.trim();
-            if !v.is_empty() {
-                cfg.crypto_lob_ml.model_path = Some(v.to_string());
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_VERSION") {
-            let v = raw.trim();
-            if !v.is_empty() {
-                cfg.crypto_lob_ml.model_version = Some(v.to_string());
-            }
-        }
-
         cfg.crypto_lob_ml.default_shares = env_u64(
             "PLOY_CRYPTO_LOB_ML__DEFAULT_SHARES",
             cfg.crypto_lob_ml.default_shares,
         )
         .max(1);
+        cfg.crypto_lob_ml.take_profit = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__TAKE_PROFIT",
+            cfg.crypto_lob_ml.take_profit,
+        );
+        cfg.crypto_lob_ml.stop_loss = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__STOP_LOSS",
+            cfg.crypto_lob_ml.stop_loss,
+        );
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.enable_price_exits = true,
+                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.enable_price_exits = false,
+                _ => {}
+            }
+        }
+        cfg.crypto_lob_ml.min_hold_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__MIN_HOLD_SECS",
+            cfg.crypto_lob_ml.min_hold_secs,
+        );
         cfg.crypto_lob_ml.min_edge =
             env_decimal("PLOY_CRYPTO_LOB_ML__MIN_EDGE", cfg.crypto_lob_ml.min_edge);
         cfg.crypto_lob_ml.max_entry_price = env_decimal(
@@ -2640,6 +2740,11 @@ impl PlatformBootstrapConfig {
         cfg.crypto_lob_ml.max_lob_snapshot_age_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__MAX_LOB_SNAPSHOT_AGE_SECS",
             cfg.crypto_lob_ml.max_lob_snapshot_age_secs,
+        )
+        .max(1);
+        cfg.crypto_lob_ml.heartbeat_interval_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__HEARTBEAT_INTERVAL_SECS",
+            cfg.crypto_lob_ml.heartbeat_interval_secs,
         )
         .max(1);
 
@@ -2687,114 +2792,121 @@ impl PlatformBootstrapConfig {
             }
         }
 
-        // Optional RL policy crypto agent (disabled by default).
-        // Default to the same risk envelope as the momentum agent unless overridden.
-        cfg.crypto_rl_policy.default_shares = cfg.crypto.default_shares;
-        cfg.crypto_rl_policy.risk_params = cfg.crypto.risk_params.clone();
-        cfg.crypto_rl_policy.heartbeat_interval_secs = cfg.crypto.heartbeat_interval_secs;
-
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__ENABLED") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.enable_crypto_rl_policy = true,
-                "0" | "false" | "no" | "off" => cfg.enable_crypto_rl_policy = false,
-                _ => {}
-            }
-        }
-
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__COINS") {
-            let coins: Vec<String> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_ascii_uppercase())
-                .collect();
-            if !coins.is_empty() {
-                cfg.crypto_rl_policy.coins = coins;
-            }
-        }
-
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_PATH") {
-            let v = raw.trim();
-            if !v.is_empty() {
-                cfg.crypto_rl_policy.policy_model_path = Some(v.to_string());
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__POLICY_OUTPUT") {
-            let v = raw.trim().to_ascii_lowercase();
-            if !v.is_empty() {
-                cfg.crypto_rl_policy.policy_output = v;
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_VERSION") {
-            let v = raw.trim();
-            if !v.is_empty() {
-                cfg.crypto_rl_policy.policy_model_version = Some(v.to_string());
-            }
-        }
-
-        cfg.crypto_rl_policy.default_shares = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__DEFAULT_SHARES",
-            cfg.crypto_rl_policy.default_shares,
-        )
-        .max(1);
-        cfg.crypto_rl_policy.max_entry_price = env_decimal(
-            "PLOY_CRYPTO_RL_POLICY__MAX_ENTRY_PRICE",
-            cfg.crypto_rl_policy.max_entry_price,
-        );
-        cfg.crypto_rl_policy.cooldown_secs = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__COOLDOWN_SECS",
-            cfg.crypto_rl_policy.cooldown_secs,
-        );
-        cfg.crypto_rl_policy.max_lob_snapshot_age_secs = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__MAX_LOB_SNAPSHOT_AGE_SECS",
-            cfg.crypto_rl_policy.max_lob_snapshot_age_secs,
-        )
-        .max(1);
-        cfg.crypto_rl_policy.decision_interval_ms = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__DECISION_INTERVAL_MS",
-            cfg.crypto_rl_policy.decision_interval_ms,
-        )
-        .max(50);
-        cfg.crypto_rl_policy.observation_version = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__OBS_VERSION",
-            cfg.crypto_rl_policy.observation_version as u64,
-        ) as u32;
-        cfg.crypto_rl_policy.event_refresh_secs = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__EVENT_REFRESH_SECS",
-            cfg.crypto_rl_policy.event_refresh_secs,
-        )
-        .max(1);
-        cfg.crypto_rl_policy.min_time_remaining_secs = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__MIN_TIME_REMAINING_SECS",
-            cfg.crypto_rl_policy.min_time_remaining_secs,
-        );
-        cfg.crypto_rl_policy.max_time_remaining_secs = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__MAX_TIME_REMAINING_SECS",
-            cfg.crypto_rl_policy.max_time_remaining_secs,
-        );
-        if cfg.crypto_rl_policy.max_time_remaining_secs < cfg.crypto_rl_policy.min_time_remaining_secs
+        #[cfg(feature = "rl")]
         {
-            cfg.crypto_rl_policy.max_time_remaining_secs = cfg.crypto_rl_policy.min_time_remaining_secs;
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__PREFER_CLOSE_TO_END") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_rl_policy.prefer_close_to_end = true,
-                "0" | "false" | "no" | "off" => cfg.crypto_rl_policy.prefer_close_to_end = false,
-                _ => {}
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__EXPLORATION_RATE") {
-            if let Ok(v) = raw.trim().parse::<f32>() {
-                if v.is_finite() {
-                    cfg.crypto_rl_policy.exploration_rate = v.clamp(0.0, 1.0);
+            // Optional RL policy crypto agent (disabled by default).
+            // Default to the same risk envelope as the momentum agent unless overridden.
+            cfg.crypto_rl_policy.default_shares = cfg.crypto.default_shares;
+            cfg.crypto_rl_policy.risk_params = cfg.crypto.risk_params.clone();
+            cfg.crypto_rl_policy.heartbeat_interval_secs = cfg.crypto.heartbeat_interval_secs;
+
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__ENABLED") {
+                match raw.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => cfg.enable_crypto_rl_policy = true,
+                    "0" | "false" | "no" | "off" => cfg.enable_crypto_rl_policy = false,
+                    _ => {}
                 }
             }
+
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__COINS") {
+                let coins: Vec<String> = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_uppercase())
+                    .collect();
+                if !coins.is_empty() {
+                    cfg.crypto_rl_policy.coins = coins;
+                }
+            }
+
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_PATH") {
+                let v = raw.trim();
+                if !v.is_empty() {
+                    cfg.crypto_rl_policy.policy_model_path = Some(v.to_string());
+                }
+            }
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__POLICY_OUTPUT") {
+                let v = raw.trim().to_ascii_lowercase();
+                if !v.is_empty() {
+                    cfg.crypto_rl_policy.policy_output = v;
+                }
+            }
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_VERSION") {
+                let v = raw.trim();
+                if !v.is_empty() {
+                    cfg.crypto_rl_policy.policy_model_version = Some(v.to_string());
+                }
+            }
+
+            cfg.crypto_rl_policy.default_shares = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__DEFAULT_SHARES",
+                cfg.crypto_rl_policy.default_shares,
+            )
+            .max(1);
+            cfg.crypto_rl_policy.max_entry_price = env_decimal(
+                "PLOY_CRYPTO_RL_POLICY__MAX_ENTRY_PRICE",
+                cfg.crypto_rl_policy.max_entry_price,
+            );
+            cfg.crypto_rl_policy.cooldown_secs = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__COOLDOWN_SECS",
+                cfg.crypto_rl_policy.cooldown_secs,
+            );
+            cfg.crypto_rl_policy.max_lob_snapshot_age_secs = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__MAX_LOB_SNAPSHOT_AGE_SECS",
+                cfg.crypto_rl_policy.max_lob_snapshot_age_secs,
+            )
+            .max(1);
+            cfg.crypto_rl_policy.decision_interval_ms = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__DECISION_INTERVAL_MS",
+                cfg.crypto_rl_policy.decision_interval_ms,
+            )
+            .max(50);
+            cfg.crypto_rl_policy.observation_version = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__OBS_VERSION",
+                cfg.crypto_rl_policy.observation_version as u64,
+            ) as u32;
+            cfg.crypto_rl_policy.event_refresh_secs = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__EVENT_REFRESH_SECS",
+                cfg.crypto_rl_policy.event_refresh_secs,
+            )
+            .max(1);
+            cfg.crypto_rl_policy.min_time_remaining_secs = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__MIN_TIME_REMAINING_SECS",
+                cfg.crypto_rl_policy.min_time_remaining_secs,
+            );
+            cfg.crypto_rl_policy.max_time_remaining_secs = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__MAX_TIME_REMAINING_SECS",
+                cfg.crypto_rl_policy.max_time_remaining_secs,
+            );
+            if cfg.crypto_rl_policy.max_time_remaining_secs
+                < cfg.crypto_rl_policy.min_time_remaining_secs
+            {
+                cfg.crypto_rl_policy.max_time_remaining_secs =
+                    cfg.crypto_rl_policy.min_time_remaining_secs;
+            }
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__PREFER_CLOSE_TO_END") {
+                match raw.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => cfg.crypto_rl_policy.prefer_close_to_end = true,
+                    "0" | "false" | "no" | "off" => {
+                        cfg.crypto_rl_policy.prefer_close_to_end = false
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__EXPLORATION_RATE") {
+                if let Ok(v) = raw.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        cfg.crypto_rl_policy.exploration_rate = v.clamp(0.0, 1.0);
+                    }
+                }
+            }
+            cfg.crypto_rl_policy.heartbeat_interval_secs = env_u64(
+                "PLOY_CRYPTO_RL_POLICY__HEARTBEAT_INTERVAL_SECS",
+                cfg.crypto_rl_policy.heartbeat_interval_secs,
+            )
+            .max(1);
         }
-        cfg.crypto_rl_policy.heartbeat_interval_secs = env_u64(
-            "PLOY_CRYPTO_RL_POLICY__HEARTBEAT_INTERVAL_SECS",
-            cfg.crypto_rl_policy.heartbeat_interval_secs,
-        )
-        .max(1);
 
         // Enable sports if NBA comeback config is present and enabled
         if let Some(ref nba) = app.nba_comeback {
@@ -2838,13 +2950,17 @@ pub async fn start_platform(
     } else {
         app_config.account.id.clone()
     };
+    #[cfg(feature = "rl")]
+    let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
+    #[cfg(not(feature = "rl"))]
+    let crypto_rl_policy_enabled = false;
 
     info!(
         account_id = %account_id,
         crypto = config.enable_crypto,
         crypto_momentum = config.enable_crypto_momentum,
         crypto_lob_ml = config.enable_crypto_lob_ml,
-        crypto_rl_policy = config.enable_crypto_rl_policy,
+        crypto_rl_policy = crypto_rl_policy_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
         dry_run = config.dry_run,
@@ -2923,16 +3039,14 @@ pub async fn start_platform(
         let grok_client = std::env::var("GROK_API_KEY")
             .ok()
             .filter(|k| !k.trim().is_empty())
-            .and_then(|_| {
-                match GrokClient::from_env() {
-                    Ok(client) => {
-                        info!("Grok client initialized for sidecar endpoints");
-                        Some(Arc::new(client))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to initialize Grok client");
-                        None
-                    }
+            .and_then(|_| match GrokClient::from_env() {
+                Ok(client) => {
+                    info!("Grok client initialized for sidecar endpoints");
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to initialize Grok client");
+                    None
                 }
             });
 
@@ -2958,7 +3072,10 @@ pub async fn start_platform(
             .await
             {
                 Ok(handle) => {
-                    info!(port = api_port, "API server started in platform mode with sidecar endpoints");
+                    info!(
+                        port = api_port,
+                        "API server started in platform mode with sidecar endpoints"
+                    );
                     Some(handle)
                 }
                 Err(e) => {
@@ -2985,12 +3102,20 @@ pub async fn start_platform(
         let momentum_enabled = config.enable_crypto_momentum;
         let lob_cfg = config.crypto_lob_ml.clone();
         let lob_agent_enabled = config.enable_crypto_lob_ml;
+        #[cfg(feature = "rl")]
         let rl_cfg = config.crypto_rl_policy.clone();
+        #[cfg(feature = "rl")]
         let rl_agent_enabled = config.enable_crypto_rl_policy;
+        #[cfg(not(feature = "rl"))]
+        let rl_agent_enabled = false;
 
         let cmd_rx_opt = if momentum_enabled {
             let risk_params = crypto_cfg.risk_params.clone();
-            Some(coordinator.register_agent(crypto_cfg.agent_id.clone(), risk_params))
+            Some(coordinator.register_agent(
+                crypto_cfg.agent_id.clone(),
+                Domain::Crypto,
+                risk_params,
+            ))
         } else {
             None
         };
@@ -3017,6 +3142,7 @@ pub async fn start_platform(
                 }
             }
         }
+        #[cfg(feature = "rl")]
         if rl_agent_enabled {
             for coin in &rl_cfg.coins {
                 if !all_coins.contains(coin) {
@@ -3325,16 +3451,26 @@ pub async fn start_platform(
                 agent_handles.push(jh);
                 info!("crypto momentum agent spawned");
             } else {
-                warn!(agent = crypto_cfg.agent_id, "crypto momentum agent enabled but coordinator cmd_rx is missing");
+                warn!(
+                    agent = crypto_cfg.agent_id,
+                    "crypto momentum agent enabled but coordinator cmd_rx is missing"
+                );
             }
         } else {
-            info!(agent = crypto_cfg.agent_id, "crypto momentum agent disabled");
+            info!(
+                agent = crypto_cfg.agent_id,
+                "crypto momentum agent disabled"
+            );
         }
 
         if lob_agent_enabled {
             if let Some(lob_cache) = lob_cache_opt.clone() {
                 let risk_params = lob_cfg.risk_params.clone();
-                let cmd_rx = coordinator.register_agent(lob_cfg.agent_id.clone(), risk_params);
+                let cmd_rx = coordinator.register_agent(
+                    lob_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                    risk_params,
+                );
 
                 let agent = CryptoLobMlAgent::new(
                     lob_cfg.clone(),
@@ -3365,10 +3501,15 @@ pub async fn start_platform(
             }
         }
 
+        #[cfg(feature = "rl")]
         if rl_agent_enabled {
             if let Some(lob_cache) = lob_cache_opt.clone() {
                 let risk_params = rl_cfg.risk_params.clone();
-                let cmd_rx = coordinator.register_agent(rl_cfg.agent_id.clone(), risk_params);
+                let cmd_rx = coordinator.register_agent(
+                    rl_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                    risk_params,
+                );
 
                 let agent = CryptoRlPolicyAgent::new(
                     rl_cfg.clone(),
@@ -3404,7 +3545,11 @@ pub async fn start_platform(
         if let Some(ref nba_cfg) = app_config.nba_comeback {
             let sports_cfg = config.sports.clone();
             let risk_params = sports_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(sports_cfg.agent_id.clone(), risk_params);
+            let cmd_rx = coordinator.register_agent(
+                sports_cfg.agent_id.clone(),
+                Domain::Sports,
+                risk_params,
+            );
 
             let pool = match shared_pool.as_ref() {
                 Some(pool) => pool.clone(),
@@ -3490,7 +3635,11 @@ pub async fn start_platform(
         if let Some(ref ee_cfg) = app_config.event_edge_agent {
             let politics_cfg = config.politics.clone();
             let risk_params = politics_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(politics_cfg.agent_id.clone(), risk_params);
+            let cmd_rx = coordinator.register_agent(
+                politics_cfg.agent_id.clone(),
+                Domain::Politics,
+                risk_params,
+            );
 
             let core = EventEdgeCore::new(pm_client.clone(), ee_cfg.clone());
             let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);

@@ -8,20 +8,22 @@
 //!   - Periodically drain the queue and execute orders
 //!   - Periodically refresh GlobalState from aggregators
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use sqlx::PgPool;
 
 use crate::domain::OrderRequest;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult, RiskGate,
+    AgentRiskParams, Domain, OrderIntent, OrderPriority, OrderQueue, PositionAggregator,
+    RiskCheckResult, RiskGate,
 };
 use crate::strategy::executor::OrderExecutor;
 
@@ -58,7 +60,9 @@ impl CoordinatorHandle {
         self.control_tx
             .send(CoordinatorControlCommand::PauseAll)
             .await
-            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
     }
 
     /// Resume all agents
@@ -66,7 +70,9 @@ impl CoordinatorHandle {
         self.control_tx
             .send(CoordinatorControlCommand::ResumeAll)
             .await
-            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
     }
 
     /// Force-close all positions and stop agents
@@ -74,7 +80,9 @@ impl CoordinatorHandle {
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseAll)
             .await
-            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
     }
 
     /// Shutdown all agents gracefully
@@ -82,7 +90,9 @@ impl CoordinatorHandle {
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownAll)
             .await
-            .map_err(|_| crate::error::PloyError::Internal("coordinator control channel closed".into()))
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
     }
 
     /// Read the current global state (non-blocking snapshot)
@@ -97,6 +107,8 @@ pub struct Coordinator {
     account_id: String,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
+    duplicate_guard: Arc<RwLock<IntentDuplicateGuard>>,
+    crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
     positions: Arc<PositionAggregator>,
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
@@ -114,6 +126,582 @@ pub struct Coordinator {
     agent_commands: HashMap<String, mpsc::Sender<CoordinatorCommand>>,
 }
 
+#[derive(Debug)]
+struct IntentDuplicateGuard {
+    enabled: bool,
+    window: ChronoDuration,
+    recent_buys: HashMap<String, chrono::DateTime<Utc>>,
+}
+
+impl IntentDuplicateGuard {
+    fn new(window_ms: u64, enabled: bool) -> Self {
+        let clamped_ms = window_ms.min(i64::MAX as u64) as i64;
+        let window = ChronoDuration::milliseconds(clamped_ms.max(1));
+        Self {
+            enabled,
+            window,
+            recent_buys: HashMap::new(),
+        }
+    }
+
+    fn buy_key(intent: &OrderIntent) -> Option<String> {
+        // Only guard normal/high-priority ENTRY orders.
+        // Use market-level key so opposite-side re-entries on the same round
+        // are also blocked within the duplicate window.
+        if !intent.is_buy || intent.priority == OrderPriority::Critical {
+            return None;
+        }
+
+        Some(format!(
+            "{}|{}",
+            intent.domain,
+            intent.market_slug.trim().to_ascii_lowercase()
+        ))
+    }
+
+    fn prune(&mut self, now: chrono::DateTime<Utc>) {
+        self.recent_buys
+            .retain(|_, ts| now.signed_duration_since(*ts) < self.window);
+    }
+
+    fn register_or_block(
+        &mut self,
+        intent: &OrderIntent,
+        now: chrono::DateTime<Utc>,
+    ) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+
+        let key = Self::buy_key(intent)?;
+        self.prune(now);
+
+        if let Some(last) = self.recent_buys.get(&key) {
+            let elapsed_ms = now.signed_duration_since(*last).num_milliseconds().max(0);
+            return Some(format!(
+                "Duplicate buy intent blocked (elapsed={}ms, guard_window={}ms, key={})",
+                elapsed_ms,
+                self.window.num_milliseconds(),
+                key
+            ));
+        }
+
+        self.recent_buys.insert(key, now);
+        None
+    }
+}
+
+const KNOWN_5M_SERIES_IDS: &[&str] = &["10684", "10683", "10686", "10685"];
+const KNOWN_15M_SERIES_IDS: &[&str] = &["10192", "10191", "10423", "10422"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CryptoHorizon {
+    M5,
+    M15,
+    Other,
+}
+
+impl CryptoHorizon {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::M5 => "5m",
+            Self::M15 => "15m",
+            Self::Other => "other",
+        }
+    }
+
+    fn from_hint(raw: &str) -> Option<Self> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+        if normalized.contains("15m") || normalized == "15" {
+            return Some(Self::M15);
+        }
+        if normalized.contains("5m") || normalized == "5" {
+            return Some(Self::M5);
+        }
+        if KNOWN_15M_SERIES_IDS.iter().any(|id| *id == normalized) {
+            return Some(Self::M15);
+        }
+        if KNOWN_5M_SERIES_IDS.iter().any(|id| *id == normalized) {
+            return Some(Self::M5);
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CryptoIntentDimensions {
+    coin: String,
+    horizon: CryptoHorizon,
+    position_key: String,
+}
+
+impl CryptoIntentDimensions {
+    fn from_intent(intent: &OrderIntent) -> Self {
+        let coin = Self::parse_coin(intent).unwrap_or_else(|| "OTHER".to_string());
+        let horizon = Self::parse_horizon(intent).unwrap_or(CryptoHorizon::Other);
+        let position_key = format!(
+            "{}|{}|{}|{}",
+            intent.agent_id,
+            intent.market_slug,
+            intent.token_id,
+            intent.side.as_str()
+        );
+        Self {
+            coin,
+            horizon,
+            position_key,
+        }
+    }
+
+    fn parse_coin(intent: &OrderIntent) -> Option<String> {
+        if let Some(coin) = intent
+            .metadata
+            .get("coin")
+            .and_then(|raw| Self::normalize_coin(raw))
+        {
+            return Some(coin);
+        }
+
+        if let Some(symbol) = intent.metadata.get("symbol") {
+            let cleaned = symbol
+                .trim()
+                .to_ascii_uppercase()
+                .replace("USDT", "")
+                .replace("USD", "");
+            if let Some(coin) = Self::normalize_coin(&cleaned) {
+                return Some(coin);
+            }
+        }
+
+        let slug = intent.market_slug.to_ascii_lowercase();
+        for (needle, coin) in [
+            ("bitcoin", "BTC"),
+            ("btc", "BTC"),
+            ("ethereum", "ETH"),
+            ("eth", "ETH"),
+            ("solana", "SOL"),
+            ("sol", "SOL"),
+            ("xrp", "XRP"),
+        ] {
+            if slug.contains(needle) {
+                return Some(coin.to_string());
+            }
+        }
+
+        None
+    }
+
+    fn parse_horizon(intent: &OrderIntent) -> Option<CryptoHorizon> {
+        if let Some(h) = intent
+            .metadata
+            .get("horizon")
+            .and_then(|raw| CryptoHorizon::from_hint(raw))
+        {
+            return Some(h);
+        }
+
+        if let Some(h) = intent
+            .metadata
+            .get("event_series_id")
+            .and_then(|raw| CryptoHorizon::from_hint(raw))
+        {
+            return Some(h);
+        }
+
+        if let Some(h) = intent
+            .metadata
+            .get("series_id")
+            .and_then(|raw| CryptoHorizon::from_hint(raw))
+        {
+            return Some(h);
+        }
+
+        CryptoHorizon::from_hint(&intent.market_slug)
+    }
+
+    fn normalize_coin(raw: &str) -> Option<String> {
+        let coin = raw.trim().to_ascii_uppercase();
+        if coin.is_empty() {
+            return None;
+        }
+        Some(match coin.as_str() {
+            "BITCOIN" | "BTC" => "BTC".to_string(),
+            "ETHEREUM" | "ETH" => "ETH".to_string(),
+            "SOLANA" | "SOL" => "SOL".to_string(),
+            "XRP" => "XRP".to_string(),
+            other => other.to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PositionExposure {
+    coin: String,
+    horizon: CryptoHorizon,
+    amount: Decimal,
+}
+
+#[derive(Debug, Default)]
+struct ExposureBook {
+    total: Decimal,
+    by_coin: HashMap<String, Decimal>,
+    by_horizon: HashMap<CryptoHorizon, Decimal>,
+    by_position: HashMap<String, PositionExposure>,
+}
+
+impl ExposureBook {
+    fn value_for_coin(&self, coin: &str) -> Decimal {
+        self.by_coin.get(coin).copied().unwrap_or(Decimal::ZERO)
+    }
+
+    fn value_for_horizon(&self, horizon: CryptoHorizon) -> Decimal {
+        self.by_horizon
+            .get(&horizon)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    fn add(&mut self, dims: &CryptoIntentDimensions, amount: Decimal) {
+        if amount <= Decimal::ZERO {
+            return;
+        }
+        self.total += amount;
+        *self
+            .by_coin
+            .entry(dims.coin.clone())
+            .or_insert(Decimal::ZERO) += amount;
+        *self.by_horizon.entry(dims.horizon).or_insert(Decimal::ZERO) += amount;
+        self.by_position
+            .entry(dims.position_key.clone())
+            .and_modify(|pos| {
+                pos.amount += amount;
+                pos.coin = dims.coin.clone();
+                pos.horizon = dims.horizon;
+            })
+            .or_insert_with(|| PositionExposure {
+                coin: dims.coin.clone(),
+                horizon: dims.horizon,
+                amount,
+            });
+    }
+
+    fn subtract_from_position_key(&mut self, position_key: &str, amount: Decimal) -> Decimal {
+        if amount <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let mut removed = Decimal::ZERO;
+        let mut coin = None;
+        let mut horizon = None;
+        let mut delete_key = false;
+
+        if let Some(pos) = self.by_position.get_mut(position_key) {
+            removed = amount.min(pos.amount);
+            if removed > Decimal::ZERO {
+                pos.amount -= removed;
+                coin = Some(pos.coin.clone());
+                horizon = Some(pos.horizon);
+                delete_key = pos.amount <= Decimal::ZERO;
+            }
+        }
+
+        if delete_key {
+            self.by_position.remove(position_key);
+        }
+
+        if removed <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        self.total = (self.total - removed).max(Decimal::ZERO);
+
+        if let Some(c) = coin {
+            if let Some(v) = self.by_coin.get_mut(&c) {
+                *v = (*v - removed).max(Decimal::ZERO);
+                if *v == Decimal::ZERO {
+                    self.by_coin.remove(&c);
+                }
+            }
+        }
+
+        if let Some(h) = horizon {
+            if let Some(v) = self.by_horizon.get_mut(&h) {
+                *v = (*v - removed).max(Decimal::ZERO);
+                if *v == Decimal::ZERO {
+                    self.by_horizon.remove(&h);
+                }
+            }
+        }
+
+        removed
+    }
+
+    fn subtract_matching_bucket(
+        &mut self,
+        coin: &str,
+        horizon: CryptoHorizon,
+        amount: Decimal,
+    ) -> Decimal {
+        if amount <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let mut remaining = amount;
+        let keys: Vec<String> = self
+            .by_position
+            .iter()
+            .filter(|(_, p)| p.coin == coin && p.horizon == horizon)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in keys {
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+            let removed = self.subtract_from_position_key(&key, remaining);
+            remaining -= removed;
+        }
+
+        amount - remaining
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingCryptoIntent {
+    dims: CryptoIntentDimensions,
+    requested_notional: Decimal,
+}
+
+#[derive(Debug)]
+struct CryptoCapitalAllocator {
+    enabled: bool,
+    total_cap: Decimal,
+    coin_cap_pct: HashMap<String, Decimal>,
+    horizon_cap_pct: HashMap<CryptoHorizon, Decimal>,
+    open: ExposureBook,
+    pending: ExposureBook,
+    pending_by_intent: HashMap<Uuid, PendingCryptoIntent>,
+}
+
+impl CryptoCapitalAllocator {
+    fn new(config: &CoordinatorConfig) -> Self {
+        let total_cap = config
+            .crypto_allocator_total_cap_usd
+            .or(config.risk.crypto_max_exposure)
+            .unwrap_or(config.risk.max_platform_exposure)
+            .max(Decimal::ZERO);
+
+        let mut coin_cap_pct = HashMap::new();
+        coin_cap_pct.insert(
+            "BTC".to_string(),
+            Self::normalize_pct(config.crypto_coin_cap_btc_pct),
+        );
+        coin_cap_pct.insert(
+            "ETH".to_string(),
+            Self::normalize_pct(config.crypto_coin_cap_eth_pct),
+        );
+        coin_cap_pct.insert(
+            "SOL".to_string(),
+            Self::normalize_pct(config.crypto_coin_cap_sol_pct),
+        );
+        coin_cap_pct.insert(
+            "XRP".to_string(),
+            Self::normalize_pct(config.crypto_coin_cap_xrp_pct),
+        );
+        coin_cap_pct.insert(
+            "OTHER".to_string(),
+            Self::normalize_pct(config.crypto_coin_cap_other_pct),
+        );
+
+        let mut horizon_cap_pct = HashMap::new();
+        horizon_cap_pct.insert(
+            CryptoHorizon::M5,
+            Self::normalize_pct(config.crypto_horizon_cap_5m_pct),
+        );
+        horizon_cap_pct.insert(
+            CryptoHorizon::M15,
+            Self::normalize_pct(config.crypto_horizon_cap_15m_pct),
+        );
+        horizon_cap_pct.insert(
+            CryptoHorizon::Other,
+            Self::normalize_pct(config.crypto_horizon_cap_other_pct),
+        );
+
+        Self {
+            enabled: config.crypto_allocator_enabled,
+            total_cap,
+            coin_cap_pct,
+            horizon_cap_pct,
+            open: ExposureBook::default(),
+            pending: ExposureBook::default(),
+            pending_by_intent: HashMap::new(),
+        }
+    }
+
+    fn normalize_pct(value: Decimal) -> Decimal {
+        if value <= Decimal::ZERO {
+            Decimal::ZERO
+        } else if value >= Decimal::ONE {
+            Decimal::ONE
+        } else {
+            value
+        }
+    }
+
+    fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
+        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
+            return Ok(());
+        }
+
+        if self.total_cap <= Decimal::ZERO {
+            return Err("Crypto allocator cap is 0; buy intent blocked".to_string());
+        }
+
+        let requested = intent.notional_value();
+        if requested <= Decimal::ZERO {
+            return Err("Crypto buy intent has non-positive notional".to_string());
+        }
+
+        let dims = CryptoIntentDimensions::from_intent(intent);
+
+        let projected_total = self.open.total + self.pending.total + requested;
+        if projected_total > self.total_cap {
+            return Err(format!(
+                "Crypto total cap exceeded: projected={} cap={}",
+                projected_total, self.total_cap
+            ));
+        }
+
+        let coin_cap = self.total_cap * self.coin_cap_for(&dims.coin);
+        let projected_coin = self.open.value_for_coin(&dims.coin)
+            + self.pending.value_for_coin(&dims.coin)
+            + requested;
+        if projected_coin > coin_cap {
+            return Err(format!(
+                "Crypto coin cap exceeded: coin={} projected={} cap={}",
+                dims.coin, projected_coin, coin_cap
+            ));
+        }
+
+        let horizon_cap = self.total_cap * self.horizon_cap_for(dims.horizon);
+        let projected_horizon = self.open.value_for_horizon(dims.horizon)
+            + self.pending.value_for_horizon(dims.horizon)
+            + requested;
+        if projected_horizon > horizon_cap {
+            return Err(format!(
+                "Crypto horizon cap exceeded: horizon={} projected={} cap={}",
+                dims.horizon.as_str(),
+                projected_horizon,
+                horizon_cap
+            ));
+        }
+
+        self.pending.add(&dims, requested);
+        self.pending_by_intent.insert(
+            intent.intent_id,
+            PendingCryptoIntent {
+                dims,
+                requested_notional: requested,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn release_buy_reservation(&mut self, intent_id: Uuid) {
+        let Some(reservation) = self.pending_by_intent.remove(&intent_id) else {
+            return;
+        };
+        self.pending.subtract_from_position_key(
+            &reservation.dims.position_key,
+            reservation.requested_notional,
+        );
+    }
+
+    fn settle_buy_execution(
+        &mut self,
+        intent: &OrderIntent,
+        filled_shares: u64,
+        fill_price: Decimal,
+    ) {
+        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
+            return;
+        }
+
+        let reservation = self
+            .pending_by_intent
+            .remove(&intent.intent_id)
+            .unwrap_or_else(|| PendingCryptoIntent {
+                dims: CryptoIntentDimensions::from_intent(intent),
+                requested_notional: intent.notional_value(),
+            });
+
+        self.pending.subtract_from_position_key(
+            &reservation.dims.position_key,
+            reservation.requested_notional,
+        );
+
+        if filled_shares == 0 || fill_price <= Decimal::ZERO {
+            return;
+        }
+
+        let actual_notional = fill_price * Decimal::from(filled_shares);
+        self.open.add(&reservation.dims, actual_notional);
+    }
+
+    fn settle_sell_execution(
+        &mut self,
+        intent: &OrderIntent,
+        filled_shares: u64,
+        execution_price: Decimal,
+    ) {
+        if !self.enabled || intent.domain != Domain::Crypto || intent.is_buy || filled_shares == 0 {
+            return;
+        }
+
+        let dims = CryptoIntentDimensions::from_intent(intent);
+        let reference_price = intent
+            .metadata
+            .get("entry_price")
+            .and_then(|v| Decimal::from_str(v).ok())
+            .or_else(|| (execution_price > Decimal::ZERO).then_some(execution_price))
+            .unwrap_or(intent.limit_price);
+
+        if reference_price <= Decimal::ZERO {
+            return;
+        }
+
+        let requested_release = Decimal::from(filled_shares) * reference_price;
+        let removed_by_key = self
+            .open
+            .subtract_from_position_key(&dims.position_key, requested_release);
+        if removed_by_key < requested_release {
+            let remaining = requested_release - removed_by_key;
+            self.open
+                .subtract_matching_bucket(&dims.coin, dims.horizon, remaining);
+        }
+    }
+
+    fn coin_cap_for(&self, coin: &str) -> Decimal {
+        self.coin_cap_pct
+            .get(coin)
+            .copied()
+            .or_else(|| self.coin_cap_pct.get("OTHER").copied())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    fn horizon_cap_for(&self, horizon: CryptoHorizon) -> Decimal {
+        self.horizon_cap_pct
+            .get(&horizon)
+            .copied()
+            .or_else(|| self.horizon_cap_pct.get(&CryptoHorizon::Other).copied())
+            .unwrap_or(Decimal::ZERO)
+    }
+}
+
 impl Coordinator {
     pub fn new(
         config: CoordinatorConfig,
@@ -126,6 +714,11 @@ impl Coordinator {
 
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
+        let duplicate_guard = Arc::new(RwLock::new(IntentDuplicateGuard::new(
+            config.duplicate_guard_window_ms,
+            config.duplicate_guard_enabled,
+        )));
+        let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let account_id = if account_id.trim().is_empty() {
@@ -139,6 +732,8 @@ impl Coordinator {
             account_id,
             risk_gate,
             order_queue,
+            duplicate_guard,
+            crypto_allocator,
             positions,
             executor,
             global_state,
@@ -182,6 +777,7 @@ impl Coordinator {
     pub fn register_agent(
         &mut self,
         agent_id: String,
+        domain: Domain,
         risk_params: AgentRiskParams,
     ) -> mpsc::Receiver<CoordinatorCommand> {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
@@ -191,7 +787,9 @@ impl Coordinator {
         let risk_gate = self.risk_gate.clone();
         let id = agent_id.clone();
         tokio::spawn(async move {
-            risk_gate.register_agent(&id, risk_params).await;
+            risk_gate
+                .register_agent_with_domain(&id, domain, risk_params)
+                .await;
         });
 
         info!(agent_id, "agent registered with coordinator");
@@ -324,8 +922,28 @@ impl Coordinator {
             self.persist_exit_reason_intent(&intent).await;
         }
 
+        if let Some(reason) = self.check_duplicate_intent(&intent).await {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by duplicate-intent guard"
+            );
+            return;
+        }
+
         match self.risk_gate.check_order(&intent).await {
             RiskCheckResult::Passed => {
+                if let Some(reason) = self.reserve_crypto_capital(&intent).await {
+                    self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                        .await;
+                    warn!(
+                        %agent_id, %intent_id, reason = %reason,
+                        "order blocked by crypto allocator"
+                    );
+                    return;
+                }
+
                 self.persist_risk_decision(&intent, "PASSED", None, None)
                     .await;
                 let mut queue = self.order_queue.write().await;
@@ -337,6 +955,7 @@ impl Coordinator {
                         );
                     }
                     Err(e) => {
+                        self.release_crypto_reservation(intent_id).await;
                         warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
                     }
                 }
@@ -368,6 +987,48 @@ impl Coordinator {
                     "order adjusted by risk gate — dropping (agent should resubmit)"
                 );
             }
+        }
+    }
+
+    async fn check_duplicate_intent(&self, intent: &OrderIntent) -> Option<String> {
+        let mut guard = self.duplicate_guard.write().await;
+        guard.register_or_block(intent, Utc::now())
+    }
+
+    async fn reserve_crypto_capital(&self, intent: &OrderIntent) -> Option<String> {
+        if intent.domain != Domain::Crypto || !intent.is_buy {
+            return None;
+        }
+        let mut allocator = self.crypto_allocator.write().await;
+        allocator.reserve_buy(intent).err()
+    }
+
+    async fn release_crypto_reservation(&self, intent_id: Uuid) {
+        let mut allocator = self.crypto_allocator.write().await;
+        allocator.release_buy_reservation(intent_id);
+    }
+
+    async fn settle_crypto_success(
+        &self,
+        intent: &OrderIntent,
+        filled_shares: u64,
+        fill_price: Decimal,
+    ) {
+        if intent.domain != Domain::Crypto {
+            return;
+        }
+        let mut allocator = self.crypto_allocator.write().await;
+        if intent.is_buy {
+            allocator.settle_buy_execution(intent, filled_shares, fill_price);
+        } else {
+            allocator.settle_sell_execution(intent, filled_shares, fill_price);
+        }
+    }
+
+    async fn settle_crypto_failure(&self, intent: &OrderIntent) {
+        if intent.domain == Domain::Crypto && intent.is_buy {
+            let mut allocator = self.crypto_allocator.write().await;
+            allocator.release_buy_reservation(intent.intent_id);
         }
     }
 
@@ -440,20 +1101,32 @@ impl Coordinator {
                         .record_success(&agent_id, Decimal::ZERO)
                         .await;
 
-                    // Open position in aggregator if filled
+                    let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
+                    self.settle_crypto_success(&intent, result.filled_shares, fill_price)
+                        .await;
+
                     if result.filled_shares > 0 {
-                        let _pos_id = self
-                            .positions
-                            .open_position(
-                                &agent_id,
-                                intent.domain.clone(),
-                                &intent.market_slug,
-                                &intent.token_id,
-                                intent.side.clone(),
+                        if intent.is_buy {
+                            let _ = self
+                                .positions
+                                .open_position(
+                                    &agent_id,
+                                    intent.domain.clone(),
+                                    &intent.market_slug,
+                                    &intent.token_id,
+                                    intent.side.clone(),
+                                    result.filled_shares,
+                                    fill_price,
+                                )
+                                .await;
+                        } else {
+                            self.apply_sell_fill_to_positions(
+                                &intent,
                                 result.filled_shares,
-                                result.avg_fill_price.unwrap_or(intent.limit_price),
+                                fill_price,
                             )
                             .await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -475,8 +1148,58 @@ impl Coordinator {
                     self.risk_gate
                         .record_failure(&agent_id, &e.to_string())
                         .await;
+
+                    self.settle_crypto_failure(&intent).await;
                 }
             }
+        }
+    }
+
+    async fn apply_sell_fill_to_positions(
+        &self,
+        intent: &OrderIntent,
+        filled_shares: u64,
+        exit_price: Decimal,
+    ) {
+        if filled_shares == 0 {
+            return;
+        }
+
+        let mut remaining = filled_shares;
+        let mut matching_positions = self
+            .positions
+            .get_agent_positions(&intent.agent_id)
+            .await
+            .into_iter()
+            .filter(|pos| {
+                pos.domain == intent.domain
+                    && pos.market_slug == intent.market_slug
+                    && pos.token_id == intent.token_id
+                    && pos.side == intent.side
+            })
+            .collect::<Vec<_>>();
+
+        matching_positions.sort_by_key(|p| p.entry_time);
+
+        for pos in matching_positions {
+            if remaining == 0 {
+                break;
+            }
+            let reduce_by = remaining.min(pos.shares);
+            let _ = self
+                .positions
+                .reduce_position(&pos.position_id, reduce_by, exit_price)
+                .await;
+            remaining -= reduce_by;
+        }
+
+        if remaining > 0 {
+            warn!(
+                agent_id = %intent.agent_id,
+                intent_id = %intent.intent_id,
+                unmatched_shares = remaining,
+                "sell fill exceeded tracked position shares; allocator adjusted, position book partially unmatched"
+            );
         }
     }
 
@@ -1045,6 +1768,7 @@ mod tests {
     use super::*;
     use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
     use rust_decimal_macros::dec;
+    use std::collections::HashMap;
 
     fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
         AgentSnapshot {
@@ -1056,6 +1780,7 @@ mod tests {
             exposure: dec!(100),
             daily_pnl: dec!(5),
             unrealized_pnl: dec!(2),
+            metrics: HashMap::new(),
             last_heartbeat: Utc::now(),
             error_message: None,
         }
@@ -1097,5 +1822,175 @@ mod tests {
         let snap = QueueStatsSnapshot::from(qs);
         assert_eq!(snap.current_size, 5);
         assert_eq!(snap.enqueued_total, 50);
+    }
+
+    fn make_intent(is_buy: bool, priority: OrderPriority) -> OrderIntent {
+        let mut intent = OrderIntent::new(
+            "crypto_lob_ml",
+            Domain::Crypto,
+            "btc-updown-5m-123",
+            "token-up-123",
+            crate::domain::Side::Up,
+            is_buy,
+            100,
+            dec!(0.42),
+        );
+        intent.priority = priority;
+        intent
+    }
+
+    #[test]
+    fn test_duplicate_guard_blocks_repeated_buy_within_window() {
+        let mut guard = IntentDuplicateGuard::new(1000, true);
+        let now = Utc::now();
+        let intent = make_intent(true, OrderPriority::Normal);
+
+        assert!(guard.register_or_block(&intent, now).is_none());
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(300))
+            .is_some());
+    }
+
+    #[test]
+    fn test_duplicate_guard_allows_after_window() {
+        let mut guard = IntentDuplicateGuard::new(500, true);
+        let now = Utc::now();
+        let intent = make_intent(true, OrderPriority::Normal);
+
+        assert!(guard.register_or_block(&intent, now).is_none());
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(700))
+            .is_none());
+    }
+
+    #[test]
+    fn test_duplicate_guard_blocks_same_market_even_if_token_differs() {
+        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let now = Utc::now();
+        let first = make_intent(true, OrderPriority::Normal);
+        let mut second = make_intent(true, OrderPriority::Normal);
+        second.token_id = "token-down-123".to_string();
+        second.side = crate::domain::Side::Down;
+
+        assert!(guard.register_or_block(&first, now).is_none());
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_some());
+    }
+
+    #[test]
+    fn test_duplicate_guard_does_not_block_sells() {
+        let mut guard = IntentDuplicateGuard::new(10_000, true);
+        let now = Utc::now();
+        let intent = make_intent(false, OrderPriority::Normal);
+
+        assert!(guard.register_or_block(&intent, now).is_none());
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
+            .is_none());
+    }
+
+    #[test]
+    fn test_duplicate_guard_skips_critical_orders() {
+        let mut guard = IntentDuplicateGuard::new(10_000, true);
+        let now = Utc::now();
+        let intent = make_intent(true, OrderPriority::Critical);
+
+        assert!(guard.register_or_block(&intent, now).is_none());
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
+            .is_none());
+    }
+
+    fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {
+        let mut cfg = CoordinatorConfig::default();
+        cfg.crypto_allocator_enabled = true;
+        cfg.crypto_allocator_total_cap_usd = Some(total_cap);
+        cfg.crypto_coin_cap_btc_pct = dec!(0.40);
+        cfg.crypto_coin_cap_eth_pct = dec!(0.40);
+        cfg.crypto_coin_cap_sol_pct = dec!(0.30);
+        cfg.crypto_coin_cap_xrp_pct = dec!(0.20);
+        cfg.crypto_coin_cap_other_pct = dec!(0.10);
+        cfg.crypto_horizon_cap_5m_pct = dec!(0.50);
+        cfg.crypto_horizon_cap_15m_pct = dec!(0.60);
+        cfg.crypto_horizon_cap_other_pct = dec!(0.25);
+        cfg
+    }
+
+    fn make_crypto_intent(
+        coin: &str,
+        horizon: &str,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+    ) -> OrderIntent {
+        let mut intent = OrderIntent::new(
+            "crypto",
+            Domain::Crypto,
+            "btc-up-or-down",
+            "token-up-123",
+            crate::domain::Side::Up,
+            is_buy,
+            shares,
+            limit_price,
+        );
+        intent.metadata.insert("coin".to_string(), coin.to_string());
+        intent
+            .metadata
+            .insert("horizon".to_string(), horizon.to_string());
+        if !is_buy {
+            intent
+                .metadata
+                .insert("entry_price".to_string(), limit_price.to_string());
+        }
+        intent
+    }
+
+    #[test]
+    fn test_crypto_allocator_blocks_buy_when_coin_cap_exceeded() {
+        let cfg = make_allocator_config(dec!(100));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let first = make_crypto_intent("BTC", "5m", true, 60, dec!(0.5)); // $30
+        let second = make_crypto_intent("BTC", "5m", true, 30, dec!(0.5)); // $15 -> total $45 > BTC cap $40
+
+        assert!(allocator.reserve_buy(&first).is_ok());
+        assert!(allocator.reserve_buy(&second).is_err());
+    }
+
+    #[test]
+    fn test_crypto_allocator_releases_pending_on_buy_failure() {
+        let cfg = make_allocator_config(dec!(100));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+        let intent = make_crypto_intent("BTC", "5m", true, 50, dec!(0.5)); // $25
+
+        assert!(allocator.reserve_buy(&intent).is_ok());
+        assert!(allocator.pending.total > Decimal::ZERO);
+
+        allocator.release_buy_reservation(intent.intent_id);
+
+        assert_eq!(allocator.pending.total, Decimal::ZERO);
+        assert!(allocator.pending_by_intent.is_empty());
+    }
+
+    #[test]
+    fn test_crypto_allocator_settles_buy_then_sell() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+        let buy = make_crypto_intent("BTC", "15m", true, 100, dec!(0.5)); // reserve $50
+
+        assert!(allocator.reserve_buy(&buy).is_ok());
+        allocator.settle_buy_execution(&buy, 80, dec!(0.5)); // open $40
+
+        assert_eq!(allocator.pending.total, Decimal::ZERO);
+        assert_eq!(allocator.open.total, dec!(40));
+
+        let mut sell = make_crypto_intent("BTC", "15m", false, 40, dec!(0.5));
+        sell.market_slug = buy.market_slug.clone();
+        sell.token_id = buy.token_id.clone();
+        sell.side = buy.side;
+        allocator.settle_sell_execution(&sell, 40, dec!(0.55)); // release by entry price metadata ($20)
+
+        assert_eq!(allocator.open.total, dec!(20));
     }
 }
