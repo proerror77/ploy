@@ -11,7 +11,11 @@
 //! - GET  /api/sidecar/positions     — Current positions from DB
 //! - GET  /api/sidecar/risk          — Risk state from Coordinator
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::State,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    Json,
+};
 use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -242,6 +246,95 @@ pub struct SidecarCircuitBreakerEvent {
     pub state: String,
 }
 
+fn sidecar_expected_auth_token() -> Option<String> {
+    std::env::var("PLOY_SIDECAR_AUTH_TOKEN")
+        .or_else(|_| std::env::var("PLOY_API_SIDECAR_AUTH_TOKEN"))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn extract_bearer_token(raw: &str) -> Option<&str> {
+    raw.strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+        .map(str::trim)
+}
+
+fn ensure_sidecar_authorized(headers: &HeaderMap) -> std::result::Result<(), (StatusCode, String)> {
+    let Some(expected) = sidecar_expected_auth_token() else {
+        return Ok(());
+    };
+
+    let token = headers
+        .get("x-ploy-sidecar-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .or_else(|| {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(extract_bearer_token)
+        });
+
+    match token {
+        Some(provided) if provided == expected => Ok(()),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            "sidecar auth failed (missing/invalid token)".to_string(),
+        )),
+    }
+}
+
+fn deployment_gate_required() -> bool {
+    matches!(
+        std::env::var("PLOY_DEPLOYMENT_GATE_REQUIRED")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+async fn ensure_intent_deployment_allowed(
+    state: &AppState,
+    deployment_id: &str,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let key = deployment_id.trim();
+    if key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "deployment_id is required".to_string(),
+        ));
+    }
+
+    let deployments = state.deployments.read().await;
+    if deployments.is_empty() {
+        if deployment_gate_required() {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "deployment registry is empty while deployment gate is required".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some(dep) = deployments.get(key) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("unknown deployment_id: {}", key),
+        ));
+    };
+    if !dep.enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("deployment {} is disabled", key),
+        ));
+    }
+    Ok(())
+}
+
 // ── Handlers ─────────────────────────────────────────────────────
 
 /// POST /api/sidecar/grok/decision
@@ -250,8 +343,11 @@ pub struct SidecarCircuitBreakerEvent {
 /// We construct a UnifiedDecisionRequest, query Grok, and return the decision.
 pub async fn sidecar_grok_decision(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<GrokDecisionRequest>,
 ) -> std::result::Result<Json<GrokDecisionResponse>, (StatusCode, String)> {
+    ensure_sidecar_authorized(&headers)?;
+
     let grok = state.grok_client.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -447,8 +543,11 @@ pub async fn sidecar_grok_decision(
 /// Submit an order through the Coordinator pipeline (risk gate → queue → execution).
 pub async fn sidecar_submit_order(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<SidecarOrderRequest>,
 ) -> std::result::Result<Json<SidecarOrderResponse>, (StatusCode, String)> {
+    ensure_sidecar_authorized(&headers)?;
+
     let dry_run = req.dry_run.unwrap_or(true);
 
     // Validate price range
@@ -595,12 +694,7 @@ pub async fn sidecar_submit_order(
 }
 
 fn parse_sidecar_domain(raw: Option<&str>) -> Domain {
-    match raw
-        .unwrap_or("crypto")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match raw.unwrap_or("crypto").trim().to_ascii_lowercase().as_str() {
         "sports" => Domain::Sports,
         "politics" => Domain::Politics,
         "economics" => Domain::Economics,
@@ -609,12 +703,7 @@ fn parse_sidecar_domain(raw: Option<&str>) -> Domain {
 }
 
 fn parse_binary_side(raw: Option<&str>) -> Side {
-    match raw
-        .unwrap_or("UP")
-        .trim()
-        .to_ascii_uppercase()
-        .as_str()
-    {
+    match raw.unwrap_or("UP").trim().to_ascii_uppercase().as_str() {
         "DOWN" | "NO" => Side::Down,
         _ => Side::Up,
     }
@@ -624,19 +713,19 @@ fn parse_is_buy(order_side: Option<&str>, is_buy: Option<bool>) -> bool {
     if let Some(v) = is_buy {
         return v;
     }
-    match order_side.unwrap_or("BUY").trim().to_ascii_uppercase().as_str() {
+    match order_side
+        .unwrap_or("BUY")
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
         "SELL" => false,
         _ => true,
     }
 }
 
 fn parse_order_priority(raw: Option<&str>) -> OrderPriority {
-    match raw
-        .unwrap_or("normal")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match raw.unwrap_or("normal").trim().to_ascii_lowercase().as_str() {
         "critical" => OrderPriority::Critical,
         "high" => OrderPriority::High,
         "low" => OrderPriority::Low,
@@ -650,11 +739,18 @@ fn parse_order_priority(raw: Option<&str>) -> OrderPriority {
 /// Always routes through Coordinator (risk gate -> duplicate guard -> allocator -> execution).
 pub async fn sidecar_submit_intent(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<SidecarIntentRequest>,
 ) -> std::result::Result<Json<SidecarIntentResponse>, (StatusCode, String)> {
+    ensure_sidecar_authorized(&headers)?;
+
     let dry_run = req.dry_run.unwrap_or(false);
-    let price = Decimal::from_str(&format!("{:.6}", req.price_limit))
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid price_limit format".to_string()))?;
+    let price = Decimal::from_str(&format!("{:.6}", req.price_limit)).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid price_limit format".to_string(),
+        )
+    })?;
     if price <= Decimal::ZERO || price >= Decimal::ONE {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -677,6 +773,8 @@ pub async fn sidecar_submit_intent(
         ));
     }
 
+    ensure_intent_deployment_allowed(&state, &req.deployment_id).await?;
+
     let domain = parse_sidecar_domain(req.domain.as_deref());
     let side = parse_binary_side(req.side.as_deref());
     let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy);
@@ -697,10 +795,20 @@ pub async fn sidecar_submit_intent(
     metadata
         .entry("domain".to_string())
         .or_insert_with(|| domain.to_string());
-    if let Some(idem) = req.idempotency_key.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(idem) = req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         metadata.insert("idempotency_key".to_string(), idem.to_string());
     }
-    if let Some(reason) = req.reason.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(reason) = req
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         metadata.insert("intent_reason".to_string(), reason.to_string());
     }
     if let Some(edge) = req.edge {
@@ -722,9 +830,18 @@ pub async fn sidecar_submit_intent(
     );
     intent.priority = priority;
     intent.metadata = metadata;
-    if let Some(raw) = req.intent_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-        let parsed = Uuid::parse_str(raw)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "intent_id must be a UUID".to_string()))?;
+    if let Some(raw) = req
+        .intent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let parsed = Uuid::parse_str(raw).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "intent_id must be a UUID".to_string(),
+            )
+        })?;
         intent.intent_id = parsed;
     }
     let intent_id = intent.intent_id.to_string();

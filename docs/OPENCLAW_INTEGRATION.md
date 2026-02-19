@@ -83,9 +83,22 @@ JSON
 - `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。
 - live 直連 `submit_order` 預設禁用（防旁路風控）；如需暫時回退可設 `PLOY_ALLOW_LEGACY_DIRECT_SUBMIT=true`（不建議 production）。
 - `ploy strategy start ...` 的 legacy live runtime 預設也會被擋下（避免繞過 Coordinator）。如需緊急回退才設 `PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true`。
+- 若設定 `PLOY_SIDECAR_AUTH_TOKEN`，所有 sidecar `POST` 端點都需帶 `x-ploy-sidecar-token`（或 `Authorization: Bearer ...`）。
 - 若你要強制「只有 coordinator/gateway 能送單」，在交易機器加上 `PLOY_GATEWAY_ONLY=true`。
   在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（Coordinator 已自動帶入）。
 - 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
+- 若你要強制每筆 intent 都必須命中已註冊 deployment，可設 `PLOY_DEPLOYMENT_GATE_REQUIRED=true`。
+
+### Deployment Matrix API
+
+控制面新增 deployment matrix API（記憶體態，支援一次批量上傳）：
+
+- `GET /api/deployments`
+- `PUT /api/deployments`（body: `{ "deployments":[...], "replace":true|false }`）
+- `GET /api/deployments/:id`
+- `POST /api/deployments/:id/enable`
+- `POST /api/deployments/:id/disable`
+- `DELETE /api/deployments/:id`
 
 已支援的 method（起步集合）：
 - `pm.get_balance`

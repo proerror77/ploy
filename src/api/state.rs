@@ -2,8 +2,10 @@ use crate::adapters::PostgresStore;
 use crate::agent::grok::GrokClient;
 use crate::api::types::WsMessage;
 use crate::coordinator::CoordinatorHandle;
+use crate::platform::StrategyDeployment;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -30,6 +32,9 @@ pub struct AppState {
 
     /// Grok client for sidecar unified decisions (optional — only set when GROK_API_KEY is present)
     pub grok_client: Option<Arc<GrokClient>>,
+
+    /// Strategy deployment matrix (control-plane first-class resource).
+    pub deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +80,27 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
+    fn load_deployments_from_env() -> HashMap<String, StrategyDeployment> {
+        let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
+            .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
+            .unwrap_or_default();
+        if raw.trim().is_empty() {
+            return HashMap::new();
+        }
+
+        let mut out = HashMap::new();
+        if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(&raw) {
+            for deployment in items {
+                let id = deployment.id.trim();
+                if id.is_empty() {
+                    continue;
+                }
+                out.insert(id.to_string(), deployment);
+            }
+        }
+        out
+    }
+
     pub fn new(store: Arc<PostgresStore>, config: StrategyConfigState) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
 
@@ -91,6 +117,7 @@ impl AppState {
             start_time: Utc::now(),
             coordinator: None,
             grok_client: None,
+            deployments: Arc::new(RwLock::new(Self::load_deployments_from_env())),
         }
     }
 
@@ -116,6 +143,7 @@ impl AppState {
             start_time: Utc::now(),
             coordinator,
             grok_client,
+            deployments: Arc::new(RwLock::new(Self::load_deployments_from_env())),
         }
     }
 

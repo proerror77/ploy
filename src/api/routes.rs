@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -40,6 +40,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/strategies/running",
             get(handlers::get_running_strategies),
         )
+        // Strategy deployment matrix (control-plane first-class resource)
+        .route(
+            "/api/deployments",
+            get(handlers::list_deployments).put(handlers::upsert_deployments),
+        )
+        .route(
+            "/api/deployments/:id",
+            get(handlers::get_deployment).delete(handlers::delete_deployment),
+        )
+        .route(
+            "/api/deployments/:id/enable",
+            post(handlers::enable_deployment),
+        )
+        .route(
+            "/api/deployments/:id/disable",
+            post(handlers::disable_deployment),
+        )
         // Security endpoints
         .route("/api/security/events", get(handlers::get_security_events))
         // Sidecar endpoints (Claude Agent SDK → Rust backend)
@@ -47,7 +64,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/sidecar/grok/decision",
             post(handlers::sidecar_grok_decision),
         )
-        .route("/api/sidecar/intents", post(handlers::sidecar_submit_intent))
+        .route(
+            "/api/sidecar/intents",
+            post(handlers::sidecar_submit_intent),
+        )
         .route("/api/sidecar/orders", post(handlers::sidecar_submit_order))
         .route(
             "/api/sidecar/positions",
