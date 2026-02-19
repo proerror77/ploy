@@ -44,3 +44,6 @@ reports/
 
 # Deployment configs with credentials
 deployment/
+
+# Sidecar build artifacts
+ploy-sidecar/dist/
