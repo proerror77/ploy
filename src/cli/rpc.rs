@@ -138,9 +138,9 @@ async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClie
     let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
     let funder = std::env::var("POLYMARKET_FUNDER").ok();
     if let Some(funder_addr) = funder {
-        PolymarketClient::new_authenticated_proxy(rest_url, wallet, &funder_addr, true).await
+        PolymarketClient::new_authenticated_proxy(rest_url, wallet, &funder_addr, false).await
     } else {
-        PolymarketClient::new_authenticated(rest_url, wallet, true).await
+        PolymarketClient::new_authenticated(rest_url, wallet, false).await
     }
 }
 
