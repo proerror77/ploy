@@ -23,7 +23,7 @@ pub struct AgentClientConfig {
     pub timeout: Duration,
     /// Maximum retries on failure
     pub max_retries: u8,
-    /// Model to use (e.g., "claude-3-opus", "claude-3-sonnet")
+    /// Model to use (e.g., "opus", "sonnet", "claude-opus-4-6", or "MiniMax-M2.5" when using an Anthropic-compatible endpoint)
     pub model: Option<String>,
     /// System prompt for trading context
     pub system_prompt: Option<String>,

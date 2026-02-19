@@ -9,6 +9,7 @@ use crate::signing::Wallet;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use chrono::{DateTime, Utc};
+use polymarket_client_sdk::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk::clob::types::{
     request::{BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest},
     AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType as SdkSignatureType,
@@ -32,6 +33,8 @@ pub const POLYGON_CHAIN_ID: u64 = 137;
 
 /// Gamma API base URL
 pub const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
+
+type AuthClobClient = ClobClient<Authenticated<Normal>>;
 
 /// Polymarket CLOB API client using official SDK
 pub struct PolymarketClient {
@@ -412,6 +415,35 @@ pub struct GammaTokenInfo {
 // ==================== Implementation ====================
 
 impl PolymarketClient {
+    async fn authenticate_fresh(&self, signer: &PrivateKeySigner) -> Result<AuthClobClient> {
+        // Serialize auth handshakes. The upstream SDK requires unique ownership when
+        // transitioning unauthenticated -> authenticated, so we create a fresh client per call.
+        let _guard = self.order_mutex.lock().await;
+
+        let fresh_client = ClobClient::new(&self.base_url, ClobConfig::default())
+            .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
+
+        let auth_client = if let Some(funder) = self.funder {
+            debug!("Using proxy wallet authentication, funder: {:?}", funder);
+            fresh_client
+                .authentication_builder(signer)
+                .funder(funder)
+                .signature_type(SdkSignatureType::Proxy)
+                .authenticate()
+                .await
+                .map_err(|e| PloyError::Auth(format!("Proxy authentication failed: {}", e)))?
+        } else {
+            debug!("Using EOA wallet authentication");
+            fresh_client
+                .authentication_builder(signer)
+                .authenticate()
+                .await
+                .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?
+        };
+
+        Ok(auth_client)
+    }
+
     /// Create a new CLOB client (dry run mode)
     pub fn new(base_url: &str, dry_run: bool) -> Result<Self> {
         let config = ClobConfig::default();
@@ -991,32 +1023,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        // Acquire mutex to serialize order submissions and prevent auth race condition
-        let _guard = self.order_mutex.lock().await;
-        debug!("Acquired order mutex for submission");
-
-        // Create a fresh ClobClient for each order to avoid SDK reference issues
-        let fresh_client = ClobClient::new(&self.base_url, ClobConfig::default())
-            .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
-
-        // Authenticate for this operation
-        let auth_client = if let Some(funder) = self.funder {
-            debug!("Using proxy wallet authentication, funder: {:?}", funder);
-            fresh_client
-                .authentication_builder(signer)
-                .funder(funder)
-                .signature_type(SdkSignatureType::Proxy)
-                .authenticate()
-                .await
-                .map_err(|e| PloyError::Auth(format!("Proxy authentication failed: {}", e)))?
-        } else {
-            debug!("Using EOA wallet authentication");
-            fresh_client
-                .authentication_builder(signer)
-                .authenticate()
-                .await
-                .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?
-        };
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         // Build the order
         let sdk_side = match request.order_side {
@@ -1081,13 +1088,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         let order = auth_client
             .order(order_id)
@@ -1124,13 +1125,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         auth_client
             .cancel_order(order_id)
@@ -1156,13 +1151,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         auth_client
             .cancel_all_orders()
@@ -1192,13 +1181,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         let req = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Collateral)
@@ -1237,13 +1220,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         let req = OrdersRequest::builder().build();
 
@@ -1290,13 +1267,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         let req = OrdersRequest::builder().asset_id(token_id).build();
 
@@ -1338,13 +1309,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         let req = OrdersRequest::builder().build();
 
@@ -1380,17 +1345,44 @@ impl PolymarketClient {
             .collect())
     }
 
-    /// Get positions (placeholder - SDK may not support this directly)
+    /// Get positions (via Polymarket Data API)
     #[instrument(skip(self))]
     pub async fn get_positions(&self) -> Result<Vec<PositionResponse>> {
         if self.dry_run {
             return Ok(vec![]);
         }
 
-        // The SDK doesn't have a direct positions endpoint
-        // This would need to be derived from trades or use a custom HTTP call
-        warn!("get_positions not fully implemented with SDK");
-        Ok(vec![])
+        let user = if let Some(funder) = self.funder {
+            format!("{:#x}", funder)
+        } else if let Some(w) = self.wallet.as_ref() {
+            format!("{:#x}", w.address())
+        } else if let Some(signer) = self.signer.as_ref() {
+            format!("{:#x}", signer.address())
+        } else {
+            return Err(PloyError::Auth("Not authenticated".to_string()));
+        };
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get("https://data-api.polymarket.com/positions")
+            .query(&[("user", user.as_str())])
+            .send()
+            .await
+            .map_err(|e| PloyError::Internal(format!("Failed to fetch positions: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Err(PloyError::Internal(format!(
+                "Positions API error: {}",
+                resp.status()
+            )));
+        }
+
+        let positions: Vec<PositionResponse> = resp
+            .json()
+            .await
+            .map_err(|e| PloyError::Internal(format!("Failed to parse positions response: {}", e)))?;
+
+        Ok(positions)
     }
 
     /// Get trades
@@ -1405,13 +1397,7 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self
-            .clob_client
-            .clone()
-            .authentication_builder(signer)
-            .authenticate()
-            .await
-            .map_err(|e| PloyError::Auth(format!("Authentication failed: {}", e)))?;
+        let auth_client = self.authenticate_fresh(signer).await?;
 
         let req = TradesRequest::builder().build();
 

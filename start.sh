@@ -71,7 +71,7 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 if [ ! -f "$PID_FILE" ]; then
-    cargo run --release --features api -- run > ploy-api.log 2>&1 &
+    cargo run --release --features api --bin ploy -- run > ploy-api.log 2>&1 &
     API_PID=$!
     echo "$API_PID" > "$PID_FILE"
     echo "       Started (PID $API_PID), waiting for /health..."

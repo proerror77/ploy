@@ -35,17 +35,42 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
+For MiniMax, you can start from:
+
+```sh
+cp .env.minimax.example .env
+```
+
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Claude API key (required) |
+| `ANTHROPIC_API_KEY` | — | Anthropic-compatible API key (required) |
+| `ANTHROPIC_BASE_URL` | — | Optional Anthropic-compatible base URL (example: MiniMax `https://api.minimax.io/anthropic`) |
 | `PLOY_API_URL` | `http://localhost:8081` | Ploy Rust backend URL |
 | `PLOY_API_KEY` | — | Bearer token (optional) |
-| `SIDECAR_MODEL` | `sonnet` | `sonnet`, `opus`, or `haiku` |
+| `SIDECAR_MODEL` | `sonnet` | Model name or alias (`sonnet`, `opus`, `haiku`, or a full model id like `claude-opus-4-6` / `MiniMax-M2.5`) |
 | `SIDECAR_POLL_INTERVAL_SECS` | `300` | Scan interval (seconds) |
 | `SIDECAR_MAX_BUDGET_USD` | `1.00` | Max Claude cost per scan cycle |
 | `SIDECAR_DRY_RUN` | `true` | Set to `false` for live orders |
 
 Grok is configured on the **Rust backend** side via `GROK_API_KEY`.
+
+## MiniMax M2.5 (Anthropic-Compatible)
+
+If you want to use **MiniMax M2.5** via their **Anthropic-compatible** endpoint (instead of Claude models), set:
+
+```sh
+export ANTHROPIC_BASE_URL="https://api.minimax.io/anthropic"
+export ANTHROPIC_API_KEY="YOUR_MINIMAX_API_KEY"
+export SIDECAR_MODEL="MiniMax-M2.5"
+```
+
+If you prefer to keep using model aliases like `opus` in configs, you can also map Claude aliases to MiniMax by setting:
+
+```sh
+export ANTHROPIC_DEFAULT_OPUS_MODEL="MiniMax-M2.5"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="MiniMax-M2.5"   # optional
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="MiniMax-M2.5"    # optional
+```
 
 ## Usage
 

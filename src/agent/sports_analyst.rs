@@ -103,7 +103,8 @@ impl SportsAnalyst {
         let data_fetcher = SportsDataFetcher::new(grok);
 
         // Use longer timeout and Opus model for complex sports analysis
-        let config = AgentClientConfig::for_autonomous().with_timeout(300); // 5 minutes for detailed analysis
+        let mut config = AgentClientConfig::for_autonomous().with_timeout(300); // 5 minutes for detailed analysis
+        config.model = Some(std::env::var("PLOY_CLAUDE_MODEL").unwrap_or_else(|_| "opus".to_string()));
         let claude = ClaudeAgentClient::with_config(config);
 
         Ok(Self {

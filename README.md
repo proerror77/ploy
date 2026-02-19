@@ -20,7 +20,7 @@ A high-performance Polymarket trading bot covering crypto, sports, and political
 - **PostgreSQL** 15+ with an active database for event store, checkpoints, and strategy state
 - **Polymarket account** with API credentials and a funded wallet on Polygon
 - (Optional) `ANTHROPIC_API_KEY` for Claude AI agent commands
-- (Optional) `XAI_API_KEY` for Grok-based sports analysis
+- (Optional) `GROK_API_KEY` for Grok-based sports analysis
 
 ## Installation
 
@@ -56,7 +56,9 @@ sqlx migrate run
 | `POLYMARKET_FUNDER` | No | Proxy/Magic wallet address |
 | `DATABASE_URL` | Yes | PostgreSQL connection string (overrides config) |
 | `ANTHROPIC_API_KEY` | No | Required for `agent` and AI-powered commands |
-| `XAI_API_KEY` | No | Required for Grok-based sports analysis |
+| `ANTHROPIC_BASE_URL` | No | Optional Anthropic-compatible base URL (example: MiniMax `https://api.minimax.io/anthropic`) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | No | Optional alias override (example: map `opus` → `MiniMax-M2.5`) |
+| `GROK_API_KEY` | No | Required for Grok-based sports analysis |
 
 ### Config File
 
