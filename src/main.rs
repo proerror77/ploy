@@ -490,7 +490,6 @@ async fn run_platform_mode(
     resume: Option<String>,
     cli: &Cli,
 ) -> Result<()> {
-    use ploy::adapters::PolymarketClient;
     use ploy::config::AppConfig;
     use ploy::coordinator::bootstrap::{
         start_platform, PlatformBootstrapConfig, PlatformStartControl,
@@ -533,7 +532,7 @@ async fn run_platform_mode(
         platform_cfg.dry_run,
     );
 
-    let pm_client = PolymarketClient::new(&app_config.market.rest_url, platform_cfg.dry_run)?;
+    let pm_client = create_pm_client(&app_config.market.rest_url, platform_cfg.dry_run).await?;
 
     let control = PlatformStartControl { pause, resume };
     start_platform(platform_cfg, pm_client, &app_config, control).await
