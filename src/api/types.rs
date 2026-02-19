@@ -113,15 +113,16 @@ pub struct SystemControlResponse {
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StrategyConfig {
     pub symbols: Vec<String>,
     pub min_move: f64,
     pub max_entry: f64,
     pub shares: i32,
     pub predictive: bool,
-    #[serde(default, alias = "take_profit")]
+    #[serde(default)]
     pub exit_edge_floor: Option<f64>,
-    #[serde(default, alias = "stop_loss")]
+    #[serde(default)]
     pub exit_price_band: Option<f64>,
     #[serde(default)]
     pub time_decay_exit_secs: Option<u64>,
@@ -211,4 +212,26 @@ pub struct MarketData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusUpdate {
     pub status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StrategyConfig;
+    use serde_json::json;
+
+    #[test]
+    fn strategy_config_rejects_legacy_take_profit_stop_loss_fields() {
+        let payload = json!({
+            "symbols": ["BTCUSDT"],
+            "min_move": 0.1,
+            "max_entry": 1.0,
+            "shares": 10,
+            "predictive": false,
+            "take_profit": 0.02,
+            "stop_loss": 0.05
+        });
+
+        let parsed = serde_json::from_value::<StrategyConfig>(payload);
+        assert!(parsed.is_err());
+    }
 }

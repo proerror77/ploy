@@ -2619,11 +2619,11 @@ impl PlatformBootstrapConfig {
         }
         cfg.crypto.exit_edge_floor = env_decimal(
             "PLOY_CRYPTO_AGENT__EXIT_EDGE_FLOOR",
-            env_decimal("PLOY_CRYPTO_AGENT__TAKE_PROFIT", cfg.crypto.exit_edge_floor),
+            cfg.crypto.exit_edge_floor,
         );
         cfg.crypto.exit_price_band = env_decimal(
             "PLOY_CRYPTO_AGENT__EXIT_PRICE_BAND",
-            env_decimal("PLOY_CRYPTO_AGENT__STOP_LOSS", cfg.crypto.exit_price_band),
+            cfg.crypto.exit_price_band,
         );
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENABLE_PRICE_EXITS") {
             match raw.trim().to_ascii_lowercase().as_str() {
@@ -2632,10 +2632,8 @@ impl PlatformBootstrapConfig {
                 _ => {}
             }
         }
-        cfg.crypto.min_hold_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__MIN_HOLD_SECS",
-            cfg.crypto.min_hold_secs,
-        );
+        cfg.crypto.min_hold_secs =
+            env_u64("PLOY_CRYPTO_AGENT__MIN_HOLD_SECS", cfg.crypto.min_hold_secs);
         cfg.crypto.heartbeat_interval_secs = env_u64(
             "PLOY_CRYPTO_AGENT__HEARTBEAT_INTERVAL_SECS",
             cfg.crypto.heartbeat_interval_secs,
@@ -2693,17 +2691,11 @@ impl PlatformBootstrapConfig {
         .max(1);
         cfg.crypto_lob_ml.exit_edge_floor = env_decimal(
             "PLOY_CRYPTO_LOB_ML__EXIT_EDGE_FLOOR",
-            env_decimal(
-                "PLOY_CRYPTO_LOB_ML__TAKE_PROFIT",
-                cfg.crypto_lob_ml.exit_edge_floor,
-            ),
+            cfg.crypto_lob_ml.exit_edge_floor,
         );
         cfg.crypto_lob_ml.exit_price_band = env_decimal(
             "PLOY_CRYPTO_LOB_ML__EXIT_PRICE_BAND",
-            env_decimal(
-                "PLOY_CRYPTO_LOB_ML__STOP_LOSS",
-                cfg.crypto_lob_ml.exit_price_band,
-            ),
+            cfg.crypto_lob_ml.exit_price_band,
         );
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS") {
             match raw.trim().to_ascii_lowercase().as_str() {
@@ -2948,9 +2940,7 @@ impl PlatformBootstrapConfig {
             }
             cfg.enable_sports = false;
             cfg.enable_politics = false;
-            info!(
-                "agent framework lockdown active (mode=openclaw): built-in agents are disabled"
-            );
+            info!("agent framework lockdown active (mode=openclaw): built-in agents are disabled");
         }
 
         cfg

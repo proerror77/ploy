@@ -13,6 +13,10 @@ mod router;
 mod traits;
 mod types;
 
+pub use contracts::{
+    MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision, RiskDecisionStatus,
+    StrategyDeployment, Timeframe, TradeIntent,
+};
 pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
@@ -24,10 +28,6 @@ pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent, S
 pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
-};
-pub use contracts::{
-    MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision, RiskDecisionStatus,
-    StrategyDeployment, Timeframe, TradeIntent,
 };
 
 pub use agents::EventEdgePlatformAgent;

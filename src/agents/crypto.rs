@@ -23,6 +23,7 @@ use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPr
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
+const STRATEGY_ID: &str = "crypto_momentum";
 
 fn default_exit_edge_floor() -> Decimal {
     dec!(0.02)
@@ -49,9 +50,9 @@ pub struct CryptoTradingConfig {
     /// Prefer events closest to end (confirmatory mode)
     pub prefer_close_to_end: bool,
     pub default_shares: u64,
-    #[serde(default = "default_exit_edge_floor", alias = "take_profit")]
+    #[serde(default = "default_exit_edge_floor")]
     pub exit_edge_floor: Decimal,
-    #[serde(default = "default_exit_price_band", alias = "stop_loss")]
+    #[serde(default = "default_exit_price_band")]
     pub exit_price_band: Decimal,
     /// Optional mark-to-market binary exit thresholds (disabled by default)
     pub enable_price_exits: bool,
@@ -121,6 +122,52 @@ fn prune_stale_traded_events(
 ) {
     let retention = chrono::Duration::hours(TRADED_EVENT_RETENTION_HOURS);
     traded_events.retain(|_, entered_at| now.signed_duration_since(*entered_at) < retention);
+}
+
+fn normalize_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn normalize_timeframe(horizon: &str) -> String {
+    let raw = horizon.trim().to_ascii_lowercase();
+    if raw.contains("15m") || raw == "15" {
+        "15m".to_string()
+    } else if raw.contains("5m") || raw == "5" {
+        "5m".to_string()
+    } else if raw.is_empty() {
+        "5m".to_string()
+    } else {
+        raw
+    }
+}
+
+fn event_window_secs_for_horizon(horizon: &str) -> u64 {
+    match normalize_timeframe(horizon).as_str() {
+        "15m" => 15 * 60,
+        "5m" => 5 * 60,
+        _ => 5 * 60,
+    }
+}
+
+fn deployment_id_for(strategy: &str, coin: &str, horizon: &str) -> String {
+    format!(
+        "crypto.pm.{}.{}.{}",
+        normalize_component(coin),
+        normalize_timeframe(horizon),
+        normalize_component(strategy)
+    )
 }
 
 impl CryptoTradingAgent {
@@ -383,11 +430,21 @@ impl TradingAgent for CryptoTradingAgent {
                             false,
                             pos.shares,
                             best_bid,
-                        )
+                        );
+                        let position_coin = pos.symbol.replace("USDT", "");
+                        let deployment_id =
+                            deployment_id_for(STRATEGY_ID, &position_coin, &pos.horizon);
+                        let timeframe = normalize_timeframe(&pos.horizon);
+                        let event_window_secs =
+                            event_window_secs_for_horizon(&timeframe).to_string();
+                        let intent = intent
                         .with_priority(OrderPriority::High)
-                        .with_metadata("strategy", "crypto_momentum")
+                        .with_metadata("strategy", STRATEGY_ID)
+                        .with_metadata("deployment_id", &deployment_id)
+                        .with_metadata("timeframe", &timeframe)
+                        .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("signal_type", "crypto_momentum_exit")
-                        .with_metadata("coin", &pos.symbol.replace("USDT", ""))
+                        .with_metadata("coin", &position_coin)
                         .with_metadata("symbol", &pos.symbol)
                         .with_metadata("series_id", &pos.series_id)
                         .with_metadata("event_series_id", &pos.series_id)
@@ -483,9 +540,17 @@ impl TradingAgent for CryptoTradingAgent {
                             true,
                             self.config.default_shares,
                             limit_price,
-                        )
+                        );
+                        let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
+                        let timeframe = normalize_timeframe(&event.horizon);
+                        let event_window_secs =
+                            event_window_secs_for_horizon(&timeframe).to_string();
+                        let intent = intent
                         .with_priority(OrderPriority::Normal)
-                        .with_metadata("strategy", "crypto_momentum")
+                        .with_metadata("strategy", STRATEGY_ID)
+                        .with_metadata("deployment_id", &deployment_id)
+                        .with_metadata("timeframe", &timeframe)
+                        .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("coin", &coin)
                         .with_metadata("condition_id", &event.condition_id)
                         .with_metadata("series_id", &event.series_id)
@@ -611,11 +676,20 @@ impl TradingAgent for CryptoTradingAgent {
                         false,
                         pos.shares,
                         best_bid,
-                    )
+                    );
+                    let position_coin = pos.symbol.replace("USDT", "");
+                    let deployment_id =
+                        deployment_id_for(STRATEGY_ID, &position_coin, &pos.horizon);
+                    let timeframe = normalize_timeframe(&pos.horizon);
+                    let event_window_secs = event_window_secs_for_horizon(&timeframe).to_string();
+                    let intent = intent
                     .with_priority(priority)
-                    .with_metadata("strategy", "crypto_momentum")
+                    .with_metadata("strategy", STRATEGY_ID)
+                    .with_metadata("deployment_id", &deployment_id)
+                    .with_metadata("timeframe", &timeframe)
+                    .with_metadata("event_window_secs", &event_window_secs)
                     .with_metadata("signal_type", "crypto_momentum_exit")
-                    .with_metadata("coin", &pos.symbol.replace("USDT", ""))
+                    .with_metadata("coin", &position_coin)
                     .with_metadata("symbol", &pos.symbol)
                     .with_metadata("series_id", &pos.series_id)
                     .with_metadata("event_series_id", &pos.series_id)
@@ -684,11 +758,21 @@ impl TradingAgent for CryptoTradingAgent {
                                     false,
                                     pos.shares,
                                     bid, // best-effort sell
-                                )
+                                );
+                                let position_coin = pos.symbol.replace("USDT", "");
+                                let deployment_id =
+                                    deployment_id_for(STRATEGY_ID, &position_coin, &pos.horizon);
+                                let timeframe = normalize_timeframe(&pos.horizon);
+                                let event_window_secs =
+                                    event_window_secs_for_horizon(&timeframe).to_string();
+                                let intent = intent
                                 .with_priority(OrderPriority::Critical)
-                                .with_metadata("strategy", "crypto_momentum")
+                                .with_metadata("strategy", STRATEGY_ID)
+                                .with_metadata("deployment_id", &deployment_id)
+                                .with_metadata("timeframe", &timeframe)
+                                .with_metadata("event_window_secs", &event_window_secs)
                                 .with_metadata("signal_type", "crypto_momentum_exit")
-                                .with_metadata("coin", &pos.symbol.replace("USDT", ""))
+                                .with_metadata("coin", &position_coin)
                                 .with_metadata("symbol", &pos.symbol)
                                 .with_metadata("series_id", &pos.series_id)
                                 .with_metadata("event_series_id", &pos.series_id)
@@ -799,5 +883,17 @@ mod tests {
 
         assert!(!traded_events.contains_key("stale"));
         assert!(traded_events.contains_key("fresh"));
+    }
+
+    #[test]
+    fn test_deployment_metadata_helpers() {
+        assert_eq!(normalize_timeframe("15"), "15m");
+        assert_eq!(normalize_timeframe("btc-5m"), "5m");
+        assert_eq!(event_window_secs_for_horizon("15m"), 900);
+        assert_eq!(event_window_secs_for_horizon("5m"), 300);
+        assert_eq!(
+            deployment_id_for("crypto_momentum", "BTC", "15m"),
+            "crypto.pm.btc.15m.crypto_momentum"
+        );
     }
 }

@@ -144,17 +144,43 @@ impl IntentDuplicateGuard {
         }
     }
 
+    fn deployment_scope(intent: &OrderIntent) -> String {
+        if let Some(scope) = intent
+            .metadata
+            .get("deployment_id")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+        {
+            return scope;
+        }
+
+        let strategy = intent
+            .metadata
+            .get("strategy")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "default".to_string());
+
+        format!(
+            "agent:{}|strategy:{}",
+            intent.agent_id.trim().to_ascii_lowercase(),
+            strategy
+        )
+    }
+
     fn buy_key(intent: &OrderIntent) -> Option<String> {
         // Only guard normal/high-priority ENTRY orders.
         // Use market-level key so opposite-side re-entries on the same round
         // are also blocked within the duplicate window.
+        // Scope by deployment to avoid blocking independent strategy deployments.
         if !intent.is_buy || intent.priority == OrderPriority::Critical {
             return None;
         }
 
         Some(format!(
-            "{}|{}",
+            "{}|{}|{}",
             intent.domain,
+            Self::deployment_scope(intent),
             intent.market_slug.trim().to_ascii_lowercase()
         ))
     }
@@ -1076,7 +1102,7 @@ impl Coordinator {
                 .max(0);
 
             // Convert OrderIntent → OrderRequest for the executor
-            let request = Self::intent_to_request(&intent);
+            let request = self.intent_to_request(&intent);
 
             match self.executor.execute(&request).await {
                 Ok(result) => {
@@ -1739,8 +1765,107 @@ impl Coordinator {
         }
     }
 
+    fn infer_time_bucket_seconds(intent: &OrderIntent) -> i64 {
+        if let Some(raw) = intent.metadata.get("event_window_secs") {
+            if let Ok(v) = raw.trim().parse::<i64>() {
+                if v > 0 {
+                    return v;
+                }
+            }
+        }
+
+        let mut hints: Vec<&str> = Vec::new();
+        if let Some(h) = intent.metadata.get("timeframe") {
+            hints.push(h.as_str());
+        }
+        if let Some(h) = intent.metadata.get("horizon") {
+            hints.push(h.as_str());
+        }
+        if let Some(h) = intent.metadata.get("series_id") {
+            hints.push(h.as_str());
+        }
+
+        for raw in hints {
+            if let Some(horizon) = CryptoHorizon::from_hint(raw) {
+                return match horizon {
+                    CryptoHorizon::M15 => 15 * 60,
+                    CryptoHorizon::M5 => 5 * 60,
+                    CryptoHorizon::Other => 5 * 60,
+                };
+            }
+        }
+
+        5 * 60
+    }
+
+    fn sanitize_idempotency_component(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        for ch in input.chars() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.' | '|') {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        out
+    }
+
+    fn stable_idempotency_key(account_id: &str, intent: &OrderIntent) -> String {
+        if let Some(key) = intent
+            .metadata
+            .get("idempotency_key")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            return Self::sanitize_idempotency_component(key);
+        }
+
+        let deployment_id = intent
+            .metadata
+            .get("deployment_id")
+            .map(String::as_str)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_ascii_lowercase())
+            .unwrap_or_else(|| {
+                let strategy = intent
+                    .metadata
+                    .get("strategy")
+                    .map(|v| v.trim().to_ascii_lowercase())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "default".to_string());
+                format!(
+                    "agent:{}|strategy:{}",
+                    intent.agent_id.trim().to_ascii_lowercase(),
+                    strategy
+                )
+            });
+
+        let window_secs = Self::infer_time_bucket_seconds(intent);
+        let ts = intent
+            .metadata
+            .get("event_time")
+            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(intent.created_at)
+            .timestamp();
+        let bucket = ts.div_euclid(window_secs);
+        let side = intent.side.as_str();
+        let order_kind = if intent.is_buy { "buy" } else { "sell" };
+
+        Self::sanitize_idempotency_component(&format!(
+            "acct:{account}|dep:{dep}|dom:{dom}|mkt:{mkt}|side:{side}|kind:{kind}|bucket:{bucket}",
+            account = account_id,
+            dep = deployment_id,
+            dom = intent.domain.to_string().to_ascii_lowercase(),
+            mkt = intent.market_slug.trim().to_ascii_lowercase(),
+            side = side.to_ascii_lowercase(),
+            kind = order_kind,
+            bucket = bucket,
+        ))
+    }
+
     /// Convert an OrderIntent into an OrderRequest for the executor
-    fn intent_to_request(intent: &OrderIntent) -> OrderRequest {
+    fn intent_to_request(&self, intent: &OrderIntent) -> OrderRequest {
         use crate::domain::OrderSide;
 
         let order_side = if intent.is_buy {
@@ -1749,9 +1874,10 @@ impl Coordinator {
             OrderSide::Sell
         };
 
+        let idempotency_key = Self::stable_idempotency_key(&self.account_id, intent);
         OrderRequest {
-            client_order_id: intent.intent_id.to_string(),
-            idempotency_key: Some(intent.intent_id.to_string()),
+            client_order_id: format!("intent:{}", intent.intent_id),
+            idempotency_key: Some(idempotency_key),
             token_id: intent.token_id.clone(),
             market_side: intent.side.clone(),
             order_side,
@@ -1879,6 +2005,28 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_guard_allows_same_market_for_different_deployments() {
+        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let now = Utc::now();
+        let mut first = make_intent(true, OrderPriority::Normal);
+        let mut second = make_intent(true, OrderPriority::Normal);
+
+        first.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.momentum".to_string(),
+        );
+        second.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.patternmem".to_string(),
+        );
+
+        assert!(guard.register_or_block(&first, now).is_none());
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_none());
+    }
+
+    #[test]
     fn test_duplicate_guard_does_not_block_sells() {
         let mut guard = IntentDuplicateGuard::new(10_000, true);
         let now = Utc::now();
@@ -1900,6 +2048,63 @@ mod tests {
         assert!(guard
             .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
             .is_none());
+    }
+
+    #[test]
+    fn test_intent_to_request_uses_stable_idempotency_key_by_window() {
+        let mut intent = OrderIntent::new(
+            "openclaw",
+            Domain::Crypto,
+            "btc-updown-15m-20260219-1200",
+            "token-up-1",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        );
+        intent.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.patternmem".to_string(),
+        );
+        intent
+            .metadata
+            .insert("horizon".to_string(), "15m".to_string());
+        intent
+            .metadata
+            .insert("event_time".to_string(), "2026-02-19T12:07:00Z".to_string());
+
+        let key = Coordinator::stable_idempotency_key("acct-main", &intent);
+
+        assert_ne!(key, intent.intent_id.to_string());
+        assert!(key.contains("acct-main"));
+        assert!(key.contains("crypto.pm.btc.15m.patternmem"));
+        assert!(key.contains("btc-updown-15m-20260219-1200"));
+    }
+
+    #[test]
+    fn test_stable_idempotency_key_fallback_uses_intent_created_at() {
+        let mut first = OrderIntent::new(
+            "openclaw",
+            Domain::Crypto,
+            "btc-updown-15m",
+            "token-up-1",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        );
+        let mut second = first.clone();
+        first.created_at = chrono::DateTime::parse_from_rfc3339("2026-02-19T12:00:00Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        second.created_at = chrono::DateTime::parse_from_rfc3339("2026-02-19T13:00:00Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+
+        let first_key = Coordinator::stable_idempotency_key("acct-main", &first);
+        let second_key = Coordinator::stable_idempotency_key("acct-main", &second);
+
+        assert_ne!(first_key, second_key);
     }
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {

@@ -80,6 +80,8 @@ JSON
 注意：
 - `pm.submit_limit` / `pm.cancel_order` / `events.upsert` / `events.update_status` 這類「寫入」操作預設會被拒絕，必須在交易機器環境設 `PLOY_RPC_WRITE_ENABLED=true` 才會放行。
 - 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
+- 若你要強制「只有 coordinator/gateway 能送單」，在交易機器加上 `PLOY_GATEWAY_ONLY=true`。
+  在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（RPC/coordinator 已自動帶入）。
 - 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
 
 已支援的 method（起步集合）：

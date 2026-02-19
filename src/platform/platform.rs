@@ -336,7 +336,7 @@ impl OrderPlatform {
         let intent_id = intent.intent_id;
 
         // 構建訂單請求
-        let request = if intent.is_buy {
+        let mut request = if intent.is_buy {
             OrderRequest::buy_limit(
                 intent.token_id.clone(),
                 intent.side,
@@ -351,6 +351,8 @@ impl OrderPlatform {
                 intent.limit_price,
             )
         };
+        request.client_order_id = format!("intent:{}", intent.intent_id);
+        request.idempotency_key = Some(format!("intent:{}", intent.intent_id));
 
         // 執行訂單
         match self.executor.execute(&request).await {

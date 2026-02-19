@@ -128,9 +128,8 @@ async fn main() -> Result<()> {
             dry_run,
         }) => {
             init_logging();
-            let cfg_for_lockdown = AppConfig::load_from(&cli.config).unwrap_or_else(|_| {
-                AppConfig::default_config(true, "btc-price-series-15m")
-            });
+            let cfg_for_lockdown = AppConfig::load_from(&cli.config)
+                .unwrap_or_else(|_| AppConfig::default_config(true, "btc-price-series-15m"));
             if cfg_for_lockdown.openclaw_runtime_lockdown() {
                 return Err(PloyError::Validation(
                     "event-edge runtime is disabled in openclaw lockdown mode".to_string(),

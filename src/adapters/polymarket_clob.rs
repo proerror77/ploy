@@ -529,6 +529,76 @@ pub struct GammaTokenInfo {
 // ==================== Implementation ====================
 
 impl PolymarketClient {
+    fn parse_boolish(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y" | "on"
+        )
+    }
+
+    fn env_bool(keys: &[&str]) -> bool {
+        keys.iter()
+            .find_map(|k| std::env::var(k).ok())
+            .map(|v| Self::parse_boolish(&v))
+            .unwrap_or(false)
+    }
+
+    fn env_string(keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .find_map(|k| std::env::var(k).ok())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn gateway_only_mode_enabled() -> bool {
+        let explicit_gate = Self::env_bool(&[
+            "PLOY_GATEWAY_ONLY",
+            "PLOY_ENFORCE_GATEWAY_ONLY",
+            "PLOY_ENFORCE_COORDINATOR_GATEWAY_ONLY",
+        ]);
+
+        let openclaw_mode =
+            Self::env_string(&["PLOY_AGENT_FRAMEWORK__MODE", "PLOY_AGENT_FRAMEWORK_MODE"])
+                .is_some_and(|mode| mode == "openclaw");
+        let openclaw_hard_disable = Self::env_bool(&[
+            "PLOY_AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
+            "PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS",
+            "PLOY_OPENCLAW_ONLY",
+        ]);
+
+        explicit_gate || (openclaw_mode && openclaw_hard_disable)
+    }
+
+    fn validate_gateway_order_request_inner(request: &OrderRequest, enforce: bool) -> Result<()> {
+        if !enforce {
+            return Ok(());
+        }
+
+        let has_idempotency_key = request
+            .idempotency_key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|v| !v.is_empty());
+        if !has_idempotency_key {
+            return Err(PloyError::Validation(
+                "gateway-only mode: idempotency_key is required (route writes through coordinator/gateway)"
+                    .to_string(),
+            ));
+        }
+
+        if !request.client_order_id.starts_with("intent:") {
+            return Err(PloyError::Validation(
+                "gateway-only mode: client_order_id must start with 'intent:'".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_gateway_order_request(request: &OrderRequest) -> Result<()> {
+        Self::validate_gateway_order_request_inner(request, Self::gateway_only_mode_enabled())
+    }
+
     async fn fetch_orders_paginated(
         &self,
         auth_client: &AuthClobClient,
@@ -1157,6 +1227,10 @@ impl PolymarketClient {
     /// Submit an order
     #[instrument(skip(self))]
     pub async fn submit_order(&self, request: &OrderRequest) -> Result<OrderResponse> {
+        if !self.dry_run {
+            Self::validate_gateway_order_request(request)?;
+        }
+
         if self.dry_run {
             info!(
                 "DRY RUN: Would submit {} order for {} shares of {} @ {}",
@@ -1998,5 +2072,32 @@ mod tests {
         assert_eq!(pos.cur_price.as_deref(), Some("1"));
         assert_eq!(pos.redeemable, Some(true));
         assert_eq!(pos.negative_risk, Some(true));
+    }
+
+    #[test]
+    fn test_gateway_only_validation_rejects_missing_idempotency() {
+        let request =
+            OrderRequest::buy_limit("token".to_string(), crate::domain::Side::Up, 10, dec!(0.5));
+        let result = PolymarketClient::validate_gateway_order_request_inner(&request, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gateway_only_validation_rejects_non_intent_client_order_id() {
+        let mut request =
+            OrderRequest::buy_limit("token".to_string(), crate::domain::Side::Up, 10, dec!(0.5));
+        request.idempotency_key = Some("stable-key".to_string());
+        let result = PolymarketClient::validate_gateway_order_request_inner(&request, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gateway_only_validation_accepts_gateway_stamped_order() {
+        let mut request =
+            OrderRequest::buy_limit("token".to_string(), crate::domain::Side::Up, 10, dec!(0.5));
+        request.client_order_id = "intent:abc".to_string();
+        request.idempotency_key = Some("stable-key".to_string());
+        let result = PolymarketClient::validate_gateway_order_request_inner(&request, true);
+        assert!(result.is_ok());
     }
 }

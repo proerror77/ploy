@@ -9,9 +9,9 @@ use crate::platform::{
     RiskDecisionStatus, RiskGate, TradeIntent,
 };
 use crate::signing::Wallet;
-use crate::strategy::executor::OrderExecutor;
 use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once};
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
+use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::multi_outcome::fetch_multi_outcome_event;
 use chrono::Utc;
@@ -169,7 +169,12 @@ async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClie
 }
 
 fn parse_domain(value: Option<&str>) -> std::result::Result<Domain, PloyError> {
-    match value.unwrap_or("crypto").trim().to_ascii_lowercase().as_str() {
+    match value
+        .unwrap_or("crypto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "crypto" => Ok(Domain::Crypto),
         "sports" => Ok(Domain::Sports),
         "politics" => Ok(Domain::Politics),
@@ -223,7 +228,8 @@ async fn execute_order_via_gateway(
     let client = build_pm_client(&config.market.rest_url, config.dry_run.enabled).await?;
     let mut executor = OrderExecutor::new(client, config.execution.clone());
 
-    if let Ok(store) = PostgresStore::new(&config.database.url, config.database.max_connections).await
+    if let Ok(store) =
+        PostgresStore::new(&config.database.url, config.database.max_connections).await
     {
         let idem = Arc::new(IdempotencyManager::new_with_account(
             store,
@@ -1024,9 +1030,7 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
             }
             if let Some(v) = parse_optional_str(&params, "series_id") {
                 metadata.insert("series_id".to_string(), v.clone());
-                metadata
-                    .entry("event_series_id".to_string())
-                    .or_insert(v);
+                metadata.entry("event_series_id".to_string()).or_insert(v);
             }
 
             let confidence = match parse_optional_decimal(&params, "confidence") {
@@ -1110,6 +1114,7 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                 }
             };
             let mut req_order = req_order;
+            req_order.client_order_id = format!("intent:{}", trade_intent.intent_id);
             req_order.idempotency_key = Some(idempotency_key);
 
             match execute_order_via_gateway(&config, &req_order).await {
@@ -1388,6 +1393,7 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                     trade_intent.price_limit,
                 )
             };
+            request.client_order_id = format!("intent:{}", trade_intent.intent_id);
             request.idempotency_key = Some(idempotency_key);
 
             match execute_order_via_gateway(&config, &request).await {
