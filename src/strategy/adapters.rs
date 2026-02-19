@@ -311,6 +311,16 @@ impl MomentumStrategyAdapter {
                 .get("min_confidence")
                 .and_then(|v| v.as_float())
                 .unwrap_or(0.5),
+            use_kelly_sizing: risk
+                .get("use_kelly_sizing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            kelly_fraction_cap: Decimal::try_from(
+                risk.get("kelly_fraction_cap")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.25),
+            )
+            .unwrap_or(dec!(0.25)),
 
             // VWAP confirmation (legacy momentum config)
             require_vwap_confirmation: entry

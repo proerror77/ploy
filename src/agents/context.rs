@@ -5,6 +5,7 @@
 
 use chrono::Utc;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::coordinator::{AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState};
@@ -50,6 +51,31 @@ impl AgentContext {
         unrealized_pnl: Decimal,
         error_message: Option<String>,
     ) -> Result<()> {
+        self.report_state_with_metrics(
+            name,
+            status,
+            position_count,
+            exposure,
+            daily_pnl,
+            unrealized_pnl,
+            HashMap::new(),
+            error_message,
+        )
+        .await
+    }
+
+    /// Report agent state with strategy-specific metrics.
+    pub async fn report_state_with_metrics(
+        &self,
+        name: &str,
+        status: AgentStatus,
+        position_count: usize,
+        exposure: Decimal,
+        daily_pnl: Decimal,
+        unrealized_pnl: Decimal,
+        metrics: HashMap<String, String>,
+        error_message: Option<String>,
+    ) -> Result<()> {
         let snapshot = AgentSnapshot {
             agent_id: self.agent_id.clone(),
             name: name.into(),
@@ -59,6 +85,7 @@ impl AgentContext {
             exposure,
             daily_pnl,
             unrealized_pnl,
+            metrics,
             last_heartbeat: Utc::now(),
             error_message,
         };

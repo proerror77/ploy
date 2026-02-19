@@ -26,8 +26,8 @@ use crate::domain::market::Side;
 use crate::platform::{Domain, OrderIntent, OrderPriority};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
-    build_unified_prompt, parse_decision_response, ComebackSnapshot, DecisionTrigger,
-    GrokDecision, MarketSnapshot, RiskMetrics, UnifiedDecisionRequest,
+    build_unified_prompt, parse_decision_response, ComebackSnapshot, DecisionTrigger, GrokDecision,
+    MarketSnapshot, RiskMetrics, UnifiedDecisionRequest,
 };
 use crate::strategy::nba_comeback::grok_intel::{
     GrokGameIntel, InjuryImpact, InjuryUpdate, MomentumDirection,
@@ -141,10 +141,11 @@ pub struct GrokDecisionResponse {
 #[derive(Debug, Deserialize)]
 pub struct SidecarOrderRequest {
     pub strategy: String,
+    pub domain: Option<String>, // "crypto" | "sports" | "politics" | "economics"
     pub market_slug: String,
     pub token_id: String,
-    pub side: Option<String>,       // "up"/"down" or "YES"/"NO"
-    pub is_buy: Option<bool>,       // defaults to true
+    pub side: Option<String>, // "up"/"down" or "YES"/"NO"
+    pub is_buy: Option<bool>, // defaults to true
     pub shares: u64,
     pub price: f64,
     pub dry_run: Option<bool>,
@@ -245,7 +246,11 @@ pub async fn sidecar_grok_decision(
     };
 
     // Build comeback snapshot (if sidecar provided stats)
-    let comeback = match (req.comeback_rate, req.adjusted_win_prob, req.statistical_edge) {
+    let comeback = match (
+        req.comeback_rate,
+        req.adjusted_win_prob,
+        req.statistical_edge,
+    ) {
         (Some(rate), Some(prob), Some(edge)) => Some(ComebackSnapshot {
             comeback_rate: rate,
             adjusted_win_prob: prob,
@@ -297,8 +302,8 @@ pub async fn sidecar_grok_decision(
     };
 
     // Market snapshot
-    let market_price = Decimal::from_str(&format!("{:.4}", req.market_price))
-        .unwrap_or_else(|_| Decimal::ZERO);
+    let market_price =
+        Decimal::from_str(&format!("{:.4}", req.market_price)).unwrap_or_else(|_| Decimal::ZERO);
     let market = MarketSnapshot {
         market_slug: req.market_slug.clone(),
         token_id: req.token_id.clone().unwrap_or_default(),
@@ -398,10 +403,7 @@ pub async fn sidecar_grok_decision(
         }
         Err(e) => {
             warn!(request_id = %request_id, error = %e, "sidecar grok decision failed");
-            Err((
-                StatusCode::BAD_GATEWAY,
-                format!("Grok query failed: {}", e),
-            ))
+            Err((StatusCode::BAD_GATEWAY, format!("Grok query failed: {}", e)))
         }
     }
 }
@@ -416,12 +418,8 @@ pub async fn sidecar_submit_order(
     let dry_run = req.dry_run.unwrap_or(true);
 
     // Validate price range
-    let price = Decimal::from_str(&format!("{:.4}", req.price)).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid price format".to_string(),
-        )
-    })?;
+    let price = Decimal::from_str(&format!("{:.4}", req.price))
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid price format".to_string()))?;
 
     if price <= Decimal::ZERO || price >= Decimal::ONE {
         return Err((
@@ -435,10 +433,7 @@ pub async fn sidecar_submit_order(
     if order_cost > 50.0 {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "Order cost ${:.2} exceeds sidecar limit $50",
-                order_cost
-            ),
+            format!("Order cost ${:.2} exceeds sidecar limit $50", order_cost),
         ));
     }
 
@@ -511,10 +506,25 @@ pub async fn sidecar_submit_order(
     if let Some(conf) = req.confidence {
         metadata.insert("confidence".to_string(), format!("{:.2}", conf));
     }
+    let domain = match req
+        .domain
+        .as_deref()
+        .unwrap_or("sports")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "crypto" => Domain::Crypto,
+        "sports" => Domain::Sports,
+        "politics" => Domain::Politics,
+        "economics" => Domain::Economics,
+        _ => Domain::Sports,
+    };
+    metadata.insert("domain".to_string(), domain.to_string());
 
     let mut intent = OrderIntent::new(
         "sidecar",
-        Domain::Sports,
+        domain,
         &req.market_slug,
         &req.token_id,
         side,
@@ -593,13 +603,16 @@ pub async fn sidecar_get_positions(
     .await
     .map_err(|e| {
         warn!(error = %e, "failed to fetch positions for sidecar");
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB error: {}", e),
+        )
     })?;
 
     let positions: Vec<SidecarPosition> = rows
         .into_iter()
-        .map(|(id, market_slug, token_id, side, shares, avg_price, current_value, pnl, status, opened_at)| {
-            SidecarPosition {
+        .map(
+            |(
                 id,
                 market_slug,
                 token_id,
@@ -609,9 +622,22 @@ pub async fn sidecar_get_positions(
                 current_value,
                 pnl,
                 status,
-                opened_at: opened_at.to_rfc3339(),
-            }
-        })
+                opened_at,
+            )| {
+                SidecarPosition {
+                    id,
+                    market_slug,
+                    token_id,
+                    side,
+                    shares,
+                    avg_price,
+                    current_value,
+                    pnl,
+                    status,
+                    opened_at: opened_at.to_rfc3339(),
+                }
+            },
+        )
         .collect();
 
     Ok(Json(positions))
@@ -851,9 +877,23 @@ async fn persist_sidecar_decision(
     .bind(req.comeback.as_ref().map(|c| c.statistical_edge))
     .bind(&req.market.market_slug)
     .bind(&req.market.token_id)
-    .bind(req.market.market_price.to_string().parse::<f64>().unwrap_or(0.0))
-    .bind(req.market.yes_best_bid.map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)))
-    .bind(req.market.yes_best_ask.map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)))
+    .bind(
+        req.market
+            .market_price
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
+    )
+    .bind(
+        req.market
+            .yes_best_bid
+            .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)),
+    )
+    .bind(
+        req.market
+            .yes_best_ask
+            .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0)),
+    )
     .bind(decision_str)
     .bind(fair_value)
     .bind(edge)

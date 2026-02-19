@@ -56,9 +56,16 @@ sqlx migrate run
 | `POLYMARKET_FUNDER` | No | Proxy/Magic wallet address |
 | `DATABASE_URL` | Yes | PostgreSQL connection string (overrides config) |
 | `ANTHROPIC_API_KEY` | No | Required for `agent` and AI-powered commands |
-| `ANTHROPIC_BASE_URL` | No | Optional Anthropic-compatible base URL (example: MiniMax `https://api.minimax.io/anthropic`) |
+| `ANTHROPIC_BASE_URL` | No | Optional Anthropic-compatible base URL (examples: MiniMax `https://api.minimaxi.com/anthropic` or `https://api.minimax.io/anthropic`) |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | No | Optional alias override (example: map `opus` → `MiniMax-M2.5`) |
+| `ANTHROPIC_CUSTOM_HEADERS` | No | Optional custom headers in newline-separated `Header: Value` format (example: `Authorization: Bearer <key>`) |
 | `GROK_API_KEY` | No | Required for Grok-based sports analysis |
+| `PLOY_RISK__CRYPTO_ALLOCATION_PCT` | No | Domain capital split (0..1), used to derive crypto exposure cap |
+| `PLOY_RISK__SPORTS_ALLOCATION_PCT` | No | Domain capital split (0..1), used to derive sports exposure cap |
+| `PLOY_RISK__CRYPTO_MAX_EXPOSURE_USD` | No | Hard crypto domain exposure cap (overrides pct-derived cap) |
+| `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
+| `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
+| `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
 
 ### Config File
 
@@ -117,6 +124,24 @@ ploy market-make --token <token_id>            # Market making opportunity analy
 ploy scan --series 10423 --watch               # Continuous arbitrage scan
 ploy analyze --event <event_id>                # Analyze multi-outcome market
 ploy paper --symbols BTCUSDT,ETHUSDT           # Paper trading mode (signals only)
+```
+
+Live momentum mode now supports automatic post-settlement claims (redeem winning positions) when keys are configured:
+
+```bash
+export PLOY_AUTO_CLAIM=true                    # default true in live momentum mode
+export CLAIMER_CHECK_INTERVAL_SECS=60          # optional
+export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
+export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
+```
+
+Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
+
+```bash
+export PLOY_RISK__CRYPTO_ALLOCATION_PCT=0.5
+export PLOY_RISK__SPORTS_ALLOCATION_PCT=0.5
+export PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD=45
+export PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD=45
 ```
 
 ### Event-Edge Scanner

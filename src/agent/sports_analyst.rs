@@ -9,13 +9,14 @@
 //! 3. Format structured data and send to Claude Opus for analysis
 //! 4. Generate trade recommendation based on edge detection
 
+use crate::adapters::polymarket_clob::{GammaMarketInfo, MarketSummary as GammaMarketSummary};
+use crate::adapters::{GammaEventInfo, PolymarketClient};
 use crate::agent::client::{AgentClientConfig, ClaudeAgentClient};
 use crate::agent::grok::GrokClient;
 use crate::agent::sports_data::{format_for_claude, SportsDataFetcher, StructuredGameData};
 use crate::error::{PloyError, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Sports event analysis result
@@ -81,6 +82,8 @@ pub struct SportsAnalyst {
     claude: ClaudeAgentClient,
 }
 
+const CLOB_BASE_URL: &str = "https://clob.polymarket.com";
+
 impl SportsAnalyst {
     /// Create a new sports analyst with Grok and Claude
     pub fn new(grok: GrokClient, claude: ClaudeAgentClient) -> Self {
@@ -104,7 +107,8 @@ impl SportsAnalyst {
 
         // Use longer timeout and Opus model for complex sports analysis
         let mut config = AgentClientConfig::for_autonomous().with_timeout(300); // 5 minutes for detailed analysis
-        config.model = Some(std::env::var("PLOY_CLAUDE_MODEL").unwrap_or_else(|_| "opus".to_string()));
+        config.model =
+            Some(std::env::var("PLOY_CLAUDE_MODEL").unwrap_or_else(|_| "opus".to_string()));
         let claude = ClaudeAgentClient::with_config(config);
 
         Ok(Self {
@@ -402,7 +406,7 @@ impl SportsAnalyst {
         team1: &str,
         team2: &str,
     ) -> Result<MarketOdds> {
-        let client = reqwest::Client::new();
+        let client = PolymarketClient::new(CLOB_BASE_URL, true)?;
 
         // Strategy 1: Try slug-based query (correct format with ?slug=)
         // For long URLs, extract just the matchup part
@@ -413,12 +417,7 @@ impl SportsAnalyst {
         };
 
         debug!("Searching Polymarket for slug: {}", search_slug);
-        let url = format!(
-            "https://gamma-api.polymarket.com/events?slug={}",
-            search_slug
-        );
-
-        if let Some(odds) = self.try_fetch_odds(&client, &url).await {
+        if let Some(odds) = self.try_fetch_odds(&client, search_slug).await {
             info!("Found market data via slug query");
             return Ok(odds);
         }
@@ -429,14 +428,12 @@ impl SportsAnalyst {
         debug!("Searching for teams: {} vs {}", team1_short, team2_short);
 
         // Try searching with team1
-        let encoded_team = team1_short.replace(' ', "%20");
-        let search_url = format!(
-            "https://gamma-api.polymarket.com/events?active=true&closed=false&_limit=50&title_contains={}",
-            encoded_team
-        );
-
+        let team_events = client
+            .get_active_sports_events(&team1_short)
+            .await
+            .unwrap_or_default();
         if let Some(odds) = self
-            .try_search_team_matchup(&client, &search_url, team1, team2)
+            .try_search_team_matchup(&client, &team_events, team1, team2)
             .await
         {
             info!("Found market data via team search");
@@ -444,13 +441,11 @@ impl SportsAnalyst {
         }
 
         // Strategy 3: Search markets endpoint directly
-        let markets_url =
-            format!("https://gamma-api.polymarket.com/markets?active=true&closed=false&_limit=100");
-
-        if let Some(odds) = self
-            .try_search_markets(&client, &markets_url, team1, team2)
+        let markets = client
+            .search_markets(&team1_short)
             .await
-        {
+            .unwrap_or_default();
+        if let Some(odds) = self.try_search_markets(&markets, team1, team2) {
             info!("Found market data via markets search");
             return Ok(odds);
         }
@@ -473,61 +468,45 @@ impl SportsAnalyst {
         })
     }
 
-    /// Try to fetch odds from a specific URL
-    async fn try_fetch_odds(&self, client: &reqwest::Client, url: &str) -> Option<MarketOdds> {
-        let response = client
-            .get(url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .ok()?;
+    /// Try to fetch odds from slug-based lookup.
+    async fn try_fetch_odds(&self, client: &PolymarketClient, slug: &str) -> Option<MarketOdds> {
+        let events = client.get_active_sports_events(slug).await.ok()?;
+        let normalized = slug.trim_matches('/');
+        let candidate = events
+            .iter()
+            .find(|event| {
+                event.slug.as_deref().is_some_and(|event_slug| {
+                    let event_slug = event_slug.trim_matches('/');
+                    event_slug == normalized || event_slug.ends_with(&format!("/{}", normalized))
+                })
+            })
+            .cloned()
+            .or_else(|| events.into_iter().next())?;
 
-        if !response.status().is_success() {
-            return None;
-        }
-
-        let data: serde_json::Value = response.json().await.ok()?;
-
-        // Handle both array response and single event response
-        let event = if data.is_array() {
-            data.as_array()?.first()?.clone()
-        } else {
-            data
-        };
-
+        let event = self.ensure_event_has_markets(client, &candidate).await?;
         self.parse_event_odds(&event)
     }
 
     /// Search for a matchup in team search results
     async fn try_search_team_matchup(
         &self,
-        client: &reqwest::Client,
-        url: &str,
+        client: &PolymarketClient,
+        events: &[GammaEventInfo],
         team1: &str,
         team2: &str,
     ) -> Option<MarketOdds> {
-        let response = client
-            .get(url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .ok()?;
-
-        if !response.status().is_success() {
-            return None;
-        }
-
-        let events: Vec<serde_json::Value> = response.json().await.ok()?;
-
         // Look for an event that mentions both teams
         let team1_lower = team1.to_lowercase();
         let team2_lower = team2.to_lowercase();
 
         for event in events {
-            if let Some(title) = event.get("title").and_then(|t| t.as_str()) {
+            if let Some(title) = event.title.as_deref() {
                 let title_lower = title.to_lowercase();
                 if title_lower.contains(&team1_lower) || title_lower.contains(&team2_lower) {
-                    if let Some(odds) = self.parse_event_odds(&event) {
+                    let Some(hydrated) = self.ensure_event_has_markets(client, event).await else {
+                        continue;
+                    };
+                    if let Some(odds) = self.parse_event_odds(&hydrated) {
                         return Some(odds);
                     }
                 }
@@ -538,36 +517,22 @@ impl SportsAnalyst {
     }
 
     /// Search markets endpoint for matchup
-    async fn try_search_markets(
+    fn try_search_markets(
         &self,
-        client: &reqwest::Client,
-        url: &str,
+        markets: &[GammaMarketSummary],
         team1: &str,
         team2: &str,
     ) -> Option<MarketOdds> {
-        let response = client
-            .get(url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .ok()?;
-
-        if !response.status().is_success() {
-            return None;
-        }
-
-        let markets: Vec<serde_json::Value> = response.json().await.ok()?;
-
         let team1_lower = team1.to_lowercase();
         let team2_lower = team2.to_lowercase();
 
         for market in markets {
-            if let Some(question) = market.get("question").and_then(|q| q.as_str()) {
+            if let Some(question) = market.question.as_deref() {
                 let question_lower = question.to_lowercase();
                 if (question_lower.contains(&team1_lower) || question_lower.contains(&team2_lower))
                     && (question_lower.contains("win") || question_lower.contains("beat"))
                 {
-                    return self.parse_market_odds(&market);
+                    return self.parse_market_summary_odds(market);
                 }
             }
         }
@@ -576,22 +541,44 @@ impl SportsAnalyst {
     }
 
     /// Parse odds from an event object
-    fn parse_event_odds(&self, event: &serde_json::Value) -> Option<MarketOdds> {
-        let markets = event.get("markets")?.as_array()?;
-        let market = markets.first()?;
+    fn parse_event_odds(&self, event: &GammaEventInfo) -> Option<MarketOdds> {
+        let market = event.markets.first()?;
         self.parse_market_odds(market)
     }
 
     /// Parse odds from a market object
-    fn parse_market_odds(&self, market: &serde_json::Value) -> Option<MarketOdds> {
-        let yes_price = market
-            .get("outcomePrices")
-            .and_then(|p| p.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
+    fn parse_market_odds(&self, market: &GammaMarketInfo) -> Option<MarketOdds> {
+        let yes_price = self
+            .parse_yes_price(market.outcome_prices.as_deref())
             .unwrap_or(0.5);
+        self.build_odds_from_yes_price(yes_price)
+    }
 
+    fn parse_market_summary_odds(&self, market: &GammaMarketSummary) -> Option<MarketOdds> {
+        let yes_price = self
+            .parse_yes_price(market.outcome_prices.as_deref())
+            .unwrap_or(0.5);
+        self.build_odds_from_yes_price(yes_price)
+    }
+
+    fn parse_yes_price(&self, outcome_prices: Option<&str>) -> Option<f64> {
+        let raw = outcome_prices?;
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(raw) {
+            return arr.first().and_then(|v| v.parse::<f64>().ok());
+        }
+        if let Ok(arr) = serde_json::from_str::<Vec<f64>>(raw) {
+            return arr.first().copied();
+        }
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+            return arr.first().and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            });
+        }
+        None
+    }
+
+    fn build_odds_from_yes_price(&self, yes_price: f64) -> Option<MarketOdds> {
         Some(MarketOdds {
             team1_yes_price: Decimal::from_f64_retain(yes_price).unwrap_or(Decimal::new(50, 2)),
             team1_no_price: Decimal::from_f64_retain(1.0 - yes_price)
@@ -604,6 +591,17 @@ impl SportsAnalyst {
             ),
             spread: None,
         })
+    }
+
+    async fn ensure_event_has_markets(
+        &self,
+        client: &PolymarketClient,
+        event: &GammaEventInfo,
+    ) -> Option<GammaEventInfo> {
+        if !event.markets.is_empty() {
+            return Some(event.clone());
+        }
+        client.get_event_details(&event.id).await.ok()
     }
 
     /// Get short team name for search

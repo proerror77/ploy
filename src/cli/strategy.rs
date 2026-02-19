@@ -110,7 +110,9 @@ fn write_crypto_lob_dataset_csv(
             format!("{:.10}", r.momentum_1s),
             format!("{:.10}", r.momentum_5s),
             r.pm_up_ask.map(|v| format!("{v:.10}")).unwrap_or_default(),
-            r.pm_down_ask.map(|v| format!("{v:.10}")).unwrap_or_default(),
+            r.pm_down_ask
+                .map(|v| format!("{v:.10}"))
+                .unwrap_or_default(),
             r.settled_price,
             r.y_up,
             csv_escape(&r.model_type),
@@ -1839,9 +1841,7 @@ async fn report_accuracy_pm_settlement(
 
         // Optional: prediction scoring for strategies that log p_up.
         // We score p_up against official settlement as y_up in {0,1}.
-        let meta: serde_json::Value = row
-            .try_get("metadata")
-            .unwrap_or(serde_json::Value::Null);
+        let meta: serde_json::Value = row.try_get("metadata").unwrap_or(serde_json::Value::Null);
         let p_up_opt = meta
             .get("p_up")
             .and_then(|v| v.as_str())
@@ -2012,9 +2012,9 @@ async fn export_crypto_lob_dataset(
     output: Option<PathBuf>,
     database_url: Option<String>,
 ) -> Result<()> {
+    use crate::adapters::PostgresStore;
     use anyhow::bail;
     use chrono::{DateTime, Utc};
-    use crate::adapters::PostgresStore;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use sqlx::Row;
@@ -2361,9 +2361,7 @@ async fn export_crypto_lob_dataset(
             _ => continue,
         };
 
-        let meta: serde_json::Value = row
-            .try_get("metadata")
-            .unwrap_or(serde_json::Value::Null);
+        let meta: serde_json::Value = row.try_get("metadata").unwrap_or(serde_json::Value::Null);
 
         let p_up = meta_f64(&meta, "p_up");
         let obi5 = meta_f64(&meta, "lob_obi_5");
@@ -2529,12 +2527,21 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
             min_reward_risk_ratio: 4.0,
             min_expected_value: 0.05,
             kelly_fraction_cap: 0.25,
+            performance_daily_loss_limit_usd: rust_decimal::Decimal::new(30, 0),
+            performance_min_settled_trades: 10,
+            performance_min_win_rate: 0.45,
+            performance_low_winrate_multiplier: 0.60,
+            performance_loss_streak_threshold: 3,
+            performance_loss_streak_multiplier: 0.50,
             scaling_enabled: false,
             scaling_max_adds: 3,
             scaling_min_price_drop_pct: 5.0,
             scaling_max_game_exposure_usd: rust_decimal::Decimal::new(50, 0),
             scaling_min_comeback_retention: 0.70,
             scaling_min_time_remaining_mins: 8.0,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 15.0,
+            early_exit_stop_loss_pct: 20.0,
         }
     });
 

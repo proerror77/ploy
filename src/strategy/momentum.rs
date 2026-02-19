@@ -7,6 +7,7 @@
 //! 4. Exit via take-profit, stop-loss, trailing stop, or hold to resolution
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{
@@ -133,6 +134,13 @@ pub struct MomentumConfig {
     /// Minimum confidence for entry (0.0 - 1.0)
     pub min_confidence: f64,
 
+    /// Enable Kelly-based position scaling.
+    /// Final shares are scaled by (kelly_fraction / kelly_fraction_cap), capped at 1.0.
+    pub use_kelly_sizing: bool,
+
+    /// Cap used to normalize Kelly sizing (e.g., 0.25 = quarter-Kelly cap).
+    pub kelly_fraction_cap: Decimal,
+
     // === VWAP CONFIRMATION ===
     /// Require spot price direction to agree with VWAP.
     ///
@@ -201,6 +209,8 @@ impl Default for MomentumConfig {
             use_price_to_beat: true,     // Consider price-to-beat
             dynamic_position_sizing: true, // Scale by confidence
             min_confidence: 0.5,         // Min 50% confidence
+            use_kelly_sizing: true,      // Scale by empirical Kelly
+            kelly_fraction_cap: dec!(0.25), // Quarter-Kelly cap
 
             // === VWAP CONFIRMATION (DEFAULT: OFF) ===
             require_vwap_confirmation: false,
@@ -259,6 +269,8 @@ pub struct EventInfo {
     pub down_token_id: String,
     pub end_time: DateTime<Utc>,
     pub condition_id: String,
+    pub series_id: String,
+    pub horizon: String,
     /// The price threshold that determines UP/DOWN outcome
     /// Parsed from market question like "Will BTC be above $94,000?"
     pub price_to_beat: Option<Decimal>,
@@ -347,6 +359,14 @@ impl EventMatcher {
             client,
             symbol_to_series,
             active_events: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    fn horizon_for_series(series_id: &str) -> &'static str {
+        match series_id {
+            "10684" | "10683" | "10686" | "10685" => "5m",
+            "10192" | "10191" | "10423" | "10422" => "15m",
+            _ => "other",
         }
     }
 
@@ -584,6 +604,8 @@ impl EventMatcher {
                 down_token_id,
                 end_time,
                 condition_id,
+                series_id: series_id.to_string(),
+                horizon: Self::horizon_for_series(series_id).to_string(),
                 price_to_beat,
             };
 
@@ -653,6 +675,8 @@ impl EventMatcher {
             down_token_id: down_token.token_id.clone(),
             end_time,
             condition_id: market.condition_id.clone().unwrap_or_default(),
+            series_id: String::new(),
+            horizon: "other".to_string(),
             price_to_beat,
         })
     }
@@ -1310,6 +1334,7 @@ pub struct Position {
     pub symbol: String,
     pub direction: Direction,
     pub entry_price: Decimal,
+    pub entry_notional: Decimal,
     pub shares: u64,
     pub entry_time: DateTime<Utc>,
     pub highest_price: Decimal,
@@ -1595,6 +1620,8 @@ pub struct MomentumEngine {
     kline_client: Option<Arc<crate::collector::BinanceKlineClient>>,
     // Dump & Hedge strategy engine
     dump_hedge: Option<Arc<DumpHedgeEngine>>,
+    // Serialize entry path to avoid duplicate orders for the same event under concurrent updates.
+    entry_mutex: Arc<Mutex<()>>,
 }
 
 impl MomentumEngine {
@@ -1643,6 +1670,7 @@ impl MomentumEngine {
             lob_cache: None,
             kline_client: None,
             dump_hedge: None,
+            entry_mutex: Arc::new(Mutex::new(())),
         }
     }
 
@@ -1715,6 +1743,66 @@ impl MomentumEngine {
     async fn record_trade(&self) -> u32 {
         let mut counter = self.daily_trades.write().await;
         counter.increment()
+    }
+
+    /// Estimate signal win probability from PM entry price + model edge.
+    fn estimated_win_probability(&self, signal: &MomentumSignal) -> Decimal {
+        (signal.pm_price + signal.edge)
+            .max(Decimal::ZERO)
+            .min(Decimal::ONE)
+    }
+
+    /// Binary-outcome Kelly fraction for contracts that pay $1 on win and cost `price`.
+    /// f* = (p - price) / (1 - price), clamped to [0, 1].
+    fn signal_kelly_fraction(&self, signal: &MomentumSignal) -> Decimal {
+        if signal.pm_price <= Decimal::ZERO || signal.pm_price >= Decimal::ONE {
+            return Decimal::ZERO;
+        }
+
+        let p = self.estimated_win_probability(signal);
+        let denom = Decimal::ONE - signal.pm_price;
+        if denom <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        ((p - signal.pm_price) / denom)
+            .max(Decimal::ZERO)
+            .min(Decimal::ONE)
+    }
+
+    /// Apply confidence/Kelly scaling on top of base shares from fund manager.
+    fn apply_signal_position_sizing(&self, base_shares: u64, signal: &MomentumSignal) -> u64 {
+        if base_shares == 0 {
+            return 0;
+        }
+
+        let mut multiplier = Decimal::ONE;
+
+        if self.config.dynamic_position_sizing {
+            let conf = Decimal::from_f64(signal.confidence.clamp(0.0, 1.0)).unwrap_or(Decimal::ONE);
+            multiplier *= conf;
+        }
+
+        if self.config.use_kelly_sizing {
+            let kelly = self.signal_kelly_fraction(signal);
+            let cap = self.config.kelly_fraction_cap.max(dec!(0.0001));
+            let normalized = (kelly / cap).min(Decimal::ONE);
+            multiplier *= normalized;
+        }
+
+        let scaled = (Decimal::from(base_shares) * multiplier)
+            .floor()
+            .to_u64()
+            .unwrap_or(0);
+
+        if scaled == 0 {
+            debug!(
+                "Position size scaled to 0 (base_shares={}, multiplier={:.4})",
+                base_shares, multiplier
+            );
+        }
+
+        scaled
     }
 
     /// Get event matcher reference
@@ -1878,8 +1966,17 @@ impl MomentumEngine {
 
                     // Update fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_closed(&pos.condition_id, &pos.symbol)
-                            .await;
+                        let released_notional = if pos.entry_notional > Decimal::ZERO {
+                            pos.entry_notional
+                        } else {
+                            pos.entry_price * Decimal::from(pos.shares)
+                        };
+                        fm.record_position_closed_with_amount(
+                            &pos.condition_id,
+                            &pos.symbol,
+                            released_notional,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
@@ -2278,6 +2375,8 @@ impl MomentumEngine {
             return Ok(());
         }
 
+        let _entry_guard = self.entry_mutex.lock().await;
+
         // CRITICAL: Check if we already have a position in this symbol or event
         // This prevents duplicate orders from momentum + volatility signals
         {
@@ -2293,7 +2392,10 @@ impl MomentumEngine {
             }
 
             // Check by condition_id (same event)
-            if positions.contains_key(&event.condition_id) {
+            if positions
+                .values()
+                .any(|p| p.condition_id == event.condition_id)
+            {
                 debug!(
                     "Already have position in event {}, skipping",
                     event.condition_id
@@ -2361,8 +2463,8 @@ impl MomentumEngine {
             return Ok(());
         }
 
-        // Determine shares to trade - use fund manager if available
-        let shares_to_trade = if let Some(ref fm) = self.fund_manager {
+        // Determine base shares to trade - use fund manager if available
+        let base_shares = if let Some(ref fm) = self.fund_manager {
             // Use fund manager for balance check and position sizing
             match fm
                 .can_open_position(&event.condition_id, &signal.symbol, signal.pm_price)
@@ -2401,6 +2503,14 @@ impl MomentumEngine {
             drop(positions);
             self.config.shares_per_trade
         };
+        let shares_to_trade = self.apply_signal_position_sizing(base_shares, &signal);
+        if shares_to_trade < 5 {
+            debug!(
+                "Position size {} below Polymarket minimum 5 shares (base={})",
+                shares_to_trade, base_shares
+            );
+            return Ok(());
+        }
 
         // Execute entry
         let token_id = match signal.direction {
@@ -2461,18 +2571,28 @@ impl MomentumEngine {
             match self.executor.execute(&order).await {
                 Ok(result) => {
                     let fill_price = result.avg_fill_price.unwrap_or(signal.pm_price);
+                    let tracked_shares = if result.filled_shares > 0 {
+                        result.filled_shares
+                    } else {
+                        shares_to_trade
+                    };
+                    let entry_notional = fill_price * Decimal::from(tracked_shares);
                     let trade_count = self.record_trade().await;
                     info!(
                         "Order filled: {} shares @ {:.2}¢ (trade #{} today)",
-                        result.filled_shares,
+                        tracked_shares,
                         fill_price * dec!(100),
                         trade_count
                     );
 
                     // Record position with fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_opened(&event.condition_id, &signal.symbol)
-                            .await;
+                        fm.record_position_opened_with_amount(
+                            &event.condition_id,
+                            &signal.symbol,
+                            entry_notional,
+                        )
+                        .await;
                     }
 
                     // Track position in local state
@@ -2481,7 +2601,8 @@ impl MomentumEngine {
                         symbol: signal.symbol.clone(),
                         direction: signal.direction,
                         entry_price: fill_price,
-                        shares: result.filled_shares,
+                        entry_notional,
+                        shares: tracked_shares,
                         entry_time: Utc::now(),
                         highest_price: fill_price,
                         event_end_time: event.end_time,
@@ -2501,7 +2622,7 @@ impl MomentumEngine {
                                 &event.condition_id,
                                 &format!("{}", signal.direction),
                                 fill_price,
-                                result.filled_shares,
+                                tracked_shares,
                                 signal.cex_move_pct,
                                 signal.edge,
                             )
@@ -2523,11 +2644,12 @@ impl MomentumEngine {
 
     /// Execute position exit
     async fn execute_exit(&self, symbol: &str, price: Decimal, reason: ExitReason) -> Result<()> {
-        let mut positions = self.positions.write().await;
-
-        let position = match positions.remove(symbol) {
-            Some(p) => p,
-            None => return Ok(()),
+        let position = {
+            let mut positions = self.positions.write().await;
+            match positions.remove(symbol) {
+                Some(p) => p,
+                None => return Ok(()),
+            }
         };
 
         let pnl_pct = position.pnl_pct(price);
@@ -2542,6 +2664,8 @@ impl MomentumEngine {
             pnl_pct * dec!(100),
             pnl_usd,
         );
+
+        let mut closed = self.dry_run;
 
         if self.dry_run {
             info!("[DRY RUN] Would sell {} shares", position.shares);
@@ -2562,12 +2686,31 @@ impl MomentumEngine {
                         result.filled_shares,
                         exit_price * dec!(100)
                     );
+                    closed = true;
                 }
                 Err(e) => {
                     error!("Exit order failed: {}", e);
                     // Re-add position on failure
-                    positions.insert(symbol.to_string(), position);
+                    let mut positions = self.positions.write().await;
+                    positions.insert(symbol.to_string(), position.clone());
+                    closed = false;
                 }
+            }
+        }
+
+        if closed {
+            if let Some(ref fm) = self.fund_manager {
+                let released_notional = if position.entry_notional > Decimal::ZERO {
+                    position.entry_notional
+                } else {
+                    position.entry_price * Decimal::from(position.shares)
+                };
+                fm.record_position_closed_with_amount(
+                    &position.condition_id,
+                    &position.symbol,
+                    released_notional,
+                )
+                .await;
             }
         }
 
@@ -2666,6 +2809,7 @@ impl MomentumEngine {
     async fn execute_pending_trade(&self, pending: PendingSignal) -> Result<()> {
         let signal = &pending.signal;
         let event = &pending.event;
+        let _entry_guard = self.entry_mutex.lock().await;
 
         // Re-check if we already have position (might have changed since queueing)
         {
@@ -2674,10 +2818,20 @@ impl MomentumEngine {
                 debug!("Already have position in {}, skipping", signal.symbol);
                 return Ok(());
             }
+            if positions
+                .values()
+                .any(|p| p.condition_id == event.condition_id)
+            {
+                debug!(
+                    "Already have position in event {}, skipping",
+                    event.condition_id
+                );
+                return Ok(());
+            }
         }
 
-        // Get position size
-        let shares_to_trade = if let Some(ref fm) = self.fund_manager {
+        // Get base position size
+        let base_shares = if let Some(ref fm) = self.fund_manager {
             match fm
                 .can_open_position(&event.condition_id, &signal.symbol, signal.pm_price)
                 .await
@@ -2704,6 +2858,14 @@ impl MomentumEngine {
         } else {
             self.config.shares_per_trade
         };
+        let shares_to_trade = self.apply_signal_position_sizing(base_shares, signal);
+        if shares_to_trade < 5 {
+            debug!(
+                "Position size {} below Polymarket minimum 5 shares (base={})",
+                shares_to_trade, base_shares
+            );
+            return Ok(());
+        }
 
         // Execute entry
         let token_id = match signal.direction {
@@ -2730,19 +2892,29 @@ impl MomentumEngine {
             match self.executor.execute(&order).await {
                 Ok(result) => {
                     let fill_price = result.avg_fill_price.unwrap_or(signal.pm_price);
+                    let tracked_shares = if result.filled_shares > 0 {
+                        result.filled_shares
+                    } else {
+                        shares_to_trade
+                    };
+                    let entry_notional = fill_price * Decimal::from(tracked_shares);
                     let trade_count = self.record_trade().await;
 
                     info!(
                         "Order filled: {} shares @ {:.2}¢ (trade #{} today)",
-                        result.filled_shares,
+                        tracked_shares,
                         fill_price * dec!(100),
                         trade_count
                     );
 
                     // Record with fund manager
                     if let Some(ref fm) = self.fund_manager {
-                        fm.record_position_opened(&event.condition_id, &signal.symbol)
-                            .await;
+                        fm.record_position_opened_with_amount(
+                            &event.condition_id,
+                            &signal.symbol,
+                            entry_notional,
+                        )
+                        .await;
                     }
 
                     // Track position
@@ -2751,7 +2923,8 @@ impl MomentumEngine {
                         symbol: signal.symbol.clone(),
                         direction: signal.direction,
                         entry_price: fill_price,
-                        shares: result.filled_shares,
+                        entry_notional,
+                        shares: tracked_shares,
                         entry_time: Utc::now(),
                         highest_price: fill_price,
                         event_end_time: event.end_time,
@@ -2771,7 +2944,7 @@ impl MomentumEngine {
                                 &event.condition_id,
                                 &format!("{}", signal.direction),
                                 fill_price,
-                                result.filled_shares,
+                                tracked_shares,
                                 signal.cex_move_pct,
                                 signal.edge,
                             )
@@ -2825,6 +2998,7 @@ mod tests {
             symbol: "BTCUSDT".into(),
             direction: Direction::Up,
             entry_price: dec!(0.50),
+            entry_notional: dec!(50),
             shares: 100,
             entry_time: Utc::now(),
             highest_price: dec!(0.50),
@@ -2856,6 +3030,7 @@ mod tests {
             symbol: "BTCUSDT".into(),
             direction: Direction::Up,
             entry_price: dec!(0.50),
+            entry_notional: dec!(50),
             shares: 100,
             entry_time: Utc::now(),
             highest_price: dec!(0.50),
@@ -2879,6 +3054,7 @@ mod tests {
             symbol: "BTCUSDT".into(),
             direction: Direction::Up,
             entry_price: dec!(0.50),
+            entry_notional: dec!(50),
             shares: 100,
             entry_time: Utc::now(),
             highest_price: dec!(0.50),
@@ -2975,6 +3151,8 @@ mod tests {
             down_token_id: format!("{slug}-down"),
             end_time: now + ChronoDuration::seconds(seconds_remaining),
             condition_id: format!("{slug}-condition"),
+            series_id: "test".to_string(),
+            horizon: "other".to_string(),
             price_to_beat: None,
         };
 

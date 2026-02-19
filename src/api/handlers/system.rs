@@ -26,7 +26,11 @@ pub async fn health_handler(
 
     let ok = db_status == "connected";
     let resp = HealthResponse {
-        status: if ok { "ok".to_string() } else { "degraded".to_string() },
+        status: if ok {
+            "ok".to_string()
+        } else {
+            "degraded".to_string()
+        },
         db: db_status,
         uptime_secs: state.uptime_seconds(),
     };
@@ -61,7 +65,7 @@ pub async fn get_system_status(
         status: status_state.status.as_str().to_string(),
         uptime_seconds: state.uptime_seconds(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        strategy: "momentum".to_string(), // TODO: Get from config
+        strategy: "coordinator".to_string(),
         last_trade_time: status_state.last_trade_time,
         websocket_connected: status_state.websocket_connected,
         database_connected: status_state.database_connected,
@@ -73,16 +77,21 @@ pub async fn get_system_status(
 pub async fn start_system(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
-    let mut status_state = state.system_status.write().await;
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    coordinator
+        .resume_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if status_state.status == SystemRunStatus::Running {
-        return Ok(Json(SystemControlResponse {
-            success: false,
-            message: "系统已在运行中".to_string(),
-        }));
+    {
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Running;
     }
-
-    status_state.status = SystemRunStatus::Running;
 
     // Broadcast status update
     state.broadcast(WsMessage::Status(StatusUpdate {
@@ -109,16 +118,21 @@ pub async fn start_system(
 pub async fn stop_system(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
-    let mut status_state = state.system_status.write().await;
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    coordinator
+        .pause_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if status_state.status == SystemRunStatus::Stopped {
-        return Ok(Json(SystemControlResponse {
-            success: false,
-            message: "系统已停止".to_string(),
-        }));
+    {
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Stopped;
     }
-
-    status_state.status = SystemRunStatus::Stopped;
 
     // Broadcast status update
     state.broadcast(WsMessage::Status(StatusUpdate {
@@ -145,10 +159,21 @@ pub async fn stop_system(
 pub async fn restart_system(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
-    let mut status_state = state.system_status.write().await;
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
 
-    // Stop first
-    status_state.status = SystemRunStatus::Stopped;
+    coordinator
+        .pause_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Stopped;
+    }
     state.broadcast(WsMessage::Status(StatusUpdate {
         status: "stopped".to_string(),
     }));
@@ -156,8 +181,14 @@ pub async fn restart_system(
     // Wait a moment
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    // Start again
-    status_state.status = SystemRunStatus::Running;
+    coordinator
+        .resume_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        let mut status_state = state.system_status.write().await;
+        status_state.status = SystemRunStatus::Running;
+    }
     state.broadcast(WsMessage::Status(StatusUpdate {
         status: "running".to_string(),
     }));
@@ -184,20 +215,22 @@ pub async fn pause_system(
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
     let _domain = req.and_then(|Json(r)| r.domain);
-    if let Some(coordinator) = state.coordinator.as_ref() {
-        coordinator
-            .pause_all()
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    } else {
-        // Fallback for standalone API mode: reflect pause in system status only.
-        let mut status_state = state.system_status.write().await;
-        status_state.status = SystemRunStatus::Stopped;
-        drop(status_state);
-        state.broadcast(WsMessage::Status(StatusUpdate {
-            status: "stopped".to_string(),
-        }));
-    }
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    coordinator
+        .pause_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut status_state = state.system_status.write().await;
+    status_state.status = SystemRunStatus::Stopped;
+    drop(status_state);
+    state.broadcast(WsMessage::Status(StatusUpdate {
+        status: "stopped".to_string(),
+    }));
 
     Ok(Json(SystemControlResponse {
         success: true,
@@ -211,20 +244,22 @@ pub async fn resume_system(
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
     let _domain = req.and_then(|Json(r)| r.domain);
-    if let Some(coordinator) = state.coordinator.as_ref() {
-        coordinator
-            .resume_all()
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    } else {
-        // Fallback for standalone API mode: reflect resume in system status only.
-        let mut status_state = state.system_status.write().await;
-        status_state.status = SystemRunStatus::Running;
-        drop(status_state);
-        state.broadcast(WsMessage::Status(StatusUpdate {
-            status: "running".to_string(),
-        }));
-    }
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    coordinator
+        .resume_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut status_state = state.system_status.write().await;
+    status_state.status = SystemRunStatus::Running;
+    drop(status_state);
+    state.broadcast(WsMessage::Status(StatusUpdate {
+        status: "running".to_string(),
+    }));
 
     Ok(Json(SystemControlResponse {
         success: true,
@@ -240,12 +275,16 @@ pub async fn halt_system(
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
     let _domain = req.and_then(|Json(r)| r.domain);
-    if let Some(coordinator) = state.coordinator.as_ref() {
-        coordinator
-            .force_close_all()
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    coordinator
+        .force_close_all()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Update system status and broadcast
     {
@@ -274,8 +313,10 @@ pub async fn get_config(
         max_entry: config.max_entry,
         shares: config.shares,
         predictive: config.predictive,
-        take_profit: config.take_profit,
-        stop_loss: config.stop_loss,
+        exit_edge_floor: config.exit_edge_floor,
+        exit_price_band: config.exit_price_band,
+        time_decay_exit_secs: config.time_decay_exit_secs,
+        liquidity_exit_spread_bps: config.liquidity_exit_spread_bps,
     }))
 }
 
@@ -292,8 +333,10 @@ pub async fn update_config(
     config.max_entry = new_config.max_entry;
     config.shares = new_config.shares;
     config.predictive = new_config.predictive;
-    config.take_profit = new_config.take_profit;
-    config.stop_loss = new_config.stop_loss;
+    config.exit_edge_floor = new_config.exit_edge_floor;
+    config.exit_price_band = new_config.exit_price_band;
+    config.time_decay_exit_secs = new_config.time_decay_exit_secs;
+    config.liquidity_exit_spread_bps = new_config.liquidity_exit_spread_bps;
 
     // Log to audit
     let _ = sqlx::query(

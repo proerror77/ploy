@@ -93,6 +93,7 @@ JSON
 - `pm.get_market`（params: `condition_id`）
 - `pm.get_order_book`（params: `token_id`）
 - `pm.submit_limit`（params: `token_id`, `order_side`=`BUY|SELL`, `shares`, `limit_price`, `market_side`=`UP|DOWN`(optional), `idempotency_key`）
+- `gateway.submit_intent`（params: `deployment_id`, `domain`, `market_slug`, `token_id`, `side`, `order_side`, `size`, `price_limit`, `idempotency_key`）
 - `event_edge.scan`（params: `event_id` 或 `title`）
 - `multi_outcome.analyze`（params: `event_id`；回傳 outcome summary + 偵測到的套利訊號）
 - `events.upsert`（params: upsert 欄位 + `idempotency_key`）
@@ -108,6 +109,16 @@ TRADING_HOST="ploy@YOUR_IP_OR_HOSTNAME"
 cat <<'JSON' | ssh "$TRADING_HOST" "rpc"
 {"jsonrpc":"2.0","id":1,"method":"event_edge.scan","params":{"title":"Which company has the best AI model end of February?"}}
 JSON
+```
+
+## OpenClaw-only Runtime Lockdown
+
+若要在交易機器強制禁用內建 agent runtime（改由 OpenClaw 全接管），可設定：
+
+```toml
+[agent_framework]
+mode = "openclaw"
+hard_disable_internal_agents = true
 ```
 
 ## B) 深度：讓 OpenClaw 以 MCP Tool 方式控制交易（下一步）

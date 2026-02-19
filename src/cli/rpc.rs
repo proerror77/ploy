@@ -4,19 +4,28 @@ use crate::adapters::PolymarketClient;
 use crate::config::AppConfig;
 use crate::domain::{OrderRequest, OrderSide, Side};
 use crate::error::{PloyError, Result};
+use crate::platform::{
+    Domain, OrderIntent, RiskCheckResult, RiskConfig as PlatformRiskConfig, RiskDecision,
+    RiskDecisionStatus, RiskGate, TradeIntent,
+};
 use crate::signing::Wallet;
+use crate::strategy::executor::OrderExecutor;
 use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once};
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
+use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::multi_outcome::fetch_multi_outcome_event;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
+use uuid::Uuid;
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +135,21 @@ fn parse_decimal(v: &Value, key: &str) -> std::result::Result<Decimal, PloyError
     }
 }
 
+fn parse_optional_decimal(v: &Value, key: &str) -> std::result::Result<Option<Decimal>, PloyError> {
+    if v.get(key).is_none() {
+        return Ok(None);
+    }
+    parse_decimal(v, key).map(Some)
+}
+
+fn parse_optional_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
 fn load_app_config(config_path: &Path) -> std::result::Result<AppConfig, PloyError> {
     AppConfig::load_from(config_path).map_err(PloyError::from)
 }
@@ -144,10 +168,81 @@ async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClie
     }
 }
 
+fn parse_domain(value: Option<&str>) -> std::result::Result<Domain, PloyError> {
+    match value.unwrap_or("crypto").trim().to_ascii_lowercase().as_str() {
+        "crypto" => Ok(Domain::Crypto),
+        "sports" => Ok(Domain::Sports),
+        "politics" => Ok(Domain::Politics),
+        "economics" => Ok(Domain::Economics),
+        other => Err(PloyError::Validation(format!(
+            "invalid domain '{}', expected crypto|sports|politics|economics",
+            other
+        ))),
+    }
+}
+
+fn build_risk_config(config: &AppConfig) -> PlatformRiskConfig {
+    let max_positions = config.risk.max_positions.max(1);
+    PlatformRiskConfig {
+        max_platform_exposure: config.risk.max_single_exposure_usd * Decimal::from(max_positions),
+        max_consecutive_failures: config.risk.max_consecutive_failures,
+        daily_loss_limit: config.risk.daily_loss_limit_usd,
+        max_spread_bps: config.execution.max_spread_bps,
+        critical_bypass_exposure: true,
+        ..Default::default()
+    }
+}
+
+fn risk_result_to_decision(result: &RiskCheckResult) -> RiskDecision {
+    match result {
+        RiskCheckResult::Passed => RiskDecision {
+            status: RiskDecisionStatus::Allow,
+            reason_code: None,
+            message: None,
+            suggested_max_size: None,
+        },
+        RiskCheckResult::Blocked(reason) => RiskDecision {
+            status: RiskDecisionStatus::Deny,
+            reason_code: Some("blocked".to_string()),
+            message: Some(reason.to_string()),
+            suggested_max_size: None,
+        },
+        RiskCheckResult::Adjusted(s) => RiskDecision {
+            status: RiskDecisionStatus::Throttle,
+            reason_code: Some("adjusted".to_string()),
+            message: Some(s.reason.clone()),
+            suggested_max_size: Some(s.max_shares),
+        },
+    }
+}
+
+async fn execute_order_via_gateway(
+    config: &AppConfig,
+    request: &OrderRequest,
+) -> Result<crate::strategy::executor::ExecutionResult> {
+    let client = build_pm_client(&config.market.rest_url, config.dry_run.enabled).await?;
+    let mut executor = OrderExecutor::new(client, config.execution.clone());
+
+    if let Ok(store) = PostgresStore::new(&config.database.url, config.database.max_connections).await
+    {
+        let idem = Arc::new(IdempotencyManager::new_with_account(
+            store,
+            config.account.id.clone(),
+        ));
+        executor = executor.with_idempotency(idem);
+    }
+
+    executor.execute(request).await
+}
+
 fn is_write_method(method: &str) -> bool {
     matches!(
         method,
-        "pm.submit_limit" | "pm.cancel_order" | "events.upsert" | "events.update_status"
+        "pm.submit_limit"
+            | "gateway.submit_intent"
+            | "pm.cancel_order"
+            | "events.upsert"
+            | "events.update_status"
     )
 }
 
@@ -425,6 +520,7 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                     "pm.get_trades",
                     "pm.get_account_summary",
                     "pm.submit_limit",
+                    "gateway.submit_intent",
                     "event_edge.scan",
                     "multi_outcome.analyze",
                     "events.upsert",
@@ -879,6 +975,132 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                 }
             };
 
+            let idempotency_key = match parse_str(&params, "idempotency_key") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+
+            let domain = match parse_domain(params.get("domain").and_then(|v| v.as_str())) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let agent_id = parse_optional_str(&params, "agent_id")
+                .unwrap_or_else(|| "openclaw_rpc".to_string());
+            let deployment_id = parse_optional_str(&params, "deployment_id")
+                .unwrap_or_else(|| "openclaw_rpc.default".to_string());
+            let market_slug =
+                parse_optional_str(&params, "market_slug").unwrap_or_else(|| token_id.clone());
+
+            let mut metadata: HashMap<String, String> = HashMap::new();
+            metadata.insert("source".to_string(), "rpc.pm.submit_limit".to_string());
+            metadata.insert("deployment_id".to_string(), deployment_id.clone());
+            if let Some(v) = parse_optional_str(&params, "symbol") {
+                metadata.insert("symbol".to_string(), v);
+            }
+            if let Some(v) = parse_optional_str(&params, "horizon") {
+                metadata.insert("horizon".to_string(), v);
+            }
+            if let Some(v) = parse_optional_str(&params, "series_id") {
+                metadata.insert("series_id".to_string(), v.clone());
+                metadata
+                    .entry("event_series_id".to_string())
+                    .or_insert(v);
+            }
+
+            let confidence = match parse_optional_decimal(&params, "confidence") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let edge = match parse_optional_decimal(&params, "edge") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let reason = parse_optional_str(&params, "reason");
+
+            let trade_intent = TradeIntent {
+                intent_id: Uuid::new_v4(),
+                deployment_id: deployment_id.clone(),
+                agent_id: agent_id.clone(),
+                domain,
+                market_slug: market_slug.clone(),
+                token_id: token_id.clone(),
+                side: market_side,
+                is_buy: matches!(order_side, OrderSide::Buy),
+                size: shares,
+                price_limit: limit_price,
+                confidence,
+                edge,
+                event_time: None,
+                reason,
+                priority: None,
+                metadata,
+            };
+            let order_intent: OrderIntent = trade_intent.clone().into_order_intent();
+            let risk_gate = RiskGate::new(build_risk_config(&config));
+            let risk_result = risk_gate.check_order(&order_intent).await;
+            let risk_decision = risk_result_to_decision(&risk_result);
+
+            if !risk_result.is_passed() {
+                println!(
+                    "{}",
+                    jsonrpc_err(
+                        req.id,
+                        -32012,
+                        "risk check failed",
+                        Some(json!({
+                            "risk_decision": risk_decision,
+                            "deployment_id": deployment_id,
+                            "agent_id": agent_id,
+                        })),
+                    )
+                );
+                return Ok(());
+            }
+
             let req_order = match order_side {
                 OrderSide::Buy => {
                     OrderRequest::buy_limit(token_id, market_side, shares, limit_price)
@@ -887,21 +1109,301 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                     OrderRequest::sell_limit(token_id, market_side, shares, limit_price)
                 }
             };
+            let mut req_order = req_order;
+            req_order.idempotency_key = Some(idempotency_key);
 
-            match build_pm_client(&rest_url, dry_run).await {
-                Ok(c) => match c.submit_order(&req_order).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.submit_limit failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
+            match execute_order_via_gateway(&config, &req_order).await {
+                Ok(exec) => jsonrpc_ok(
+                    req.id,
+                    json!({
+                        "execution": exec,
+                        "risk_decision": risk_decision,
+                        "intent_id": trade_intent.intent_id,
+                        "deployment_id": trade_intent.deployment_id,
+                    }),
+                ),
                 Err(e) => jsonrpc_err(
                     req.id,
                     -32001,
-                    "pm client init failed",
+                    "pm.submit_limit failed",
+                    Some(json!({"detail": e.to_string()})),
+                ),
+            }
+        }
+
+        "gateway.submit_intent" => {
+            if let Err(v) = require_write_enabled(req.id.clone()) {
+                println!("{}", v.to_string());
+                return Ok(());
+            }
+
+            let deployment_id = match parse_str(&params, "deployment_id") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let agent_id =
+                parse_optional_str(&params, "agent_id").unwrap_or_else(|| "openclaw_rpc".into());
+            let domain = match parse_domain(params.get("domain").and_then(|v| v.as_str())) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let market_slug = match parse_str(&params, "market_slug") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let token_id = match parse_str(&params, "token_id") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let side = match parse_str(&params, "side")
+                .unwrap_or_else(|_| "UP".to_string())
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "UP" | "YES" => Side::Up,
+                "DOWN" | "NO" => Side::Down,
+                _ => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": "side must be UP|DOWN|YES|NO"}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let order_side = match parse_str(&params, "order_side")
+                .unwrap_or_else(|_| "BUY".to_string())
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "BUY" => OrderSide::Buy,
+                "SELL" => OrderSide::Sell,
+                _ => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": "order_side must be BUY|SELL"}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let size = match parse_u64(&params, "size") {
+                Ok(v) => v,
+                Err(_) => match parse_u64(&params, "shares") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": e.to_string()}))
+                            )
+                        );
+                        return Ok(());
+                    }
+                },
+            };
+            let price_limit = match parse_decimal(&params, "price_limit") {
+                Ok(v) => v,
+                Err(_) => match parse_decimal(&params, "limit_price") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": e.to_string()}))
+                            )
+                        );
+                        return Ok(());
+                    }
+                },
+            };
+            let idempotency_key = match parse_str(&params, "idempotency_key") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+
+            let confidence = match parse_optional_decimal(&params, "confidence") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let edge = match parse_optional_decimal(&params, "edge") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            let reason = parse_optional_str(&params, "reason");
+
+            let mut metadata: HashMap<String, String> = HashMap::new();
+            if let Some(meta_obj) = params.get("metadata").and_then(|v| v.as_object()) {
+                for (k, v) in meta_obj {
+                    if let Some(s) = v.as_str() {
+                        metadata.insert(k.clone(), s.to_string());
+                    } else {
+                        metadata.insert(k.clone(), v.to_string());
+                    }
+                }
+            }
+            metadata
+                .entry("source".to_string())
+                .or_insert_with(|| "rpc.gateway.submit_intent".to_string());
+
+            let trade_intent = TradeIntent {
+                intent_id: Uuid::new_v4(),
+                deployment_id: deployment_id.clone(),
+                agent_id: agent_id.clone(),
+                domain,
+                market_slug,
+                token_id,
+                side,
+                is_buy: matches!(order_side, OrderSide::Buy),
+                size,
+                price_limit,
+                confidence,
+                edge,
+                event_time: None,
+                reason,
+                priority: None,
+                metadata,
+            };
+
+            let order_intent = trade_intent.clone().into_order_intent();
+            let risk_gate = RiskGate::new(build_risk_config(&config));
+            let risk_result = risk_gate.check_order(&order_intent).await;
+            let risk_decision = risk_result_to_decision(&risk_result);
+            if !risk_result.is_passed() {
+                println!(
+                    "{}",
+                    jsonrpc_err(
+                        req.id,
+                        -32012,
+                        "risk check failed",
+                        Some(json!({ "risk_decision": risk_decision })),
+                    )
+                );
+                return Ok(());
+            }
+
+            let mut request = if trade_intent.is_buy {
+                OrderRequest::buy_limit(
+                    trade_intent.token_id.clone(),
+                    trade_intent.side,
+                    trade_intent.size,
+                    trade_intent.price_limit,
+                )
+            } else {
+                OrderRequest::sell_limit(
+                    trade_intent.token_id.clone(),
+                    trade_intent.side,
+                    trade_intent.size,
+                    trade_intent.price_limit,
+                )
+            };
+            request.idempotency_key = Some(idempotency_key);
+
+            match execute_order_via_gateway(&config, &request).await {
+                Ok(exec) => jsonrpc_ok(
+                    req.id,
+                    json!({
+                        "execution": exec,
+                        "risk_decision": risk_decision,
+                        "intent_id": trade_intent.intent_id,
+                        "deployment_id": trade_intent.deployment_id,
+                    }),
+                ),
+                Err(e) => jsonrpc_err(
+                    req.id,
+                    -32001,
+                    "gateway.submit_intent failed",
                     Some(json!({"detail": e.to_string()})),
                 ),
             }

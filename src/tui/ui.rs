@@ -87,7 +87,10 @@ fn render_help(f: &mut Frame, _app: &TuiApp) {
 
     let mut help_lines: Vec<Line> = Vec::with_capacity(KEYBINDINGS.len() + 6);
     help_lines.push(Line::from(""));
-    help_lines.push(Line::from(Span::styled("  Keybindings", THEME.title_style())));
+    help_lines.push(Line::from(Span::styled(
+        "  Keybindings",
+        THEME.title_style(),
+    )));
     help_lines.push(Line::from(""));
 
     for (keys, desc) in KEYBINDINGS {

@@ -21,6 +21,7 @@ import math
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import uuid
@@ -405,7 +406,7 @@ def _fetch_rows_via_ssm_file(*, instance_id: str, select_sql: str, label: str) -
     return rows
 
 
-def _write_json_report(*, instance_id: str, out_dir: Path, basename: str, select_sql: str, via_file: bool = False) -> int:
+def _write_json_report(*, instance_id: str, out_dir: Path, basename: str, select_sql: str, via_file: bool = False) -> list:
     if via_file:
         data = _fetch_rows_via_ssm_file(instance_id=instance_id, select_sql=select_sql, label=basename)
     else:
@@ -416,7 +417,57 @@ def _write_json_report(*, instance_id: str, out_dir: Path, basename: str, select
 
     print(str(json_path))
     print(f"{basename}: rows={len(data)}")
-    return len(data)
+    return data
+
+
+def _write_sqlite_table(conn: sqlite3.Connection, table_name: str, rows: list) -> None:
+    conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+
+    if not rows:
+        conn.execute(f'CREATE TABLE "{table_name}" (__empty INTEGER)')
+        conn.execute(f'DELETE FROM "{table_name}"')
+        return
+
+    columns = sorted({k for row in rows for k in row.keys()})
+    col_defs = ", ".join([f'"{c}" TEXT' for c in columns])
+    conn.execute(f'CREATE TABLE "{table_name}" ({col_defs})')
+
+    placeholders = ", ".join(["?"] * len(columns))
+    quoted_cols = ", ".join([f'"{c}"' for c in columns])
+    insert_sql = f'INSERT INTO "{table_name}" ({quoted_cols}) VALUES ({placeholders})'
+
+    for row in rows:
+        vals = []
+        for c in columns:
+            v = row.get(c)
+            if v is None:
+                vals.append(None)
+            elif isinstance(v, (dict, list)):
+                vals.append(json.dumps(v, ensure_ascii=False))
+            elif isinstance(v, bool):
+                vals.append("1" if v else "0")
+            else:
+                vals.append(str(v))
+        conn.execute(insert_sql, vals)
+
+
+def _write_sqlite_reports(*, sqlite_path: Path, product_rows: list, market_rows: Optional[list]) -> None:
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        _write_sqlite_table(conn, "drawdown_by_product", product_rows)
+        if market_rows is not None:
+            _write_sqlite_table(conn, "drawdown_by_market", market_rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+    print(str(sqlite_path))
+    if market_rows is None:
+        print("sqlite: tables=drawdown_by_product")
+    else:
+        print("sqlite: tables=drawdown_by_product,drawdown_by_market")
 
 
 def main() -> int:
@@ -428,6 +479,11 @@ def main() -> int:
     p.add_argument("--timeframes", default="5m,15m", help="comma-separated list (default: 5m,15m)")
     p.add_argument("--include-market", action="store_true", help="also generate per-market drill-down (large; fetched via chunked SSM file)")
     p.add_argument("--out-dir", default=str(REPO_ROOT / "reports"), help="output directory (default: ./reports)")
+    p.add_argument(
+        "--sqlite-file",
+        default=str(REPO_ROOT / "reports" / "drawdown.sqlite"),
+        help="optional SQLite output path (default: ./reports/drawdown.sqlite, set empty to disable)",
+    )
     args = p.parse_args()
 
     if not args.instance_id:
@@ -450,12 +506,13 @@ def main() -> int:
         fee_rate=fee_rate,
         initial_capital=initial_capital,
     )
-    _write_json_report(
+    product_rows = _write_json_report(
         instance_id=args.instance_id,
         out_dir=out_dir,
         basename="drawdown_by_product",
         select_sql=product_sql,
     )
+    market_rows: Optional[list] = None
     if args.include_market:
         market_sql = _select_sql_by_market(
             account_id=account_id,
@@ -464,12 +521,20 @@ def main() -> int:
             fee_rate=fee_rate,
             initial_capital=initial_capital,
         )
-        _write_json_report(
+        market_rows = _write_json_report(
             instance_id=args.instance_id,
             out_dir=out_dir,
             basename="drawdown_by_market",
             select_sql=market_sql,
             via_file=True,
+        )
+
+    sqlite_file = (args.sqlite_file or "").strip()
+    if sqlite_file:
+        _write_sqlite_reports(
+            sqlite_path=Path(sqlite_file),
+            product_rows=product_rows,
+            market_rows=market_rows,
         )
 
     return 0

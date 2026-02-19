@@ -43,6 +43,12 @@ enabled = true                  # Start in dry run mode for safety
 level = "info"
 json = false
 
+# Agent framework control-plane mode.
+# Set mode=openclaw + hard_disable_internal_agents=true to force OpenClaw-only runtime.
+[agent_framework]
+mode = "internal"
+hard_disable_internal_agents = false
+
 # =============================================================================
 # Optional always-on agent: Arena leaderboard → Polymarket event mispricing scan
 # =============================================================================
@@ -95,6 +101,12 @@ json = false
 # espn_poll_interval_secs = 30
 # min_comeback_rate = 0.15
 # season = "2025-26"
+# performance_daily_loss_limit_usd = 30
+# performance_min_settled_trades = 10
+# performance_min_win_rate = 0.45
+# performance_low_winrate_multiplier = 0.60
+# performance_loss_streak_threshold = 3
+# performance_loss_streak_multiplier = 0.50
 
 # =============================================================================
 # Event Registry — shared event pool for cross-strategy discovery

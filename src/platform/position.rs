@@ -239,6 +239,50 @@ impl PositionAggregator {
         }
     }
 
+    /// Reduce shares from an existing position (supports partial close).
+    /// Returns realized PnL for the reduced shares.
+    pub async fn reduce_position(
+        &self,
+        position_id: &str,
+        reduce_shares: u64,
+        exit_price: Decimal,
+    ) -> Option<Decimal> {
+        if reduce_shares == 0 {
+            return Some(Decimal::ZERO);
+        }
+
+        let mut positions = self.positions.write().await;
+        let mut remove_entry = false;
+
+        let (agent_id, reduced, pnl) = {
+            let position = positions.get_mut(position_id)?;
+            let reduced = reduce_shares.min(position.shares);
+            let pnl = (exit_price - position.entry_price) * Decimal::from(reduced);
+            position.shares -= reduced;
+            if position.shares == 0 {
+                remove_entry = true;
+            } else {
+                position.updated_at = Utc::now();
+            }
+            (position.agent_id.clone(), reduced, pnl)
+        };
+
+        if reduced == 0 {
+            return Some(Decimal::ZERO);
+        }
+
+        if remove_entry {
+            positions.remove(position_id);
+        }
+
+        drop(positions);
+
+        let mut realized = self.realized_pnl.write().await;
+        *realized.entry(agent_id).or_insert(Decimal::ZERO) += pnl;
+
+        Some(pnl)
+    }
+
     /// 更新倉位價格
     pub async fn update_price(&self, position_id: &str, price: Decimal) {
         if let Some(position) = self.positions.write().await.get_mut(position_id) {
@@ -503,6 +547,32 @@ mod tests {
 
         assert_eq!(agg.position_count().await, 0);
         assert_eq!(agg.total_realized_pnl().await, Decimal::from(5));
+    }
+
+    #[tokio::test]
+    async fn test_reduce_position_partial_close() {
+        let agg = PositionAggregator::new();
+        let pos_id = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+
+        let pnl = agg
+            .reduce_position(&pos_id, 40, Decimal::from_str_exact("0.60").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(pnl, Decimal::from(4)); // (0.60 - 0.50) * 40
+        assert_eq!(agg.position_count().await, 1);
+        assert_eq!(agg.total_exposure().await, Decimal::from(30)); // 60 * 0.50
+        assert_eq!(agg.total_realized_pnl().await, Decimal::from(4));
     }
 
     #[tokio::test]

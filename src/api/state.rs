@@ -64,8 +64,14 @@ pub struct StrategyConfigState {
     pub max_entry: f64,
     pub shares: i32,
     pub predictive: bool,
-    pub take_profit: Option<f64>,
-    pub stop_loss: Option<f64>,
+    /// Binary-options exit threshold based on modeled edge deterioration.
+    pub exit_edge_floor: Option<f64>,
+    /// Binary-options exit threshold based on adverse price move band.
+    pub exit_price_band: Option<f64>,
+    /// Optional minimum seconds before scheduled resolution to force time-based exit.
+    pub time_decay_exit_secs: Option<u64>,
+    /// Optional max spread (bps) for liquidity-based forced exit.
+    pub liquidity_exit_spread_bps: Option<u32>,
 }
 
 impl AppState {

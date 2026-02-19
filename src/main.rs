@@ -14,7 +14,7 @@ use ploy::cli::legacy::{
 use ploy::config::AppConfig;
 use ploy::error::{PloyError, Result};
 use ploy::services::{DataCollector, HealthServer, HealthState, Metrics};
-use ploy::strategy::{OrderExecutor, StrategyEngine};
+use ploy::strategy::{IdempotencyManager, OrderExecutor, StrategyEngine};
 use std::sync::Arc;
 use tokio::signal;
 use tokio::time::Duration;
@@ -53,8 +53,10 @@ async fn main() -> Result<()> {
                     max_entry: config.strategy.sum_target.to_f64().unwrap_or(1.0),
                     shares: i32::try_from(config.strategy.shares).unwrap_or(i32::MAX),
                     predictive: false,
-                    take_profit: None,
-                    stop_loss: None,
+                    exit_edge_floor: None,
+                    exit_price_band: None,
+                    time_decay_exit_secs: None,
+                    liquidity_exit_spread_bps: None,
                 };
 
                 start_api_server(Arc::new(store), api_port, api_config).await?;
@@ -126,6 +128,14 @@ async fn main() -> Result<()> {
             dry_run,
         }) => {
             init_logging();
+            let cfg_for_lockdown = AppConfig::load_from(&cli.config).unwrap_or_else(|_| {
+                AppConfig::default_config(true, "btc-price-series-15m")
+            });
+            if cfg_for_lockdown.openclaw_runtime_lockdown() {
+                return Err(PloyError::Validation(
+                    "event-edge runtime is disabled in openclaw lockdown mode".to_string(),
+                ));
+            }
             run_event_edge_mode(
                 event.as_deref(),
                 title.as_deref(),
@@ -516,6 +526,18 @@ async fn run_platform_mode(
         platform_cfg.enable_crypto = crypto;
         platform_cfg.enable_sports = sports;
         platform_cfg.enable_politics = politics;
+    }
+    if app_config.openclaw_runtime_lockdown() {
+        platform_cfg.enable_crypto = false;
+        platform_cfg.enable_crypto_momentum = false;
+        platform_cfg.enable_crypto_lob_ml = false;
+        #[cfg(feature = "rl")]
+        {
+            platform_cfg.enable_crypto_rl_policy = false;
+        }
+        platform_cfg.enable_sports = false;
+        platform_cfg.enable_politics = false;
+        warn!("platform started in openclaw lockdown mode; built-in agents forced off");
     }
     if dry_run {
         platform_cfg.dry_run = true;
@@ -2134,7 +2156,11 @@ async fn run_full_bot(
     }
 
     // Initialize order executor
-    let executor = OrderExecutor::new(clob_client.clone(), config.execution.clone());
+    let executor = OrderExecutor::new(clob_client.clone(), config.execution.clone())
+        .with_idempotency(Arc::new(IdempotencyManager::new_with_account(
+            store.clone(),
+            config.account.id.clone(),
+        )));
 
     // Initialize strategy engine
     let engine = Arc::new(
@@ -2203,8 +2229,10 @@ async fn run_full_bot(
             max_entry: config.strategy.sum_target.to_f64().unwrap_or(1.0),
             shares: i32::try_from(config.strategy.shares).unwrap_or(i32::MAX),
             predictive: false,
-            take_profit: None,
-            stop_loss: None,
+            exit_edge_floor: None,
+            exit_price_band: None,
+            time_decay_exit_secs: None,
+            liquidity_exit_spread_bps: None,
         };
 
         match start_api_server_background(Arc::new(store.clone()), api_port, api_config).await {
@@ -2293,7 +2321,10 @@ async fn run_full_bot(
     };
 
     // Spawn always-on event-edge agent (optional)
-    let event_edge_handle = if let Some(agent_cfg) = config.event_edge_agent.clone() {
+    let event_edge_handle = if config.openclaw_runtime_lockdown() {
+        warn!("event-edge runtime disabled by openclaw lockdown");
+        tokio::spawn(async {})
+    } else if let Some(agent_cfg) = config.event_edge_agent.clone() {
         if agent_cfg.enabled {
             use ploy::services::{
                 EventEdgeAgent, EventEdgeClaudeFrameworkAgent, EventEdgeEventDrivenAgent,
@@ -2440,7 +2471,10 @@ async fn run_simple_bot(
     });
 
     // Spawn always-on event-edge agent (optional)
-    let event_edge_handle = if let Some(agent_cfg) = config.event_edge_agent.clone() {
+    let event_edge_handle = if config.openclaw_runtime_lockdown() {
+        warn!("event-edge runtime disabled by openclaw lockdown");
+        tokio::spawn(async {})
+    } else if let Some(agent_cfg) = config.event_edge_agent.clone() {
         if agent_cfg.enabled {
             use ploy::services::{
                 EventEdgeAgent, EventEdgeClaudeFrameworkAgent, EventEdgeEventDrivenAgent,
@@ -2752,7 +2786,9 @@ async fn run_momentum_mode(
 ) -> Result<()> {
     use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket};
     use ploy::signing::Wallet;
-    use ploy::strategy::{ExitConfig, MomentumConfig, MomentumEngine, OrderExecutor};
+    use ploy::strategy::{
+        AutoClaimer, ClaimerConfig, ExitConfig, MomentumConfig, MomentumEngine, OrderExecutor,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::str::FromStr;
@@ -2816,6 +2852,8 @@ async fn run_momentum_mode(
         use_price_to_beat: true,     // Consider price-to-beat from market question
         dynamic_position_sizing: true, // Scale position by confidence
         min_confidence: 0.5,         // Minimum 50% confidence
+        use_kelly_sizing: true,      // Kelly scaling enabled
+        kelly_fraction_cap: dec!(0.25), // Quarter-Kelly cap
 
         // VWAP confirmation (optional)
         require_vwap_confirmation: vwap_confirm,
@@ -2935,7 +2973,7 @@ async fn run_momentum_mode(
     };
 
     // Create momentum engine with fund management
-    let engine = MomentumEngine::new_with_fund_manager(
+    let mut engine = MomentumEngine::new_with_fund_manager(
         momentum_config,
         exit_config,
         pm_client.clone(),
@@ -2943,6 +2981,61 @@ async fn run_momentum_mode(
         risk_config,
         dry_run,
     );
+
+    // Optional auto-claim wiring for live momentum mode.
+    // Enabled by default in live mode; disable with PLOY_AUTO_CLAIM=false.
+    if !dry_run {
+        let auto_claim_enabled = std::env::var("PLOY_AUTO_CLAIM")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "y" | "on"
+                )
+            })
+            .unwrap_or(true);
+
+        if auto_claim_enabled {
+            let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
+                .or_else(|_| std::env::var("PRIVATE_KEY"))
+                .ok();
+
+            if let Some(private_key) = private_key {
+                let check_interval_secs = std::env::var("CLAIMER_CHECK_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(60);
+                let min_claim_size = std::env::var("CLAIMER_MIN_CLAIM_SIZE")
+                    .ok()
+                    .and_then(|v| Decimal::from_str(v.trim()).ok())
+                    .filter(|v| *v > Decimal::ZERO)
+                    .unwrap_or(Decimal::ONE);
+
+                let claimer = AutoClaimer::new(
+                    pm_client.clone(),
+                    ClaimerConfig {
+                        check_interval_secs,
+                        min_claim_size,
+                        auto_claim: true,
+                        private_key: Some(private_key),
+                    },
+                );
+
+                engine = engine.with_claimer(claimer);
+                info!(
+                    "Auto-claimer enabled for momentum (interval={}s, min_claim_size=${})",
+                    check_interval_secs, min_claim_size
+                );
+            } else {
+                warn!(
+                    "Auto-claimer requested for live momentum, but POLYMARKET_PRIVATE_KEY/PRIVATE_KEY is missing"
+                );
+            }
+        } else {
+            info!("Auto-claimer disabled via PLOY_AUTO_CLAIM=false");
+        }
+    }
 
     // Refresh events to get token IDs
     info!("Fetching active Polymarket events...");
@@ -3539,98 +3632,107 @@ async fn run_agent_mode(
 
 /// Fetch market data from Polymarket and create a populated MarketSnapshot
 async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::agent::protocol::MarketSnapshot> {
-    use chrono::{DateTime, Utc};
+    use chrono::Utc;
+    use ploy::adapters::polymarket_clob::GAMMA_API_URL;
     use ploy::agent::protocol::MarketSnapshot;
     use ploy::error::PloyError;
+    use polymarket_client_sdk::gamma::types::request::SearchRequest;
+    use polymarket_client_sdk::gamma::Client as GammaClient;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
-    // Try to fetch event by slug from Gamma API
-    let url = format!(
-        "https://gamma-api.polymarket.com/events?slug={}",
-        market_slug
-    );
-
-    let http_client = reqwest::Client::new();
-    let resp = http_client.get(&url).send().await?;
-
-    if !resp.status().is_success() {
-        return Err(PloyError::MarketDataUnavailable(format!(
-            "Event not found: {}",
-            market_slug
-        )));
-    }
-
-    let events: Vec<serde_json::Value> = resp.json().await?;
-    let event = events.first().ok_or_else(|| {
-        PloyError::MarketDataUnavailable(format!("No event found for slug: {}", market_slug))
+    let gamma = GammaClient::new(GAMMA_API_URL).map_err(|e| {
+        PloyError::MarketDataUnavailable(format!("Failed to create Gamma client: {}", e))
     })?;
+    let req = SearchRequest::builder().q(market_slug).build();
+    let search = gamma.search(&req).await.map_err(|e| {
+        PloyError::MarketDataUnavailable(format!("Gamma search failed for {}: {}", market_slug, e))
+    })?;
+    let events = search.events.unwrap_or_default();
+    let normalized = market_slug.trim_matches('/');
+    let event = events
+        .iter()
+        .find(|e| {
+            e.slug.as_deref().is_some_and(|slug| {
+                let slug = slug.trim_matches('/');
+                slug == normalized || slug.ends_with(&format!("/{}", normalized))
+            })
+        })
+        .cloned()
+        .or_else(|| events.into_iter().next())
+        .ok_or_else(|| {
+            PloyError::MarketDataUnavailable(format!("No event found for slug: {}", market_slug))
+        })?;
 
     let mut snapshot = MarketSnapshot::new(market_slug.to_string());
 
     // Set description from event title
-    snapshot.description = event
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    snapshot.description = event.title.clone();
 
     // Parse end date
-    if let Some(end_str) = event.get("endDate").and_then(|v| v.as_str()) {
-        if let Ok(end_dt) = DateTime::parse_from_rfc3339(end_str) {
-            let end_utc: DateTime<Utc> = end_dt.into();
-            snapshot.end_time = Some(end_utc);
-            let now = Utc::now();
-            let duration = end_utc.signed_duration_since(now);
-            snapshot.minutes_remaining = Some(duration.num_minutes());
-        }
+    if let Some(end_utc) = event.end_date {
+        snapshot.end_time = Some(end_utc);
+        let now = Utc::now();
+        let duration = end_utc.signed_duration_since(now);
+        snapshot.minutes_remaining = Some(duration.num_minutes());
     }
 
+    let parse_json_array = |raw: Option<&str>| -> Vec<String> {
+        let Some(raw) = raw else { return vec![] };
+        if let Ok(v) = serde_json::from_str::<Vec<String>>(raw) {
+            return v;
+        }
+        if let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+            return v
+                .into_iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| x.to_string())
+                })
+                .collect();
+        }
+        vec![]
+    };
+
     // Get markets from the event
-    if let Some(markets) = event.get("markets").and_then(|v| v.as_array()) {
+    if let Some(markets) = event.markets.as_ref() {
         let mut sum_yes_asks = Decimal::ZERO;
         let mut sum_no_bids = Decimal::ZERO;
         let mut first_market = true;
 
         for market in markets {
             // Get CLOB token IDs
-            let clob_token_ids = market
-                .get("clobTokenIds")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
+            let clob_token_ids = parse_json_array(market.clob_token_ids.as_deref());
 
             // Get outcome prices from market data
-            let outcome_prices = market
-                .get("outcomePrices")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
+            let outcome_prices = parse_json_array(market.outcome_prices.as_deref());
 
-            if let (Some(token_ids), Some(prices)) = (clob_token_ids, outcome_prices) {
-                if token_ids.len() >= 2 && prices.len() >= 2 {
-                    // Parse YES price (first token)
-                    let yes_price = Decimal::from_str(&prices[0]).ok();
-                    // Parse NO price (second token)
-                    let no_price = Decimal::from_str(&prices[1]).ok();
+            if clob_token_ids.len() >= 2 && outcome_prices.len() >= 2 {
+                // Parse YES price (first token)
+                let yes_price = Decimal::from_str(&outcome_prices[0]).ok();
+                // Parse NO price (second token)
+                let no_price = Decimal::from_str(&outcome_prices[1]).ok();
 
-                    // For first market, set as primary prices
-                    if first_market {
-                        snapshot.yes_token_id = Some(token_ids[0].clone());
-                        snapshot.no_token_id = Some(token_ids[1].clone());
-                        // Use outcome prices as approximate bid/ask
-                        snapshot.yes_bid = yes_price;
-                        snapshot.yes_ask = yes_price;
-                        snapshot.no_bid = no_price;
-                        snapshot.no_ask = no_price;
+                // For first market, set as primary prices
+                if first_market {
+                    snapshot.yes_token_id = Some(clob_token_ids[0].clone());
+                    snapshot.no_token_id = Some(clob_token_ids[1].clone());
+                    // Use outcome prices as approximate bid/ask
+                    snapshot.yes_bid = yes_price;
+                    snapshot.yes_ask = yes_price;
+                    snapshot.no_bid = no_price;
+                    snapshot.no_ask = no_price;
 
-                        first_market = false;
-                    }
+                    first_market = false;
+                }
 
-                    // Accumulate for sum calculations (multi-outcome markets)
-                    if let Some(price) = yes_price {
-                        sum_yes_asks = sum_yes_asks + price;
-                    }
-                    if let Some(price) = no_price {
-                        sum_no_bids = sum_no_bids + price;
-                    }
+                // Accumulate for sum calculations (multi-outcome markets)
+                if let Some(price) = yes_price {
+                    sum_yes_asks += price;
+                }
+                if let Some(price) = no_price {
+                    sum_no_bids += price;
                 }
             }
         }

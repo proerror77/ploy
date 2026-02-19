@@ -10,8 +10,10 @@
 //!    - Quarter/period
 //! 4. Executing trades when edge > threshold
 
+use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::error::{PloyError, Result};
-use reqwest::Client;
+use polymarket_client_sdk::gamma::types::request::{EventByIdRequest, SeriesByIdRequest};
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -206,7 +208,7 @@ impl ArbitrageOpportunity {
 
 /// Live arbitrage monitor
 pub struct LiveArbitrageMonitor {
-    client: Client,
+    gamma_client: GammaClient,
     comeback_model: ComebackModel,
     price_history: HashMap<String, Vec<(DateTime<Utc>, MoneylinePrices)>>,
     /// Team strength factors (team name -> 0.8-1.2 multiplier)
@@ -216,10 +218,7 @@ pub struct LiveArbitrageMonitor {
 impl LiveArbitrageMonitor {
     pub fn new() -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap(),
+            gamma_client: GammaClient::new(GAMMA_API_URL).unwrap(),
             comeback_model: ComebackModel::new(),
             price_history: HashMap::new(),
             team_strength: Self::default_team_strength(),
@@ -323,34 +322,25 @@ impl LiveArbitrageMonitor {
 
     /// Fetch all live NBA games
     async fn fetch_live_games(&self) -> Result<Vec<LiveGameState>> {
-        let url = "https://gamma-api.polymarket.com/series/10345"; // NBA 2026
-        let response = self.client.get(url).send().await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
+        let req = SeriesByIdRequest::builder().id("10345").build(); // NBA 2026
+        let series = self
+            .gamma_client
+            .series_by_id(&req)
+            .await
+            .map_err(|e| PloyError::Internal(format!("Gamma series fetch failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(PloyError::Internal("API error".into()));
-        }
-
-        let series: serde_json::Value = response.json().await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
-
-        let events = series.get("events")
-            .and_then(|e| e.as_array())
-            .ok_or_else(|| PloyError::Internal("No events".into()))?;
+        let events = series.events.unwrap_or_default();
 
         let mut live_games = vec![];
 
         for event in events {
-            let event_id = event.get("id")
-                .and_then(|id| id.as_str())
-                .unwrap_or("");
-
+            let event_id = event.id;
             if event_id.is_empty() {
                 continue;
             }
 
             // Fetch event details
-            match self.fetch_game_state(event_id).await {
+            match self.fetch_game_state(&event_id).await {
                 Ok(Some(game)) => {
                     if game.live && !game.ended {
                         live_games.push(game);
@@ -368,76 +358,42 @@ impl LiveArbitrageMonitor {
 
     /// Fetch game state
     async fn fetch_game_state(&self, event_id: &str) -> Result<Option<LiveGameState>> {
-        let url = format!("https://gamma-api.polymarket.com/events/{}", event_id);
-        let response = self.client.get(&url).send().await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
+        let req = EventByIdRequest::builder().id(event_id).build();
+        let event = match self.gamma_client.event_by_id(&req).await {
+            Ok(event) => event,
+            Err(_) => return Ok(None),
+        };
 
-        if !response.status().is_success() {
-            return Ok(None);
-        }
+        let title = event.title.clone().unwrap_or_default();
+        let slug = event.slug.clone().unwrap_or_default();
+        let live = event.live.unwrap_or(false);
+        let ended = event.ended.unwrap_or(false);
 
-        let event: serde_json::Value = response.json().await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
-
-        let title = event.get("title")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let slug = event.get("slug")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let live = event.get("live")
-            .and_then(|l| l.as_bool())
-            .unwrap_or(false);
-
-        let ended = event.get("ended")
-            .and_then(|e| e.as_bool())
-            .unwrap_or(false);
-
-        let score_str = event.get("score")
-            .and_then(|s| s.as_str());
+        let score_str = event.score.as_deref();
 
         let score = score_str.and_then(|s| GameScore::from_string(s));
-
-        let period = event.get("period")
-            .and_then(|p| p.as_str())
-            .map(|s| s.to_string());
-
-        let elapsed = event.get("elapsed")
-            .and_then(|e| e.as_str())
-            .map(|s| s.to_string());
+        let period = event.period.clone();
+        let elapsed = event.elapsed.clone();
 
         // Find moneyline market
-        let markets = event.get("markets")
-            .and_then(|m| m.as_array())
-            .ok_or_else(|| PloyError::Internal("No markets".into()))?;
+        let Some(markets) = event.markets.as_ref() else {
+            return Ok(None);
+        };
 
         let mut moneyline = None;
         let mut team1 = String::new();
         let mut team2 = String::new();
 
         for market in markets {
-            let question = market.get("question")
-                .and_then(|q| q.as_str())
-                .unwrap_or("");
+            let question = market.question.as_deref().unwrap_or("");
 
             // Find main moneyline (not 1H)
             if question.contains(" vs. ") && !question.contains("1H") && !question.contains("O/U") && !question.contains("Spread") {
-                let prices_str = market.get("outcomePrices")
-                    .and_then(|p| p.as_str())
-                    .unwrap_or("[]");
-                let prices: Vec<String> = serde_json::from_str(prices_str).unwrap_or_default();
-
-                let outcomes_str = market.get("outcomes")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or("[]");
-                let outcomes: Vec<String> = serde_json::from_str(outcomes_str).unwrap_or_default();
-
-                let volume = market.get("volume")
-                    .and_then(|v| v.as_str())
+                let prices = self.parse_json_array_strings(market.outcome_prices.as_deref());
+                let outcomes = self.parse_json_array_strings(market.outcomes.as_deref());
+                let volume = market
+                    .volume
+                    .as_deref()
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
 
@@ -484,6 +440,24 @@ impl LiveArbitrageMonitor {
         } else {
             Ok(None)
         }
+    }
+
+    fn parse_json_array_strings(&self, raw: Option<&str>) -> Vec<String> {
+        let Some(raw) = raw else { return vec![] };
+        if let Ok(v) = serde_json::from_str::<Vec<String>>(raw) {
+            return v;
+        }
+        if let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+            return v
+                .into_iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| x.to_string())
+                })
+                .collect();
+        }
+        vec![]
     }
 
     /// Analyze game for arbitrage opportunity

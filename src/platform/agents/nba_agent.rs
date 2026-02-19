@@ -300,12 +300,21 @@ mod tests {
             min_reward_risk_ratio: 4.0,
             min_expected_value: 0.05,
             kelly_fraction_cap: 0.25,
+            performance_daily_loss_limit_usd: dec!(30),
+            performance_min_settled_trades: 10,
+            performance_min_win_rate: 0.45,
+            performance_low_winrate_multiplier: 0.60,
+            performance_loss_streak_threshold: 3,
+            performance_loss_streak_multiplier: 0.50,
             scaling_enabled: false,
             scaling_max_adds: 3,
             scaling_min_price_drop_pct: 5.0,
             scaling_max_game_exposure_usd: dec!(50),
             scaling_min_comeback_retention: 0.70,
             scaling_min_time_remaining_mins: 8.0,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 15.0,
+            early_exit_stop_loss_pct: 20.0,
         };
 
         // Test status transitions without DB

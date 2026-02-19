@@ -45,6 +45,11 @@ pub async fn get_running_strategies(
             pnl_usd,
             order_count,
             domain: "crypto".to_string(),
+            win_rate: None,
+            loss_streak: None,
+            size_multiplier: None,
+            settled_trades: None,
+            daily_realized_pnl_usd: None,
         }]));
     };
 
@@ -73,12 +78,21 @@ pub async fn get_running_strategies(
             }
             .to_string();
 
+            let parse_f64 = |key: &str| snap.metrics.get(key).and_then(|v| v.parse::<f64>().ok());
+            let parse_u32 = |key: &str| snap.metrics.get(key).and_then(|v| v.parse::<u32>().ok());
+            let parse_u64 = |key: &str| snap.metrics.get(key).and_then(|v| v.parse::<u64>().ok());
+
             RunningStrategy {
                 name: snap.name.clone(),
                 status,
                 pnl_usd: snap.daily_pnl.to_f64().unwrap_or(0.0),
                 order_count: snap.position_count as u64,
                 domain,
+                win_rate: parse_f64("sports_win_rate"),
+                loss_streak: parse_u32("sports_loss_streak"),
+                size_multiplier: parse_f64("sports_size_multiplier"),
+                settled_trades: parse_u64("sports_settled_trades"),
+                daily_realized_pnl_usd: parse_f64("sports_daily_realized_pnl_usd"),
             }
         })
         .collect();

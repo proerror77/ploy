@@ -35,8 +35,8 @@ enabled = true
 coins = ["BTC", "ETH", "SOL"]
 sum_threshold = 0.96                # Enter when sum of asks < this
 default_shares = 100
-take_profit = 0.02                  # 2% profit target
-stop_loss = 0.05                    # 5% max loss
+exit_edge_floor = 0.02              # exit when modeled edge floor is reached
+exit_price_band = 0.05              # exit on adverse price band
 
 [agents.rl_crypto]
 # RL-powered agent settings (requires --features rl)
@@ -48,3 +48,7 @@ model_checkpoint = "./models/latest.bin"
 [logging]
 level = "info"                      # debug, info, warn, error
 format = "json"                     # json or pretty
+
+[agent_framework]
+mode = "openclaw"
+hard_disable_internal_agents = true

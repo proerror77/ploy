@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::polymarket_ws::PriceLevel;
-use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket};
+use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agent::PolymarketSportsClient;
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
@@ -26,6 +26,7 @@ use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
+use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -2548,7 +2549,7 @@ impl PlatformBootstrapConfig {
         } else if app.strategy.sum_target > rust_decimal::Decimal::ZERO {
             cfg.crypto.sum_threshold = app.strategy.sum_target;
         }
-        cfg.crypto.take_profit = app.strategy.profit_buffer.max(rust_decimal::Decimal::ZERO);
+        cfg.crypto.exit_edge_floor = app.strategy.profit_buffer.max(rust_decimal::Decimal::ZERO);
         cfg.crypto.risk_params.max_order_value = app.risk.max_single_exposure_usd;
         let max_positions = if app.risk.max_positions > 0 {
             app.risk.max_positions
@@ -2616,9 +2617,14 @@ impl PlatformBootstrapConfig {
                 _ => {}
             }
         }
-        cfg.crypto.take_profit =
-            env_decimal("PLOY_CRYPTO_AGENT__TAKE_PROFIT", cfg.crypto.take_profit);
-        cfg.crypto.stop_loss = env_decimal("PLOY_CRYPTO_AGENT__STOP_LOSS", cfg.crypto.stop_loss);
+        cfg.crypto.exit_edge_floor = env_decimal(
+            "PLOY_CRYPTO_AGENT__EXIT_EDGE_FLOOR",
+            env_decimal("PLOY_CRYPTO_AGENT__TAKE_PROFIT", cfg.crypto.exit_edge_floor),
+        );
+        cfg.crypto.exit_price_band = env_decimal(
+            "PLOY_CRYPTO_AGENT__EXIT_PRICE_BAND",
+            env_decimal("PLOY_CRYPTO_AGENT__STOP_LOSS", cfg.crypto.exit_price_band),
+        );
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENABLE_PRICE_EXITS") {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => cfg.crypto.enable_price_exits = true,
@@ -2656,8 +2662,8 @@ impl PlatformBootstrapConfig {
         // Optional LOB+ML crypto agent (disabled by default).
         // Default to the same risk envelope as the momentum agent unless overridden.
         cfg.crypto_lob_ml.default_shares = cfg.crypto.default_shares;
-        cfg.crypto_lob_ml.take_profit = cfg.crypto.take_profit;
-        cfg.crypto_lob_ml.stop_loss = cfg.crypto.stop_loss;
+        cfg.crypto_lob_ml.exit_edge_floor = cfg.crypto.exit_edge_floor;
+        cfg.crypto_lob_ml.exit_price_band = cfg.crypto.exit_price_band;
         cfg.crypto_lob_ml.risk_params = cfg.crypto.risk_params.clone();
 
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENABLED") {
@@ -2685,13 +2691,19 @@ impl PlatformBootstrapConfig {
             cfg.crypto_lob_ml.default_shares,
         )
         .max(1);
-        cfg.crypto_lob_ml.take_profit = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__TAKE_PROFIT",
-            cfg.crypto_lob_ml.take_profit,
+        cfg.crypto_lob_ml.exit_edge_floor = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__EXIT_EDGE_FLOOR",
+            env_decimal(
+                "PLOY_CRYPTO_LOB_ML__TAKE_PROFIT",
+                cfg.crypto_lob_ml.exit_edge_floor,
+            ),
         );
-        cfg.crypto_lob_ml.stop_loss = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__STOP_LOSS",
-            cfg.crypto_lob_ml.stop_loss,
+        cfg.crypto_lob_ml.exit_price_band = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__EXIT_PRICE_BAND",
+            env_decimal(
+                "PLOY_CRYPTO_LOB_ML__STOP_LOSS",
+                cfg.crypto_lob_ml.exit_price_band,
+            ),
         );
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS") {
             match raw.trim().to_ascii_lowercase().as_str() {
@@ -2924,6 +2936,23 @@ impl PlatformBootstrapConfig {
             }
         }
 
+        // OpenClaw-first runtime lockdown:
+        // keep coordinator available, but disable built-in agent loops.
+        if app.openclaw_runtime_lockdown() {
+            cfg.enable_crypto = false;
+            cfg.enable_crypto_momentum = false;
+            cfg.enable_crypto_lob_ml = false;
+            #[cfg(feature = "rl")]
+            {
+                cfg.enable_crypto_rl_policy = false;
+            }
+            cfg.enable_sports = false;
+            cfg.enable_politics = false;
+            info!(
+                "agent framework lockdown active (mode=openclaw): built-in agents are disabled"
+            );
+        }
+
         cfg
     }
 }
@@ -2967,10 +2996,6 @@ pub async fn start_platform(
         "starting multi-agent platform"
     );
 
-    // 1. Create shared executor
-    let exec_config = crate::config::ExecutionConfig::default();
-    let executor = Arc::new(OrderExecutor::new(pm_client.clone(), exec_config));
-
     // Optional shared DB pool used for (a) coordinator execution logs and (b) market data persistence.
     // Crypto agents can run without DB; sports agent requires DB for calendar/stats.
     let shared_pool = match PgPoolOptions::new()
@@ -2987,6 +3012,22 @@ pub async fn start_platform(
             None
         }
     };
+
+    // 1. Create shared executor (+ DB-backed idempotency when DB is available)
+    let exec_config = crate::config::ExecutionConfig::default();
+    let mut executor_builder = OrderExecutor::new(pm_client.clone(), exec_config);
+    if let Some(pool) = shared_pool.as_ref() {
+        let idem_store = PostgresStore::from_pool(pool.clone());
+        let idem_mgr = Arc::new(IdempotencyManager::new_with_account(
+            idem_store,
+            account_id.clone(),
+        ));
+        executor_builder = executor_builder.with_idempotency(idem_mgr);
+        info!("order executor idempotency enabled");
+    } else {
+        warn!("order executor idempotency disabled (no database connection)");
+    }
+    let executor = Arc::new(executor_builder);
 
     // 2. Create coordinator
     let mut coordinator =
@@ -3058,8 +3099,10 @@ pub async fn start_platform(
                 max_entry: 1.0,
                 shares: 0,
                 predictive: false,
-                take_profit: None,
-                stop_loss: None,
+                exit_edge_floor: None,
+                exit_price_band: None,
+                time_decay_exit_secs: None,
+                liquidity_exit_spread_bps: None,
             };
 
             match start_api_server_platform_background(

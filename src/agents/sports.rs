@@ -26,7 +26,7 @@ use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::nba_comeback::core::{
-    ComebackCandidate, ComebackOpportunity, NbaComebackCore,
+    ComebackCandidate, ComebackOpportunity, GamePosition, NbaComebackCore, NbaComebackState,
 };
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
@@ -512,6 +512,104 @@ impl SportsTradingAgent {
         Ok(rows.into_iter().collect())
     }
 
+    async fn ensure_state_table(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS nba_comeback_agent_state (
+                account_id TEXT NOT NULL DEFAULT 'default',
+                agent_id TEXT NOT NULL,
+                state_json JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (account_id, agent_id)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_nba_comeback_agent_state_updated_at ON nba_comeback_agent_state(updated_at DESC)",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn load_persisted_state(&mut self, pool: &PgPool) -> Result<()> {
+        let state = sqlx::query_scalar::<_, sqlx::types::Json<NbaComebackState>>(
+            r#"
+            SELECT state_json
+            FROM nba_comeback_agent_state
+            WHERE account_id = $1
+              AND agent_id = $2
+            "#,
+        )
+        .bind(&self.config.account_id)
+        .bind(&self.config.agent_id)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(sqlx::types::Json(state)) = state {
+            self.core.state = state;
+            self.core.reset_daily_if_needed();
+            info!(
+                agent = self.config.agent_id,
+                tracked_positions = self.core.state.game_positions.len(),
+                initial_entries = self.core.state.initial_entries.len(),
+                daily_spend = %self.core.state.daily_spend_usd,
+                daily_realized_pnl = %self.core.state.daily_realized_pnl_usd,
+                settled_trades = self.core.state.settled_trades,
+                winning_trades = self.core.state.winning_trades,
+                loss_streak = self.core.state.loss_streak,
+                daily_spend_day = %self.core.state.daily_spend_day,
+                "restored nba comeback state from persistence"
+            );
+        } else {
+            debug!(
+                agent = self.config.agent_id,
+                "no persisted nba comeback state found"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn persist_state(&self, pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO nba_comeback_agent_state (
+                account_id, agent_id, state_json, updated_at
+            )
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (account_id, agent_id) DO UPDATE SET
+                state_json = EXCLUDED.state_json,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&self.config.account_id)
+        .bind(&self.config.agent_id)
+        .bind(sqlx::types::Json(&self.core.state))
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn persist_state_best_effort(&self, reason: &'static str) {
+        let Some(pool) = self.observation_pool.as_ref() else {
+            return;
+        };
+        if let Err(e) = self.persist_state(pool).await {
+            warn!(
+                agent = self.config.agent_id,
+                reason,
+                error = %e,
+                "failed to persist nba comeback state"
+            );
+        }
+    }
+
     async fn ensure_observation_table(pool: &PgPool) -> Result<()> {
         sqlx::query(
             r#"
@@ -852,6 +950,43 @@ impl SportsTradingAgent {
         .with_metadata("config_hash", config_hash)
     }
 
+    fn exit_intent(
+        agent_id: &str,
+        game_id: &str,
+        trailing_team: &str,
+        market_slug: &str,
+        token_id: &str,
+        shares: u64,
+        limit_price: Decimal,
+        exit_reason: &str,
+        config_hash: &str,
+    ) -> OrderIntent {
+        let priority = if exit_reason == "stop_loss" {
+            OrderPriority::Critical
+        } else {
+            OrderPriority::High
+        };
+
+        OrderIntent::new(
+            agent_id,
+            Domain::Sports,
+            market_slug,
+            token_id,
+            Side::Up,
+            false,
+            shares,
+            limit_price,
+        )
+        .with_priority(priority)
+        .with_metadata("strategy", "nba_comeback_exit")
+        .with_metadata("game_id", game_id)
+        .with_metadata("trailing_team", trailing_team)
+        .with_metadata("exit_reason", exit_reason)
+        .with_metadata("signal_type", "nba_comeback_exit")
+        .with_metadata("signal_market_price", &limit_price.to_string())
+        .with_metadata("config_hash", config_hash)
+    }
+
     async fn ensure_grok_intel_table(pool: &PgPool) -> Result<()> {
         sqlx::query(
             r#"
@@ -992,6 +1127,147 @@ impl SportsTradingAgent {
             .insert(game_id.to_string(), std::time::Instant::now());
     }
 
+    fn initial_entry_notional(entry_price: Decimal, shares: u64) -> Decimal {
+        entry_price * Decimal::from(shares)
+    }
+
+    fn record_initial_espn_entry(
+        &mut self,
+        game_id: &str,
+        trailing_abbrev: &str,
+        market_slug: &str,
+        token_id: &str,
+        entry_price: Decimal,
+        shares: u64,
+        comeback_rate: f64,
+    ) {
+        self.core.record_position_entry_with_market_and_team(
+            game_id,
+            trailing_abbrev,
+            market_slug,
+            token_id,
+            entry_price,
+            shares,
+            comeback_rate,
+        );
+        let spend = Self::initial_entry_notional(entry_price, shares);
+        self.core
+            .record_initial_entry_submission(game_id, token_id, spend);
+    }
+
+    fn record_initial_grok_signal_entry(
+        &mut self,
+        game_id: &str,
+        trailing_abbrev: &str,
+        market_slug: &str,
+        token_id: &str,
+        entry_price: Decimal,
+        shares: u64,
+    ) {
+        self.core.record_position_entry_with_market_and_team(
+            game_id,
+            trailing_abbrev,
+            market_slug,
+            token_id,
+            entry_price,
+            shares,
+            0.0,
+        );
+        let spend = Self::initial_entry_notional(entry_price, shares);
+        self.core
+            .record_initial_entry_submission(game_id, token_id, spend);
+    }
+
+    fn position_avg_entry_price(pos: &GamePosition) -> Option<Decimal> {
+        if pos.total_shares == 0 {
+            return None;
+        }
+        Some(pos.total_cost / Decimal::from(pos.total_shares))
+    }
+
+    fn position_realized_pnl(pos: &GamePosition, exit_price: Decimal) -> Option<Decimal> {
+        let avg_entry = Self::position_avg_entry_price(pos)?;
+        Some((exit_price - avg_entry) * Decimal::from(pos.total_shares))
+    }
+
+    fn settlement_price_for_position(pos: &GamePosition, game: &LiveGame) -> Option<Decimal> {
+        if game.status != GameStatus::Final {
+            return None;
+        }
+        if game.home_score == game.away_score {
+            return None;
+        }
+        let team = pos.trailing_abbrev.as_ref()?;
+        let winner = if game.home_score > game.away_score {
+            &game.home_abbrev
+        } else {
+            &game.away_abbrev
+        };
+        if winner.eq_ignore_ascii_case(team) {
+            Some(Decimal::ONE)
+        } else {
+            Some(Decimal::ZERO)
+        }
+    }
+
+    fn performance_metrics(&self, daily_pnl: Decimal) -> HashMap<String, String> {
+        let mut metrics = HashMap::new();
+        let win_rate = self.core.settled_win_rate().unwrap_or(0.0);
+        metrics.insert("sports_win_rate".to_string(), format!("{:.6}", win_rate));
+        metrics.insert(
+            "sports_settled_trades".to_string(),
+            self.core.state.settled_trades.to_string(),
+        );
+        metrics.insert(
+            "sports_winning_trades".to_string(),
+            self.core.state.winning_trades.to_string(),
+        );
+        metrics.insert(
+            "sports_loss_streak".to_string(),
+            self.core.state.loss_streak.to_string(),
+        );
+        metrics.insert(
+            "sports_daily_realized_pnl_usd".to_string(),
+            daily_pnl.to_string(),
+        );
+        metrics.insert(
+            "sports_size_multiplier".to_string(),
+            format!("{:.6}", self.core.risk_size_multiplier()),
+        );
+        metrics.insert(
+            "sports_daily_loss_limit_usd".to_string(),
+            self.core.cfg.performance_daily_loss_limit_usd.to_string(),
+        );
+        metrics.insert(
+            "sports_can_open_new_risk".to_string(),
+            self.core.can_open_new_risk().to_string(),
+        );
+        metrics
+    }
+
+    fn classify_early_exit(
+        avg_entry_price: Decimal,
+        current_price: Decimal,
+        take_profit_pct: f64,
+        stop_loss_pct: f64,
+    ) -> Option<&'static str> {
+        if avg_entry_price <= Decimal::ZERO || current_price <= Decimal::ZERO {
+            return None;
+        }
+        let pnl_pct = ((current_price - avg_entry_price) * dec!(100) / avg_entry_price)
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0);
+
+        if pnl_pct >= take_profit_pct {
+            return Some("take_profit");
+        }
+        if pnl_pct <= -stop_loss_pct {
+            return Some("stop_loss");
+        }
+        None
+    }
+
     /// Convert a GrokDecision::Trade into an OrderIntent
     fn decision_to_intent(
         agent_id: &str,
@@ -1030,9 +1306,18 @@ impl SportsTradingAgent {
         .with_metadata("signal_fair_value", &format!("{:.6}", fair_value))
         .with_metadata("signal_market_price", &req.market.market_price.to_string())
         .with_metadata("signal_edge", &format!("{:.6}", edge))
-        .with_metadata("reward_risk_ratio", &format!("{:.2}", req.risk_metrics.reward_risk_ratio))
-        .with_metadata("expected_value", &format!("{:.6}", req.risk_metrics.expected_value))
-        .with_metadata("kelly_fraction", &format!("{:.6}", req.risk_metrics.kelly_fraction))
+        .with_metadata(
+            "reward_risk_ratio",
+            &format!("{:.2}", req.risk_metrics.reward_risk_ratio),
+        )
+        .with_metadata(
+            "expected_value",
+            &format!("{:.6}", req.risk_metrics.expected_value),
+        )
+        .with_metadata(
+            "kelly_fraction",
+            &format!("{:.6}", req.risk_metrics.kelly_fraction),
+        )
         .with_metadata("config_hash", config_hash)
     }
 
@@ -1119,29 +1404,42 @@ impl SportsTradingAgent {
             req.game.away_abbrev, req.game.away_score, req.game.home_score, req.game.home_abbrev
         );
 
-        let (decision_str, d_fair_value, d_own_fair_value, d_edge, d_confidence, d_reasoning, d_risk_factors) =
-            match decision {
-                GrokDecision::Trade {
-                    fair_value,
-                    own_fair_value,
-                    edge,
-                    confidence,
-                    reasoning,
-                    risk_factors,
-                    ..
-                } => (
-                    "trade",
-                    Some(*fair_value),
-                    Some(*own_fair_value),
-                    Some(*edge),
-                    Some(*confidence),
-                    Some(reasoning.as_str()),
-                    Some(risk_factors.clone()),
-                ),
-                GrokDecision::Pass { reasoning, .. } => {
-                    ("pass", None, None, None, None, Some(reasoning.as_str()), None)
-                }
-            };
+        let (
+            decision_str,
+            d_fair_value,
+            d_own_fair_value,
+            d_edge,
+            d_confidence,
+            d_reasoning,
+            d_risk_factors,
+        ) = match decision {
+            GrokDecision::Trade {
+                fair_value,
+                own_fair_value,
+                edge,
+                confidence,
+                reasoning,
+                risk_factors,
+                ..
+            } => (
+                "trade",
+                Some(*fair_value),
+                Some(*own_fair_value),
+                Some(*edge),
+                Some(*confidence),
+                Some(reasoning.as_str()),
+                Some(risk_factors.clone()),
+            ),
+            GrokDecision::Pass { reasoning, .. } => (
+                "pass",
+                None,
+                None,
+                None,
+                None,
+                Some(reasoning.as_str()),
+                None,
+            ),
+        };
 
         let momentum_str = req
             .grok_intel
@@ -1296,28 +1594,38 @@ impl TradingAgent for SportsTradingAgent {
         if let Err(e) = self.core.stats.load_all().await {
             warn!(agent = self.config.agent_id, error = %e, "failed to load NBA stats, continuing");
         }
-        if let Some(pool) = self.observation_pool.as_ref() {
-            if let Err(e) = Self::ensure_calendar_table(pool).await {
+        if let Some(pool) = self.observation_pool.clone() {
+            if let Err(e) = Self::ensure_calendar_table(&pool).await {
                 warn!(agent = self.config.agent_id, error = %e, "failed to ensure nba_schedule_calendar table");
             }
-            if let Err(e) = Self::ensure_observation_table(pool).await {
+            if let Err(e) = Self::ensure_observation_table(&pool).await {
                 warn!(agent = self.config.agent_id, error = %e, "failed to ensure nba_live_observations table");
             }
-            if let Err(e) = ensure_collector_token_targets_table(pool).await {
+            if let Err(e) = Self::ensure_state_table(&pool).await {
+                warn!(agent = self.config.agent_id, error = %e, "failed to ensure nba_comeback_agent_state table");
+            }
+            if let Err(e) = ensure_collector_token_targets_table(&pool).await {
                 warn!(agent = self.config.agent_id, error = %e, "failed to ensure collector_token_targets table");
             }
             if let Err(e) =
-                crate::coordinator::bootstrap::ensure_clob_orderbook_snapshots_table(pool).await
+                crate::coordinator::bootstrap::ensure_clob_orderbook_snapshots_table(&pool).await
             {
                 warn!(agent = self.config.agent_id, error = %e, "failed to ensure clob_orderbook_snapshots table");
             }
             if self.grok.is_some() {
-                if let Err(e) = Self::ensure_grok_intel_table(pool).await {
+                if let Err(e) = Self::ensure_grok_intel_table(&pool).await {
                     warn!(agent = self.config.agent_id, error = %e, "failed to ensure grok_game_intel table");
                 }
-                if let Err(e) = Self::ensure_grok_unified_decisions_table(pool).await {
+                if let Err(e) = Self::ensure_grok_unified_decisions_table(&pool).await {
                     warn!(agent = self.config.agent_id, error = %e, "failed to ensure grok_unified_decisions table");
                 }
+            }
+            if let Err(e) = self.load_persisted_state(&pool).await {
+                warn!(
+                    agent = self.config.agent_id,
+                    error = %e,
+                    "failed to load persisted nba comeback state"
+                );
             }
         } else {
             warn!(
@@ -1330,7 +1638,7 @@ impl TradingAgent for SportsTradingAgent {
         let mut pending_intents: HashMap<Uuid, ComebackOpportunity> = HashMap::new();
         let position_count: usize = 0;
         let total_exposure = Decimal::ZERO;
-        let daily_pnl = Decimal::ZERO;
+        let mut daily_pnl = self.core.state.daily_realized_pnl_usd;
         let mut last_calendar_sync_at: Option<chrono::DateTime<Utc>> = None;
         let pm_events_refresh_secs: u64 = std::env::var("PM_SPORTS_EVENTS_REFRESH_SECS")
             .ok()
@@ -1540,6 +1848,148 @@ impl TradingAgent for SportsTradingAgent {
                     live_games_cache = live_games.clone();
                     market_inputs_cache = market_inputs.clone();
 
+                    // --- Exit management: settle at final, or early TP/SL sell ---
+                    let mut game_status_by_id: HashMap<String, GameStatus> = HashMap::new();
+                    let mut game_by_id: HashMap<String, LiveGame> = HashMap::new();
+                    let mut trailing_by_game: HashMap<String, String> = HashMap::new();
+                    for game in &live_games {
+                        game_status_by_id.insert(game.espn_game_id.clone(), game.status);
+                        game_by_id.insert(game.espn_game_id.clone(), game.clone());
+                        if let Some((_, trailing_abbrev, _)) = game.trailing_team() {
+                            trailing_by_game.insert(game.espn_game_id.clone(), trailing_abbrev);
+                        }
+                    }
+
+                    let tracked_game_ids: Vec<String> =
+                        self.core.state.game_positions.keys().cloned().collect();
+                    for game_id in tracked_game_ids {
+                        let Some(pos) = self.core.state.game_positions.get(&game_id).cloned() else {
+                            continue;
+                        };
+
+                        if matches!(game_status_by_id.get(&game_id), Some(GameStatus::Final)) {
+                            if let Some(game) = game_by_id.get(&game_id) {
+                                if let Some(settle_price) =
+                                    Self::settlement_price_for_position(&pos, game)
+                                {
+                                    if let Some(realized_pnl) =
+                                        Self::position_realized_pnl(&pos, settle_price)
+                                    {
+                                        self.core.record_realized_pnl(realized_pnl);
+                                        daily_pnl = self.core.state.daily_realized_pnl_usd;
+                                        info!(
+                                            agent = self.config.agent_id,
+                                            game_id = %game_id,
+                                            settle_price = %settle_price,
+                                            realized_pnl = %realized_pnl,
+                                            daily_realized_pnl = %daily_pnl,
+                                            "recorded final settlement pnl"
+                                        );
+                                    }
+                                }
+                            }
+                            self.core.close_position(&game_id);
+                            self.persist_state_best_effort("final_settlement").await;
+                            info!(
+                                agent = self.config.agent_id,
+                                game_id = %game_id,
+                                "position settled at final status; closed local state"
+                            );
+                            continue;
+                        }
+
+                        if !self.core.cfg.early_exit_enabled || !trade_gate_open {
+                            continue;
+                        }
+                        if self.is_on_cooldown(&game_id) {
+                            continue;
+                        }
+
+                        let Some(market_input) = market_inputs.get(&game_id) else {
+                            continue;
+                        };
+                        let Some(current_price) = market_input.trailing_price else {
+                            continue;
+                        };
+                        let Some(avg_entry_price) = Self::position_avg_entry_price(&pos) else {
+                            continue;
+                        };
+
+                        let Some(exit_reason) = Self::classify_early_exit(
+                            avg_entry_price,
+                            current_price,
+                            self.core.cfg.early_exit_take_profit_pct,
+                            self.core.cfg.early_exit_stop_loss_pct,
+                        ) else {
+                            continue;
+                        };
+
+                        let market_slug = pos
+                            .market_slug
+                            .clone()
+                            .or_else(|| market_input.market_slug.clone());
+                        let token_id = pos
+                            .token_id
+                            .clone()
+                            .or_else(|| market_input.trailing_token_id.clone());
+                        let (Some(market_slug), Some(token_id)) = (market_slug, token_id) else {
+                            continue;
+                        };
+
+                        if pos.total_shares == 0 {
+                            continue;
+                        }
+
+                        let trailing_team = trailing_by_game
+                            .get(&game_id)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let intent = Self::exit_intent(
+                            &self.config.agent_id,
+                            &game_id,
+                            &trailing_team,
+                            &market_slug,
+                            &token_id,
+                            pos.total_shares,
+                            current_price,
+                            exit_reason,
+                            &config_hash,
+                        );
+
+                        match ctx.submit_order(intent).await {
+                            Ok(()) => {
+                                if let Some(realized_pnl) =
+                                    Self::position_realized_pnl(&pos, current_price)
+                                {
+                                    self.core.record_realized_pnl(realized_pnl);
+                                    daily_pnl = self.core.state.daily_realized_pnl_usd;
+                                }
+                                self.core.close_position(&game_id);
+                                self.set_cooldown(&game_id);
+                                self.persist_state_best_effort("early_exit").await;
+                                info!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    reason = exit_reason,
+                                    shares = pos.total_shares,
+                                    price = %current_price,
+                                    avg_entry = %avg_entry_price,
+                                    daily_realized_pnl = %daily_pnl,
+                                    "submitted early exit"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    reason = exit_reason,
+                                    error = %e,
+                                    "failed to submit early exit order"
+                                );
+                            }
+                        }
+                    }
+
                     if candidates.is_empty() {
                         debug!(agent = self.config.agent_id, games = live_games.len(), "no NBA candidates this cycle");
                         continue;
@@ -1585,6 +2035,15 @@ impl TradingAgent for SportsTradingAgent {
                         ) {
                             let game_id = opp.game.espn_game_id.clone();
                             let market_price_f64 = opp.market_price.to_string().parse::<f64>().unwrap_or(0.0);
+                            if self.core.is_duplicate_initial_entry(&game_id, &opp.token_id) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    token_id = %opp.token_id,
+                                    "skipping ESPN entry: duplicate initial entry"
+                                );
+                                continue;
+                            }
 
                             // Calculate risk metrics and pre-filter on reward-to-risk ratio
                             let risk_metrics = RiskMetrics::calculate(opp.adjusted_win_prob, market_price_f64);
@@ -1602,6 +2061,19 @@ impl TradingAgent for SportsTradingAgent {
                                 );
                                 continue;
                             }
+
+                            if !self.core.can_open_new_risk() {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    daily_realized_pnl = %self.core.state.daily_realized_pnl_usd,
+                                    daily_loss_limit = %self.core.cfg.performance_daily_loss_limit_usd,
+                                    "skipping ESPN entry: daily loss limit reached"
+                                );
+                                continue;
+                            }
+
+                            let entry_shares = self.core.adjusted_shares(self.core.cfg.shares);
 
                             // Build unified decision request with all available context
                             let req = UnifiedDecisionRequest {
@@ -1656,20 +2128,24 @@ impl TradingAgent for SportsTradingAgent {
                                                     &self.config.agent_id,
                                                     &req,
                                                     &decision,
-                                                    self.core.cfg.shares,
+                                                    entry_shares,
                                                     &config_hash,
                                                 );
                                                 let intent_id = intent.intent_id;
                                                 order_submitted = ctx.submit_order(intent).await.is_ok();
                                                 if order_submitted {
                                                     pending_intents.insert(intent_id, opp.clone());
-                                                    // Record for Kelly scaling-in tracking
-                                                    self.core.record_position_entry(
+                                                    self.record_initial_espn_entry(
                                                         &game_id,
+                                                        &opp.trailing_abbrev,
+                                                        &opp.market_slug,
+                                                        &opp.token_id,
                                                         opp.market_price,
-                                                        self.core.cfg.shares,
+                                                        entry_shares,
                                                         opp.comeback_rate,
                                                     );
+                                                    self.persist_state_best_effort("espn_initial_entry")
+                                                        .await;
                                                 }
                                             }
                                             GrokDecision::Pass { reasoning, .. } => {
@@ -1709,19 +2185,24 @@ impl TradingAgent for SportsTradingAgent {
                                             let intent = Self::opportunity_to_intent(
                                                 &self.config.agent_id,
                                                 &opp,
-                                                self.core.cfg.shares,
+                                                entry_shares,
                                                 &config_hash,
                                             );
                                             let intent_id = intent.intent_id;
                                             if let Err(e) = ctx.submit_order(intent).await {
                                                 warn!(agent = self.config.agent_id, error = %e, "failed to submit fallback order");
                                             } else {
-                                                self.core.record_position_entry(
+                                                self.record_initial_espn_entry(
                                                     &game_id,
+                                                    &opp.trailing_abbrev,
+                                                    &opp.market_slug,
+                                                    &opp.token_id,
                                                     opp.market_price,
-                                                    self.core.cfg.shares,
+                                                    entry_shares,
                                                     opp.comeback_rate,
                                                 );
+                                                self.persist_state_best_effort("espn_fallback_entry")
+                                                    .await;
                                                 pending_intents.insert(intent_id, opp);
                                             }
                                         } else {
@@ -1739,19 +2220,23 @@ impl TradingAgent for SportsTradingAgent {
                                 let intent = Self::opportunity_to_intent(
                                     &self.config.agent_id,
                                     &opp,
-                                    self.core.cfg.shares,
+                                    entry_shares,
                                     &config_hash,
                                 );
                                 let intent_id = intent.intent_id;
                                 if let Err(e) = ctx.submit_order(intent).await {
                                     warn!(agent = self.config.agent_id, error = %e, "failed to submit");
                                 } else {
-                                    self.core.record_position_entry(
+                                    self.record_initial_espn_entry(
                                         &game_id,
+                                        &opp.trailing_abbrev,
+                                        &opp.market_slug,
+                                        &opp.token_id,
                                         opp.market_price,
-                                        self.core.cfg.shares,
+                                        entry_shares,
                                         opp.comeback_rate,
                                     );
+                                    self.persist_state_best_effort("espn_rule_entry").await;
                                     pending_intents.insert(intent_id, opp);
                                 }
                             }
@@ -1770,6 +2255,16 @@ impl TradingAgent for SportsTradingAgent {
                             // Only scale into games we already have a position in
                             let has_position = self.core.state.game_positions.contains_key(game_id);
                             if !has_position {
+                                continue;
+                            }
+                            if !self.core.can_open_new_risk() {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    daily_realized_pnl = %self.core.state.daily_realized_pnl_usd,
+                                    daily_loss_limit = %self.core.cfg.performance_daily_loss_limit_usd,
+                                    "scaling blocked: daily loss limit reached"
+                                );
                                 continue;
                             }
 
@@ -1791,7 +2286,7 @@ impl TradingAgent for SportsTradingAgent {
                             }
 
                             // Calculate Kelly optimal shares to add
-                            let delta_shares = match self.core.kelly_scaling_shares(
+                            let raw_delta_shares = match self.core.kelly_scaling_shares(
                                 game_id,
                                 current_price,
                                 candidate.adjusted_win_prob,
@@ -1799,6 +2294,7 @@ impl TradingAgent for SportsTradingAgent {
                                 Some(s) => s,
                                 None => continue,
                             };
+                            let delta_shares = self.core.adjusted_shares(raw_delta_shares);
 
                             // Check daily spend limit
                             let add_cost = current_price * Decimal::from(delta_shares);
@@ -1917,6 +2413,7 @@ impl TradingAgent for SportsTradingAgent {
                                                         candidate.comeback_rate,
                                                     );
                                                     self.core.record_trade(game_id, add_cost);
+                                                    self.persist_state_best_effort("scale_in").await;
                                                 }
                                             }
                                             GrokDecision::Pass { reasoning, .. } => {
@@ -2053,6 +2550,37 @@ impl TradingAgent for SportsTradingAgent {
                                 .unwrap_or_else(|| {
                                     format!("{}-win-yes", sig.target_team_abbrev.to_lowercase())
                                 });
+                            if self.core.is_duplicate_initial_entry(&game_id, &token_id) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    token_id = %token_id,
+                                    "skipping grok signal entry: duplicate initial entry"
+                                );
+                                continue;
+                            }
+                            if !self.core.can_open_new_risk() {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    daily_realized_pnl = %self.core.state.daily_realized_pnl_usd,
+                                    daily_loss_limit = %self.core.cfg.performance_daily_loss_limit_usd,
+                                    "skipping grok signal entry: daily loss limit reached"
+                                );
+                                continue;
+                            }
+                            let entry_shares = self.core.adjusted_shares(self.core.cfg.shares);
+                            let entry_notional =
+                                Self::initial_entry_notional(sig.market_price, entry_shares);
+                            if !self.core.can_spend(entry_notional) {
+                                debug!(
+                                    agent = self.config.agent_id,
+                                    game_id = %game_id,
+                                    spend = %entry_notional,
+                                    "skipping grok signal entry: daily spend limit"
+                                );
+                                continue;
+                            }
 
                             let (trailing_team, trailing_abbrev, deficit) = match game.trailing_team() {
                                 Some(t) => t,
@@ -2128,12 +2656,22 @@ impl TradingAgent for SportsTradingAgent {
                                                 &self.config.agent_id,
                                                 &req,
                                                 &decision,
-                                                self.core.cfg.shares,
+                                                entry_shares,
                                                 &config_hash,
                                             );
                                             let intent_id = intent.intent_id;
                                             order_submitted = ctx.submit_order(intent).await.is_ok();
                                             if order_submitted {
+                                                self.record_initial_grok_signal_entry(
+                                                    &game_id,
+                                                    &req.trailing_abbrev,
+                                                    &req.market.market_slug,
+                                                    &req.market.token_id,
+                                                    req.market.market_price,
+                                                    entry_shares,
+                                                );
+                                                self.persist_state_best_effort("grok_signal_entry")
+                                                    .await;
                                                 info!(
                                                     agent = self.config.agent_id,
                                                     intent_id = %intent_id,
@@ -2209,6 +2747,7 @@ impl TradingAgent for SportsTradingAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
+                                metrics: self.performance_metrics(daily_pnl),
                                 last_heartbeat: Utc::now(),
                                 error_message: None,
                             };
@@ -2225,13 +2764,14 @@ impl TradingAgent for SportsTradingAgent {
 
                 // --- Heartbeat ---
                 _ = heartbeat_tick.tick() => {
-                    let _ = ctx.report_state(
+                    let _ = ctx.report_state_with_metrics(
                         &self.config.name,
                         status,
                         position_count,
                         total_exposure,
                         daily_pnl,
                         Decimal::ZERO,
+                        self.performance_metrics(daily_pnl),
                         None,
                     ).await;
                 }
@@ -2246,11 +2786,24 @@ impl TradingAgent for SportsTradingAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_config_defaults() {
         let cfg = SportsTradingConfig::default();
         assert_eq!(cfg.agent_id, "sports");
         assert_eq!(cfg.poll_interval_secs, 30);
+    }
+
+    #[test]
+    fn test_classify_early_exit_take_profit_and_stop_loss() {
+        let tp = SportsTradingAgent::classify_early_exit(dec!(0.30), dec!(0.36), 15.0, 20.0);
+        assert_eq!(tp, Some("take_profit"));
+
+        let sl = SportsTradingAgent::classify_early_exit(dec!(0.30), dec!(0.23), 15.0, 20.0);
+        assert_eq!(sl, Some("stop_loss"));
+
+        let hold = SportsTradingAgent::classify_early_exit(dec!(0.30), dec!(0.31), 15.0, 20.0);
+        assert_eq!(hold, None);
     }
 }

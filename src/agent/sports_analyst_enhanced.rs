@@ -10,7 +10,11 @@ use crate::agent::grok::GrokClient;
 use crate::agent::client::{ClaudeAgentClient, AgentClientConfig};
 use crate::agent::sports_data::{SportsDataFetcher, StructuredGameData, format_for_claude};
 use crate::agent::sports_data_aggregator::{SportsDataAggregator, AggregatedGameData};
+use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::error::{PloyError, Result};
+use polymarket_client_sdk::gamma::types::request::{EventByIdRequest, SearchRequest};
+use polymarket_client_sdk::gamma::types::response::{Event as GammaEvent, Market as GammaMarket};
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -293,7 +297,8 @@ impl SportsAnalyst {
         team1: &str,
         team2: &str
     ) -> Result<MarketOdds> {
-        let client = reqwest::Client::new();
+        let gamma = GammaClient::new(GAMMA_API_URL)
+            .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {}", e)))?;
 
         // Try to get event by slug
         let search_slug = if event_slug.contains('/') {
@@ -303,34 +308,37 @@ impl SportsAnalyst {
         };
 
         debug!("Fetching Polymarket markets for: {}", search_slug);
-        let url = format!("https://gamma-api.polymarket.com/events?slug={}", search_slug);
-
-        let response = client.get(&url)
-            .timeout(Duration::from_secs(10))
-            .send()
+        let req = SearchRequest::builder().q(search_slug).build();
+        let results = tokio::time::timeout(Duration::from_secs(10), gamma.search(&req))
             .await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
+            .map_err(|_| PloyError::Internal("Gamma search timed out".to_string()))?
+            .map_err(|e| PloyError::Internal(format!("Gamma search failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            warn!("Polymarket API returned {}", response.status());
-            return self.get_default_odds(team1, team2);
-        }
-
-        let data: serde_json::Value = response.json().await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
-
-        let event = if data.is_array() {
-            data.as_array()
-                .and_then(|arr| arr.first())
+        let mut event = {
+            let events = results.events.unwrap_or_default();
+            let normalized = search_slug.trim_matches('/');
+            events
+                .iter()
+                .find(|e| {
+                    e.slug.as_deref().is_some_and(|slug| {
+                        let s = slug.trim_matches('/');
+                        s == normalized || s.ends_with(&format!("/{}", normalized))
+                    })
+                })
                 .cloned()
-                .unwrap_or(serde_json::Value::Null)
-        } else {
-            data
+                .or_else(|| events.into_iter().next())
         };
 
-        if event.is_null() {
+        let Some(mut event) = event.take() else {
             warn!("No event found for slug: {}", search_slug);
             return self.get_default_odds(team1, team2);
+        };
+
+        if event.markets.as_ref().map_or(true, |m| m.is_empty()) {
+            let by_id_req = EventByIdRequest::builder().id(&event.id).build();
+            if let Ok(full_event) = gamma.event_by_id(&by_id_req).await {
+                event = full_event;
+            }
         }
 
         self.parse_event_markets(&event, team1, team2)
@@ -339,12 +347,13 @@ impl SportsAnalyst {
     /// Parse all markets from event
     fn parse_event_markets(
         &self,
-        event: &serde_json::Value,
+        event: &GammaEvent,
         team1: &str,
         team2: &str,
     ) -> Result<MarketOdds> {
-        let markets = event.get("markets")
-            .and_then(|m| m.as_array())
+        let markets = event
+            .markets
+            .as_ref()
             .ok_or_else(|| PloyError::Internal("No markets found".into()))?;
 
         let mut all_markets = vec![];
@@ -354,34 +363,26 @@ impl SportsAnalyst {
         let mut spread_info = None;
 
         for market in markets {
-            let question = market.get("question")
-                .and_then(|q| q.as_str())
-                .unwrap_or("");
+            let question = market.question.as_deref().unwrap_or("");
 
             let market_type = MarketType::from_question(question);
 
             // Parse prices
-            let prices_str = market.get("outcomePrices")
-                .and_then(|p| p.as_str())
-                .unwrap_or("[]");
-            let prices: Vec<String> = serde_json::from_str(prices_str).unwrap_or_default();
+            let prices = self.parse_json_array_strings(market.outcome_prices.as_deref());
 
             // Parse outcomes
-            let outcomes_str = market.get("outcomes")
-                .and_then(|o| o.as_str())
-                .unwrap_or("[]");
-            let outcomes: Vec<String> = serde_json::from_str(outcomes_str).unwrap_or_default();
+            let mut outcomes = self.parse_json_array_strings(market.outcomes.as_deref());
+            if outcomes.len() < 2 {
+                outcomes = vec![team1.to_string(), team2.to_string()];
+            }
 
             // Parse volume
-            let volume = market.get("volume")
-                .and_then(|v| v.as_str())
+            let volume = market.volume
+                .as_deref()
                 .and_then(|s| s.parse::<f64>().ok());
 
             // Parse token IDs
-            let token_ids_str = market.get("clobTokenIds")
-                .and_then(|t| t.as_str())
-                .unwrap_or("[]");
-            let token_ids: Vec<String> = serde_json::from_str(token_ids_str).unwrap_or_default();
+            let token_ids = self.parse_json_array_strings(market.clob_token_ids.as_deref());
 
             // Convert prices to Decimal
             let decimal_prices: Vec<Decimal> = prices.iter()
@@ -445,7 +446,7 @@ impl SportsAnalyst {
     }
 
     /// Get default odds when API fails
-    fn get_default_odds(&self, team1: &str, team2: &str) -> Result<MarketOdds> {
+    fn get_default_odds(&self, _team1: &str, _team2: &str) -> Result<MarketOdds> {
         Ok(MarketOdds {
             team1_yes_price: Decimal::new(50, 2),
             team1_no_price: Decimal::new(50, 2),
@@ -455,6 +456,24 @@ impl SportsAnalyst {
             moneyline: None,
             all_markets: vec![],
         })
+    }
+
+    fn parse_json_array_strings(&self, raw: Option<&str>) -> Vec<String> {
+        let Some(raw) = raw else { return vec![] };
+        if let Ok(v) = serde_json::from_str::<Vec<String>>(raw) {
+            return v;
+        }
+        if let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+            return v
+                .into_iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| x.to_string())
+                })
+                .collect();
+        }
+        vec![]
     }
 
     // ... (keep existing methods: parse_event_url, get_claude_prediction, generate_recommendation, etc.)

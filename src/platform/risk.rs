@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use super::traits::AgentRiskParams;
-use super::types::{OrderIntent, OrderPriority};
+use super::types::{Domain, OrderIntent, OrderPriority};
 
 /// 風控配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +31,16 @@ pub struct RiskConfig {
     pub max_spread_bps: u32,
     /// 緊急訂單是否跳過部分檢查
     pub critical_bypass_exposure: bool,
+    /// Optional per-domain exposure caps (USD)
+    pub crypto_max_exposure: Option<Decimal>,
+    pub sports_max_exposure: Option<Decimal>,
+    pub politics_max_exposure: Option<Decimal>,
+    pub economics_max_exposure: Option<Decimal>,
+    /// Optional per-domain daily loss limits (USD)
+    pub crypto_daily_loss_limit: Option<Decimal>,
+    pub sports_daily_loss_limit: Option<Decimal>,
+    pub politics_daily_loss_limit: Option<Decimal>,
+    pub economics_daily_loss_limit: Option<Decimal>,
 }
 
 impl Default for RiskConfig {
@@ -41,6 +51,36 @@ impl Default for RiskConfig {
             daily_loss_limit: Decimal::from(1000),
             max_spread_bps: 500, // 5%
             critical_bypass_exposure: true,
+            crypto_max_exposure: None,
+            sports_max_exposure: None,
+            politics_max_exposure: None,
+            economics_max_exposure: None,
+            crypto_daily_loss_limit: None,
+            sports_daily_loss_limit: None,
+            politics_daily_loss_limit: None,
+            economics_daily_loss_limit: None,
+        }
+    }
+}
+
+impl RiskConfig {
+    fn domain_exposure_limit(&self, domain: Domain) -> Option<Decimal> {
+        match domain {
+            Domain::Crypto => self.crypto_max_exposure,
+            Domain::Sports => self.sports_max_exposure,
+            Domain::Politics => self.politics_max_exposure,
+            Domain::Economics => self.economics_max_exposure,
+            Domain::Custom(_) => None,
+        }
+    }
+
+    fn domain_daily_loss_limit(&self, domain: Domain) -> Option<Decimal> {
+        match domain {
+            Domain::Crypto => self.crypto_daily_loss_limit,
+            Domain::Sports => self.sports_daily_loss_limit,
+            Domain::Politics => self.politics_daily_loss_limit,
+            Domain::Economics => self.economics_daily_loss_limit,
+            Domain::Custom(_) => None,
         }
     }
 }
@@ -79,8 +119,21 @@ pub enum BlockReason {
         current: Decimal,
         requested: Decimal,
     },
+    /// Domain exposure cap exceeded
+    DomainExposureExceeded {
+        domain: Domain,
+        limit: Decimal,
+        current: Decimal,
+        requested: Decimal,
+    },
     /// 每日損失超限
     DailyLossExceeded { limit: Decimal, current: Decimal },
+    /// Domain daily loss cap exceeded
+    DomainDailyLossExceeded {
+        domain: Domain,
+        limit: Decimal,
+        current: Decimal,
+    },
     /// 市場不允許
     MarketNotAllowed { market: String, agent: String },
     /// Agent 狀態不允許交易
@@ -111,8 +164,31 @@ impl std::fmt::Display for BlockReason {
                     current, requested, limit
                 )
             }
+            BlockReason::DomainExposureExceeded {
+                domain,
+                limit,
+                current,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "{} exposure ${} + ${} exceeds ${}",
+                    domain, current, requested, limit
+                )
+            }
             BlockReason::DailyLossExceeded { limit, current } => {
                 write!(f, "Daily loss ${} exceeds limit ${}", current, limit)
+            }
+            BlockReason::DomainDailyLossExceeded {
+                domain,
+                limit,
+                current,
+            } => {
+                write!(
+                    f,
+                    "{} daily loss ${} exceeds limit ${}",
+                    domain, current, limit
+                )
             }
             BlockReason::MarketNotAllowed { market, agent } => {
                 write!(f, "Agent {} not allowed in market {}", agent, market)
@@ -196,6 +272,7 @@ struct AgentRiskStats {
 struct DailyStats {
     date: Option<NaiveDate>,
     total_pnl: Decimal,
+    domain_pnl: HashMap<Domain, Decimal>,
     order_count: u32,
     success_count: u32,
     failure_count: u32,
@@ -212,8 +289,12 @@ pub struct RiskGate {
     agent_stats: Arc<RwLock<HashMap<String, AgentRiskStats>>>,
     /// 每個 Agent 的風控參數
     agent_params: Arc<RwLock<HashMap<String, AgentRiskParams>>>,
+    /// Agent -> domain mapping for domain-level controls
+    agent_domains: Arc<RwLock<HashMap<String, Domain>>>,
     /// 平台總暴露
     total_exposure: Arc<RwLock<Decimal>>,
+    /// Exposure by domain
+    domain_exposure: Arc<RwLock<HashMap<Domain, Decimal>>>,
     /// 全局連續失敗計數
     consecutive_failures: AtomicU32,
     /// 每日統計
@@ -230,7 +311,9 @@ impl RiskGate {
             state: Arc::new(RwLock::new(PlatformRiskState::Normal)),
             agent_stats: Arc::new(RwLock::new(HashMap::new())),
             agent_params: Arc::new(RwLock::new(HashMap::new())),
+            agent_domains: Arc::new(RwLock::new(HashMap::new())),
             total_exposure: Arc::new(RwLock::new(Decimal::ZERO)),
+            domain_exposure: Arc::new(RwLock::new(HashMap::new())),
             consecutive_failures: AtomicU32::new(0),
             daily_stats: Arc::new(RwLock::new(DailyStats::default())),
             circuit_events: Arc::new(RwLock::new(Vec::new())),
@@ -244,8 +327,41 @@ impl RiskGate {
         debug!("Registered risk params for agent {}", agent_id);
     }
 
+    /// 註冊 Agent 的風控參數 (含 domain)
+    pub async fn register_agent_with_domain(
+        &self,
+        agent_id: &str,
+        domain: Domain,
+        params: AgentRiskParams,
+    ) {
+        self.register_agent(agent_id, params).await;
+        self.agent_domains
+            .write()
+            .await
+            .insert(agent_id.to_string(), domain);
+    }
+
     /// 取消註冊 Agent
     pub async fn unregister_agent(&self, agent_id: &str) {
+        let removed_domain = self.agent_domains.write().await.remove(agent_id);
+        if let Some(domain) = removed_domain {
+            let old_exposure = self
+                .agent_stats
+                .read()
+                .await
+                .get(agent_id)
+                .map(|s| s.exposure)
+                .unwrap_or(Decimal::ZERO);
+            if old_exposure > Decimal::ZERO {
+                let mut domain_map = self.domain_exposure.write().await;
+                if let Some(current) = domain_map.get_mut(&domain) {
+                    *current = (*current - old_exposure).max(Decimal::ZERO);
+                    if *current == Decimal::ZERO {
+                        domain_map.remove(&domain);
+                    }
+                }
+            }
+        }
         self.agent_params.write().await.remove(agent_id);
         self.agent_stats.write().await.remove(agent_id);
         debug!("Unregistered agent {}", agent_id);
@@ -346,6 +462,25 @@ impl RiskGate {
             });
         }
 
+        // 8b. Domain exposure cap (if configured)
+        if let Some(domain_limit) = self.config.domain_exposure_limit(intent.domain) {
+            let current_domain_exposure = self
+                .domain_exposure
+                .read()
+                .await
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if current_domain_exposure + order_value > domain_limit {
+                return RiskCheckResult::Blocked(BlockReason::DomainExposureExceeded {
+                    domain: intent.domain,
+                    limit: domain_limit,
+                    current: current_domain_exposure,
+                    requested: order_value,
+                });
+            }
+        }
+
         // 9. 檢查平台總暴露
         let current_platform_exposure = *self.total_exposure.read().await;
         if current_platform_exposure + order_value > self.config.max_platform_exposure {
@@ -375,6 +510,21 @@ impl RiskGate {
             });
         }
 
+        if let Some(domain_loss_limit) = self.config.domain_daily_loss_limit(intent.domain) {
+            let domain_pnl = daily
+                .domain_pnl
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if domain_pnl < Decimal::ZERO && domain_pnl.abs() >= domain_loss_limit {
+                return RiskCheckResult::Blocked(BlockReason::DomainDailyLossExceeded {
+                    domain: intent.domain,
+                    limit: domain_loss_limit,
+                    current: domain_pnl.abs(),
+                });
+            }
+        }
+
         RiskCheckResult::Passed
     }
 
@@ -389,6 +539,8 @@ impl RiskGate {
         position_count: usize,
         unhedged_count: u32,
     ) {
+        let domain = self.agent_domains.read().await.get(agent_id).copied();
+
         let mut stats_map = self.agent_stats.write().await;
         let stats = stats_map.entry(agent_id.to_string()).or_default();
 
@@ -404,10 +556,22 @@ impl RiskGate {
         // 更新平台總暴露
         let mut total = self.total_exposure.write().await;
         *total = *total - old_exposure + exposure;
+
+        // 更新 domain 暴露
+        if let Some(domain) = domain {
+            let mut domain_map = self.domain_exposure.write().await;
+            let current = domain_map.entry(domain).or_insert(Decimal::ZERO);
+            *current = (*current - old_exposure + exposure).max(Decimal::ZERO);
+            if *current == Decimal::ZERO {
+                domain_map.remove(&domain);
+            }
+        }
     }
 
     /// 記錄成功執行
     pub async fn record_success(&self, agent_id: &str, pnl: Decimal) {
+        let domain = self.agent_domains.read().await.get(agent_id).copied();
+
         // 重置連續失敗
         self.consecutive_failures.store(0, Ordering::SeqCst);
 
@@ -424,6 +588,9 @@ impl RiskGate {
             let mut daily = self.daily_stats.write().await;
             self.ensure_daily_reset(&mut daily);
             daily.total_pnl += pnl;
+            if let Some(domain) = domain {
+                *daily.domain_pnl.entry(domain).or_insert(Decimal::ZERO) += pnl;
+            }
             daily.order_count += 1;
             daily.success_count += 1;
         }
@@ -472,6 +639,8 @@ impl RiskGate {
 
     /// 記錄損失
     pub async fn record_loss(&self, agent_id: &str, loss: Decimal) {
+        let domain = self.agent_domains.read().await.get(agent_id).copied();
+
         // 更新 Agent 統計
         {
             let mut stats_map = self.agent_stats.write().await;
@@ -484,6 +653,9 @@ impl RiskGate {
             let mut daily = self.daily_stats.write().await;
             self.ensure_daily_reset(&mut daily);
             daily.total_pnl -= loss.abs();
+            if let Some(domain) = domain {
+                *daily.domain_pnl.entry(domain).or_insert(Decimal::ZERO) -= loss.abs();
+            }
             daily.total_pnl.abs() >= self.config.daily_loss_limit
         };
 
@@ -602,8 +774,10 @@ impl RiskGate {
         *self.state.write().await = PlatformRiskState::Normal;
         self.agent_stats.write().await.clear();
         self.agent_params.write().await.clear();
+        self.agent_domains.write().await.clear();
         self.consecutive_failures.store(0, Ordering::SeqCst);
         *self.total_exposure.write().await = Decimal::ZERO;
+        self.domain_exposure.write().await.clear();
         *self.daily_stats.write().await = DailyStats::default();
         self.circuit_events.write().await.clear();
     }
@@ -708,5 +882,46 @@ mod tests {
         let critical_intent = intent.with_priority(OrderPriority::Critical);
         let result = gate.check_order(&critical_intent).await;
         assert!(result.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_domain_exposure_limit() {
+        let mut config = RiskConfig::default();
+        config.crypto_max_exposure = Some(Decimal::from(20));
+        let gate = RiskGate::new(config);
+
+        gate.register_agent_with_domain("agent1", Domain::Crypto, AgentRiskParams::default())
+            .await;
+        gate.update_agent_exposure("agent1", Decimal::from(15), Decimal::ZERO, 1, 0)
+            .await;
+
+        let intent = make_intent("agent1", 20, Decimal::from_str_exact("0.50").unwrap()); // $10
+        let result = gate.check_order(&intent).await;
+        match result {
+            RiskCheckResult::Blocked(BlockReason::DomainExposureExceeded { domain, .. }) => {
+                assert_eq!(domain, Domain::Crypto);
+            }
+            _ => panic!("Expected domain exposure block"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_domain_daily_loss_limit() {
+        let mut config = RiskConfig::default();
+        config.crypto_daily_loss_limit = Some(Decimal::from(5));
+        let gate = RiskGate::new(config);
+
+        gate.register_agent_with_domain("agent1", Domain::Crypto, AgentRiskParams::default())
+            .await;
+        gate.record_loss("agent1", Decimal::from(6)).await;
+
+        let intent = make_intent("agent1", 5, Decimal::from_str_exact("0.50").unwrap()); // $2.5
+        let result = gate.check_order(&intent).await;
+        match result {
+            RiskCheckResult::Blocked(BlockReason::DomainDailyLossExceeded { domain, .. }) => {
+                assert_eq!(domain, Domain::Crypto);
+            }
+            _ => panic!("Expected domain daily loss block"),
+        }
     }
 }

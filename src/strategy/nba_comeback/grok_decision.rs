@@ -278,8 +278,19 @@ RISK METRICS (pre-computed):
         best_bid = best_bid_str,
         best_ask = best_ask_str,
         rr = req.risk_metrics.reward_risk_ratio,
-        gain = 1.0 - req.market.market_price.to_string().parse::<f64>().unwrap_or(0.0),
-        risk = req.market.market_price.to_string().parse::<f64>().unwrap_or(0.0),
+        gain = 1.0
+            - req
+                .market
+                .market_price
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0),
+        risk = req
+            .market
+            .market_price
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
         ev = req.risk_metrics.expected_value * 100.0,
         kelly = req.risk_metrics.kelly_fraction * 100.0,
     ));
@@ -610,7 +621,10 @@ mod tests {
                 ..
             } => {
                 assert!(fair_value <= 1.0, "fair_value should be clamped to 1.0");
-                assert!(own_fair_value <= 1.0, "own_fair_value should be clamped to 1.0");
+                assert!(
+                    own_fair_value <= 1.0,
+                    "own_fair_value should be clamped to 1.0"
+                );
                 assert!(confidence <= 1.0, "confidence should be clamped to 1.0");
             }
             GrokDecision::Pass { .. } => panic!("expected Trade"),

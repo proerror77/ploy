@@ -1,11 +1,11 @@
 //! Auto-claimer for resolved Polymarket positions
 //!
 //! Monitors for positions that can be redeemed (winning positions after market resolution)
-//! and automatically claims them by calling the CTFExchange contract.
+//! and automatically claims them by calling the ConditionalTokens contract.
 
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use rust_decimal::Decimal;
@@ -17,18 +17,20 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::PolymarketClient;
 use crate::error::Result;
 
-// CTF Exchange contract addresses on Polygon
-const CTF_EXCHANGE_POLYGON: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
-const NEG_RISK_CTF_EXCHANGE_POLYGON: &str = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
-const POLYGON_RPC: &str = "https://polygon-rpc.com";
+// CTF contracts on Polygon
+const CONDITIONAL_TOKENS_POLYGON: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+const USDC_E_POLYGON: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const POLYGON_RPC_DEFAULT: &str = "https://polygon-bor-rpc.publicnode.com";
+const DEFAULT_MIN_NATIVE_GAS_WEI: u64 = 5_000_000_000_000_000; // 0.005 MATIC buffer
 
-// Generate contract bindings for CTFExchange
+// Generate contract bindings for ConditionalTokens
 sol! {
     #[allow(missing_docs)]
     #[sol(rpc)]
-    interface ICTFExchange {
+    interface IConditionalTokens {
         /// Redeem positions for a resolved condition
         function redeemPositions(
+            address collateralToken,
             bytes32 parentCollectionId,
             bytes32 conditionId,
             uint256[] calldata indexSets
@@ -37,6 +39,50 @@ sol! {
         /// Get balance of a token for an account
         function balanceOf(address account, uint256 id) external view returns (uint256);
     }
+}
+
+fn json_value_to_boolish(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(v) => Some(*v),
+        serde_json::Value::Number(n) => {
+            if n.as_i64() == Some(0) {
+                Some(false)
+            } else if n.as_i64() == Some(1) {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        serde_json::Value::String(s) => {
+            let s = s.trim().to_ascii_lowercase();
+            match s.as_str() {
+                "true" | "1" | "yes" | "y" => Some(true),
+                "false" | "0" | "no" | "n" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn min_native_gas_wei() -> U256 {
+    std::env::var("CLAIMER_MIN_NATIVE_GAS_WEI")
+        .ok()
+        .and_then(|v| v.trim().parse::<u128>().ok())
+        .map(U256::from)
+        .unwrap_or_else(|| U256::from(DEFAULT_MIN_NATIVE_GAS_WEI))
 }
 
 /// Position that can be redeemed
@@ -162,14 +208,19 @@ impl AutoClaimer {
 
     /// Check for redeemable positions and optionally claim them
     pub async fn check_and_claim(&self) -> Result<Vec<ClaimResult>> {
-        let positions = self.get_redeemable_positions().await?;
+        let positions =
+            Self::collapse_positions_by_condition(self.get_redeemable_positions().await?);
 
         if positions.is_empty() {
             debug!("No redeemable positions found");
             return Ok(vec![]);
         }
 
-        info!("Found {} redeemable positions", positions.len());
+        if self.config.auto_claim && !self.preflight_wallet_can_claim().await? {
+            return Ok(vec![]);
+        }
+
+        info!("Found {} redeemable condition(s)", positions.len());
 
         let mut results = Vec::new();
 
@@ -231,10 +282,37 @@ impl AutoClaimer {
         Ok(results)
     }
 
+    /// Merge multiple redeemable rows for the same condition into one claim attempt.
+    ///
+    /// A condition-level redeem burns all balances for the provided index sets, so sending
+    /// one transaction per condition avoids duplicate claims for split rows in Data API output.
+    fn collapse_positions_by_condition(
+        positions: Vec<RedeemablePosition>,
+    ) -> Vec<RedeemablePosition> {
+        let mut merged: std::collections::BTreeMap<String, RedeemablePosition> =
+            std::collections::BTreeMap::new();
+
+        for pos in positions {
+            if let Some(existing) = merged.get_mut(&pos.condition_id) {
+                existing.size += pos.size;
+                existing.payout += pos.payout;
+                existing.neg_risk = existing.neg_risk || pos.neg_risk;
+                if existing.outcome.is_empty() && !pos.outcome.is_empty() {
+                    existing.outcome = pos.outcome;
+                }
+                continue;
+            }
+            merged.insert(pos.condition_id.clone(), pos);
+        }
+
+        merged.into_values().collect()
+    }
+
     /// Get list of redeemable positions from Polymarket
     async fn get_redeemable_positions(&self) -> Result<Vec<RedeemablePosition>> {
         // Use the Data API to get positions
         let positions = self.client.get_positions().await?;
+        let allow_price_fallback = env_flag("CLAIMER_ALLOW_PRICE_FALLBACK", false);
 
         let mut redeemable = Vec::new();
 
@@ -257,43 +335,141 @@ impl AutoClaimer {
             // Also check the redeemable flag if available
             let api_says_redeemable = p.is_redeemable();
 
-            if !is_winner && !api_says_redeemable {
+            if !api_says_redeemable && !(allow_price_fallback && is_winner) {
                 continue;
             }
+            if !api_says_redeemable && allow_price_fallback && is_winner {
+                debug!(
+                    "Using price-based fallback for condition {:?} (cur_price={:?})",
+                    p.condition_id, p.cur_price
+                );
+            }
+
+            let condition_id = p
+                .condition_id
+                .clone()
+                .or_else(|| {
+                    p.extra
+                        .get("conditionId")
+                        .and_then(|v| v.as_str().map(ToString::to_string))
+                })
+                .or_else(|| {
+                    p.extra
+                        .get("condition_id")
+                        .and_then(|v| v.as_str().map(ToString::to_string))
+                })
+                .unwrap_or_default();
+            if condition_id.trim().is_empty() {
+                warn!(
+                    "Skipping redeemable position with missing condition_id (outcome={}, size={})",
+                    p.outcome.clone().unwrap_or_default(),
+                    size
+                );
+                continue;
+            }
+
+            let token_id = p
+                .token_id
+                .clone()
+                .or_else(|| {
+                    p.extra
+                        .get("tokenId")
+                        .and_then(|v| v.as_str().map(ToString::to_string))
+                })
+                .or_else(|| {
+                    p.extra
+                        .get("token_id")
+                        .and_then(|v| v.as_str().map(ToString::to_string))
+                })
+                .unwrap_or_else(|| p.asset_id.clone());
+
+            let outcome = p
+                .outcome
+                .clone()
+                .or_else(|| {
+                    p.extra
+                        .get("outcome")
+                        .and_then(|v| v.as_str().map(ToString::to_string))
+                })
+                .unwrap_or_default();
 
             let payout = size; // Each winning share = $1
 
             redeemable.push(RedeemablePosition {
-                condition_id: p.condition_id.clone().unwrap_or_default(),
-                token_id: p.token_id.clone().unwrap_or_else(|| p.asset_id.clone()),
-                outcome: p.outcome.clone().unwrap_or_default(),
+                condition_id: condition_id.clone(),
+                token_id,
+                outcome: outcome.clone(),
                 size,
                 payout,
                 neg_risk: p
-                    .extra
-                    .get("neg_risk")
-                    .or_else(|| p.extra.get("negRisk"))
-                    .and_then(|v| v.as_bool())
+                    .negative_risk
+                    .or_else(|| {
+                        p.extra
+                            .get("neg_risk")
+                            .or_else(|| p.extra.get("negRisk"))
+                            .and_then(json_value_to_boolish)
+                    })
                     .unwrap_or(false),
             });
 
             info!(
                 "Found redeemable position: {} {} shares, condition={}",
-                p.outcome.clone().unwrap_or_default(),
+                outcome,
                 size,
-                p.condition_id
-                    .clone()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(16)
-                    .collect::<String>()
+                condition_id.chars().take(16).collect::<String>()
             );
         }
 
         Ok(redeemable)
     }
 
-    /// Claim a specific position by calling the CTFExchange contract
+    /// Preflight signer wallet native balance to avoid spamming failed redeem txs.
+    async fn preflight_wallet_can_claim(&self) -> Result<bool> {
+        let private_key =
+            self.config.private_key.as_ref().ok_or_else(|| {
+                crate::error::PloyError::Wallet("No private key for claiming".into())
+            })?;
+
+        let signer: PrivateKeySigner = private_key
+            .parse()
+            .map_err(|e| crate::error::PloyError::Wallet(format!("Invalid private key: {}", e)))?;
+
+        let polygon_rpc = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+        let rpc_url = polygon_rpc.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
+        })?;
+        let provider = ProviderBuilder::new().connect_http(rpc_url);
+
+        let wallet_addr = signer.address();
+        let balance = provider.get_balance(wallet_addr).await.map_err(|e| {
+            crate::error::PloyError::OrderSubmission(format!(
+                "Failed to read claimer wallet balance: {}",
+                e
+            ))
+        })?;
+        let min_balance = min_native_gas_wei();
+
+        if balance < min_balance {
+            warn!(
+                "Auto-claim paused: wallet {} has {} wei, need at least {} wei for gas. Top up MATIC and claimer will resume automatically.",
+                wallet_addr,
+                balance,
+                min_balance
+            );
+            return Ok(false);
+        }
+
+        debug!(
+            "Claimer wallet {} gas check passed: {} wei",
+            wallet_addr, balance
+        );
+        Ok(true)
+    }
+
+    /// Claim a specific condition by calling the ConditionalTokens redeem function
     async fn claim_position(&self, pos: &RedeemablePosition) -> Result<String> {
         let private_key =
             self.config.private_key.as_ref().ok_or_else(|| {
@@ -307,30 +483,35 @@ impl AutoClaimer {
 
         let wallet = EthereumWallet::from(signer);
 
-        // Connect to Polygon
-        let rpc_url = POLYGON_RPC.parse().map_err(|e| {
+        // Connect to Polygon (allow env override for infra-level failover)
+        let polygon_rpc = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+        let rpc_url = polygon_rpc.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
         })?;
         let provider = ProviderBuilder::new().wallet(wallet).connect_http(rpc_url);
 
-        // Select appropriate exchange contract
-        let exchange_addr: Address = if pos.neg_risk {
-            NEG_RISK_CTF_EXCHANGE_POLYGON.parse().map_err(|e| {
-                crate::error::PloyError::AddressParsing(format!(
-                    "Invalid NegRisk CTF address: {}",
-                    e
-                ))
-            })?
-        } else {
-            CTF_EXCHANGE_POLYGON.parse().map_err(|e| {
-                crate::error::PloyError::AddressParsing(format!("Invalid CTF address: {}", e))
-            })?
-        };
+        let conditional_tokens_addr: Address = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!(
+                "Invalid ConditionalTokens address: {}",
+                e
+            ))
+        })?;
+        let collateral_addr: Address = USDC_E_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid USDC.e address: {}", e))
+        })?;
 
-        let contract = ICTFExchange::new(exchange_addr, provider);
+        let contract = IConditionalTokens::new(conditional_tokens_addr, provider);
 
-        // Parse condition ID to bytes32
-        let condition_id: [u8; 32] = hex::decode(&pos.condition_id)
+        // Parse condition ID to bytes32 (accept both raw hex and 0x-prefixed values)
+        let condition_hex = pos
+            .condition_id
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        let condition_id: [u8; 32] = hex::decode(condition_hex)
             .map_err(|e| crate::error::PloyError::Internal(format!("Invalid condition ID: {}", e)))?
             .try_into()
             .map_err(|_| crate::error::PloyError::Internal("Condition ID wrong length".into()))?;
@@ -343,18 +524,19 @@ impl AutoClaimer {
         let index_sets = vec![U256::from(1), U256::from(2)];
 
         info!(
-            "Calling redeemPositions on {} for condition {}...",
-            if pos.neg_risk {
-                "NegRisk CTF Exchange"
-            } else {
-                "CTF Exchange"
-            },
-            &pos.condition_id[..16]
+            "Calling ConditionalTokens.redeemPositions for condition {} (neg_risk={})...",
+            &condition_hex.chars().take(16).collect::<String>(),
+            pos.neg_risk
         );
 
-        // Call redeem
-        let tx =
-            contract.redeemPositions(parent_collection_id.into(), condition_id.into(), index_sets);
+        // Polymarket docs: redeem against ConditionalTokens with collateral token +
+        // zero parent collection and indexSets [1,2] for binary outcomes.
+        let tx = contract.redeemPositions(
+            collateral_addr,
+            parent_collection_id.into(),
+            condition_id.into(),
+            index_sets,
+        );
 
         let pending = tx.send().await.map_err(|e| {
             crate::error::PloyError::OrderSubmission(format!("Redeem tx failed: {}", e))
@@ -402,5 +584,46 @@ mod tests {
 
         assert_eq!(pos.size, dec!(100));
         assert!(!pos.neg_risk);
+    }
+
+    #[test]
+    fn test_collapse_positions_by_condition_merges_duplicate_rows() {
+        let positions = vec![
+            RedeemablePosition {
+                condition_id: "cond-1".to_string(),
+                token_id: "tok-a".to_string(),
+                outcome: "Yes".to_string(),
+                size: dec!(10),
+                payout: dec!(10),
+                neg_risk: false,
+            },
+            RedeemablePosition {
+                condition_id: "cond-1".to_string(),
+                token_id: "tok-b".to_string(),
+                outcome: "No".to_string(),
+                size: dec!(5),
+                payout: dec!(5),
+                neg_risk: true,
+            },
+            RedeemablePosition {
+                condition_id: "cond-2".to_string(),
+                token_id: "tok-c".to_string(),
+                outcome: "Yes".to_string(),
+                size: dec!(7),
+                payout: dec!(7),
+                neg_risk: false,
+            },
+        ];
+
+        let merged = AutoClaimer::collapse_positions_by_condition(positions);
+        assert_eq!(merged.len(), 2);
+
+        let cond1 = merged
+            .iter()
+            .find(|p| p.condition_id == "cond-1")
+            .expect("cond-1 should exist");
+        assert_eq!(cond1.size, dec!(15));
+        assert_eq!(cond1.payout, dec!(15));
+        assert!(cond1.neg_risk);
     }
 }

@@ -90,9 +90,10 @@ impl OnnxModel {
             )));
         }
 
-        let tensor = tract_ndarray::Array2::<f32>::from_shape_vec((1, self.input_dim), input.to_vec())
-            .map_err(|e| PloyError::Internal(format!("onnx input reshape failed: {e}")))?
-            .into_tvalue();
+        let tensor =
+            tract_ndarray::Array2::<f32>::from_shape_vec((1, self.input_dim), input.to_vec())
+                .map_err(|e| PloyError::Internal(format!("onnx input reshape failed: {e}")))?
+                .into_tvalue();
 
         let outputs = self
             .plan

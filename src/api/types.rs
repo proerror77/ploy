@@ -119,8 +119,14 @@ pub struct StrategyConfig {
     pub max_entry: f64,
     pub shares: i32,
     pub predictive: bool,
-    pub take_profit: Option<f64>,
-    pub stop_loss: Option<f64>,
+    #[serde(default, alias = "take_profit")]
+    pub exit_edge_floor: Option<f64>,
+    #[serde(default, alias = "stop_loss")]
+    pub exit_price_band: Option<f64>,
+    #[serde(default)]
+    pub time_decay_exit_secs: Option<u64>,
+    #[serde(default)]
+    pub liquidity_exit_spread_bps: Option<u32>,
 }
 
 // ============================================================================
@@ -134,6 +140,11 @@ pub struct RunningStrategy {
     pub pnl_usd: f64,
     pub order_count: u64,
     pub domain: String,
+    pub win_rate: Option<f64>,
+    pub loss_streak: Option<u32>,
+    pub size_multiplier: Option<f64>,
+    pub settled_trades: Option<u64>,
+    pub daily_realized_pnl_usd: Option<f64>,
 }
 
 // ============================================================================

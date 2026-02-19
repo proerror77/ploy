@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
+use polymarket_client_sdk::clob::types::{request::BalanceAllowanceRequest, AssetType};
 use polymarket_client_sdk::clob::{Client, Config};
-use polymarket_client_sdk::clob::types::{AssetType, request::BalanceAllowanceRequest};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

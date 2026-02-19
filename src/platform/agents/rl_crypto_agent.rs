@@ -178,28 +178,30 @@ impl RLCryptoAgent {
 
         #[cfg(feature = "onnx")]
         let policy_model: Option<OnnxModel> = match config.policy_model_path.as_deref() {
-            Some(path) if !path.trim().is_empty() => match OnnxModel::load_for_vec_input(path, TOTAL_FEATURES) {
-                Ok(m) => {
-                    info!(
-                        agent = %config.id,
-                        policy_path = %path,
-                        input_dim = m.input_dim(),
-                        output_dim = m.output_dim(),
-                        policy_output = %config.policy_output,
-                        "loaded RL policy ONNX model"
-                    );
-                    Some(m)
+            Some(path) if !path.trim().is_empty() => {
+                match OnnxModel::load_for_vec_input(path, TOTAL_FEATURES) {
+                    Ok(m) => {
+                        info!(
+                            agent = %config.id,
+                            policy_path = %path,
+                            input_dim = m.input_dim(),
+                            output_dim = m.output_dim(),
+                            policy_output = %config.policy_output,
+                            "loaded RL policy ONNX model"
+                        );
+                        Some(m)
+                    }
+                    Err(e) => {
+                        warn!(
+                            agent = %config.id,
+                            policy_path = %path,
+                            error = %e,
+                            "failed to load RL policy ONNX model; falling back to rule-based policy"
+                        );
+                        None
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        agent = %config.id,
-                        policy_path = %path,
-                        error = %e,
-                        "failed to load RL policy ONNX model; falling back to rule-based policy"
-                    );
-                    None
-                }
-            },
+            }
             _ => None,
         };
 
@@ -450,7 +452,13 @@ impl RLCryptoAgent {
                 }
                 let mean = &output[..CONTINUOUS_ACTION_DIM];
                 let urgency = Self::map_urgency(mean[2]);
-                Some(ContinuousAction::new(mean[0].tanh(), mean[1].tanh(), urgency, mean[3].tanh(), mean[4].tanh()))
+                Some(ContinuousAction::new(
+                    mean[0].tanh(),
+                    mean[1].tanh(),
+                    urgency,
+                    mean[3].tanh(),
+                    mean[4].tanh(),
+                ))
             }
             "discrete_logits" | "discrete" => {
                 if output.len() < NUM_DISCRETE_ACTIONS {

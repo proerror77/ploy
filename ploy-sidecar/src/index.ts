@@ -23,6 +23,50 @@ import { tradingOutputSchema } from "./schemas/output.js";
 
 // ── Config ──────────────────────────────────────────
 
+function isMiniMaxAnthropicEndpoint(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false;
+
+  try {
+    const parsed = new URL(baseUrl);
+    const isMiniMaxHost =
+      parsed.hostname.includes("minimax.io") || parsed.hostname.includes("minimaxi.com");
+    return isMiniMaxHost && parsed.pathname.includes("/anthropic");
+  } catch {
+    return (
+      baseUrl.includes("api.minimax.io/anthropic") ||
+      baseUrl.includes("api.minimaxi.com/anthropic")
+    );
+  }
+}
+
+function applyMiniMaxCompatEnv(): string | null {
+  if (!isMiniMaxAnthropicEndpoint(process.env.ANTHROPIC_BASE_URL)) {
+    return null;
+  }
+
+  const minimaxModel = process.env.MINIMAX_ANTHROPIC_MODEL || "MiniMax-M2.5";
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY?.trim();
+
+  // MiniMax Anthropic-compatible endpoint expects Authorization header.
+  if (anthropicApiKey && !process.env.ANTHROPIC_CUSTOM_HEADERS) {
+    process.env.ANTHROPIC_CUSTOM_HEADERS = `Authorization: Bearer ${anthropicApiKey}`;
+  }
+
+  // Map Claude aliases to the MiniMax model unless user already set custom mappings.
+  if (!process.env.ANTHROPIC_DEFAULT_OPUS_MODEL) {
+    process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = minimaxModel;
+  }
+  if (!process.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = minimaxModel;
+  }
+  if (!process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
+    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = minimaxModel;
+  }
+
+  return minimaxModel;
+}
+
+const minimaxCompatModel = applyMiniMaxCompatEnv();
 const MODEL = process.env.SIDECAR_MODEL || "sonnet";
 const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 10) * 1000;
 const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
@@ -198,6 +242,9 @@ async function main() {
   console.log(`  Dry run: ${DRY_RUN}`);
   console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
   console.log(`  Max budget/cycle: $${MAX_BUDGET}`);
+  if (minimaxCompatModel) {
+    console.log(`  MiniMax compat: enabled (alias → ${minimaxCompatModel})`);
+  }
   console.log("");
 
   // Run first cycle immediately

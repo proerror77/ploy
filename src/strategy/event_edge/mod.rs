@@ -7,6 +7,7 @@
 pub mod core;
 pub mod data_source;
 
+use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::adapters::PolymarketClient;
 use crate::domain::{OrderRequest, Side};
 use crate::error::{PloyError, Result};
@@ -15,6 +16,8 @@ use crate::strategy::event_models::arena_text::{
 };
 use crate::strategy::{ExpectedValue, POLYMARKET_FEE_RATE};
 use chrono::{DateTime, Utc};
+use polymarket_client_sdk::gamma::types::request::SearchRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -390,16 +393,6 @@ pub async fn run_event_edge(client: &PolymarketClient, cfg: EventEdgeConfig) -> 
 // Polymarket event discovery by title (Gamma API)
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GammaEventCandidate {
-    id: String,
-    title: Option<String>,
-    #[serde(rename = "endDate")]
-    end_date: Option<String>,
-    #[serde(default)]
-    closed: bool,
-}
-
 fn title_match_score(query: &str, candidate: &str) -> i32 {
     let q = query.to_lowercase();
     let c = candidate.to_lowercase();
@@ -424,26 +417,17 @@ fn title_match_score(query: &str, candidate: &str) -> i32 {
 }
 
 pub async fn discover_best_event_id_by_title(title: &str) -> Result<String> {
-    let encoded = urlencoding::encode(title);
-    let url = format!(
-        "https://gamma-api.polymarket.com/events?active=true&closed=false&_limit=25&title_contains={}",
-        encoded
-    );
-
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .timeout(Duration::from_secs(15))
-        .send()
+    let gamma = GammaClient::new(GAMMA_API_URL)
+        .map_err(|e| PloyError::Internal(format!("Failed to create Gamma client: {e}")))?;
+    let req = SearchRequest::builder().q(title).build();
+    let search = tokio::time::timeout(Duration::from_secs(15), gamma.search(&req))
         .await
-        .map_err(|e| PloyError::Internal(format!("Gamma search failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| PloyError::Internal(format!("Gamma search bad status: {e}")))?
-        .json::<Vec<GammaEventCandidate>>()
-        .await
-        .map_err(|e| PloyError::Internal(format!("Gamma search parse failed: {e}")))?;
+        .map_err(|_| PloyError::Internal("Gamma search timed out".to_string()))?
+        .map_err(|e| PloyError::Internal(format!("Gamma search failed: {e}")))?;
+    let resp = search.events.unwrap_or_default();
 
     let mut best: Option<(i32, String, String)> = None;
-    for ev in resp.into_iter().filter(|e| !e.closed) {
+    for ev in resp.into_iter().filter(|e| !e.closed.unwrap_or(false)) {
         let Some(t) = ev.title.clone() else { continue };
         let score = title_match_score(title, &t);
         match &best {

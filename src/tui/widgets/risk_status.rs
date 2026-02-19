@@ -24,9 +24,7 @@ pub fn render_risk_status(f: &mut Frame, area: Rect, app: &TuiApp) {
     };
 
     let loss_pct = if risk.daily_loss_limit > rust_decimal::Decimal::ZERO {
-        ((risk.daily_loss_used / risk.daily_loss_limit)
-            * rust_decimal::Decimal::from(100))
-        .round()
+        ((risk.daily_loss_used / risk.daily_loss_limit) * rust_decimal::Decimal::from(100)).round()
     } else {
         rust_decimal::Decimal::ZERO
     };
@@ -36,15 +34,15 @@ pub fn render_risk_status(f: &mut Frame, area: Rect, app: &TuiApp) {
             Span::styled("Risk State", Style::default().fg(Color::DarkGray)),
             Span::styled(risk.state.clone(), Style::default().fg(state_color)),
             Span::styled("Circuit Breaker", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                risk.circuit_breaker.clone(),
-                Style::default().fg(cb_color),
-            ),
+            Span::styled(risk.circuit_breaker.clone(), Style::default().fg(cb_color)),
         ]),
         Row::new(vec![
             Span::styled("Daily Loss", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("${} / ${} ({}%)", risk.daily_loss_used, risk.daily_loss_limit, loss_pct),
+                format!(
+                    "${} / ${} ({}%)",
+                    risk.daily_loss_used, risk.daily_loss_limit, loss_pct
+                ),
                 Style::default().fg(if loss_pct > rust_decimal::Decimal::from(80) {
                     Color::Red
                 } else if loss_pct > rust_decimal::Decimal::from(50) {

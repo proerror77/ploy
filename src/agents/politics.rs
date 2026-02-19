@@ -8,6 +8,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::agents::{AgentContext, TradingAgent};
@@ -224,6 +225,7 @@ impl TradingAgent for PoliticsTradingAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
+                                metrics: HashMap::new(),
                                 last_heartbeat: Utc::now(),
                                 error_message: None,
                             };

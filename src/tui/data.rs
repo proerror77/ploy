@@ -205,6 +205,9 @@ pub struct DisplayAgent {
     pub position_count: usize,
     pub exposure: Decimal,
     pub daily_pnl: Decimal,
+    pub win_rate: Option<f64>,
+    pub loss_streak: Option<u32>,
+    pub size_multiplier: Option<f64>,
     pub last_heartbeat: String,
     pub is_healthy: bool,
 }
@@ -212,6 +215,9 @@ pub struct DisplayAgent {
 impl DisplayAgent {
     /// Create from a coordinator AgentSnapshot
     pub fn from_snapshot(snap: &crate::coordinator::AgentSnapshot) -> Self {
+        let parse_f64 = |key: &str| snap.metrics.get(key).and_then(|v| v.parse::<f64>().ok());
+        let parse_u32 = |key: &str| snap.metrics.get(key).and_then(|v| v.parse::<u32>().ok());
+
         Self {
             agent_id: snap.agent_id.clone(),
             name: snap.name.clone(),
@@ -220,6 +226,9 @@ impl DisplayAgent {
             position_count: snap.position_count,
             exposure: snap.exposure,
             daily_pnl: snap.daily_pnl,
+            win_rate: parse_f64("sports_win_rate"),
+            loss_streak: parse_u32("sports_loss_streak"),
+            size_multiplier: parse_f64("sports_size_multiplier"),
             last_heartbeat: snap.last_heartbeat.format("%H:%M:%S").to_string(),
             is_healthy: snap.error_message.is_none(),
         }

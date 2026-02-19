@@ -4,6 +4,7 @@
 //! 所有策略 Agent 透過這個平台提交訂單。
 
 pub mod agents;
+mod contracts;
 mod platform;
 mod position;
 mod queue;
@@ -23,6 +24,10 @@ pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent, S
 pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
+};
+pub use contracts::{
+    MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision, RiskDecisionStatus,
+    StrategyDeployment, Timeframe, TradeIntent,
 };
 
 pub use agents::EventEdgePlatformAgent;

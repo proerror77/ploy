@@ -33,6 +33,14 @@ use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 
+fn default_exit_edge_floor() -> Decimal {
+    dec!(0.02)
+}
+
+fn default_exit_price_band() -> Decimal {
+    dec!(0.05)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobMlWeights {
     pub bias: f64,
@@ -82,11 +90,13 @@ pub struct CryptoLobMlConfig {
     pub prefer_close_to_end: bool,
 
     pub default_shares: u64,
-    pub take_profit: Decimal,
-    pub stop_loss: Decimal,
-    /// Optional mark-to-market TP/SL exits (disabled by default for binary options)
+    #[serde(default = "default_exit_edge_floor", alias = "take_profit")]
+    pub exit_edge_floor: Decimal,
+    #[serde(default = "default_exit_price_band", alias = "stop_loss")]
+    pub exit_price_band: Decimal,
+    /// Optional mark-to-market binary exit thresholds (disabled by default)
     pub enable_price_exits: bool,
-    /// Minimum hold time before TP/SL exits are allowed (seconds)
+    /// Minimum hold time before edge/price-band exits are allowed (seconds)
     pub min_hold_secs: u64,
 
     /// Minimum expected-value edge required to enter.
@@ -136,8 +146,8 @@ impl Default for CryptoLobMlConfig {
             max_time_remaining_secs: 900,
             prefer_close_to_end: true,
             default_shares: 50,
-            take_profit: dec!(0.02),
-            stop_loss: dec!(0.05),
+            exit_edge_floor: default_exit_edge_floor(),
+            exit_price_band: default_exit_price_band(),
             enable_price_exits: false,
             min_hold_secs: 20,
             min_edge: dec!(0.02),
@@ -870,10 +880,10 @@ impl TradingAgent for CryptoLobMlAgent {
                     }
 
                     let pnl_pct = (best_bid - pos.entry_price) / pos.entry_price;
-                    let maybe_reason = if pnl_pct >= self.config.take_profit {
-                        Some(("take_profit", OrderPriority::High))
-                    } else if pnl_pct <= -self.config.stop_loss {
-                        Some(("stop_loss", OrderPriority::Critical))
+                    let maybe_reason = if pnl_pct >= self.config.exit_edge_floor {
+                        Some(("exit_edge_floor", OrderPriority::High))
+                    } else if pnl_pct <= -self.config.exit_price_band {
+                        Some(("exit_price_band", OrderPriority::Critical))
                     } else {
                         None
                     };

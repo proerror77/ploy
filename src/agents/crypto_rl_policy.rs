@@ -158,12 +158,12 @@ impl Default for CryptoRlPolicyConfig {
         Self {
             agent_id: "crypto_rl_policy".into(),
             name: "Crypto RL Policy".into(),
-            coins: vec!["BTC".into()],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             event_refresh_secs: 15,
-            // Default to BTC 5m predictive mode (enter early).
-            min_time_remaining_secs: 240,
-            max_time_remaining_secs: 300,
-            prefer_close_to_end: false,
+            // Cover both 5m + 15m windows by default.
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 900,
+            prefer_close_to_end: true,
             default_shares: 50,
             max_entry_price: dec!(0.70),
             cooldown_secs: 10,
@@ -608,8 +608,7 @@ impl CryptoRlPolicyAgent {
         let (has_pos, pos_side, pos_shares_norm, entry_price, pnl_pct) = match position {
             Some(pos) if !pos.legs.is_empty() => {
                 let leg = &pos.legs[0];
-                let shares_norm =
-                    (leg.shares as f32) / (self.config.default_shares.max(1) as f32);
+                let shares_norm = (leg.shares as f32) / (self.config.default_shares.max(1) as f32);
                 // Use mid of the held leg side for unrealized PnL proxy (best bid is used elsewhere for exits).
                 let mark = match leg.side {
                     Side::Up => up_bid,
@@ -747,7 +746,10 @@ impl TradingAgent for CryptoRlPolicyAgent {
     }
 
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
-        info!(agent = self.config.agent_id, "crypto RL policy agent starting");
+        info!(
+            agent = self.config.agent_id,
+            "crypto RL policy agent starting"
+        );
         let config_hash = self.config_hash();
 
         let mut status = AgentStatus::Running;
@@ -1736,6 +1738,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
+                                metrics: HashMap::new(),
                                 last_heartbeat: Utc::now(),
                                 error_message: None,
                             };

@@ -11,10 +11,15 @@ use alloy::signers::Signer;
 use chrono::{DateTime, Utc};
 use polymarket_client_sdk::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk::clob::types::{
-    request::{BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest},
+    request::{
+        BalanceAllowanceRequest, CancelMarketOrderRequest, OrderBookSummaryRequest, OrdersRequest,
+        TradesRequest,
+    },
     AssetType, OrderType as SdkOrderType, Side as SdkSide, SignatureType as SdkSignatureType,
 };
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::data::types::request::PositionsRequest;
+use polymarket_client_sdk::data::Client as DataClient;
 use polymarket_client_sdk::gamma::types::request::{
     EventByIdRequest, MarketsRequest, SearchRequest, SeriesByIdRequest,
 };
@@ -25,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 use zeroize::Zeroize;
 
 /// Chain ID for Polygon Mainnet
@@ -33,6 +38,7 @@ pub const POLYGON_CHAIN_ID: u64 = 137;
 
 /// Gamma API base URL
 pub const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
+const CLOB_TERMINAL_CURSOR: &str = "LTE="; // base64("-1"), used by CLOB pagination
 
 type AuthClobClient = ClobClient<Authenticated<Normal>>;
 
@@ -121,6 +127,69 @@ where
         Some(serde_json::Value::String(s)) => Ok(Some(s)),
         Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
         Some(other) => Ok(Some(other.to_string())),
+    }
+}
+
+fn deserialize_stringified<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(String::new()),
+        Some(serde_json::Value::String(s)) => Ok(s),
+        Some(serde_json::Value::Number(n)) => Ok(n.to_string()),
+        Some(serde_json::Value::Bool(b)) => Ok(b.to_string()),
+        Some(other) => Ok(other.to_string()),
+    }
+}
+
+fn deserialize_option_stringified<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b.to_string())),
+        Some(other) => Ok(Some(other.to_string())),
+    }
+}
+
+fn deserialize_option_boolish<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Some(i != 0))
+            } else if let Some(u) = n.as_u64() {
+                Ok(Some(u != 0))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Some(f != 0.0))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(serde_json::Value::String(s)) => {
+            let normalized = s.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "true" | "1" | "yes" | "y" | "on" => Ok(Some(true)),
+                "false" | "0" | "no" | "n" | "off" => Ok(Some(false)),
+                _ => Ok(None),
+            }
+        }
+        Some(_) => Ok(None),
     }
 }
 
@@ -258,26 +327,71 @@ pub struct BalanceResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PositionResponse {
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "assetId",
+        deserialize_with = "deserialize_stringified"
+    )]
     pub asset_id: String,
-    #[serde(default, alias = "token_id")]
+    #[serde(
+        default,
+        alias = "token_id",
+        alias = "tokenId",
+        deserialize_with = "deserialize_option_stringified"
+    )]
     pub token_id: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "conditionId",
+        deserialize_with = "deserialize_option_stringified"
+    )]
     pub condition_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_stringified")]
     pub outcome: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "outcomeIndex",
+        deserialize_with = "deserialize_option_stringified"
+    )]
+    pub outcome_index: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_stringified")]
     pub size: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "avgPrice",
+        deserialize_with = "deserialize_option_stringified"
+    )]
     pub avg_price: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "realizedPnl",
+        deserialize_with = "deserialize_option_stringified"
+    )]
     pub realized_pnl: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "unrealizedPnl",
+        deserialize_with = "deserialize_option_stringified"
+    )]
     pub unrealized_pnl: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "curPrice",
+        deserialize_with = "deserialize_option_stringified"
+    )]
     pub cur_price: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "isRedeemable",
+        deserialize_with = "deserialize_option_boolish"
+    )]
     pub redeemable: Option<bool>,
+    #[serde(
+        default,
+        alias = "negativeRisk",
+        deserialize_with = "deserialize_option_boolish"
+    )]
+    pub negative_risk: Option<bool>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -415,6 +529,72 @@ pub struct GammaTokenInfo {
 // ==================== Implementation ====================
 
 impl PolymarketClient {
+    async fn fetch_orders_paginated(
+        &self,
+        auth_client: &AuthClobClient,
+        req: &OrdersRequest,
+        limit: Option<usize>,
+    ) -> Result<Vec<polymarket_client_sdk::clob::types::response::OpenOrderResponse>> {
+        let mut cursor: Option<String> = None;
+        let mut out = Vec::new();
+
+        loop {
+            let page = auth_client
+                .orders(req, cursor.clone())
+                .await
+                .map_err(|e| PloyError::Internal(format!("Failed to get orders: {}", e)))?;
+
+            for order in page.data {
+                out.push(order);
+                if let Some(max) = limit {
+                    if out.len() >= max {
+                        return Ok(out);
+                    }
+                }
+            }
+
+            if page.next_cursor == CLOB_TERMINAL_CURSOR {
+                break;
+            }
+            cursor = Some(page.next_cursor);
+        }
+
+        Ok(out)
+    }
+
+    async fn fetch_trades_paginated(
+        &self,
+        auth_client: &AuthClobClient,
+        req: &TradesRequest,
+        limit: Option<usize>,
+    ) -> Result<Vec<polymarket_client_sdk::clob::types::response::TradeResponse>> {
+        let mut cursor: Option<String> = None;
+        let mut out = Vec::new();
+
+        loop {
+            let page = auth_client
+                .trades(req, cursor.clone())
+                .await
+                .map_err(|e| PloyError::Internal(format!("Failed to get trades: {}", e)))?;
+
+            for trade in page.data {
+                out.push(trade);
+                if let Some(max) = limit {
+                    if out.len() >= max {
+                        return Ok(out);
+                    }
+                }
+            }
+
+            if page.next_cursor == CLOB_TERMINAL_CURSOR {
+                break;
+            }
+            cursor = Some(page.next_cursor);
+        }
+
+        Ok(out)
+    }
+
     async fn authenticate_fresh(&self, signer: &PrivateKeySigner) -> Result<AuthClobClient> {
         // Serialize auth handshakes. The upstream SDK requires unique ownership when
         // transitioning unauthenticated -> authenticated, so we create a fresh client per call.
@@ -898,32 +1078,21 @@ impl PolymarketClient {
     /// Get all active events from a series
     #[instrument(skip(self))]
     pub async fn get_all_active_events(&self, series_id: &str) -> Result<Vec<GammaEventInfo>> {
-        // Use direct HTTP call to /series/{id} which returns events array
-        let url = format!("{}/series/{}", GAMMA_API_URL, series_id);
-
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
+        let req = SeriesByIdRequest::builder().id(series_id).build();
+        let series = self
+            .gamma_client
+            .series_by_id(&req)
             .await
             .map_err(|e| PloyError::Internal(format!("Failed to fetch series: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(PloyError::Internal(format!(
-                "Gamma API error: {} for series {}",
-                response.status(),
-                series_id
-            )));
-        }
-
-        let series: GammaSeriesResponse = response
-            .json()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to parse series response: {}", e)))?;
-
         // Filter for active (not closed) events
-        let active_events: Vec<GammaEventInfo> =
-            series.events.into_iter().filter(|e| !e.closed).collect();
+        let active_events: Vec<GammaEventInfo> = series
+            .events
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| !e.closed.unwrap_or(false))
+            .map(|e| self.convert_sdk_event(&e))
+            .collect();
 
         debug!(
             "Found {} active events in series {}",
@@ -1137,9 +1306,9 @@ impl PolymarketClient {
 
     /// Cancel all orders for a token
     #[instrument(skip(self))]
-    pub async fn cancel_all_orders(&self, _token_id: &str) -> Result<CancelOrderResponse> {
+    pub async fn cancel_all_orders(&self, token_id: &str) -> Result<CancelOrderResponse> {
         if self.dry_run {
-            info!("DRY RUN: Would cancel all orders");
+            info!("DRY RUN: Would cancel all orders for token {}", token_id);
             return Ok(CancelOrderResponse {
                 canceled: Some(vec![]),
                 not_canceled: None,
@@ -1153,14 +1322,28 @@ impl PolymarketClient {
 
         let auth_client = self.authenticate_fresh(signer).await?;
 
-        auth_client
-            .cancel_all_orders()
+        let req = CancelMarketOrderRequest::builder()
+            .asset_id(token_id)
+            .build();
+        let resp = auth_client
+            .cancel_market_orders(&req)
             .await
-            .map_err(|e| PloyError::Internal(format!("Failed to cancel all orders: {}", e)))?;
+            .map_err(|e| PloyError::Internal(format!("Failed to cancel token orders: {}", e)))?;
+
+        let not_canceled = if resp.not_canceled.is_empty() {
+            None
+        } else {
+            Some(
+                resp.not_canceled
+                    .into_iter()
+                    .map(|(order_id, reason)| NotCanceledOrder { order_id, reason })
+                    .collect(),
+            )
+        };
 
         Ok(CancelOrderResponse {
-            canceled: Some(vec![]),
-            not_canceled: None,
+            canceled: Some(resp.canceled),
+            not_canceled,
         })
     }
 
@@ -1224,14 +1407,12 @@ impl PolymarketClient {
 
         let req = OrdersRequest::builder().build();
 
-        let orders = auth_client
-            .orders(&req, None)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get open orders: {}", e)))?;
+        let orders = self
+            .fetch_orders_paginated(&auth_client, &req, None)
+            .await?;
 
         // Filter for open orders (LIVE status)
         Ok(orders
-            .data
             .into_iter()
             .filter(|o| {
                 let status = format!("{:?}", o.status);
@@ -1271,13 +1452,11 @@ impl PolymarketClient {
 
         let req = OrdersRequest::builder().asset_id(token_id).build();
 
-        let orders = auth_client
-            .orders(&req, None)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get orders: {}", e)))?;
+        let orders = self
+            .fetch_orders_paginated(&auth_client, &req, None)
+            .await?;
 
         Ok(orders
-            .data
             .into_iter()
             .map(|o| OrderResponse {
                 id: o.id.clone(),
@@ -1312,18 +1491,9 @@ impl PolymarketClient {
         let auth_client = self.authenticate_fresh(signer).await?;
 
         let req = OrdersRequest::builder().build();
-
-        let orders = auth_client
-            .orders(&req, None)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get order history: {}", e)))?;
-
-        // Apply limit if specified (SDK doesn't support limit parameter)
-        let orders_data: Vec<_> = if let Some(l) = limit {
-            orders.data.into_iter().take(l as usize).collect()
-        } else {
-            orders.data
-        };
+        let orders_data = self
+            .fetch_orders_paginated(&auth_client, &req, limit.map(|v| v as usize))
+            .await?;
 
         Ok(orders_data
             .into_iter()
@@ -1362,25 +1532,73 @@ impl PolymarketClient {
             return Err(PloyError::Auth("Not authenticated".to_string()));
         };
 
-        let client = reqwest::Client::new();
-        let resp = client
-            .get("https://data-api.polymarket.com/positions")
-            .query(&[("user", user.as_str())])
-            .send()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to fetch positions: {}", e)))?;
+        let data_client = DataClient::default();
+        let user_addr: polymarket_client_sdk::types::Address = user
+            .parse()
+            .map_err(|e| PloyError::Internal(format!("Invalid user address {}: {}", user, e)))?;
 
-        if !resp.status().is_success() {
-            return Err(PloyError::Internal(format!(
-                "Positions API error: {}",
-                resp.status()
-            )));
+        let mut positions = Vec::new();
+        let mut offset: i32 = 0;
+        let page_size: i32 = 500;
+
+        loop {
+            let req_builder = PositionsRequest::builder().user(user_addr);
+            let req_builder = req_builder
+                .limit(page_size)
+                .map_err(|e| PloyError::Internal(format!("Invalid positions limit: {}", e)))?;
+            let req_builder = req_builder
+                .offset(offset)
+                .map_err(|e| PloyError::Internal(format!("Invalid positions offset: {}", e)))?;
+            let req = req_builder.build();
+
+            let batch = data_client
+                .positions(&req)
+                .await
+                .map_err(|e| PloyError::Internal(format!("Failed to fetch positions: {}", e)))?;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_len = batch.len() as i32;
+            positions.extend(batch.into_iter().map(|p| {
+                let mut extra = HashMap::new();
+                extra.insert("title".to_string(), serde_json::json!(p.title));
+                extra.insert("slug".to_string(), serde_json::json!(p.slug));
+                extra.insert("eventSlug".to_string(), serde_json::json!(p.event_slug));
+                extra.insert(
+                    "oppositeOutcome".to_string(),
+                    serde_json::json!(p.opposite_outcome),
+                );
+                extra.insert(
+                    "oppositeAsset".to_string(),
+                    serde_json::json!(p.opposite_asset),
+                );
+                extra.insert("endDate".to_string(), serde_json::json!(p.end_date));
+                extra.insert("mergeable".to_string(), serde_json::json!(p.mergeable));
+
+                PositionResponse {
+                    asset_id: p.asset.clone(),
+                    token_id: Some(p.asset),
+                    condition_id: Some(p.condition_id),
+                    outcome: Some(p.outcome),
+                    outcome_index: Some(p.outcome_index.to_string()),
+                    size: p.size.to_string(),
+                    avg_price: Some(p.avg_price.to_string()),
+                    realized_pnl: Some(p.realized_pnl.to_string()),
+                    unrealized_pnl: Some(p.cash_pnl.to_string()),
+                    cur_price: Some(p.cur_price.to_string()),
+                    redeemable: Some(p.redeemable),
+                    negative_risk: Some(p.negative_risk),
+                    extra,
+                }
+            }));
+
+            if batch_len < page_size || offset >= 10_000 {
+                break;
+            }
+            offset += batch_len;
         }
-
-        let positions: Vec<PositionResponse> = resp
-            .json()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to parse positions response: {}", e)))?;
 
         Ok(positions)
     }
@@ -1401,18 +1619,12 @@ impl PolymarketClient {
 
         let req = TradesRequest::builder().build();
 
-        let trades = auth_client
-            .trades(&req, None)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to get trades: {}", e)))?;
+        let trades = self
+            .fetch_trades_paginated(&auth_client, &req, limit.map(|v| v as usize))
+            .await?;
 
-        // Apply limit if specified (SDK doesn't support limit parameter)
-        let trades_iter: Box<dyn Iterator<Item = _>> = match limit {
-            Some(l) => Box::new(trades.data.into_iter().take(l as usize)),
-            None => Box::new(trades.data.into_iter()),
-        };
-
-        Ok(trades_iter
+        Ok(trades
+            .into_iter()
             .map(|t| TradeResponse {
                 id: Some(t.id.clone()),
                 order_id: Some(t.taker_order_id.clone()),
@@ -1718,5 +1930,73 @@ mod tests {
         assert_eq!(filled, dec!(5));
         // (2*0.40 + 3*0.50)/5 = 0.46
         assert_eq!(avg, dec!(0.46));
+    }
+
+    #[test]
+    fn test_position_response_deserializes_numeric_fields() {
+        let raw = serde_json::json!({
+            "asset_id": 12345,
+            "token_id": 67890,
+            "condition_id": "abc123",
+            "outcome": "Yes",
+            "size": 49.4701,
+            "avg_price": 0.5,
+            "realized_pnl": -1.23,
+            "unrealized_pnl": 0.0,
+            "cur_price": 1,
+            "redeemable": 1
+        });
+
+        let pos: PositionResponse =
+            serde_json::from_value(raw).expect("position should deserialize");
+        assert_eq!(pos.asset_id, "12345");
+        assert_eq!(pos.token_id.as_deref(), Some("67890"));
+        assert_eq!(pos.size, "49.4701");
+        assert_eq!(pos.avg_price.as_deref(), Some("0.5"));
+        assert_eq!(pos.cur_price.as_deref(), Some("1"));
+        assert_eq!(pos.redeemable, Some(true));
+    }
+
+    #[test]
+    fn test_position_response_deserializes_redeemable_string() {
+        let raw = serde_json::json!({
+            "asset_id": "token",
+            "size": "10",
+            "redeemable": "true"
+        });
+
+        let pos: PositionResponse =
+            serde_json::from_value(raw).expect("position should deserialize");
+        assert_eq!(pos.redeemable, Some(true));
+        assert!(pos.is_redeemable());
+    }
+
+    #[test]
+    fn test_position_response_deserializes_camel_case_fields() {
+        let raw = serde_json::json!({
+            "assetId": "token-1",
+            "tokenId": "tok-yes",
+            "conditionId": "0xabc123",
+            "outcome": "Yes",
+            "outcomeIndex": 0,
+            "size": 5,
+            "avgPrice": 0.42,
+            "realizedPnl": 1.5,
+            "unrealizedPnl": -0.1,
+            "curPrice": 1,
+            "isRedeemable": "1",
+            "negativeRisk": "true"
+        });
+
+        let pos: PositionResponse =
+            serde_json::from_value(raw).expect("position should deserialize");
+        assert_eq!(pos.asset_id, "token-1");
+        assert_eq!(pos.token_id.as_deref(), Some("tok-yes"));
+        assert_eq!(pos.condition_id.as_deref(), Some("0xabc123"));
+        assert_eq!(pos.outcome_index.as_deref(), Some("0"));
+        assert_eq!(pos.avg_price.as_deref(), Some("0.42"));
+        assert_eq!(pos.cur_price.as_deref(), Some("1"));
+        assert_eq!(pos.redeemable, Some(true));
+        assert_eq!(pos.negative_risk, Some(true));
     }
 }

@@ -17,6 +17,9 @@ pub struct AppConfig {
     pub dry_run: DryRunConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Agent framework control-plane mode.
+    #[serde(default)]
+    pub agent_framework: AgentFrameworkConfig,
     /// Health server port (default: 8080)
     #[serde(default)]
     pub health_port: Option<u16>,
@@ -59,6 +62,41 @@ impl Default for AccountConfig {
 
 fn default_account_id() -> String {
     "default".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentFrameworkConfig {
+    /// Agent framework mode:
+    /// - "internal": built-in Rust agents are enabled by config flags.
+    /// - "openclaw": OpenClaw orchestrates agents; built-in agent runtime can be disabled.
+    #[serde(default = "default_agent_framework_mode")]
+    pub mode: String,
+    /// If true and mode=openclaw, disable built-in agent runtime entrypoints.
+    #[serde(default = "default_agent_framework_hard_disable")]
+    pub hard_disable_internal_agents: bool,
+}
+
+impl Default for AgentFrameworkConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_agent_framework_mode(),
+            hard_disable_internal_agents: default_agent_framework_hard_disable(),
+        }
+    }
+}
+
+impl AgentFrameworkConfig {
+    pub fn is_openclaw_mode(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("openclaw")
+    }
+}
+
+fn default_agent_framework_mode() -> String {
+    "internal".to_string()
+}
+
+fn default_agent_framework_hard_disable() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,6 +305,26 @@ pub struct NbaComebackConfig {
     /// Limits position sizing even when Kelly suggests larger bets.
     #[serde(default = "default_kelly_fraction_cap")]
     pub kelly_fraction_cap: f64,
+    /// Halt opening NEW risk (new entries / scale-ins) once daily realized PnL
+    /// drops below this negative threshold.
+    #[serde(default = "default_performance_daily_loss_limit")]
+    pub performance_daily_loss_limit_usd: Decimal,
+    /// Minimum number of settled trades required before win-rate based sizing
+    /// adjustment is activated.
+    #[serde(default = "default_performance_min_settled_trades")]
+    pub performance_min_settled_trades: u64,
+    /// If settled-trade win rate drops below this threshold, reduce position size.
+    #[serde(default = "default_performance_min_win_rate")]
+    pub performance_min_win_rate: f64,
+    /// Position-size multiplier applied when win rate is below threshold.
+    #[serde(default = "default_performance_low_winrate_multiplier")]
+    pub performance_low_winrate_multiplier: f64,
+    /// Consecutive loss threshold that triggers additional size reduction.
+    #[serde(default = "default_performance_loss_streak_threshold")]
+    pub performance_loss_streak_threshold: u32,
+    /// Additional size multiplier applied when consecutive losses hit threshold.
+    #[serde(default = "default_performance_loss_streak_multiplier")]
+    pub performance_loss_streak_multiplier: f64,
     // ── Kelly scaling-in ─────────────────────────────────────────
     /// Enable Kelly-proportional scaling-in (add to positions when price drops
     /// but fundamentals remain strong). Each cycle recalculates Kelly optimal
@@ -288,6 +346,15 @@ pub struct NbaComebackConfig {
     /// Minimum game time remaining in minutes for scaling-in (default 8.0)
     #[serde(default = "default_scaling_min_time_remaining")]
     pub scaling_min_time_remaining_mins: f64,
+    /// Enable early exits before final settlement (take-profit / stop-loss).
+    #[serde(default = "default_early_exit_enabled")]
+    pub early_exit_enabled: bool,
+    /// Take-profit trigger as percentage gain from average entry (default 15%).
+    #[serde(default = "default_early_exit_take_profit_pct")]
+    pub early_exit_take_profit_pct: f64,
+    /// Stop-loss trigger as percentage drawdown from average entry (default 20%).
+    #[serde(default = "default_early_exit_stop_loss_pct")]
+    pub early_exit_stop_loss_pct: f64,
 }
 
 fn default_nba_comeback_min_edge() -> Decimal {
@@ -356,6 +423,30 @@ fn default_kelly_fraction_cap() -> f64 {
     0.25
 }
 
+fn default_performance_daily_loss_limit() -> Decimal {
+    Decimal::new(30, 0) // $30 daily realized loss stop
+}
+
+fn default_performance_min_settled_trades() -> u64 {
+    10
+}
+
+fn default_performance_min_win_rate() -> f64 {
+    0.45
+}
+
+fn default_performance_low_winrate_multiplier() -> f64 {
+    0.60
+}
+
+fn default_performance_loss_streak_threshold() -> u32 {
+    3
+}
+
+fn default_performance_loss_streak_multiplier() -> f64 {
+    0.50
+}
+
 fn default_scaling_max_adds() -> u32 {
     3
 }
@@ -374,6 +465,18 @@ fn default_scaling_min_comeback_retention() -> f64 {
 
 fn default_scaling_min_time_remaining() -> f64 {
     8.0 // 8 minutes
+}
+
+fn default_early_exit_enabled() -> bool {
+    true
+}
+
+fn default_early_exit_take_profit_pct() -> f64 {
+    15.0
+}
+
+fn default_early_exit_stop_loss_pct() -> f64 {
+    20.0
 }
 
 /// Event registry discovery service configuration
@@ -662,6 +765,7 @@ impl AppConfig {
             },
             dry_run: DryRunConfig { enabled: dry_run },
             logging: LoggingConfig::default(),
+            agent_framework: AgentFrameworkConfig::default(),
             health_port: Some(8080),
             api_port: Some(8081),
             event_edge_agent: None,
@@ -703,6 +807,14 @@ impl AppConfig {
             errors.push(
                 "leg2_force_close_seconds should be less than min_remaining_seconds".to_string(),
             );
+        }
+
+        let framework_mode = self.agent_framework.mode.trim().to_ascii_lowercase();
+        if framework_mode != "internal" && framework_mode != "openclaw" {
+            errors.push(format!(
+                "agent_framework.mode must be one of [internal, openclaw], got {}",
+                self.agent_framework.mode
+            ));
         }
 
         if errors.is_empty() {
@@ -770,6 +882,26 @@ impl AppConfig {
             self.database.max_connections = v;
         }
 
+        if let Some(v) = env_string(&[
+            "PLOY_AGENT_FRAMEWORK__MODE",
+            "PLOY__AGENT_FRAMEWORK__MODE",
+            "PLOY_AGENT_FRAMEWORK_MODE",
+        ]) {
+            let normalized = v.trim().to_ascii_lowercase();
+            if matches!(normalized.as_str(), "internal" | "openclaw") {
+                self.agent_framework.mode = normalized;
+            }
+        }
+
+        if let Some(v) = env_bool(&[
+            "PLOY_AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
+            "PLOY__AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
+            "PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS",
+            "PLOY_OPENCLAW_ONLY",
+        ]) {
+            self.agent_framework.hard_disable_internal_agents = v;
+        }
+
         let ee_enabled = env_bool(&[
             "PLOY_EVENT_EDGE_AGENT__ENABLED",
             "PLOY__EVENT_EDGE_AGENT__ENABLED",
@@ -810,6 +942,11 @@ impl AppConfig {
                 ee.titles = v;
             }
         }
+    }
+
+    /// Whether built-in Rust agent loops must be disabled in this process.
+    pub fn openclaw_runtime_lockdown(&self) -> bool {
+        self.agent_framework.is_openclaw_mode() && self.agent_framework.hard_disable_internal_agents
     }
 }
 

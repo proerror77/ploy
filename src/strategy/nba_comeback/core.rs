@@ -11,7 +11,8 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
 use crate::config::NbaComebackConfig;
@@ -35,7 +36,7 @@ pub struct ComebackOpportunity {
 }
 
 /// A single entry in a game position (for Kelly scaling-in tracking)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionEntry {
     pub entry_price: Decimal,
     pub shares: u64,
@@ -43,22 +44,44 @@ pub struct PositionEntry {
 }
 
 /// Tracks all entries for a single game (for Kelly scaling-in)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GamePosition {
     pub entries: Vec<PositionEntry>,
     pub initial_comeback_rate: f64,
     pub total_shares: u64,
     pub total_cost: Decimal,
+    /// Team abbreviation this YES position represents (for final settlement PnL).
+    #[serde(default)]
+    pub trailing_abbrev: Option<String>,
+    /// Market slug for exits; populated on initial entry.
+    #[serde(default)]
+    pub market_slug: Option<String>,
+    /// Token id for exits; populated on initial entry.
+    #[serde(default)]
+    pub token_id: Option<String>,
 }
 
 /// Mutable state across scan cycles
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NbaComebackState {
     pub traded_games: HashMap<String, DateTime<Utc>>,
     pub daily_spend_usd: Decimal,
     pub daily_spend_day: NaiveDate,
+    /// Realized PnL for current UTC day.
+    pub daily_realized_pnl_usd: Decimal,
+    /// Lifetime realized PnL from settled/early-exit positions.
+    pub total_realized_pnl_usd: Decimal,
+    /// Number of realized trades used for performance sizing.
+    pub settled_trades: u64,
+    /// Number of winning realized trades.
+    pub winning_trades: u64,
+    /// Current consecutive losing trades.
+    pub loss_streak: u32,
     /// Per-game position tracking for Kelly scaling-in
     pub game_positions: HashMap<String, GamePosition>,
+    /// Initial-entry idempotency keys (`game_id:token_id`) to prevent duplicate submits.
+    pub initial_entries: HashSet<String>,
 }
 
 impl Default for NbaComebackState {
@@ -67,8 +90,31 @@ impl Default for NbaComebackState {
             traded_games: HashMap::new(),
             daily_spend_usd: Decimal::ZERO,
             daily_spend_day: Utc::now().date_naive(),
+            daily_realized_pnl_usd: Decimal::ZERO,
+            total_realized_pnl_usd: Decimal::ZERO,
+            settled_trades: 0,
+            winning_trades: 0,
+            loss_streak: 0,
             game_positions: HashMap::new(),
+            initial_entries: HashSet::new(),
         }
+    }
+}
+
+impl NbaComebackState {
+    fn initial_entry_key(game_id: &str, token_id: &str) -> String {
+        format!("{game_id}:{token_id}")
+    }
+
+    pub fn is_initial_entry_recorded(&self, game_id: &str, token_id: &str) -> bool {
+        let key = Self::initial_entry_key(game_id, token_id);
+        self.initial_entries.contains(&key)
+    }
+
+    /// Returns true when the key was inserted, false when it already existed.
+    pub fn record_initial_entry(&mut self, game_id: &str, token_id: &str) -> bool {
+        let key = Self::initial_entry_key(game_id, token_id);
+        self.initial_entries.insert(key)
     }
 }
 
@@ -99,6 +145,7 @@ impl NbaComebackCore {
         if today != self.state.daily_spend_day {
             self.state.daily_spend_day = today;
             self.state.daily_spend_usd = Decimal::ZERO;
+            self.state.daily_realized_pnl_usd = Decimal::ZERO;
             info!("NBA comeback: daily spend reset");
         }
     }
@@ -114,6 +161,85 @@ impl NbaComebackCore {
 
     pub fn can_spend(&self, amount: Decimal) -> bool {
         self.state.daily_spend_usd + amount <= self.cfg.max_daily_spend_usd
+    }
+
+    pub fn has_hit_daily_loss_limit(&self) -> bool {
+        self.state.daily_realized_pnl_usd <= -self.cfg.performance_daily_loss_limit_usd
+    }
+
+    pub fn can_open_new_risk(&self) -> bool {
+        !self.has_hit_daily_loss_limit()
+    }
+
+    pub fn settled_win_rate(&self) -> Option<f64> {
+        if self.state.settled_trades == 0 {
+            return None;
+        }
+        Some(self.state.winning_trades as f64 / self.state.settled_trades as f64)
+    }
+
+    /// Dynamic size multiplier from realized performance.
+    ///
+    /// - No adjustment until `performance_min_settled_trades` reached.
+    /// - Low win rate and loss streak multipliers are multiplicative.
+    pub fn risk_size_multiplier(&self) -> f64 {
+        if self.state.settled_trades < self.cfg.performance_min_settled_trades {
+            return 1.0;
+        }
+
+        let mut multiplier = 1.0_f64;
+        if let Some(win_rate) = self.settled_win_rate() {
+            if win_rate < self.cfg.performance_min_win_rate {
+                multiplier *= self.cfg.performance_low_winrate_multiplier;
+            }
+        }
+        if self.state.loss_streak >= self.cfg.performance_loss_streak_threshold {
+            multiplier *= self.cfg.performance_loss_streak_multiplier;
+        }
+
+        multiplier.clamp(0.1, 1.0)
+    }
+
+    /// Base shares scaled by performance-aware risk multiplier.
+    pub fn adjusted_shares(&self, base_shares: u64) -> u64 {
+        if base_shares == 0 {
+            return 0;
+        }
+        let adjusted = (base_shares as f64 * self.risk_size_multiplier()).floor() as u64;
+        adjusted.max(1)
+    }
+
+    /// Record realized trade outcome (early exit or final settlement).
+    pub fn record_realized_pnl(&mut self, pnl: Decimal) {
+        self.state.total_realized_pnl_usd += pnl;
+        self.state.daily_realized_pnl_usd += pnl;
+        self.state.settled_trades = self.state.settled_trades.saturating_add(1);
+        if pnl > Decimal::ZERO {
+            self.state.winning_trades = self.state.winning_trades.saturating_add(1);
+            self.state.loss_streak = 0;
+        } else if pnl < Decimal::ZERO {
+            self.state.loss_streak = self.state.loss_streak.saturating_add(1);
+        } else {
+            self.state.loss_streak = 0;
+        }
+    }
+
+    pub fn has_position(&self, game_id: &str) -> bool {
+        self.state.game_positions.contains_key(game_id)
+    }
+
+    pub fn is_duplicate_initial_entry(&self, game_id: &str, token_id: &str) -> bool {
+        self.has_position(game_id) || self.state.is_initial_entry_recorded(game_id, token_id)
+    }
+
+    pub fn record_initial_entry_submission(
+        &mut self,
+        game_id: &str,
+        token_id: &str,
+        spend: Decimal,
+    ) {
+        self.record_trade(game_id, spend);
+        self.state.record_initial_entry(game_id, token_id);
     }
 
     pub fn record_trade(&mut self, game_id: &str, spend: Decimal) {
@@ -134,6 +260,70 @@ impl NbaComebackCore {
         shares: u64,
         comeback_rate: f64,
     ) {
+        self.record_position_entry_internal(
+            game_id,
+            None,
+            None,
+            None,
+            entry_price,
+            shares,
+            comeback_rate,
+        );
+    }
+
+    /// Record a position entry and persist market metadata needed for exit orders.
+    pub fn record_position_entry_with_market(
+        &mut self,
+        game_id: &str,
+        market_slug: &str,
+        token_id: &str,
+        entry_price: Decimal,
+        shares: u64,
+        comeback_rate: f64,
+    ) {
+        self.record_position_entry_internal(
+            game_id,
+            None,
+            Some(market_slug),
+            Some(token_id),
+            entry_price,
+            shares,
+            comeback_rate,
+        );
+    }
+
+    /// Record a position entry with market metadata and trailing team abbreviation.
+    pub fn record_position_entry_with_market_and_team(
+        &mut self,
+        game_id: &str,
+        trailing_abbrev: &str,
+        market_slug: &str,
+        token_id: &str,
+        entry_price: Decimal,
+        shares: u64,
+        comeback_rate: f64,
+    ) {
+        self.record_position_entry_internal(
+            game_id,
+            Some(trailing_abbrev),
+            Some(market_slug),
+            Some(token_id),
+            entry_price,
+            shares,
+            comeback_rate,
+        );
+    }
+
+    fn record_position_entry_internal(
+        &mut self,
+        game_id: &str,
+        trailing_abbrev: Option<&str>,
+        market_slug: Option<&str>,
+        token_id: Option<&str>,
+        entry_price: Decimal,
+        shares: u64,
+        comeback_rate: f64,
+    ) {
         let cost = entry_price * Decimal::from(shares);
         let entry = PositionEntry {
             entry_price,
@@ -150,11 +340,29 @@ impl NbaComebackCore {
                 initial_comeback_rate: comeback_rate,
                 total_shares: 0,
                 total_cost: Decimal::ZERO,
+                trailing_abbrev: trailing_abbrev.map(ToString::to_string),
+                market_slug: market_slug.map(ToString::to_string),
+                token_id: token_id.map(ToString::to_string),
             });
+
+        if pos.trailing_abbrev.is_none() {
+            pos.trailing_abbrev = trailing_abbrev.map(ToString::to_string);
+        }
+        if pos.market_slug.is_none() {
+            pos.market_slug = market_slug.map(ToString::to_string);
+        }
+        if pos.token_id.is_none() {
+            pos.token_id = token_id.map(ToString::to_string);
+        }
 
         pos.entries.push(entry);
         pos.total_shares += shares;
         pos.total_cost += cost;
+    }
+
+    /// Remove a tracked game position after full exit/settlement.
+    pub fn close_position(&mut self, game_id: &str) -> Option<GamePosition> {
+        self.state.game_positions.remove(game_id)
     }
 
     /// Check whether scaling-in guards pass for a game.
@@ -288,11 +496,7 @@ impl NbaComebackCore {
             .unwrap_or(50.0);
 
         let target_exposure = capped * max_exposure_f64;
-        let current_exposure = pos
-            .total_cost
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
+        let current_exposure = pos.total_cost.to_string().parse::<f64>().unwrap_or(0.0);
 
         let delta = target_exposure - current_exposure;
         if delta <= 0.0 {
@@ -581,12 +785,21 @@ mod tests {
             min_reward_risk_ratio: 4.0,
             min_expected_value: 0.05,
             kelly_fraction_cap: 0.25,
+            performance_daily_loss_limit_usd: dec!(30),
+            performance_min_settled_trades: 10,
+            performance_min_win_rate: 0.45,
+            performance_low_winrate_multiplier: 0.60,
+            performance_loss_streak_threshold: 3,
+            performance_loss_streak_multiplier: 0.50,
             scaling_enabled: true,
             scaling_max_adds: 3,
             scaling_min_price_drop_pct: 5.0,
             scaling_max_game_exposure_usd: dec!(50),
             scaling_min_comeback_retention: 0.70,
             scaling_min_time_remaining_mins: 8.0,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 15.0,
+            early_exit_stop_loss_pct: 20.0,
         }
     }
 
@@ -611,6 +824,9 @@ mod tests {
                 initial_comeback_rate: 0.22,
                 total_shares: 0,
                 total_cost: Decimal::ZERO,
+                trailing_abbrev: None,
+                market_slug: None,
+                token_id: None,
             });
         pos.entries.push(entry);
         pos.total_shares += 50;
@@ -638,6 +854,9 @@ mod tests {
                 initial_comeback_rate: 0.25,
                 total_shares: 0,
                 total_cost: Decimal::ZERO,
+                trailing_abbrev: None,
+                market_slug: None,
+                token_id: None,
             });
         for i in 0..4 {
             pos.entries.push(PositionEntry {
@@ -712,6 +931,9 @@ mod tests {
                 initial_comeback_rate: 0.22,
                 total_shares: 50,
                 total_cost: dec!(6),
+                trailing_abbrev: None,
+                market_slug: None,
+                token_id: None,
             });
 
         let cfg = scaling_cfg();
@@ -738,5 +960,140 @@ mod tests {
         let fair_value = 0.10_f64;
         let edge = fair_value - price_f64;
         assert!(edge <= 0.0);
+    }
+
+    #[test]
+    fn test_state_prevents_duplicate_initial_entries() {
+        let mut state = NbaComebackState::default();
+
+        assert!(!state.is_initial_entry_recorded("game-1", "token-a"));
+        assert!(state.record_initial_entry("game-1", "token-a"));
+        assert!(state.is_initial_entry_recorded("game-1", "token-a"));
+
+        // Same game+token should be treated as duplicate.
+        assert!(!state.record_initial_entry("game-1", "token-a"));
+
+        // Different token or game should still be allowed.
+        assert!(state.record_initial_entry("game-1", "token-b"));
+        assert!(state.record_initial_entry("game-2", "token-a"));
+    }
+
+    #[tokio::test]
+    async fn test_record_position_entry_with_market_metadata() {
+        let cfg = scaling_cfg();
+        let mut core = NbaComebackCore {
+            espn: EspnClient::new(),
+            stats: ComebackStatsProvider::new(
+                // Test doesn't touch DB; use lazy connection options via a local pool.
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://localhost/unused")
+                    .expect("lazy pool"),
+                cfg.season.clone(),
+            ),
+            winprob_model: LiveWinProbModel::default_untrained(),
+            cfg,
+            state: NbaComebackState::default(),
+        };
+
+        core.record_position_entry_with_market(
+            "game-1",
+            "market-1",
+            "token-1",
+            dec!(0.20),
+            50,
+            0.25,
+        );
+
+        let pos = core.state.game_positions.get("game-1").expect("position");
+        assert_eq!(pos.market_slug.as_deref(), Some("market-1"));
+        assert_eq!(pos.token_id.as_deref(), Some("token-1"));
+    }
+
+    #[test]
+    fn test_state_json_roundtrip_preserves_positions_and_idempotency() {
+        let mut state = NbaComebackState::default();
+        state.daily_spend_usd = dec!(12.5);
+        state.record_initial_entry("game-1", "token-a");
+        state.traded_games.insert(
+            "game-1".to_string(),
+            Utc::now() - chrono::Duration::seconds(15),
+        );
+        state.game_positions.insert(
+            "game-1".to_string(),
+            GamePosition {
+                entries: vec![PositionEntry {
+                    entry_price: dec!(0.31),
+                    shares: 40,
+                    timestamp: Utc::now(),
+                }],
+                initial_comeback_rate: 0.22,
+                total_shares: 40,
+                total_cost: dec!(12.4),
+                trailing_abbrev: Some("HOU".to_string()),
+                market_slug: Some("market-1".to_string()),
+                token_id: Some("token-a".to_string()),
+            },
+        );
+
+        let json = serde_json::to_value(&state).expect("serialize state");
+        let restored: NbaComebackState = serde_json::from_value(json).expect("deserialize state");
+
+        assert!(restored.is_initial_entry_recorded("game-1", "token-a"));
+        let pos = restored
+            .game_positions
+            .get("game-1")
+            .expect("restored position");
+        assert_eq!(pos.total_shares, 40);
+        assert_eq!(pos.market_slug.as_deref(), Some("market-1"));
+        assert_eq!(restored.daily_spend_usd, dec!(12.5));
+        assert_eq!(restored.daily_realized_pnl_usd, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_daily_loss_limit_blocks_new_risk() {
+        let cfg = scaling_cfg();
+        let mut core = NbaComebackCore {
+            espn: EspnClient::new(),
+            stats: ComebackStatsProvider::new(
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://localhost/unused")
+                    .expect("lazy pool"),
+                cfg.season.clone(),
+            ),
+            winprob_model: LiveWinProbModel::default_untrained(),
+            cfg,
+            state: NbaComebackState::default(),
+        };
+
+        core.record_realized_pnl(dec!(-20));
+        assert!(core.can_open_new_risk());
+        core.record_realized_pnl(dec!(-11));
+        assert!(core.has_hit_daily_loss_limit());
+        assert!(!core.can_open_new_risk());
+    }
+
+    #[tokio::test]
+    async fn test_adjusted_shares_reduces_after_poor_performance() {
+        let cfg = scaling_cfg();
+        let mut core = NbaComebackCore {
+            espn: EspnClient::new(),
+            stats: ComebackStatsProvider::new(
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://localhost/unused")
+                    .expect("lazy pool"),
+                cfg.season.clone(),
+            ),
+            winprob_model: LiveWinProbModel::default_untrained(),
+            cfg,
+            state: NbaComebackState::default(),
+        };
+
+        core.state.settled_trades = 10;
+        core.state.winning_trades = 3; // 30% < 45%
+        core.state.loss_streak = 3; // >= threshold
+
+        let multiplier = core.risk_size_multiplier();
+        assert!((multiplier - 0.30).abs() < f64::EPSILON); // 0.60 * 0.50
+        assert_eq!(core.adjusted_shares(50), 15);
     }
 }

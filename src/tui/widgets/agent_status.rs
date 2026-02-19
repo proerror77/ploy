@@ -14,6 +14,9 @@ pub fn render_agent_status(f: &mut Frame, area: Rect, agents: &[DisplayAgent]) {
         "Pos",
         "Exposure",
         "PnL",
+        "WR",
+        "LS",
+        "Mult",
         "Heartbeat",
     ]
     .iter()
@@ -41,6 +44,19 @@ pub fn render_agent_status(f: &mut Frame, area: Rect, agents: &[DisplayAgent]) {
             Color::Red
         };
 
+        let win_rate = a
+            .win_rate
+            .map(|wr| format!("{:.1}%", wr * 100.0))
+            .unwrap_or_else(|| "-".to_string());
+        let loss_streak = a
+            .loss_streak
+            .map(|ls| ls.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let multiplier = a
+            .size_multiplier
+            .map(|m| format!("{:.2}x", m))
+            .unwrap_or_else(|| "-".to_string());
+
         Row::new(vec![
             Cell::from(a.name.clone()).style(Style::default().fg(Color::White)),
             Cell::from(a.domain.clone()).style(Style::default().fg(Color::Magenta)),
@@ -48,6 +64,9 @@ pub fn render_agent_status(f: &mut Frame, area: Rect, agents: &[DisplayAgent]) {
             Cell::from(a.position_count.to_string()).style(Style::default().fg(Color::White)),
             Cell::from(format!("${}", a.exposure)).style(Style::default().fg(Color::White)),
             Cell::from(format!("${}", a.daily_pnl)).style(Style::default().fg(pnl_color)),
+            Cell::from(win_rate).style(Style::default().fg(Color::White)),
+            Cell::from(loss_streak).style(Style::default().fg(Color::White)),
+            Cell::from(multiplier).style(Style::default().fg(Color::White)),
             Cell::from(a.last_heartbeat.clone()).style(Style::default().fg(Color::DarkGray)),
         ])
     });
@@ -61,6 +80,9 @@ pub fn render_agent_status(f: &mut Frame, area: Rect, agents: &[DisplayAgent]) {
             Constraint::Length(5),
             Constraint::Length(12),
             Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Length(5),
+            Constraint::Length(8),
             Constraint::Length(10),
         ],
     )

@@ -21,6 +21,8 @@ pub struct AgentSnapshot {
     pub exposure: Decimal,
     pub daily_pnl: Decimal,
     pub unrealized_pnl: Decimal,
+    /// Strategy-specific metrics (string map for extensibility across agents).
+    pub metrics: HashMap<String, String>,
     pub last_heartbeat: DateTime<Utc>,
     pub error_message: Option<String>,
 }

@@ -44,7 +44,9 @@ cp .env.minimax.example .env
 | Variable | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Anthropic-compatible API key (required) |
-| `ANTHROPIC_BASE_URL` | — | Optional Anthropic-compatible base URL (example: MiniMax `https://api.minimax.io/anthropic`) |
+| `ANTHROPIC_BASE_URL` | — | Optional Anthropic-compatible base URL (MiniMax examples: `https://api.minimaxi.com/anthropic` or `https://api.minimax.io/anthropic`) |
+| `ANTHROPIC_CUSTOM_HEADERS` | — | Optional custom headers, one per line in `Header: Value` format (example: `Authorization: Bearer <key>`) |
+| `MINIMAX_ANTHROPIC_MODEL` | `MiniMax-M2.5` | Optional MiniMax model id used for automatic alias mapping when `ANTHROPIC_BASE_URL` points to MiniMax |
 | `PLOY_API_URL` | `http://localhost:8081` | Ploy Rust backend URL |
 | `PLOY_API_KEY` | — | Bearer token (optional) |
 | `SIDECAR_MODEL` | `sonnet` | Model name or alias (`sonnet`, `opus`, `haiku`, or a full model id like `claude-opus-4-6` / `MiniMax-M2.5`) |
@@ -59,10 +61,19 @@ Grok is configured on the **Rust backend** side via `GROK_API_KEY`.
 If you want to use **MiniMax M2.5** via their **Anthropic-compatible** endpoint (instead of Claude models), set:
 
 ```sh
-export ANTHROPIC_BASE_URL="https://api.minimax.io/anthropic"
+export ANTHROPIC_BASE_URL="https://api.minimaxi.com/anthropic"
 export ANTHROPIC_API_KEY="YOUR_MINIMAX_API_KEY"
 export SIDECAR_MODEL="MiniMax-M2.5"
+# Optional for Anthropic-compatible providers that require explicit Authorization:
+export ANTHROPIC_CUSTOM_HEADERS=$'Authorization: Bearer YOUR_MINIMAX_API_KEY'
 ```
+
+When `ANTHROPIC_BASE_URL` points to MiniMax, the sidecar now auto-applies:
+
+- `Authorization: Bearer ...` header (if `ANTHROPIC_CUSTOM_HEADERS` is unset)
+- alias mapping for `opus` / `sonnet` / `haiku` to `MINIMAX_ANTHROPIC_MODEL` (default `MiniMax-M2.5`)
+
+If you get `invalid api key` on one MiniMax domain, switch to the other domain above (accounts are often region-bound).
 
 If you prefer to keep using model aliases like `opus` in configs, you can also map Claude aliases to MiniMax by setting:
 
