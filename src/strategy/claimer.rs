@@ -482,8 +482,15 @@ impl AutoClaimer {
         info!("Found {} redeemable condition(s)", positions.len());
 
         let mut results = Vec::new();
+        let mut abort_remaining_claims = false;
 
         for pos in positions {
+            if abort_remaining_claims {
+                debug!(
+                    "Skipping remaining redeemable conditions in this cycle after terminal claim error"
+                );
+                break;
+            }
             // Skip if already claimed
             {
                 let claimed = self.claimed_conditions.read().await;
@@ -521,13 +528,25 @@ impl AutoClaimer {
                         });
                     }
                     Err(e) => {
+                        let err_text = e.to_string();
+                        let terminal_cycle_error = err_text
+                            .contains("Relayer submit failed: status=429")
+                            || err_text
+                                .contains("Insufficient native gas for on-chain fallback redeem");
                         results.push(ClaimResult {
                             condition_id: pos.condition_id,
                             amount_claimed: Decimal::ZERO,
                             tx_hash: String::new(),
                             success: false,
-                            error: Some(e.to_string()),
+                            error: Some(err_text.clone()),
                         });
+                        if terminal_cycle_error {
+                            warn!(
+                                "Stopping further claim attempts in this cycle after terminal error: {}",
+                                err_text
+                            );
+                            abort_remaining_claims = true;
+                        }
                     }
                 }
             } else {
