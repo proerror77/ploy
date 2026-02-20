@@ -336,7 +336,9 @@ pub async fn halt_system(
 /// GET /api/config
 pub async fn get_config(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<StrategyConfig>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let config = state.config.read().await;
 
     Ok(Json(StrategyConfig {

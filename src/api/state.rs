@@ -1,14 +1,18 @@
 use crate::adapters::PostgresStore;
 use crate::agent::grok::GrokClient;
-use crate::api::types::WsMessage;
+use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
 use crate::coordinator::CoordinatorHandle;
 use crate::platform::StrategyDeployment;
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::Serialize;
+use sqlx::Row;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
+use tokio::time::Duration;
 
 /// Shared application state for API handlers
 #[derive(Clone)]
@@ -98,9 +102,14 @@ impl AppState {
     }
 
     fn deployments_state_path() -> PathBuf {
-        std::env::var("PLOY_DEPLOYMENTS_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("data/state/deployments.json"))
+        if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
+            return PathBuf::from(path);
+        }
+        let container_data_root = Path::new("/opt/ploy/data");
+        if container_data_root.exists() {
+            return container_data_root.join("state/deployments.json");
+        }
+        PathBuf::from("data/state/deployments.json")
     }
 
     fn load_deployments(path: &Path) -> HashMap<String, StrategyDeployment> {
@@ -202,5 +211,200 @@ impl AppState {
     /// Get system uptime in seconds
     pub fn uptime_seconds(&self) -> i64 {
         (Utc::now() - self.start_time).num_seconds()
+    }
+
+    /// Broadcast DB-backed realtime updates so UI receives trade/position/market
+    /// events even when orders are submitted by internal runtime agents.
+    pub fn spawn_realtime_broadcast_loop(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            let mut last_trade_key: Option<String> = None;
+            let mut last_positions_sig = String::new();
+            let mut last_market_key: Option<String> = None;
+
+            loop {
+                tick.tick().await;
+
+                // Latest trade from cycles.
+                if let Ok(Some(row)) = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        created_at,
+                        leg1_token_id,
+                        leg1_side,
+                        leg1_shares,
+                        leg1_price,
+                        leg2_price,
+                        pnl,
+                        state,
+                        error_message
+                    FROM cycles
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .fetch_optional(state.store.pool())
+                .await
+                {
+                    let id = if let Ok(v) = row.try_get::<uuid::Uuid, _>("id") {
+                        v.to_string()
+                    } else if let Ok(v) = row.try_get::<String, _>("id") {
+                        v
+                    } else {
+                        String::new()
+                    };
+                    if !id.is_empty() && last_trade_key.as_deref() != Some(id.as_str()) {
+                        let timestamp: DateTime<Utc> =
+                            row.try_get("created_at").unwrap_or_else(|_| Utc::now());
+                        let token_id: String = row.try_get("leg1_token_id").unwrap_or_default();
+                        let side: String = row.try_get("leg1_side").unwrap_or_default();
+                        let shares: i32 = row.try_get("leg1_shares").unwrap_or(0);
+                        let entry_price: Decimal =
+                            row.try_get("leg1_price").unwrap_or(Decimal::ZERO);
+                        let exit_price = row
+                            .try_get::<Decimal, _>("leg2_price")
+                            .ok()
+                            .and_then(|d| d.to_f64());
+                        let pnl = row
+                            .try_get::<Decimal, _>("pnl")
+                            .ok()
+                            .and_then(|d| d.to_f64());
+                        let status: String = row.try_get("state").unwrap_or_default();
+                        let error_message: Option<String> = row.try_get("error_message").ok();
+
+                        state.broadcast(WsMessage::Trade(TradeResponse {
+                            id: id.clone(),
+                            timestamp,
+                            token_id: token_id.clone(),
+                            token_name: token_id.split('-').next().unwrap_or("Unknown").to_string(),
+                            side,
+                            shares,
+                            entry_price: entry_price.to_f64().unwrap_or(0.0),
+                            exit_price,
+                            pnl,
+                            status,
+                            error_message,
+                        }));
+                        last_trade_key = Some(id);
+                    }
+                }
+
+                // Active positions from cycles.
+                if let Ok(rows) = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        created_at,
+                        leg1_token_id,
+                        leg1_side,
+                        leg1_shares,
+                        leg1_price
+                    FROM cycles
+                    WHERE state IN ('LEG1_PENDING', 'LEG1_FILLED', 'LEG2_PENDING')
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                    "#,
+                )
+                .fetch_all(state.store.pool())
+                .await
+                {
+                    let mut sig_parts: Vec<String> = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        let id = if let Ok(v) = row.try_get::<uuid::Uuid, _>("id") {
+                            v.to_string()
+                        } else if let Ok(v) = row.try_get::<String, _>("id") {
+                            v
+                        } else {
+                            String::new()
+                        };
+                        if !id.is_empty() {
+                            sig_parts.push(id);
+                        }
+                    }
+                    let sig = sig_parts.join(",");
+                    if sig != last_positions_sig {
+                        for row in rows {
+                            let entry_time: DateTime<Utc> =
+                                row.try_get("created_at").unwrap_or_else(|_| Utc::now());
+                            let token_id: String = row.try_get("leg1_token_id").unwrap_or_default();
+                            let side: String = row.try_get("leg1_side").unwrap_or_default();
+                            let shares: i32 = row.try_get("leg1_shares").unwrap_or(0);
+                            let entry_price: Decimal =
+                                row.try_get("leg1_price").unwrap_or(Decimal::ZERO);
+                            let entry_price_f64 = entry_price.to_f64().unwrap_or(0.0);
+                            let duration_seconds = (Utc::now() - entry_time).num_seconds();
+
+                            state.broadcast(WsMessage::Position(PositionResponse {
+                                token_id: token_id.clone(),
+                                token_name: token_id
+                                    .split('-')
+                                    .next()
+                                    .unwrap_or("Unknown")
+                                    .to_string(),
+                                side,
+                                shares,
+                                entry_price: entry_price_f64,
+                                current_price: entry_price_f64,
+                                unrealized_pnl: 0.0,
+                                entry_time,
+                                duration_seconds,
+                            }));
+                        }
+                        last_positions_sig = sig;
+                    }
+                }
+
+                // Latest market quote.
+                if let Ok(Some(row)) = sqlx::query(
+                    r#"
+                    SELECT token_id, best_bid, best_ask, received_at
+                    FROM clob_quote_ticks
+                    ORDER BY received_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .fetch_optional(state.store.pool())
+                .await
+                {
+                    let token_id: String = row.try_get("token_id").unwrap_or_default();
+                    let received_at: DateTime<Utc> =
+                        row.try_get("received_at").unwrap_or_else(|_| Utc::now());
+                    let market_key = format!("{}:{}", token_id, received_at.timestamp_micros());
+                    if !token_id.is_empty()
+                        && last_market_key.as_deref() != Some(market_key.as_str())
+                    {
+                        let best_bid = row
+                            .try_get::<Decimal, _>("best_bid")
+                            .ok()
+                            .and_then(|d| d.to_f64())
+                            .unwrap_or(0.0);
+                        let best_ask = row
+                            .try_get::<Decimal, _>("best_ask")
+                            .ok()
+                            .and_then(|d| d.to_f64())
+                            .unwrap_or(0.0);
+                        state.broadcast(WsMessage::Market(MarketData {
+                            token_id: token_id.clone(),
+                            token_name: token_id.clone(),
+                            best_bid,
+                            best_ask,
+                            spread: (best_ask - best_bid).max(0.0),
+                            last_price: if best_bid > 0.0 && best_ask > 0.0 {
+                                (best_bid + best_ask) / 2.0
+                            } else {
+                                best_ask.max(best_bid)
+                            },
+                            volume_24h: 0.0,
+                            timestamp: received_at,
+                        }));
+                        last_market_key = Some(market_key);
+                    }
+                }
+            }
+        });
     }
 }

@@ -17,6 +17,7 @@ pub async fn start_api_server(
     config: StrategyConfigState,
 ) -> Result<()> {
     let app_state = AppState::new(store, config);
+    app_state.spawn_realtime_broadcast_loop();
 
     let app = create_router(app_state);
 
@@ -38,6 +39,7 @@ pub async fn start_api_server_with_platform(
     grok_client: Option<Arc<GrokClient>>,
 ) -> Result<()> {
     let app_state = AppState::with_platform_services(store, config, coordinator, grok_client);
+    app_state.spawn_realtime_broadcast_loop();
 
     let app = create_router(app_state);
 

@@ -342,15 +342,21 @@ impl MomentumStrategyAdapter {
         };
 
         let exit_config = ExitConfig {
+            // Binary options semantics:
+            // - exit_edge_floor_pct: minimum modeled edge before forced exit
+            // - exit_price_band_pct: adverse price-band threshold
+            // Keep legacy take_profit/stop_loss keys as backward-compatible aliases.
             take_profit_pct: Decimal::try_from(
-                exit.get("take_profit")
+                exit.get("exit_edge_floor_pct")
+                    .or_else(|| exit.get("take_profit"))
                     .and_then(|v| v.as_float())
                     .unwrap_or(20.0)
                     / 100.0,
             )
             .unwrap_or(dec!(0.20)),
             stop_loss_pct: Decimal::try_from(
-                exit.get("stop_loss")
+                exit.get("exit_price_band_pct")
+                    .or_else(|| exit.get("stop_loss"))
                     .and_then(|v| v.as_float())
                     .unwrap_or(12.0)
                     / 100.0,
@@ -1675,8 +1681,8 @@ min_move = 0.5
 max_entry = 45
 
 [exit]
-take_profit = 20
-stop_loss = 12
+exit_edge_floor_pct = 20
+exit_price_band_pct = 12
 
 [timing]
 min_time_remaining = 300

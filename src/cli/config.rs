@@ -266,11 +266,11 @@ max_entry = 45
 min_edge = 5
 
 [exit]
-# Take profit percentage (predictive mode)
-take_profit = 20
+# Binary options: minimum modeled edge floor (%) before forced exit
+exit_edge_floor_pct = 20
 
-# Stop loss percentage (predictive mode)
-stop_loss = 12
+# Binary options: adverse price-band threshold (%) for risk exit
+exit_price_band_pct = 12
 
 # Hold to resolution (confirmatory mode only)
 hold_to_resolution = false

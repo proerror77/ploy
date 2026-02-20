@@ -26,6 +26,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::{
+    auth::ensure_admin_authorized,
     state::AppState,
     types::{MarketData, PositionResponse, TradeResponse, WsMessage},
 };
@@ -319,6 +320,15 @@ fn ensure_sidecar_authorized(headers: &HeaderMap) -> std::result::Result<(), (St
             "sidecar auth failed (missing/invalid token)".to_string(),
         )),
     }
+}
+
+fn ensure_sidecar_or_admin_authorized(
+    headers: &HeaderMap,
+) -> std::result::Result<(), (StatusCode, String)> {
+    if ensure_sidecar_authorized(headers).is_ok() {
+        return Ok(());
+    }
+    ensure_admin_authorized(headers)
 }
 
 fn deployment_gate_required() -> bool {
@@ -1355,7 +1365,7 @@ pub async fn sidecar_get_risk(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> std::result::Result<Json<SidecarRiskState>, (StatusCode, String)> {
-    ensure_sidecar_authorized(&headers)?;
+    ensure_sidecar_or_admin_authorized(&headers)?;
     match state.coordinator.as_ref() {
         Some(coordinator) => {
             let global = coordinator.read_state().await;

@@ -38,7 +38,9 @@ pub struct DeploymentDeleteResponse {
 /// GET /api/deployments
 pub async fn list_deployments(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<Vec<StrategyDeployment>>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let deployments = state.deployments.read().await;
     let mut items: Vec<StrategyDeployment> = deployments.values().cloned().collect();
     items.sort_by(|a, b| a.id.cmp(&b.id));
@@ -48,8 +50,10 @@ pub async fn list_deployments(
 /// GET /api/deployments/:id
 pub async fn get_deployment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<StrategyDeployment>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let deployments = state.deployments.read().await;
     let key = id.trim();
     if key.is_empty() {

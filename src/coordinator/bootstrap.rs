@@ -23,7 +23,7 @@ use crate::config::AppConfig;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::platform::{Domain, MarketSelector, StrategyDeployment};
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
@@ -36,7 +36,8 @@ use polymarket_client_sdk::data::Client as DataApiClient;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::instrument;
 
@@ -2259,6 +2260,210 @@ fn env_decimal_opt(name: &str) -> Option<rust_decimal::Decimal> {
         .and_then(|v| v.parse::<rust_decimal::Decimal>().ok())
 }
 
+fn deployments_state_path() -> PathBuf {
+    if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
+        return PathBuf::from(path);
+    }
+    let container_data_root = Path::new("/opt/ploy/data");
+    if container_data_root.exists() {
+        return container_data_root.join("state/deployments.json");
+    }
+    PathBuf::from("data/state/deployments.json")
+}
+
+fn parse_strategy_deployments(raw: &str) -> Vec<StrategyDeployment> {
+    let mut out = Vec::new();
+    if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
+        for dep in items {
+            if dep.id.trim().is_empty() {
+                continue;
+            }
+            out.push(dep);
+        }
+    }
+    out
+}
+
+fn load_strategy_deployments() -> Vec<StrategyDeployment> {
+    let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
+        .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
+        .unwrap_or_default();
+    if !raw.trim().is_empty() {
+        return parse_strategy_deployments(&raw);
+    }
+
+    let path = deployments_state_path();
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        return parse_strategy_deployments(&contents);
+    }
+    Vec::new()
+}
+
+fn add_coin_from_text(raw: &str, coins: &mut HashSet<String>) {
+    let upper = raw.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return;
+    }
+
+    for known in ["BTC", "ETH", "SOL", "XRP"] {
+        if upper.contains(known) {
+            coins.insert(known.to_string());
+        }
+    }
+
+    for token in upper.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let base = t.strip_suffix("USDT").unwrap_or(t);
+        if (2..=8).contains(&base.len()) && base.chars().all(|c| c.is_ascii_alphabetic()) {
+            coins.insert(base.to_string());
+        }
+    }
+}
+
+fn add_coins_from_selector(selector: &MarketSelector, coins: &mut HashSet<String>) {
+    match selector {
+        MarketSelector::Static {
+            symbol,
+            series_id,
+            market_slug,
+        } => {
+            if let Some(raw) = symbol.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+            if let Some(raw) = series_id.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+            if let Some(raw) = market_slug.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+        }
+        MarketSelector::Dynamic { query, .. } => {
+            if let Some(raw) = query.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+        }
+    }
+}
+
+fn apply_strategy_deployments(
+    cfg: &mut PlatformBootstrapConfig,
+    deployments: &[StrategyDeployment],
+) {
+    if deployments.is_empty() {
+        return;
+    }
+
+    let enabled: Vec<&StrategyDeployment> = deployments.iter().filter(|d| d.enabled).collect();
+
+    cfg.enable_crypto = false;
+    cfg.enable_crypto_momentum = false;
+    cfg.enable_crypto_lob_ml = false;
+    #[cfg(feature = "rl")]
+    {
+        cfg.enable_crypto_rl_policy = false;
+    }
+    cfg.enable_sports = false;
+    cfg.enable_politics = false;
+
+    let mut coins: HashSet<String> = HashSet::new();
+    let mut timeframe_summary: HashMap<String, usize> = HashMap::new();
+
+    for dep in enabled.iter().copied() {
+        *timeframe_summary
+            .entry(dep.timeframe.as_str().to_string())
+            .or_insert(0) += 1;
+
+        match dep.domain {
+            Domain::Crypto => {
+                cfg.enable_crypto = true;
+                let strategy_key = dep
+                    .strategy
+                    .to_ascii_lowercase()
+                    .replace(['-', '_', ' '], "");
+
+                let mut matched = false;
+                if strategy_key.contains("momentum") || strategy_key.contains("mom") {
+                    cfg.enable_crypto_momentum = true;
+                    matched = true;
+                }
+                if strategy_key.contains("pattern")
+                    || strategy_key.contains("memory")
+                    || strategy_key.contains("pattenmem")
+                    || strategy_key.contains("lob")
+                    || strategy_key.contains("dl")
+                {
+                    cfg.enable_crypto_lob_ml = true;
+                    matched = true;
+                }
+                #[cfg(feature = "rl")]
+                if strategy_key.contains("rl") || strategy_key.contains("policy") {
+                    cfg.enable_crypto_rl_policy = true;
+                    matched = true;
+                }
+                if !matched {
+                    cfg.enable_crypto_momentum = true;
+                }
+
+                add_coins_from_selector(&dep.market_selector, &mut coins);
+            }
+            Domain::Sports => cfg.enable_sports = true,
+            Domain::Politics => cfg.enable_politics = true,
+            Domain::Economics | Domain::Custom(_) => {}
+        }
+    }
+
+    if cfg.enable_crypto && !cfg.enable_crypto_momentum && !cfg.enable_crypto_lob_ml && {
+        #[cfg(feature = "rl")]
+        {
+            !cfg.enable_crypto_rl_policy
+        }
+        #[cfg(not(feature = "rl"))]
+        {
+            true
+        }
+    } {
+        cfg.enable_crypto_momentum = true;
+    }
+
+    if !coins.is_empty() {
+        let mut sorted: Vec<String> = coins.into_iter().collect();
+        sorted.sort();
+        cfg.crypto.coins = sorted.clone();
+        cfg.crypto_lob_ml.coins = sorted.clone();
+        #[cfg(feature = "rl")]
+        {
+            cfg.crypto_rl_policy.coins = sorted.clone();
+        }
+    }
+
+    let mut tf: Vec<String> = timeframe_summary
+        .into_iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+    tf.sort();
+    #[cfg(feature = "rl")]
+    let crypto_rl_policy_enabled = cfg.enable_crypto_rl_policy;
+    #[cfg(not(feature = "rl"))]
+    let crypto_rl_policy_enabled = false;
+
+    info!(
+        total = deployments.len(),
+        enabled = enabled.len(),
+        crypto = cfg.enable_crypto,
+        crypto_momentum = cfg.enable_crypto_momentum,
+        crypto_lob_ml = cfg.enable_crypto_lob_ml,
+        crypto_rl_policy = crypto_rl_policy_enabled,
+        sports = cfg.enable_sports,
+        politics = cfg.enable_politics,
+        coins = ?cfg.crypto.coins,
+        timeframes = ?tf,
+        "applied strategy deployment matrix to platform runtime"
+    );
+}
+
 fn spawn_clob_orderbook_persistence(
     pm_ws: Arc<PolymarketWebSocket>,
     pool: PgPool,
@@ -2429,7 +2634,7 @@ impl PlatformBootstrapConfig {
             max_consecutive_failures: app.risk.max_consecutive_failures,
             daily_loss_limit: app.risk.daily_loss_limit_usd,
             max_spread_bps: 500,
-            critical_bypass_exposure: true,
+            critical_bypass_exposure: false,
             ..Default::default()
         };
 
@@ -2928,6 +3133,11 @@ impl PlatformBootstrapConfig {
             }
         }
 
+        let strategy_deployments = load_strategy_deployments();
+        if !strategy_deployments.is_empty() {
+            apply_strategy_deployments(&mut cfg, &strategy_deployments);
+        }
+
         // OpenClaw-first runtime lockdown:
         // keep coordinator available, but disable built-in agent loops.
         if app.openclaw_runtime_lockdown() {
@@ -3035,6 +3245,8 @@ pub async fn start_platform(
         Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
     if let Some(pool) = shared_pool.as_ref() {
         let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
+        let require_startup_schema =
+            env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
         let migration_store = PostgresStore::from_pool(pool.clone());
         if let Err(e) = migration_store.migrate().await {
             if require_sqlx_migrations {
@@ -3047,25 +3259,61 @@ pub async fn start_platform(
         }
         ensure_schema_repairs(pool).await?;
         if let Err(e) = ensure_accounts_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure accounts table: {}",
+                    e
+                )));
+            }
             warn!(error = %e, "failed to ensure accounts table");
         } else if let Err(e) =
             upsert_account_from_config(pool, &account_id, &app_config.account).await
         {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to upsert account metadata: {}",
+                    e
+                )));
+            }
             warn!(error = %e, "failed to upsert account metadata");
         }
         if let Err(e) = ensure_agent_order_executions_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure agent_order_executions table: {}",
+                    e
+                )));
+            }
             warn!(error = %e, "failed to ensure agent_order_executions table; execution logging disabled");
         } else {
             coordinator.set_execution_log_pool(pool.clone());
         }
         if let Err(e) = ensure_strategy_observability_tables(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure strategy observability tables: {}",
+                    e
+                )));
+            }
             warn!(error = %e, "failed to ensure strategy observability tables");
         }
         if let Err(e) = ensure_pm_token_settlements_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure pm_token_settlements table: {}",
+                    e
+                )));
+            }
             warn!(error = %e, "failed to ensure pm_token_settlements table");
         }
         if config.enable_crypto {
             if let Err(e) = ensure_clob_trade_alerts_table(pool).await {
+                if require_startup_schema {
+                    return Err(crate::error::PloyError::Internal(format!(
+                        "failed to ensure clob_trade_alerts table: {}",
+                        e
+                    )));
+                }
                 warn!(
                     error = %e,
                     "failed to ensure clob_trade_alerts table at startup"

@@ -12,59 +12,12 @@ import type {
 
 const API_BASE = '/api';
 
-type RuntimeConfig = {
-  PLOY_API_ADMIN_TOKEN?: string;
-  PLOY_SIDECAR_AUTH_TOKEN?: string;
-};
-
-declare global {
-  interface Window {
-    __PLOY_RUNTIME_CONFIG__?: RuntimeConfig;
-  }
-}
-
-const viteEnv = import.meta.env as Record<string, string | undefined>;
-
-function runtimeConfig(): RuntimeConfig {
-  if (typeof window === 'undefined') {
-    return {};
-  }
-  return window.__PLOY_RUNTIME_CONFIG__ ?? {};
-}
-
-function readStorage(key: string): string | undefined {
-  if (typeof window === 'undefined') {
-    return undefined;
-  }
-  const value = window.localStorage.getItem(key)?.trim();
-  return value ? value : undefined;
-}
-
-function resolveAdminToken(): string | undefined {
-  return (
-    runtimeConfig().PLOY_API_ADMIN_TOKEN?.trim() ||
-    viteEnv.VITE_PLOY_API_ADMIN_TOKEN?.trim() ||
-    readStorage('PLOY_API_ADMIN_TOKEN')
-  );
-}
-
-function resolveSidecarToken(): string | undefined {
-  return (
-    runtimeConfig().PLOY_SIDECAR_AUTH_TOKEN?.trim() ||
-    viteEnv.VITE_PLOY_SIDECAR_AUTH_TOKEN?.trim() ||
-    readStorage('PLOY_SIDECAR_AUTH_TOKEN')
-  );
-}
-
 class ApiService {
   private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
-    const adminToken = resolveAdminToken();
-    const sidecarToken = resolveSidecarToken();
     const response = await fetch(`${API_BASE}${endpoint}`, {
+      credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
-        ...(adminToken ? { 'x-ploy-admin-token': adminToken } : {}),
-        ...(sidecarToken ? { 'x-ploy-sidecar-token': sidecarToken } : {}),
         ...options?.headers,
       },
       ...options,
@@ -76,6 +29,25 @@ class ApiService {
     }
 
     return response.json();
+  }
+
+  async getAuthSession(): Promise<{ authenticated: boolean; auth_required: boolean }> {
+    return this.fetch<{ authenticated: boolean; auth_required: boolean }>('/auth/session');
+  }
+
+  async login(adminToken: string): Promise<{ success: boolean }> {
+    return this.fetch<{ success: boolean }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        admin_token: adminToken,
+      }),
+    });
+  }
+
+  async logout(): Promise<{ success: boolean }> {
+    return this.fetch<{ success: boolean }>('/auth/logout', {
+      method: 'POST',
+    });
   }
 
   // Stats endpoints
