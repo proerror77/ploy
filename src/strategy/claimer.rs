@@ -8,6 +8,16 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
+use chrono::{NaiveDate, Utc};
+use ethers::middleware::SignerMiddleware;
+use ethers::providers::{
+    Http as EthersHttp, Middleware as EthersMiddleware, Provider as EthersProvider,
+};
+use ethers::signers::{LocalWallet, Signer as _};
+use ethers::types::{
+    Address as EthersAddress, TransactionRequest as EthersTransactionRequest, U256 as EthersU256,
+    U64 as EthersU64,
+};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +31,12 @@ use crate::error::Result;
 const CONDITIONAL_TOKENS_POLYGON: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 const USDC_E_POLYGON: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const POLYGON_RPC_DEFAULT: &str = "https://polygon-bor-rpc.publicnode.com";
+const POLYGON_CHAIN_ID: u64 = 137;
 const DEFAULT_MIN_NATIVE_GAS_WEI: u64 = 5_000_000_000_000_000; // 0.005 MATIC buffer
+const DEFAULT_AUTO_TOPUP_TARGET_WEI: u128 = 20_000_000_000_000_000; // 0.02 MATIC
+const DEFAULT_AUTO_TOPUP_MAX_PER_TX_WEI: u128 = 20_000_000_000_000_000; // 0.02 MATIC
+const DEFAULT_AUTO_TOPUP_DAILY_CAP_WEI: u128 = 100_000_000_000_000_000; // 0.1 MATIC
+const DEFAULT_AUTO_TOPUP_RESERVE_WEI: u128 = 5_000_000_000_000_000; // keep 0.005 MATIC on top-up wallet
 
 // Generate contract bindings for ConditionalTokens
 sol! {
@@ -77,12 +92,52 @@ fn env_flag(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn env_string_any(keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Ok(v) = std::env::var(key) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn env_u128_any(keys: &[&str]) -> Option<u128> {
+    for key in keys {
+        if let Ok(v) = std::env::var(key) {
+            if let Ok(parsed) = v.trim().parse::<u128>() {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
 fn min_native_gas_wei() -> U256 {
     std::env::var("CLAIMER_MIN_NATIVE_GAS_WEI")
         .ok()
         .and_then(|v| v.trim().parse::<u128>().ok())
         .map(U256::from)
         .unwrap_or_else(|| U256::from(DEFAULT_MIN_NATIVE_GAS_WEI))
+}
+
+fn auto_topup_enabled() -> bool {
+    env_flag(
+        "CLAIMER_AUTO_TOPUP_ENABLED",
+        env_flag("CLAIMER_GAS_TOPUP_ENABLED", false),
+    )
+}
+
+fn u256_to_u128_saturating(value: U256) -> u128 {
+    value.to_string().parse::<u128>().unwrap_or(u128::MAX)
+}
+
+#[derive(Debug, Clone)]
+struct GasTopupState {
+    day: NaiveDate,
+    spent_wei: u128,
 }
 
 /// Position that can be redeemed
@@ -135,6 +190,7 @@ pub struct AutoClaimer {
     client: PolymarketClient,
     config: ClaimerConfig,
     claimed_conditions: Arc<RwLock<std::collections::HashSet<String>>>,
+    gas_topup_state: Arc<RwLock<GasTopupState>>,
     running: Arc<RwLock<bool>>,
 }
 
@@ -145,6 +201,10 @@ impl AutoClaimer {
             client,
             config,
             claimed_conditions: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            gas_topup_state: Arc::new(RwLock::new(GasTopupState {
+                day: Utc::now().date_naive(),
+                spent_wei: 0,
+            })),
             running: Arc::new(RwLock::new(false)),
         }
     }
@@ -452,11 +512,21 @@ impl AutoClaimer {
         })?;
         let min_balance = min_native_gas_wei();
 
-        if balance < min_balance {
+        let mut effective_balance = balance;
+        if effective_balance < min_balance {
+            if let Some(updated) = self
+                .maybe_auto_topup_wallet(wallet_addr, effective_balance, min_balance)
+                .await?
+            {
+                effective_balance = updated;
+            }
+        }
+
+        if effective_balance < min_balance {
             warn!(
                 "Auto-claim paused: wallet {} has {} wei, need at least {} wei for gas. Top up MATIC and claimer will resume automatically.",
                 wallet_addr,
-                balance,
+                effective_balance,
                 min_balance
             );
             return Ok(false);
@@ -464,9 +534,228 @@ impl AutoClaimer {
 
         debug!(
             "Claimer wallet {} gas check passed: {} wei",
-            wallet_addr, balance
+            wallet_addr, effective_balance
         );
         Ok(true)
+    }
+
+    /// Optionally tops up signer native gas from a dedicated top-up wallet.
+    ///
+    /// This is intentionally conservative and disabled by default. Enable with:
+    /// - CLAIMER_AUTO_TOPUP_ENABLED=true
+    /// - CLAIMER_AUTO_TOPUP_PRIVATE_KEY=0x... (wallet with POL/MATIC)
+    async fn maybe_auto_topup_wallet(
+        &self,
+        target_wallet: Address,
+        current_balance: U256,
+        min_balance: U256,
+    ) -> Result<Option<U256>> {
+        if !auto_topup_enabled() {
+            return Ok(None);
+        }
+
+        let Some(topup_private_key) = env_string_any(&[
+            "CLAIMER_AUTO_TOPUP_PRIVATE_KEY",
+            "CLAIMER_GAS_TOPUP_PRIVATE_KEY",
+        ]) else {
+            warn!(
+                "Auto top-up enabled but missing CLAIMER_AUTO_TOPUP_PRIVATE_KEY/CLAIMER_GAS_TOPUP_PRIVATE_KEY"
+            );
+            return Ok(None);
+        };
+
+        let threshold_wei = env_u128_any(&[
+            "CLAIMER_AUTO_TOPUP_THRESHOLD_WEI",
+            "CLAIMER_GAS_TOPUP_THRESHOLD_WEI",
+        ])
+        .unwrap_or_else(|| u256_to_u128_saturating(min_balance));
+
+        let current_wei = u256_to_u128_saturating(current_balance);
+        if current_wei >= threshold_wei {
+            return Ok(Some(current_balance));
+        }
+
+        let target_wei = env_u128_any(&[
+            "CLAIMER_AUTO_TOPUP_TARGET_WEI",
+            "CLAIMER_GAS_TOPUP_TARGET_WEI",
+        ])
+        .unwrap_or(DEFAULT_AUTO_TOPUP_TARGET_WEI)
+        .max(threshold_wei);
+
+        if target_wei <= current_wei {
+            return Ok(Some(current_balance));
+        }
+
+        let max_per_tx_wei = env_u128_any(&[
+            "CLAIMER_AUTO_TOPUP_MAX_PER_TX_WEI",
+            "CLAIMER_GAS_TOPUP_MAX_PER_TX_WEI",
+        ])
+        .unwrap_or(DEFAULT_AUTO_TOPUP_MAX_PER_TX_WEI)
+        .max(1);
+
+        let daily_cap_wei = env_u128_any(&[
+            "CLAIMER_AUTO_TOPUP_DAILY_CAP_WEI",
+            "CLAIMER_GAS_TOPUP_DAILY_CAP_WEI",
+        ])
+        .unwrap_or(DEFAULT_AUTO_TOPUP_DAILY_CAP_WEI);
+
+        let reserve_wei = env_u128_any(&[
+            "CLAIMER_AUTO_TOPUP_RESERVE_WEI",
+            "CLAIMER_GAS_TOPUP_RESERVE_WEI",
+        ])
+        .unwrap_or(DEFAULT_AUTO_TOPUP_RESERVE_WEI);
+
+        let desired_wei = target_wei.saturating_sub(current_wei);
+        let mut topup_wei = desired_wei.min(max_per_tx_wei);
+
+        {
+            let today = Utc::now().date_naive();
+            let mut state = self.gas_topup_state.write().await;
+            if state.day != today {
+                state.day = today;
+                state.spent_wei = 0;
+            }
+
+            if state.spent_wei >= daily_cap_wei {
+                warn!(
+                    "Auto top-up skipped: daily cap reached (spent={} wei, cap={} wei)",
+                    state.spent_wei, daily_cap_wei
+                );
+                return Ok(None);
+            }
+
+            let remaining_today = daily_cap_wei.saturating_sub(state.spent_wei);
+            topup_wei = topup_wei.min(remaining_today);
+        }
+
+        if topup_wei == 0 {
+            debug!("Auto top-up skipped: computed top-up amount is 0 wei");
+            return Ok(None);
+        }
+
+        let polygon_rpc = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+
+        let provider = match EthersProvider::<EthersHttp>::try_from(polygon_rpc.as_str()) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Auto top-up skipped: invalid POLYGON_RPC_URL: {}", e);
+                return Ok(None);
+            }
+        };
+
+        let topup_wallet = match topup_private_key.parse::<LocalWallet>() {
+            Ok(w) => w.with_chain_id(POLYGON_CHAIN_ID),
+            Err(e) => {
+                warn!("Auto top-up skipped: invalid top-up private key: {}", e);
+                return Ok(None);
+            }
+        };
+        let topup_addr = topup_wallet.address();
+        let client = SignerMiddleware::new(provider.clone(), topup_wallet);
+
+        let topup_balance_wei = match provider.get_balance(topup_addr, None).await {
+            Ok(v) => v.to_string().parse::<u128>().unwrap_or(u128::MAX),
+            Err(e) => {
+                warn!(
+                    "Auto top-up skipped: failed reading top-up wallet balance: {}",
+                    e
+                );
+                return Ok(None);
+            }
+        };
+
+        let required_wei = topup_wei.saturating_add(reserve_wei);
+        if topup_balance_wei < required_wei {
+            warn!(
+                "Auto top-up skipped: top-up wallet {} has {} wei, needs at least {} wei (topup={} + reserve={})",
+                topup_addr, topup_balance_wei, required_wei, topup_wei, reserve_wei
+            );
+            return Ok(None);
+        }
+
+        let target_str = format!("{:#x}", target_wallet);
+        let target_addr: EthersAddress = match target_str.parse() {
+            Ok(addr) => addr,
+            Err(e) => {
+                warn!(
+                    "Auto top-up skipped: invalid target wallet address {}: {}",
+                    target_str, e
+                );
+                return Ok(None);
+            }
+        };
+
+        info!(
+            "Auto top-up triggered: sending {} wei to claimer wallet {} (current={} threshold={} target={})",
+            topup_wei, target_addr, current_wei, threshold_wei, target_wei
+        );
+
+        let tx = EthersTransactionRequest::new()
+            .to(target_addr)
+            .value(EthersU256::from(topup_wei));
+
+        let pending_tx = match client.send_transaction(tx, None).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Auto top-up tx submission failed: {}", e);
+                return Ok(None);
+            }
+        };
+
+        let receipt = match pending_tx.await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                warn!("Auto top-up tx dropped before receipt");
+                return Ok(None);
+            }
+            Err(e) => {
+                warn!("Auto top-up tx confirmation failed: {}", e);
+                return Ok(None);
+            }
+        };
+
+        if receipt.status != Some(EthersU64::from(1u64)) {
+            warn!(
+                "Auto top-up tx reverted: hash={:?}, status={:?}",
+                receipt.transaction_hash, receipt.status
+            );
+            return Ok(None);
+        }
+
+        {
+            let today = Utc::now().date_naive();
+            let mut state = self.gas_topup_state.write().await;
+            if state.day != today {
+                state.day = today;
+                state.spent_wei = 0;
+            }
+            state.spent_wei = state.spent_wei.saturating_add(topup_wei);
+        }
+
+        let refreshed = match provider.get_balance(target_addr, None).await {
+            Ok(v) => v.to_string().parse::<u128>().unwrap_or(u128::MAX),
+            Err(e) => {
+                warn!(
+                    "Auto top-up sent but failed to read refreshed balance: {}",
+                    e
+                );
+                return Ok(None);
+            }
+        };
+
+        let refreshed_alloy = refreshed
+            .to_string()
+            .parse::<U256>()
+            .unwrap_or(current_balance);
+
+        info!(
+            "Auto top-up success: tx={:?}, new claimer wallet balance={} wei",
+            receipt.transaction_hash, refreshed
+        );
+        Ok(Some(refreshed_alloy))
     }
 
     /// Claim a specific condition by calling the ConditionalTokens redeem function
@@ -625,5 +914,10 @@ mod tests {
         assert_eq!(cond1.size, dec!(15));
         assert_eq!(cond1.payout, dec!(15));
         assert!(cond1.neg_risk);
+    }
+
+    #[test]
+    fn test_u256_to_u128_saturating() {
+        assert_eq!(u256_to_u128_saturating(U256::from(123u64)), 123u128);
     }
 }
