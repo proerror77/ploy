@@ -212,9 +212,20 @@ fn relayer_poll_interval_ms() -> u64 {
 }
 
 fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Result<String> {
-    let secret = BASE64.decode(secret_base64.trim()).map_err(|e| {
-        crate::error::PloyError::Signature(format!("Invalid builder secret encoding: {}", e))
-    })?;
+    let trimmed = secret_base64.trim();
+    let secret = BASE64
+        .decode(trimmed)
+        .or_else(|_| {
+            // Some builder secrets are url-safe base64 (with '-'/'_').
+            let mut normalized = trimmed.replace('-', "+").replace('_', "/");
+            while normalized.len() % 4 != 0 {
+                normalized.push('=');
+            }
+            BASE64.decode(normalized.as_bytes())
+        })
+        .map_err(|e| {
+            crate::error::PloyError::Signature(format!("Invalid builder secret encoding: {}", e))
+        })?;
     let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&secret).map_err(|e| {
         crate::error::PloyError::Signature(format!("Builder HMAC init failed: {}", e))
     })?;
@@ -1454,6 +1465,16 @@ mod tests {
         let sig = relayer_hmac_signature("dGVzdHNlY3JldA==", "123POST/submit{\"a\":1}")
             .expect("signature should be created");
         assert_eq!(sig, "5UKMaApqgL6X7RdBVDJLKCU_aDY7kSpONfbGIEZAX0s=");
+    }
+
+    #[test]
+    fn test_relayer_hmac_signature_accepts_urlsafe_secret_variant() {
+        let sig = relayer_hmac_signature(
+            "Ndt7ZPLgVWpSzXHGFMohLB33x_Z4qCfqjiMYBwmxamE=",
+            "1700000000POST/submit{}",
+        )
+        .expect("url-safe builder secret should decode");
+        assert!(!sig.is_empty());
     }
 
     #[test]
