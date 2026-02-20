@@ -10,7 +10,7 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{NaiveDate, Utc};
-use ethers::abi::{AbiParser, Token};
+use ethers::abi::{encode as abi_encode, AbiParser, Token};
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{
     Http as EthersHttp, Middleware as EthersMiddleware, Provider as EthersProvider,
@@ -946,27 +946,18 @@ impl AutoClaimer {
     }
 
     fn encode_proxy_transaction_data(call_to: EthersAddress, call_data: Vec<u8>) -> Result<Vec<u8>> {
-        let function = AbiParser::default()
-            .parse_function(
-                "function proxy((uint8 typeCode,address to,uint256 value,bytes data)[] calls)",
-            )
-            .map_err(|e| {
-                crate::error::PloyError::Internal(format!("Failed to parse proxy ABI: {}", e))
-            })?;
-
-        function
-            .encode_input(&[Token::Array(vec![Token::Tuple(vec![
-                Token::Uint(EthersU256::from(1u8)), // CallType.Call
-                Token::Address(call_to),
-                Token::Uint(EthersU256::zero()),
-                Token::Bytes(call_data),
-            ])])])
-            .map_err(|e| {
-                crate::error::PloyError::Internal(format!(
-                    "Failed to encode proxy calldata: {}",
-                    e
-                ))
-            })
+        let calls = Token::Array(vec![Token::Tuple(vec![
+            Token::Uint(EthersU256::from(1u8)), // CallType.Call
+            Token::Address(call_to),
+            Token::Uint(EthersU256::zero()),
+            Token::Bytes(call_data),
+        ])]);
+        let encoded_args = abi_encode(&[calls]);
+        let selector = &keccak256("proxy((uint8,address,uint256,bytes)[])")[0..4];
+        let mut payload = Vec::with_capacity(4 + encoded_args.len());
+        payload.extend_from_slice(selector);
+        payload.extend_from_slice(&encoded_args);
+        Ok(payload)
     }
 
     fn derive_proxy_wallet_address(signer: EthersAddress) -> Result<EthersAddress> {
@@ -1476,5 +1467,15 @@ mod tests {
             format!("{:#x}", proxy),
             "0xcbaaa60c5dec85eac2a2c424bdcd7258ab67eee2"
         );
+    }
+
+    #[test]
+    fn test_encode_proxy_transaction_data_accepts_tuple_calls() {
+        let call_to: EthersAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+            .parse()
+            .expect("valid call target");
+        let encoded = AutoClaimer::encode_proxy_transaction_data(call_to, vec![0x12, 0x34])
+            .expect("proxy calldata should encode");
+        assert!(!encoded.is_empty());
     }
 }
