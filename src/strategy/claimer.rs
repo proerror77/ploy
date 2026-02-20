@@ -145,6 +145,44 @@ fn env_u64_any(keys: &[&str]) -> Option<u64> {
     None
 }
 
+fn normalize_condition_id(input: &str) -> Option<String> {
+    let normalized = input
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn ignored_condition_patterns() -> Vec<String> {
+    let raw = env_string_any(&[
+        "CLAIMER_IGNORE_CONDITION_IDS",
+        "CLAIMER_IGNORE_CONDITIONS",
+    ]);
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+
+    raw.split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(normalize_condition_id)
+        .collect()
+}
+
+fn condition_is_ignored(condition_id: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let Some(normalized) = normalize_condition_id(condition_id) else {
+        return false;
+    };
+
+    patterns.iter().any(|pattern| normalized.starts_with(pattern))
+}
+
 fn min_native_gas_wei() -> U256 {
     std::env::var("CLAIMER_MIN_NATIVE_GAS_WEI")
         .ok()
@@ -591,6 +629,7 @@ impl AutoClaimer {
         // Use the Data API to get positions
         let positions = self.client.get_positions().await?;
         let allow_price_fallback = env_flag("CLAIMER_ALLOW_PRICE_FALLBACK", false);
+        let ignored_patterns = ignored_condition_patterns();
 
         let mut redeemable = Vec::new();
 
@@ -642,6 +681,14 @@ impl AutoClaimer {
                     "Skipping redeemable position with missing condition_id (outcome={}, size={})",
                     p.outcome.clone().unwrap_or_default(),
                     size
+                );
+                continue;
+            }
+
+            if condition_is_ignored(&condition_id, &ignored_patterns) {
+                debug!(
+                    "Ignoring redeemable position by condition filter: {}",
+                    condition_id.chars().take(16).collect::<String>()
                 );
                 continue;
             }
@@ -1579,6 +1626,19 @@ mod tests {
         assert!(!needs_native_gas_preflight(false, false));
         assert!(needs_native_gas_preflight(true, false));
         assert!(!needs_native_gas_preflight(true, true));
+    }
+
+    #[test]
+    fn test_condition_ignore_prefix_matching() {
+        let patterns = vec!["04e8fab12c2e30".to_string()];
+        assert!(condition_is_ignored(
+            "0x04e8fab12c2e30d06292db90b9c16f5526deac27b96345f15ccc7ba0bdb16c17",
+            &patterns
+        ));
+        assert!(!condition_is_ignored(
+            "0x0ab116e9d0401a0000000000000000000000000000000000000000000000000",
+            &patterns
+        ));
     }
 
     #[test]

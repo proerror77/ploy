@@ -132,6 +132,7 @@ Live momentum mode now supports automatic post-settlement claims (redeem winning
 export PLOY_AUTO_CLAIM=true                    # default true in live momentum mode
 export CLAIMER_CHECK_INTERVAL_SECS=60          # optional
 export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
+export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix match)
 export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
 ```
 
