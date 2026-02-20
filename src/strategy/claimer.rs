@@ -263,6 +263,16 @@ fn ensure_0x_prefix(hex: &str) -> String {
     format!("0x{}", hex)
 }
 
+fn needs_native_gas_preflight(auto_claim: bool, relayer_ready: bool) -> bool {
+    if !auto_claim {
+        return false;
+    }
+    if !relayer_ready {
+        return true;
+    }
+    relayer_fallback_onchain_enabled()
+}
+
 #[derive(Debug, Clone)]
 struct GasTopupState {
     day: NaiveDate,
@@ -465,11 +475,14 @@ impl AutoClaimer {
         }
 
         let relayer_ready = relayer_claim_enabled() && relayer_builder_credentials().is_some();
-        if self.config.auto_claim && !relayer_ready && !self.preflight_wallet_can_claim().await? {
+        let preflight_required = needs_native_gas_preflight(self.config.auto_claim, relayer_ready);
+        if preflight_required && !self.preflight_wallet_can_claim().await? {
             return Ok(vec![]);
         }
-        if self.config.auto_claim && relayer_ready {
-            debug!("Relayer redeem is enabled; skipping native gas preflight");
+        if self.config.auto_claim && relayer_ready && !preflight_required {
+            debug!("Relayer redeem is enabled without on-chain fallback; skipping native gas preflight");
+        } else if self.config.auto_claim && relayer_ready && preflight_required {
+            debug!("Relayer fallback-to-onchain is enabled; enforcing native gas preflight");
         }
 
         info!("Found {} redeemable condition(s)", positions.len());
@@ -1536,6 +1549,17 @@ mod tests {
     fn test_ensure_0x_prefix() {
         assert_eq!(ensure_0x_prefix("abcd"), "0xabcd");
         assert_eq!(ensure_0x_prefix("0xabcd"), "0xabcd");
+    }
+
+    #[test]
+    fn test_needs_native_gas_preflight() {
+        assert!(!needs_native_gas_preflight(false, false));
+        assert!(needs_native_gas_preflight(true, false));
+        std::env::set_var("CLAIMER_RELAYER_FALLBACK_ONCHAIN", "false");
+        assert!(!needs_native_gas_preflight(true, true));
+        std::env::set_var("CLAIMER_RELAYER_FALLBACK_ONCHAIN", "true");
+        assert!(needs_native_gas_preflight(true, true));
+        std::env::remove_var("CLAIMER_RELAYER_FALLBACK_ONCHAIN");
     }
 
     #[test]
