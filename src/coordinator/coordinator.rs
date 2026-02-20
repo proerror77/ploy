@@ -31,6 +31,13 @@ use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngressMode {
+    Running,
+    Paused,
+    Halted,
+}
+
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
@@ -38,11 +45,19 @@ pub struct CoordinatorHandle {
     state_tx: mpsc::Sender<AgentSnapshot>,
     control_tx: mpsc::Sender<CoordinatorControlCommand>,
     global_state: Arc<RwLock<GlobalState>>,
+    ingress_mode: Arc<RwLock<IngressMode>>,
 }
 
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
+        let mode = *self.ingress_mode.read().await;
+        if mode != IngressMode::Running {
+            return Err(crate::error::PloyError::Validation(format!(
+                "coordinator ingress is {:?}; new intents are blocked",
+                mode
+            )));
+        }
         self.order_tx.send(intent).await.map_err(|_| {
             crate::error::PloyError::Internal("coordinator order channel closed".into())
         })
@@ -57,6 +72,10 @@ impl CoordinatorHandle {
 
     /// Pause all agents
     pub async fn pause_all(&self) -> Result<()> {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Paused;
+        }
         self.control_tx
             .send(CoordinatorControlCommand::PauseAll)
             .await
@@ -67,6 +86,10 @@ impl CoordinatorHandle {
 
     /// Resume all agents
     pub async fn resume_all(&self) -> Result<()> {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Running;
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ResumeAll)
             .await
@@ -77,6 +100,10 @@ impl CoordinatorHandle {
 
     /// Force-close all positions and stop agents
     pub async fn force_close_all(&self) -> Result<()> {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Halted;
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseAll)
             .await
@@ -87,6 +114,10 @@ impl CoordinatorHandle {
 
     /// Shutdown all agents gracefully
     pub async fn shutdown_all(&self) -> Result<()> {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Halted;
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownAll)
             .await
@@ -113,6 +144,7 @@ pub struct Coordinator {
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
     execution_log_pool: Option<PgPool>,
+    ingress_mode: Arc<RwLock<IngressMode>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -747,6 +779,7 @@ impl Coordinator {
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
+        let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
         } else {
@@ -764,6 +797,7 @@ impl Coordinator {
             executor,
             global_state,
             execution_log_pool: None,
+            ingress_mode,
             order_tx,
             order_rx,
             state_tx,
@@ -786,6 +820,7 @@ impl Coordinator {
             state_tx: self.state_tx.clone(),
             control_tx: self.control_tx.clone(),
             global_state: self.global_state.clone(),
+            ingress_mode: self.ingress_mode.clone(),
         }
     }
 
@@ -841,6 +876,10 @@ impl Coordinator {
 
     /// Pause all agents
     pub async fn pause_all(&self) {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Paused;
+        }
         for (id, tx) in &self.agent_commands {
             if let Err(e) = tx.send(CoordinatorCommand::Pause).await {
                 warn!(agent_id = %id, error = %e, "failed to send pause");
@@ -850,6 +889,10 @@ impl Coordinator {
 
     /// Resume all agents
     pub async fn resume_all(&self) {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Running;
+        }
         for (id, tx) in &self.agent_commands {
             if let Err(e) = tx.send(CoordinatorCommand::Resume).await {
                 warn!(agent_id = %id, error = %e, "failed to send resume");
@@ -859,6 +902,10 @@ impl Coordinator {
 
     /// Force-close all agents (best-effort)
     pub async fn force_close_all(&self) {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Halted;
+        }
         info!("coordinator: sending force-close to all agents");
         for (id, tx) in &self.agent_commands {
             if let Err(e) = tx.send(CoordinatorCommand::ForceClose).await {
@@ -869,6 +916,10 @@ impl Coordinator {
 
     /// Shutdown all agents gracefully
     pub async fn shutdown(&self) {
+        {
+            let mut mode = self.ingress_mode.write().await;
+            *mode = IngressMode::Halted;
+        }
         info!("coordinator: sending shutdown to all agents");
         for (id, tx) in &self.agent_commands {
             if let Err(e) = tx.send(CoordinatorCommand::Shutdown).await {
@@ -942,6 +993,21 @@ impl Coordinator {
     async fn handle_order_intent(&self, intent: OrderIntent) {
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
+
+        let ingress_mode = *self.ingress_mode.read().await;
+        if ingress_mode != IngressMode::Running {
+            let reason = format!(
+                "Coordinator ingress is {:?}; blocking new intent while paused/halted",
+                ingress_mode
+            );
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by coordinator ingress state"
+            );
+            return;
+        }
 
         self.persist_signal_from_intent(&intent).await;
         if !intent.is_buy {

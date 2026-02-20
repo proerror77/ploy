@@ -6,6 +6,7 @@ use crate::platform::StrategyDeployment;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -35,6 +36,8 @@ pub struct AppState {
 
     /// Strategy deployment matrix (control-plane first-class resource).
     pub deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
+    /// Persistence path for deployment matrix state.
+    pub deployments_path: Arc<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,16 +83,9 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
-    fn load_deployments_from_env() -> HashMap<String, StrategyDeployment> {
-        let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
-            .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
-            .unwrap_or_default();
-        if raw.trim().is_empty() {
-            return HashMap::new();
-        }
-
+    fn parse_deployments(raw: &str) -> HashMap<String, StrategyDeployment> {
         let mut out = HashMap::new();
-        if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(&raw) {
+        if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
             for deployment in items {
                 let id = deployment.id.trim();
                 if id.is_empty() {
@@ -101,8 +97,53 @@ impl AppState {
         out
     }
 
+    fn deployments_state_path() -> PathBuf {
+        std::env::var("PLOY_DEPLOYMENTS_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("data/state/deployments.json"))
+    }
+
+    fn load_deployments(path: &Path) -> HashMap<String, StrategyDeployment> {
+        let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
+            .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
+            .unwrap_or_default();
+        if !raw.trim().is_empty() {
+            return Self::parse_deployments(&raw);
+        }
+
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            return Self::parse_deployments(&contents);
+        }
+
+        HashMap::new()
+    }
+
+    pub async fn persist_deployments(&self) -> std::result::Result<(), String> {
+        let mut items = {
+            let deployments = self.deployments.read().await;
+            deployments.values().cloned().collect::<Vec<_>>()
+        };
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let payload = serde_json::to_vec_pretty(&items)
+            .map_err(|e| format!("failed to serialize deployments: {}", e))?;
+        let path = self.deployments_path.as_ref().clone();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("failed to create deployment state dir: {}", e))?;
+        }
+        tokio::fs::write(&path, payload)
+            .await
+            .map_err(|e| format!("failed to write deployment state file: {}", e))
+    }
+
     pub fn new(store: Arc<PostgresStore>, config: StrategyConfigState) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
+        let deployments_path = Arc::new(Self::deployments_state_path());
+        let deployments = Arc::new(RwLock::new(Self::load_deployments(
+            deployments_path.as_ref(),
+        )));
 
         Self {
             store,
@@ -117,7 +158,8 @@ impl AppState {
             start_time: Utc::now(),
             coordinator: None,
             grok_client: None,
-            deployments: Arc::new(RwLock::new(Self::load_deployments_from_env())),
+            deployments,
+            deployments_path,
         }
     }
 
@@ -129,6 +171,10 @@ impl AppState {
         grok_client: Option<Arc<GrokClient>>,
     ) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
+        let deployments_path = Arc::new(Self::deployments_state_path());
+        let deployments = Arc::new(RwLock::new(Self::load_deployments(
+            deployments_path.as_ref(),
+        )));
 
         Self {
             store,
@@ -143,7 +189,8 @@ impl AppState {
             start_time: Utc::now(),
             coordinator,
             grok_client,
-            deployments: Arc::new(RwLock::new(Self::load_deployments_from_env())),
+            deployments,
+            deployments_path,
         }
     }
 

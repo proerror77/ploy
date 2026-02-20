@@ -20,6 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 use uuid::Uuid;
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
@@ -182,24 +183,30 @@ fn coordinator_intent_ingress_url() -> String {
         .unwrap_or_else(|_| "http://127.0.0.1:8081/api/sidecar/intents".to_string())
 }
 
+fn coordinator_intent_ingress_token() -> Option<String> {
+    std::env::var("PLOY_RPC_SIDECAR_AUTH_TOKEN")
+        .or_else(|_| std::env::var("PLOY_SIDECAR_AUTH_TOKEN"))
+        .or_else(|_| std::env::var("PLOY_API_SIDECAR_AUTH_TOKEN"))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 async fn submit_intent_via_coordinator(payload: &Value) -> Result<Value> {
     let url = coordinator_intent_ingress_url();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .map_err(|e| PloyError::Internal(format!("failed to build http client: {}", e)))?;
+    let client = coordinator_ingress_http_client()?;
 
-    let response = client
-        .post(&url)
-        .json(payload)
-        .send()
-        .await
-        .map_err(|e| {
-            PloyError::Internal(format!(
-                "failed to reach coordinator intent ingress {}: {}",
-                url, e
-            ))
-        })?;
+    let mut request = client.post(&url).json(payload);
+    if let Some(token) = coordinator_intent_ingress_token() {
+        request = request.header("x-ploy-sidecar-token", token);
+    }
+
+    let response = request.send().await.map_err(|e| {
+        PloyError::Internal(format!(
+            "failed to reach coordinator intent ingress {}: {}",
+            url, e
+        ))
+    })?;
     let status = response.status();
     let text = response
         .text()
@@ -216,6 +223,23 @@ async fn submit_intent_via_coordinator(payload: &Value) -> Result<Value> {
     serde_json::from_str(&text)
         .or_else(|_| Ok(json!({ "raw": text })))
         .map_err(|e: serde_json::Error| PloyError::Internal(format!("invalid ingress JSON: {}", e)))
+}
+
+fn coordinator_ingress_http_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .tcp_nodelay(true)
+            .build()
+            .map_err(|e| format!("failed to build http client: {}", e))
+    });
+
+    client
+        .as_ref()
+        .map_err(|msg| PloyError::Internal(msg.clone()))
 }
 
 fn is_write_method(method: &str) -> bool {

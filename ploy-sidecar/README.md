@@ -144,7 +144,8 @@ The Rust backend exposes these endpoints for the sidecar:
 
 ```
 POST /api/sidecar/grok/decision   Grok unified trade decision
-POST /api/sidecar/orders          Submit order through Coordinator
+POST /api/sidecar/intents         Submit intent through Coordinator ingress (recommended)
+POST /api/sidecar/orders          Legacy live route (disabled by default)
 GET  /api/sidecar/positions       Current open positions
 GET  /api/sidecar/risk            Coordinator risk state
 ```

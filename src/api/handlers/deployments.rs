@@ -87,19 +87,28 @@ pub async fn upsert_deployments(
         }
     }
 
-    let mut deployments = state.deployments.write().await;
-    if req.replace {
-        deployments.clear();
-    }
     let upserted = req.deployments.len();
-    for dep in req.deployments {
-        deployments.insert(dep.id.clone(), dep);
-    }
+    let total = {
+        let mut deployments = state.deployments.write().await;
+        if req.replace {
+            deployments.clear();
+        }
+        for dep in req.deployments {
+            deployments.insert(dep.id.clone(), dep);
+        }
+        deployments.len()
+    };
+    state.persist_deployments().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist deployments: {}", e),
+        )
+    })?;
 
     Ok(Json(UpsertDeploymentsResponse {
         success: true,
         upserted,
-        total: deployments.len(),
+        total,
     }))
 }
 
@@ -137,11 +146,20 @@ async fn set_deployment_enabled(
         return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
     };
     dep.enabled = enabled;
+    let id = dep.id.clone();
+    let enabled_now = dep.enabled;
+    drop(deployments);
+    state.persist_deployments().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist deployments: {}", e),
+        )
+    })?;
 
     Ok(Json(DeploymentMutationResponse {
         success: true,
-        id: dep.id.clone(),
-        enabled: dep.enabled,
+        id,
+        enabled: enabled_now,
     }))
 }
 
@@ -158,10 +176,18 @@ pub async fn delete_deployment(
         ));
     }
 
-    let mut deployments = state.deployments.write().await;
-    let Some(_removed) = deployments.remove(key) else {
-        return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
-    };
+    {
+        let mut deployments = state.deployments.write().await;
+        let Some(_removed) = deployments.remove(key) else {
+            return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
+        };
+    }
+    state.persist_deployments().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist deployments: {}", e),
+        )
+    })?;
 
     Ok(Json(DeploymentDeleteResponse {
         success: true,

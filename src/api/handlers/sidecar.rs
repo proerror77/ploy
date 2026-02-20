@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::api::state::AppState;
 use crate::config::AppConfig;
 use crate::domain::market::Side;
+use crate::error::PloyError;
 use crate::platform::{Domain, OrderIntent, OrderPriority};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
@@ -146,6 +147,7 @@ pub struct GrokDecisionResponse {
 #[derive(Debug, Deserialize)]
 pub struct SidecarOrderRequest {
     pub strategy: String,
+    pub deployment_id: Option<String>,
     pub domain: Option<String>, // "crypto" | "sports" | "politics" | "economics"
     pub market_slug: String,
     pub token_id: String,
@@ -153,6 +155,7 @@ pub struct SidecarOrderRequest {
     pub is_buy: Option<bool>, // defaults to true
     pub shares: u64,
     pub price: f64,
+    pub idempotency_key: Option<String>,
     pub dry_run: Option<bool>,
     #[serde(alias = "grok_decision_id")]
     pub decision_request_id: Option<String>,
@@ -254,6 +257,29 @@ fn sidecar_expected_auth_token() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn parse_boolish(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+fn env_bool(keys: &[&str]) -> bool {
+    keys.iter()
+        .find_map(|k| std::env::var(k).ok())
+        .map(|v| parse_boolish(&v))
+        .unwrap_or(false)
+}
+
+fn sidecar_auth_required() -> bool {
+    env_bool(&[
+        "PLOY_SIDECAR_AUTH_REQUIRED",
+        "PLOY_GATEWAY_ONLY",
+        "PLOY_ENFORCE_GATEWAY_ONLY",
+        "PLOY_ENFORCE_COORDINATOR_GATEWAY_ONLY",
+    ])
+}
+
 fn extract_bearer_token(raw: &str) -> Option<&str> {
     raw.strip_prefix("Bearer ")
         .or_else(|| raw.strip_prefix("bearer "))
@@ -261,8 +287,15 @@ fn extract_bearer_token(raw: &str) -> Option<&str> {
 }
 
 fn ensure_sidecar_authorized(headers: &HeaderMap) -> std::result::Result<(), (StatusCode, String)> {
-    let Some(expected) = sidecar_expected_auth_token() else {
+    let expected = sidecar_expected_auth_token();
+    if expected.is_none() && !sidecar_auth_required() {
         return Ok(());
+    }
+    let Some(expected) = expected else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sidecar auth is required but token is not configured".to_string(),
+        ));
     };
 
     let token = headers
@@ -286,15 +319,15 @@ fn ensure_sidecar_authorized(headers: &HeaderMap) -> std::result::Result<(), (St
 }
 
 fn deployment_gate_required() -> bool {
-    matches!(
-        std::env::var("PLOY_DEPLOYMENT_GATE_REQUIRED")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
+    match std::env::var("PLOY_DEPLOYMENT_GATE_REQUIRED")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    {
+        Some(v) => !matches!(v.as_str(), "0" | "false" | "no" | "off"),
+        None => true,
+    }
 }
 
 async fn ensure_intent_deployment_allowed(
@@ -333,6 +366,10 @@ async fn ensure_intent_deployment_allowed(
         ));
     }
     Ok(())
+}
+
+fn sidecar_orders_live_enabled() -> bool {
+    env_bool(&["PLOY_SIDECAR_ORDERS_LIVE_ENABLED"])
 }
 
 // ── Handlers ─────────────────────────────────────────────────────
@@ -611,6 +648,14 @@ pub async fn sidecar_submit_order(
         }));
     }
 
+    if !sidecar_orders_live_enabled() {
+        return Err((
+            StatusCode::CONFLICT,
+            "live /api/sidecar/orders is disabled; route live intents to /api/sidecar/intents"
+                .to_string(),
+        ));
+    }
+
     // Live order — requires Coordinator
     let coordinator = state.coordinator.as_ref().ok_or_else(|| {
         (
@@ -619,14 +664,28 @@ pub async fn sidecar_submit_order(
         )
     })?;
 
-    let side = match req.side.as_deref() {
-        Some("down") | Some("NO") | Some("no") => Side::Down,
-        _ => Side::Up, // "up", "YES", "yes", or default
-    };
+    let deployment_id = req
+        .deployment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "deployment_id is required for live /api/sidecar/orders".to_string(),
+            )
+        })?
+        .to_string();
+    ensure_intent_deployment_allowed(&state, &deployment_id).await?;
+
+    let side = parse_binary_side(req.side.as_deref())?;
+    let domain = parse_sidecar_domain(req.domain.as_deref(), Domain::Sports)?;
+    let is_buy = parse_is_buy(None, req.is_buy)?;
 
     let mut metadata = HashMap::new();
     metadata.insert("source".to_string(), "sidecar".to_string());
     metadata.insert("strategy".to_string(), req.strategy.clone());
+    metadata.insert("deployment_id".to_string(), deployment_id);
     if let Some(ref dec_id) = req.decision_request_id {
         metadata.insert("decision_request_id".to_string(), dec_id.clone());
     }
@@ -639,20 +698,14 @@ pub async fn sidecar_submit_order(
     if let Some(conf) = req.confidence {
         metadata.insert("confidence".to_string(), format!("{:.2}", conf));
     }
-    let domain = match req
-        .domain
+    if let Some(idem) = req
+        .idempotency_key
         .as_deref()
-        .unwrap_or("sports")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
     {
-        "crypto" => Domain::Crypto,
-        "sports" => Domain::Sports,
-        "politics" => Domain::Politics,
-        "economics" => Domain::Economics,
-        _ => Domain::Sports,
-    };
+        metadata.insert("idempotency_key".to_string(), idem.to_string());
+    }
     metadata.insert("domain".to_string(), domain.to_string());
 
     let mut intent = OrderIntent::new(
@@ -661,7 +714,7 @@ pub async fn sidecar_submit_order(
         &req.market_slug,
         &req.token_id,
         side,
-        req.is_buy.unwrap_or(true),
+        is_buy,
         req.shares,
         price,
     );
@@ -670,12 +723,10 @@ pub async fn sidecar_submit_order(
 
     let intent_id = intent.intent_id.to_string();
 
-    coordinator.submit_order(intent).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to submit order: {}", e),
-        )
-    })?;
+    coordinator
+        .submit_order(intent)
+        .await
+        .map_err(|e| map_coordinator_submit_error("Failed to submit order", e))?;
 
     info!(
         intent_id = %intent_id,
@@ -693,25 +744,48 @@ pub async fn sidecar_submit_order(
     }))
 }
 
-fn parse_sidecar_domain(raw: Option<&str>) -> Domain {
-    match raw.unwrap_or("crypto").trim().to_ascii_lowercase().as_str() {
-        "sports" => Domain::Sports,
-        "politics" => Domain::Politics,
-        "economics" => Domain::Economics,
-        _ => Domain::Crypto,
+fn parse_sidecar_domain(
+    raw: Option<&str>,
+    default_domain: Domain,
+) -> std::result::Result<Domain, (StatusCode, String)> {
+    let Some(raw) = raw else {
+        return Ok(default_domain);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "crypto" => Ok(Domain::Crypto),
+        "sports" => Ok(Domain::Sports),
+        "politics" => Ok(Domain::Politics),
+        "economics" => Ok(Domain::Economics),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "invalid domain '{}', expected crypto|sports|politics|economics",
+                other
+            ),
+        )),
     }
 }
 
-fn parse_binary_side(raw: Option<&str>) -> Side {
-    match raw.unwrap_or("UP").trim().to_ascii_uppercase().as_str() {
-        "DOWN" | "NO" => Side::Down,
-        _ => Side::Up,
+fn parse_binary_side(raw: Option<&str>) -> std::result::Result<Side, (StatusCode, String)> {
+    let Some(raw) = raw else {
+        return Ok(Side::Up);
+    };
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "UP" | "YES" => Ok(Side::Up),
+        "DOWN" | "NO" => Ok(Side::Down),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid side '{}', expected UP|DOWN|YES|NO", other),
+        )),
     }
 }
 
-fn parse_is_buy(order_side: Option<&str>, is_buy: Option<bool>) -> bool {
+fn parse_is_buy(
+    order_side: Option<&str>,
+    is_buy: Option<bool>,
+) -> std::result::Result<bool, (StatusCode, String)> {
     if let Some(v) = is_buy {
-        return v;
+        return Ok(v);
     }
     match order_side
         .unwrap_or("BUY")
@@ -719,17 +793,40 @@ fn parse_is_buy(order_side: Option<&str>, is_buy: Option<bool>) -> bool {
         .to_ascii_uppercase()
         .as_str()
     {
-        "SELL" => false,
-        _ => true,
+        "BUY" => Ok(true),
+        "SELL" => Ok(false),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid order_side '{}', expected BUY|SELL", other),
+        )),
     }
 }
 
-fn parse_order_priority(raw: Option<&str>) -> OrderPriority {
+fn parse_order_priority(
+    raw: Option<&str>,
+) -> std::result::Result<OrderPriority, (StatusCode, String)> {
     match raw.unwrap_or("normal").trim().to_ascii_lowercase().as_str() {
-        "critical" => OrderPriority::Critical,
-        "high" => OrderPriority::High,
-        "low" => OrderPriority::Low,
-        _ => OrderPriority::Normal,
+        "critical" => Ok(OrderPriority::Critical),
+        "high" => Ok(OrderPriority::High),
+        "normal" => Ok(OrderPriority::Normal),
+        "low" => Ok(OrderPriority::Low),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "invalid priority '{}', expected critical|high|normal|low",
+                other
+            ),
+        )),
+    }
+}
+
+fn map_coordinator_submit_error(prefix: &str, err: PloyError) -> (StatusCode, String) {
+    match err {
+        PloyError::Validation(msg) => (StatusCode::CONFLICT, format!("{}: {}", prefix, msg)),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}: {}", prefix, other),
+        ),
     }
 }
 
@@ -775,10 +872,10 @@ pub async fn sidecar_submit_intent(
 
     ensure_intent_deployment_allowed(&state, &req.deployment_id).await?;
 
-    let domain = parse_sidecar_domain(req.domain.as_deref());
-    let side = parse_binary_side(req.side.as_deref());
-    let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy);
-    let priority = parse_order_priority(req.priority.as_deref());
+    let domain = parse_sidecar_domain(req.domain.as_deref(), Domain::Crypto)?;
+    let side = parse_binary_side(req.side.as_deref())?;
+    let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy)?;
+    let priority = parse_order_priority(req.priority.as_deref())?;
     let agent_id = req
         .agent_id
         .as_deref()
@@ -861,12 +958,10 @@ pub async fn sidecar_submit_intent(
             "Coordinator not running (platform not started)".to_string(),
         )
     })?;
-    coordinator.submit_order(intent).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to submit intent: {}", e),
-        )
-    })?;
+    coordinator
+        .submit_order(intent)
+        .await
+        .map_err(|e| map_coordinator_submit_error("Failed to submit intent", e))?;
 
     Ok(Json(SidecarIntentResponse {
         success: true,
@@ -1224,5 +1319,31 @@ async fn persist_sidecar_decision(
 
     if let Err(e) = result {
         warn!(error = %e, "failed to persist sidecar grok decision (non-fatal)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_domain_rejects_unknown_values() {
+        assert!(parse_sidecar_domain(Some("crypto"), Domain::Sports).is_ok());
+        assert!(parse_sidecar_domain(Some("sports"), Domain::Crypto).is_ok());
+        assert!(parse_sidecar_domain(Some("bad-domain"), Domain::Crypto).is_err());
+    }
+
+    #[test]
+    fn parse_side_rejects_unknown_values() {
+        assert_eq!(parse_binary_side(Some("UP")).unwrap(), Side::Up);
+        assert_eq!(parse_binary_side(Some("NO")).unwrap(), Side::Down);
+        assert!(parse_binary_side(Some("LEFT")).is_err());
+    }
+
+    #[test]
+    fn parse_order_side_rejects_unknown_values() {
+        assert_eq!(parse_is_buy(Some("BUY"), None).unwrap(), true);
+        assert_eq!(parse_is_buy(Some("SELL"), None).unwrap(), false);
+        assert!(parse_is_buy(Some("HOLD"), None).is_err());
     }
 }

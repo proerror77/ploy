@@ -10,6 +10,7 @@
 
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { randomUUID } from "crypto";
 
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 
@@ -92,18 +93,21 @@ This is the FINAL JUDGE — only trade if Grok approves.`,
 
     tool(
       "submit_order",
-      `Submit a trade order to the Ploy Coordinator. Goes through RiskGate before execution.
+      `Submit a trade intent to the Ploy Coordinator ingress. Goes through deployment/risk gate before execution.
 IMPORTANT: Always use dry_run=true unless explicitly configured for live trading.`,
       {
+        deployment_id: z.string().default("openclaw.default").describe("Strategy deployment ID"),
+        domain: z.enum(["crypto", "sports", "politics", "economics"]).default("sports"),
         strategy: z
           .string()
           .default("sidecar_nba")
-          .describe("Strategy identifier"),
+          .describe("Strategy label (metadata only)"),
         market_slug: z.string().describe("Polymarket market slug"),
         token_id: z.string().describe("Token ID to trade"),
         side: z.enum(["YES", "NO"]).describe("Which outcome to buy"),
         shares: z.number().min(1).describe("Number of shares to buy"),
         price: z.number().min(0.01).max(0.99).describe("Limit price"),
+        idempotency_key: z.string().optional().describe("Optional idempotency key"),
         dry_run: z.boolean().default(true).describe("Simulate only (default true)"),
         // Decision metadata for audit trail
         grok_decision_id: z.string().optional().describe("Grok decision request_id if applicable"),
@@ -113,9 +117,30 @@ IMPORTANT: Always use dry_run=true unless explicitly configured for live trading
       },
       async (args) => {
         try {
-          const resp = await ployFetch("/api/sidecar/orders", {
+          const payload = {
+            deployment_id: args.deployment_id,
+            domain: args.domain,
+            market_slug: args.market_slug,
+            token_id: args.token_id,
+            side: args.side === "YES" ? "UP" : "DOWN",
+            order_side: "BUY",
+            size: args.shares,
+            price_limit: args.price,
+            idempotency_key: args.idempotency_key || `sidecar-${randomUUID()}`,
+            reason: args.reasoning,
+            confidence: args.confidence,
+            edge: args.edge,
+            metadata: {
+              source: "ploy-sidecar.mcp",
+              strategy: args.strategy,
+              decision_request_id: args.grok_decision_id || "",
+            },
+            dry_run: args.dry_run,
+          };
+
+          const resp = await ployFetch("/api/sidecar/intents", {
             method: "POST",
-            body: JSON.stringify(args),
+            body: JSON.stringify(payload),
           });
 
           if (!resp.ok) {

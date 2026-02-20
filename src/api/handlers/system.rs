@@ -12,6 +12,25 @@ pub struct DomainControlRequest {
     pub domain: Option<String>,
 }
 
+fn reject_domain_scoped_control(
+    req: Option<Json<DomainControlRequest>>,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let Some(Json(r)) = req else {
+        return Ok(());
+    };
+    if r.domain
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "domain-scoped pause/resume/halt is not implemented yet; omit `domain`".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// GET /health -- lightweight liveness/readiness probe
 pub async fn health_handler(
     State(state): State<AppState>,
@@ -214,7 +233,7 @@ pub async fn pause_system(
     State(state): State<AppState>,
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
-    let _domain = req.and_then(|Json(r)| r.domain);
+    reject_domain_scoped_control(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -243,7 +262,7 @@ pub async fn resume_system(
     State(state): State<AppState>,
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
-    let _domain = req.and_then(|Json(r)| r.domain);
+    reject_domain_scoped_control(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -274,7 +293,7 @@ pub async fn halt_system(
     State(state): State<AppState>,
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
-    let _domain = req.and_then(|Json(r)| r.domain);
+    reject_domain_scoped_control(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,

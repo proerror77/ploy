@@ -81,13 +81,16 @@ JSON
 - `pm.submit_limit` / `pm.cancel_order` / `events.upsert` / `events.update_status` 這類「寫入」操作預設會被拒絕，必須在交易機器環境設 `PLOY_RPC_WRITE_ENABLED=true` 才會放行。
 - 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
 - `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。
+- 若你有設定 sidecar token，可用 `PLOY_RPC_SIDECAR_AUTH_TOKEN` 讓 RPC 自動帶 `x-ploy-sidecar-token` 呼叫 ingress。
 - live 直連 `submit_order` 預設禁用（防旁路風控）；如需暫時回退可設 `PLOY_ALLOW_LEGACY_DIRECT_SUBMIT=true`（不建議 production）。
 - `ploy strategy start ...` 的 legacy live runtime 預設也會被擋下（避免繞過 Coordinator）。如需緊急回退才設 `PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true`。
 - 若設定 `PLOY_SIDECAR_AUTH_TOKEN`，所有 sidecar `POST` 端點都需帶 `x-ploy-sidecar-token`（或 `Authorization: Bearer ...`）。
+- `PLOY_GATEWAY_ONLY=true` 時，sidecar auth 也會強制要求有 token 設定（沒設 token 會拒絕寫入請求）。
 - 若你要強制「只有 coordinator/gateway 能送單」，在交易機器加上 `PLOY_GATEWAY_ONLY=true`。
   在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（Coordinator 已自動帶入）。
 - 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
-- 若你要強制每筆 intent 都必須命中已註冊 deployment，可設 `PLOY_DEPLOYMENT_GATE_REQUIRED=true`。
+- sidecar `/api/sidecar/intents` 的 deployment gate 預設為啟用（可用 `PLOY_DEPLOYMENT_GATE_REQUIRED=false` 暫時關掉，不建議 production）。
+- `/api/sidecar/orders` live 提交預設關閉（避免繞過 deployment 治理）；僅在 `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=true` 才允許 live。
 
 ### Deployment Matrix API
 
@@ -99,6 +102,7 @@ JSON
 - `POST /api/deployments/:id/enable`
 - `POST /api/deployments/:id/disable`
 - `DELETE /api/deployments/:id`
+- deployment matrix 會落地到 `data/state/deployments.json`（可用 `PLOY_DEPLOYMENTS_FILE` 覆寫）。
 
 已支援的 method（起步集合）：
 - `pm.get_balance`
