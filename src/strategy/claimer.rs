@@ -8,20 +8,30 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{NaiveDate, Utc};
+use ethers::abi::{AbiParser, Token};
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{
     Http as EthersHttp, Middleware as EthersMiddleware, Provider as EthersProvider,
 };
 use ethers::signers::{LocalWallet, Signer as _};
 use ethers::types::{
+    Bytes as EthersBytes, H256 as EthersH256,
     Address as EthersAddress, TransactionRequest as EthersTransactionRequest, U256 as EthersU256,
+    transaction::eip2718::TypedTransaction as EthersTypedTransaction,
     U64 as EthersU64,
 };
+use ethers::utils::{get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256};
+use hmac::{Hmac, Mac};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::PolymarketClient;
@@ -37,6 +47,14 @@ const DEFAULT_AUTO_TOPUP_TARGET_WEI: u128 = 20_000_000_000_000_000; // 0.02 MATI
 const DEFAULT_AUTO_TOPUP_MAX_PER_TX_WEI: u128 = 20_000_000_000_000_000; // 0.02 MATIC
 const DEFAULT_AUTO_TOPUP_DAILY_CAP_WEI: u128 = 100_000_000_000_000_000; // 0.1 MATIC
 const DEFAULT_AUTO_TOPUP_RESERVE_WEI: u128 = 5_000_000_000_000_000; // keep 0.005 MATIC on top-up wallet
+const RELAYER_URL_DEFAULT: &str = "https://relayer-v2.polymarket.com";
+const RELAYER_PROXY_FACTORY_POLYGON: &str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
+const RELAYER_RELAY_HUB_POLYGON: &str = "0xD216153c06E857cD7f72665E0aF1d7D82172F494";
+const RELAYER_PROXY_INIT_CODE_HASH: &str =
+    "0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b";
+const RELAYER_DEFAULT_GAS_LIMIT: u64 = 10_000_000;
+const RELAYER_DEFAULT_MAX_POLLS: u64 = 100;
+const RELAYER_DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
 
 // Generate contract bindings for ConditionalTokens
 sol! {
@@ -115,6 +133,17 @@ fn env_u128_any(keys: &[&str]) -> Option<u128> {
     None
 }
 
+fn env_u64_any(keys: &[&str]) -> Option<u64> {
+    for key in keys {
+        if let Ok(v) = std::env::var(key) {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
 fn min_native_gas_wei() -> U256 {
     std::env::var("CLAIMER_MIN_NATIVE_GAS_WEI")
         .ok()
@@ -130,6 +159,70 @@ fn auto_topup_enabled() -> bool {
     )
 }
 
+fn relayer_claim_enabled() -> bool {
+    env_flag(
+        "CLAIMER_RELAYER_ENABLED",
+        env_flag("CLAIMER_GASLESS_REDEEM_ENABLED", true),
+    )
+}
+
+fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
+    let api_key = env_string_any(&[
+        "CLAIMER_BUILDER_API_KEY",
+        "POLY_BUILDER_API_KEY",
+        "BUILDER_API_KEY",
+    ])?;
+    let secret = env_string_any(&[
+        "CLAIMER_BUILDER_SECRET",
+        "POLY_BUILDER_SECRET",
+        "BUILDER_SECRET",
+    ])?;
+    let passphrase = env_string_any(&[
+        "CLAIMER_BUILDER_PASSPHRASE",
+        "POLY_BUILDER_PASSPHRASE",
+        "BUILDER_PASS_PHRASE",
+        "BUILDER_PASSPHRASE",
+    ])?;
+    Some(RelayerBuilderCredentials {
+        api_key,
+        secret,
+        passphrase,
+    })
+}
+
+fn relayer_base_url() -> String {
+    env_string_any(&["CLAIMER_RELAYER_URL", "POLYMARKET_RELAYER_URL", "RELAYER_URL"])
+        .unwrap_or_else(|| RELAYER_URL_DEFAULT.to_string())
+}
+
+fn relayer_fallback_onchain_enabled() -> bool {
+    env_flag("CLAIMER_RELAYER_FALLBACK_ONCHAIN", false)
+}
+
+fn relayer_poll_max() -> u64 {
+    env_u64_any(&["CLAIMER_RELAYER_MAX_POLLS"])
+        .unwrap_or(RELAYER_DEFAULT_MAX_POLLS)
+        .max(1)
+}
+
+fn relayer_poll_interval_ms() -> u64 {
+    env_u64_any(&["CLAIMER_RELAYER_POLL_INTERVAL_MS"])
+        .unwrap_or(RELAYER_DEFAULT_POLL_INTERVAL_MS)
+        .max(250)
+}
+
+fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Result<String> {
+    let secret = BASE64.decode(secret_base64.trim()).map_err(|e| {
+        crate::error::PloyError::Signature(format!("Invalid builder secret encoding: {}", e))
+    })?;
+    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&secret).map_err(|e| {
+        crate::error::PloyError::Signature(format!("Builder HMAC init failed: {}", e))
+    })?;
+    mac.update(message.as_bytes());
+    let sig = BASE64.encode(mac.finalize().into_bytes());
+    Ok(sig.replace('+', "-").replace('/', "_"))
+}
+
 fn u256_to_u128_saturating(value: U256) -> u128 {
     value.to_string().parse::<u128>().unwrap_or(u128::MAX)
 }
@@ -138,6 +231,65 @@ fn u256_to_u128_saturating(value: U256) -> u128 {
 struct GasTopupState {
     day: NaiveDate,
     spent_wei: u128,
+}
+
+#[derive(Debug, Clone)]
+struct RelayerBuilderCredentials {
+    api_key: String,
+    secret: String,
+    passphrase: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelayerPayloadResponse {
+    address: String,
+    nonce: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayerSignatureParams {
+    #[serde(rename = "gasPrice")]
+    gas_price: String,
+    #[serde(rename = "gasLimit")]
+    gas_limit: String,
+    #[serde(rename = "relayerFee")]
+    relayer_fee: String,
+    #[serde(rename = "relayHub")]
+    relay_hub: String,
+    relay: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RelayerSubmitRequest {
+    #[serde(rename = "type")]
+    tx_type: String,
+    from: String,
+    to: String,
+    #[serde(rename = "proxyWallet")]
+    proxy_wallet: String,
+    data: String,
+    nonce: String,
+    signature: String,
+    #[serde(rename = "signatureParams")]
+    signature_params: RelayerSignatureParams,
+    metadata: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelayerSubmitResponse {
+    #[serde(rename = "transactionID")]
+    transaction_id: String,
+    state: String,
+    #[serde(rename = "transactionHash")]
+    transaction_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelayerTransactionStatus {
+    state: String,
+    #[serde(rename = "transactionHash")]
+    transaction_hash: Option<String>,
 }
 
 /// Position that can be redeemed
@@ -276,8 +428,12 @@ impl AutoClaimer {
             return Ok(vec![]);
         }
 
-        if self.config.auto_claim && !self.preflight_wallet_can_claim().await? {
+        let relayer_ready = relayer_claim_enabled() && relayer_builder_credentials().is_some();
+        if self.config.auto_claim && !relayer_ready && !self.preflight_wallet_can_claim().await? {
             return Ok(vec![]);
+        }
+        if self.config.auto_claim && relayer_ready {
+            debug!("Relayer redeem is enabled; skipping native gas preflight");
         }
 
         info!("Found {} redeemable condition(s)", positions.len());
@@ -758,8 +914,389 @@ impl AutoClaimer {
         Ok(Some(refreshed_alloy))
     }
 
+    fn encode_ctf_redeem_calldata(condition_id: [u8; 32]) -> Result<Vec<u8>> {
+        let function = AbiParser::default()
+            .parse_function(
+                "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+            )
+            .map_err(|e| {
+                crate::error::PloyError::Internal(format!("Failed to parse redeem ABI: {}", e))
+            })?;
+
+        let usdc_addr: EthersAddress = USDC_E_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid USDC.e address: {}", e))
+        })?;
+
+        function
+            .encode_input(&[
+                Token::Address(usdc_addr),
+                Token::FixedBytes(vec![0u8; 32]),
+                Token::FixedBytes(condition_id.to_vec()),
+                Token::Array(vec![
+                    Token::Uint(EthersU256::from(1u8)),
+                    Token::Uint(EthersU256::from(2u8)),
+                ]),
+            ])
+            .map_err(|e| {
+                crate::error::PloyError::Internal(format!(
+                    "Failed to encode redeem calldata: {}",
+                    e
+                ))
+            })
+    }
+
+    fn encode_proxy_transaction_data(call_to: EthersAddress, call_data: Vec<u8>) -> Result<Vec<u8>> {
+        let function = AbiParser::default()
+            .parse_function(
+                "function proxy((uint8 typeCode,address to,uint256 value,bytes data)[] calls)",
+            )
+            .map_err(|e| {
+                crate::error::PloyError::Internal(format!("Failed to parse proxy ABI: {}", e))
+            })?;
+
+        function
+            .encode_input(&[Token::Array(vec![Token::Tuple(vec![
+                Token::Uint(EthersU256::from(1u8)), // CallType.Call
+                Token::Address(call_to),
+                Token::Uint(EthersU256::zero()),
+                Token::Bytes(call_data),
+            ])])])
+            .map_err(|e| {
+                crate::error::PloyError::Internal(format!(
+                    "Failed to encode proxy calldata: {}",
+                    e
+                ))
+            })
+    }
+
+    fn derive_proxy_wallet_address(signer: EthersAddress) -> Result<EthersAddress> {
+        let proxy_factory: EthersAddress = RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid relayer proxy factory: {}", e))
+        })?;
+        let init_hash: EthersH256 = RELAYER_PROXY_INIT_CODE_HASH.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!(
+                "Invalid relayer proxy init code hash: {}",
+                e
+            ))
+        })?;
+        let salt = keccak256(signer.as_bytes());
+        Ok(ethers_get_create2_address_from_hash(
+            proxy_factory,
+            salt,
+            init_hash.to_fixed_bytes(),
+        ))
+    }
+
+    fn create_proxy_struct_hash(
+        from: EthersAddress,
+        to: EthersAddress,
+        data: &[u8],
+        tx_fee: EthersU256,
+        gas_price: EthersU256,
+        gas_limit: EthersU256,
+        nonce: EthersU256,
+        relay_hub: EthersAddress,
+        relay: EthersAddress,
+    ) -> EthersH256 {
+        fn append_u256(out: &mut Vec<u8>, value: EthersU256) {
+            let mut buf = [0u8; 32];
+            value.to_big_endian(&mut buf);
+            out.extend_from_slice(&buf);
+        }
+
+        let mut payload = Vec::with_capacity(4 + 20 + 20 + data.len() + 32 * 4 + 20 + 20);
+        payload.extend_from_slice(b"rlx:");
+        payload.extend_from_slice(from.as_bytes());
+        payload.extend_from_slice(to.as_bytes());
+        payload.extend_from_slice(data);
+        append_u256(&mut payload, tx_fee);
+        append_u256(&mut payload, gas_price);
+        append_u256(&mut payload, gas_limit);
+        append_u256(&mut payload, nonce);
+        payload.extend_from_slice(relay_hub.as_bytes());
+        payload.extend_from_slice(relay.as_bytes());
+
+        EthersH256::from(keccak256(payload))
+    }
+
+    fn build_relayer_builder_headers(
+        creds: &RelayerBuilderCredentials,
+        timestamp: i64,
+        body: &str,
+    ) -> Result<HeaderMap> {
+        let message = format!("{}POST/submit{}", timestamp, body);
+        let signature = relayer_hmac_signature(&creds.secret, &message)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            HeaderName::from_static("poly_builder_api_key"),
+            HeaderValue::from_str(&creds.api_key).map_err(|e| {
+                crate::error::PloyError::Internal(format!("Invalid builder API key header: {}", e))
+            })?,
+        );
+        headers.insert(
+            HeaderName::from_static("poly_builder_passphrase"),
+            HeaderValue::from_str(&creds.passphrase).map_err(|e| {
+                crate::error::PloyError::Internal(format!(
+                    "Invalid builder passphrase header: {}",
+                    e
+                ))
+            })?,
+        );
+        headers.insert(
+            HeaderName::from_static("poly_builder_signature"),
+            HeaderValue::from_str(&signature).map_err(|e| {
+                crate::error::PloyError::Internal(format!(
+                    "Invalid builder signature header: {}",
+                    e
+                ))
+            })?,
+        );
+        headers.insert(
+            HeaderName::from_static("poly_builder_timestamp"),
+            HeaderValue::from_str(&timestamp.to_string()).map_err(|e| {
+                crate::error::PloyError::Internal(format!(
+                    "Invalid builder timestamp header: {}",
+                    e
+                ))
+            })?,
+        );
+        Ok(headers)
+    }
+
+    async fn claim_position_via_relayer_proxy(
+        &self,
+        pos: &RedeemablePosition,
+    ) -> Result<Option<String>> {
+        if !relayer_claim_enabled() {
+            return Ok(None);
+        }
+
+        let Some(builder_creds) = relayer_builder_credentials() else {
+            return Ok(None);
+        };
+
+        let private_key = self.config.private_key.as_ref().ok_or_else(|| {
+            crate::error::PloyError::Wallet("No private key for relayer redeem".into())
+        })?;
+
+        let signer_wallet = private_key.parse::<LocalWallet>().map_err(|e| {
+            crate::error::PloyError::Wallet(format!("Invalid private key for relayer: {}", e))
+        })?
+        .with_chain_id(POLYGON_CHAIN_ID);
+        let signer_addr = signer_wallet.address();
+
+        let condition_hex = pos
+            .condition_id
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        let condition_bytes: [u8; 32] = hex::decode(condition_hex)
+            .map_err(|e| crate::error::PloyError::Internal(format!("Invalid condition ID: {}", e)))?
+            .try_into()
+            .map_err(|_| crate::error::PloyError::Internal("Condition ID wrong length".into()))?;
+
+        let redeem_call_data = Self::encode_ctf_redeem_calldata(condition_bytes)?;
+        let ctf_addr: EthersAddress = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!(
+                "Invalid ConditionalTokens address: {}",
+                e
+            ))
+        })?;
+        let proxy_factory_addr: EthersAddress =
+            RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
+                crate::error::PloyError::AddressParsing(format!(
+                    "Invalid relayer proxy factory: {}",
+                    e
+                ))
+            })?;
+        let relay_hub_addr: EthersAddress = RELAYER_RELAY_HUB_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid relayer hub address: {}", e))
+        })?;
+        let proxy_wallet = Self::derive_proxy_wallet_address(signer_addr)?;
+        let proxy_call_data = Self::encode_proxy_transaction_data(ctf_addr, redeem_call_data)?;
+
+        let polygon_rpc = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+        let provider = EthersProvider::<EthersHttp>::try_from(polygon_rpc.as_str()).map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
+        })?;
+
+        let gas_estimate_tx: EthersTypedTransaction = EthersTransactionRequest::new()
+            .from(signer_addr)
+            .to(proxy_factory_addr)
+            .data(EthersBytes::from(proxy_call_data.clone()))
+            .into();
+        let gas_limit = match provider.estimate_gas(&gas_estimate_tx, None).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "Relayer redeem gas estimation failed, using default {}: {}",
+                    RELAYER_DEFAULT_GAS_LIMIT, e
+                );
+                EthersU256::from(RELAYER_DEFAULT_GAS_LIMIT)
+            }
+        };
+
+        let relayer_url = relayer_base_url();
+        let relayer_base = relayer_url.trim_end_matches('/').to_string();
+        let http = reqwest::Client::new();
+
+        let relay_payload_resp = http
+            .get(format!("{}/relay-payload", relayer_base))
+            .query(&[
+                ("address", format!("{:#x}", signer_addr)),
+                ("type", "PROXY".to_string()),
+            ])
+            .send()
+            .await
+            .map_err(crate::error::PloyError::Http)?
+            .error_for_status()
+            .map_err(crate::error::PloyError::Http)?;
+        let relay_payload: RelayerPayloadResponse = relay_payload_resp
+            .json()
+            .await
+            .map_err(crate::error::PloyError::Http)?;
+
+        let relay_addr: EthersAddress = relay_payload.address.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!(
+                "Invalid relayer payload address {}: {}",
+                relay_payload.address, e
+            ))
+        })?;
+        let nonce = EthersU256::from_dec_str(relay_payload.nonce.trim()).map_err(|e| {
+            crate::error::PloyError::Internal(format!(
+                "Invalid relayer payload nonce {}: {}",
+                relay_payload.nonce, e
+            ))
+        })?;
+
+        let struct_hash = Self::create_proxy_struct_hash(
+            signer_addr,
+            proxy_factory_addr,
+            &proxy_call_data,
+            EthersU256::zero(),
+            EthersU256::zero(),
+            gas_limit,
+            nonce,
+            relay_hub_addr,
+            relay_addr,
+        );
+        let signature = signer_wallet
+            .sign_message(struct_hash.as_bytes())
+            .await
+            .map_err(|e| {
+                crate::error::PloyError::Signature(format!("Relayer proxy signature failed: {}", e))
+            })?
+            .to_string();
+
+        let submit_req = RelayerSubmitRequest {
+            tx_type: "PROXY".to_string(),
+            from: format!("{:#x}", signer_addr),
+            to: format!("{:#x}", proxy_factory_addr),
+            proxy_wallet: format!("{:#x}", proxy_wallet),
+            data: format!("0x{}", hex::encode(proxy_call_data)),
+            nonce: relay_payload.nonce,
+            signature,
+            signature_params: RelayerSignatureParams {
+                gas_price: "0".to_string(),
+                gas_limit: gas_limit.to_string(),
+                relayer_fee: "0".to_string(),
+                relay_hub: format!("{:#x}", relay_hub_addr),
+                relay: format!("{:#x}", relay_addr),
+            },
+            metadata: format!("redeem {}", &condition_hex.chars().take(16).collect::<String>()),
+        };
+        let submit_body = serde_json::to_string(&submit_req)?;
+        let ts = Utc::now().timestamp();
+        let headers = Self::build_relayer_builder_headers(&builder_creds, ts, &submit_body)?;
+
+        let submit_resp = http
+            .post(format!("{}/submit", relayer_base))
+            .headers(headers)
+            .body(submit_body)
+            .send()
+            .await
+            .map_err(crate::error::PloyError::Http)?
+            .error_for_status()
+            .map_err(crate::error::PloyError::Http)?;
+        let submitted: RelayerSubmitResponse = submit_resp
+            .json()
+            .await
+            .map_err(crate::error::PloyError::Http)?;
+
+        info!(
+            "Relayer redeem submitted: id={}, state={}, condition={}",
+            submitted.transaction_id,
+            submitted.state,
+            &condition_hex.chars().take(16).collect::<String>()
+        );
+
+        for _ in 0..relayer_poll_max() {
+            let status_resp = http
+                .get(format!("{}/transaction", relayer_base))
+                .query(&[("id", submitted.transaction_id.as_str())])
+                .send()
+                .await
+                .map_err(crate::error::PloyError::Http)?
+                .error_for_status()
+                .map_err(crate::error::PloyError::Http)?;
+            let transactions: Vec<RelayerTransactionStatus> = status_resp
+                .json()
+                .await
+                .map_err(crate::error::PloyError::Http)?;
+
+            if let Some(txn) = transactions.first() {
+                match txn.state.as_str() {
+                    "STATE_MINED" | "STATE_CONFIRMED" => {
+                        let tx_hash = txn
+                            .transaction_hash
+                            .clone()
+                            .or_else(|| submitted.transaction_hash.clone())
+                            .unwrap_or_default();
+                        info!("Relayer redeem confirmed: state={}, tx={}", txn.state, tx_hash);
+                        return Ok(Some(tx_hash));
+                    }
+                    "STATE_FAILED" | "STATE_INVALID" => {
+                        return Err(crate::error::PloyError::OrderSubmission(format!(
+                            "Relayer redeem failed: id={}, state={}",
+                            submitted.transaction_id, txn.state
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+
+            sleep(Duration::from_millis(relayer_poll_interval_ms())).await;
+        }
+
+        Err(crate::error::PloyError::OrderTimeout(format!(
+            "Relayer redeem polling timed out: id={}",
+            submitted.transaction_id
+        )))
+    }
+
     /// Claim a specific condition by calling the ConditionalTokens redeem function
     async fn claim_position(&self, pos: &RedeemablePosition) -> Result<String> {
+        if relayer_claim_enabled() && relayer_builder_credentials().is_some() {
+            match self.claim_position_via_relayer_proxy(pos).await {
+                Ok(Some(tx_hash)) => return Ok(tx_hash),
+                Ok(None) => {}
+                Err(e) => {
+                    if !relayer_fallback_onchain_enabled() {
+                        return Err(e);
+                    }
+                    warn!(
+                        "Relayer redeem failed, falling back to direct on-chain redeem: {}",
+                        e
+                    );
+                }
+            }
+        }
+
         let private_key =
             self.config.private_key.as_ref().ok_or_else(|| {
                 crate::error::PloyError::Wallet("No private key for claiming".into())
@@ -919,5 +1456,25 @@ mod tests {
     #[test]
     fn test_u256_to_u128_saturating() {
         assert_eq!(u256_to_u128_saturating(U256::from(123u64)), 123u128);
+    }
+
+    #[test]
+    fn test_relayer_hmac_signature_urlsafe_base64() {
+        let sig = relayer_hmac_signature("dGVzdHNlY3JldA==", "123POST/submit{\"a\":1}")
+            .expect("signature should be created");
+        assert_eq!(sig, "5UKMaApqgL6X7RdBVDJLKCU_aDY7kSpONfbGIEZAX0s=");
+    }
+
+    #[test]
+    fn test_derive_proxy_wallet_address_matches_known_vector() {
+        let signer: EthersAddress = "0x9d699747148fd637a7d2514f9b3e3028bf59195c"
+            .parse()
+            .expect("valid signer");
+        let proxy = AutoClaimer::derive_proxy_wallet_address(signer)
+            .expect("proxy address should derive correctly");
+        assert_eq!(
+            format!("{:#x}", proxy),
+            "0xcbaaa60c5dec85eac2a2c424bdcd7258ab67eee2"
+        );
     }
 }
