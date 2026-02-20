@@ -25,7 +25,10 @@ use std::str::FromStr;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::api::state::AppState;
+use crate::api::{
+    state::AppState,
+    types::{MarketData, PositionResponse, TradeResponse, WsMessage},
+};
 use crate::config::AppConfig;
 use crate::domain::market::Side;
 use crate::error::PloyError;
@@ -193,7 +196,7 @@ pub struct SidecarIntentRequest {
     pub reason: Option<String>,
     pub confidence: Option<f64>,
     pub edge: Option<f64>,
-    pub priority: Option<String>, // "critical" | "high" | "normal" | "low"
+    pub priority: Option<String>, // "high" | "normal" | "low" (critical gated by env)
     #[serde(default)]
     pub metadata: HashMap<String, String>,
     pub dry_run: Option<bool>,
@@ -539,6 +542,76 @@ fn deployment_default_priority(deployment: &StrategyDeployment) -> OrderPriority
         p if p <= 20 => OrderPriority::Low,
         _ => OrderPriority::Normal,
     }
+}
+
+fn external_critical_priority_allowed() -> bool {
+    env_bool(&["PLOY_ALLOW_EXTERNAL_CRITICAL_PRIORITY"])
+}
+
+fn clamp_external_priority(priority: OrderPriority) -> OrderPriority {
+    if priority == OrderPriority::Critical && !external_critical_priority_allowed() {
+        return OrderPriority::High;
+    }
+    priority
+}
+
+fn side_to_label(side: Side) -> String {
+    match side {
+        Side::Up => "UP".to_string(),
+        Side::Down => "DOWN".to_string(),
+    }
+}
+
+fn broadcast_sidecar_activity(
+    state: &AppState,
+    intent_id: &str,
+    market_slug: &str,
+    token_id: &str,
+    side: Side,
+    shares: u64,
+    price: Decimal,
+) {
+    let now = Utc::now();
+    let side_label = side_to_label(side);
+    let shares_i32 = i32::try_from(shares).unwrap_or(i32::MAX);
+    let price_f64 = price.to_f64().unwrap_or_default();
+
+    state.broadcast(WsMessage::Trade(TradeResponse {
+        id: intent_id.to_string(),
+        timestamp: now,
+        token_id: token_id.to_string(),
+        token_name: market_slug.to_string(),
+        side: side_label.clone(),
+        shares: shares_i32,
+        entry_price: price_f64,
+        exit_price: None,
+        pnl: None,
+        status: "PENDING".to_string(),
+        error_message: None,
+    }));
+
+    state.broadcast(WsMessage::Position(PositionResponse {
+        token_id: token_id.to_string(),
+        token_name: market_slug.to_string(),
+        side: side_label,
+        shares: shares_i32,
+        entry_price: price_f64,
+        current_price: price_f64,
+        unrealized_pnl: 0.0,
+        entry_time: now,
+        duration_seconds: 0,
+    }));
+
+    state.broadcast(WsMessage::Market(MarketData {
+        token_id: token_id.to_string(),
+        token_name: market_slug.to_string(),
+        best_bid: price_f64,
+        best_ask: price_f64,
+        spread: 0.0,
+        last_price: price_f64,
+        volume_24h: 0.0,
+        timestamp: now,
+    }));
 }
 
 // ── Handlers ─────────────────────────────────────────────────────
@@ -895,10 +968,12 @@ pub async fn sidecar_submit_order(
         req.shares,
         price,
     );
-    intent.priority = deployment
-        .as_ref()
-        .map(deployment_default_priority)
-        .unwrap_or(OrderPriority::Normal);
+    intent.priority = clamp_external_priority(
+        deployment
+            .as_ref()
+            .map(deployment_default_priority)
+            .unwrap_or(OrderPriority::Normal),
+    );
     intent.metadata = metadata;
 
     let intent_id = intent.intent_id.to_string();
@@ -907,6 +982,16 @@ pub async fn sidecar_submit_order(
         .submit_order(intent)
         .await
         .map_err(|e| map_coordinator_submit_error("Failed to submit order", e))?;
+
+    broadcast_sidecar_activity(
+        &state,
+        &intent_id,
+        &req.market_slug,
+        &req.token_id,
+        side,
+        req.shares,
+        price,
+    );
 
     info!(
         intent_id = %intent_id,
@@ -986,16 +1071,17 @@ fn parse_order_priority(
     raw: Option<&str>,
 ) -> std::result::Result<OrderPriority, (StatusCode, String)> {
     match raw.unwrap_or("normal").trim().to_ascii_lowercase().as_str() {
-        "critical" => Ok(OrderPriority::Critical),
+        "critical" if external_critical_priority_allowed() => Ok(OrderPriority::Critical),
+        "critical" => Err((
+            StatusCode::BAD_REQUEST,
+            "critical priority is disabled for external sidecar requests".to_string(),
+        )),
         "high" => Ok(OrderPriority::High),
         "normal" => Ok(OrderPriority::Normal),
         "low" => Ok(OrderPriority::Low),
         other => Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "invalid priority '{}', expected critical|high|normal|low",
-                other
-            ),
+            format!("invalid priority '{}', expected high|normal|low", other),
         )),
     }
 }
@@ -1067,6 +1153,7 @@ pub async fn sidecar_submit_intent(
             .map(deployment_default_priority)
             .unwrap_or(OrderPriority::Normal)
     };
+    let priority = clamp_external_priority(priority);
     let agent_id = req
         .agent_id
         .as_deref()
@@ -1157,6 +1244,16 @@ pub async fn sidecar_submit_intent(
         .submit_order(intent)
         .await
         .map_err(|e| map_coordinator_submit_error("Failed to submit intent", e))?;
+
+    broadcast_sidecar_activity(
+        &state,
+        &intent_id,
+        &req.market_slug,
+        &req.token_id,
+        side,
+        req.size,
+        price,
+    );
 
     Ok(Json(SidecarIntentResponse {
         success: true,

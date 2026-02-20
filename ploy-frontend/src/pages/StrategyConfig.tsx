@@ -13,8 +13,10 @@ export function StrategyConfig() {
     max_entry: 45,
     shares: 100,
     predictive: false,
-    take_profit: 20,
-    stop_loss: 12,
+    exit_edge_floor: 0.02,
+    exit_price_band: 0.12,
+    time_decay_exit_secs: 900,
+    liquidity_exit_spread_bps: 150,
   });
 
   const { isLoading } = useQuery({
@@ -27,8 +29,10 @@ export function StrategyConfig() {
         max_entry: data.max_entry,
         shares: data.shares,
         predictive: data.predictive,
-        take_profit: data.take_profit ?? 20,
-        stop_loss: data.stop_loss ?? 12,
+        exit_edge_floor: data.exit_edge_floor ?? 0.02,
+        exit_price_band: data.exit_price_band ?? 0.12,
+        time_decay_exit_secs: data.time_decay_exit_secs ?? 900,
+        liquidity_exit_spread_bps: data.liquidity_exit_spread_bps ?? 150,
       });
       return data;
     },
@@ -42,8 +46,10 @@ export function StrategyConfig() {
         max_entry: data.max_entry,
         shares: data.shares,
         predictive: data.predictive,
-        take_profit: data.take_profit,
-        stop_loss: data.stop_loss,
+        exit_edge_floor: data.exit_edge_floor,
+        exit_price_band: data.exit_price_band,
+        time_decay_exit_secs: data.time_decay_exit_secs,
+        liquidity_exit_spread_bps: data.liquidity_exit_spread_bps,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['config'] });
@@ -164,16 +170,16 @@ export function StrategyConfig() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="mb-2 block text-sm font-medium">
-                      止盈百分比 (%)
+                      退出边际阈值
                     </label>
                     <input
                       type="number"
-                      step="1"
-                      value={formData.take_profit}
+                      step="0.001"
+                      value={formData.exit_edge_floor}
                       onChange={(e) =>
                         setFormData({
                           ...formData,
-                          take_profit: parseFloat(e.target.value),
+                          exit_edge_floor: parseFloat(e.target.value),
                         })
                       }
                       className="w-full rounded-md border bg-background px-3 py-2"
@@ -182,16 +188,54 @@ export function StrategyConfig() {
 
                   <div>
                     <label className="mb-2 block text-sm font-medium">
-                      止损百分比 (%)
+                      退出价格带
+                    </label>
+                    <input
+                      type="number"
+                      step="0.001"
+                      value={formData.exit_price_band}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          exit_price_band: parseFloat(e.target.value),
+                        })
+                      }
+                      className="w-full rounded-md border bg-background px-3 py-2"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="mb-2 block text-sm font-medium">
+                      时间衰减退出 (秒)
                     </label>
                     <input
                       type="number"
                       step="1"
-                      value={formData.stop_loss}
+                      value={formData.time_decay_exit_secs}
                       onChange={(e) =>
                         setFormData({
                           ...formData,
-                          stop_loss: parseFloat(e.target.value),
+                          time_decay_exit_secs: parseInt(e.target.value),
+                        })
+                      }
+                      className="w-full rounded-md border bg-background px-3 py-2"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-sm font-medium">
+                      流动性退出点差 (bps)
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      value={formData.liquidity_exit_spread_bps}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          liquidity_exit_spread_bps: parseInt(e.target.value),
                         })
                       }
                       className="w-full rounded-md border bg-background px-3 py-2"

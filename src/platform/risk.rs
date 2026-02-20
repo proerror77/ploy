@@ -50,7 +50,7 @@ impl Default for RiskConfig {
             max_consecutive_failures: 5,
             daily_loss_limit: Decimal::from(1000),
             max_spread_bps: 500, // 5%
-            critical_bypass_exposure: true,
+            critical_bypass_exposure: false,
             crypto_max_exposure: None,
             sports_max_exposure: None,
             politics_max_exposure: None,

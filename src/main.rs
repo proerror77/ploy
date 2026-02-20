@@ -2043,7 +2043,15 @@ async fn run_bot(cli: &Cli) -> Result<()> {
         match PostgresStore::new(&config.database.url, config.database.max_connections).await {
             Ok(s) => {
                 if let Err(e) = s.migrate().await {
-                    error!("Database migration failed: {}", e);
+                    if config.dry_run.enabled {
+                        warn!(
+                            "Database migration failed in dry-run mode: {} - continuing anyway",
+                            e
+                        );
+                    } else {
+                        error!("Database migration failed in live mode: {}", e);
+                        return Err(e);
+                    }
                 }
                 info!("Database connected");
                 Some(s)

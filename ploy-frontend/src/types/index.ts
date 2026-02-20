@@ -52,8 +52,10 @@ export interface StrategyConfig {
   max_entry: number;
   shares: number;
   predictive: boolean;
-  take_profit?: number;
-  stop_loss?: number;
+  exit_edge_floor?: number | null;
+  exit_price_band?: number | null;
+  time_decay_exit_secs?: number | null;
+  liquidity_exit_spread_bps?: number | null;
 }
 
 export interface LogEntry {

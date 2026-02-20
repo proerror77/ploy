@@ -159,10 +159,7 @@ fn normalize_condition_id(input: &str) -> Option<String> {
 }
 
 fn ignored_condition_patterns() -> Vec<String> {
-    let raw = env_string_any(&[
-        "CLAIMER_IGNORE_CONDITION_IDS",
-        "CLAIMER_IGNORE_CONDITIONS",
-    ]);
+    let raw = env_string_any(&["CLAIMER_IGNORE_CONDITION_IDS", "CLAIMER_IGNORE_CONDITIONS"]);
     let Some(raw) = raw else {
         return Vec::new();
     };
@@ -180,7 +177,9 @@ fn condition_is_ignored(condition_id: &str, patterns: &[String]) -> bool {
         return false;
     };
 
-    patterns.iter().any(|pattern| normalized.starts_with(pattern))
+    patterns
+        .iter()
+        .any(|pattern| normalized.starts_with(pattern))
 }
 
 fn min_native_gas_wei() -> U256 {

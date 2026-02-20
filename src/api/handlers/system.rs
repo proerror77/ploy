@@ -389,8 +389,10 @@ pub async fn update_config(
 /// GET /api/security/events
 pub async fn get_security_events(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<SecurityEventQuery>,
 ) -> std::result::Result<Json<Vec<SecurityEvent>>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let limit = query.limit.unwrap_or(100).min(500);
 
     let mut qb = QueryBuilder::<Postgres>::new(

@@ -71,6 +71,7 @@ const MODEL = process.env.SIDECAR_MODEL || "sonnet";
 const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 10) * 1000;
 const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
 const DRY_RUN = process.env.SIDECAR_DRY_RUN !== "false";
+const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 
 // ── System Prompt ───────────────────────────────────
 
@@ -121,6 +122,130 @@ Adjust for: team strength, home/away, rest days, key player status.
 Return structured JSON with scan_summary, opportunities[], and orders_submitted[].
 `;
 
+type RuntimeContext = {
+  system: {
+    status: string;
+    uptime_seconds: number;
+    error_count_1h: number;
+  } | null;
+  risk: {
+    state: string;
+    queue_depth: number;
+    daily_pnl_usd: number;
+    position_count: number;
+    circuit_breaker_events: number;
+  } | null;
+  open_positions: Array<{
+    market_slug: string;
+    side: string;
+    shares: number;
+    status: string;
+  }>;
+  deployments: {
+    total: number;
+    enabled: number;
+    sample: Array<{
+      id: string;
+      domain: string;
+      strategy: string;
+      enabled: boolean;
+      timeframe: string;
+    }>;
+  } | null;
+};
+
+async function backendFetchJson<T>(path: string): Promise<T | null> {
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (process.env.PLOY_SIDECAR_AUTH_TOKEN) {
+      headers["x-ploy-sidecar-token"] = process.env.PLOY_SIDECAR_AUTH_TOKEN;
+    }
+    if (process.env.PLOY_API_ADMIN_TOKEN) {
+      headers["x-ploy-admin-token"] = process.env.PLOY_API_ADMIN_TOKEN;
+    }
+    if (process.env.PLOY_API_KEY) {
+      headers["Authorization"] = `Bearer ${process.env.PLOY_API_KEY}`;
+    }
+
+    const resp = await fetch(`${PLOY_API}${path}`, { headers });
+    if (!resp.ok) return null;
+    return (await resp.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function buildRuntimeContext(): Promise<RuntimeContext> {
+  const [system, risk, positions, deployments] = await Promise.all([
+    backendFetchJson<{
+      status: string;
+      uptime_seconds: number;
+      error_count_1h: number;
+    }>("/api/system/status"),
+    backendFetchJson<{
+      risk_state: string;
+      queue_depth: number;
+      daily_pnl_usd: number;
+      positions: unknown[];
+      circuit_breaker_events: unknown[];
+    }>("/api/sidecar/risk"),
+    backendFetchJson<
+      Array<{ market_slug: string; side: string; shares: number; status: string }>
+    >("/api/sidecar/positions"),
+    backendFetchJson<
+      Array<{
+        id: string;
+        domain: string;
+        strategy: string;
+        enabled: boolean;
+        timeframe: string;
+      }>
+    >("/api/deployments"),
+  ]);
+
+  return {
+    system: system
+      ? {
+          status: system.status,
+          uptime_seconds: system.uptime_seconds,
+          error_count_1h: system.error_count_1h,
+        }
+      : null,
+    risk: risk
+      ? {
+          state: risk.risk_state,
+          queue_depth: risk.queue_depth,
+          daily_pnl_usd: risk.daily_pnl_usd,
+          position_count: Array.isArray(risk.positions) ? risk.positions.length : 0,
+          circuit_breaker_events: Array.isArray(risk.circuit_breaker_events)
+            ? risk.circuit_breaker_events.length
+            : 0,
+        }
+      : null,
+    open_positions: (positions ?? []).slice(0, 8).map((p) => ({
+      market_slug: p.market_slug,
+      side: p.side,
+      shares: p.shares,
+      status: p.status,
+    })),
+    deployments: deployments
+      ? {
+          total: deployments.length,
+          enabled: deployments.filter((d) => d.enabled).length,
+          sample: deployments.slice(0, 12).map((d) => ({
+            id: d.id,
+            domain: d.domain,
+            strategy: d.strategy,
+            enabled: d.enabled,
+            timeframe: d.timeframe,
+          })),
+        }
+      : null,
+  };
+}
+
 // ── Main Loop ───────────────────────────────────────
 
 async function runScanCycle(): Promise<void> {
@@ -128,10 +253,14 @@ async function runScanCycle(): Promise<void> {
   console.log(`\n[${timestamp}] Starting scan cycle (model=${MODEL}, dry_run=${DRY_RUN})`);
 
   try {
+    const runtimeContext = await buildRuntimeContext();
     let resultOutput: unknown = null;
 
     for await (const message of query({
       prompt: `Current time: ${timestamp}
+
+Runtime context snapshot:
+${JSON.stringify(runtimeContext, null, 2)}
 
 Run a full NBA comeback trading scan cycle:
 1. Check the ESPN scoreboard for today's live games
@@ -145,7 +274,10 @@ Run a full NBA comeback trading scan cycle:
 Return your structured analysis.`,
       options: {
         model: MODEL,
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt: `${SYSTEM_PROMPT}
+
+## Runtime Context (fresh snapshot for this cycle)
+${JSON.stringify(runtimeContext, null, 2)}`,
         mcpServers: {
           espn: espnServer,
           polymarket: polymarketServer,

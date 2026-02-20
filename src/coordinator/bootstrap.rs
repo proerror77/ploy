@@ -604,8 +604,8 @@ pub(crate) async fn ensure_strategy_observability_tables(pool: &PgPool) -> Resul
 }
 
 async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
-    // These repairs are intentionally startup-applied because `platform start`
-    // does not run the sqlx migration runner.
+    // These repairs remain startup-applied to harden mixed-version upgrades.
+    // `platform start` also runs the sqlx migration runner before this step.
     let result = sqlx::query(
         r#"
         DO $$
@@ -3034,6 +3034,17 @@ pub async fn start_platform(
     let mut coordinator =
         Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
     if let Some(pool) = shared_pool.as_ref() {
+        let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
+        let migration_store = PostgresStore::from_pool(pool.clone());
+        if let Err(e) = migration_store.migrate().await {
+            if require_sqlx_migrations {
+                return Err(e);
+            }
+            warn!(
+                error = %e,
+                "sqlx migration runner failed at startup; continuing due to PLOY_REQUIRE_SQLX_MIGRATIONS=false"
+            );
+        }
         ensure_schema_repairs(pool).await?;
         if let Err(e) = ensure_accounts_table(pool).await {
             warn!(error = %e, "failed to ensure accounts table");

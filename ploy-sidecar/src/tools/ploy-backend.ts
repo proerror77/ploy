@@ -13,6 +13,7 @@ import { z } from "zod";
 import { randomUUID } from "crypto";
 
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
+const PLOY_ADMIN_TOKEN = process.env.PLOY_API_ADMIN_TOKEN || process.env.PLOY_ADMIN_TOKEN;
 
 async function ployFetch(path: string, options?: RequestInit) {
   const url = `${PLOY_API}${path}`;
@@ -25,7 +26,19 @@ async function ployFetch(path: string, options?: RequestInit) {
   if (process.env.PLOY_API_KEY) {
     headers["Authorization"] = `Bearer ${process.env.PLOY_API_KEY}`;
   }
+  if (PLOY_ADMIN_TOKEN) {
+    headers["x-ploy-admin-token"] = PLOY_ADMIN_TOKEN;
+  }
   return fetch(url, { ...options, headers: { ...headers, ...options?.headers } });
+}
+
+async function callBackend(path: string, options?: RequestInit): Promise<any> {
+  const resp = await ployFetch(path, options);
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Backend error (${resp.status}): ${err}`);
+  }
+  return resp.json();
 }
 
 export const ployBackendServer = createSdkMcpServer({
@@ -213,6 +226,255 @@ IMPORTANT: Always use dry_run=true unless explicitly configured for live trading
         } catch (e: any) {
           return {
             content: [{ type: "text" as const, text: `Backend unreachable: ${e.message}` }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "system_control",
+      "Control coordinator runtime. action: start|stop|restart|pause|resume|halt.",
+      {
+        action: z.enum(["start", "stop", "restart", "pause", "resume", "halt"]),
+        domain: z.string().optional().describe("Optional domain scope (currently ignored by backend)"),
+      },
+      async (args) => {
+        try {
+          const body = args.domain ? JSON.stringify({ domain: args.domain }) : undefined;
+          const result = await callBackend(`/api/system/${args.action}`, {
+            method: "POST",
+            body,
+          });
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "get_config",
+      "Fetch current strategy configuration from backend.",
+      {},
+      async () => {
+        try {
+          const config = await callBackend("/api/config");
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(config, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "update_config",
+      "Patch strategy configuration. Backend requires full config; this tool merges with current config first.",
+      {
+        symbols: z.array(z.string()).optional(),
+        min_move: z.number().optional(),
+        max_entry: z.number().optional(),
+        shares: z.number().int().positive().optional(),
+        predictive: z.boolean().optional(),
+        exit_edge_floor: z.number().nullable().optional(),
+        exit_price_band: z.number().nullable().optional(),
+        time_decay_exit_secs: z.number().int().nonnegative().nullable().optional(),
+        liquidity_exit_spread_bps: z.number().int().nonnegative().nullable().optional(),
+      },
+      async (args) => {
+        try {
+          const current = await callBackend("/api/config");
+          const payload = { ...current, ...args };
+          const result = await callBackend("/api/config", {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          });
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "list_deployments",
+      "List strategy deployment matrix entries.",
+      {},
+      async () => {
+        try {
+          const items = await callBackend("/api/deployments");
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(items, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "get_deployment",
+      "Get one deployment by id.",
+      {
+        id: z.string(),
+      },
+      async (args) => {
+        try {
+          const item = await callBackend(`/api/deployments/${encodeURIComponent(args.id)}`);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(item, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "upsert_deployments",
+      "Bulk upsert deployment matrix. Provide deployments_json as a JSON array.",
+      {
+        deployments_json: z.string().describe("JSON array of StrategyDeployment objects"),
+        replace: z.boolean().default(false),
+      },
+      async (args) => {
+        try {
+          const parsed = JSON.parse(args.deployments_json);
+          if (!Array.isArray(parsed)) {
+            throw new Error("deployments_json must be a JSON array");
+          }
+          const result = await callBackend("/api/deployments", {
+            method: "PUT",
+            body: JSON.stringify({
+              deployments: parsed,
+              replace: args.replace,
+            }),
+          });
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "set_deployment_enabled",
+      "Enable/disable a deployment.",
+      {
+        id: z.string(),
+        enabled: z.boolean(),
+      },
+      async (args) => {
+        try {
+          const suffix = args.enabled ? "enable" : "disable";
+          const result = await callBackend(
+            `/api/deployments/${encodeURIComponent(args.id)}/${suffix}`,
+            {
+              method: "POST",
+            }
+          );
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "delete_deployment",
+      "Delete a deployment by id.",
+      {
+        id: z.string(),
+      },
+      async (args) => {
+        try {
+          const result = await callBackend(`/api/deployments/${encodeURIComponent(args.id)}`, {
+            method: "DELETE",
+          });
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "get_security_events",
+      "Read security audit events from backend.",
+      {
+        limit: z.number().int().positive().max(500).optional(),
+        severity: z.string().optional(),
+        start_time: z.string().optional().describe("ISO timestamp"),
+      },
+      async (args) => {
+        try {
+          const params = new URLSearchParams();
+          if (args.limit !== undefined) params.set("limit", String(args.limit));
+          if (args.severity) params.set("severity", args.severity);
+          if (args.start_time) params.set("start_time", args.start_time);
+          const query = params.toString();
+          const result = await callBackend(`/api/security/events${query ? `?${query}` : ""}`);
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
+            isError: true,
+          };
+        }
+      }
+    ),
+
+    tool(
+      "get_risk_state",
+      "Get current risk state from coordinator.",
+      {},
+      async () => {
+        try {
+          const risk = await callBackend("/api/sidecar/risk");
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify(risk, null, 2) }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: e.message }],
             isError: true,
           };
         }
