@@ -314,6 +314,28 @@ if [[ -f "$REMOTE_ROOT/env/sports-pm.env" && -f "$REMOTE_ROOT/env/crypto-dryrun.
   fi
 fi
 
+# Keep SQLx migration runner enabled by default to prevent startup on stale schema.
+ensure_env_true() {
+  local env_file="$1"
+  local key="$2"
+  if sudo grep -qE "^${key}=" "$env_file"; then
+    sudo sed -i "s/^${key}=.*/${key}=true/" "$env_file"
+  else
+    echo "${key}=true" | sudo tee -a "$env_file" >/dev/null
+  fi
+}
+
+ensure_sqlx_migrations_enabled() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_true "$env_file" "PLOY_RUN_SQLX_MIGRATIONS"
+  ensure_env_true "$env_file" "PLOY_REQUIRE_SQLX_MIGRATIONS"
+}
+
+ensure_sqlx_migrations_enabled "$REMOTE_ROOT/.env"
+ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/sports-pm.env"
+ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/crypto-dryrun.env"
+
 sudo chmod 600 "$REMOTE_ROOT"/.env "$REMOTE_ROOT"/env/*.env 2>/dev/null || true
 sudo chown ploy:ploy \
   "$REMOTE_ROOT"/config/*.toml \

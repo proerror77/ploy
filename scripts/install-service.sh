@@ -49,6 +49,29 @@ fi
 if [[ -f /opt/ploy/deployment/env.crypto-dryrun.example && ! -f /opt/ploy/env/crypto-dryrun.env ]]; then
   sudo cp /opt/ploy/deployment/env.crypto-dryrun.example /opt/ploy/env/crypto-dryrun.env
 fi
+
+# Keep SQLx migration runner enabled by default to prevent startup on stale schema.
+ensure_env_true() {
+  local env_file="$1"
+  local key="$2"
+  if sudo grep -qE "^${key}=" "$env_file"; then
+    sudo sed -i "s/^${key}=.*/${key}=true/" "$env_file"
+  else
+    echo "${key}=true" | sudo tee -a "$env_file" >/dev/null
+  fi
+}
+
+ensure_sqlx_migrations_enabled() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_true "$env_file" "PLOY_RUN_SQLX_MIGRATIONS"
+  ensure_env_true "$env_file" "PLOY_REQUIRE_SQLX_MIGRATIONS"
+}
+
+ensure_sqlx_migrations_enabled /opt/ploy/.env
+ensure_sqlx_migrations_enabled /opt/ploy/env/sports-pm.env
+ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-dryrun.env
+
 sudo chmod 600 /opt/ploy/env/*.env 2>/dev/null || true
 sudo chown ploy:ploy /opt/ploy/config/*.toml /opt/ploy/env/*.env 2>/dev/null || true
 

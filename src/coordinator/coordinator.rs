@@ -38,6 +38,8 @@ enum IngressMode {
     Halted,
 }
 
+const HEARTBEAT_STALE_WARN_COOLDOWN_SECS: i64 = 60;
+
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
@@ -145,6 +147,7 @@ pub struct Coordinator {
     global_state: Arc<RwLock<GlobalState>>,
     execution_log_pool: Option<PgPool>,
     ingress_mode: Arc<RwLock<IngressMode>>,
+    stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -780,6 +783,7 @@ impl Coordinator {
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
+        let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
         } else {
@@ -798,6 +802,7 @@ impl Coordinator {
             global_state,
             execution_log_pool: None,
             ingress_mode,
+            stale_heartbeat_warn_at,
             order_tx,
             order_rx,
             state_tx,
@@ -1820,12 +1825,28 @@ impl Coordinator {
 
         // Check for stale agents
         let timeout = chrono::Duration::milliseconds(self.config.heartbeat_timeout_ms as i64);
+        let stale_warn_cooldown =
+            chrono::Duration::seconds(HEARTBEAT_STALE_WARN_COOLDOWN_SECS);
         let now = Utc::now();
+        let mut stale_warn_at = self.stale_heartbeat_warn_at.write().await;
         for (id, agent) in state.agents.iter_mut() {
             if now - agent.last_heartbeat > timeout
                 && matches!(agent.status, crate::platform::AgentStatus::Running)
             {
-                warn!(agent_id = %id, "agent heartbeat stale");
+                let should_warn = stale_warn_at
+                    .get(id)
+                    .map(|last_warned_at| now - *last_warned_at >= stale_warn_cooldown)
+                    .unwrap_or(true);
+                if should_warn {
+                    warn!(
+                        agent_id = %id,
+                        last_heartbeat = %agent.last_heartbeat,
+                        stale_ms = (now - agent.last_heartbeat).num_milliseconds(),
+                        timeout_ms = self.config.heartbeat_timeout_ms,
+                        "agent heartbeat stale"
+                    );
+                    stale_warn_at.insert(id.clone(), now);
+                }
                 agent.error_message = Some("heartbeat timeout".into());
             }
         }
