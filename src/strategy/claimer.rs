@@ -17,12 +17,13 @@ use ethers::providers::{
 };
 use ethers::signers::{LocalWallet, Signer as _};
 use ethers::types::{
-    Bytes as EthersBytes, H256 as EthersH256,
-    Address as EthersAddress, TransactionRequest as EthersTransactionRequest, U256 as EthersU256,
-    transaction::eip2718::TypedTransaction as EthersTypedTransaction,
-    U64 as EthersU64,
+    transaction::eip2718::TypedTransaction as EthersTypedTransaction, Address as EthersAddress,
+    Bytes as EthersBytes, TransactionRequest as EthersTransactionRequest, H256 as EthersH256,
+    U256 as EthersU256, U64 as EthersU64,
 };
-use ethers::utils::{get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256};
+use ethers::utils::{
+    get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256,
+};
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
@@ -191,8 +192,12 @@ fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
 }
 
 fn relayer_base_url() -> String {
-    env_string_any(&["CLAIMER_RELAYER_URL", "POLYMARKET_RELAYER_URL", "RELAYER_URL"])
-        .unwrap_or_else(|| RELAYER_URL_DEFAULT.to_string())
+    env_string_any(&[
+        "CLAIMER_RELAYER_URL",
+        "POLYMARKET_RELAYER_URL",
+        "RELAYER_URL",
+    ])
+    .unwrap_or_else(|| RELAYER_URL_DEFAULT.to_string())
 }
 
 fn relayer_fallback_onchain_enabled() -> bool {
@@ -236,6 +241,26 @@ fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Result<String> 
 
 fn u256_to_u128_saturating(value: U256) -> u128 {
     value.to_string().parse::<u128>().unwrap_or(u128::MAX)
+}
+
+fn compact_http_body(raw: &str, max_chars: usize) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "<empty>".to_string();
+    }
+    let mut out = trimmed.to_string();
+    if out.len() > max_chars {
+        out.truncate(max_chars);
+        out.push_str("...");
+    }
+    out
+}
+
+fn ensure_0x_prefix(hex: &str) -> String {
+    if hex.starts_with("0x") || hex.starts_with("0X") {
+        return hex.to_string();
+    }
+    format!("0x{}", hex)
 }
 
 #[derive(Debug, Clone)]
@@ -956,7 +981,10 @@ impl AutoClaimer {
             })
     }
 
-    fn encode_proxy_transaction_data(call_to: EthersAddress, call_data: Vec<u8>) -> Result<Vec<u8>> {
+    fn encode_proxy_transaction_data(
+        call_to: EthersAddress,
+        call_data: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let calls = Token::Array(vec![Token::Tuple(vec![
             Token::Uint(EthersU256::from(1u8)), // CallType.Call
             Token::Address(call_to),
@@ -1083,10 +1111,12 @@ impl AutoClaimer {
             crate::error::PloyError::Wallet("No private key for relayer redeem".into())
         })?;
 
-        let signer_wallet = private_key.parse::<LocalWallet>().map_err(|e| {
-            crate::error::PloyError::Wallet(format!("Invalid private key for relayer: {}", e))
-        })?
-        .with_chain_id(POLYGON_CHAIN_ID);
+        let signer_wallet = private_key
+            .parse::<LocalWallet>()
+            .map_err(|e| {
+                crate::error::PloyError::Wallet(format!("Invalid private key for relayer: {}", e))
+            })?
+            .with_chain_id(POLYGON_CHAIN_ID);
         let signer_addr = signer_wallet.address();
 
         let condition_hex = pos
@@ -1123,9 +1153,10 @@ impl AutoClaimer {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
-        let provider = EthersProvider::<EthersHttp>::try_from(polygon_rpc.as_str()).map_err(|e| {
-            crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
-        })?;
+        let provider =
+            EthersProvider::<EthersHttp>::try_from(polygon_rpc.as_str()).map_err(|e| {
+                crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
+            })?;
 
         let gas_estimate_tx: EthersTypedTransaction = EthersTransactionRequest::new()
             .from(signer_addr)
@@ -1187,13 +1218,18 @@ impl AutoClaimer {
             relay_hub_addr,
             relay_addr,
         );
-        let signature = signer_wallet
-            .sign_message(struct_hash.as_bytes())
-            .await
-            .map_err(|e| {
-                crate::error::PloyError::Signature(format!("Relayer proxy signature failed: {}", e))
-            })?
-            .to_string();
+        let signature = ensure_0x_prefix(
+            &signer_wallet
+                .sign_message(struct_hash.as_bytes())
+                .await
+                .map_err(|e| {
+                    crate::error::PloyError::Signature(format!(
+                        "Relayer proxy signature failed: {}",
+                        e
+                    ))
+                })?
+                .to_string(),
+        );
 
         let submit_req = RelayerSubmitRequest {
             tx_type: "PROXY".to_string(),
@@ -1210,7 +1246,10 @@ impl AutoClaimer {
                 relay_hub: format!("{:#x}", relay_hub_addr),
                 relay: format!("{:#x}", relay_addr),
             },
-            metadata: format!("redeem {}", &condition_hex.chars().take(16).collect::<String>()),
+            metadata: format!(
+                "redeem {}",
+                &condition_hex.chars().take(16).collect::<String>()
+            ),
         };
         let submit_body = serde_json::to_string(&submit_req)?;
         let ts = Utc::now().timestamp();
@@ -1222,13 +1261,26 @@ impl AutoClaimer {
             .body(submit_body)
             .send()
             .await
-            .map_err(crate::error::PloyError::Http)?
-            .error_for_status()
             .map_err(crate::error::PloyError::Http)?;
-        let submitted: RelayerSubmitResponse = submit_resp
-            .json()
+        let submit_status = submit_resp.status();
+        let submit_text = submit_resp
+            .text()
             .await
             .map_err(crate::error::PloyError::Http)?;
+        if !submit_status.is_success() {
+            return Err(crate::error::PloyError::OrderSubmission(format!(
+                "Relayer submit failed: status={}, body={}",
+                submit_status,
+                compact_http_body(&submit_text, 4096)
+            )));
+        }
+        let submitted: RelayerSubmitResponse = serde_json::from_str(&submit_text).map_err(|e| {
+            crate::error::PloyError::Internal(format!(
+                "Invalid relayer submit response JSON: {}, body={}",
+                e,
+                compact_http_body(&submit_text, 4096)
+            ))
+        })?;
 
         info!(
             "Relayer redeem submitted: id={}, state={}, condition={}",
@@ -1259,7 +1311,10 @@ impl AutoClaimer {
                             .clone()
                             .or_else(|| submitted.transaction_hash.clone())
                             .unwrap_or_default();
-                        info!("Relayer redeem confirmed: state={}, tx={}", txn.state, tx_hash);
+                        info!(
+                            "Relayer redeem confirmed: state={}, tx={}",
+                            txn.state, tx_hash
+                        );
                         return Ok(Some(tx_hash));
                     }
                     "STATE_FAILED" | "STATE_INVALID" => {
@@ -1478,6 +1533,12 @@ mod tests {
     }
 
     #[test]
+    fn test_ensure_0x_prefix() {
+        assert_eq!(ensure_0x_prefix("abcd"), "0xabcd");
+        assert_eq!(ensure_0x_prefix("0xabcd"), "0xabcd");
+    }
+
+    #[test]
     fn test_derive_proxy_wallet_address_matches_known_vector() {
         let signer: EthersAddress = "0x9d699747148fd637a7d2514f9b3e3028bf59195c"
             .parse()
@@ -1498,5 +1559,53 @@ mod tests {
         let encoded = AutoClaimer::encode_proxy_transaction_data(call_to, vec![0x12, 0x34])
             .expect("proxy calldata should encode");
         assert!(!encoded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_proxy_signature_matches_builder_relayer_client_vector() {
+        // Match @polymarket/builder-relayer-client tests/signatures/index.test.ts
+        let private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        let signer_wallet: LocalWallet = private_key.parse().expect("known private key");
+        let signer_addr = signer_wallet.address();
+
+        let proxy_factory: EthersAddress = RELAYER_PROXY_FACTORY_POLYGON
+            .parse()
+            .expect("proxy factory");
+        let relay_hub: EthersAddress = RELAYER_RELAY_HUB_POLYGON.parse().expect("relay hub");
+        let relay_addr: EthersAddress = "0xae700edfd9ab986395f3999fe11177b9903a52f1"
+            .parse()
+            .expect("relay address");
+        let usdc: EthersAddress = USDC_E_POLYGON.parse().expect("usdc");
+        let approve_calldata = hex::decode(
+            "095ea7b30000000000000000000000004d97dcd97ec945f40cf65f87097ace5ea0476045ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .expect("approve calldata");
+        let proxy_call_data =
+            AutoClaimer::encode_proxy_transaction_data(usdc, approve_calldata).expect("proxy data");
+
+        let struct_hash = AutoClaimer::create_proxy_struct_hash(
+            signer_addr,
+            proxy_factory,
+            &proxy_call_data,
+            EthersU256::zero(),
+            EthersU256::zero(),
+            EthersU256::from(85_338u64),
+            EthersU256::zero(),
+            relay_hub,
+            relay_addr,
+        );
+        let sig = ensure_0x_prefix(
+            &signer_wallet
+                .with_chain_id(POLYGON_CHAIN_ID)
+                .sign_message(struct_hash.as_bytes())
+                .await
+                .expect("signature")
+                .to_string(),
+        );
+
+        assert_eq!(
+            sig,
+            "0x4c18e2d2294a00d686714aff8e7936ab657cb4655dfccb2b556efadcb7e835f800dc2fecec69c501e29bb36ecb54b4da6b7c410c4dc740a33af2afde2b77297e1b"
+        );
     }
 }
