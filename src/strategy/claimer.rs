@@ -264,13 +264,7 @@ fn ensure_0x_prefix(hex: &str) -> String {
 }
 
 fn needs_native_gas_preflight(auto_claim: bool, relayer_ready: bool) -> bool {
-    if !auto_claim {
-        return false;
-    }
-    if !relayer_ready {
-        return true;
-    }
-    relayer_fallback_onchain_enabled()
+    auto_claim && !relayer_ready
 }
 
 #[derive(Debug, Clone)]
@@ -479,10 +473,10 @@ impl AutoClaimer {
         if preflight_required && !self.preflight_wallet_can_claim().await? {
             return Ok(vec![]);
         }
-        if self.config.auto_claim && relayer_ready && !preflight_required {
-            debug!("Relayer redeem is enabled without on-chain fallback; skipping native gas preflight");
-        } else if self.config.auto_claim && relayer_ready && preflight_required {
-            debug!("Relayer fallback-to-onchain is enabled; enforcing native gas preflight");
+        if self.config.auto_claim && relayer_ready {
+            debug!(
+                "Relayer redeem is enabled; deferring native gas preflight unless on-chain fallback is needed"
+            );
         }
 
         info!("Found {} redeemable condition(s)", positions.len());
@@ -1351,7 +1345,9 @@ impl AutoClaimer {
 
     /// Claim a specific condition by calling the ConditionalTokens redeem function
     async fn claim_position(&self, pos: &RedeemablePosition) -> Result<String> {
+        let mut attempted_relayer = false;
         if relayer_claim_enabled() && relayer_builder_credentials().is_some() {
+            attempted_relayer = true;
             match self.claim_position_via_relayer_proxy(pos).await {
                 Ok(Some(tx_hash)) => return Ok(tx_hash),
                 Ok(None) => {}
@@ -1365,6 +1361,14 @@ impl AutoClaimer {
                     );
                 }
             }
+        }
+        if attempted_relayer
+            && relayer_fallback_onchain_enabled()
+            && !self.preflight_wallet_can_claim().await?
+        {
+            return Err(crate::error::PloyError::Wallet(
+                "Insufficient native gas for on-chain fallback redeem".into(),
+            ));
         }
 
         let private_key =
@@ -1555,11 +1559,7 @@ mod tests {
     fn test_needs_native_gas_preflight() {
         assert!(!needs_native_gas_preflight(false, false));
         assert!(needs_native_gas_preflight(true, false));
-        std::env::set_var("CLAIMER_RELAYER_FALLBACK_ONCHAIN", "false");
         assert!(!needs_native_gas_preflight(true, true));
-        std::env::set_var("CLAIMER_RELAYER_FALLBACK_ONCHAIN", "true");
-        assert!(needs_native_gas_preflight(true, true));
-        std::env::remove_var("CLAIMER_RELAYER_FALLBACK_ONCHAIN");
     }
 
     #[test]
