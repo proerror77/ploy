@@ -1,4 +1,4 @@
--- Migration: 005_security_fixes
+-- Migration: 016_security_fixes_legacy
 -- Description: Security fixes for duplicate orders, race conditions, and nonce management
 -- Part of: Phase 1 - Critical Security Fixes
 
@@ -267,8 +267,8 @@ COMMENT ON TABLE state_transitions IS 'Audit log of all state machine transition
 COMMENT ON TABLE nonce_counter IS 'Current nonce counter for each wallet address';
 COMMENT ON TABLE nonce_usage IS 'Detailed log of nonce allocations and usage';
 
-COMMENT ON FUNCTION get_next_nonce IS 'Atomically allocate next nonce for a wallet';
-COMMENT ON FUNCTION mark_nonce_used IS 'Mark nonce as successfully used in an order';
-COMMENT ON FUNCTION release_nonce IS 'Release nonce when order fails';
-COMMENT ON FUNCTION cleanup_expired_idempotency_keys IS 'Remove expired idempotency keys';
-COMMENT ON FUNCTION log_state_transition IS 'Log a state machine transition for audit';
+COMMENT ON FUNCTION get_next_nonce(TEXT) IS 'Atomically allocate next nonce for a wallet';
+COMMENT ON FUNCTION mark_nonce_used(TEXT, BIGINT, TEXT) IS 'Mark nonce as successfully used in an order';
+COMMENT ON FUNCTION release_nonce(TEXT, BIGINT, TEXT) IS 'Release nonce when order fails';
+COMMENT ON FUNCTION cleanup_expired_idempotency_keys() IS 'Remove expired idempotency keys';
+COMMENT ON FUNCTION log_state_transition(INT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, JSONB) IS 'Log a state machine transition for audit';

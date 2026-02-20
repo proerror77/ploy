@@ -108,6 +108,43 @@ CREATE TABLE IF NOT EXISTS quote_freshness (
     ) STORED
 );
 
+-- Legacy/drift-safe repair: older DBs may have quote_freshness without `is_stale`.
+DO $$
+BEGIN
+    IF to_regclass('public.quote_freshness') IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'quote_freshness'
+          AND column_name = 'is_stale'
+    ) THEN
+        BEGIN
+            -- Keep the generated-column intent when supported.
+            EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN GENERATED ALWAYS AS ((EXTRACT(EPOCH FROM (NOW() - received_at)) > 30)) STORED';
+        EXCEPTION WHEN feature_not_supported OR invalid_object_definition THEN
+            -- Fallback for drifted schemas where generated expressions are unavailable.
+            EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT FALSE';
+        END;
+    END IF;
+
+    -- If `is_stale` is a normal column, refresh values from `received_at`.
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'quote_freshness'
+          AND column_name = 'is_stale'
+          AND is_generated = 'NEVER'
+    ) THEN
+        EXECUTE 'UPDATE quote_freshness SET is_stale = (EXTRACT(EPOCH FROM (NOW() - received_at)) > 30)
+                 WHERE is_stale IS DISTINCT FROM (EXTRACT(EPOCH FROM (NOW() - received_at)) > 30)';
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_quote_freshness_token ON quote_freshness(token_id, side);
 CREATE INDEX IF NOT EXISTS idx_quote_freshness_received ON quote_freshness(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_quote_freshness_stale ON quote_freshness(is_stale) WHERE is_stale = false;
@@ -216,10 +253,20 @@ $$ LANGUAGE plpgsql;
 -- 6. APPLY UPDATED_AT TRIGGER TO NEW TABLES
 -- ============================================================================
 
-CREATE TRIGGER update_order_idempotency_updated_at
-BEFORE UPDATE ON order_idempotency
-FOR EACH ROW
-EXECUTE FUNCTION update_updated_at_column();
+DO $$
+BEGIN
+    IF to_regclass('public.order_idempotency') IS NULL THEN
+        RETURN;
+    END IF;
+
+    DROP TRIGGER IF EXISTS update_order_idempotency_updated_at ON order_idempotency;
+    CREATE TRIGGER update_order_idempotency_updated_at
+    BEFORE UPDATE ON order_idempotency
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+EXCEPTION WHEN undefined_function THEN
+    NULL;
+END $$;
 
 -- ============================================================================
 -- 7. MIGRATION METADATA

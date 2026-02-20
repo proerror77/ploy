@@ -2042,16 +2042,29 @@ async fn run_bot(cli: &Cli) -> Result<()> {
     let store =
         match PostgresStore::new(&config.database.url, config.database.max_connections).await {
             Ok(s) => {
-                if let Err(e) = s.migrate().await {
-                    if config.dry_run.enabled {
-                        warn!(
-                            "Database migration failed in dry-run mode: {} - continuing anyway",
-                            e
-                        );
-                    } else {
-                        error!("Database migration failed in live mode: {}", e);
-                        return Err(e);
+                let run_sqlx_migrations = std::env::var("PLOY_RUN_SQLX_MIGRATIONS")
+                    .ok()
+                    .map(|v| {
+                        matches!(
+                            v.trim().to_ascii_lowercase().as_str(),
+                            "1" | "true" | "yes" | "on"
+                        )
+                    })
+                    .unwrap_or(!config.dry_run.enabled);
+                if run_sqlx_migrations {
+                    if let Err(e) = s.migrate().await {
+                        if config.dry_run.enabled {
+                            warn!(
+                                "Database migration failed in dry-run mode: {} - continuing anyway",
+                                e
+                            );
+                        } else {
+                            error!("Database migration failed in live mode: {}", e);
+                            return Err(e);
+                        }
                     }
+                } else {
+                    info!("Skipping SQLx migration runner (PLOY_RUN_SQLX_MIGRATIONS=false)");
                 }
                 info!("Database connected");
                 Some(s)

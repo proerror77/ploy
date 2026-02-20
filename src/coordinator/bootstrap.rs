@@ -675,10 +675,34 @@ async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
                         FROM information_schema.columns
                         WHERE table_schema = 'public'
                           AND table_name = 'nonce_usage'
+                          AND column_name = 'wallet_address'
+                    ) AND EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'nonce_usage'
+                          AND column_name = 'released_at'
+                    ) AND EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'nonce_usage'
                           AND column_name = 'allocated_at'
                     ) THEN
                         EXECUTE 'CREATE INDEX IF NOT EXISTS idx_nonce_usage_active ON nonce_usage(wallet_address, allocated_at DESC) WHERE released_at IS NULL';
                     ELSIF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'nonce_usage'
+                          AND column_name = 'wallet_address'
+                    ) AND EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'nonce_usage'
+                          AND column_name = 'released_at'
+                    ) AND EXISTS (
                         SELECT 1
                         FROM information_schema.columns
                         WHERE table_schema = 'public'
@@ -812,7 +836,7 @@ async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
                         WHERE c.conrelid = 'public.order_idempotency'::regclass
                           AND c.contype = 'p'
                         GROUP BY c.oid
-                        HAVING array_agg(a.attname ORDER BY x.ordinality) = ARRAY['idempotency_key']
+                        HAVING array_agg(a.attname::text ORDER BY x.ordinality) = ARRAY['idempotency_key']::text[]
                     ) THEN
                         EXECUTE 'ALTER TABLE order_idempotency DROP CONSTRAINT order_idempotency_pkey';
                         EXECUTE 'ALTER TABLE order_idempotency ADD PRIMARY KEY (account_id, idempotency_key)';
@@ -825,6 +849,52 @@ async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
                     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_status ON order_idempotency(status, created_at)';
                     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_expires ON order_idempotency(expires_at)';
                     EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_account_expires ON order_idempotency(account_id, expires_at)';
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_proc
+                        WHERE proname = 'update_updated_at_column'
+                          AND pg_function_is_visible(oid)
+                    ) THEN
+                        EXECUTE 'DROP TRIGGER IF EXISTS update_order_idempotency_updated_at ON order_idempotency';
+                        EXECUTE 'CREATE TRIGGER update_order_idempotency_updated_at BEFORE UPDATE ON order_idempotency FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()';
+                    END IF;
+                END IF;
+            EXCEPTION WHEN insufficient_privilege THEN
+                NULL;
+            END;
+
+            BEGIN
+                -- Reconcile quote_freshness drift from partial/legacy migrations.
+                IF to_regclass('public.quote_freshness') IS NOT NULL THEN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'quote_freshness'
+                          AND column_name = 'is_stale'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT FALSE';
+                    END IF;
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'quote_freshness'
+                          AND column_name = 'is_stale'
+                          AND is_generated = 'NEVER'
+                    ) AND EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'quote_freshness'
+                          AND column_name = 'received_at'
+                    ) THEN
+                        EXECUTE 'UPDATE quote_freshness SET is_stale = (EXTRACT(EPOCH FROM (NOW() - received_at)) > 30) WHERE is_stale IS DISTINCT FROM (EXTRACT(EPOCH FROM (NOW() - received_at)) > 30)';
+                    END IF;
+
+                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_quote_freshness_stale ON quote_freshness(is_stale) WHERE is_stale = false';
                 END IF;
             EXCEPTION WHEN insufficient_privilege THEN
                 NULL;
@@ -3244,18 +3314,24 @@ pub async fn start_platform(
     let mut coordinator =
         Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
     if let Some(pool) = shared_pool.as_ref() {
+        let run_sqlx_migrations =
+            env_bool("PLOY_RUN_SQLX_MIGRATIONS", !app_config.dry_run.enabled);
         let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
         let migration_store = PostgresStore::from_pool(pool.clone());
-        if let Err(e) = migration_store.migrate().await {
-            if require_sqlx_migrations {
-                return Err(e);
+        if run_sqlx_migrations {
+            if let Err(e) = migration_store.migrate().await {
+                if require_sqlx_migrations {
+                    return Err(e);
+                }
+                warn!(
+                    error = %e,
+                    "sqlx migration runner failed at startup; continuing due to PLOY_REQUIRE_SQLX_MIGRATIONS=false"
+                );
             }
-            warn!(
-                error = %e,
-                "sqlx migration runner failed at startup; continuing due to PLOY_REQUIRE_SQLX_MIGRATIONS=false"
-            );
+        } else {
+            info!("sqlx migration runner skipped at startup (PLOY_RUN_SQLX_MIGRATIONS=false)");
         }
         ensure_schema_repairs(pool).await?;
         if let Err(e) = ensure_accounts_table(pool).await {
