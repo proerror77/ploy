@@ -385,9 +385,9 @@ fn sidecar_orders_live_enabled() -> bool {
     env_bool(&["PLOY_SIDECAR_ORDERS_LIVE_ENABLED"])
 }
 
-fn normalize_opt(value: Option<&String>) -> Option<&str> {
+fn normalize_opt(value: &Option<String>) -> Option<&str> {
     value
-        .map(String::as_str)
+        .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
 }
