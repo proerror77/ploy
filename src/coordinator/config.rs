@@ -56,10 +56,10 @@ impl Default for CoordinatorConfig {
             crypto_allocator_total_cap_usd: None,
             // Conservative baseline allocator (can be overridden by env).
             // Bias exposure toward 15m markets and cap short-horizon 5m risk.
-            crypto_coin_cap_btc_pct: Decimal::new(40, 2),   // 40%
-            crypto_coin_cap_eth_pct: Decimal::new(30, 2),   // 30%
-            crypto_coin_cap_sol_pct: Decimal::new(20, 2),   // 20%
-            crypto_coin_cap_xrp_pct: Decimal::new(12, 2),   // 12%
+            crypto_coin_cap_btc_pct: Decimal::new(40, 2), // 40%
+            crypto_coin_cap_eth_pct: Decimal::new(30, 2), // 30%
+            crypto_coin_cap_sol_pct: Decimal::new(20, 2), // 20%
+            crypto_coin_cap_xrp_pct: Decimal::new(12, 2), // 12%
             crypto_coin_cap_other_pct: Decimal::new(10, 2), // 10%
             crypto_horizon_cap_5m_pct: Decimal::new(25, 2), // 25%
             crypto_horizon_cap_15m_pct: Decimal::new(65, 2), // 65%

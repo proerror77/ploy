@@ -1,10 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const ALLOWED_DIRECT_SUBMIT_CALLERS: &[&str] = &[
-    "src/strategy/executor.rs",
-    "src/strategy/core/executor.rs",
-];
+const ALLOWED_DIRECT_SUBMIT_CALLERS: &[&str] =
+    &["src/strategy/executor.rs", "src/strategy/core/executor.rs"];
 
 fn collect_rust_files(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {

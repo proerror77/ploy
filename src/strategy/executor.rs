@@ -265,10 +265,9 @@ impl OrderExecutor {
         let start = Instant::now();
 
         // Submit order
-        let order_resp = PolymarketClient::with_gateway_execution_context(
-            self.client.submit_order(request),
-        )
-        .await?;
+        let order_resp =
+            PolymarketClient::with_gateway_execution_context(self.client.submit_order(request))
+                .await?;
         let order_id = order_resp.id.clone();
 
         debug!("Order submitted: {}", order_id);

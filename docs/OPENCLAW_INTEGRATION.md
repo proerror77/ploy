@@ -78,6 +78,8 @@ JSON
 ```
 
 注意：
+- 控制面寫入 API（`/api/system/*`、`/api/config`、`/api/deployments*`）需要 admin token：
+  設 `PLOY_API_ADMIN_TOKEN`，並在 header 帶 `x-ploy-admin-token`（或 `Authorization: Bearer ...`）。
 - `pm.submit_limit` / `pm.cancel_order` / `events.upsert` / `events.update_status` 這類「寫入」操作預設會被拒絕，必須在交易機器環境設 `PLOY_RPC_WRITE_ENABLED=true` 才會放行。
 - 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
 - `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。
@@ -141,6 +143,23 @@ JSON
 [agent_framework]
 mode = "openclaw"
 hard_disable_internal_agents = true
+```
+
+## 內建模式（推薦）
+
+若你要盡量使用 repo 內建 runtime（非 OpenClaw 接管），請固定：
+
+```toml
+[agent_framework]
+mode = "internal"
+hard_disable_internal_agents = false
+```
+
+或用環境變數：
+
+```bash
+export PLOY_AGENT_FRAMEWORK_MODE=internal
+export PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS=false
 ```
 
 ## B) 深度：讓 OpenClaw 以 MCP Tool 方式控制交易（下一步）

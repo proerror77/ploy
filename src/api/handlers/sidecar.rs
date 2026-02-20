@@ -29,7 +29,7 @@ use crate::api::state::AppState;
 use crate::config::AppConfig;
 use crate::domain::market::Side;
 use crate::error::PloyError;
-use crate::platform::{Domain, OrderIntent, OrderPriority};
+use crate::platform::{Domain, MarketSelector, OrderIntent, OrderPriority, StrategyDeployment};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
     build_unified_prompt, parse_decision_response, ComebackSnapshot, DecisionTrigger, GrokDecision,
@@ -330,10 +330,10 @@ fn deployment_gate_required() -> bool {
     }
 }
 
-async fn ensure_intent_deployment_allowed(
+async fn resolve_intent_deployment(
     state: &AppState,
     deployment_id: &str,
-) -> std::result::Result<(), (StatusCode, String)> {
+) -> std::result::Result<Option<StrategyDeployment>, (StatusCode, String)> {
     let key = deployment_id.trim();
     if key.is_empty() {
         return Err((
@@ -350,7 +350,7 @@ async fn ensure_intent_deployment_allowed(
                 "deployment registry is empty while deployment gate is required".to_string(),
             ));
         }
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(dep) = deployments.get(key) else {
@@ -365,11 +365,180 @@ async fn ensure_intent_deployment_allowed(
             format!("deployment {} is disabled", key),
         ));
     }
-    Ok(())
+    Ok(Some(dep.clone()))
 }
 
 fn sidecar_orders_live_enabled() -> bool {
     env_bool(&["PLOY_SIDECAR_ORDERS_LIVE_ENABLED"])
+}
+
+fn normalize_opt(value: Option<&String>) -> Option<&str> {
+    value
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn normalize_meta<'a>(metadata: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|k| metadata.get(*k))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn validate_deployment_binding(
+    deployment: &StrategyDeployment,
+    domain: Domain,
+    market_slug: &str,
+    metadata: &HashMap<String, String>,
+) -> std::result::Result<(), (StatusCode, String)> {
+    if deployment.domain != domain {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "deployment {} is bound to domain {}, but request domain is {}",
+                deployment.id, deployment.domain, domain
+            ),
+        ));
+    }
+
+    if let Some(tf) = normalize_meta(metadata, &["timeframe"]) {
+        let expected = deployment.timeframe.as_str();
+        if !tf.eq_ignore_ascii_case(expected) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "deployment {} timeframe mismatch: expected {}, got {}",
+                    deployment.id, expected, tf
+                ),
+            ));
+        }
+    }
+
+    match &deployment.market_selector {
+        MarketSelector::Static {
+            symbol,
+            series_id,
+            market_slug: expected_market_slug,
+        } => {
+            if let Some(expected_slug) = normalize_opt(expected_market_slug) {
+                if !market_slug.eq_ignore_ascii_case(expected_slug) {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        format!(
+                            "deployment {} market mismatch: expected {}, got {}",
+                            deployment.id, expected_slug, market_slug
+                        ),
+                    ));
+                }
+            }
+            if let Some(expected_symbol) = normalize_opt(symbol) {
+                if let Some(actual_symbol) = normalize_meta(metadata, &["symbol"]) {
+                    if !actual_symbol.eq_ignore_ascii_case(expected_symbol) {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            format!(
+                                "deployment {} symbol mismatch: expected {}, got {}",
+                                deployment.id, expected_symbol, actual_symbol
+                            ),
+                        ));
+                    }
+                }
+            }
+            if let Some(expected_series_id) = normalize_opt(series_id) {
+                if let Some(actual_series_id) =
+                    normalize_meta(metadata, &["series_id", "event_series_id"])
+                {
+                    if !actual_series_id.eq_ignore_ascii_case(expected_series_id) {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            format!(
+                                "deployment {} series mismatch: expected {}, got {}",
+                                deployment.id, expected_series_id, actual_series_id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        MarketSelector::Dynamic {
+            domain: selector_domain,
+            ..
+        } => {
+            if *selector_domain != domain {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "deployment {} dynamic selector domain mismatch: expected {}, got {}",
+                        deployment.id, selector_domain, domain
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_deployment_metadata(
+    metadata: &mut HashMap<String, String>,
+    deployment: &StrategyDeployment,
+) {
+    metadata.insert("deployment_id".to_string(), deployment.id.clone());
+    metadata
+        .entry("timeframe".to_string())
+        .or_insert_with(|| deployment.timeframe.as_str().to_string());
+    metadata
+        .entry("allocator_profile".to_string())
+        .or_insert_with(|| deployment.allocator_profile.clone());
+    metadata
+        .entry("risk_profile".to_string())
+        .or_insert_with(|| deployment.risk_profile.clone());
+    metadata
+        .entry("deployment_strategy".to_string())
+        .or_insert_with(|| deployment.strategy.clone());
+    metadata
+        .entry("deployment_priority".to_string())
+        .or_insert_with(|| deployment.priority.to_string());
+    metadata
+        .entry("deployment_cooldown_secs".to_string())
+        .or_insert_with(|| deployment.cooldown_secs.to_string());
+
+    if let MarketSelector::Static {
+        symbol,
+        series_id,
+        market_slug,
+    } = &deployment.market_selector
+    {
+        if let Some(v) = normalize_opt(symbol) {
+            metadata
+                .entry("symbol".to_string())
+                .or_insert_with(|| v.to_string());
+        }
+        if let Some(v) = normalize_opt(series_id) {
+            metadata
+                .entry("series_id".to_string())
+                .or_insert_with(|| v.to_string());
+            metadata
+                .entry("event_series_id".to_string())
+                .or_insert_with(|| v.to_string());
+        }
+        if let Some(v) = normalize_opt(market_slug) {
+            metadata
+                .entry("selector_market_slug".to_string())
+                .or_insert_with(|| v.to_string());
+        }
+    }
+}
+
+fn deployment_default_priority(deployment: &StrategyDeployment) -> OrderPriority {
+    match deployment.priority {
+        p if p >= 90 => OrderPriority::Critical,
+        p if p >= 70 => OrderPriority::High,
+        p if p <= 20 => OrderPriority::Low,
+        _ => OrderPriority::Normal,
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────
@@ -676,10 +845,14 @@ pub async fn sidecar_submit_order(
             )
         })?
         .to_string();
-    ensure_intent_deployment_allowed(&state, &deployment_id).await?;
+    let deployment = resolve_intent_deployment(&state, &deployment_id).await?;
 
+    let domain_default = deployment
+        .as_ref()
+        .map(|d| d.domain)
+        .unwrap_or(Domain::Sports);
+    let domain = parse_sidecar_domain(req.domain.as_deref(), domain_default)?;
     let side = parse_binary_side(req.side.as_deref())?;
-    let domain = parse_sidecar_domain(req.domain.as_deref(), Domain::Sports)?;
     let is_buy = parse_is_buy(None, req.is_buy)?;
 
     let mut metadata = HashMap::new();
@@ -707,6 +880,10 @@ pub async fn sidecar_submit_order(
         metadata.insert("idempotency_key".to_string(), idem.to_string());
     }
     metadata.insert("domain".to_string(), domain.to_string());
+    if let Some(dep) = deployment.as_ref() {
+        validate_deployment_binding(dep, domain, &req.market_slug, &metadata)?;
+        apply_deployment_metadata(&mut metadata, dep);
+    }
 
     let mut intent = OrderIntent::new(
         "sidecar",
@@ -718,7 +895,10 @@ pub async fn sidecar_submit_order(
         req.shares,
         price,
     );
-    intent.priority = OrderPriority::Normal;
+    intent.priority = deployment
+        .as_ref()
+        .map(deployment_default_priority)
+        .unwrap_or(OrderPriority::Normal);
     intent.metadata = metadata;
 
     let intent_id = intent.intent_id.to_string();
@@ -870,12 +1050,23 @@ pub async fn sidecar_submit_intent(
         ));
     }
 
-    ensure_intent_deployment_allowed(&state, &req.deployment_id).await?;
+    let deployment = resolve_intent_deployment(&state, &req.deployment_id).await?;
 
-    let domain = parse_sidecar_domain(req.domain.as_deref(), Domain::Crypto)?;
+    let domain_default = deployment
+        .as_ref()
+        .map(|d| d.domain)
+        .unwrap_or(Domain::Crypto);
+    let domain = parse_sidecar_domain(req.domain.as_deref(), domain_default)?;
     let side = parse_binary_side(req.side.as_deref())?;
     let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy)?;
-    let priority = parse_order_priority(req.priority.as_deref())?;
+    let priority = if req.priority.as_deref().is_some() {
+        parse_order_priority(req.priority.as_deref())?
+    } else {
+        deployment
+            .as_ref()
+            .map(deployment_default_priority)
+            .unwrap_or(OrderPriority::Normal)
+    };
     let agent_id = req
         .agent_id
         .as_deref()
@@ -913,6 +1104,10 @@ pub async fn sidecar_submit_intent(
     }
     if let Some(conf) = req.confidence {
         metadata.insert("signal_confidence".to_string(), format!("{:.6}", conf));
+    }
+    if let Some(dep) = deployment.as_ref() {
+        validate_deployment_binding(dep, domain, &req.market_slug, &metadata)?;
+        apply_deployment_metadata(&mut metadata, dep);
     }
 
     let mut intent = OrderIntent::new(
@@ -976,7 +1171,9 @@ pub async fn sidecar_submit_intent(
 /// Returns current open positions from the database.
 pub async fn sidecar_get_positions(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<Vec<SidecarPosition>>, (StatusCode, String)> {
+    ensure_sidecar_authorized(&headers)?;
     let rows = sqlx::query_as::<
         _,
         (
@@ -1059,7 +1256,9 @@ pub async fn sidecar_get_positions(
 /// Returns risk state from the Coordinator's GlobalState.
 pub async fn sidecar_get_risk(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<SidecarRiskState>, (StatusCode, String)> {
+    ensure_sidecar_authorized(&headers)?;
     match state.coordinator.as_ref() {
         Some(coordinator) => {
             let global = coordinator.read_state().await;

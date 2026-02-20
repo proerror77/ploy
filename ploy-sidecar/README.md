@@ -49,6 +49,7 @@ cp .env.minimax.example .env
 | `MINIMAX_ANTHROPIC_MODEL` | `MiniMax-M2.5` | Optional MiniMax model id used for automatic alias mapping when `ANTHROPIC_BASE_URL` points to MiniMax |
 | `PLOY_API_URL` | `http://localhost:8081` | Ploy Rust backend URL |
 | `PLOY_API_KEY` | — | Bearer token (optional) |
+| `PLOY_SIDECAR_AUTH_TOKEN` | — | Sidecar token header (`x-ploy-sidecar-token`) for `/api/sidecar/*` |
 | `SIDECAR_MODEL` | `sonnet` | Model name or alias (`sonnet`, `opus`, `haiku`, or a full model id like `claude-opus-4-6` / `MiniMax-M2.5`) |
 | `SIDECAR_POLL_INTERVAL_SECS` | `300` | Scan interval (seconds) |
 | `SIDECAR_MAX_BUDGET_USD` | `1.00` | Max Claude cost per scan cycle |

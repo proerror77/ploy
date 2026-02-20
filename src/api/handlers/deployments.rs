@@ -1,11 +1,11 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::api::state::AppState;
+use crate::api::{auth::ensure_admin_authorized, state::AppState};
 use crate::platform::StrategyDeployment;
 
 #[derive(Debug, Deserialize)]
@@ -69,8 +69,10 @@ pub async fn get_deployment(
 /// Bulk upsert; `replace=true` will replace the entire matrix.
 pub async fn upsert_deployments(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<UpsertDeploymentsRequest>,
 ) -> std::result::Result<Json<UpsertDeploymentsResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     if req.deployments.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -115,16 +117,20 @@ pub async fn upsert_deployments(
 /// POST /api/deployments/:id/enable
 pub async fn enable_deployment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<DeploymentMutationResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     set_deployment_enabled(state, id, true).await
 }
 
 /// POST /api/deployments/:id/disable
 pub async fn disable_deployment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<DeploymentMutationResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     set_deployment_enabled(state, id, false).await
 }
 
@@ -166,8 +172,10 @@ async fn set_deployment_enabled(
 /// DELETE /api/deployments/:id
 pub async fn delete_deployment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> std::result::Result<Json<DeploymentDeleteResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let key = id.trim();
     if key.is_empty() {
         return Err((

@@ -2986,6 +2986,11 @@ pub async fn start_platform(
         "starting multi-agent platform"
     );
 
+    let db_required = env_bool(
+        "PLOY_DB_REQUIRED",
+        env_bool("PLOY_REQUIRE_DB", !app_config.dry_run.enabled),
+    );
+
     // Optional shared DB pool used for (a) coordinator execution logs and (b) market data persistence.
     // Crypto agents can run without DB; sports agent requires DB for calendar/stats.
     let shared_pool = match PgPoolOptions::new()
@@ -2995,6 +3000,12 @@ pub async fn start_platform(
     {
         Ok(pool) => Some(pool),
         Err(e) => {
+            if db_required {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "database connection is required but failed at startup: {}",
+                    e
+                )));
+            }
             warn!(
                 error = %e,
                 "failed to connect DB at startup; continuing without shared pool"

@@ -5,16 +5,14 @@ services:
     image: postgres:16-alpine
     container_name: ploy-postgres
     environment:
-      POSTGRES_USER: ploy
-      POSTGRES_PASSWORD: ploy
-      POSTGRES_DB: ploy
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${PLOY_DB_USER:?PLOY_DB_USER is required}
+      POSTGRES_PASSWORD: ${PLOY_DB_PASSWORD:?PLOY_DB_PASSWORD is required}
+      POSTGRES_DB: ${PLOY_DB_NAME:-ploy}
     volumes:
       - ploy_pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ploy -d ploy"]
+      test: ["CMD-SHELL", "pg_isready -U ${PLOY_DB_USER:-ploy} -d ${PLOY_DB_NAME:-ploy}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -30,9 +28,17 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://ploy:ploy@postgres:5432/ploy
+      - DATABASE_URL=postgresql://${PLOY_DB_USER}:${PLOY_DB_PASSWORD}@postgres:5432/${PLOY_DB_NAME:-ploy}
       - RUST_LOG=info,ploy=debug,sqlx=warn
-      - PLOY_API_PORT=8081
+      - API_PORT=8081
+      - PLOY_DB_REQUIRED=true
+      - PLOY_GATEWAY_ONLY=true
+      - PLOY_API_ADMIN_AUTH_REQUIRED=true
+      - PLOY_API_ADMIN_TOKEN=${PLOY_API_ADMIN_TOKEN:?PLOY_API_ADMIN_TOKEN is required}
+      - PLOY_SIDECAR_AUTH_TOKEN=${PLOY_SIDECAR_AUTH_TOKEN:?PLOY_SIDECAR_AUTH_TOKEN is required}
+      - PLOY_DEPLOYMENT_GATE_REQUIRED=true
+      - PLOY_AGENT_FRAMEWORK_MODE=internal
+      - PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS=false
       - POLYMARKET_PRIVATE_KEY=${POLYMARKET_PRIVATE_KEY}
       - THE_ODDS_API_KEY=${THE_ODDS_API_KEY}
       - GROK_API_KEY=${GROK_API_KEY}

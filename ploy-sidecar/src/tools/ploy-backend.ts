@@ -19,6 +19,9 @@ async function ployFetch(path: string, options?: RequestInit) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
+  if (process.env.PLOY_SIDECAR_AUTH_TOKEN) {
+    headers["x-ploy-sidecar-token"] = process.env.PLOY_SIDECAR_AUTH_TOKEN;
+  }
   if (process.env.PLOY_API_KEY) {
     headers["Authorization"] = `Bearer ${process.env.PLOY_API_KEY}`;
   }

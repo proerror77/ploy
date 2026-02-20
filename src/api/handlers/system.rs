@@ -1,8 +1,9 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
 use serde::Deserialize;
 use sqlx::{postgres::Postgres, QueryBuilder, Row};
 
 use crate::api::{
+    auth::ensure_admin_authorized,
     state::{AppState, SystemRunStatus},
     types::*,
 };
@@ -95,7 +96,9 @@ pub async fn get_system_status(
 /// POST /api/system/start
 pub async fn start_system(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -136,7 +139,9 @@ pub async fn start_system(
 /// POST /api/system/stop
 pub async fn stop_system(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -177,7 +182,9 @@ pub async fn stop_system(
 /// POST /api/system/restart
 pub async fn restart_system(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -231,8 +238,10 @@ pub async fn restart_system(
 /// POST /api/system/pause
 pub async fn pause_system(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     reject_domain_scoped_control(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
@@ -260,8 +269,10 @@ pub async fn pause_system(
 /// POST /api/system/resume
 pub async fn resume_system(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     reject_domain_scoped_control(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
@@ -291,8 +302,10 @@ pub async fn resume_system(
 /// Force-close all positions and mark the system as stopped.
 pub async fn halt_system(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     reject_domain_scoped_control(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
@@ -342,8 +355,10 @@ pub async fn get_config(
 /// PUT /api/config
 pub async fn update_config(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(new_config): Json<StrategyConfig>,
 ) -> std::result::Result<Json<serde_json::Value>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
     let mut config = state.config.write().await;
 
     // Update config

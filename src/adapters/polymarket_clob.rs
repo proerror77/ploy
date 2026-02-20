@@ -589,9 +589,7 @@ impl PolymarketClient {
     }
 
     fn gateway_execution_context_active() -> bool {
-        GATEWAY_EXECUTION_CONTEXT
-            .try_with(|v| *v)
-            .unwrap_or(false)
+        GATEWAY_EXECUTION_CONTEXT.try_with(|v| *v).unwrap_or(false)
     }
 
     fn validate_gateway_execution_context(dry_run: bool) -> Result<()> {
