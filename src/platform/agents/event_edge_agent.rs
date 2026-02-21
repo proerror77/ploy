@@ -18,6 +18,8 @@ use crate::platform::{
 use crate::strategy::event_edge::core::{EventEdgeCore, TradeDecision};
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
 
+const DEPLOYMENT_ID_EVENT_EDGE: &str = "politics.pm.event_edge";
+
 /// Platform-integrated EventEdge agent.
 ///
 /// Receives `Tick` events from the platform router, fetches Arena data,
@@ -67,7 +69,7 @@ impl EventEdgePlatformAgent {
 
     /// Convert a `TradeDecision` into an `OrderIntent` for the platform.
     fn decision_to_intent(&self, d: &TradeDecision) -> OrderIntent {
-        OrderIntent::new(
+        let mut intent = OrderIntent::new(
             "event_edge",
             Domain::Politics,
             &d.market_slug,
@@ -79,11 +81,21 @@ impl EventEdgePlatformAgent {
         )
         .with_priority(OrderPriority::Normal)
         .with_metadata("strategy", "event_edge")
+        .with_deployment_id(DEPLOYMENT_ID_EVENT_EDGE)
         .with_metadata("event_id", &d.event_id)
         .with_metadata("outcome", &d.outcome)
         .with_metadata("edge", &d.edge.to_string())
         .with_metadata("p_true", &d.p_true.to_string())
-        .with_metadata("net_ev", &d.net_ev.to_string())
+        .with_metadata("net_ev", &d.net_ev.to_string());
+        if let Some(condition_id) = d
+            .condition_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            intent = intent.with_condition_id(condition_id);
+        }
+        intent
     }
 
     /// Run one full scan cycle across all configured events.

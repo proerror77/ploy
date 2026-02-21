@@ -2900,6 +2900,40 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.sports_auto_split_by_active_markets,
         );
 
+        cfg.coordinator.politics_allocator_enabled = env_bool(
+            "PLOY_COORDINATOR__POLITICS_ALLOCATOR_ENABLED",
+            cfg.coordinator.politics_allocator_enabled,
+        );
+        cfg.coordinator.politics_allocator_total_cap_usd =
+            env_decimal_opt("PLOY_COORDINATOR__POLITICS_ALLOCATOR_TOTAL_CAP_USD")
+                .or(cfg.coordinator.politics_allocator_total_cap_usd);
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__POLITICS_MARKET_CAP_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.politics_market_cap_pct = v;
+        }
+        cfg.coordinator.politics_auto_split_by_active_markets = env_bool(
+            "PLOY_COORDINATOR__POLITICS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
+            cfg.coordinator.politics_auto_split_by_active_markets,
+        );
+
+        cfg.coordinator.economics_allocator_enabled = env_bool(
+            "PLOY_COORDINATOR__ECONOMICS_ALLOCATOR_ENABLED",
+            cfg.coordinator.economics_allocator_enabled,
+        );
+        cfg.coordinator.economics_allocator_total_cap_usd =
+            env_decimal_opt("PLOY_COORDINATOR__ECONOMICS_ALLOCATOR_TOTAL_CAP_USD")
+                .or(cfg.coordinator.economics_allocator_total_cap_usd);
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__ECONOMICS_MARKET_CAP_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.economics_market_cap_pct = v;
+        }
+        cfg.coordinator.economics_auto_split_by_active_markets = env_bool(
+            "PLOY_COORDINATOR__ECONOMICS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
+            cfg.coordinator.economics_auto_split_by_active_markets,
+        );
+
         cfg.coordinator.governance_block_new_intents =
             std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS")
                 .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCK_NEW_INTENTS"))

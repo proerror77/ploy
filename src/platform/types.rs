@@ -277,6 +277,9 @@ pub struct OrderIntent {
 }
 
 impl OrderIntent {
+    const METADATA_KEY_DEPLOYMENT_ID: &'static str = "deployment_id";
+    const METADATA_KEY_CONDITION_ID: &'static str = "condition_id";
+
     pub fn new(
         agent_id: impl Into<String>,
         domain: Domain,
@@ -317,6 +320,47 @@ impl OrderIntent {
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
+    }
+
+    pub fn with_deployment_id(mut self, deployment_id: impl Into<String>) -> Self {
+        self.metadata.insert(
+            Self::METADATA_KEY_DEPLOYMENT_ID.to_string(),
+            deployment_id.into(),
+        );
+        self
+    }
+
+    pub fn deployment_id(&self) -> Option<&str> {
+        self.metadata_value(Self::METADATA_KEY_DEPLOYMENT_ID)
+    }
+
+    pub fn with_condition_id(mut self, condition_id: impl Into<String>) -> Self {
+        self.metadata.insert(
+            Self::METADATA_KEY_CONDITION_ID.to_string(),
+            condition_id.into(),
+        );
+        self
+    }
+
+    pub fn condition_id(&self) -> Option<&str> {
+        const CONDITION_ID_KEYS: &[&str] = &[
+            "condition_id",
+            "conditionId",
+            "condition",
+            "market_condition_id",
+            "marketConditionId",
+        ];
+        CONDITION_ID_KEYS
+            .iter()
+            .find_map(|key| self.metadata_value(key))
+    }
+
+    fn metadata_value(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .get(key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 
     /// 計算訂單價值 (USD)
@@ -440,5 +484,41 @@ impl ExecutionReport {
             self.status,
             ExecutionStatus::Filled | ExecutionStatus::PartiallyFilled
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_intent() -> OrderIntent {
+        OrderIntent::new(
+            "agent-1",
+            Domain::Crypto,
+            "btc-updown-15m",
+            "token-yes",
+            Side::Up,
+            true,
+            10,
+            Decimal::new(42, 2),
+        )
+    }
+
+    #[test]
+    fn order_intent_deployment_id_accessor_trims_and_rejects_blank() {
+        let intent = sample_intent().with_deployment_id(" deploy.crypto.15m ");
+        assert_eq!(intent.deployment_id(), Some("deploy.crypto.15m"));
+
+        let blank = sample_intent().with_deployment_id("   ");
+        assert_eq!(blank.deployment_id(), None);
+    }
+
+    #[test]
+    fn order_intent_condition_id_accessor_supports_aliases() {
+        let canonical = sample_intent().with_condition_id("0xabc");
+        assert_eq!(canonical.condition_id(), Some("0xabc"));
+
+        let alias = sample_intent().with_metadata("marketConditionId", " 0xdef ");
+        assert_eq!(alias.condition_id(), Some("0xdef"));
     }
 }

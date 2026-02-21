@@ -250,10 +250,7 @@ mod tests {
 
         let mapped = intent.into_order_intent();
         assert_eq!(mapped.priority, OrderPriority::High);
-        assert_eq!(
-            mapped.metadata.get("deployment_id").map(String::as_str),
-            Some("deploy.crypto.15m")
-        );
+        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
         assert_eq!(
             mapped.metadata.get("intent_reason").map(String::as_str),
             Some("signal_edge")

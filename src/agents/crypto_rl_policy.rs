@@ -282,6 +282,10 @@ struct TrackedPosition {
     legs: Vec<PositionLeg>, // 1 or 2 (hedged)
 }
 
+fn deployment_id_for_symbol(symbol: &str) -> String {
+    format!("crypto.pm.{}.rl_policy", symbol.trim().to_ascii_lowercase())
+}
+
 pub struct CryptoRlPolicyAgent {
     config: CryptoRlPolicyConfig,
     binance_ws: Arc<BinanceWebSocket>,
@@ -985,6 +989,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                     let discrete = action.to_discrete();
                                     let priority = if action.is_aggressive() { OrderPriority::High } else { OrderPriority::Normal };
                                     let policy_version = self.config.policy_model_version.as_deref().unwrap_or("");
+                                    let deployment_id = deployment_id_for_symbol(symbol);
 
                                     match discrete {
                                         DiscreteAction::Hold => {}
@@ -1010,6 +1015,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_priority(priority)
                                             .with_metadata("strategy", "crypto_rl_policy")
+                                            .with_deployment_id(deployment_id.as_str())
                                             .with_metadata("signal_type", "crypto_rl_policy")
                                             .with_metadata("action", "buy_up")
                                             .with_metadata("coin", coin.as_str())
@@ -1025,7 +1031,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                             .with_metadata("lob_age_secs", age_secs.to_string())
-                                            .with_metadata("condition_id", event.condition_id.as_str())
+                                            .with_condition_id(event.condition_id.as_str())
                                             .with_metadata("event_end_time", event.end_time.to_rfc3339())
                                             .with_metadata("event_title", event.title.as_str())
                                             .with_metadata("policy_source", policy_source)
@@ -1102,6 +1108,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_priority(priority)
                                             .with_metadata("strategy", "crypto_rl_policy")
+                                            .with_deployment_id(deployment_id.as_str())
                                             .with_metadata("signal_type", "crypto_rl_policy")
                                             .with_metadata("action", "buy_down")
                                             .with_metadata("coin", coin.as_str())
@@ -1117,7 +1124,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                             .with_metadata("lob_age_secs", age_secs.to_string())
-                                            .with_metadata("condition_id", event.condition_id.as_str())
+                                            .with_condition_id(event.condition_id.as_str())
                                             .with_metadata("event_end_time", event.end_time.to_rfc3339())
                                             .with_metadata("event_title", event.title.as_str())
                                             .with_metadata("policy_source", policy_source)
@@ -1199,6 +1206,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                                 )
                                                 .with_priority(OrderPriority::High)
                                                 .with_metadata("strategy", "crypto_rl_policy")
+                                                .with_deployment_id(deployment_id.as_str())
                                                 .with_metadata("signal_type", "crypto_rl_policy")
                                                 .with_metadata("action", "sell")
                                                 .with_metadata("coin", coin.as_str())
@@ -1214,7 +1222,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                                 )
                                                 .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                                 .with_metadata("lob_age_secs", age_secs.to_string())
-                                                .with_metadata("condition_id", event.condition_id.as_str())
+                                                .with_condition_id(event.condition_id.as_str())
                                                 .with_metadata("policy_source", policy_source)
                                                 .with_metadata("policy_output", self.config.policy_output.as_str())
                                                 .with_metadata("policy_model_version", policy_version)
@@ -1272,6 +1280,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                                 )
                                                 .with_priority(OrderPriority::High)
                                                 .with_metadata("strategy", "crypto_rl_policy")
+                                                .with_deployment_id(deployment_id.as_str())
                                                 .with_metadata("signal_type", "crypto_rl_policy")
                                                 .with_metadata("action", "hedge_complete")
                                                 .with_metadata("coin", coin.as_str())
@@ -1287,7 +1296,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                                 )
                                                 .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                                 .with_metadata("lob_age_secs", age_secs.to_string())
-                                                .with_metadata("condition_id", event.condition_id.as_str())
+                                                .with_condition_id(event.condition_id.as_str())
                                                 .with_metadata("policy_source", policy_source)
                                                 .with_metadata("policy_model_version", policy_version)
                                                 .with_metadata("locked_profit_per_share", (dec!(1.0) - total_cost).to_string())
@@ -1333,6 +1342,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_priority(OrderPriority::High)
                                             .with_metadata("strategy", "crypto_rl_policy")
+                                            .with_deployment_id(deployment_id.as_str())
                                             .with_metadata("signal_type", "crypto_rl_policy")
                                             .with_metadata("action", "hedge_buy_up")
                                             .with_metadata("coin", coin.as_str())
@@ -1348,7 +1358,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                             .with_metadata("lob_age_secs", age_secs.to_string())
-                                            .with_metadata("condition_id", event.condition_id.as_str())
+                                            .with_condition_id(event.condition_id.as_str())
                                             .with_metadata("policy_source", policy_source)
                                             .with_metadata("policy_model_version", policy_version)
                                             .with_metadata("locked_profit_per_share", (dec!(1.0) - sum_cost).to_string())
@@ -1366,6 +1376,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_priority(OrderPriority::High)
                                             .with_metadata("strategy", "crypto_rl_policy")
+                                            .with_deployment_id(deployment_id.as_str())
                                             .with_metadata("signal_type", "crypto_rl_policy")
                                             .with_metadata("action", "hedge_buy_down")
                                             .with_metadata("coin", coin.as_str())
@@ -1381,7 +1392,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                             )
                                             .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                             .with_metadata("lob_age_secs", age_secs.to_string())
-                                            .with_metadata("condition_id", event.condition_id.as_str())
+                                            .with_condition_id(event.condition_id.as_str())
                                             .with_metadata("policy_source", policy_source)
                                             .with_metadata("policy_model_version", policy_version)
                                             .with_metadata("locked_profit_per_share", (dec!(1.0) - sum_cost).to_string())
@@ -1446,6 +1457,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                         }
                         // Baseline only exits or enters single-leg. Hedge is ignored here.
                         let priority = if base_action.is_aggressive() { OrderPriority::High } else { OrderPriority::Normal };
+                        let deployment_id = deployment_id_for_symbol(symbol.as_str());
 
                         match discrete {
                             DiscreteAction::BuyUp => {
@@ -1463,6 +1475,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 )
                                 .with_priority(priority)
                                 .with_metadata("strategy", "crypto_rl_policy")
+                                .with_deployment_id(deployment_id.as_str())
                                 .with_metadata("signal_type", "crypto_rl_policy")
                                 .with_metadata("action", "buy_up")
                                 .with_metadata("coin", coin.as_str())
@@ -1478,7 +1491,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 )
                                 .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                 .with_metadata("lob_age_secs", age_secs.to_string())
-                                .with_metadata("condition_id", event.condition_id.as_str())
+                                .with_condition_id(event.condition_id.as_str())
                                 .with_metadata("event_end_time", event.end_time.to_rfc3339())
                                 .with_metadata("event_title", event.title.as_str())
                                 .with_metadata("policy_source", policy_source)
@@ -1542,6 +1555,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 )
                                 .with_priority(priority)
                                 .with_metadata("strategy", "crypto_rl_policy")
+                                .with_deployment_id(deployment_id.as_str())
                                 .with_metadata("signal_type", "crypto_rl_policy")
                                 .with_metadata("action", "buy_down")
                                 .with_metadata("coin", coin.as_str())
@@ -1557,7 +1571,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 )
                                 .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                 .with_metadata("lob_age_secs", age_secs.to_string())
-                                .with_metadata("condition_id", event.condition_id.as_str())
+                                .with_condition_id(event.condition_id.as_str())
                                 .with_metadata("event_end_time", event.end_time.to_rfc3339())
                                 .with_metadata("event_title", event.title.as_str())
                                 .with_metadata("policy_source", policy_source)
@@ -1624,6 +1638,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 )
                                 .with_priority(OrderPriority::High)
                                 .with_metadata("strategy", "crypto_rl_policy")
+                                .with_deployment_id(deployment_id.as_str())
                                 .with_metadata("signal_type", "crypto_rl_policy")
                                 .with_metadata("action", "sell")
                                 .with_metadata("coin", coin.as_str())
@@ -1639,7 +1654,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                 )
                                 .with_metadata("lob_timestamp", lob.timestamp.to_rfc3339())
                                 .with_metadata("lob_age_secs", age_secs.to_string())
-                                .with_metadata("condition_id", event.condition_id.as_str())
+                                .with_condition_id(event.condition_id.as_str())
                                 .with_metadata("policy_source", policy_source)
                                 .with_metadata("config_hash", config_hash.clone());
                                 if let Err(e) = ctx.submit_order(intent).await {
@@ -1693,6 +1708,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                             warn!(agent = self.config.agent_id, "force close — submitting exit orders");
                             let quote_cache = self.pm_ws.quote_cache();
                             for (slug, pos) in &positions {
+                                let deployment_id = deployment_id_for_symbol(&pos.symbol);
                                 for leg in &pos.legs {
                                     let bid = quote_cache
                                         .get(&leg.token_id)
@@ -1711,6 +1727,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                     )
                                     .with_priority(OrderPriority::Critical)
                                     .with_metadata("strategy", "crypto_rl_policy")
+                                    .with_deployment_id(deployment_id.as_str())
                                     .with_metadata("signal_type", "crypto_rl_policy")
                                     .with_metadata("action", "force_close")
                                     .with_metadata("config_hash", &config_hash);
