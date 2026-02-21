@@ -492,6 +492,40 @@ pub enum CryptoCommands {
         #[arg(long, default_value = "SOL,ETH,BTC")]
         coins: String,
     },
+
+    /// Backtest crypto UP/DOWN markets (5m + 15m) using Gamma settled events + Binance spot.
+    BacktestUpDown {
+        /// Symbols to analyze (comma-separated: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT)
+        #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
+        symbols: String,
+        /// Look back this many days of settled events
+        #[arg(long, default_value = "7")]
+        days: u64,
+        /// Max settled events per series (cap API + runtime)
+        #[arg(long, default_value = "500")]
+        max_events_per_series: usize,
+        /// Entry time(s) as seconds remaining (comma-separated)
+        #[arg(long, default_value = "60,120,300,600,900")]
+        entry_remaining_secs: String,
+        /// Minimum window move filter (abs return since start) (comma-separated)
+        #[arg(long, default_value = "0,0.0001,0.0002")]
+        min_window_move_pcts: String,
+        /// Binance kline interval (recommended: 1m)
+        #[arg(long, default_value = "1m")]
+        binance_interval: String,
+        /// Volatility lookback in minutes (used for p_up estimate)
+        #[arg(long, default_value = "60")]
+        vol_lookback_minutes: usize,
+        /// Use Postgres clob_orderbook_snapshots for historical best-ask (EV/PNL)
+        #[arg(long)]
+        use_db_prices: bool,
+        /// Optional DB URL override (otherwise use PLOY_DATABASE__URL / DATABASE_URL)
+        #[arg(long)]
+        db_url: Option<String>,
+        /// Reject DB snapshots older than this many seconds vs entry time
+        #[arg(long, default_value = "120")]
+        max_snapshot_age_secs: i64,
+    },
 }
 
 /// Sports market subcommands

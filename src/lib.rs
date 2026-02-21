@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod agent;
 pub mod agent_system;
 pub mod agents;
+pub mod analysis;
 #[cfg(feature = "api")]
 pub mod api;
 pub mod cli;

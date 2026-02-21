@@ -3785,6 +3785,7 @@ fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
 
 /// Handle crypto subcommands
 async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
+    use ploy::analysis::updown_backtest::{run_updown_backtest, UpDownBacktestConfig};
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
     use ploy::signing::Wallet;
     use ploy::strategy::{core::SplitArbConfig, run_crypto_split_arb, CryptoSplitArbConfig};
@@ -3851,6 +3852,64 @@ async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
 
             // Run strategy
             run_crypto_split_arb(client, executor, config, *dry_run).await?;
+        }
+        CryptoCommands::BacktestUpDown {
+            symbols,
+            days,
+            max_events_per_series,
+            entry_remaining_secs,
+            min_window_move_pcts,
+            binance_interval,
+            vol_lookback_minutes,
+            use_db_prices,
+            db_url,
+            max_snapshot_age_secs,
+        } => {
+            let symbols = symbols
+                .split(',')
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if symbols.is_empty() {
+                return Err(PloyError::Validation(
+                    "crypto backtest symbols cannot be empty".to_string(),
+                ));
+            }
+
+            let entry_remaining_secs = entry_remaining_secs
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect::<Vec<_>>();
+            if entry_remaining_secs.is_empty() {
+                return Err(PloyError::Validation(
+                    "entry_remaining_secs must contain at least one integer".to_string(),
+                ));
+            }
+
+            let min_window_move_pcts = min_window_move_pcts
+                .split(',')
+                .filter_map(|s| Decimal::from_str(s.trim()).ok())
+                .collect::<Vec<_>>();
+            if min_window_move_pcts.is_empty() {
+                return Err(PloyError::Validation(
+                    "min_window_move_pcts must contain at least one decimal".to_string(),
+                ));
+            }
+
+            let cfg = UpDownBacktestConfig {
+                symbols,
+                lookback_days: *days,
+                max_events_per_series: *max_events_per_series,
+                entry_remaining_secs,
+                min_window_move_pcts,
+                binance_interval: binance_interval.trim().to_string(),
+                vol_lookback_minutes: *vol_lookback_minutes,
+                use_db_prices: *use_db_prices,
+                db_url: db_url.clone(),
+                max_snapshot_age_secs: *max_snapshot_age_secs,
+            };
+
+            run_updown_backtest(cfg).await?;
         }
         CryptoCommands::Monitor { coins } => {
             info!("Monitoring crypto markets: {}", coins);

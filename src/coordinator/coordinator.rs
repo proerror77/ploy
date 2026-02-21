@@ -9,6 +9,7 @@
 //!   - Periodically refresh GlobalState from aggregators
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -33,7 +34,7 @@ use super::command::{
     GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
     GovernanceStatusSnapshot,
 };
-use super::config::CoordinatorConfig;
+use super::config::{CoordinatorConfig, DuplicateGuardScope};
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1262,16 +1263,18 @@ pub struct Coordinator {
 struct IntentDuplicateGuard {
     enabled: bool,
     window: ChronoDuration,
+    scope: DuplicateGuardScope,
     recent_buys: HashMap<String, chrono::DateTime<Utc>>,
 }
 
 impl IntentDuplicateGuard {
-    fn new(window_ms: u64, enabled: bool) -> Self {
+    fn new(window_ms: u64, enabled: bool, scope: DuplicateGuardScope) -> Self {
         let clamped_ms = window_ms.min(i64::MAX as u64) as i64;
         let window = ChronoDuration::milliseconds(clamped_ms.max(1));
         Self {
             enabled,
             window,
+            scope,
             recent_buys: HashMap::new(),
         }
     }
@@ -1280,21 +1283,37 @@ impl IntentDuplicateGuard {
         intent_deployment_scope(intent)
     }
 
-    fn buy_key(intent: &OrderIntent) -> Option<String> {
+    fn buy_key(&self, intent: &OrderIntent) -> Option<String> {
         // Only guard normal/high-priority ENTRY orders.
-        // Use condition_id-first market identity so opposite-side re-entries
+        // Use condition_id-first identity so opposite-side re-entries
         // on the same contract are blocked within the duplicate window.
-        // Scope by deployment to avoid blocking independent strategy deployments.
+        // Scope is configurable:
+        // - Market: block across all strategies/deployments (safer, avoids double-entries).
+        // - Deployment: legacy behavior; allow different deployments to each enter.
         if !intent.is_buy || intent.priority == OrderPriority::Critical {
             return None;
         }
 
-        Some(format!(
-            "{}|{}|{}",
-            intent.domain,
-            Self::deployment_scope(intent),
-            intent_market_identity(intent)
-        ))
+        let scope = match intent
+            .metadata
+            .get("duplicate_guard_scope")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("deployment") | Some("dep") => DuplicateGuardScope::Deployment,
+            Some("market") | Some("global") => DuplicateGuardScope::Market,
+            _ => self.scope,
+        };
+
+        let market = intent_market_identity(intent);
+        let base = format!("{}|{}", intent.domain, market);
+
+        match scope {
+            DuplicateGuardScope::Market => Some(base),
+            DuplicateGuardScope::Deployment => {
+                Some(format!("{}|{}", base, Self::deployment_scope(intent)))
+            }
+        }
     }
 
     fn prune(&mut self, now: chrono::DateTime<Utc>) {
@@ -1311,7 +1330,7 @@ impl IntentDuplicateGuard {
             return None;
         }
 
-        let key = Self::buy_key(intent)?;
+        let key = self.buy_key(intent)?;
         self.prune(now);
 
         if let Some(last) = self.recent_buys.get(&key) {
@@ -1768,6 +1787,32 @@ impl CryptoCapitalAllocator {
         );
 
         Ok(())
+    }
+
+    fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
+        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
+            return None;
+        }
+
+        if self.total_cap <= Decimal::ZERO {
+            return Some(Decimal::ZERO);
+        }
+
+        let dims = CryptoIntentDimensions::from_intent(intent);
+        let remaining_total =
+            (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
+
+        let coin_cap = self.total_cap * self.coin_cap_for(&dims.coin);
+        let projected_coin =
+            self.open.value_for_coin(&dims.coin) + self.pending.value_for_coin(&dims.coin);
+        let remaining_coin = (coin_cap - projected_coin).max(Decimal::ZERO);
+
+        let horizon_cap = self.total_cap * self.horizon_cap_for(dims.horizon);
+        let projected_horizon = self.open.value_for_horizon(dims.horizon)
+            + self.pending.value_for_horizon(dims.horizon);
+        let remaining_horizon = (horizon_cap - projected_horizon).max(Decimal::ZERO);
+
+        Some(remaining_total.min(remaining_coin).min(remaining_horizon))
     }
 
     fn release_buy_reservation(&mut self, intent_id: Uuid) {
@@ -2316,7 +2361,6 @@ impl MarketCapitalAllocator {
         let dynamic_cap = self.total_cap / Decimal::from(market_count);
         dynamic_cap.min(fixed_cap)
     }
-
     fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
         let open_notional_usd = self.open.total;
         let pending_notional_usd = self.pending.total;
@@ -2366,6 +2410,27 @@ impl MarketCapitalAllocator {
         rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
         rows
     }
+
+    fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
+        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
+            return None;
+        }
+
+        if self.total_cap <= Decimal::ZERO {
+            return Some(Decimal::ZERO);
+        }
+
+        let dims = MarketIntentDimensions::from_intent(intent);
+        let remaining_total =
+            (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
+
+        let market_cap = self.market_cap_for(&dims.market_key);
+        let projected_market = self.open.value_for_market(&dims.market_key)
+            + self.pending.value_for_market(&dims.market_key);
+        let remaining_market = (market_cap - projected_market).max(Decimal::ZERO);
+
+        Some(remaining_total.min(remaining_market))
+    }
 }
 
 impl Coordinator {
@@ -2383,6 +2448,7 @@ impl Coordinator {
         let duplicate_guard = Arc::new(RwLock::new(IntentDuplicateGuard::new(
             config.duplicate_guard_window_ms,
             config.duplicate_guard_enabled,
+            config.duplicate_guard_scope,
         )));
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
         let sports_allocator = Arc::new(RwLock::new(MarketCapitalAllocator::for_sports(&config)));
@@ -2914,8 +2980,10 @@ impl Coordinator {
 
     /// Risk-check an incoming order intent and enqueue if passed
     async fn handle_order_intent(&self, intent: OrderIntent) {
+        let mut intent = intent;
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
+        let strategy_max_shares = intent.shares;
 
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
@@ -3019,69 +3087,318 @@ impl Coordinator {
             return;
         }
 
-        match self.risk_gate.check_order(&intent).await {
-            RiskCheckResult::Passed => {
-                if let Some(reason) = self.reserve_domain_capital(&intent).await {
-                    self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+        if let Some(reason) = self.apply_kelly_sizing(&mut intent).await {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by kelly sizing policy"
+            );
+            return;
+        }
+
+        if let Some(reason) = self.apply_min_order_constraints(&mut intent, strategy_max_shares) {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by venue minimum constraints"
+            );
+            return;
+        }
+
+        let mut adjusted: Option<(u64, String)> = None;
+        let mut evaluated = intent;
+        for attempt in 0..3 {
+            match self.risk_gate.check_order(&evaluated).await {
+                RiskCheckResult::Passed => {
+                    if let Some(reason) = self.reserve_domain_capital(&evaluated).await {
+                        self.persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.clone()),
+                            adjusted.clone(),
+                        )
                         .await;
+                        warn!(
+                            %agent_id, %intent_id, reason = %reason,
+                            "order blocked by domain allocator"
+                        );
+                        return;
+                    }
+
+                    self.persist_risk_decision(&evaluated, "PASSED", None, adjusted.clone())
+                        .await;
+                    let mut queue = self.order_queue.write().await;
+                    match queue.enqueue(evaluated) {
+                        Ok(()) => {
+                            debug!(
+                                %agent_id, %intent_id,
+                                "order enqueued"
+                            );
+                        }
+                        Err(e) => {
+                            self.release_domain_reservation(intent_id).await;
+                            warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
+                        }
+                    }
+                    return;
+                }
+                RiskCheckResult::Blocked(reason) => {
+                    self.persist_risk_decision(
+                        &evaluated,
+                        "BLOCKED",
+                        Some(reason.to_string()),
+                        adjusted.clone(),
+                    )
+                    .await;
                     warn!(
-                        %agent_id, %intent_id, reason = %reason,
-                        "order blocked by domain allocator"
+                        %agent_id, %intent_id,
+                        reason = ?reason,
+                        "order blocked by risk gate"
                     );
                     return;
                 }
+                RiskCheckResult::Adjusted(suggestion) => {
+                    // Apply adjustment locally and re-evaluate; agents do not automatically resubmit.
+                    if suggestion.max_shares == 0 {
+                        let reason =
+                            format!("risk-gate suggested max_shares=0: {}", suggestion.reason);
+                        self.persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.clone()),
+                            adjusted.clone(),
+                        )
+                        .await;
+                        warn!(%agent_id, %intent_id, reason = %reason, "order blocked after risk adjustment");
+                        return;
+                    }
 
-                self.persist_risk_decision(&intent, "PASSED", None, None)
-                    .await;
-                let mut queue = self.order_queue.write().await;
-                match queue.enqueue_with_eviction(intent) {
-                    Ok(evicted) => {
-                        drop(queue);
-                        if let Some(dropped) = evicted {
-                            self.settle_domain_failure(&dropped).await;
-                            warn!(
-                                dropped_intent_id = %dropped.intent_id,
-                                dropped_agent_id = %dropped.agent_id,
-                                dropped_priority = ?dropped.priority,
-                                "queue full: evicted lower-priority intent"
-                            );
-                        }
-                        debug!(
-                            %agent_id, %intent_id,
-                            "order enqueued"
-                        );
-                    }
-                    Err(e) => {
-                        self.release_domain_reservation(intent_id).await;
-                        warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
-                    }
+                    adjusted = Some((suggestion.max_shares, suggestion.reason.clone()));
+                    evaluated.shares = suggestion.max_shares;
+                    info!(
+                        %agent_id, %intent_id,
+                        attempt,
+                        max_shares = suggestion.max_shares,
+                        reason = %suggestion.reason,
+                        "order adjusted by risk gate; re-evaluating"
+                    );
                 }
             }
-            RiskCheckResult::Blocked(reason) => {
-                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
-                    .await;
-                warn!(
-                    %agent_id, %intent_id,
-                    reason = ?reason,
-                    "order blocked by risk gate"
-                );
+        }
+
+        let reason = "risk-gate adjustment loop exceeded max attempts".to_string();
+        self.persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
+            .await;
+        warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
+    }
+
+    async fn apply_kelly_sizing(&self, intent: &mut OrderIntent) -> Option<String> {
+        if !self.config.kelly_sizing_enabled {
+            return None;
+        }
+        if !intent.is_buy {
+            return None;
+        }
+        if intent.priority == OrderPriority::Critical {
+            return None;
+        }
+        if intent.limit_price <= Decimal::ZERO || intent.limit_price >= Decimal::ONE {
+            return None;
+        }
+
+        let p = intent
+            .metadata
+            .get("signal_fair_value")
+            .or_else(|| intent.metadata.get("signal_win_prob"))
+            .and_then(|v| Decimal::from_str(v).ok())?;
+        let p = p.max(Decimal::ZERO).min(Decimal::ONE);
+        let price = intent.limit_price;
+        let edge = p - price;
+
+        if edge < self.config.kelly_min_edge {
+            return Some(format!(
+                "kelly edge {} below min {}",
+                edge, self.config.kelly_min_edge
+            ));
+        }
+
+        let denom = Decimal::ONE - price;
+        if denom <= Decimal::ZERO {
+            return Some("kelly denom <= 0".to_string());
+        }
+
+        let raw_kelly = ((p - price) / denom).max(Decimal::ZERO).min(Decimal::ONE);
+        if raw_kelly <= Decimal::ZERO {
+            return Some("kelly fraction <= 0 (no positive edge)".to_string());
+        }
+
+        let mut effective_fraction = (raw_kelly * self.config.kelly_fraction_multiplier)
+            .max(Decimal::ZERO)
+            .min(Decimal::ONE);
+        if let Some(conf) = intent
+            .metadata
+            .get("signal_confidence")
+            .and_then(|v| Decimal::from_str(v).ok())
+        {
+            effective_fraction *= conf.max(Decimal::ZERO).min(Decimal::ONE);
+        }
+
+        if effective_fraction <= Decimal::ZERO {
+            return Some("kelly effective fraction <= 0".to_string());
+        }
+
+        // Prefer sizing against allocator remaining budget when enabled; otherwise,
+        // treat the strategy-provided notional as the bankroll for relative sizing.
+        let bankroll = match intent.domain {
+            Domain::Crypto => {
+                let allocator = self.crypto_allocator.read().await;
+                allocator
+                    .available_notional_for(intent)
+                    .unwrap_or_else(|| intent.notional_value())
             }
-            RiskCheckResult::Adjusted(suggestion) => {
-                self.persist_risk_decision(
-                    &intent,
-                    "ADJUSTED",
-                    None,
-                    Some((suggestion.max_shares, suggestion.reason.clone())),
-                )
-                .await;
-                info!(
-                    %agent_id, %intent_id,
-                    max_shares = suggestion.max_shares,
-                    reason = %suggestion.reason,
-                    "order adjusted by risk gate — dropping (agent should resubmit)"
+            Domain::Sports => {
+                let allocator = self.sports_allocator.read().await;
+                allocator
+                    .available_notional_for(intent)
+                    .unwrap_or_else(|| intent.notional_value())
+            }
+            _ => intent.notional_value(),
+        };
+
+        if bankroll <= Decimal::ZERO {
+            return Some("kelly bankroll <= 0".to_string());
+        }
+
+        let target_notional = (bankroll * effective_fraction).max(Decimal::ZERO);
+        if target_notional <= Decimal::ZERO {
+            return Some("kelly target_notional <= 0".to_string());
+        }
+
+        let sized_shares = (target_notional / price)
+            .floor()
+            .to_u64()
+            .unwrap_or(0)
+            .min(intent.shares);
+
+        let mut final_shares = sized_shares;
+        if final_shares == 0 {
+            let floor_shares = self.config.kelly_min_shares.min(intent.shares);
+            if floor_shares > 0 {
+                final_shares = floor_shares;
+                intent
+                    .metadata
+                    .insert("kelly_min_shares_applied".to_string(), "true".to_string());
+                intent.metadata.insert(
+                    "kelly_min_shares_floor".to_string(),
+                    floor_shares.to_string(),
                 );
+            } else {
+                return Some("kelly sizing produced 0 shares".to_string());
             }
         }
+
+        if final_shares < intent.shares {
+            intent.shares = final_shares;
+        }
+
+        intent
+            .metadata
+            .insert("kelly_fraction_raw".to_string(), raw_kelly.to_string());
+        intent.metadata.insert(
+            "kelly_fraction_multiplier".to_string(),
+            self.config.kelly_fraction_multiplier.to_string(),
+        );
+        intent.metadata.insert(
+            "kelly_fraction_effective".to_string(),
+            effective_fraction.to_string(),
+        );
+        intent
+            .metadata
+            .insert("kelly_bankroll_usd".to_string(), bankroll.to_string());
+        intent.metadata.insert(
+            "kelly_target_notional_usd".to_string(),
+            target_notional.to_string(),
+        );
+        intent
+            .metadata
+            .insert("kelly_sized_shares".to_string(), sized_shares.to_string());
+        if final_shares != sized_shares {
+            intent
+                .metadata
+                .insert("kelly_final_shares".to_string(), final_shares.to_string());
+        }
+
+        None
+    }
+
+    fn apply_min_order_constraints(
+        &self,
+        intent: &mut OrderIntent,
+        strategy_max_shares: u64,
+    ) -> Option<String> {
+        if !intent.is_buy {
+            return None;
+        }
+        // Never force-size emergency/critical intents.
+        if intent.priority == OrderPriority::Critical {
+            return None;
+        }
+        if intent.limit_price <= Decimal::ZERO {
+            return None;
+        }
+
+        let min_shares_cfg = self.config.min_order_shares.max(1);
+        let min_notional = self.config.min_order_notional_usd.max(Decimal::ZERO);
+
+        let mut required_shares = min_shares_cfg;
+        if min_notional > Decimal::ZERO {
+            // Exchange enforces a minimum order notional for (marketable) buys.
+            // We enforce it pre-submit to avoid deterministic 400s that trip the circuit breaker.
+            let min_shares_for_notional = (min_notional / intent.limit_price)
+                .ceil()
+                .to_u64()
+                .unwrap_or(u64::MAX);
+            required_shares = required_shares.max(min_shares_for_notional);
+        }
+
+        if required_shares <= 1 {
+            return None;
+        }
+
+        if required_shares > strategy_max_shares {
+            return Some(format!(
+                "venue minimum requires {} shares (min_shares={}, min_notional_usd={}) but strategy_max_shares={}",
+                required_shares, min_shares_cfg, min_notional, strategy_max_shares
+            ));
+        }
+
+        if intent.shares < required_shares {
+            let before = intent.shares;
+            intent.shares = required_shares;
+            intent
+                .metadata
+                .insert("venue_min_order_applied".to_string(), "true".to_string());
+            intent.metadata.insert(
+                "venue_min_order_before_shares".to_string(),
+                before.to_string(),
+            );
+            intent.metadata.insert(
+                "venue_min_order_required_shares".to_string(),
+                required_shares.to_string(),
+            );
+            intent.metadata.insert(
+                "venue_min_order_min_shares".to_string(),
+                min_shares_cfg.to_string(),
+            );
+            intent.metadata.insert(
+                "venue_min_order_min_notional_usd".to_string(),
+                min_notional.to_string(),
+            );
+        }
+
+        None
     }
 
     async fn check_duplicate_intent(&self, intent: &OrderIntent) -> Option<String> {
@@ -4036,7 +4353,11 @@ impl Coordinator {
         out
     }
 
-    fn stable_idempotency_key(account_id: &str, intent: &OrderIntent) -> String {
+    fn stable_idempotency_key(
+        account_id: &str,
+        intent: &OrderIntent,
+        default_scope: DuplicateGuardScope,
+    ) -> String {
         if let Some(key) = intent
             .metadata
             .get("idempotency_key")
@@ -4046,7 +4367,28 @@ impl Coordinator {
             return Self::sanitize_idempotency_component(key);
         }
 
-        let deployment_id = intent_deployment_scope(intent);
+        // Align idempotency with duplicate-guard semantics.
+        // - When the guard is market-scoped, avoid including deployment_id in the key so
+        //   cross-deployment duplicate intents resolve to the same idempotency key.
+        // - When deployment-scoped, keep legacy behavior (key includes deployment_id).
+        let scope = match intent
+            .metadata
+            .get("duplicate_guard_scope")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("deployment") | Some("dep") => DuplicateGuardScope::Deployment,
+            Some("market") | Some("global") => DuplicateGuardScope::Market,
+            _ => default_scope,
+        };
+        let scope_label = match scope {
+            DuplicateGuardScope::Market => "market",
+            DuplicateGuardScope::Deployment => "deployment",
+        };
+        let dep_label = match scope {
+            DuplicateGuardScope::Market => "market".to_string(),
+            DuplicateGuardScope::Deployment => IntentDuplicateGuard::deployment_scope(intent),
+        };
 
         let window_secs = Self::infer_time_bucket_seconds(intent);
         let ts = intent
@@ -4061,9 +4403,10 @@ impl Coordinator {
         let order_kind = if intent.is_buy { "buy" } else { "sell" };
 
         Self::sanitize_idempotency_component(&format!(
-            "acct:{account}|dep:{dep}|dom:{dom}|mkt:{mkt}|side:{side}|kind:{kind}|bucket:{bucket}",
+            "acct:{account}|scope:{scope}|dep:{dep}|dom:{dom}|mkt:{mkt}|side:{side}|kind:{kind}|bucket:{bucket}",
             account = account_id,
-            dep = deployment_id,
+            scope = scope_label,
+            dep = dep_label,
             dom = intent.domain.to_string().to_ascii_lowercase(),
             mkt = intent_market_identity(intent),
             side = side.to_ascii_lowercase(),
@@ -4082,7 +4425,11 @@ impl Coordinator {
             OrderSide::Sell
         };
 
-        let idempotency_key = Self::stable_idempotency_key(&self.account_id, intent);
+        let idempotency_key = Self::stable_idempotency_key(
+            &self.account_id,
+            intent,
+            self.config.duplicate_guard_scope,
+        );
         OrderRequest {
             client_order_id: format!("intent:{}", intent.intent_id),
             idempotency_key: Some(idempotency_key),
@@ -4251,7 +4598,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_blocks_repeated_buy_within_window() {
-        let mut guard = IntentDuplicateGuard::new(1000, true);
+        let mut guard = IntentDuplicateGuard::new(1000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(true, OrderPriority::Normal);
 
@@ -4263,7 +4610,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_allows_after_window() {
-        let mut guard = IntentDuplicateGuard::new(500, true);
+        let mut guard = IntentDuplicateGuard::new(500, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(true, OrderPriority::Normal);
 
@@ -4275,7 +4622,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_blocks_same_market_even_if_token_differs() {
-        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let first = make_intent(true, OrderPriority::Normal);
         let mut second = make_intent(true, OrderPriority::Normal);
@@ -4313,7 +4660,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_allows_same_market_for_different_deployments() {
-        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Deployment);
         let now = Utc::now();
         let mut first = make_intent(true, OrderPriority::Normal);
         let mut second = make_intent(true, OrderPriority::Normal);
@@ -4334,8 +4681,30 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_guard_blocks_same_market_for_different_deployments_in_market_scope() {
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Market);
+        let now = Utc::now();
+        let mut first = make_intent(true, OrderPriority::Normal);
+        let mut second = make_intent(true, OrderPriority::Normal);
+
+        first.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.momentum".to_string(),
+        );
+        second.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.patternmem".to_string(),
+        );
+
+        assert!(guard.register_or_block(&first, now).is_none());
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_some());
+    }
+
+    #[test]
     fn test_duplicate_guard_does_not_block_sells() {
-        let mut guard = IntentDuplicateGuard::new(10_000, true);
+        let mut guard = IntentDuplicateGuard::new(10_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(false, OrderPriority::Normal);
 
@@ -4347,7 +4716,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_skips_critical_orders() {
-        let mut guard = IntentDuplicateGuard::new(10_000, true);
+        let mut guard = IntentDuplicateGuard::new(10_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(true, OrderPriority::Critical);
 
@@ -4384,11 +4753,13 @@ mod tests {
             "0xABCD00000000000000000000000000000000000000000000000000000000".to_string(),
         );
 
-        let key = Coordinator::stable_idempotency_key("acct-main", &intent);
+        let key =
+            Coordinator::stable_idempotency_key("acct-main", &intent, DuplicateGuardScope::Market);
 
         assert_ne!(key, intent.intent_id.to_string());
         assert!(key.contains("acct-main"));
-        assert!(key.contains("crypto.pm.btc.15m.patternmem"));
+        assert!(key.contains("scope:market"));
+        assert!(key.contains("dep:market"));
         assert!(key
             .contains("condition:0xabcd00000000000000000000000000000000000000000000000000000000"));
     }
@@ -4413,8 +4784,10 @@ mod tests {
             .expect("valid timestamp")
             .with_timezone(&Utc);
 
-        let first_key = Coordinator::stable_idempotency_key("acct-main", &first);
-        let second_key = Coordinator::stable_idempotency_key("acct-main", &second);
+        let first_key =
+            Coordinator::stable_idempotency_key("acct-main", &first, DuplicateGuardScope::Market);
+        let second_key =
+            Coordinator::stable_idempotency_key("acct-main", &second, DuplicateGuardScope::Market);
 
         assert_ne!(first_key, second_key);
     }

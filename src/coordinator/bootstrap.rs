@@ -20,6 +20,7 @@ use crate::agent_system::runtime::{
 #[cfg(feature = "rl")]
 use crate::agent_system::runtime::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
+use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
@@ -2874,6 +2875,14 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.duplicate_guard_window_ms,
         )
         .max(100);
+        if let Ok(raw) = std::env::var("PLOY_COORDINATOR__DUPLICATE_GUARD_SCOPE") {
+            let v = raw.trim().to_ascii_lowercase();
+            cfg.coordinator.duplicate_guard_scope = match v.as_str() {
+                "deployment" | "dep" => DuplicateGuardScope::Deployment,
+                "market" | "global" => DuplicateGuardScope::Market,
+                _ => cfg.coordinator.duplicate_guard_scope,
+            };
+        }
         cfg.coordinator.heartbeat_stale_warn_cooldown_secs = env_u64(
             "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS",
             cfg.coordinator.heartbeat_stale_warn_cooldown_secs,
@@ -3013,7 +3022,35 @@ impl PlatformBootstrapConfig {
                 cfg.coordinator.governance_blocked_domains = domains;
             }
         }
+        // Coordinator-level Kelly sizing (optional; applied when intents carry `signal_fair_value`).
+        cfg.coordinator.kelly_sizing_enabled = env_bool(
+            "PLOY_COORDINATOR__KELLY_SIZING_ENABLED",
+            cfg.coordinator.kelly_sizing_enabled,
+        );
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__KELLY_FRACTION_MULTIPLIER").and_then(normalize_pct)
+        {
+            cfg.coordinator.kelly_fraction_multiplier = v;
+        }
+        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__KELLY_MIN_EDGE") {
+            cfg.coordinator.kelly_min_edge = v
+                .max(rust_decimal::Decimal::ZERO)
+                .min(rust_decimal::Decimal::ONE);
+        }
+        cfg.coordinator.kelly_min_shares = env_u64(
+            "PLOY_COORDINATOR__KELLY_MIN_SHARES",
+            cfg.coordinator.kelly_min_shares,
+        );
 
+        // Execution venue minimums (used to prevent deterministic 400s that would otherwise
+        // trip the circuit breaker and make the system look like it "stops after one loop").
+        cfg.coordinator.min_order_shares = env_u64(
+            "PLOY_COORDINATOR__MIN_ORDER_SHARES",
+            cfg.coordinator.min_order_shares,
+        );
+        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__MIN_ORDER_NOTIONAL_USD") {
+            cfg.coordinator.min_order_notional_usd = v.max(rust_decimal::Decimal::ZERO);
+        }
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
         cfg.crypto.default_shares = app.strategy.shares.max(1);
@@ -3068,6 +3105,10 @@ impl PlatformBootstrapConfig {
                 }
             }
         }
+        cfg.crypto.min_window_move_pct = env_decimal(
+            "PLOY_CRYPTO_AGENT__MIN_WINDOW_MOVE_PCT",
+            cfg.crypto.min_window_move_pct,
+        );
         cfg.crypto.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_AGENT__EVENT_REFRESH_SECS",
             cfg.crypto.event_refresh_secs,

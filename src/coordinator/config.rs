@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform::RiskConfig;
 
+/// Scope for duplicate-intent guard.
+///
+/// - `market`: block repeated BUY intents for the same (domain, market_slug) within the guard window,
+///   regardless of which strategy deployment produced them. This is safer when multiple strategies
+///   can overlap and would otherwise double-enter the same event.
+/// - `deployment`: legacy behavior; scope duplicates by deployment_id (or agent+strategy fallback).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateGuardScope {
+    Market,
+    Deployment,
+}
+
+impl Default for DuplicateGuardScope {
+    fn default() -> Self {
+        Self::Market
+    }
+}
+
 /// Configuration for the coordinator
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,6 +44,8 @@ pub struct CoordinatorConfig {
     pub duplicate_guard_window_ms: u64,
     /// Enable/disable duplicate-intent guard.
     pub duplicate_guard_enabled: bool,
+    /// Duplicate-intent guard scope (market vs deployment).
+    pub duplicate_guard_scope: DuplicateGuardScope,
     /// Cooldown in seconds between repeated stale heartbeat warnings for same agent.
     pub heartbeat_stale_warn_cooldown_secs: u64,
     /// Enable/disable crypto capital allocator.
@@ -73,6 +94,32 @@ pub struct CoordinatorConfig {
     pub governance_max_total_notional_usd: Option<Decimal>,
     /// Governance blocklist for domains (e.g. ["sports", "politics"]).
     pub governance_blocked_domains: Vec<String>,
+
+    // === Sizing policy (Coordinator-level) ===
+    /// Enable Kelly-based sizing for buy intents when a strategy provides `signal_fair_value`.
+    ///
+    /// This is applied in the coordinator before risk checks and capital allocation.
+    pub kelly_sizing_enabled: bool,
+    /// Conservative Kelly multiplier (e.g., 0.25 = quarter-Kelly).
+    pub kelly_fraction_multiplier: Decimal,
+    /// Optional minimum edge (p - price) required to allow sizing; set 0 to disable.
+    pub kelly_min_edge: Decimal,
+    /// Optional floor for Kelly sizing (shares). If >0, entries that would size to 0 shares
+    /// will be bumped to this minimum (bounded by the strategy-provided max shares).
+    ///
+    /// This helps keep the system "alive" under conservative bankroll/caps without disabling
+    /// Kelly entirely. Set 0 to preserve strict Kelly behavior (block when < 1 share).
+    pub kelly_min_shares: u64,
+
+    // === Exchange / venue minimums ===
+    /// Minimum buy order size in shares required by the execution venue.
+    ///
+    /// Polymarket CLOB rejects orders below 5 shares; keep this >= 5 in production.
+    pub min_order_shares: u64,
+    /// Minimum buy order notional (USD) required by the execution venue.
+    ///
+    /// Polymarket enforces a $1 minimum on marketable orders; keep this >= 1 in production.
+    pub min_order_notional_usd: Decimal,
 }
 
 impl Default for CoordinatorConfig {
@@ -86,6 +133,7 @@ impl Default for CoordinatorConfig {
             batch_size: 10,
             duplicate_guard_window_ms: 60_000,
             duplicate_guard_enabled: true,
+            duplicate_guard_scope: DuplicateGuardScope::Market,
             heartbeat_stale_warn_cooldown_secs: 300,
             crypto_allocator_enabled: true,
             crypto_allocator_total_cap_usd: None,
@@ -115,6 +163,16 @@ impl Default for CoordinatorConfig {
             governance_max_intent_notional_usd: None,
             governance_max_total_notional_usd: None,
             governance_blocked_domains: Vec::new(),
+
+            // Kelly sizing is opt-in by env to preserve legacy behavior.
+            kelly_sizing_enabled: false,
+            kelly_fraction_multiplier: Decimal::new(25, 2), // 0.25 (quarter-Kelly)
+            kelly_min_edge: Decimal::ZERO,
+            kelly_min_shares: 0,
+
+            // Venue minimums (Polymarket defaults).
+            min_order_shares: 5,
+            min_order_notional_usd: Decimal::from(1),
         }
     }
 }

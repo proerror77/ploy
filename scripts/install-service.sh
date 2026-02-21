@@ -20,11 +20,29 @@ sudo install -m 0644 /opt/ploy/deployment/ploy.service /etc/systemd/system/ploy.
 if [[ -f /opt/ploy/deployment/ploy@.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy@.service /etc/systemd/system/ploy@.service
 fi
+if [[ -f /opt/ploy/deployment/ploy-platform-live.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-platform-live.service /etc/systemd/system/ploy-platform-live.service
+fi
 if [[ -f /opt/ploy/deployment/ploy-sports-pm.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-sports-pm.service /etc/systemd/system/ploy-sports-pm.service
 fi
 if [[ -f /opt/ploy/deployment/ploy-crypto-dryrun.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-crypto-dryrun.service /etc/systemd/system/ploy-crypto-dryrun.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-crypto-live.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-crypto-live.service /etc/systemd/system/ploy-crypto-live.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-sports-live.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-sports-live.service /etc/systemd/system/ploy-sports-live.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-orderbook-history.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-orderbook-history.service /etc/systemd/system/ploy-orderbook-history.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-maintenance.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-maintenance.service /etc/systemd/system/ploy-maintenance.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-maintenance.timer ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-maintenance.timer /etc/systemd/system/ploy-maintenance.timer
 fi
 if [[ -f /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service /etc/systemd/system/ploy-strategy-pattern-memory-dryrun.service
@@ -43,6 +61,15 @@ fi
 if [[ -f /opt/ploy/deployment/config/crypto_dry_run.toml && ! -f /opt/ploy/config/crypto_dry_run.toml ]]; then
   sudo cp /opt/ploy/deployment/config/crypto_dry_run.toml /opt/ploy/config/crypto_dry_run.toml
 fi
+if [[ -f /opt/ploy/deployment/config/crypto_live.toml && ! -f /opt/ploy/config/crypto_live.toml ]]; then
+  sudo cp /opt/ploy/deployment/config/crypto_live.toml /opt/ploy/config/crypto_live.toml
+fi
+if [[ -f /opt/ploy/deployment/config/sports_live.toml && ! -f /opt/ploy/config/sports_live.toml ]]; then
+  sudo cp /opt/ploy/deployment/config/sports_live.toml /opt/ploy/config/sports_live.toml
+fi
+if [[ -f /opt/ploy/deployment/config/platform_live.toml && ! -f /opt/ploy/config/platform_live.toml ]]; then
+  sudo cp /opt/ploy/deployment/config/platform_live.toml /opt/ploy/config/platform_live.toml
+fi
 sudo mkdir -p /opt/ploy/data/state
 if [[ ! -f /opt/ploy/data/state/deployments.json ]]; then
   if [[ -f /opt/ploy/deployment/deployments.json ]]; then
@@ -57,6 +84,27 @@ fi
 if [[ -f /opt/ploy/deployment/env.crypto-dryrun.example && ! -f /opt/ploy/env/crypto-dryrun.env ]]; then
   sudo cp /opt/ploy/deployment/env.crypto-dryrun.example /opt/ploy/env/crypto-dryrun.env
 fi
+if [[ -f /opt/ploy/deployment/env.crypto-live.example && ! -f /opt/ploy/env/crypto-live.env ]]; then
+  sudo cp /opt/ploy/deployment/env.crypto-live.example /opt/ploy/env/crypto-live.env
+fi
+if [[ -f /opt/ploy/deployment/env.sports-live.example && ! -f /opt/ploy/env/sports-live.env ]]; then
+  sudo cp /opt/ploy/deployment/env.sports-live.example /opt/ploy/env/sports-live.env
+fi
+if [[ -f /opt/ploy/deployment/env.platform-live.example && ! -f /opt/ploy/env/platform-live.env ]]; then
+  sudo cp /opt/ploy/deployment/env.platform-live.example /opt/ploy/env/platform-live.env
+fi
+
+# Avoid empty placeholders in workload env overlays overriding real values from /opt/ploy/.env.
+sanitize_env_overlay() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  sudo sed -i.bak -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d; /^[A-Za-z_][A-Za-z0-9_]*=\"\"$/d' "$env_file"
+}
+sanitize_env_overlay /opt/ploy/env/sports-pm.env
+sanitize_env_overlay /opt/ploy/env/crypto-dryrun.env
+sanitize_env_overlay /opt/ploy/env/crypto-live.env
+sanitize_env_overlay /opt/ploy/env/sports-live.env
+sanitize_env_overlay /opt/ploy/env/platform-live.env
 
 # Keep SQLx migration runner enabled by default to prevent startup on stale schema.
 ensure_env_true() {
@@ -110,20 +158,59 @@ ensure_sports_allocator_defaults() {
   ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT" "0.35"
 }
 
+ensure_kelly_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  # Keep the system active under conservative caps: floor tiny-but-positive Kelly sizes.
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__KELLY_MIN_SHARES" "1"
+}
+
+ensure_venue_minimum_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  # Prevent deterministic 400s from Polymarket (min shares / min notional).
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__MIN_ORDER_SHARES" "5"
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__MIN_ORDER_NOTIONAL_USD" "1"
+}
+
 ensure_sqlx_migrations_enabled /opt/ploy/.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/sports-pm.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-dryrun.env
+ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-live.env
+ensure_sqlx_migrations_enabled /opt/ploy/env/sports-live.env
+ensure_sqlx_migrations_enabled /opt/ploy/env/platform-live.env
 ensure_account_budget_defaults /opt/ploy/.env
 ensure_account_budget_defaults /opt/ploy/env/sports-pm.env
 ensure_account_budget_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_account_budget_defaults /opt/ploy/env/crypto-live.env
+ensure_account_budget_defaults /opt/ploy/env/sports-live.env
+ensure_account_budget_defaults /opt/ploy/env/platform-live.env
 ensure_coordinator_heartbeat_defaults /opt/ploy/.env
 ensure_coordinator_heartbeat_defaults /opt/ploy/env/sports-pm.env
 ensure_coordinator_heartbeat_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_coordinator_heartbeat_defaults /opt/ploy/env/crypto-live.env
+ensure_coordinator_heartbeat_defaults /opt/ploy/env/sports-live.env
+ensure_coordinator_heartbeat_defaults /opt/ploy/env/platform-live.env
+ensure_kelly_defaults /opt/ploy/env/sports-pm.env
+ensure_kelly_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_kelly_defaults /opt/ploy/env/crypto-live.env
+ensure_kelly_defaults /opt/ploy/env/sports-live.env
+ensure_kelly_defaults /opt/ploy/env/platform-live.env
+ensure_venue_minimum_defaults /opt/ploy/env/sports-pm.env
+ensure_venue_minimum_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_venue_minimum_defaults /opt/ploy/env/crypto-live.env
+ensure_venue_minimum_defaults /opt/ploy/env/sports-live.env
+ensure_venue_minimum_defaults /opt/ploy/env/platform-live.env
 ensure_env_default "/opt/ploy/.env" "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_env_default /opt/ploy/env/sports-pm.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_env_default /opt/ploy/env/crypto-dryrun.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
+ensure_env_default /opt/ploy/env/crypto-live.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
+ensure_env_default /opt/ploy/env/sports-live.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
+ensure_env_default /opt/ploy/env/platform-live.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_sports_allocator_defaults /opt/ploy/.env
 ensure_sports_allocator_defaults /opt/ploy/env/sports-pm.env
+ensure_sports_allocator_defaults /opt/ploy/env/sports-live.env
+ensure_sports_allocator_defaults /opt/ploy/env/platform-live.env
 
 sudo chmod 600 /opt/ploy/env/*.env 2>/dev/null || true
 sudo chown ploy:ploy /opt/ploy/config/*.toml /opt/ploy/env/*.env 2>/dev/null || true

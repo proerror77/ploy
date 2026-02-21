@@ -267,6 +267,7 @@ pub struct EventInfo {
     pub title: String,
     pub up_token_id: String,
     pub down_token_id: String,
+    pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     pub condition_id: String,
     pub series_id: String,
@@ -280,6 +281,14 @@ impl EventInfo {
     /// Time remaining until event resolution
     pub fn time_remaining(&self) -> ChronoDuration {
         self.end_time - Utc::now()
+    }
+
+    /// Time elapsed since the event start (seconds, clamped to >= 0).
+    pub fn seconds_since_start(&self) -> i64 {
+        Utc::now()
+            .signed_duration_since(self.start_time)
+            .num_seconds()
+            .max(0)
     }
 
     /// Check if event is still tradeable (has enough time remaining)
@@ -367,6 +376,14 @@ impl EventMatcher {
             "10684" | "10683" | "10686" | "10685" => "5m",
             "10192" | "10191" | "10423" | "10422" => "15m",
             _ => "other",
+        }
+    }
+
+    fn window_secs_for_horizon(horizon: &str) -> i64 {
+        match horizon {
+            "15m" => 15 * 60,
+            "5m" => 5 * 60,
+            _ => 5 * 60,
         }
     }
 
@@ -562,25 +579,82 @@ impl EventMatcher {
             };
             let condition_id = market.condition_id.clone().unwrap_or_default();
 
-            // Parse token IDs from clobTokenIds field (JSON string array)
-            // Format: ["token_id_for_up", "token_id_for_down"]
-            let tokens: Vec<String> = market
+            let is_up_label = |label: &str| -> bool {
+                let o = label.trim().to_ascii_lowercase();
+                o == "up" || o.contains("up") || o == "yes" || o.starts_with('↑')
+            };
+            let is_down_label = |label: &str| -> bool {
+                let o = label.trim().to_ascii_lowercase();
+                o == "down" || o.contains("down") || o == "no" || o.starts_with('↓')
+            };
+
+            // Prefer token-id mapping from `tokens` (token_id + outcome) when available.
+            // This is the most reliable source and avoids assuming outcome ordering.
+            let mut up_token_id: Option<String> = None;
+            let mut down_token_id: Option<String> = None;
+            if let Some(token_infos) = market.tokens.as_ref() {
+                for t in token_infos {
+                    if up_token_id.is_none() && is_up_label(&t.outcome) {
+                        up_token_id = Some(t.token_id.clone());
+                    }
+                    if down_token_id.is_none() && is_down_label(&t.outcome) {
+                        down_token_id = Some(t.token_id.clone());
+                    }
+                }
+            }
+
+            // Fallback: parse token IDs from clobTokenIds field (JSON string array).
+            // Gamma aligns indices across `outcomes`, `clobTokenIds`, and `outcomePrices`.
+            let mut token_ids: Vec<String> = market
                 .clob_token_ids
                 .as_ref()
                 .and_then(|ids_str| serde_json::from_str::<Vec<String>>(ids_str).ok())
                 .unwrap_or_default();
 
-            if tokens.len() < 2 {
+            if token_ids.len() < 2 {
+                if let Some(token_infos) = market.tokens.as_ref() {
+                    token_ids = token_infos.iter().map(|t| t.token_id.clone()).collect();
+                }
+            }
+
+            if token_ids.len() < 2 {
                 debug!(
-                    "Market {} has insufficient tokens: {:?}",
-                    condition_id, tokens
+                    "Market {} has insufficient tokens (clobTokenIds/tokens missing)",
+                    condition_id
                 );
                 continue;
             }
 
-            // First token is UP, second is DOWN (Polymarket convention)
-            let up_token_id = tokens[0].clone();
-            let down_token_id = tokens[1].clone();
+            // If we didn't resolve via `tokens`, try mapping by the `outcomes` array indices.
+            if up_token_id.is_none() || down_token_id.is_none() {
+                if let Some(outcomes_raw) = market.outcomes.as_ref() {
+                    if let Ok(outcomes) = serde_json::from_str::<Vec<String>>(outcomes_raw) {
+                        if outcomes.len() == token_ids.len() {
+                            let mut up_idx: Option<usize> = None;
+                            let mut down_idx: Option<usize> = None;
+                            for (idx, outcome) in outcomes.iter().enumerate() {
+                                if up_idx.is_none() && is_up_label(outcome) {
+                                    up_idx = Some(idx);
+                                }
+                                if down_idx.is_none() && is_down_label(outcome) {
+                                    down_idx = Some(idx);
+                                }
+                            }
+
+                            if let Some(u) = up_idx {
+                                up_token_id = Some(token_ids[u].clone());
+                            }
+                            if let Some(d) = down_idx {
+                                down_token_id = Some(token_ids[d].clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Final fallback: assume first token is UP, second is DOWN.
+            let up_token_id = up_token_id.unwrap_or_else(|| token_ids[0].clone());
+            let down_token_id = down_token_id.unwrap_or_else(|| token_ids[1].clone());
 
             // Parse end time
             let end_time = match event_details.end_date.as_ref().and_then(|s| {
@@ -592,6 +666,15 @@ impl EventMatcher {
                 None => continue,
             };
 
+            let horizon = Self::horizon_for_series(series_id).to_string();
+            let window_secs = Self::window_secs_for_horizon(&horizon);
+            let start_time = event_details
+                .start_time
+                .as_ref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|| end_time - ChronoDuration::seconds(window_secs));
+
             // Parse price_to_beat from market title (e.g., "Will BTC be above $94,000?")
             let price_to_beat = EventInfo::parse_price_from_question(
                 &event_details.title.clone().unwrap_or_default(),
@@ -602,10 +685,11 @@ impl EventMatcher {
                 title: event_details.title.clone().unwrap_or_default(),
                 up_token_id,
                 down_token_id,
+                start_time,
                 end_time,
                 condition_id,
                 series_id: series_id.to_string(),
-                horizon: Self::horizon_for_series(series_id).to_string(),
+                horizon,
                 price_to_beat,
             };
 
@@ -665,6 +749,15 @@ impl EventMatcher {
                 .ok()
         })?;
 
+        let start_time = gamma
+            .start_time
+            .as_ref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| {
+                end_time - ChronoDuration::seconds(Self::window_secs_for_horizon("other"))
+            });
+
         let title = gamma.title.clone().unwrap_or_default();
         let price_to_beat = EventInfo::parse_price_from_question(&title);
 
@@ -673,6 +766,7 @@ impl EventMatcher {
             title,
             up_token_id: up_token.token_id.clone(),
             down_token_id: down_token.token_id.clone(),
+            start_time,
             end_time,
             condition_id: market.condition_id.clone().unwrap_or_default(),
             series_id: String::new(),
@@ -3149,6 +3243,7 @@ mod tests {
             title: slug.to_string(),
             up_token_id: format!("{slug}-up"),
             down_token_id: format!("{slug}-down"),
+            start_time: now,
             end_time: now + ChronoDuration::seconds(seconds_remaining),
             condition_id: format!("{slug}-condition"),
             series_id: "test".to_string(),

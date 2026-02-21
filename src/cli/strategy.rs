@@ -19,6 +19,7 @@ use tracing::{error, info, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
+use crate::safety::legacy_live::legacy_strategy_live_allowed;
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};

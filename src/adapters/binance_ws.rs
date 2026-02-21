@@ -36,8 +36,11 @@ const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 /// Price update broadcast channel capacity
 const CHANNEL_CAPACITY: usize = 1000;
 
-/// How many price samples to keep per symbol (need 120+ for volatility calculation)
-const MAX_PRICE_HISTORY: usize = 300;
+/// How many price samples to keep per symbol.
+///
+/// We store at most one sample per second (see `SpotPrice::update`), so this also bounds
+/// the maximum lookback window in seconds. Keep enough history for 15m window returns.
+const MAX_PRICE_HISTORY: usize = 5_000;
 
 /// Get proxy URL from environment variables
 fn get_proxy_url() -> Option<String> {
@@ -252,6 +255,24 @@ impl SpotPrice {
     pub fn update(&mut self, price: Decimal, quantity: Option<Decimal>, timestamp: DateTime<Utc>) {
         self.price = price;
         self.timestamp = timestamp;
+        // Downsample to 1 sample/second to keep lookbacks time-based (not trade-count based).
+        // This keeps memory bounded while still supporting 5m/15m window return calculations.
+        if let Some((front_price, front_qty, front_ts)) = self.history.front_mut() {
+            if front_ts.timestamp() == timestamp.timestamp() {
+                *front_price = price;
+                *front_ts = timestamp;
+                // Best-effort volume aggregation for VWAP.
+                let prev = front_qty.take();
+                *front_qty = match (prev, quantity) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                return;
+            }
+        }
+
         self.history.push_front((price, quantity, timestamp));
 
         // Keep bounded history
@@ -273,6 +294,11 @@ impl SpotPrice {
 
         // If no exact match, return oldest available
         self.history.back().map(|(p, _, _)| *p)
+    }
+
+    /// Oldest timestamp currently stored in history (useful to validate lookbacks).
+    pub fn oldest_timestamp(&self) -> Option<DateTime<Utc>> {
+        self.history.back().map(|(_, _, ts)| *ts)
     }
 
     /// Calculate momentum over N seconds: (current - past) / past

@@ -23,7 +23,7 @@ Options:
   --start <true|false>     Start services after deploy (default: true)
   --enable <true|false>    Enable services on boot (default: true)
   --services <csv>         Services to enable/start
-                           allowed: ploy,ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
+                           allowed: ploy,ploy-platform-live,ploy-sports-pm,ploy-crypto-dryrun,ploy-crypto-live,ploy-orderbook-history,ploy-maintenance.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
                            default: ploy,ploy-orderbook-history,ploy-maintenance.timer
   -h, --help               Show help
 
@@ -31,6 +31,7 @@ Examples:
   scripts/aws_ec2_deploy.sh --host 1.2.3.4 --key ~/.ssh/my-ec2.pem
   scripts/aws_ec2_deploy.sh --host 1.2.3.4 --services ploy
   scripts/aws_ec2_deploy.sh --host 1.2.3.4 --services ploy-sports-pm,ploy-crypto-dryrun
+  scripts/aws_ec2_deploy.sh --host 1.2.3.4 --services ploy-platform-live
 
 What it does:
   1) Upload source bundle to /tmp on EC2
@@ -44,7 +45,7 @@ USAGE
 
 is_allowed_service() {
   case "$1" in
-    ploy|ploy-sports-pm|ploy-crypto-dryrun|ploy-orderbook-history|ploy-maintenance.timer) return 0 ;;
+    ploy|ploy-platform-live|ploy-sports-pm|ploy-crypto-dryrun|ploy-crypto-live|ploy-orderbook-history|ploy-maintenance.timer) return 0 ;;
     ploy-strategy-pattern-memory-dryrun|ploy-strategy-momentum-dryrun|ploy-strategy-split-arb-dryrun) return 0 ;;
     *) return 1 ;;
   esac
@@ -60,7 +61,7 @@ normalize_services_csv() {
     [[ -n "$svc" ]] || continue
     if ! is_allowed_service "$svc"; then
       echo "invalid service in --services: $svc" >&2
-      echo "allowed: ploy, ploy-sports-pm, ploy-crypto-dryrun, ploy-orderbook-history, ploy-maintenance.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
+      echo "allowed: ploy, ploy-platform-live, ploy-sports-pm, ploy-crypto-dryrun, ploy-crypto-live, ploy-orderbook-history, ploy-maintenance.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
       exit 2
     fi
     out+=("$svc")
@@ -271,8 +272,10 @@ sudo chown -R ploy:ploy "$REMOTE_ROOT"
 for unit in \
   "$REMOTE_ROOT/deployment/ploy.service" \
   "$REMOTE_ROOT/deployment/ploy@.service" \
+  "$REMOTE_ROOT/deployment/ploy-platform-live.service" \
   "$REMOTE_ROOT/deployment/ploy-sports-pm.service" \
   "$REMOTE_ROOT/deployment/ploy-crypto-dryrun.service" \
+  "$REMOTE_ROOT/deployment/ploy-crypto-live.service" \
   "$REMOTE_ROOT/deployment/ploy-strategy-pattern-memory-dryrun.service" \
   "$REMOTE_ROOT/deployment/ploy-strategy-momentum-dryrun.service" \
   "$REMOTE_ROOT/deployment/ploy-strategy-split-arb-dryrun.service" \
@@ -291,6 +294,15 @@ if [[ -f "$REMOTE_ROOT/deployment/config/sports_pm.toml" && ! -f "$REMOTE_ROOT/c
 fi
 if [[ -f "$REMOTE_ROOT/deployment/config/crypto_dry_run.toml" && ! -f "$REMOTE_ROOT/config/crypto_dry_run.toml" ]]; then
   sudo cp "$REMOTE_ROOT/deployment/config/crypto_dry_run.toml" "$REMOTE_ROOT/config/crypto_dry_run.toml"
+fi
+if [[ -f "$REMOTE_ROOT/deployment/config/crypto_live.toml" && ! -f "$REMOTE_ROOT/config/crypto_live.toml" ]]; then
+  sudo cp "$REMOTE_ROOT/deployment/config/crypto_live.toml" "$REMOTE_ROOT/config/crypto_live.toml"
+fi
+if [[ -f "$REMOTE_ROOT/deployment/config/sports_live.toml" && ! -f "$REMOTE_ROOT/config/sports_live.toml" ]]; then
+  sudo cp "$REMOTE_ROOT/deployment/config/sports_live.toml" "$REMOTE_ROOT/config/sports_live.toml"
+fi
+if [[ -f "$REMOTE_ROOT/deployment/config/platform_live.toml" && ! -f "$REMOTE_ROOT/config/platform_live.toml" ]]; then
+  sudo cp "$REMOTE_ROOT/deployment/config/platform_live.toml" "$REMOTE_ROOT/config/platform_live.toml"
 fi
 sudo mkdir -p "$REMOTE_ROOT/data/state"
 if [[ ! -f "$REMOTE_ROOT/data/state/deployments.json" ]]; then
@@ -311,6 +323,29 @@ fi
 if [[ -f "$REMOTE_ROOT/deployment/env.crypto-dryrun.example" && ! -f "$REMOTE_ROOT/env/crypto-dryrun.env" ]]; then
   sudo cp "$REMOTE_ROOT/deployment/env.crypto-dryrun.example" "$REMOTE_ROOT/env/crypto-dryrun.env"
 fi
+if [[ -f "$REMOTE_ROOT/deployment/env.crypto-live.example" && ! -f "$REMOTE_ROOT/env/crypto-live.env" ]]; then
+  sudo cp "$REMOTE_ROOT/deployment/env.crypto-live.example" "$REMOTE_ROOT/env/crypto-live.env"
+fi
+if [[ -f "$REMOTE_ROOT/deployment/env.sports-live.example" && ! -f "$REMOTE_ROOT/env/sports-live.env" ]]; then
+  sudo cp "$REMOTE_ROOT/deployment/env.sports-live.example" "$REMOTE_ROOT/env/sports-live.env"
+fi
+if [[ -f "$REMOTE_ROOT/deployment/env.platform-live.example" && ! -f "$REMOTE_ROOT/env/platform-live.env" ]]; then
+  sudo cp "$REMOTE_ROOT/deployment/env.platform-live.example" "$REMOTE_ROOT/env/platform-live.env"
+fi
+
+# Avoid a common foot-gun: env overlay templates often ship with empty placeholders like
+# `POLYMARKET_PRIVATE_KEY=` which would override a correctly-set value in `/opt/ploy/.env`.
+# Remove any empty assignments in workload env files (but leave `/opt/ploy/.env` untouched).
+sanitize_env_overlay() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  sudo sed -i.bak -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d; /^[A-Za-z_][A-Za-z0-9_]*=\"\"$/d' "$env_file"
+}
+sanitize_env_overlay "$REMOTE_ROOT/env/sports-pm.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/crypto-dryrun.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/crypto-live.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/sports-live.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/platform-live.env"
 
 # Keep crypto/sports DB target aligned by default (avoid split persistence DBs).
 if [[ -f "$REMOTE_ROOT/env/sports-pm.env" && -f "$REMOTE_ROOT/env/crypto-dryrun.env" ]]; then
@@ -380,20 +415,45 @@ ensure_sports_allocator_defaults() {
   ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT" "0.35"
 }
 
+ensure_kelly_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  # Keep the system active under conservative caps: floor tiny-but-positive Kelly sizes.
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__KELLY_MIN_SHARES" "1"
+}
+
 ensure_sqlx_migrations_enabled "$REMOTE_ROOT/.env"
 ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/sports-pm.env"
 ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/crypto-dryrun.env"
+ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/crypto-live.env"
+ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/sports-live.env"
+ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/platform-live.env"
 ensure_account_budget_defaults "$REMOTE_ROOT/.env"
 ensure_account_budget_defaults "$REMOTE_ROOT/env/sports-pm.env"
 ensure_account_budget_defaults "$REMOTE_ROOT/env/crypto-dryrun.env"
+ensure_account_budget_defaults "$REMOTE_ROOT/env/crypto-live.env"
+ensure_account_budget_defaults "$REMOTE_ROOT/env/sports-live.env"
+ensure_account_budget_defaults "$REMOTE_ROOT/env/platform-live.env"
 ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/.env"
 ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/sports-pm.env"
 ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/crypto-dryrun.env"
+ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/crypto-live.env"
+ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/sports-live.env"
+ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/platform-live.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/sports-pm.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/crypto-live.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/sports-live.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/platform-live.env"
 ensure_deployments_file_default "$REMOTE_ROOT/.env"
 ensure_deployments_file_default "$REMOTE_ROOT/env/sports-pm.env"
 ensure_deployments_file_default "$REMOTE_ROOT/env/crypto-dryrun.env"
+ensure_deployments_file_default "$REMOTE_ROOT/env/crypto-live.env"
+ensure_deployments_file_default "$REMOTE_ROOT/env/sports-live.env"
+ensure_deployments_file_default "$REMOTE_ROOT/env/platform-live.env"
 ensure_sports_allocator_defaults "$REMOTE_ROOT/.env"
 ensure_sports_allocator_defaults "$REMOTE_ROOT/env/sports-pm.env"
+ensure_sports_allocator_defaults "$REMOTE_ROOT/env/sports-live.env"
+ensure_sports_allocator_defaults "$REMOTE_ROOT/env/platform-live.env"
 
 sudo chmod 600 "$REMOTE_ROOT"/.env "$REMOTE_ROOT"/env/*.env 2>/dev/null || true
 sudo chown ploy:ploy \
