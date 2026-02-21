@@ -2233,15 +2233,11 @@ impl Coordinator {
                     )
                     .await;
 
-                    // Record success with risk gate
-                    self.risk_gate
-                        .record_success(&agent_id, Decimal::ZERO)
-                        .await;
-
                     let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
                     self.settle_domain_success(&intent, result.filled_shares, fill_price)
                         .await;
 
+                    let mut realized_pnl = Decimal::ZERO;
                     if result.filled_shares > 0 {
                         if intent.is_buy {
                             let _ = self
@@ -2257,7 +2253,8 @@ impl Coordinator {
                                 )
                                 .await;
                         } else {
-                            self.apply_sell_fill_to_positions(
+                            realized_pnl = self
+                                .apply_sell_fill_to_positions(
                                 &intent,
                                 result.filled_shares,
                                 fill_price,
@@ -2266,6 +2263,19 @@ impl Coordinator {
                         }
 
                         self.refresh_risk_exposure_for_agent(&agent_id).await;
+                    }
+
+                    // Record execution outcome with RiskGate (including realized PnL on exits).
+                    // For binary options, PnL is realized on SELL fills (reduce/close).
+                    if realized_pnl < Decimal::ZERO {
+                        self.risk_gate
+                            .record_success(&agent_id, Decimal::ZERO)
+                            .await;
+                        self.risk_gate
+                            .record_loss(&agent_id, realized_pnl.abs())
+                            .await;
+                    } else {
+                        self.risk_gate.record_success(&agent_id, realized_pnl).await;
                     }
                 }
                 Err(e) => {
@@ -2299,11 +2309,12 @@ impl Coordinator {
         intent: &OrderIntent,
         filled_shares: u64,
         exit_price: Decimal,
-    ) {
+    ) -> Decimal {
         if filled_shares == 0 {
-            return;
+            return Decimal::ZERO;
         }
 
+        let mut realized_pnl = Decimal::ZERO;
         let mut remaining = filled_shares;
         let mut matching_positions = self
             .positions
@@ -2325,10 +2336,13 @@ impl Coordinator {
                 break;
             }
             let reduce_by = remaining.min(pos.shares);
-            let _ = self
+            if let Some(pnl) = self
                 .positions
                 .reduce_position(&pos.position_id, reduce_by, exit_price)
-                .await;
+                .await
+            {
+                realized_pnl += pnl;
+            }
             remaining -= reduce_by;
         }
 
@@ -2340,6 +2354,8 @@ impl Coordinator {
                 "sell fill exceeded tracked position shares; allocator adjusted, position book partially unmatched"
             );
         }
+
+        realized_pnl
     }
 
     async fn persist_execution(
