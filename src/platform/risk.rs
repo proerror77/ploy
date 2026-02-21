@@ -395,17 +395,23 @@ impl RiskGate {
         // Try automatic recovery before evaluating trading eligibility.
         self.try_auto_recover_circuit_breaker().await;
 
-        // 1. 檢查平台狀態
+        // 1. 檢查訂單是否過期
+        if intent.is_expired() {
+            return RiskCheckResult::Blocked(BlockReason::OrderExpired);
+        }
+
+        // Binary-options semantics (Polymarket): SELL intents are reduce-only exits.
+        // They must stay allowed during circuit-breaker, daily-loss, and exposure limits.
+        if !intent.is_buy {
+            return RiskCheckResult::Passed;
+        }
+
+        // 2. 檢查平台狀態 (BUY only)
         let platform_state = *self.state.read().await;
         if !platform_state.can_trade() {
             return RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped {
                 reason: "Platform trading halted".to_string(),
             });
-        }
-
-        // 2. 檢查訂單是否過期
-        if intent.is_expired() {
-            return RiskCheckResult::Blocked(BlockReason::OrderExpired);
         }
 
         // 3. Critical 訂單不再繞過風控檢查
@@ -871,6 +877,19 @@ mod tests {
         )
     }
 
+    fn make_sell_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {
+        OrderIntent::new(
+            agent,
+            Domain::Crypto,
+            "btc-15m",
+            "token-123",
+            Side::Up,
+            false,
+            shares,
+            price,
+        )
+    }
+
     #[tokio::test]
     async fn test_basic_check() {
         let gate = RiskGate::new(RiskConfig::default());
@@ -925,6 +944,48 @@ mod tests {
         // 重置
         gate.reset_circuit_breaker().await;
         assert!(gate.can_trade().await);
+    }
+
+    #[tokio::test]
+    async fn test_sell_allowed_when_halted() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 1;
+        config.circuit_breaker_auto_recover = false;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+
+        gate.record_failure("agent1", "forced failure").await;
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+
+        let buy_intent = make_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&buy_intent).await.is_blocked());
+
+        let sell_intent = make_sell_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&sell_intent).await.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_sell_allowed_when_daily_loss_exceeded() {
+        let mut config = RiskConfig::default();
+        config.daily_loss_limit = Decimal::from(5);
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+
+        {
+            let mut daily = gate.daily_stats.write().await;
+            daily.date = Some(Utc::now().date_naive());
+            daily.total_pnl = Decimal::from(-6);
+        }
+
+        let buy_intent = make_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&buy_intent).await.is_blocked());
+
+        let sell_intent = make_sell_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&sell_intent).await.is_passed());
     }
 
     #[tokio::test]

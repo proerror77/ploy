@@ -372,27 +372,31 @@ pub struct CoordinatorHandle {
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
-        let global_mode = *self.ingress_mode.read().await;
-        let domain_mode = self
-            .domain_ingress_mode
-            .read()
-            .await
-            .get(&intent.domain)
-            .copied()
-            .unwrap_or(IngressMode::Running);
+        // Binary-options semantics (Polymarket): SELL intents are treated as
+        // reduce-only exits and must remain allowed during pause/halt.
+        if intent.is_buy {
+            let global_mode = *self.ingress_mode.read().await;
+            let domain_mode = self
+                .domain_ingress_mode
+                .read()
+                .await
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(IngressMode::Running);
 
-        if global_mode != IngressMode::Running {
-            return Err(crate::error::PloyError::Validation(format!(
-                "coordinator global ingress is {:?}; new intents are blocked",
-                global_mode
-            )));
-        }
+            if global_mode != IngressMode::Running {
+                return Err(crate::error::PloyError::Validation(format!(
+                    "coordinator global ingress is {:?}; new intents are blocked",
+                    global_mode
+                )));
+            }
 
-        if domain_mode != IngressMode::Running {
-            return Err(crate::error::PloyError::Validation(format!(
-                "coordinator {:?} ingress is {:?}; new intents are blocked",
-                intent.domain, domain_mode
-            )));
+            if domain_mode != IngressMode::Running {
+                return Err(crate::error::PloyError::Validation(format!(
+                    "coordinator {:?} ingress is {:?}; new intents are blocked",
+                    intent.domain, domain_mode
+                )));
+            }
         }
         self.order_tx.send(intent).await.map_err(|_| {
             crate::error::PloyError::Internal("coordinator order channel closed".into())
@@ -1942,9 +1946,9 @@ impl Coordinator {
         let intent_id = intent.intent_id;
 
         let ingress_mode = *self.ingress_mode.read().await;
-        if ingress_mode != IngressMode::Running {
+        if intent.is_buy && ingress_mode != IngressMode::Running {
             let reason = format!(
-                "Coordinator ingress is {:?}; blocking new intent while paused/halted",
+                "Coordinator ingress is {:?}; blocking BUY intent while paused/halted",
                 ingress_mode
             );
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
@@ -1955,25 +1959,27 @@ impl Coordinator {
             );
             return;
         }
-        let domain_mode = self
-            .domain_ingress_mode
-            .read()
-            .await
-            .get(&intent.domain)
-            .copied()
-            .unwrap_or(IngressMode::Running);
-        if domain_mode != IngressMode::Running {
-            let reason = format!(
-                "Domain {:?} ingress is {:?}; blocking new intent while paused/halted",
-                intent.domain, domain_mode
-            );
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by coordinator domain ingress state"
-            );
-            return;
+        if intent.is_buy {
+            let domain_mode = self
+                .domain_ingress_mode
+                .read()
+                .await
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(IngressMode::Running);
+            if domain_mode != IngressMode::Running {
+                let reason = format!(
+                    "Domain {:?} ingress is {:?}; blocking BUY intent while paused/halted",
+                    intent.domain, domain_mode
+                );
+                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                    .await;
+                warn!(
+                    %agent_id, %intent_id, reason = %reason,
+                    "order blocked by coordinator domain ingress state"
+                );
+                return;
+            }
         }
 
         if let Some(reason) = self.check_governance_policy(&intent).await {
