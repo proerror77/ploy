@@ -28,6 +28,9 @@ For deployment/runtime control projection, query `GET /api/strategies/control` (
 For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
 `strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
 Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
+Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
+
+Canonical agent namespace is now `crate::agent_system::{ai,runtime,legacy_platform}` (legacy paths kept for compatibility).
 
 ## Prerequisites
 

@@ -87,6 +87,15 @@ fn capability_endpoints(governance_available: bool) -> Vec<CapabilityEndpoint> {
             auth: "x-ploy-admin-token".to_string(),
         },
         CapabilityEndpoint {
+            path: "/api/strategy-evaluations|/api/strategy-evaluations/:deployment_id/latest"
+                .to_string(),
+            method: "GET/POST".to_string(),
+            description:
+                "Traceable backtest/paper/live evaluation evidence registry for strategy governance"
+                    .to_string(),
+            auth: "x-ploy-admin-token".to_string(),
+        },
+        CapabilityEndpoint {
             path: "/api/system/pause|resume|halt".to_string(),
             method: "POST".to_string(),
             description: "Global/domain runtime control commands".to_string(),

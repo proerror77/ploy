@@ -100,6 +100,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/strategies/control/:id",
             put(handlers::update_strategy_control),
         )
+        .route(
+            "/api/strategy-evaluations",
+            get(handlers::list_strategy_evaluations).post(handlers::create_strategy_evaluation),
+        )
+        .route(
+            "/api/strategy-evaluations/:deployment_id/latest",
+            get(handlers::get_latest_strategy_evaluation),
+        )
         // Strategy deployment matrix (control-plane first-class resource)
         .route(
             "/api/deployments",

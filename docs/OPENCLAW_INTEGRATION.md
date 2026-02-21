@@ -138,6 +138,24 @@ Ingress lifecycle contract:
 - sidecar live ingress 預設只接受 `lifecycle_stage=live` 的 deployment（避免未審核策略直接進 live queue）
 - 遷移期可暫時設 `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true` 放寬，但不建議 production
 
+### Strategy Evaluation Evidence API
+
+新增可追溯證據層（需 admin token）：
+
+- `GET /api/strategy-evaluations`
+  - filter: `deployment_id` / `strategy` / `strategy_version` / `stage` / `lifecycle_stage` / `limit`
+- `POST /api/strategy-evaluations`
+  - 寫入 backtest/paper/live 證據（包含 `dataset_hash` / `model_hash` / `config_hash` / metrics）
+- `GET /api/strategy-evaluations/:deployment_id/latest`
+  - 讀取最新證據（可帶 `stage` / `strategy_version`）
+
+`GET /api/strategies/control` 現在會回傳每個 deployment 的 latest evidence 摘要：
+- `latest_evaluation_id`
+- `latest_evaluation_stage`
+- `latest_evaluation_dataset_hash`
+- `latest_evaluation_model_hash`
+- `latest_evaluation_sample_size`
+
 已支援的 method（起步集合）：
 - `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）
 - `pm.get_balance`

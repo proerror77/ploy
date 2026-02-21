@@ -32,6 +32,11 @@ pub struct StrategyControlEntry {
     pub cooldown_secs: u64,
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub last_evaluation_score: Option<f64>,
+    pub latest_evaluation_id: Option<String>,
+    pub latest_evaluation_stage: Option<String>,
+    pub latest_evaluation_dataset_hash: Option<String>,
+    pub latest_evaluation_model_hash: Option<String>,
+    pub latest_evaluation_sample_size: Option<u64>,
     pub domain_ingress_mode: String,
     pub running_agents: Vec<String>,
 }
@@ -56,6 +61,11 @@ pub struct StrategyControlMutationResponse {
     pub product_type: String,
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub last_evaluation_score: Option<f64>,
+    pub latest_evaluation_id: Option<String>,
+    pub latest_evaluation_stage: Option<String>,
+    pub latest_evaluation_dataset_hash: Option<String>,
+    pub latest_evaluation_model_hash: Option<String>,
+    pub latest_evaluation_sample_size: Option<u64>,
     pub allocator_profile: String,
     pub risk_profile: String,
 }
@@ -245,6 +255,17 @@ pub async fn get_strategies_control(
             (None, None, HashMap::new(), HashMap::new())
         };
 
+    let latest_eval_by_key = {
+        let rows = state.strategy_evaluations.read().await;
+        let mut map: HashMap<(String, String), crate::platform::StrategyEvaluationEvidence> =
+            HashMap::new();
+        for row in rows.iter() {
+            map.entry((row.deployment_id.clone(), row.strategy_version.clone()))
+                .or_insert_with(|| row.clone());
+        }
+        map
+    };
+
     let items = {
         let deployments = state.deployments.read().await;
         let mut entries: Vec<StrategyControlEntry> = deployments
@@ -252,6 +273,8 @@ pub async fn get_strategies_control(
             .map(|dep: &StrategyDeployment| {
                 let domain = domain_key(dep.domain);
                 let running_agents = domain_agents.get(&domain).cloned().unwrap_or_default();
+                let latest_eval =
+                    latest_eval_by_key.get(&(dep.id.clone(), dep.strategy_version.clone()));
                 StrategyControlEntry {
                     deployment_id: dep.id.clone(),
                     strategy: dep.strategy.clone(),
@@ -268,6 +291,11 @@ pub async fn get_strategies_control(
                     cooldown_secs: dep.cooldown_secs,
                     last_evaluated_at: dep.last_evaluated_at,
                     last_evaluation_score: dep.last_evaluation_score,
+                    latest_evaluation_id: latest_eval.map(|v| v.evaluation_id.clone()),
+                    latest_evaluation_stage: latest_eval.map(|v| v.stage.as_str().to_string()),
+                    latest_evaluation_dataset_hash: latest_eval.map(|v| v.dataset_hash.clone()),
+                    latest_evaluation_model_hash: latest_eval.and_then(|v| v.model_hash.clone()),
+                    latest_evaluation_sample_size: latest_eval.map(|v| v.metrics.sample_size),
                     domain_ingress_mode: domain_modes
                         .get(&domain)
                         .cloned()
@@ -331,7 +359,7 @@ pub async fn update_strategy_control(
         }
     }
 
-    let response = {
+    let dep_snapshot = {
         let mut deployments = state.deployments.write().await;
         let Some(dep) = deployments.get_mut(key) else {
             return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
@@ -382,21 +410,35 @@ pub async fn update_strategy_control(
             dep.last_evaluation_score = Some(last_evaluation_score);
             dep.last_evaluated_at = Some(Utc::now());
         }
-
-        StrategyControlMutationResponse {
-            success: true,
-            deployment_id: dep.id.clone(),
-            strategy_version: dep.strategy_version.clone(),
-            enabled: dep.enabled,
-            priority: dep.priority,
-            cooldown_secs: dep.cooldown_secs,
-            lifecycle_stage: dep.lifecycle_stage.as_str().to_string(),
-            product_type: dep.product_type.as_str().to_string(),
-            last_evaluated_at: dep.last_evaluated_at,
-            last_evaluation_score: dep.last_evaluation_score,
-            allocator_profile: dep.allocator_profile.clone(),
-            risk_profile: dep.risk_profile.clone(),
-        }
+        dep.clone()
+    };
+    let latest_eval = {
+        let rows = state.strategy_evaluations.read().await;
+        rows.iter()
+            .find(|row| {
+                row.deployment_id == dep_snapshot.id
+                    && row.strategy_version == dep_snapshot.strategy_version
+            })
+            .cloned()
+    };
+    let response = StrategyControlMutationResponse {
+        success: true,
+        deployment_id: dep_snapshot.id.clone(),
+        strategy_version: dep_snapshot.strategy_version.clone(),
+        enabled: dep_snapshot.enabled,
+        priority: dep_snapshot.priority,
+        cooldown_secs: dep_snapshot.cooldown_secs,
+        lifecycle_stage: dep_snapshot.lifecycle_stage.as_str().to_string(),
+        product_type: dep_snapshot.product_type.as_str().to_string(),
+        last_evaluated_at: dep_snapshot.last_evaluated_at,
+        last_evaluation_score: dep_snapshot.last_evaluation_score,
+        latest_evaluation_id: latest_eval.as_ref().map(|v| v.evaluation_id.clone()),
+        latest_evaluation_stage: latest_eval.as_ref().map(|v| v.stage.as_str().to_string()),
+        latest_evaluation_dataset_hash: latest_eval.as_ref().map(|v| v.dataset_hash.clone()),
+        latest_evaluation_model_hash: latest_eval.as_ref().and_then(|v| v.model_hash.clone()),
+        latest_evaluation_sample_size: latest_eval.as_ref().map(|v| v.metrics.sample_size),
+        allocator_profile: dep_snapshot.allocator_profile.clone(),
+        risk_profile: dep_snapshot.risk_profile.clone(),
     };
 
     state.persist_deployments().await.map_err(|e| {

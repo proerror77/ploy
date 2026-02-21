@@ -5,6 +5,7 @@ pub mod governance;
 pub mod sidecar;
 pub mod stats;
 pub mod strategies;
+pub mod strategy_evaluations;
 pub mod system;
 
 pub use auth::*;
@@ -14,4 +15,5 @@ pub use governance::*;
 pub use sidecar::*;
 pub use stats::*;
 pub use strategies::*;
+pub use strategy_evaluations::*;
 pub use system::*;
