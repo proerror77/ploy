@@ -49,6 +49,16 @@ pub struct CryptoTradingConfig {
     pub max_time_remaining_secs: u64,
     /// Prefer events closest to end (confirmatory mode)
     pub prefer_close_to_end: bool,
+    /// Entry cooldown; `0` uses the event window for the horizon (5m=300s, 15m=900s).
+    #[serde(default)]
+    pub entry_cooldown_secs: u64,
+    /// Require multi-timeframe momentum agreement for entries.
+    ///
+    /// When enabled:
+    /// - 5m entries require 1s and 5s momentum to agree (when 5s momentum is available)
+    /// - 15m entries additionally require 30s momentum to agree (when available)
+    #[serde(default)]
+    pub require_mtf_agreement: bool,
     pub default_shares: u64,
     #[serde(default = "default_exit_edge_floor")]
     pub exit_edge_floor: Decimal,
@@ -74,6 +84,8 @@ impl Default for CryptoTradingConfig {
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,
             prefer_close_to_end: true,
+            entry_cooldown_secs: 0,
+            require_mtf_agreement: true,
             default_shares: 100,
             exit_edge_floor: default_exit_edge_floor(),
             exit_price_band: default_exit_price_band(),
@@ -263,6 +275,13 @@ impl CryptoTradingAgent {
         format!("{:x}", hasher.finalize())
     }
 
+    fn entry_cooldown_secs(&self, horizon: &str) -> u64 {
+        if self.config.entry_cooldown_secs > 0 {
+            return self.config.entry_cooldown_secs;
+        }
+        event_window_secs_for_horizon(horizon).max(1)
+    }
+
     fn estimate_fair_value(momentum: Decimal) -> Decimal {
         (dec!(0.50) + momentum.abs() * dec!(10))
             .max(dec!(0.05))
@@ -327,6 +346,7 @@ impl TradingAgent for CryptoTradingAgent {
         let mut active_events: HashMap<String, Vec<EventInfo>> = HashMap::new(); // symbol -> events
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut last_entry_at: HashMap<String, DateTime<Utc>> = HashMap::new(); // symbol|timeframe -> ts
         let daily_pnl = Decimal::ZERO;
         sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
 
@@ -442,35 +462,31 @@ impl TradingAgent for CryptoTradingAgent {
 
                     // Check momentum from binance price cache
                     let spot_cache = self.binance_ws.price_cache();
-                    let momentum = spot_cache.momentum(&update.symbol, 1).await;
-                    let short_momentum = spot_cache
-                        .momentum(&update.symbol, 5)
-                        .await
-                        .unwrap_or(Decimal::ZERO);
-                    let long_momentum = spot_cache
-                        .momentum(&update.symbol, 30)
-                        .await
-                        .unwrap_or(Decimal::ZERO);
+                    let Some(momentum_1s) = spot_cache.momentum(&update.symbol, 1).await else {
+                        continue;
+                    };
+                    let short_momentum_opt = spot_cache.momentum(&update.symbol, 5).await;
+                    let long_momentum_opt = spot_cache.momentum(&update.symbol, 30).await;
+                    let short_momentum = short_momentum_opt.unwrap_or(Decimal::ZERO);
+                    let long_momentum = long_momentum_opt.unwrap_or(Decimal::ZERO);
                     let rolling_volatility = spot_cache
                         .volatility(&update.symbol, 60)
                         .await
                         .unwrap_or(Decimal::ZERO);
 
                     // Check momentum threshold
-                    let mom_ok = momentum
-                        .map(|m| m.abs() >= Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)))
-                        .unwrap_or(true);
+                    let mom_ok = momentum_1s.abs()
+                        >= Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001));
 
                     if !mom_ok {
                         continue;
                     }
 
-                    let side = if momentum.map(|m| m > Decimal::ZERO).unwrap_or(true) {
+                    let side = if momentum_1s > Decimal::ZERO {
                         Side::Up
                     } else {
                         Side::Down
                     };
-                    let momentum_1s = momentum.unwrap_or(Decimal::ZERO);
                     let quote_cache = self.pm_ws.quote_cache();
 
                     // Binary options default: exit on signal flip instead of TP/SL.
@@ -548,9 +564,65 @@ impl TradingAgent for CryptoTradingAgent {
                         }
                     }
 
+                    let mut entered_timeframes: HashSet<String> = HashSet::new();
+                    let now = Utc::now();
                     for event in events {
                         if should_skip_entry(&event.slug, &positions, &traded_events) {
                             continue;
+                        }
+
+                        let timeframe = normalize_timeframe(&event.horizon);
+                        if entered_timeframes.contains(&timeframe) {
+                            continue;
+                        }
+
+                        // Prevent "pre-trading" multiple future windows: enforce cooldown per (symbol,timeframe).
+                        let entry_key = format!("{}|{}", update.symbol, timeframe);
+                        let cooldown_secs = self.entry_cooldown_secs(&timeframe);
+                        if let Some(prev) = last_entry_at.get(&entry_key) {
+                            let elapsed = now
+                                .signed_duration_since(*prev)
+                                .num_seconds()
+                                .max(0) as u64;
+                            if elapsed < cooldown_secs {
+                                continue;
+                            }
+                        }
+
+                        if self.config.require_mtf_agreement {
+                            let mom_sign = if momentum_1s > Decimal::ZERO {
+                                1
+                            } else if momentum_1s < Decimal::ZERO {
+                                -1
+                            } else {
+                                0
+                            };
+                            if mom_sign == 0 {
+                                continue;
+                            }
+
+                            let sign = |v: Decimal| {
+                                if v > Decimal::ZERO {
+                                    1
+                                } else if v < Decimal::ZERO {
+                                    -1
+                                } else {
+                                    0
+                                }
+                            };
+
+                            let short_sign = short_momentum_opt.map(sign).unwrap_or(0);
+                            let long_sign = long_momentum_opt.map(sign).unwrap_or(0);
+
+                            if timeframe == "15m" {
+                                if (short_sign != 0 && short_sign != mom_sign)
+                                    || (long_sign != 0 && long_sign != mom_sign)
+                                {
+                                    continue;
+                                }
+                            } else if short_sign != 0 && short_sign != mom_sign {
+                                continue;
+                            }
                         }
 
                         let up = quote_cache.get(&event.up_token_id);
@@ -601,7 +673,6 @@ impl TradingAgent for CryptoTradingAgent {
                             limit_price,
                         );
                         let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
-                        let timeframe = normalize_timeframe(&event.horizon);
                         let event_window_secs =
                             event_window_secs_for_horizon(&timeframe).to_string();
                         let intent = intent
@@ -645,8 +716,9 @@ impl TradingAgent for CryptoTradingAgent {
                         }
 
                         // Track position locally
-                        let now = Utc::now();
                         traded_events.insert(event.slug.clone(), now);
+                        last_entry_at.insert(entry_key, now);
+                        entered_timeframes.insert(timeframe);
                     }
                 }
 

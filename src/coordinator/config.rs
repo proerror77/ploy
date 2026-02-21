@@ -58,7 +58,7 @@ impl Default for CoordinatorConfig {
             state_refresh_ms: 1000,
             queue_drain_ms: 200,
             max_platform_exposure: None,
-            heartbeat_timeout_ms: 15_000,
+            heartbeat_timeout_ms: 30_000,
             batch_size: 10,
             duplicate_guard_window_ms: 60_000,
             duplicate_guard_enabled: true,

@@ -2950,6 +2950,17 @@ impl PlatformBootstrapConfig {
                 _ => {}
             }
         }
+        cfg.crypto.entry_cooldown_secs = env_u64(
+            "PLOY_CRYPTO_AGENT__ENTRY_COOLDOWN_SECS",
+            cfg.crypto.entry_cooldown_secs,
+        );
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__REQUIRE_MTF_AGREEMENT") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto.require_mtf_agreement = true,
+                "0" | "false" | "no" | "off" => cfg.crypto.require_mtf_agreement = false,
+                _ => {}
+            }
+        }
         cfg.crypto.exit_edge_floor = env_decimal(
             "PLOY_CRYPTO_AGENT__EXIT_EDGE_FLOOR",
             cfg.crypto.exit_edge_floor,
@@ -3372,7 +3383,9 @@ pub async fn start_platform(
     let mut coordinator =
         Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
     if let Some(pool) = shared_pool.as_ref() {
-        let run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", !app_config.dry_run.enabled);
+        // Run migrations by default whenever a DB connection is available, even in dry-run.
+        // This prevents long-lived services from starting on a stale schema.
+        let run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", true);
         let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
