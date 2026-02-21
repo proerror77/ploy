@@ -386,10 +386,7 @@ fn sidecar_orders_live_enabled() -> bool {
 }
 
 fn normalize_opt(value: &Option<String>) -> Option<&str> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+    value.as_deref().map(str::trim).filter(|v| !v.is_empty())
 }
 
 fn normalize_meta<'a>(metadata: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {

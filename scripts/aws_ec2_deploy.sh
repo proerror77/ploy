@@ -348,6 +348,8 @@ ensure_account_budget_defaults() {
   ensure_env_default "$env_file" "PLOY_RISK__ACCOUNT_RESERVE_PCT" "0.15"
   ensure_env_default "$env_file" "PLOY_RISK__CRYPTO_ALLOCATION_PCT" "0.6667"
   ensure_env_default "$env_file" "PLOY_RISK__SPORTS_ALLOCATION_PCT" "0.3333"
+  ensure_env_default "$env_file" "PLOY_RISK__CIRCUIT_BREAKER_AUTO_RECOVER" "true"
+  ensure_env_default "$env_file" "PLOY_RISK__CIRCUIT_BREAKER_COOLDOWN_SECS" "300"
 }
 
 ensure_sports_allocator_defaults() {

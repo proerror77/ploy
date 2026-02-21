@@ -1405,9 +1405,6 @@ impl Coordinator {
                     reason = ?reason,
                     "order blocked by risk gate"
                 );
-                self.risk_gate
-                    .record_failure(&agent_id, &format!("{:?}", reason))
-                    .await;
             }
             RiskCheckResult::Adjusted(suggestion) => {
                 self.persist_risk_decision(

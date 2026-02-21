@@ -31,6 +31,12 @@ pub struct RiskConfig {
     pub max_spread_bps: u32,
     /// 緊急訂單是否跳過部分檢查
     pub critical_bypass_exposure: bool,
+    /// Enable automatic circuit-breaker recovery after cooldown.
+    #[serde(default = "default_circuit_breaker_auto_recover")]
+    pub circuit_breaker_auto_recover: bool,
+    /// Cooldown before auto-recovering from HALTED state.
+    #[serde(default = "default_circuit_breaker_cooldown_secs")]
+    pub circuit_breaker_cooldown_secs: u64,
     /// Optional per-domain exposure caps (USD)
     pub crypto_max_exposure: Option<Decimal>,
     pub sports_max_exposure: Option<Decimal>,
@@ -43,6 +49,14 @@ pub struct RiskConfig {
     pub economics_daily_loss_limit: Option<Decimal>,
 }
 
+fn default_circuit_breaker_auto_recover() -> bool {
+    true
+}
+
+fn default_circuit_breaker_cooldown_secs() -> u64 {
+    300
+}
+
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
@@ -51,6 +65,8 @@ impl Default for RiskConfig {
             daily_loss_limit: Decimal::from(1000),
             max_spread_bps: 500, // 5%
             critical_bypass_exposure: false,
+            circuit_breaker_auto_recover: default_circuit_breaker_auto_recover(),
+            circuit_breaker_cooldown_secs: default_circuit_breaker_cooldown_secs(),
             crypto_max_exposure: None,
             sports_max_exposure: None,
             politics_max_exposure: None,
@@ -301,6 +317,8 @@ pub struct RiskGate {
     daily_stats: Arc<RwLock<DailyStats>>,
     /// Circuit breaker event history (bounded)
     circuit_events: Arc<RwLock<Vec<CircuitBreakerEvent>>>,
+    /// Last HALTED timestamp (for auto-recovery cooldown checks)
+    halted_at: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
 impl RiskGate {
@@ -317,6 +335,7 @@ impl RiskGate {
             consecutive_failures: AtomicU32::new(0),
             daily_stats: Arc::new(RwLock::new(DailyStats::default())),
             circuit_events: Arc::new(RwLock::new(Vec::new())),
+            halted_at: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -373,6 +392,9 @@ impl RiskGate {
     ///
     /// 這是主要的風控入口點，會依序執行多層檢查。
     pub async fn check_order(&self, intent: &OrderIntent) -> RiskCheckResult {
+        // Try automatic recovery before evaluating trading eligibility.
+        self.try_auto_recover_circuit_breaker().await;
+
         // 1. 檢查平台狀態
         let platform_state = *self.state.read().await;
         if !platform_state.can_trade() {
@@ -667,43 +689,40 @@ impl RiskGate {
 
     /// 觸發熔斷
     pub async fn trigger_circuit_breaker(&self, reason: &str) {
-        error!("CIRCUIT BREAKER TRIGGERED: {}", reason);
-        *self.state.write().await = PlatformRiskState::Halted;
-
-        let mut events = self.circuit_events.write().await;
-        events.push(CircuitBreakerEvent {
-            timestamp: Utc::now(),
-            reason: reason.to_string(),
-            state: PlatformRiskState::Halted,
-        });
-        if events.len() > 100 {
-            let drain = events.len() - 100;
-            events.drain(0..drain);
+        let mut state = self.state.write().await;
+        if *state == PlatformRiskState::Halted {
+            return;
         }
+        error!("CIRCUIT BREAKER TRIGGERED: {}", reason);
+        *state = PlatformRiskState::Halted;
+        drop(state);
+
+        *self.halted_at.write().await = Some(Utc::now());
+        self.push_circuit_event(reason.to_string(), PlatformRiskState::Halted)
+            .await;
     }
 
     /// 重置熔斷
     pub async fn reset_circuit_breaker(&self) {
-        info!("Circuit breaker reset");
+        self.reset_circuit_breaker_with_reason("reset".to_string())
+            .await;
+    }
+
+    async fn reset_circuit_breaker_with_reason(&self, reason: String) {
+        info!("Circuit breaker reset: {}", reason);
         *self.state.write().await = PlatformRiskState::Normal;
         self.consecutive_failures.store(0, Ordering::SeqCst);
+        *self.halted_at.write().await = None;
 
         // 重置所有 Agent 失敗計數
         let mut stats_map = self.agent_stats.write().await;
         for stats in stats_map.values_mut() {
             stats.consecutive_failures = 0;
         }
+        drop(stats_map);
 
-        let mut events = self.circuit_events.write().await;
-        events.push(CircuitBreakerEvent {
-            timestamp: Utc::now(),
-            reason: "reset".to_string(),
-            state: PlatformRiskState::Normal,
-        });
-        if events.len() > 100 {
-            let drain = events.len() - 100;
-            events.drain(0..drain);
-        }
+        self.push_circuit_event(reason, PlatformRiskState::Normal)
+            .await;
     }
 
     // ==================== 查詢方法 ====================
@@ -780,6 +799,52 @@ impl RiskGate {
         self.domain_exposure.write().await.clear();
         *self.daily_stats.write().await = DailyStats::default();
         self.circuit_events.write().await.clear();
+        *self.halted_at.write().await = None;
+    }
+
+    async fn try_auto_recover_circuit_breaker(&self) {
+        if !self.config.circuit_breaker_auto_recover {
+            return;
+        }
+        if *self.state.read().await != PlatformRiskState::Halted {
+            return;
+        }
+
+        let halted_at = *self.halted_at.read().await;
+        let Some(halted_at) = halted_at else {
+            self.reset_circuit_breaker_with_reason(
+                "auto-recover: missing halted timestamp".to_string(),
+            )
+            .await;
+            return;
+        };
+
+        let elapsed_secs = Utc::now()
+            .signed_duration_since(halted_at)
+            .num_seconds()
+            .max(0) as u64;
+        if elapsed_secs < self.config.circuit_breaker_cooldown_secs {
+            return;
+        }
+
+        self.reset_circuit_breaker_with_reason(format!(
+            "auto-recover after cooldown ({}s >= {}s)",
+            elapsed_secs, self.config.circuit_breaker_cooldown_secs
+        ))
+        .await;
+    }
+
+    async fn push_circuit_event(&self, reason: String, state: PlatformRiskState) {
+        let mut events = self.circuit_events.write().await;
+        events.push(CircuitBreakerEvent {
+            timestamp: Utc::now(),
+            reason,
+            state,
+        });
+        if events.len() > 100 {
+            let drain = events.len() - 100;
+            events.drain(0..drain);
+        }
     }
 }
 
@@ -846,6 +911,7 @@ mod tests {
     async fn test_circuit_breaker() {
         let mut config = RiskConfig::default();
         config.max_consecutive_failures = 3;
+        config.circuit_breaker_auto_recover = false;
         let gate = RiskGate::new(config);
 
         // 記錄失敗
@@ -861,6 +927,25 @@ mod tests {
         // 重置
         gate.reset_circuit_breaker().await;
         assert!(gate.can_trade().await);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_auto_recover_on_check_order() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 1;
+        config.circuit_breaker_auto_recover = true;
+        config.circuit_breaker_cooldown_secs = 0;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+        gate.record_failure("agent1", "forced failure").await;
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+
+        let intent = make_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        let result = gate.check_order(&intent).await;
+        assert!(result.is_passed());
+        assert_eq!(gate.state().await, PlatformRiskState::Normal);
     }
 
     #[tokio::test]

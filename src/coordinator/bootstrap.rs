@@ -2707,6 +2707,14 @@ impl PlatformBootstrapConfig {
             critical_bypass_exposure: false,
             ..Default::default()
         };
+        cfg.coordinator.risk.circuit_breaker_auto_recover = env_bool(
+            "PLOY_RISK__CIRCUIT_BREAKER_AUTO_RECOVER",
+            cfg.coordinator.risk.circuit_breaker_auto_recover,
+        );
+        cfg.coordinator.risk.circuit_breaker_cooldown_secs = env_u64(
+            "PLOY_RISK__CIRCUIT_BREAKER_COOLDOWN_SECS",
+            cfg.coordinator.risk.circuit_breaker_cooldown_secs,
+        );
 
         // Optional domain-level risk splits.
         // Example:

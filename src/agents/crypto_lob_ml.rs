@@ -269,6 +269,76 @@ fn deployment_id_for(strategy: &str, coin: &str, horizon: &str) -> String {
     )
 }
 
+fn infer_coin_from_market_slug(slug: &str) -> String {
+    slug.split('-')
+        .next()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "UNKNOWN".to_string())
+}
+
+fn infer_horizon_from_market_slug(slug: &str) -> String {
+    normalize_timeframe(slug)
+}
+
+fn tracked_position_from_global(position: &crate::platform::Position) -> TrackedPosition {
+    let coin = infer_coin_from_market_slug(&position.market_slug);
+    let symbol = position
+        .metadata
+        .get("symbol")
+        .cloned()
+        .unwrap_or_else(|| format!("{coin}USDT"));
+    let horizon = position
+        .metadata
+        .get("horizon")
+        .cloned()
+        .unwrap_or_else(|| infer_horizon_from_market_slug(&position.market_slug));
+    let series_id = position
+        .metadata
+        .get("series_id")
+        .or_else(|| position.metadata.get("event_series_id"))
+        .cloned()
+        .unwrap_or_default();
+
+    TrackedPosition {
+        market_slug: position.market_slug.clone(),
+        symbol,
+        horizon,
+        series_id,
+        token_id: position.token_id.clone(),
+        side: position.side,
+        shares: position.shares,
+        entry_price: position.entry_price,
+        entry_time: position.entry_time,
+    }
+}
+
+async fn sync_positions_from_global(
+    ctx: &AgentContext,
+    agent_id: &str,
+    positions: &mut HashMap<String, TrackedPosition>,
+) -> Decimal {
+    let state = ctx.read_global_state().await;
+    positions.clear();
+    for position in state.positions {
+        if position.agent_id != agent_id
+            || position.domain != Domain::Crypto
+            || position.shares == 0
+        {
+            continue;
+        }
+        positions.insert(
+            position.market_slug.clone(),
+            tracked_position_from_global(&position),
+        );
+    }
+
+    positions
+        .values()
+        .map(|p| p.entry_price * Decimal::from(p.shares))
+        .sum()
+}
+
 impl CryptoLobMlAgent {
     pub fn new(
         config: CryptoLobMlConfig,
@@ -535,7 +605,7 @@ impl TradingAgent for CryptoLobMlAgent {
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         let daily_pnl = Decimal::ZERO;
-        let mut total_exposure = Decimal::ZERO;
+        sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
 
         // Subscribe to data feeds
         let mut binance_rx: broadcast::Receiver<PriceUpdate> = self.binance_ws.subscribe();
@@ -772,11 +842,6 @@ impl TradingAgent for CryptoLobMlAgent {
                                                     p_up = %p_up,
                                                     "signal flip detected, submitting sell order"
                                                 );
-                                                positions.remove(&event.slug);
-                                                total_exposure = positions
-                                                    .values()
-                                                    .map(|p| p.entry_price * Decimal::from(p.shares))
-                                                    .sum();
                                             }
                                             Err(e) => {
                                                 warn!(
@@ -879,21 +944,6 @@ impl TradingAgent for CryptoLobMlAgent {
                         let now = Utc::now();
                         last_trade_by_symbol.insert(update.symbol.clone(), now);
                         traded_events.insert(event.slug.clone(), now);
-                        positions.insert(event.slug.clone(), TrackedPosition {
-                            market_slug: event.slug.clone(),
-                            symbol: update.symbol.clone(),
-                            horizon: event.horizon.clone(),
-                            series_id: event.series_id.clone(),
-                            token_id,
-                            side,
-                            shares: self.config.default_shares.max(1),
-                            entry_price: limit_price,
-                            entry_time: now,
-                        });
-
-                        total_exposure = positions.values()
-                            .map(|p| p.entry_price * Decimal::from(p.shares))
-                            .sum();
                     }
                 }
 
@@ -999,10 +1049,6 @@ impl TradingAgent for CryptoLobMlAgent {
                                 pnl_pct = %pnl_pct,
                                 "exit signal triggered, submitting sell order"
                             );
-                            positions.remove(&slug);
-                            total_exposure = positions.values()
-                                .map(|p| p.entry_price * Decimal::from(p.shares))
-                                .sum();
                         }
                         Err(e) => {
                             warn!(
@@ -1032,6 +1078,12 @@ impl TradingAgent for CryptoLobMlAgent {
                         }
                         Some(CoordinatorCommand::ForceClose) => {
                             warn!(agent = self.config.agent_id, "force close — submitting exit orders");
+                            sync_positions_from_global(
+                                &ctx,
+                                &self.config.agent_id,
+                                &mut positions,
+                            )
+                            .await;
                             let quote_cache = self.pm_ws.quote_cache();
                             for (slug, pos) in &positions {
                                 let bid = quote_cache
@@ -1083,6 +1135,12 @@ impl TradingAgent for CryptoLobMlAgent {
                             break;
                         }
                         Some(CoordinatorCommand::HealthCheck(tx)) => {
+                            let total_exposure = sync_positions_from_global(
+                                &ctx,
+                                &self.config.agent_id,
+                                &mut positions,
+                            )
+                            .await;
                             let snapshot = crate::coordinator::AgentSnapshot {
                                 agent_id: self.config.agent_id.clone(),
                                 name: self.config.name.clone(),
@@ -1113,6 +1171,12 @@ impl TradingAgent for CryptoLobMlAgent {
 
                 // --- Heartbeat ---
                 _ = heartbeat_tick.tick() => {
+                    let total_exposure = sync_positions_from_global(
+                        &ctx,
+                        &self.config.agent_id,
+                        &mut positions,
+                    )
+                    .await;
                     let _ = ctx.report_state(
                         &self.config.name,
                         status,
