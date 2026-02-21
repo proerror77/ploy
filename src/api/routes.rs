@@ -93,6 +93,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/deployments/:id/disable",
             post(handlers::disable_deployment),
         )
+        // Account-level governance policy (OpenClaw control-plane)
+        .route(
+            "/api/governance/policy",
+            get(handlers::get_governance_policy).put(handlers::put_governance_policy),
+        )
         // Security endpoints
         .route("/api/security/events", get(handlers::get_security_events))
         // Sidecar endpoints (Claude Agent SDK → Rust backend)

@@ -27,7 +27,9 @@ use crate::platform::{
 };
 use crate::strategy::executor::OrderExecutor;
 
-use super::command::{CoordinatorCommand, CoordinatorControlCommand};
+use super::command::{
+    CoordinatorCommand, CoordinatorControlCommand, GovernancePolicySnapshot, GovernancePolicyUpdate,
+};
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
@@ -40,6 +42,154 @@ enum IngressMode {
 
 const HEARTBEAT_STALE_WARN_COOLDOWN_SECS: i64 = 60;
 
+#[derive(Debug, Clone)]
+struct GovernancePolicy {
+    block_new_intents: bool,
+    blocked_domains: HashSet<Domain>,
+    max_intent_notional_usd: Option<Decimal>,
+    max_total_notional_usd: Option<Decimal>,
+    updated_at: chrono::DateTime<Utc>,
+    updated_by: String,
+    reason: Option<String>,
+}
+
+impl GovernancePolicy {
+    fn from_config(config: &CoordinatorConfig) -> Self {
+        let blocked_domains = config
+            .governance_blocked_domains
+            .iter()
+            .filter_map(|raw| parse_governance_domain(raw))
+            .collect::<HashSet<_>>();
+
+        Self {
+            block_new_intents: config.governance_block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd: config.governance_max_intent_notional_usd,
+            max_total_notional_usd: config.governance_max_total_notional_usd,
+            updated_at: Utc::now(),
+            updated_by: "boot".to_string(),
+            reason: Some("loaded from coordinator config".to_string()),
+        }
+    }
+
+    fn try_from_update(update: GovernancePolicyUpdate) -> std::result::Result<Self, String> {
+        let mut blocked_domains = HashSet::new();
+        for raw in &update.blocked_domains {
+            let Some(domain) = parse_governance_domain(raw) else {
+                return Err(format!("unknown blocked domain '{}'", raw));
+            };
+            blocked_domains.insert(domain);
+        }
+
+        if update.updated_by.trim().is_empty() {
+            return Err("updated_by is required".to_string());
+        }
+
+        if let Some(v) = update.max_intent_notional_usd {
+            if v <= Decimal::ZERO {
+                return Err("max_intent_notional_usd must be > 0".to_string());
+            }
+        }
+        if let Some(v) = update.max_total_notional_usd {
+            if v <= Decimal::ZERO {
+                return Err("max_total_notional_usd must be > 0".to_string());
+            }
+        }
+
+        Ok(Self {
+            block_new_intents: update.block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd: update.max_intent_notional_usd,
+            max_total_notional_usd: update.max_total_notional_usd,
+            updated_at: Utc::now(),
+            updated_by: update.updated_by.trim().to_string(),
+            reason: update.reason.and_then(|v| {
+                let trimmed = v.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }),
+        })
+    }
+
+    fn to_snapshot(&self) -> GovernancePolicySnapshot {
+        let mut blocked_domains = self
+            .blocked_domains
+            .iter()
+            .map(|d| governance_domain_label(*d).to_string())
+            .collect::<Vec<_>>();
+        blocked_domains.sort();
+        GovernancePolicySnapshot {
+            block_new_intents: self.block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd: self.max_intent_notional_usd,
+            max_total_notional_usd: self.max_total_notional_usd,
+            updated_at: self.updated_at,
+            updated_by: self.updated_by.clone(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+fn parse_governance_domain(raw: &str) -> Option<Domain> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "sports" => Some(Domain::Sports),
+        "crypto" => Some(Domain::Crypto),
+        "politics" => Some(Domain::Politics),
+        "economics" => Some(Domain::Economics),
+        _ => None,
+    }
+}
+
+fn governance_domain_label(domain: Domain) -> &'static str {
+    match domain {
+        Domain::Sports => "sports",
+        Domain::Crypto => "crypto",
+        Domain::Politics => "politics",
+        Domain::Economics => "economics",
+        Domain::Custom(_) => "custom",
+    }
+}
+
+fn governance_block_reason(
+    policy: &GovernancePolicy,
+    intent: &OrderIntent,
+    current_account_notional: Decimal,
+) -> Option<String> {
+    if policy.block_new_intents {
+        return Some("global governance policy blocks new intents".to_string());
+    }
+
+    if policy.blocked_domains.contains(&intent.domain) {
+        return Some(format!(
+            "domain '{}' is blocked by global governance policy",
+            governance_domain_label(intent.domain)
+        ));
+    }
+
+    let intent_notional = intent.notional_value();
+    if let Some(max_intent) = policy.max_intent_notional_usd {
+        if intent_notional > max_intent {
+            return Some(format!(
+                "intent notional {} exceeds governance max_intent_notional_usd {}",
+                intent_notional, max_intent
+            ));
+        }
+    }
+
+    if intent.is_buy {
+        if let Some(max_total) = policy.max_total_notional_usd {
+            let projected = current_account_notional + intent_notional;
+            if projected > max_total {
+                return Some(format!(
+                    "projected account notional {} exceeds governance max_total_notional_usd {}",
+                    projected, max_total
+                ));
+            }
+        }
+    }
+
+    None
+}
+
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
@@ -48,6 +198,7 @@ pub struct CoordinatorHandle {
     control_tx: mpsc::Sender<CoordinatorControlCommand>,
     global_state: Arc<RwLock<GlobalState>>,
     ingress_mode: Arc<RwLock<IngressMode>>,
+    governance_policy: Arc<RwLock<GovernancePolicy>>,
 }
 
 impl CoordinatorHandle {
@@ -132,6 +283,24 @@ impl CoordinatorHandle {
     pub async fn read_state(&self) -> GlobalState {
         self.global_state.read().await.clone()
     }
+
+    /// Read current account-level governance policy.
+    pub async fn governance_policy(&self) -> GovernancePolicySnapshot {
+        self.governance_policy.read().await.to_snapshot()
+    }
+
+    /// Replace account-level governance policy (control-plane managed).
+    pub async fn update_governance_policy(
+        &self,
+        update: GovernancePolicyUpdate,
+    ) -> Result<GovernancePolicySnapshot> {
+        let next = GovernancePolicy::try_from_update(update)
+            .map_err(crate::error::PloyError::Validation)?;
+        let snapshot = next.to_snapshot();
+        let mut policy = self.governance_policy.write().await;
+        *policy = next;
+        Ok(snapshot)
+    }
 }
 
 /// The Coordinator — owns shared infrastructure and runs the main event loop
@@ -148,6 +317,7 @@ pub struct Coordinator {
     global_state: Arc<RwLock<GlobalState>>,
     execution_log_pool: Option<PgPool>,
     ingress_mode: Arc<RwLock<IngressMode>>,
+    governance_policy: Arc<RwLock<GovernancePolicy>>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
 
     // Channels
@@ -1122,6 +1292,7 @@ impl Coordinator {
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
+        let governance_policy = Arc::new(RwLock::new(GovernancePolicy::from_config(&config)));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
@@ -1142,6 +1313,7 @@ impl Coordinator {
             global_state,
             execution_log_pool: None,
             ingress_mode,
+            governance_policy,
             stale_heartbeat_warn_at,
             order_tx,
             order_rx,
@@ -1166,6 +1338,7 @@ impl Coordinator {
             control_tx: self.control_tx.clone(),
             global_state: self.global_state.clone(),
             ingress_mode: self.ingress_mode.clone(),
+            governance_policy: self.governance_policy.clone(),
         }
     }
 
@@ -1354,6 +1527,16 @@ impl Coordinator {
             return;
         }
 
+        if let Some(reason) = self.check_governance_policy(&intent).await {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by global governance policy"
+            );
+            return;
+        }
+
         self.persist_signal_from_intent(&intent).await;
         if !intent.is_buy {
             self.persist_exit_reason_intent(&intent).await;
@@ -1427,6 +1610,24 @@ impl Coordinator {
     async fn check_duplicate_intent(&self, intent: &OrderIntent) -> Option<String> {
         let mut guard = self.duplicate_guard.write().await;
         guard.register_or_block(intent, Utc::now())
+    }
+
+    async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {
+        let policy = self.governance_policy.read().await.clone();
+        let current_notional = self.current_account_notional().await;
+        governance_block_reason(&policy, intent, current_notional)
+    }
+
+    async fn current_account_notional(&self) -> Decimal {
+        let crypto_total = {
+            let allocator = self.crypto_allocator.read().await;
+            allocator.open.total + allocator.pending.total
+        };
+        let sports_total = {
+            let allocator = self.sports_allocator.read().await;
+            allocator.open.total + allocator.pending.total
+        };
+        crypto_total + sports_total
     }
 
     async fn reserve_domain_capital(&self, intent: &OrderIntent) -> Option<String> {
@@ -2561,6 +2762,75 @@ mod tests {
         let second_key = Coordinator::stable_idempotency_key("acct-main", &second);
 
         assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn test_governance_policy_update_rejects_unknown_domain() {
+        let update = GovernancePolicyUpdate {
+            block_new_intents: false,
+            blocked_domains: vec!["unknown".to_string()],
+            max_intent_notional_usd: None,
+            max_total_notional_usd: None,
+            updated_by: "openclaw".to_string(),
+            reason: None,
+        };
+
+        let parsed = GovernancePolicy::try_from_update(update);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_governance_policy_blocks_domain() {
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: false,
+            blocked_domains: vec!["sports".to_string()],
+            max_intent_notional_usd: None,
+            max_total_notional_usd: None,
+            updated_by: "openclaw".to_string(),
+            reason: Some("maintenance".to_string()),
+        })
+        .expect("valid policy");
+
+        let intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        );
+        let reason = governance_block_reason(&policy, &intent, dec!(0));
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn test_governance_policy_blocks_projected_total_notional() {
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: false,
+            blocked_domains: vec![],
+            max_intent_notional_usd: Some(dec!(50)),
+            max_total_notional_usd: Some(dec!(100)),
+            updated_by: "openclaw".to_string(),
+            reason: None,
+        })
+        .expect("valid policy");
+
+        let intent = OrderIntent::new(
+            "crypto",
+            Domain::Crypto,
+            "btc-updown-5m-1",
+            "token-up",
+            crate::domain::Side::Up,
+            true,
+            50,
+            dec!(0.50),
+        ); // 25 notional
+        let reason = governance_block_reason(&policy, &intent, dec!(90));
+        assert!(reason
+            .unwrap_or_default()
+            .contains("max_total_notional_usd"));
     }
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {

@@ -2849,6 +2849,33 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.sports_auto_split_by_active_markets,
         );
 
+        cfg.coordinator.governance_block_new_intents = env_bool(
+            "PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS",
+            cfg.coordinator.governance_block_new_intents,
+        );
+        cfg.coordinator.governance_max_intent_notional_usd =
+            env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_INTENT_NOTIONAL_USD")
+                .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_INTENT_NOTIONAL_USD"))
+                .or(cfg.coordinator.governance_max_intent_notional_usd);
+        cfg.coordinator.governance_max_total_notional_usd =
+            env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_TOTAL_NOTIONAL_USD")
+                .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_TOTAL_NOTIONAL_USD"))
+                .or(cfg.coordinator.governance_max_total_notional_usd);
+
+        if let Ok(raw) = std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCKED_DOMAINS")
+            .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCKED_DOMAINS"))
+        {
+            let domains = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            if !domains.is_empty() {
+                cfg.coordinator.governance_blocked_domains = domains;
+            }
+        }
+
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
         cfg.crypto.default_shares = app.strategy.shares.max(1);

@@ -47,6 +47,14 @@ pub struct CoordinatorConfig {
     pub sports_market_cap_pct: Decimal,
     /// If true, auto-split sports cap by active market count.
     pub sports_auto_split_by_active_markets: bool,
+    /// Governance kill-switch for new intents (control-plane managed).
+    pub governance_block_new_intents: bool,
+    /// Governance hard cap for a single intent notional (USD).
+    pub governance_max_intent_notional_usd: Option<Decimal>,
+    /// Governance hard cap for total open+pending notional (USD, account-wide).
+    pub governance_max_total_notional_usd: Option<Decimal>,
+    /// Governance blocklist for domains (e.g. ["sports", "politics"]).
+    pub governance_blocked_domains: Vec<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -76,6 +84,10 @@ impl Default for CoordinatorConfig {
             sports_allocator_total_cap_usd: None,
             sports_market_cap_pct: Decimal::new(35, 2), // 35%
             sports_auto_split_by_active_markets: true,
+            governance_block_new_intents: false,
+            governance_max_intent_notional_usd: None,
+            governance_max_total_notional_usd: None,
+            governance_blocked_domains: Vec::new(),
         }
     }
 }

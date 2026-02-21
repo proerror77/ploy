@@ -1,5 +1,8 @@
 //! Coordinator Commands — control messages between coordinator and agents
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use super::state::AgentSnapshot;
@@ -40,4 +43,29 @@ pub struct AgentHealthResponse {
     pub uptime_secs: u64,
     pub orders_submitted: u64,
     pub orders_filled: u64,
+}
+
+/// Runtime governance policy exposed to control-plane APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernancePolicySnapshot {
+    pub block_new_intents: bool,
+    pub blocked_domains: Vec<String>,
+    pub max_intent_notional_usd: Option<Decimal>,
+    pub max_total_notional_usd: Option<Decimal>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+    pub reason: Option<String>,
+}
+
+/// Full replacement payload for runtime governance policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernancePolicyUpdate {
+    pub block_new_intents: bool,
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+    pub max_intent_notional_usd: Option<Decimal>,
+    pub max_total_notional_usd: Option<Decimal>,
+    pub updated_by: String,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
