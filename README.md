@@ -158,8 +158,8 @@ export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
 Recommended for gasless redeem via Polymarket Builder Relayer:
 
 ```bash
-# Enable official Rust relayer client path (recommended)
-cargo run --features builder_relayer_sdk -- momentum --live
+# Official Rust relayer client path is enabled by default
+cargo run -- momentum --live
 
 export CLAIMER_RELAYER_ENABLED=true
 export POLY_BUILDER_API_KEY=xxx

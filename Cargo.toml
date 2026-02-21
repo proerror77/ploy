@@ -115,7 +115,7 @@ duckdb = { version = "1.4", features = ["bundled"], optional = true }
 tract-onnx = { version = "0.22.0", optional = true }
 
 [features]
-default = []
+default = ["builder_relayer_sdk"]
 api = []  # Enable API module with SQLx compile-time checks (requires DATABASE_URL)
 rl = ["burn", "burn-ndarray", "bincode"]
 analysis = ["duckdb"]
