@@ -581,19 +581,12 @@ impl PolymarketClient {
         explicit_gate || (openclaw_mode && openclaw_hard_disable)
     }
 
-    fn allow_legacy_direct_submit() -> bool {
-        Self::env_bool(&[
-            "PLOY_ALLOW_LEGACY_DIRECT_SUBMIT",
-            "PLOY_ALLOW_DIRECT_SUBMIT",
-        ])
-    }
-
     fn gateway_execution_context_active() -> bool {
         GATEWAY_EXECUTION_CONTEXT.try_with(|v| *v).unwrap_or(false)
     }
 
     fn validate_gateway_execution_context(dry_run: bool) -> Result<()> {
-        if dry_run || Self::allow_legacy_direct_submit() {
+        if dry_run {
             return Ok(());
         }
 
@@ -2152,11 +2145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gateway_execution_context_rejects_legacy_direct_live_submit() {
-        if PolymarketClient::allow_legacy_direct_submit() {
-            return;
-        }
-
+    async fn test_gateway_execution_context_rejects_direct_live_submit() {
         let result = PolymarketClient::validate_gateway_execution_context(false);
         assert!(result.is_err());
 
