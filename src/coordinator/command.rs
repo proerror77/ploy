@@ -79,6 +79,19 @@ pub struct GovernancePolicyUpdate {
     pub reason: Option<String>,
 }
 
+/// Append-only governance policy change event (audit ledger).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernancePolicyHistoryEntry {
+    pub id: i64,
+    pub block_new_intents: bool,
+    pub blocked_domains: Vec<String>,
+    pub max_intent_notional_usd: Option<Decimal>,
+    pub max_total_notional_usd: Option<Decimal>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+    pub reason: Option<String>,
+}
+
 /// Per-domain allocator ledger snapshot (account-level capital tracking).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllocatorLedgerSnapshot {

@@ -29,8 +29,8 @@ use crate::strategy::executor::OrderExecutor;
 
 use super::command::{
     AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
-    DeploymentLedgerSnapshot, GovernancePolicySnapshot, GovernancePolicyUpdate,
-    GovernanceStatusSnapshot,
+    DeploymentLedgerSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,
+    GovernancePolicyUpdate, GovernanceStatusSnapshot,
 };
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
@@ -163,6 +163,16 @@ fn governance_domain_label(domain: Domain) -> &'static str {
         Domain::Economics => "economics",
         Domain::Custom(_) => "custom",
     }
+}
+
+fn governance_policy_blocked_domains_sorted(policy: &GovernancePolicy) -> Vec<String> {
+    let mut blocked_domains = policy
+        .blocked_domains
+        .iter()
+        .map(|d| governance_domain_label(*d).to_string())
+        .collect::<Vec<_>>();
+    blocked_domains.sort();
+    blocked_domains
 }
 
 fn parse_persisted_domain(raw: &str) -> Option<Domain> {
@@ -554,12 +564,10 @@ async fn persist_governance_policy(
     account_id: &str,
     policy: &GovernancePolicy,
 ) -> Result<()> {
-    let mut blocked_domains = policy
-        .blocked_domains
-        .iter()
-        .map(|d| governance_domain_label(*d).to_string())
-        .collect::<Vec<_>>();
-    blocked_domains.sort();
+    let blocked_domains = governance_policy_blocked_domains_sorted(policy);
+    let mut tx = pool.begin().await.map_err(|e| {
+        crate::error::PloyError::Internal(format!("begin governance policy tx: {}", e))
+    })?;
 
     sqlx::query(
         r#"
@@ -586,17 +594,130 @@ async fn persist_governance_policy(
     )
     .bind(account_id)
     .bind(policy.block_new_intents)
+    .bind(sqlx::types::Json(blocked_domains.clone()))
+    .bind(policy.max_intent_notional_usd)
+    .bind(policy.max_total_notional_usd)
+    .bind(policy.updated_at)
+    .bind(policy.updated_by.clone())
+    .bind(policy.reason.clone())
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("persist governance policy: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_governance_policy_history (
+            account_id,
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        "#,
+    )
+    .bind(account_id)
+    .bind(policy.block_new_intents)
     .bind(sqlx::types::Json(blocked_domains))
     .bind(policy.max_intent_notional_usd)
     .bind(policy.max_total_notional_usd)
     .bind(policy.updated_at)
     .bind(policy.updated_by.clone())
     .bind(policy.reason.clone())
-    .execute(pool)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| crate::error::PloyError::Internal(format!("persist governance policy: {}", e)))?;
+    .map_err(|e| {
+        crate::error::PloyError::Internal(format!("append governance policy history entry: {}", e))
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        crate::error::PloyError::Internal(format!("commit governance policy tx: {}", e))
+    })?;
 
     Ok(())
+}
+
+fn clamp_governance_history_limit(limit: usize) -> usize {
+    limit.clamp(1, 500)
+}
+
+async fn load_governance_policy_history(
+    pool: &PgPool,
+    account_id: &str,
+    limit: usize,
+) -> Result<Vec<GovernancePolicyHistoryEntry>> {
+    let limit = clamp_governance_history_limit(limit) as i64;
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            bool,
+            sqlx::types::Json<Vec<String>>,
+            Option<Decimal>,
+            Option<Decimal>,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT
+            id,
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        FROM coordinator_governance_policy_history
+        WHERE account_id = $1
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(account_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        crate::error::PloyError::Internal(format!("load governance policy history: {}", e))
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                block_new_intents,
+                sqlx::types::Json(blocked_domains),
+                max_intent_notional_usd,
+                max_total_notional_usd,
+                updated_at,
+                updated_by,
+                reason,
+            )| GovernancePolicyHistoryEntry {
+                id,
+                block_new_intents,
+                blocked_domains: blocked_domains
+                    .into_iter()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect(),
+                max_intent_notional_usd,
+                max_total_notional_usd,
+                updated_at,
+                updated_by,
+                reason: reason.and_then(|v| {
+                    let trimmed = v.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }),
+            },
+        )
+        .collect())
 }
 
 async fn load_governance_policy(
@@ -870,6 +991,19 @@ impl CoordinatorHandle {
     /// Read current account-level governance policy.
     pub async fn governance_policy(&self) -> GovernancePolicySnapshot {
         self.governance_policy.read().await.to_snapshot()
+    }
+
+    /// Read account-level governance policy change history (latest first).
+    pub async fn governance_policy_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GovernancePolicyHistoryEntry>> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Err(crate::error::PloyError::Validation(
+                "governance history store is unavailable in this runtime".to_string(),
+            ));
+        };
+        load_governance_policy_history(pool, &self.account_id, limit).await
     }
 
     /// Replace account-level governance policy (control-plane managed).
@@ -4162,6 +4296,13 @@ mod tests {
         );
         let reason = governance_block_reason(&policy, &intent, dec!(999));
         assert!(reason.is_none(), "sell intent should remain allowed");
+    }
+
+    #[test]
+    fn test_clamp_governance_history_limit_bounds() {
+        assert_eq!(clamp_governance_history_limit(0), 1);
+        assert_eq!(clamp_governance_history_limit(25), 25);
+        assert_eq!(clamp_governance_history_limit(999), 500);
     }
 
     #[test]

@@ -370,6 +370,36 @@ pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) 
     Ok(())
 }
 
+pub(crate) async fn ensure_coordinator_governance_policy_history_table(
+    pool: &PgPool,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS coordinator_governance_policy_history (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
+            blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+            max_intent_notional_usd NUMERIC,
+            max_total_notional_usd NUMERIC,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_by TEXT NOT NULL,
+            reason TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_coord_gov_policy_hist_account_time ON coordinator_governance_policy_history(account_id, updated_at DESC, id DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub(crate) async fn ensure_pm_token_settlements_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"
@@ -3561,6 +3591,17 @@ pub async fn start_platform(
             warn!(
                 error = %e,
                 "failed to ensure coordinator_governance_policies table; governance persistence disabled"
+            );
+        } else if let Err(e) = ensure_coordinator_governance_policy_history_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure coordinator_governance_policy_history table: {}",
+                    e
+                )));
+            }
+            warn!(
+                error = %e,
+                "failed to ensure coordinator_governance_policy_history table; governance history persistence disabled"
             );
         } else {
             coordinator.set_governance_store_pool(pool.clone());

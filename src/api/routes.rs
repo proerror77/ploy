@@ -102,6 +102,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/governance/policy",
             get(handlers::get_governance_policy).put(handlers::put_governance_policy),
         )
+        .route(
+            "/api/governance/policy/history",
+            get(handlers::get_governance_policy_history),
+        )
         // Security endpoints
         .route("/api/security/events", get(handlers::get_security_events))
         // Sidecar endpoints (Claude Agent SDK → Rust backend)

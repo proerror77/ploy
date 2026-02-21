@@ -106,6 +106,15 @@ JSON
 - `DELETE /api/deployments/:id`
 - deployment matrix 會落地到 `data/state/deployments.json`（可用 `PLOY_DEPLOYMENTS_FILE` 覆寫）。
 
+### Governance Policy API
+
+OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
+
+- `GET /api/governance/status`
+- `GET /api/governance/policy`
+- `PUT /api/governance/policy`
+- `GET /api/governance/policy/history?limit=100`（最新在前，預設 100，最大 500）
+
 已支援的 method（起步集合）：
 - `pm.get_balance`
 - `pm.get_positions`
