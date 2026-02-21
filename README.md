@@ -66,8 +66,6 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
 | `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
-| `PLOY_ALLOW_LEGACY_LIVE` | No | Allow legacy (non-Coordinator) live order paths. Not recommended. |
-| `PLOY_ALLOW_LEGACY_STRATEGY_LIVE` | No | Allow legacy `ploy strategy start` live runtime. Prefer `ploy platform start`. |
 
 ### Config File
 
@@ -100,12 +98,7 @@ ploy platform start --crypto --dry-run             # Safe dry-run
 ```
 
 Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
-
-If you need an explicit override (not recommended), set:
-
-```bash
-export PLOY_ALLOW_LEGACY_LIVE=true
-```
+Legacy live overrides are now removed to enforce a single audited execution path.
 
 ### Global Flags
 
@@ -118,7 +111,7 @@ export PLOY_ALLOW_LEGACY_LIVE=true
 ### Core Commands
 
 ```bash
-ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_LEGACY_LIVE=true)
+ploy run                                       # Legacy bot loop (dry-run only; live is blocked)
 ploy test                                      # Test Polymarket API connectivity
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
