@@ -92,7 +92,7 @@ JSON
   在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（Coordinator 已自動帶入）。
 - 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
 - sidecar `/api/sidecar/intents` 的 deployment gate 預設為啟用（可用 `PLOY_DEPLOYMENT_GATE_REQUIRED=false` 暫時關掉，不建議 production）。
-- `/api/sidecar/orders` live 提交預設關閉（避免繞過 deployment 治理）；僅在 `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=true` 才允許 live。
+- `/api/sidecar/orders` live 提交預設不掛載路由（避免繞過 deployment 治理）；僅在 `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=true` 才會暴露。
 
 ### Deployment Matrix API
 

@@ -41,11 +41,25 @@ fn build_cors_layer() -> CorsLayer {
         ])
 }
 
+fn parse_boolish(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+fn sidecar_orders_live_enabled() -> bool {
+    std::env::var("PLOY_SIDECAR_ORDERS_LIVE_ENABLED")
+        .ok()
+        .map(|v| parse_boolish(&v))
+        .unwrap_or(false)
+}
+
 pub fn create_router(state: AppState) -> Router {
     // CORS configuration
     let cors = build_cors_layer();
 
-    Router::new()
+    let mut router = Router::new()
         // Health check (top-level, used by docker/scripts for readiness probes)
         .route("/health", get(handlers::health_handler))
         // Capability discovery (machine-readable control-plane surface)
@@ -119,15 +133,18 @@ pub fn create_router(state: AppState) -> Router {
             "/api/sidecar/intents",
             post(handlers::sidecar_submit_intent),
         )
-        .route("/api/sidecar/orders", post(handlers::sidecar_submit_order))
         .route(
             "/api/sidecar/positions",
             get(handlers::sidecar_get_positions),
         )
         .route("/api/sidecar/risk", get(handlers::sidecar_get_risk))
         // WebSocket endpoint
-        .route("/ws", get(websocket_handler))
-        // Add state and CORS
-        .with_state(state)
-        .layer(cors)
+        .route("/ws", get(websocket_handler));
+
+    if sidecar_orders_live_enabled() {
+        router = router.route("/api/sidecar/orders", post(handlers::sidecar_submit_order));
+    }
+
+    // Add state and CORS
+    router.with_state(state).layer(cors)
 }
