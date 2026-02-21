@@ -237,6 +237,17 @@ struct PersistedExecutionFill {
     metadata: HashMap<String, String>,
 }
 
+#[derive(Debug)]
+struct PersistedExecutionOutcome {
+    agent_id: String,
+    executed_at: DateTime<Utc>,
+    is_failure: bool,
+}
+
+fn execution_error_is_failure(error: Option<&str>) -> bool {
+    error.map(str::trim).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
 async fn load_execution_log_fills(
     pool: &PgPool,
     account_id: &str,
@@ -359,6 +370,47 @@ async fn load_execution_log_fills(
     }
 
     Ok(fills)
+}
+
+async fn load_execution_log_outcomes(
+    pool: &PgPool,
+    account_id: &str,
+    dry_run: bool,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+) -> Result<Vec<PersistedExecutionOutcome>> {
+    let rows = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
+        r#"
+        SELECT
+            agent_id,
+            executed_at,
+            error
+        FROM agent_order_executions
+        WHERE account_id = $1
+          AND dry_run = $2
+          AND executed_at >= $3
+          AND executed_at < $4
+        ORDER BY executed_at ASC, id ASC
+        "#,
+    )
+    .bind(account_id)
+    .bind(dry_run)
+    .bind(window_start)
+    .bind(window_end)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        crate::error::PloyError::Internal(format!("load execution log outcomes: {}", e))
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(agent_id, executed_at, error)| PersistedExecutionOutcome {
+            agent_id,
+            executed_at,
+            is_failure: execution_error_is_failure(error.as_deref()),
+        })
+        .collect())
 }
 
 fn normalized_identity_component(raw: &str) -> Option<String> {
@@ -2064,9 +2116,22 @@ impl Coordinator {
             return Ok(());
         };
 
-        let fills =
-            load_execution_log_fills(pool, &self.account_id, self.executor.is_dry_run()).await?;
-        if fills.is_empty() {
+        let today = Utc::now().date_naive();
+        let window_start = DateTime::<Utc>::from_naive_utc_and_offset(
+            today
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is always a valid UTC time"),
+            Utc,
+        );
+        let window_end = window_start + ChronoDuration::days(1);
+        let dry_run = self.executor.is_dry_run();
+
+        let fills = load_execution_log_fills(pool, &self.account_id, dry_run).await?;
+        let outcomes_today =
+            load_execution_log_outcomes(pool, &self.account_id, dry_run, window_start, window_end)
+                .await?;
+
+        if fills.is_empty() && outcomes_today.is_empty() {
             return Ok(());
         }
 
@@ -2090,6 +2155,9 @@ impl Coordinator {
 
         let restored_fill_count = fills.len();
         let mut restored_agents = HashSet::new();
+        let mut daily_total_pnl = Decimal::ZERO;
+        let mut daily_domain_pnl: HashMap<Domain, Decimal> = HashMap::new();
+        let mut daily_agent_pnl: HashMap<String, Decimal> = HashMap::new();
 
         for fill in fills {
             let mut intent = OrderIntent::new(
@@ -2123,11 +2191,58 @@ impl Coordinator {
                     )
                     .await;
             } else {
-                self.apply_sell_fill_to_positions(&intent, fill.filled_shares, fill.fill_price)
+                let realized_pnl = self
+                    .apply_sell_fill_to_positions(&intent, fill.filled_shares, fill.fill_price)
                     .await;
+                if fill.executed_at >= window_start && fill.executed_at < window_end {
+                    daily_total_pnl += realized_pnl;
+                    *daily_domain_pnl.entry(fill.domain).or_insert(Decimal::ZERO) += realized_pnl;
+                    *daily_agent_pnl
+                        .entry(fill.agent_id.clone())
+                        .or_insert(Decimal::ZERO) += realized_pnl;
+                }
             }
             restored_agents.insert(fill.agent_id);
         }
+
+        let mut daily_order_count: u32 = 0;
+        let mut daily_success_count: u32 = 0;
+        let mut daily_failure_count: u32 = 0;
+        let mut global_consecutive_failures: u32 = 0;
+        let mut per_agent_consecutive_failures: HashMap<String, u32> = HashMap::new();
+        let mut last_risk_event_at: Option<DateTime<Utc>> = None;
+
+        for outcome in outcomes_today {
+            daily_order_count = daily_order_count.saturating_add(1);
+            last_risk_event_at = Some(outcome.executed_at);
+            if outcome.is_failure {
+                daily_failure_count = daily_failure_count.saturating_add(1);
+                global_consecutive_failures = global_consecutive_failures.saturating_add(1);
+                let entry = per_agent_consecutive_failures
+                    .entry(outcome.agent_id)
+                    .or_insert(0);
+                *entry = entry.saturating_add(1);
+            } else {
+                daily_success_count = daily_success_count.saturating_add(1);
+                global_consecutive_failures = 0;
+                per_agent_consecutive_failures.insert(outcome.agent_id, 0);
+            }
+        }
+
+        self.risk_gate
+            .restore_runtime_counters(
+                today,
+                daily_total_pnl,
+                daily_domain_pnl,
+                daily_order_count,
+                daily_success_count,
+                daily_failure_count,
+                global_consecutive_failures,
+                daily_agent_pnl,
+                per_agent_consecutive_failures,
+                last_risk_event_at,
+            )
+            .await;
 
         for agent_id in &restored_agents {
             self.refresh_risk_exposure_for_agent(agent_id).await;
@@ -2138,6 +2253,10 @@ impl Coordinator {
             account_id = %self.account_id,
             fill_count = restored_fill_count,
             restored_agents = restored_agents.len(),
+            daily_order_count,
+            daily_success_count,
+            daily_failure_count,
+            global_consecutive_failures,
             "restored coordinator runtime state from execution log"
         );
         Ok(())
@@ -3978,6 +4097,13 @@ mod tests {
         );
         assert_eq!(metadata.get("flag").map(String::as_str), Some("true"));
         assert!(!metadata.contains_key("skip"));
+    }
+
+    #[test]
+    fn test_execution_error_is_failure_treats_blank_as_success() {
+        assert!(execution_error_is_failure(Some("transport timeout")));
+        assert!(!execution_error_is_failure(Some("   ")));
+        assert!(!execution_error_is_failure(None));
     }
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {
