@@ -230,7 +230,8 @@ impl OrderQueue {
             .iter()
             .filter_map(|item| {
                 let intent = &item.intent;
-                (intent.is_buy && !excluded.contains(&intent.domain)).then_some(intent.notional_value())
+                (intent.is_buy && !excluded.contains(&intent.domain))
+                    .then_some(intent.notional_value())
             })
             .sum()
     }

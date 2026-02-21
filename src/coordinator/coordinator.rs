@@ -2255,11 +2255,11 @@ impl Coordinator {
                         } else {
                             realized_pnl = self
                                 .apply_sell_fill_to_positions(
-                                &intent,
-                                result.filled_shares,
-                                fill_price,
-                            )
-                            .await;
+                                    &intent,
+                                    result.filled_shares,
+                                    fill_price,
+                                )
+                                .await;
                         }
 
                         self.refresh_risk_exposure_for_agent(&agent_id).await;

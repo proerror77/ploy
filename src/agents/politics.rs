@@ -71,7 +71,10 @@ impl PoliticsTradingAgent {
             .collect::<Vec<_>>();
 
         if positions.is_empty() {
-            info!(agent = self.config.agent_id, "force close: no open positions");
+            info!(
+                agent = self.config.agent_id,
+                "force close: no open positions"
+            );
             return;
         }
 

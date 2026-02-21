@@ -2900,17 +2900,16 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.sports_auto_split_by_active_markets,
         );
 
-        cfg.coordinator.governance_block_new_intents = std::env::var(
-            "PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS",
-        )
-        .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCK_NEW_INTENTS"))
-        .ok()
-        .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => cfg.coordinator.governance_block_new_intents,
-        })
-        .unwrap_or(cfg.coordinator.governance_block_new_intents);
+        cfg.coordinator.governance_block_new_intents =
+            std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS")
+                .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCK_NEW_INTENTS"))
+                .ok()
+                .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => true,
+                    "0" | "false" | "no" | "off" => false,
+                    _ => cfg.coordinator.governance_block_new_intents,
+                })
+                .unwrap_or(cfg.coordinator.governance_block_new_intents);
         cfg.coordinator.governance_max_intent_notional_usd =
             env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_INTENT_NOTIONAL_USD")
                 .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_INTENT_NOTIONAL_USD"))
