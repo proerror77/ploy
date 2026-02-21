@@ -145,12 +145,30 @@ pub struct CryptoLobMlConfig {
     #[serde(default)]
     pub model_version: Option<String>,
 
+    /// If true and a trained model is requested but unavailable, run in
+    /// collect-only mode and skip entry orders.
+    #[serde(default = "default_collect_only_on_model_error")]
+    pub collect_only_on_model_error: bool,
+
+    /// Safety fallback blend weight for window baseline probability.
+    /// p_up = p_up_model * (1 - w_window) + p_up_window * w_window
+    #[serde(default = "default_window_fallback_weight")]
+    pub window_fallback_weight: Decimal,
+
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
 }
 
 fn default_lob_ml_model_type() -> String {
     "logistic".to_string()
+}
+
+fn default_collect_only_on_model_error() -> bool {
+    true
+}
+
+fn default_window_fallback_weight() -> Decimal {
+    dec!(0.10)
 }
 
 impl Default for CryptoLobMlConfig {
@@ -177,6 +195,8 @@ impl Default for CryptoLobMlConfig {
             model_type: default_lob_ml_model_type(),
             model_path: None,
             model_version: None,
+            collect_only_on_model_error: default_collect_only_on_model_error(),
+            window_fallback_weight: default_window_fallback_weight(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }
@@ -205,6 +225,7 @@ pub struct CryptoLobMlAgent {
     nn_model: Option<DenseNetwork>,
     #[cfg(feature = "onnx")]
     onnx_model: Option<OnnxModel>,
+    entry_trading_enabled: bool,
 }
 
 fn should_skip_entry(
@@ -366,6 +387,8 @@ impl CryptoLobMlAgent {
         lob_cache: LobCache,
     ) -> Self {
         let model_type = config.model_type.trim().to_ascii_lowercase();
+        let mut model_load_failed = false;
+
         let nn_model = if model_type == "mlp" || model_type == "mlp_json" {
             match config.model_path.as_deref() {
                 Some(path) if !path.trim().is_empty() => match DenseNetwork::from_file(path) {
@@ -388,6 +411,7 @@ impl CryptoLobMlAgent {
                             error = %e,
                             "failed to load lob-ml neural model; falling back to logistic"
                         );
+                        model_load_failed = true;
                         None
                     }
                 },
@@ -397,6 +421,7 @@ impl CryptoLobMlAgent {
                         model_type = "mlp_json",
                         "model_type=mlp but model_path is not set; falling back to logistic"
                     );
+                    model_load_failed = true;
                     None
                 }
             }
@@ -428,6 +453,7 @@ impl CryptoLobMlAgent {
                                 error = %e,
                                 "failed to load lob-ml onnx model; falling back to logistic"
                             );
+                            model_load_failed = true;
                             None
                         }
                     }
@@ -438,6 +464,7 @@ impl CryptoLobMlAgent {
                         model_type = "onnx",
                         "model_type=onnx but model_path is not set; falling back to logistic"
                     );
+                    model_load_failed = true;
                     None
                 }
             }
@@ -451,7 +478,19 @@ impl CryptoLobMlAgent {
                 agent = config.agent_id,
                 "model_type=onnx requested but binary is built without --features onnx; falling back to logistic"
             );
+            model_load_failed = true;
         }
+
+        let entry_trading_enabled = if model_load_failed && config.collect_only_on_model_error {
+            warn!(
+                agent = config.agent_id,
+                requested_model_type = %model_type,
+                "trained model unavailable; switching to collect-only mode (entry orders disabled)"
+            );
+            false
+        } else {
+            true
+        };
 
         Self {
             config,
@@ -462,6 +501,7 @@ impl CryptoLobMlAgent {
             nn_model,
             #[cfg(feature = "onnx")]
             onnx_model,
+            entry_trading_enabled,
         }
     }
 
@@ -618,6 +658,22 @@ impl CryptoLobMlAgent {
             "logistic",
         )
     }
+
+    fn model_window_blend_weights(&self) -> (Decimal, Decimal) {
+        // Keep window baseline as a small fallback, never dominant.
+        let w_window = self
+            .config
+            .window_fallback_weight
+            .max(Decimal::ZERO)
+            .min(dec!(0.49));
+        let w_model = (Decimal::ONE - w_window).max(Decimal::ZERO);
+        (w_model, w_window)
+    }
+
+    #[cfg(test)]
+    fn allows_entry_orders(&self) -> bool {
+        self.entry_trading_enabled
+    }
 }
 
 #[async_trait]
@@ -744,6 +800,9 @@ impl TradingAgent for CryptoLobMlAgent {
                     if !matches!(status, AgentStatus::Running) {
                         continue;
                     }
+                    if !self.entry_trading_enabled {
+                        continue;
+                    }
 
                     let coin = update.symbol.replace("USDT", "");
                     if !self.config.coins.iter().any(|c| c == &coin) {
@@ -849,10 +908,7 @@ impl TradingAgent for CryptoLobMlAgent {
                             rolling_volatility_opt,
                             remaining_secs,
                         );
-                        let (w_model, w_window) = match model_type_used {
-                            "onnx" | "mlp_json" => (dec!(0.50), dec!(0.50)),
-                            _ => (dec!(0.20), dec!(0.80)),
-                        };
+                        let (w_model, w_window) = self.model_window_blend_weights();
                         let p_up_dec = (p_up_window_dec * w_window + p_up_model_dec * w_model)
                             .max(dec!(0.001))
                             .min(dec!(0.999));
@@ -1373,9 +1429,71 @@ mod tests {
             nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
+            entry_trading_enabled: true,
         };
         let (p, _model) = agent.estimate_p_up(&snap, Decimal::ZERO, Decimal::ZERO);
         assert!(p > 0.0 && p < 1.0);
+    }
+
+    #[test]
+    fn test_collect_only_mode_when_trained_model_missing() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.model_type = "mlp".to_string();
+        cfg.model_path = None;
+        cfg.collect_only_on_model_error = true;
+
+        let agent = CryptoLobMlAgent::new(
+            cfg,
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            LobCache::new(),
+        );
+
+        assert!(!agent.allows_entry_orders());
+    }
+
+    #[test]
+    fn test_fallback_mode_when_collect_only_disabled() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.model_type = "mlp".to_string();
+        cfg.model_path = None;
+        cfg.collect_only_on_model_error = false;
+
+        let agent = CryptoLobMlAgent::new(
+            cfg,
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            LobCache::new(),
+        );
+
+        assert!(agent.allows_entry_orders());
+    }
+
+    #[test]
+    fn test_model_first_blend_weights_default() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            nn_model: None,
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+            entry_trading_enabled: true,
+        };
+
+        let (w_model, w_window) = agent.model_window_blend_weights();
+        assert_eq!(w_model, dec!(0.90));
+        assert_eq!(w_window, dec!(0.10));
     }
 
     #[test]

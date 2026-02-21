@@ -3138,6 +3138,43 @@ impl PlatformBootstrapConfig {
             cfg.crypto_lob_ml.heartbeat_interval_secs,
         )
         .max(1);
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_TYPE") {
+            let v = raw.trim().to_ascii_lowercase();
+            if !v.is_empty() {
+                cfg.crypto_lob_ml.model_type = v;
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_PATH") {
+            let v = raw.trim();
+            cfg.crypto_lob_ml.model_path = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_VERSION") {
+            let v = raw.trim();
+            cfg.crypto_lob_ml.model_version = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__COLLECT_ONLY_ON_MODEL_ERROR") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.collect_only_on_model_error = true,
+                "0" | "false" | "no" | "off" => {
+                    cfg.crypto_lob_ml.collect_only_on_model_error = false
+                }
+                _ => {}
+            }
+        }
+        cfg.crypto_lob_ml.window_fallback_weight = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT",
+            cfg.crypto_lob_ml.window_fallback_weight,
+        )
+        .max(rust_decimal::Decimal::ZERO)
+        .min(rust_decimal::Decimal::new(49, 2));
 
         // Weight overrides (baseline logistic model).
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_BIAS") {
@@ -4242,5 +4279,82 @@ pub fn print_platform_status(state: &GlobalState) {
             agent.daily_pnl,
             agent.last_heartbeat.format("%H:%M:%S")
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn from_app_config_reads_crypto_lob_ml_model_env_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let model_type_key = "PLOY_CRYPTO_LOB_ML__MODEL_TYPE";
+        let model_path_key = "PLOY_CRYPTO_LOB_ML__MODEL_PATH";
+        let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
+        let collect_only_key = "PLOY_CRYPTO_LOB_ML__COLLECT_ONLY_ON_MODEL_ERROR";
+        let window_weight_key = "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT";
+
+        let prev_model_type = std::env::var(model_type_key).ok();
+        let prev_model_path = std::env::var(model_path_key).ok();
+        let prev_model_version = std::env::var(model_version_key).ok();
+        let prev_collect_only = std::env::var(collect_only_key).ok();
+        let prev_window_weight = std::env::var(window_weight_key).ok();
+
+        set_env(model_type_key, Some("onnx"));
+        set_env(model_path_key, Some("/tmp/models/lob_mlp_v2.onnx"));
+        set_env(model_version_key, Some("lob_mlp_v2"));
+        set_env(collect_only_key, Some("false"));
+        set_env(window_weight_key, Some("0.15"));
+
+        let app = AppConfig::default_config(true, "btc-up-or-down-test");
+        let cfg = PlatformBootstrapConfig::from_app_config(&app);
+
+        assert_eq!(cfg.crypto_lob_ml.model_type, "onnx");
+        assert_eq!(
+            cfg.crypto_lob_ml.model_path.as_deref(),
+            Some("/tmp/models/lob_mlp_v2.onnx")
+        );
+        assert_eq!(
+            cfg.crypto_lob_ml.model_version.as_deref(),
+            Some("lob_mlp_v2")
+        );
+        assert!(!cfg.crypto_lob_ml.collect_only_on_model_error);
+        assert_eq!(
+            cfg.crypto_lob_ml.window_fallback_weight,
+            rust_decimal::Decimal::new(15, 2)
+        );
+
+        match prev_model_type.as_deref() {
+            Some(v) => set_env(model_type_key, Some(v)),
+            None => set_env(model_type_key, None),
+        }
+        match prev_model_path.as_deref() {
+            Some(v) => set_env(model_path_key, Some(v)),
+            None => set_env(model_path_key, None),
+        }
+        match prev_model_version.as_deref() {
+            Some(v) => set_env(model_version_key, Some(v)),
+            None => set_env(model_version_key, None),
+        }
+        match prev_collect_only.as_deref() {
+            Some(v) => set_env(collect_only_key, Some(v)),
+            None => set_env(collect_only_key, None),
+        }
+        match prev_window_weight.as_deref() {
+            Some(v) => set_env(window_weight_key, Some(v)),
+            None => set_env(window_weight_key, None),
+        }
     }
 }
