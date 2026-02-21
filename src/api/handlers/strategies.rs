@@ -1,8 +1,52 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
+use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
+use serde::Serialize;
+use std::collections::HashMap;
 
-use crate::api::{state::AppState, types::RunningStrategy};
-use crate::platform::{AgentStatus, Domain};
+use crate::api::{auth::ensure_admin_authorized, state::AppState, types::RunningStrategy};
+use crate::platform::{AgentStatus, Domain, MarketSelector, StrategyDeployment};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyControlEntry {
+    pub deployment_id: String,
+    pub strategy: String,
+    pub domain: String,
+    pub enabled: bool,
+    pub timeframe: String,
+    pub market_selector_mode: String,
+    pub allocator_profile: String,
+    pub risk_profile: String,
+    pub priority: i32,
+    pub cooldown_secs: u64,
+    pub domain_ingress_mode: String,
+    pub running_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategiesControlResponse {
+    pub account_id: Option<String>,
+    pub ingress_mode: Option<String>,
+    pub items: Vec<StrategyControlEntry>,
+    pub updated_at: DateTime<Utc>,
+}
+
+fn domain_key(domain: Domain) -> String {
+    match domain {
+        Domain::Crypto => "crypto".to_string(),
+        Domain::Sports => "sports".to_string(),
+        Domain::Politics => "politics".to_string(),
+        Domain::Economics => "economics".to_string(),
+        Domain::Custom(id) => format!("custom:{}", id),
+    }
+}
+
+fn selector_mode(selector: &MarketSelector) -> &'static str {
+    match selector {
+        MarketSelector::Static { .. } => "static",
+        MarketSelector::Dynamic { .. } => "dynamic",
+    }
+}
 
 /// GET /api/strategies/running
 ///
@@ -100,4 +144,82 @@ pub async fn get_running_strategies(
     strategies.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
 
     Ok(Json(strategies))
+}
+
+/// GET /api/strategies/control
+///
+/// Control-plane view that joins deployment matrix with runtime ingress/agent state.
+pub async fn get_strategies_control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> std::result::Result<Json<StrategiesControlResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+
+    let (account_id, ingress_mode, domain_modes, domain_agents) =
+        if let Some(coordinator) = state.coordinator.as_ref() {
+            let snapshot = coordinator.governance_status().await;
+            let mut domain_modes = HashMap::new();
+            for row in &snapshot.domain_ingress_modes {
+                domain_modes.insert(row.domain.clone(), row.mode.clone());
+            }
+            let mut domain_agents: HashMap<String, Vec<String>> = HashMap::new();
+            for agent in &snapshot.agents {
+                if agent.status == "running" || agent.status == "observing" {
+                    domain_agents
+                        .entry(agent.domain.clone())
+                        .or_default()
+                        .push(agent.name.clone());
+                }
+            }
+            for names in domain_agents.values_mut() {
+                names.sort();
+                names.dedup();
+            }
+
+            (
+                Some(snapshot.account_id),
+                Some(snapshot.ingress_mode),
+                domain_modes,
+                domain_agents,
+            )
+        } else {
+            (None, None, HashMap::new(), HashMap::new())
+        };
+
+    let items = {
+        let deployments = state.deployments.read().await;
+        let mut entries: Vec<StrategyControlEntry> = deployments
+            .values()
+            .map(|dep: &StrategyDeployment| {
+                let domain = domain_key(dep.domain);
+                let running_agents = domain_agents.get(&domain).cloned().unwrap_or_default();
+                StrategyControlEntry {
+                    deployment_id: dep.id.clone(),
+                    strategy: dep.strategy.clone(),
+                    domain: domain.clone(),
+                    enabled: dep.enabled,
+                    timeframe: dep.timeframe.as_str().to_string(),
+                    market_selector_mode: selector_mode(&dep.market_selector).to_string(),
+                    allocator_profile: dep.allocator_profile.clone(),
+                    risk_profile: dep.risk_profile.clone(),
+                    priority: dep.priority,
+                    cooldown_secs: dep.cooldown_secs,
+                    domain_ingress_mode: domain_modes
+                        .get(&domain)
+                        .cloned()
+                        .unwrap_or_else(|| "running".to_string()),
+                    running_agents,
+                }
+            })
+            .collect();
+        entries.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
+        entries
+    };
+
+    Ok(Json(StrategiesControlResponse {
+        account_id,
+        ingress_mode,
+        items,
+        updated_at: Utc::now(),
+    }))
 }

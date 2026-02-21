@@ -92,6 +92,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/strategies/running",
             get(handlers::get_running_strategies),
         )
+        .route(
+            "/api/strategies/control",
+            get(handlers::get_strategies_control),
+        )
         // Strategy deployment matrix (control-plane first-class resource)
         .route(
             "/api/deployments",
