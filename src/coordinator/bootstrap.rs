@@ -11,14 +11,14 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agent::PolymarketSportsClient;
-use crate::agents::{
+use crate::agent_system::ai::PolymarketSportsClient;
+use crate::agent_system::runtime::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
     PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
     TradingAgent,
 };
 #[cfg(feature = "rl")]
-use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agent_system::runtime::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
 use crate::domain::Side;

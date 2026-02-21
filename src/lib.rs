@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod agent;
+pub mod agent_system;
 pub mod agents;
 #[cfg(feature = "api")]
 pub mod api;
