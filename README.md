@@ -14,6 +14,16 @@ A high-performance Polymarket trading bot covering crypto, sports, and political
 - **Persistence** -- PostgreSQL event store, checkpoints, dead-letter queue, and crash recovery
 - **Risk management** -- Position limits, circuit breaker, daily loss limit, slippage protection, emergency stop
 
+## Architecture (Agent-Based)
+
+Production runtime uses a 3-plane model:
+
+- **Strategy Plane (Poly Agents)**: direction/timing/pricing decisions and intent generation.
+- **Execution Plane (Ploy Coordinator)**: single live ingestion path (`OrderIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail.
+- **Control Plane (OpenClaw / AI Scheduler)**: global capital policy, deployment enable/disable, pause/halt/force-close.
+
+Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; agents decide entries/exits inside those boundaries.
+
 ## Prerequisites
 
 - **Rust** 1.75+ (2021 edition)

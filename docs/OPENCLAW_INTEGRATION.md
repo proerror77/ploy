@@ -115,6 +115,14 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 - `PUT /api/governance/policy`
 - `GET /api/governance/policy/history?limit=100`（最新在前，預設 100，最大 500）
 
+`GET /api/governance/status` 現在包含 AI 調度層需要的完整快照：
+- `ingress_mode`（全局）
+- `domain_ingress_modes[]`（domain 級 pause/halt 狀態）
+- `agents[]`（agent_id/name/domain/status/exposure/daily_pnl/last_heartbeat/error_message）
+- `allocators[]` + `deployments[]`（資金佔用與 deployment 維度帳本）
+
+Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將該 domain 設為 `halted`，避免命令傳遞期間仍接收新 BUY intents。
+
 已支援的 method（起步集合）：
 - `pm.get_balance`
 - `pm.get_positions`
