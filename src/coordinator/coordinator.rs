@@ -10,7 +10,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -142,6 +142,7 @@ pub struct Coordinator {
     order_queue: Arc<RwLock<OrderQueue>>,
     duplicate_guard: Arc<RwLock<IntentDuplicateGuard>>,
     crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
+    sports_allocator: Arc<RwLock<SportsCapitalAllocator>>,
     positions: Arc<PositionAggregator>,
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
@@ -549,10 +550,15 @@ struct CryptoCapitalAllocator {
 
 impl CryptoCapitalAllocator {
     fn new(config: &CoordinatorConfig) -> Self {
-        let total_cap = config
+        let configured_cap = config
             .crypto_allocator_total_cap_usd
             .or(config.risk.crypto_max_exposure)
-            .unwrap_or(config.risk.max_platform_exposure)
+            .unwrap_or(config.risk.max_platform_exposure);
+        let total_cap = config
+            .risk
+            .crypto_max_exposure
+            .map(|risk_cap| configured_cap.min(risk_cap))
+            .unwrap_or(configured_cap)
             .max(Decimal::ZERO);
 
         let mut coin_cap_pct = HashMap::new();
@@ -763,6 +769,338 @@ impl CryptoCapitalAllocator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SportsIntentDimensions {
+    market_key: String,
+    position_key: String,
+}
+
+impl SportsIntentDimensions {
+    fn from_intent(intent: &OrderIntent) -> Self {
+        let market_key = intent.market_slug.trim().to_ascii_lowercase();
+        let position_key = format!(
+            "{}|{}|{}|{}",
+            intent.agent_id,
+            market_key,
+            intent.token_id,
+            intent.side.as_str()
+        );
+        Self {
+            market_key,
+            position_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SportsPositionExposure {
+    market_key: String,
+    amount: Decimal,
+}
+
+#[derive(Debug, Default)]
+struct SportsExposureBook {
+    total: Decimal,
+    by_market: HashMap<String, Decimal>,
+    by_position: HashMap<String, SportsPositionExposure>,
+}
+
+impl SportsExposureBook {
+    fn value_for_market(&self, market_key: &str) -> Decimal {
+        self.by_market
+            .get(market_key)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    fn add(&mut self, dims: &SportsIntentDimensions, amount: Decimal) {
+        if amount <= Decimal::ZERO {
+            return;
+        }
+
+        self.total += amount;
+        *self
+            .by_market
+            .entry(dims.market_key.clone())
+            .or_insert(Decimal::ZERO) += amount;
+        self.by_position
+            .entry(dims.position_key.clone())
+            .and_modify(|pos| {
+                pos.amount += amount;
+                pos.market_key = dims.market_key.clone();
+            })
+            .or_insert_with(|| SportsPositionExposure {
+                market_key: dims.market_key.clone(),
+                amount,
+            });
+    }
+
+    fn subtract_from_position_key(&mut self, position_key: &str, amount: Decimal) -> Decimal {
+        if amount <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let mut removed = Decimal::ZERO;
+        let mut market_key = None;
+        let mut delete_key = false;
+
+        if let Some(pos) = self.by_position.get_mut(position_key) {
+            removed = amount.min(pos.amount);
+            if removed > Decimal::ZERO {
+                pos.amount -= removed;
+                market_key = Some(pos.market_key.clone());
+                delete_key = pos.amount <= Decimal::ZERO;
+            }
+        }
+
+        if delete_key {
+            self.by_position.remove(position_key);
+        }
+
+        if removed <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        self.total = (self.total - removed).max(Decimal::ZERO);
+        if let Some(market) = market_key {
+            if let Some(v) = self.by_market.get_mut(&market) {
+                *v = (*v - removed).max(Decimal::ZERO);
+                if *v == Decimal::ZERO {
+                    self.by_market.remove(&market);
+                }
+            }
+        }
+
+        removed
+    }
+
+    fn subtract_matching_market(&mut self, market_key: &str, amount: Decimal) -> Decimal {
+        if amount <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let mut remaining = amount;
+        let keys: Vec<String> = self
+            .by_position
+            .iter()
+            .filter(|(_, p)| p.market_key == market_key)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in keys {
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+            let removed = self.subtract_from_position_key(&key, remaining);
+            remaining -= removed;
+        }
+
+        amount - remaining
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingSportsIntent {
+    dims: SportsIntentDimensions,
+    requested_notional: Decimal,
+}
+
+#[derive(Debug)]
+struct SportsCapitalAllocator {
+    enabled: bool,
+    total_cap: Decimal,
+    market_cap_pct: Decimal,
+    auto_split_by_active_markets: bool,
+    open: SportsExposureBook,
+    pending: SportsExposureBook,
+    pending_by_intent: HashMap<Uuid, PendingSportsIntent>,
+}
+
+impl SportsCapitalAllocator {
+    fn new(config: &CoordinatorConfig) -> Self {
+        let configured_cap = config
+            .sports_allocator_total_cap_usd
+            .or(config.risk.sports_max_exposure)
+            .unwrap_or(config.risk.max_platform_exposure);
+        let total_cap = config
+            .risk
+            .sports_max_exposure
+            .map(|risk_cap| configured_cap.min(risk_cap))
+            .unwrap_or(configured_cap)
+            .max(Decimal::ZERO);
+
+        Self {
+            enabled: config.sports_allocator_enabled,
+            total_cap,
+            market_cap_pct: Self::normalize_pct(config.sports_market_cap_pct),
+            auto_split_by_active_markets: config.sports_auto_split_by_active_markets,
+            open: SportsExposureBook::default(),
+            pending: SportsExposureBook::default(),
+            pending_by_intent: HashMap::new(),
+        }
+    }
+
+    fn normalize_pct(value: Decimal) -> Decimal {
+        if value <= Decimal::ZERO {
+            Decimal::ZERO
+        } else if value >= Decimal::ONE {
+            Decimal::ONE
+        } else {
+            value
+        }
+    }
+
+    fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
+        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
+            return Ok(());
+        }
+
+        if self.total_cap <= Decimal::ZERO {
+            return Err("Sports allocator cap is 0; buy intent blocked".to_string());
+        }
+
+        let requested = intent.notional_value();
+        if requested <= Decimal::ZERO {
+            return Err("Sports buy intent has non-positive notional".to_string());
+        }
+
+        let dims = SportsIntentDimensions::from_intent(intent);
+
+        let projected_total = self.open.total + self.pending.total + requested;
+        if projected_total > self.total_cap {
+            return Err(format!(
+                "Sports total cap exceeded: projected={} cap={}",
+                projected_total, self.total_cap
+            ));
+        }
+
+        let market_cap = self.market_cap_for(&dims.market_key);
+        let projected_market = self.open.value_for_market(&dims.market_key)
+            + self.pending.value_for_market(&dims.market_key)
+            + requested;
+        if projected_market > market_cap {
+            return Err(format!(
+                "Sports market cap exceeded: market={} projected={} cap={}",
+                dims.market_key, projected_market, market_cap
+            ));
+        }
+
+        self.pending.add(&dims, requested);
+        self.pending_by_intent.insert(
+            intent.intent_id,
+            PendingSportsIntent {
+                dims,
+                requested_notional: requested,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn release_buy_reservation(&mut self, intent_id: Uuid) {
+        let Some(reservation) = self.pending_by_intent.remove(&intent_id) else {
+            return;
+        };
+        self.pending.subtract_from_position_key(
+            &reservation.dims.position_key,
+            reservation.requested_notional,
+        );
+    }
+
+    fn settle_buy_execution(
+        &mut self,
+        intent: &OrderIntent,
+        filled_shares: u64,
+        fill_price: Decimal,
+    ) {
+        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
+            return;
+        }
+
+        let reservation = self
+            .pending_by_intent
+            .remove(&intent.intent_id)
+            .unwrap_or_else(|| PendingSportsIntent {
+                dims: SportsIntentDimensions::from_intent(intent),
+                requested_notional: intent.notional_value(),
+            });
+
+        self.pending.subtract_from_position_key(
+            &reservation.dims.position_key,
+            reservation.requested_notional,
+        );
+
+        if filled_shares == 0 || fill_price <= Decimal::ZERO {
+            return;
+        }
+
+        let actual_notional = fill_price * Decimal::from(filled_shares);
+        self.open.add(&reservation.dims, actual_notional);
+    }
+
+    fn settle_sell_execution(
+        &mut self,
+        intent: &OrderIntent,
+        filled_shares: u64,
+        execution_price: Decimal,
+    ) {
+        if !self.enabled || intent.domain != Domain::Sports || intent.is_buy || filled_shares == 0 {
+            return;
+        }
+
+        let dims = SportsIntentDimensions::from_intent(intent);
+        let reference_price = intent
+            .metadata
+            .get("entry_price")
+            .and_then(|v| Decimal::from_str(v).ok())
+            .or_else(|| (execution_price > Decimal::ZERO).then_some(execution_price))
+            .unwrap_or(intent.limit_price);
+
+        if reference_price <= Decimal::ZERO {
+            return;
+        }
+
+        let requested_release = Decimal::from(filled_shares) * reference_price;
+        let removed_by_key = self
+            .open
+            .subtract_from_position_key(&dims.position_key, requested_release);
+        if removed_by_key < requested_release {
+            let remaining = requested_release - removed_by_key;
+            self.open
+                .subtract_matching_market(&dims.market_key, remaining);
+        }
+    }
+
+    fn market_cap_for(&self, market_key: &str) -> Decimal {
+        let fixed_cap = self.total_cap * self.market_cap_pct;
+        if !self.auto_split_by_active_markets {
+            return fixed_cap;
+        }
+
+        let mut active_markets: HashSet<String> = self
+            .open
+            .by_market
+            .iter()
+            .filter(|(_, v)| **v > Decimal::ZERO)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for (k, v) in &self.pending.by_market {
+            if *v > Decimal::ZERO {
+                active_markets.insert(k.clone());
+            }
+        }
+
+        if !market_key.is_empty() {
+            active_markets.insert(market_key.to_string());
+        }
+
+        let market_count = active_markets.len().max(1) as u64;
+        let dynamic_cap = self.total_cap / Decimal::from(market_count);
+        dynamic_cap.min(fixed_cap)
+    }
+}
+
 impl Coordinator {
     pub fn new(
         config: CoordinatorConfig,
@@ -780,6 +1118,7 @@ impl Coordinator {
             config.duplicate_guard_enabled,
         )));
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
+        let sports_allocator = Arc::new(RwLock::new(SportsCapitalAllocator::new(&config)));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
@@ -797,6 +1136,7 @@ impl Coordinator {
             order_queue,
             duplicate_guard,
             crypto_allocator,
+            sports_allocator,
             positions,
             executor,
             global_state,
@@ -1031,12 +1371,12 @@ impl Coordinator {
 
         match self.risk_gate.check_order(&intent).await {
             RiskCheckResult::Passed => {
-                if let Some(reason) = self.reserve_crypto_capital(&intent).await {
+                if let Some(reason) = self.reserve_domain_capital(&intent).await {
                     self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                         .await;
                     warn!(
                         %agent_id, %intent_id, reason = %reason,
-                        "order blocked by crypto allocator"
+                        "order blocked by domain allocator"
                     );
                     return;
                 }
@@ -1052,7 +1392,7 @@ impl Coordinator {
                         );
                     }
                     Err(e) => {
-                        self.release_crypto_reservation(intent_id).await;
+                        self.release_domain_reservation(intent_id).await;
                         warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
                     }
                 }
@@ -1092,40 +1432,73 @@ impl Coordinator {
         guard.register_or_block(intent, Utc::now())
     }
 
-    async fn reserve_crypto_capital(&self, intent: &OrderIntent) -> Option<String> {
-        if intent.domain != Domain::Crypto || !intent.is_buy {
+    async fn reserve_domain_capital(&self, intent: &OrderIntent) -> Option<String> {
+        if !intent.is_buy {
             return None;
         }
-        let mut allocator = self.crypto_allocator.write().await;
-        allocator.reserve_buy(intent).err()
+        match intent.domain {
+            Domain::Crypto => {
+                let mut allocator = self.crypto_allocator.write().await;
+                allocator.reserve_buy(intent).err()
+            }
+            Domain::Sports => {
+                let mut allocator = self.sports_allocator.write().await;
+                allocator.reserve_buy(intent).err()
+            }
+            _ => None,
+        }
     }
 
-    async fn release_crypto_reservation(&self, intent_id: Uuid) {
-        let mut allocator = self.crypto_allocator.write().await;
-        allocator.release_buy_reservation(intent_id);
+    async fn release_domain_reservation(&self, intent_id: Uuid) {
+        {
+            let mut allocator = self.crypto_allocator.write().await;
+            allocator.release_buy_reservation(intent_id);
+        }
+        let mut sports_allocator = self.sports_allocator.write().await;
+        sports_allocator.release_buy_reservation(intent_id);
     }
 
-    async fn settle_crypto_success(
+    async fn settle_domain_success(
         &self,
         intent: &OrderIntent,
         filled_shares: u64,
         fill_price: Decimal,
     ) {
-        if intent.domain != Domain::Crypto {
-            return;
-        }
-        let mut allocator = self.crypto_allocator.write().await;
-        if intent.is_buy {
-            allocator.settle_buy_execution(intent, filled_shares, fill_price);
-        } else {
-            allocator.settle_sell_execution(intent, filled_shares, fill_price);
+        match intent.domain {
+            Domain::Crypto => {
+                let mut allocator = self.crypto_allocator.write().await;
+                if intent.is_buy {
+                    allocator.settle_buy_execution(intent, filled_shares, fill_price);
+                } else {
+                    allocator.settle_sell_execution(intent, filled_shares, fill_price);
+                }
+            }
+            Domain::Sports => {
+                let mut allocator = self.sports_allocator.write().await;
+                if intent.is_buy {
+                    allocator.settle_buy_execution(intent, filled_shares, fill_price);
+                } else {
+                    allocator.settle_sell_execution(intent, filled_shares, fill_price);
+                }
+            }
+            _ => {}
         }
     }
 
-    async fn settle_crypto_failure(&self, intent: &OrderIntent) {
-        if intent.domain == Domain::Crypto && intent.is_buy {
-            let mut allocator = self.crypto_allocator.write().await;
-            allocator.release_buy_reservation(intent.intent_id);
+    async fn settle_domain_failure(&self, intent: &OrderIntent) {
+        if !intent.is_buy {
+            return;
+        }
+        match intent.domain {
+            Domain::Crypto => {
+                let mut allocator = self.crypto_allocator.write().await;
+                allocator.release_buy_reservation(intent.intent_id);
+            }
+            Domain::Sports => {
+                let mut allocator = self.sports_allocator.write().await;
+                allocator.release_buy_reservation(intent.intent_id);
+            }
+            _ => {}
         }
     }
 
@@ -1199,7 +1572,7 @@ impl Coordinator {
                         .await;
 
                     let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
-                    self.settle_crypto_success(&intent, result.filled_shares, fill_price)
+                    self.settle_domain_success(&intent, result.filled_shares, fill_price)
                         .await;
 
                     if result.filled_shares > 0 {
@@ -1246,7 +1619,7 @@ impl Coordinator {
                         .record_failure(&agent_id, &e.to_string())
                         .await;
 
-                    self.settle_crypto_failure(&intent).await;
+                    self.settle_domain_failure(&intent).await;
                 }
             }
         }
@@ -1825,8 +2198,7 @@ impl Coordinator {
 
         // Check for stale agents
         let timeout = chrono::Duration::milliseconds(self.config.heartbeat_timeout_ms as i64);
-        let stale_warn_cooldown =
-            chrono::Duration::seconds(HEARTBEAT_STALE_WARN_COOLDOWN_SECS);
+        let stale_warn_cooldown = chrono::Duration::seconds(HEARTBEAT_STALE_WARN_COOLDOWN_SECS);
         let now = Utc::now();
         let mut stale_warn_at = self.stale_heartbeat_warn_at.write().await;
         for (id, agent) in state.agents.iter_mut() {
@@ -2251,6 +2623,16 @@ mod tests {
     }
 
     #[test]
+    fn test_crypto_allocator_clamps_total_cap_to_risk_domain_cap() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.crypto_allocator_total_cap_usd = Some(dec!(100));
+        cfg.risk.crypto_max_exposure = Some(dec!(60));
+
+        let allocator = CryptoCapitalAllocator::new(&cfg);
+        assert_eq!(allocator.total_cap, dec!(60));
+    }
+
+    #[test]
     fn test_crypto_allocator_releases_pending_on_buy_failure() {
         let cfg = make_allocator_config(dec!(100));
         let mut allocator = CryptoCapitalAllocator::new(&cfg);
@@ -2284,5 +2666,77 @@ mod tests {
         allocator.settle_sell_execution(&sell, 40, dec!(0.55)); // release by entry price metadata ($20)
 
         assert_eq!(allocator.open.total, dec!(20));
+    }
+
+    fn make_sports_intent(
+        market_slug: &str,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+    ) -> OrderIntent {
+        let mut intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            market_slug,
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            is_buy,
+            shares,
+            limit_price,
+        );
+        if !is_buy {
+            intent
+                .metadata
+                .insert("entry_price".to_string(), limit_price.to_string());
+        }
+        intent
+    }
+
+    #[test]
+    fn test_sports_allocator_auto_splits_by_active_markets() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(30));
+        cfg.sports_market_cap_pct = dec!(0.70);
+        cfg.sports_auto_split_by_active_markets = true;
+
+        let mut allocator = SportsCapitalAllocator::new(&cfg);
+
+        let game1_buy = make_sports_intent("nba-game-1", true, 100, dec!(0.15)); // $15
+        let game2_buy = make_sports_intent("nba-game-2", true, 100, dec!(0.15)); // $15
+        let game1_extra = make_sports_intent("nba-game-1", true, 10, dec!(0.10)); // $1
+
+        assert!(allocator.reserve_buy(&game1_buy).is_ok());
+        assert!(allocator.reserve_buy(&game2_buy).is_ok());
+        assert!(allocator.reserve_buy(&game1_extra).is_err());
+    }
+
+    #[test]
+    fn test_sports_allocator_releases_pending_on_buy_failure() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(30));
+
+        let mut allocator = SportsCapitalAllocator::new(&cfg);
+        let intent = make_sports_intent("nba-game-1", true, 100, dec!(0.10)); // $10
+
+        assert!(allocator.reserve_buy(&intent).is_ok());
+        assert!(allocator.pending.total > Decimal::ZERO);
+
+        allocator.release_buy_reservation(intent.intent_id);
+
+        assert_eq!(allocator.pending.total, Decimal::ZERO);
+        assert!(allocator.pending_by_intent.is_empty());
+    }
+
+    #[test]
+    fn test_sports_allocator_clamps_total_cap_to_risk_domain_cap() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(50));
+        cfg.risk.sports_max_exposure = Some(dec!(25));
+
+        let allocator = SportsCapitalAllocator::new(&cfg);
+        assert_eq!(allocator.total_cap, dec!(25));
     }
 }

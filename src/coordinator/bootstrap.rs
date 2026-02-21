@@ -2710,6 +2710,8 @@ impl PlatformBootstrapConfig {
 
         // Optional domain-level risk splits.
         // Example:
+        // - PLOY_RISK__ACCOUNT_RESERVE_PCT=0.15
+        // - PLOY_RISK__ACCOUNT_DEPLOYABLE_PCT=0.85
         // - PLOY_RISK__CRYPTO_ALLOCATION_PCT=0.5
         // - PLOY_RISK__SPORTS_ALLOCATION_PCT=0.5
         // - PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD=45
@@ -2731,7 +2733,14 @@ impl PlatformBootstrapConfig {
         let economics_alloc_pct =
             env_decimal_opt("PLOY_RISK__ECONOMICS_ALLOCATION_PCT").and_then(normalize_pct);
 
-        let alloc_base = cfg.coordinator.risk.max_platform_exposure;
+        let account_reserve_pct = env_decimal_opt("PLOY_RISK__ACCOUNT_RESERVE_PCT")
+            .and_then(normalize_pct)
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+        let account_deployable_pct = env_decimal_opt("PLOY_RISK__ACCOUNT_DEPLOYABLE_PCT")
+            .and_then(normalize_pct)
+            .unwrap_or_else(|| rust_decimal::Decimal::ONE - account_reserve_pct);
+        let alloc_base = (cfg.coordinator.risk.max_platform_exposure * account_deployable_pct)
+            .max(rust_decimal::Decimal::ZERO);
 
         cfg.coordinator.risk.crypto_max_exposure =
             env_decimal_opt("PLOY_RISK__CRYPTO_MAX_EXPOSURE_USD")
@@ -2814,6 +2823,23 @@ impl PlatformBootstrapConfig {
         {
             cfg.coordinator.crypto_horizon_cap_other_pct = v;
         }
+
+        cfg.coordinator.sports_allocator_enabled = env_bool(
+            "PLOY_COORDINATOR__SPORTS_ALLOCATOR_ENABLED",
+            cfg.coordinator.sports_allocator_enabled,
+        );
+        cfg.coordinator.sports_allocator_total_cap_usd =
+            env_decimal_opt("PLOY_COORDINATOR__SPORTS_ALLOCATOR_TOTAL_CAP_USD")
+                .or(cfg.coordinator.sports_allocator_total_cap_usd);
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.sports_market_cap_pct = v;
+        }
+        cfg.coordinator.sports_auto_split_by_active_markets = env_bool(
+            "PLOY_COORDINATOR__SPORTS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
+            cfg.coordinator.sports_auto_split_by_active_markets,
+        );
 
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
@@ -3314,8 +3340,7 @@ pub async fn start_platform(
     let mut coordinator =
         Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
     if let Some(pool) = shared_pool.as_ref() {
-        let run_sqlx_migrations =
-            env_bool("PLOY_RUN_SQLX_MIGRATIONS", !app_config.dry_run.enabled);
+        let run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", !app_config.dry_run.enabled);
         let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);

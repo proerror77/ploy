@@ -39,6 +39,14 @@ pub struct CoordinatorConfig {
     pub crypto_horizon_cap_5m_pct: Decimal,
     pub crypto_horizon_cap_15m_pct: Decimal,
     pub crypto_horizon_cap_other_pct: Decimal,
+    /// Enable/disable sports capital allocator.
+    pub sports_allocator_enabled: bool,
+    /// Total sports capital cap (USD). If None, falls back to risk caps.
+    pub sports_allocator_total_cap_usd: Option<Decimal>,
+    /// Per-market cap as percentage of total sports cap.
+    pub sports_market_cap_pct: Decimal,
+    /// If true, auto-split sports cap by active market count.
+    pub sports_auto_split_by_active_markets: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -64,6 +72,10 @@ impl Default for CoordinatorConfig {
             crypto_horizon_cap_5m_pct: Decimal::new(25, 2), // 25%
             crypto_horizon_cap_15m_pct: Decimal::new(65, 2), // 65%
             crypto_horizon_cap_other_pct: Decimal::new(20, 2), // 20%
+            sports_allocator_enabled: true,
+            sports_allocator_total_cap_usd: None,
+            sports_market_cap_pct: Decimal::new(35, 2), // 35%
+            sports_auto_split_by_active_markets: true,
         }
     }
 }

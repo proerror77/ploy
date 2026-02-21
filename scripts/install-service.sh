@@ -61,6 +61,16 @@ ensure_env_true() {
   fi
 }
 
+ensure_env_default() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+  [[ -f "$env_file" ]] || return 0
+  if ! sudo grep -qE "^${key}=" "$env_file"; then
+    echo "${key}=${value}" | sudo tee -a "$env_file" >/dev/null
+  fi
+}
+
 ensure_sqlx_migrations_enabled() {
   local env_file="$1"
   [[ -f "$env_file" ]] || return 0
@@ -68,9 +78,30 @@ ensure_sqlx_migrations_enabled() {
   ensure_env_true "$env_file" "PLOY_REQUIRE_SQLX_MIGRATIONS"
 }
 
+ensure_account_budget_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_default "$env_file" "PLOY_RISK__ACCOUNT_RESERVE_PCT" "0.15"
+  ensure_env_default "$env_file" "PLOY_RISK__CRYPTO_ALLOCATION_PCT" "0.6667"
+  ensure_env_default "$env_file" "PLOY_RISK__SPORTS_ALLOCATION_PCT" "0.3333"
+}
+
+ensure_sports_allocator_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_ALLOCATOR_ENABLED" "true"
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_AUTO_SPLIT_BY_ACTIVE_MARKETS" "true"
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT" "0.35"
+}
+
 ensure_sqlx_migrations_enabled /opt/ploy/.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/sports-pm.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-dryrun.env
+ensure_account_budget_defaults /opt/ploy/.env
+ensure_account_budget_defaults /opt/ploy/env/sports-pm.env
+ensure_account_budget_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_sports_allocator_defaults /opt/ploy/.env
+ensure_sports_allocator_defaults /opt/ploy/env/sports-pm.env
 
 sudo chmod 600 /opt/ploy/env/*.env 2>/dev/null || true
 sudo chown ploy:ploy /opt/ploy/config/*.toml /opt/ploy/env/*.env 2>/dev/null || true
