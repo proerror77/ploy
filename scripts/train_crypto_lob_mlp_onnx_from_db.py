@@ -4,6 +4,11 @@ Train a small MLP (DL) to predict y_up (Polymarket official settlement) from
 Binance LOB-derived features, and export the model to ONNX.
 
 This script reads directly from Postgres (no dataset file required).
+Default source is `sync_records + pm_token_settlements`, with optional
+`--horizon 5m|15m` to train per-window models.
+
+Legacy source (`agent_order_executions`) is still available via:
+  --source order_executions
 
 Install deps on the training machine:
   python3 -m pip install torch psycopg2-binary
@@ -121,7 +126,7 @@ def chronological_split(ds: Dataset, test_ratio: float) -> Tuple[Dataset, Datase
     return take(idx[:cut]), take(idx[cut:])
 
 
-def fetch_from_db(
+def fetch_from_order_executions(
     db_url: str,
     lookback_hours: int,
     account_id: Optional[str],
@@ -219,6 +224,130 @@ def fetch_from_db(
 
     if not x:
         raise SystemExit("no usable rows fetched")
+    return Dataset(x=x, y=y, ts=ts)
+
+
+def fetch_from_sync_records(
+    db_url: str,
+    lookback_hours: int,
+    symbol: Optional[str],
+    horizon: Optional[str],
+    limit: int,
+) -> Dataset:
+    try:
+        import psycopg2  # type: ignore
+    except Exception as e:
+        raise SystemExit(
+            "psycopg2 is required.\n"
+            "Install: python3 -m pip install psycopg2-binary\n"
+            f"Import error: {e}"
+        )
+
+    if limit <= 0:
+        raise SystemExit("--limit must be > 0")
+
+    horizon_norm: Optional[str] = None
+    if horizon is not None:
+        h = horizon.strip().lower()
+        if h not in ("5m", "15m"):
+            raise SystemExit("--horizon must be one of: 5m, 15m")
+        horizon_norm = h
+
+    where = [
+        "sr.timestamp >= NOW() - (%s::bigint * INTERVAL '1 hour')",
+        "sr.pm_market_slug IS NOT NULL",
+        "ml.y_up IS NOT NULL",
+        "ml.horizon IS NOT NULL",
+        "sr.timestamp <= COALESCE(ml.resolved_at, NOW())",
+        "sr.bn_obi_5 IS NOT NULL",
+        "sr.bn_obi_10 IS NOT NULL",
+        "sr.bn_spread_bps IS NOT NULL",
+        "sr.bn_bid_volume IS NOT NULL",
+        "sr.bn_ask_volume IS NOT NULL",
+        "sr.bn_price_change_1s IS NOT NULL",
+        "sr.bn_price_change_5s IS NOT NULL",
+    ]
+    params: List[object] = [lookback_hours]
+
+    if symbol:
+        where.append("sr.symbol = %s")
+        params.append(symbol.strip().upper())
+    if horizon_norm:
+        where.append("ml.horizon = %s")
+        params.append(horizon_norm)
+
+    sql = f"""
+    WITH market_labels AS (
+      SELECT
+        market_slug,
+        MAX(resolved_at) AS resolved_at,
+        CASE
+          WHEN SUM(CASE WHEN LOWER(outcome) LIKE '%up%' THEN 1 ELSE 0 END) > 0 THEN
+            MAX(CASE WHEN LOWER(outcome) LIKE '%up%' THEN CASE WHEN settled_price > 0.5 THEN 1 ELSE 0 END END)
+          WHEN SUM(CASE WHEN LOWER(outcome) IN ('yes', 'true') THEN 1 ELSE 0 END) > 0 THEN
+            MAX(CASE WHEN LOWER(outcome) IN ('yes', 'true') THEN CASE WHEN settled_price > 0.5 THEN 1 ELSE 0 END END)
+          WHEN SUM(CASE WHEN LOWER(outcome) LIKE '%down%' THEN 1 ELSE 0 END) > 0 THEN
+            MAX(CASE WHEN LOWER(outcome) LIKE '%down%' THEN CASE WHEN settled_price > 0.5 THEN 0 ELSE 1 END END)
+          WHEN SUM(CASE WHEN LOWER(outcome) IN ('no', 'false') THEN 1 ELSE 0 END) > 0 THEN
+            MAX(CASE WHEN LOWER(outcome) IN ('no', 'false') THEN CASE WHEN settled_price > 0.5 THEN 0 ELSE 1 END END)
+          ELSE NULL
+        END AS y_up,
+        CASE
+          WHEN market_slug ILIKE '%15m%' OR market_slug ILIKE '%15-minute%' OR market_slug ILIKE '%15_minute%' THEN '15m'
+          WHEN market_slug ILIKE '%5m%' OR market_slug ILIKE '%5-minute%' OR market_slug ILIKE '%5_minute%' THEN '5m'
+          ELSE NULL
+        END AS horizon
+      FROM pm_token_settlements
+      WHERE resolved = TRUE
+        AND settled_price IS NOT NULL
+        AND market_slug IS NOT NULL
+      GROUP BY market_slug
+    )
+    SELECT
+      sr.timestamp,
+      sr.bn_obi_5::double precision AS obi5,
+      sr.bn_obi_10::double precision AS obi10,
+      sr.bn_spread_bps::double precision AS spread_bps,
+      sr.bn_bid_volume::double precision AS bid_volume_5,
+      sr.bn_ask_volume::double precision AS ask_volume_5,
+      sr.bn_price_change_1s::double precision AS momentum_1s,
+      sr.bn_price_change_5s::double precision AS momentum_5s,
+      ml.y_up
+    FROM sync_records sr
+    JOIN market_labels ml
+      ON ml.market_slug = sr.pm_market_slug
+    WHERE {" AND ".join(where)}
+    ORDER BY sr.timestamp ASC
+    LIMIT {int(limit)}
+    """
+
+    x: List[List[float]] = []
+    y: List[int] = []
+    ts: List[str] = []
+
+    conn = psycopg2.connect(db_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            for row in cur.fetchall():
+                timestamp = row[0]
+                feats = list(row[1:8])
+                yi = row[8]
+                if yi not in (0, 1):
+                    continue
+                if any(v is None or (isinstance(v, float) and not math.isfinite(v)) for v in feats):
+                    continue
+                x.append([float(v) for v in feats])
+                y.append(int(yi))
+                if hasattr(timestamp, "isoformat"):
+                    ts.append(timestamp.replace(tzinfo=timezone.utc).isoformat())
+                else:
+                    ts.append(str(timestamp))
+    finally:
+        conn.close()
+
+    if not x:
+        raise SystemExit("no usable rows fetched from sync_records")
     return Dataset(x=x, y=y, ts=ts)
 
 
@@ -379,6 +508,23 @@ def main() -> None:
         help="Postgres URL (or env DATABASE_URL)",
     )
     ap.add_argument("--lookback-hours", type=int, default=168)
+    ap.add_argument(
+        "--source",
+        choices=["sync_records", "order_executions"],
+        default="sync_records",
+        help="training data source",
+    )
+    ap.add_argument(
+        "--symbol",
+        default=None,
+        help="optional symbol filter for sync_records source (e.g., BTCUSDT)",
+    )
+    ap.add_argument(
+        "--horizon",
+        choices=["5m", "15m"],
+        default=None,
+        help="optional horizon filter for sync_records source",
+    )
     ap.add_argument("--account-id", default=None)
     ap.add_argument("--agent-id", default=None)
     ap.add_argument("--live-only", action="store_true")
@@ -400,15 +546,24 @@ def main() -> None:
     if not hidden:
         raise SystemExit("--hidden must not be empty")
 
-    print("Fetching from DB...")
-    ds = fetch_from_db(
-        db_url=args.db_url,
-        lookback_hours=args.lookback_hours,
-        account_id=args.account_id,
-        agent_id=args.agent_id,
-        live_only=bool(args.live_only),
-        limit=args.limit,
-    )
+    print(f"Fetching from DB (source={args.source})...")
+    if args.source == "sync_records":
+        ds = fetch_from_sync_records(
+            db_url=args.db_url,
+            lookback_hours=args.lookback_hours,
+            symbol=args.symbol,
+            horizon=args.horizon,
+            limit=args.limit,
+        )
+    else:
+        ds = fetch_from_order_executions(
+            db_url=args.db_url,
+            lookback_hours=args.lookback_hours,
+            account_id=args.account_id,
+            agent_id=args.agent_id,
+            live_only=bool(args.live_only),
+            limit=args.limit,
+        )
     print(f"Rows: {len(ds.y)}")
 
     if args.save_parquet:
@@ -446,8 +601,9 @@ def main() -> None:
     print("  PLOY_CRYPTO_LOB_ML__MODEL_TYPE=onnx")
     print(f"  PLOY_CRYPTO_LOB_ML__MODEL_PATH={args.output}")
     print("  PLOY_CRYPTO_LOB_ML__MODEL_VERSION=lob_mlp_v1")
+    print("  PLOY_CRYPTO_LOB_ML__COLLECT_ONLY_ON_MODEL_ERROR=true")
+    print("  PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.10")
 
 
 if __name__ == "__main__":
     main()
-
