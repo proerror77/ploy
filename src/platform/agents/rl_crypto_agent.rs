@@ -992,6 +992,7 @@ mod tests {
     async fn test_rl_signal_on_good_sum() {
         let config = RLCryptoAgentConfig {
             coins: vec!["BTC".to_string()],
+            exploration_rate: 0.0,
             ..Default::default()
         };
         let mut agent = RLCryptoAgent::new(config);
@@ -1013,6 +1014,7 @@ mod tests {
     async fn test_rl_no_signal_on_high_sum() {
         let config = RLCryptoAgentConfig {
             coins: vec!["BTC".to_string()],
+            exploration_rate: 0.0,
             ..Default::default()
         };
         let mut agent = RLCryptoAgent::new(config);

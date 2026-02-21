@@ -2365,6 +2365,14 @@ fn deployments_state_path() -> PathBuf {
     if container_data_root.exists() {
         return container_data_root.join("state/deployments.json");
     }
+    let repo_root_deployment = Path::new("deployment/deployments.json");
+    if repo_root_deployment.exists() {
+        return repo_root_deployment.to_path_buf();
+    }
+    let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
+    if container_deployment.exists() {
+        return container_deployment.to_path_buf();
+    }
     PathBuf::from("data/state/deployments.json")
 }
 
@@ -2389,9 +2397,20 @@ fn load_strategy_deployments() -> Vec<StrategyDeployment> {
         return parse_strategy_deployments(&raw);
     }
 
-    let path = deployments_state_path();
-    if let Ok(contents) = std::fs::read_to_string(path) {
-        return parse_strategy_deployments(&contents);
+    let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
+    let deployment_file_candidates = [
+        deployments_state_path(),
+        Path::new("deployment/deployments.json").to_path_buf(),
+        container_data_path.to_path_buf(),
+    ];
+
+    for path in deployment_file_candidates {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let items = parse_strategy_deployments(&contents);
+            if !items.is_empty() {
+                return items;
+            }
+        }
     }
     Vec::new()
 }
@@ -2808,6 +2827,11 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.duplicate_guard_window_ms,
         )
         .max(100);
+        cfg.coordinator.heartbeat_stale_warn_cooldown_secs = env_u64(
+            "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS",
+            cfg.coordinator.heartbeat_stale_warn_cooldown_secs,
+        )
+        .max(10);
 
         cfg.coordinator.crypto_allocator_enabled = env_bool(
             "PLOY_COORDINATOR__CRYPTO_ALLOCATOR_ENABLED",
@@ -2984,6 +3008,17 @@ impl PlatformBootstrapConfig {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => cfg.crypto.prefer_close_to_end = true,
                 "0" | "false" | "no" | "off" => cfg.crypto.prefer_close_to_end = false,
+                _ => {}
+            }
+        }
+        cfg.crypto.entry_cooldown_secs = env_u64(
+            "PLOY_CRYPTO_AGENT__ENTRY_COOLDOWN_SECS",
+            cfg.crypto.entry_cooldown_secs,
+        );
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__REQUIRE_MTF_AGREEMENT") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto.require_mtf_agreement = true,
+                "0" | "false" | "no" | "off" => cfg.crypto.require_mtf_agreement = false,
                 _ => {}
             }
         }
@@ -3409,8 +3444,16 @@ pub async fn start_platform(
     let mut coordinator =
         Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
     if let Some(pool) = shared_pool.as_ref() {
-        let run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", !app_config.dry_run.enabled);
+        // Run migrations by default whenever a DB connection is available, even in dry-run.
+        // This prevents long-lived services from starting on a stale schema.
+        let mut run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", true);
         let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
+        if require_sqlx_migrations && !run_sqlx_migrations {
+            warn!(
+                "PLOY_RUN_SQLX_MIGRATIONS=false but PLOY_REQUIRE_SQLX_MIGRATIONS=true; forcing migrations"
+            );
+            run_sqlx_migrations = true;
+        }
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
         let migration_store = PostgresStore::from_pool(pool.clone());

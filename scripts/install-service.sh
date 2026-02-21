@@ -43,6 +43,14 @@ fi
 if [[ -f /opt/ploy/deployment/config/crypto_dry_run.toml && ! -f /opt/ploy/config/crypto_dry_run.toml ]]; then
   sudo cp /opt/ploy/deployment/config/crypto_dry_run.toml /opt/ploy/config/crypto_dry_run.toml
 fi
+sudo mkdir -p /opt/ploy/data/state
+if [[ ! -f /opt/ploy/data/state/deployments.json ]]; then
+  if [[ -f /opt/ploy/deployment/deployments.json ]]; then
+    sudo cp /opt/ploy/deployment/deployments.json /opt/ploy/data/state/deployments.json
+  elif [[ -f /opt/ploy/data/state/deployments.json.sample ]]; then
+    sudo cp /opt/ploy/data/state/deployments.json.sample /opt/ploy/data/state/deployments.json
+  fi
+fi
 if [[ -f /opt/ploy/deployment/env.sports-pm.example && ! -f /opt/ploy/env/sports-pm.env ]]; then
   sudo cp /opt/ploy/deployment/env.sports-pm.example /opt/ploy/env/sports-pm.env
 fi
@@ -88,6 +96,12 @@ ensure_account_budget_defaults() {
   ensure_env_default "$env_file" "PLOY_RISK__CIRCUIT_BREAKER_COOLDOWN_SECS" "300"
 }
 
+ensure_coordinator_heartbeat_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS" "300"
+}
+
 ensure_sports_allocator_defaults() {
   local env_file="$1"
   [[ -f "$env_file" ]] || return 0
@@ -102,6 +116,12 @@ ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-dryrun.env
 ensure_account_budget_defaults /opt/ploy/.env
 ensure_account_budget_defaults /opt/ploy/env/sports-pm.env
 ensure_account_budget_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_coordinator_heartbeat_defaults /opt/ploy/.env
+ensure_coordinator_heartbeat_defaults /opt/ploy/env/sports-pm.env
+ensure_coordinator_heartbeat_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_env_default "/opt/ploy/.env" "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
+ensure_env_default /opt/ploy/env/sports-pm.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
+ensure_env_default /opt/ploy/env/crypto-dryrun.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_sports_allocator_defaults /opt/ploy/.env
 ensure_sports_allocator_defaults /opt/ploy/env/sports-pm.env
 

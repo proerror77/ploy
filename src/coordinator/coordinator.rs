@@ -51,7 +51,11 @@ impl IngressMode {
     }
 }
 
-const HEARTBEAT_STALE_WARN_COOLDOWN_SECS: i64 = 60;
+#[derive(Debug, Clone)]
+struct AgentCommandChannel {
+    domain: Domain,
+    tx: mpsc::Sender<CoordinatorCommand>,
+}
 
 #[derive(Debug, Clone)]
 struct GovernancePolicy {
@@ -360,6 +364,7 @@ pub struct CoordinatorHandle {
     crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
     sports_allocator: Arc<RwLock<SportsCapitalAllocator>>,
     ingress_mode: Arc<RwLock<IngressMode>>,
+    domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
     governance_store_pool: Option<PgPool>,
 }
@@ -367,11 +372,26 @@ pub struct CoordinatorHandle {
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
-        let mode = *self.ingress_mode.read().await;
-        if mode != IngressMode::Running {
+        let global_mode = *self.ingress_mode.read().await;
+        let domain_mode = self
+            .domain_ingress_mode
+            .read()
+            .await
+            .get(&intent.domain)
+            .copied()
+            .unwrap_or(IngressMode::Running);
+
+        if global_mode != IngressMode::Running {
             return Err(crate::error::PloyError::Validation(format!(
-                "coordinator ingress is {:?}; new intents are blocked",
-                mode
+                "coordinator global ingress is {:?}; new intents are blocked",
+                global_mode
+            )));
+        }
+
+        if domain_mode != IngressMode::Running {
+            return Err(crate::error::PloyError::Validation(format!(
+                "coordinator {:?} ingress is {:?}; new intents are blocked",
+                intent.domain, domain_mode
             )));
         }
         self.order_tx.send(intent).await.map_err(|_| {
@@ -392,6 +412,7 @@ impl CoordinatorHandle {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Paused;
         }
+        self.domain_ingress_mode.write().await.clear();
         self.control_tx
             .send(CoordinatorControlCommand::PauseAll)
             .await
@@ -406,6 +427,7 @@ impl CoordinatorHandle {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Running;
         }
+        self.domain_ingress_mode.write().await.clear();
         self.control_tx
             .send(CoordinatorControlCommand::ResumeAll)
             .await
@@ -420,6 +442,7 @@ impl CoordinatorHandle {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Halted;
         }
+        self.domain_ingress_mode.write().await.clear();
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseAll)
             .await
@@ -434,8 +457,57 @@ impl CoordinatorHandle {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Halted;
         }
+        self.domain_ingress_mode.write().await.clear();
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownAll)
+            .await
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
+    }
+
+    /// Pause a specific domain
+    pub async fn pause_domain(&self, domain: Domain) -> Result<()> {
+        {
+            let mut domain_mode = self.domain_ingress_mode.write().await;
+            domain_mode.insert(domain, IngressMode::Paused);
+        }
+        self.control_tx
+            .send(CoordinatorControlCommand::PauseDomain(domain))
+            .await
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
+    }
+
+    /// Resume a specific domain
+    pub async fn resume_domain(&self, domain: Domain) -> Result<()> {
+        {
+            let mut domain_mode = self.domain_ingress_mode.write().await;
+            domain_mode.remove(&domain);
+        }
+        self.control_tx
+            .send(CoordinatorControlCommand::ResumeDomain(domain))
+            .await
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
+    }
+
+    /// Force-close positions for one domain
+    pub async fn force_close_domain(&self, domain: Domain) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::ForceCloseDomain(domain))
+            .await
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
+    }
+
+    /// Shutdown one domain
+    pub async fn shutdown_domain(&self, domain: Domain) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::ShutdownDomain(domain))
             .await
             .map_err(|_| {
                 crate::error::PloyError::Internal("coordinator control channel closed".into())
@@ -523,6 +595,7 @@ pub struct Coordinator {
     execution_log_pool: Option<PgPool>,
     governance_store_pool: Option<PgPool>,
     ingress_mode: Arc<RwLock<IngressMode>>,
+    domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
 
@@ -535,7 +608,7 @@ pub struct Coordinator {
     control_rx: mpsc::Receiver<CoordinatorControlCommand>,
 
     // Per-agent command channels
-    agent_commands: HashMap<String, mpsc::Sender<CoordinatorCommand>>,
+    agent_commands: HashMap<String, AgentCommandChannel>,
 }
 
 #[derive(Debug)]
@@ -1529,6 +1602,7 @@ impl Coordinator {
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
         let governance_policy = Arc::new(RwLock::new(GovernancePolicy::from_config(&config)));
+        let domain_ingress_mode = Arc::new(RwLock::new(HashMap::new()));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
@@ -1550,6 +1624,7 @@ impl Coordinator {
             execution_log_pool: None,
             governance_store_pool: None,
             ingress_mode,
+            domain_ingress_mode,
             governance_policy,
             stale_heartbeat_warn_at,
             order_tx,
@@ -1607,6 +1682,7 @@ impl Coordinator {
             crypto_allocator: self.crypto_allocator.clone(),
             sports_allocator: self.sports_allocator.clone(),
             ingress_mode: self.ingress_mode.clone(),
+            domain_ingress_mode: self.domain_ingress_mode.clone(),
             governance_policy: self.governance_policy.clone(),
             governance_store_pool: self.governance_store_pool.clone(),
         }
@@ -1630,7 +1706,8 @@ impl Coordinator {
         risk_params: AgentRiskParams,
     ) -> mpsc::Receiver<CoordinatorCommand> {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
-        self.agent_commands.insert(agent_id.clone(), cmd_tx);
+        self.agent_commands
+            .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
 
         // Register with risk gate (fire-and-forget via spawn since we're not async here)
         let risk_gate = self.risk_gate.clone();
@@ -1648,7 +1725,7 @@ impl Coordinator {
     /// Send a command to a specific agent
     pub async fn send_command(&self, agent_id: &str, cmd: CoordinatorCommand) -> Result<()> {
         if let Some(tx) = self.agent_commands.get(agent_id) {
-            tx.send(cmd).await.map_err(|_| {
+            tx.tx.send(cmd).await.map_err(|_| {
                 crate::error::PloyError::Internal(format!(
                     "agent {} command channel closed",
                     agent_id
@@ -1662,14 +1739,35 @@ impl Coordinator {
         }
     }
 
+    fn domain_for_agent(&self, agent_id: &str) -> Option<Domain> {
+        self.agent_commands.get(agent_id).map(|entry| entry.domain)
+    }
+
+    fn should_apply_domain_cmd(&self, entry: &AgentCommandChannel, target: Domain) -> bool {
+        entry.domain == target
+    }
+
+    async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
+        let mut domain_modes = self.domain_ingress_mode.write().await;
+        match mode {
+            IngressMode::Running => {
+                domain_modes.remove(&domain);
+            }
+            _ => {
+                domain_modes.insert(domain, mode);
+            }
+        }
+    }
+
     /// Pause all agents
     pub async fn pause_all(&self) {
         {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Paused;
         }
-        for (id, tx) in &self.agent_commands {
-            if let Err(e) = tx.send(CoordinatorCommand::Pause).await {
+        self.domain_ingress_mode.write().await.clear();
+        for (id, entry) in &self.agent_commands {
+            if let Err(e) = entry.tx.send(CoordinatorCommand::Pause).await {
                 warn!(agent_id = %id, error = %e, "failed to send pause");
             }
         }
@@ -1681,8 +1779,9 @@ impl Coordinator {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Running;
         }
-        for (id, tx) in &self.agent_commands {
-            if let Err(e) = tx.send(CoordinatorCommand::Resume).await {
+        self.domain_ingress_mode.write().await.clear();
+        for (id, entry) in &self.agent_commands {
+            if let Err(e) = entry.tx.send(CoordinatorCommand::Resume).await {
                 warn!(agent_id = %id, error = %e, "failed to send resume");
             }
         }
@@ -1694,9 +1793,10 @@ impl Coordinator {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Halted;
         }
+        self.domain_ingress_mode.write().await.clear();
         info!("coordinator: sending force-close to all agents");
-        for (id, tx) in &self.agent_commands {
-            if let Err(e) = tx.send(CoordinatorCommand::ForceClose).await {
+        for (id, entry) in &self.agent_commands {
+            if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
                 warn!(agent_id = %id, error = %e, "failed to send force-close");
             }
         }
@@ -1708,10 +1808,59 @@ impl Coordinator {
             let mut mode = self.ingress_mode.write().await;
             *mode = IngressMode::Halted;
         }
+        self.domain_ingress_mode.write().await.clear();
         info!("coordinator: sending shutdown to all agents");
-        for (id, tx) in &self.agent_commands {
-            if let Err(e) = tx.send(CoordinatorCommand::Shutdown).await {
+        for (id, entry) in &self.agent_commands {
+            if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
                 warn!(agent_id = %id, error = %e, "failed to send shutdown");
+            }
+        }
+    }
+
+    /// Pause one domain
+    pub async fn pause_domain(&self, domain: Domain) {
+        self.set_domain_mode(domain, IngressMode::Paused).await;
+        for (id, entry) in &self.agent_commands {
+            if self.should_apply_domain_cmd(entry, domain) {
+                if let Err(e) = entry.tx.send(CoordinatorCommand::Pause).await {
+                    warn!(agent_id = %id, error = %e, "failed to send domain pause");
+                }
+            }
+        }
+    }
+
+    /// Resume one domain
+    pub async fn resume_domain(&self, domain: Domain) {
+        self.set_domain_mode(domain, IngressMode::Running).await;
+        for (id, entry) in &self.agent_commands {
+            if self.should_apply_domain_cmd(entry, domain) {
+                if let Err(e) = entry.tx.send(CoordinatorCommand::Resume).await {
+                    warn!(agent_id = %id, error = %e, "failed to send domain resume");
+                }
+            }
+        }
+    }
+
+    /// Force-close all agents in one domain
+    pub async fn force_close_domain(&self, domain: Domain) {
+        self.set_domain_mode(domain, IngressMode::Halted).await;
+        for (id, entry) in &self.agent_commands {
+            if self.should_apply_domain_cmd(entry, domain) {
+                if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
+                    warn!(agent_id = %id, error = %e, "failed to send domain force-close");
+                }
+            }
+        }
+    }
+
+    /// Shutdown all agents in one domain
+    pub async fn shutdown_domain(&self, domain: Domain) {
+        self.set_domain_mode(domain, IngressMode::Halted).await;
+        for (id, entry) in &self.agent_commands {
+            if self.should_apply_domain_cmd(entry, domain) {
+                if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
+                    warn!(agent_id = %id, error = %e, "failed to send domain shutdown");
+                }
             }
         }
     }
@@ -1742,6 +1891,16 @@ impl Coordinator {
                         CoordinatorControlCommand::ResumeAll => self.resume_all().await,
                         CoordinatorControlCommand::ForceCloseAll => self.force_close_all().await,
                         CoordinatorControlCommand::ShutdownAll => self.shutdown().await,
+                        CoordinatorControlCommand::PauseDomain(domain) => self.pause_domain(domain).await,
+                        CoordinatorControlCommand::ResumeDomain(domain) => {
+                            self.resume_domain(domain).await
+                        }
+                        CoordinatorControlCommand::ForceCloseDomain(domain) => {
+                            self.force_close_domain(domain).await
+                        }
+                        CoordinatorControlCommand::ShutdownDomain(domain) => {
+                            self.shutdown_domain(domain).await
+                        }
                     }
                 }
 
@@ -1793,6 +1952,26 @@ impl Coordinator {
             warn!(
                 %agent_id, %intent_id, reason = %reason,
                 "order blocked by coordinator ingress state"
+            );
+            return;
+        }
+        let domain_mode = self
+            .domain_ingress_mode
+            .read()
+            .await
+            .get(&intent.domain)
+            .copied()
+            .unwrap_or(IngressMode::Running);
+        if domain_mode != IngressMode::Running {
+            let reason = format!(
+                "Domain {:?} ingress is {:?}; blocking new intent while paused/halted",
+                intent.domain, domain_mode
+            );
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by coordinator domain ingress state"
             );
             return;
         }
@@ -2677,7 +2856,8 @@ impl Coordinator {
 
         // Check for stale agents
         let timeout = chrono::Duration::milliseconds(self.config.heartbeat_timeout_ms as i64);
-        let stale_warn_cooldown = chrono::Duration::seconds(HEARTBEAT_STALE_WARN_COOLDOWN_SECS);
+        let stale_warn_cooldown =
+            chrono::Duration::seconds(self.config.heartbeat_stale_warn_cooldown_secs as i64);
         let now = Utc::now();
         let mut stale_warn_at = self.stale_heartbeat_warn_at.write().await;
         for (id, agent) in state.agents.iter_mut() {

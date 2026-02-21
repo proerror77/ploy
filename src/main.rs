@@ -2038,53 +2038,70 @@ async fn run_bot(cli: &Cli) -> Result<()> {
         config.market.market_slug, config.dry_run.enabled
     );
 
+    let parse_bool_env = |key: &str, default: bool| -> bool {
+        std::env::var(key)
+            .ok()
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(default)
+    };
+
+    let run_sqlx_migrations = parse_bool_env("PLOY_RUN_SQLX_MIGRATIONS", !config.dry_run.enabled);
+    let require_sqlx_migrations =
+        parse_bool_env("PLOY_REQUIRE_SQLX_MIGRATIONS", !config.dry_run.enabled);
+
     // Check if we can connect to database
-    let store =
-        match PostgresStore::new(&config.database.url, config.database.max_connections).await {
-            Ok(s) => {
-                let run_sqlx_migrations = std::env::var("PLOY_RUN_SQLX_MIGRATIONS")
-                    .ok()
-                    .map(|v| {
-                        matches!(
-                            v.trim().to_ascii_lowercase().as_str(),
-                            "1" | "true" | "yes" | "on"
-                        )
-                    })
-                    .unwrap_or(!config.dry_run.enabled);
-                if run_sqlx_migrations {
-                    if let Err(e) = s.migrate().await {
-                        if config.dry_run.enabled {
-                            warn!(
-                                "Database migration failed in dry-run mode: {} - continuing anyway",
-                                e
-                            );
-                        } else {
-                            error!("Database migration failed in live mode: {}", e);
-                            return Err(e);
-                        }
+    let store = match PostgresStore::new(&config.database.url, config.database.max_connections)
+        .await
+    {
+        Ok(s) => {
+            if run_sqlx_migrations {
+                if let Err(e) = s.migrate().await {
+                    if require_sqlx_migrations {
+                        error!("Database migration failed: {}", e);
+                        return Err(e);
                     }
-                } else {
-                    info!("Skipping SQLx migration runner (PLOY_RUN_SQLX_MIGRATIONS=false)");
-                }
-                info!("Database connected");
-                Some(s)
-            }
-            Err(e) => {
-                if config.dry_run.enabled {
+
                     warn!(
+                            "Database migration failed but continuing due PLOY_REQUIRE_SQLX_MIGRATIONS=false: {}",
+                            e
+                        );
+                }
+            } else {
+                if require_sqlx_migrations && !config.dry_run.enabled {
+                    return Err(PloyError::Internal(
+                        "PLOY_RUN_SQLX_MIGRATIONS=false and startup requires migrations"
+                            .to_string(),
+                    ));
+                }
+                info!(
+                    run_sqlx_migrations = run_sqlx_migrations,
+                    "Skipping SQLx migration runner"
+                );
+            }
+            info!("Database connected");
+            Some(s)
+        }
+        Err(e) => {
+            if config.dry_run.enabled {
+                warn!(
                     "Database connection failed in dry-run mode: {} - falling back to simple mode",
                     e
                 );
-                    None
-                } else {
-                    error!(
-                        "Database connection failed in live mode: {} - aborting startup",
-                        e
-                    );
-                    return Err(e);
-                }
+                None
+            } else {
+                error!(
+                    "Database connection failed in live mode: {} - aborting startup",
+                    e
+                );
+                return Err(e);
             }
-        };
+        }
+    };
 
     // Crash recovery check
     if let Some(ref store) = store {

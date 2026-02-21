@@ -31,6 +31,7 @@ logs/
 
 # Runtime artifacts (RPC idempotency/audit files)
 data/rpc/
+data/state/
 
 # Local one-off generators / scratch
 gen_parts/
@@ -42,8 +43,9 @@ reports/
 /tmp/
 *.tmp
 
-# Deployment configs with credentials
-deployment/
+# Deployment templates/config artifacts (tracked in git)
+# Runtime env/secrets remain untracked as .env / env/*.env
 
 # Sidecar build artifacts
 ploy-sidecar/dist/
+.worktrees
