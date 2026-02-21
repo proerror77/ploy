@@ -13,6 +13,7 @@ pub mod error;
 pub mod ml;
 pub mod persistence;
 pub mod platform;
+pub mod safety;
 pub mod services;
 pub mod signing;
 pub mod strategy;
