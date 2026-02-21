@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -8,7 +8,8 @@ use serde::Deserialize;
 
 use crate::api::{auth::ensure_admin_authorized, state::AppState};
 use crate::coordinator::{
-    GovernancePolicySnapshot, GovernancePolicyUpdate, GovernanceStatusSnapshot,
+    GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
+    GovernanceStatusSnapshot,
 };
 use crate::error::PloyError;
 
@@ -23,6 +24,12 @@ pub struct GovernancePolicyUpdateRequest {
     pub updated_by: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GovernancePolicyHistoryQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// GET /api/governance/policy
@@ -53,6 +60,30 @@ pub async fn get_governance_status(
         ));
     };
     Ok(Json(coordinator.governance_status().await))
+}
+
+/// GET /api/governance/policy/history?limit=100
+pub async fn get_governance_policy_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GovernancePolicyHistoryQuery>,
+) -> std::result::Result<Json<Vec<GovernancePolicyHistoryEntry>>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let rows = coordinator
+        .governance_policy_history(limit)
+        .await
+        .map_err(|e| match e {
+            PloyError::Validation(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
+            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        })?;
+    Ok(Json(rows))
 }
 
 /// PUT /api/governance/policy

@@ -41,13 +41,29 @@ fn build_cors_layer() -> CorsLayer {
         ])
 }
 
+fn parse_boolish(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
+fn sidecar_orders_live_enabled() -> bool {
+    std::env::var("PLOY_SIDECAR_ORDERS_LIVE_ENABLED")
+        .ok()
+        .map(|v| parse_boolish(&v))
+        .unwrap_or(false)
+}
+
 pub fn create_router(state: AppState) -> Router {
     // CORS configuration
     let cors = build_cors_layer();
 
-    Router::new()
+    let mut router = Router::new()
         // Health check (top-level, used by docker/scripts for readiness probes)
         .route("/health", get(handlers::health_handler))
+        // Capability discovery (machine-readable control-plane surface)
+        .route("/api/capabilities", get(handlers::get_capabilities))
         // Auth endpoints
         .route("/api/auth/session", get(handlers::get_auth_session))
         .route("/api/auth/login", post(handlers::login_admin))
@@ -76,6 +92,22 @@ pub fn create_router(state: AppState) -> Router {
             "/api/strategies/running",
             get(handlers::get_running_strategies),
         )
+        .route(
+            "/api/strategies/control",
+            get(handlers::get_strategies_control),
+        )
+        .route(
+            "/api/strategies/control/:id",
+            put(handlers::update_strategy_control),
+        )
+        .route(
+            "/api/strategy-evaluations",
+            get(handlers::list_strategy_evaluations).post(handlers::create_strategy_evaluation),
+        )
+        .route(
+            "/api/strategy-evaluations/:deployment_id/latest",
+            get(handlers::get_latest_strategy_evaluation),
+        )
         // Strategy deployment matrix (control-plane first-class resource)
         .route(
             "/api/deployments",
@@ -102,6 +134,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/governance/policy",
             get(handlers::get_governance_policy).put(handlers::put_governance_policy),
         )
+        .route(
+            "/api/governance/policy/history",
+            get(handlers::get_governance_policy_history),
+        )
         // Security endpoints
         .route("/api/security/events", get(handlers::get_security_events))
         // Sidecar endpoints (Claude Agent SDK → Rust backend)
@@ -113,15 +149,18 @@ pub fn create_router(state: AppState) -> Router {
             "/api/sidecar/intents",
             post(handlers::sidecar_submit_intent),
         )
-        .route("/api/sidecar/orders", post(handlers::sidecar_submit_order))
         .route(
             "/api/sidecar/positions",
             get(handlers::sidecar_get_positions),
         )
         .route("/api/sidecar/risk", get(handlers::sidecar_get_risk))
         // WebSocket endpoint
-        .route("/ws", get(websocket_handler))
-        // Add state and CORS
-        .with_state(state)
-        .layer(cors)
+        .route("/ws", get(websocket_handler));
+
+    if sidecar_orders_live_enabled() {
+        router = router.route("/api/sidecar/orders", post(handlers::sidecar_submit_order));
+    }
+
+    // Add state and CORS
+    router.with_state(state).layer(cors)
 }

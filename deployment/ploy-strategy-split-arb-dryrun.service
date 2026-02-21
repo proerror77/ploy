@@ -11,7 +11,6 @@ WorkingDirectory=/opt/ploy
 
 Environment=RUST_LOG=info,ploy=info,sqlx=warn
 Environment=LOG_DIR=/opt/ploy/logs
-Environment=PLOY_ALLOW_LEGACY_STRATEGY_LIVE=false
 EnvironmentFile=-/opt/ploy/.env
 
 ExecStart=/opt/ploy/bin/ploy strategy start split_arb --config /opt/ploy/config/strategies/split_arb.toml --dry-run --foreground

@@ -79,6 +79,19 @@ pub struct GovernancePolicyUpdate {
     pub reason: Option<String>,
 }
 
+/// Append-only governance policy change event (audit ledger).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernancePolicyHistoryEntry {
+    pub id: i64,
+    pub block_new_intents: bool,
+    pub blocked_domains: Vec<String>,
+    pub max_intent_notional_usd: Option<Decimal>,
+    pub max_total_notional_usd: Option<Decimal>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+    pub reason: Option<String>,
+}
+
 /// Per-domain allocator ledger snapshot (account-level capital tracking).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllocatorLedgerSnapshot {
@@ -90,11 +103,42 @@ pub struct AllocatorLedgerSnapshot {
     pub available_notional_usd: Decimal,
 }
 
+/// Per-deployment capital occupancy snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentLedgerSnapshot {
+    pub deployment_id: String,
+    pub domain: String,
+    pub open_notional_usd: Decimal,
+    pub pending_notional_usd: Decimal,
+    pub total_notional_usd: Decimal,
+}
+
+/// Domain-level ingress mode snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainIngressSnapshot {
+    pub domain: String,
+    pub mode: String,
+}
+
+/// Agent runtime health snapshot for control-plane scheduling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceAgentSnapshot {
+    pub agent_id: String,
+    pub name: String,
+    pub domain: String,
+    pub status: String,
+    pub exposure: Decimal,
+    pub daily_pnl: Decimal,
+    pub last_heartbeat: DateTime<Utc>,
+    pub error_message: Option<String>,
+}
+
 /// Runtime governance + risk + capital view for OpenClaw control-plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceStatusSnapshot {
     pub account_id: String,
     pub ingress_mode: String,
+    pub domain_ingress_modes: Vec<DomainIngressSnapshot>,
     pub policy: GovernancePolicySnapshot,
     pub account_notional_usd: Decimal,
     pub platform_exposure_usd: Decimal,
@@ -102,6 +146,8 @@ pub struct GovernanceStatusSnapshot {
     pub daily_pnl_usd: Decimal,
     pub daily_loss_limit_usd: Decimal,
     pub queue: QueueStatsSnapshot,
+    pub agents: Vec<GovernanceAgentSnapshot>,
     pub allocators: Vec<AllocatorLedgerSnapshot>,
+    pub deployments: Vec<DeploymentLedgerSnapshot>,
     pub updated_at: DateTime<Utc>,
 }

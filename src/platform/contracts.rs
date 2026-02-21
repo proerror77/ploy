@@ -56,10 +56,66 @@ pub enum MarketSelector {
 }
 
 /// Runtime deployment unit: strategy x market scope x risk/allocator profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyLifecycleStage {
+    Backtest,
+    Paper,
+    Shadow,
+    Live,
+}
+
+impl StrategyLifecycleStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backtest => "backtest",
+            Self::Paper => "paper",
+            Self::Shadow => "shadow",
+            Self::Live => "live",
+        }
+    }
+
+    pub fn allows_live_ingress(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyProductType {
+    BinaryOption,
+    MultiOutcome,
+    Scalar,
+}
+
+impl StrategyProductType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BinaryOption => "binary_option",
+            Self::MultiOutcome => "multi_outcome",
+            Self::Scalar => "scalar",
+        }
+    }
+}
+
+fn default_strategy_version() -> String {
+    "v1".to_string()
+}
+
+fn default_lifecycle_stage() -> StrategyLifecycleStage {
+    StrategyLifecycleStage::Live
+}
+
+fn default_strategy_product_type() -> StrategyProductType {
+    StrategyProductType::BinaryOption
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyDeployment {
     pub id: String,
     pub strategy: String,
+    #[serde(default = "default_strategy_version")]
+    pub strategy_version: String,
     pub domain: Domain,
     pub market_selector: MarketSelector,
     pub timeframe: Timeframe,
@@ -68,6 +124,67 @@ pub struct StrategyDeployment {
     pub risk_profile: String,
     pub priority: i32,
     pub cooldown_secs: u64,
+    #[serde(default = "default_lifecycle_stage")]
+    pub lifecycle_stage: StrategyLifecycleStage,
+    #[serde(default = "default_strategy_product_type")]
+    pub product_type: StrategyProductType,
+    #[serde(default)]
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_evaluation_score: Option<f64>,
+}
+
+/// Evidence stage for strategy evaluation artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyEvaluationStage {
+    Backtest,
+    Paper,
+    Live,
+}
+
+impl StrategyEvaluationStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backtest => "backtest",
+            Self::Paper => "paper",
+            Self::Live => "live",
+        }
+    }
+}
+
+/// Quantitative summary for one evaluation run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyEvaluationMetrics {
+    pub sample_size: u64,
+    pub win_rate: Option<f64>,
+    pub pnl_usd: Option<f64>,
+    pub max_drawdown_pct: Option<f64>,
+    pub sharpe: Option<f64>,
+    pub fill_rate: Option<f64>,
+    pub avg_slippage_bps: Option<f64>,
+}
+
+/// Traceable strategy evaluation evidence used by control-plane governance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyEvaluationEvidence {
+    pub evaluation_id: String,
+    pub deployment_id: String,
+    pub strategy: String,
+    pub strategy_version: String,
+    pub product_type: StrategyProductType,
+    pub lifecycle_stage: StrategyLifecycleStage,
+    pub stage: StrategyEvaluationStage,
+    pub evaluated_at: DateTime<Utc>,
+    pub evaluator: String,
+    pub dataset_hash: String,
+    pub model_hash: Option<String>,
+    pub config_hash: Option<String>,
+    pub run_id: Option<String>,
+    pub artifact_uri: Option<String>,
+    pub metrics: StrategyEvaluationMetrics,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 /// Unified strategy output contract (agent -> coordinator).
@@ -101,7 +218,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("deployment_id")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             self.metadata
@@ -110,7 +227,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("intent_reason")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(reason) = self.reason.clone() {
@@ -120,7 +237,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("signal_confidence")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(confidence) = self.confidence {
@@ -133,7 +250,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("signal_edge")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(edge) = self.edge {
@@ -144,7 +261,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("event_time")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(ts) = self.event_time {
@@ -250,13 +367,38 @@ mod tests {
 
         let mapped = intent.into_order_intent();
         assert_eq!(mapped.priority, OrderPriority::High);
-        assert_eq!(
-            mapped.metadata.get("deployment_id").map(String::as_str),
-            Some("deploy.crypto.15m")
-        );
+        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
         assert_eq!(
             mapped.metadata.get("intent_reason").map(String::as_str),
             Some("signal_edge")
         );
+    }
+
+    #[test]
+    fn trade_intent_into_order_intent_normalizes_blank_deployment_metadata() {
+        let mut intent = TradeIntent {
+            intent_id: Uuid::new_v4(),
+            deployment_id: "deploy.crypto.15m".to_string(),
+            agent_id: "openclaw-agent".to_string(),
+            domain: Domain::Crypto,
+            market_slug: "btc-updown-15m".to_string(),
+            token_id: "token-yes".to_string(),
+            side: Side::Up,
+            is_buy: true,
+            size: 10,
+            price_limit: dec!(0.42),
+            confidence: None,
+            edge: None,
+            event_time: None,
+            reason: None,
+            priority: None,
+            metadata: HashMap::new(),
+        };
+        intent
+            .metadata
+            .insert("deployment_id".to_string(), "   ".to_string());
+
+        let mapped = intent.into_order_intent();
+        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
     }
 }

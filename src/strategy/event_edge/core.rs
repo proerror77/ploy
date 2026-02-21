@@ -22,6 +22,7 @@ pub struct TradeDecision {
     pub event_id: String,
     pub outcome: String,
     pub token_id: String,
+    pub condition_id: Option<String>,
     pub market_slug: String,
     pub side: crate::domain::Side,
     pub shares: u64,
@@ -263,6 +264,7 @@ impl EventEdgeCore {
             event_id: scan.event_id.clone(),
             outcome: r.outcome.clone(),
             token_id: r.yes_token_id.clone(),
+            condition_id: r.condition_id.clone(),
             // Event-level strategies may not expose per-outcome market slugs directly.
             // Use a stable non-empty market key for routing/risk/position grouping.
             market_slug: scan.event_id.clone(),

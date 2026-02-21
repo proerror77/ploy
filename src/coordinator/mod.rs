@@ -13,6 +13,7 @@ pub mod state;
 pub use bootstrap::{start_platform, PlatformBootstrapConfig, PlatformStartControl};
 pub use command::{
     AgentHealthResponse, AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
+    DomainIngressSnapshot, GovernanceAgentSnapshot, GovernancePolicyHistoryEntry,
     GovernancePolicySnapshot, GovernancePolicyUpdate, GovernanceStatusSnapshot,
 };
 pub use config::CoordinatorConfig;

@@ -116,6 +116,8 @@ struct DepthLevelJson {
 const CALENDAR_LOOKBACK_DAYS: i64 = 1;
 const CALENDAR_LOOKAHEAD_DAYS: i64 = 7;
 const CALENDAR_SYNC_INTERVAL_SECS: i64 = 30 * 60; // 30 minutes
+const DEPLOYMENT_ID_NBA_COMEBACK: &str = "sports.pm.nba.comeback";
+const DEPLOYMENT_ID_NBA_GROK_UNIFIED: &str = "sports.pm.nba.grok_unified";
 
 const NBA_TEAM_ABBREVS: &[&str] = &[
     "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW", "HOU", "IND", "LAC",
@@ -934,6 +936,7 @@ impl SportsTradingAgent {
         )
         .with_priority(OrderPriority::Normal)
         .with_metadata("strategy", "nba_comeback")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_COMEBACK)
         .with_metadata("game_id", &opp.game.espn_game_id)
         .with_metadata("trailing_team", &opp.trailing_abbrev)
         .with_metadata("deficit", &opp.deficit.to_string())
@@ -978,7 +981,8 @@ impl SportsTradingAgent {
             limit_price,
         )
         .with_priority(priority)
-        .with_metadata("strategy", "nba_comeback_exit")
+        .with_metadata("strategy", "nba_comeback")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_COMEBACK)
         .with_metadata("game_id", game_id)
         .with_metadata("trailing_team", trailing_team)
         .with_metadata("exit_reason", exit_reason)
@@ -1268,7 +1272,7 @@ impl SportsTradingAgent {
         );
 
         for pos in positions {
-            let intent = OrderIntent::new(
+            let mut intent = OrderIntent::new(
                 &self.config.agent_id,
                 pos.domain,
                 &pos.market_slug,
@@ -1282,6 +1286,21 @@ impl SportsTradingAgent {
             .with_metadata("intent_reason", "force_close")
             .with_metadata("position_id", &pos.position_id)
             .with_metadata("force_close_price_floor", "0.01");
+            if let Some(deployment_id) = pos
+                .metadata
+                .get("deployment_id")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_deployment_id(deployment_id);
+            } else if let Some(strategy) = pos
+                .metadata
+                .get("strategy")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_metadata("strategy", strategy);
+            }
 
             if let Err(e) = ctx.submit_order(intent).await {
                 warn!(
@@ -1347,6 +1366,7 @@ impl SportsTradingAgent {
         )
         .with_priority(OrderPriority::Normal)
         .with_metadata("strategy", "grok_unified_decision")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_GROK_UNIFIED)
         .with_metadata("game_id", &req.game.espn_game_id)
         .with_metadata("trailing_team", &req.trailing_abbrev)
         .with_metadata("deficit", &req.deficit.to_string())

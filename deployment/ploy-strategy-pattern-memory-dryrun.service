@@ -12,7 +12,6 @@ WorkingDirectory=/opt/ploy
 Environment=RUST_LOG=info,ploy=info,sqlx=warn
 Environment=LOG_DIR=/opt/ploy/logs
 Environment=PLOY_BINANCE_KLINE_BACKFILL_LIMIT=300
-Environment=PLOY_ALLOW_LEGACY_STRATEGY_LIVE=false
 EnvironmentFile=-/opt/ploy/.env
 
 ExecStart=/opt/ploy/bin/ploy strategy start pattern_memory --config /opt/ploy/config/strategies/pattern_memory.toml --dry-run --foreground

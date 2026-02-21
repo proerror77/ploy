@@ -7,6 +7,7 @@ use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
 use super::types::{Domain, OrderIntent};
+use crate::domain::Side;
 
 /// 包裝 OrderIntent 以支持優先級排序
 #[derive(Debug)]
@@ -77,13 +78,22 @@ impl OrderQueue {
     /// - `Ok(())` 成功入隊
     /// - `Err(reason)` 隊列已滿或訂單無效
     pub fn enqueue(&mut self, intent: OrderIntent) -> Result<(), String> {
+        self.enqueue_with_eviction(intent).map(|_| ())
+    }
+
+    /// Enqueue and return evicted low-priority intent when queue is full.
+    pub fn enqueue_with_eviction(
+        &mut self,
+        intent: OrderIntent,
+    ) -> Result<Option<OrderIntent>, String> {
+        let mut evicted: Option<OrderIntent> = None;
         // 檢查隊列是否已滿
         if self.heap.len() >= self.max_size {
             // 如果新訂單優先級更高，嘗試移除最低優先級的
-            if let Some(lowest) = self.heap.peek() {
-                if intent.priority < lowest.intent.priority {
+            if let Some(lowest_priority) = self.heap.iter().map(|item| item.intent.priority).max() {
+                if intent.priority < lowest_priority {
                     // 新訂單優先級更高，移除最低的
-                    self.heap.pop();
+                    evicted = self.pop_lowest_priority().map(|v| v.intent);
                     warn!(
                         "Queue full, dropped lowest priority order to make room for {:?}",
                         intent.priority
@@ -110,7 +120,32 @@ impl OrderQueue {
         self.heap.push(PrioritizedIntent { intent, sequence });
         self.enqueued_count += 1;
 
-        Ok(())
+        Ok(evicted)
+    }
+
+    /// Pop one lowest-priority item from queue.
+    /// When priorities tie, evict the newest item in that lowest bucket.
+    fn pop_lowest_priority(&mut self) -> Option<PrioritizedIntent> {
+        let mut items: Vec<PrioritizedIntent> = std::mem::take(&mut self.heap).into_vec();
+        if items.is_empty() {
+            return None;
+        }
+
+        let mut lowest_idx = 0usize;
+        for idx in 1..items.len() {
+            let current = &items[idx];
+            let lowest = &items[lowest_idx];
+            if current.intent.priority > lowest.intent.priority
+                || (current.intent.priority == lowest.intent.priority
+                    && current.sequence > lowest.sequence)
+            {
+                lowest_idx = idx;
+            }
+        }
+
+        let dropped = items.swap_remove(lowest_idx);
+        self.heap = BinaryHeap::from(items);
+        Some(dropped)
     }
 
     /// 取出下一個要執行的訂單
@@ -163,8 +198,14 @@ impl OrderQueue {
 
     /// 清理過期訂單
     pub fn cleanup_expired(&mut self) -> usize {
+        self.cleanup_expired_intents().len()
+    }
+
+    /// 清理過期訂單並返回被移除的 intents（供上層釋放預留資金）
+    pub fn cleanup_expired_intents(&mut self) -> Vec<OrderIntent> {
         let before = self.heap.len();
         let now = Utc::now();
+        let mut expired = Vec::new();
 
         // 需要重建堆，因為 BinaryHeap 不支持條件刪除
         let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
@@ -173,6 +214,7 @@ impl OrderQueue {
             if let Some(expires) = item.intent.expires_at {
                 if now > expires {
                     self.expired_count += 1;
+                    expired.push(item.intent);
                     continue;
                 }
             }
@@ -183,7 +225,7 @@ impl OrderQueue {
         if cleaned > 0 {
             debug!("Cleaned {} expired orders from queue", cleaned);
         }
-        cleaned
+        expired
     }
 
     /// 移除指定 Agent 的所有訂單
@@ -199,6 +241,26 @@ impl OrderQueue {
         }
 
         before - self.heap.len()
+    }
+
+    /// 移除 queue 中待執行 BUY 訂單（可選限定 domain），並返回被移除的 intents。
+    pub fn remove_buy_orders(&mut self, domain: Option<Domain>) -> Vec<OrderIntent> {
+        let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
+        let mut removed = Vec::new();
+
+        for item in items {
+            let should_remove = item.intent.is_buy
+                && domain
+                    .map(|target| item.intent.domain == target)
+                    .unwrap_or(true);
+            if should_remove {
+                removed.push(item.intent);
+            } else {
+                self.heap.push(item);
+            }
+        }
+
+        removed
     }
 
     /// 獲取隊列統計
@@ -234,6 +296,29 @@ impl OrderQueue {
                     .then_some(intent.notional_value())
             })
             .sum()
+    }
+
+    /// Sum pending SELL shares in queue for one reduce-only bucket.
+    pub fn pending_sell_shares_for(
+        &self,
+        agent_id: &str,
+        domain: Domain,
+        token_id: &str,
+        side: Side,
+    ) -> u64 {
+        self.heap
+            .iter()
+            .filter_map(|item| {
+                let intent = &item.intent;
+                (!intent.is_buy
+                    && !intent.is_expired()
+                    && intent.agent_id == agent_id
+                    && intent.domain == domain
+                    && intent.side == side
+                    && intent.token_id.eq_ignore_ascii_case(token_id))
+                .then_some(intent.shares)
+            })
+            .fold(0u64, |acc, shares| acc.saturating_add(shares))
     }
 }
 
@@ -357,6 +442,25 @@ mod tests {
     }
 
     #[test]
+    fn test_enqueue_with_eviction_returns_dropped_intent() {
+        let mut queue = OrderQueue::new(2);
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Low))
+            .unwrap();
+
+        let dropped = queue
+            .enqueue_with_eviction(make_intent("a3", OrderPriority::Critical))
+            .unwrap()
+            .expect("expected an evicted intent");
+
+        assert_eq!(dropped.agent_id, "a2");
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
     fn test_stats() {
         let mut queue = OrderQueue::new(100);
 
@@ -424,5 +528,106 @@ mod tests {
         let notional =
             queue.pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]);
         assert_eq!(notional, Decimal::from_str_exact("10.00").unwrap());
+    }
+
+    #[test]
+    fn test_remove_buy_orders_with_domain_filter() {
+        let mut queue = OrderQueue::new(100);
+        let crypto_buy = make_intent("a1", OrderPriority::Normal);
+        let sports_buy = OrderIntent::new(
+            "a2",
+            Domain::Sports,
+            "nba",
+            "token-s",
+            Side::Up,
+            true,
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        let mut crypto_sell = make_intent("a3", OrderPriority::Low);
+        crypto_sell.is_buy = false;
+
+        queue.enqueue(crypto_buy).unwrap();
+        queue.enqueue(sports_buy).unwrap();
+        queue.enqueue(crypto_sell).unwrap();
+
+        let removed = queue.remove_buy_orders(Some(Domain::Crypto));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].domain, Domain::Crypto);
+        assert_eq!(queue.len(), 2);
+
+        let removed_all = queue.remove_buy_orders(None);
+        assert_eq!(removed_all.len(), 1);
+        assert_eq!(removed_all[0].domain, Domain::Sports);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn test_pending_sell_shares_for_filters_bucket() {
+        let mut queue = OrderQueue::new(100);
+
+        let mut sell_a = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "TOKEN-UP",
+            Side::Up,
+            false,
+            40,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        sell_a.priority = OrderPriority::High;
+
+        let mut sell_b = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "token-up",
+            Side::Up,
+            false,
+            35,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        sell_b.priority = OrderPriority::Normal;
+
+        let mut other_side = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "token-up",
+            Side::Down,
+            false,
+            20,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        other_side.priority = OrderPriority::Low;
+
+        queue.enqueue(sell_a).unwrap();
+        queue.enqueue(sell_b).unwrap();
+        queue.enqueue(other_side).unwrap();
+
+        assert_eq!(
+            queue.pending_sell_shares_for("agent1", Domain::Crypto, "token-up", Side::Up),
+            75
+        );
+    }
+
+    #[test]
+    fn test_cleanup_expired_intents_returns_removed_items() {
+        let mut queue = OrderQueue::new(100);
+        let mut expired = make_intent("agent1", OrderPriority::Normal);
+        expired.is_buy = false;
+        expired.expires_at = Some(Utc::now() + chrono::Duration::milliseconds(10));
+
+        let active = make_intent("agent2", OrderPriority::High);
+
+        queue.enqueue(expired).unwrap();
+        queue.enqueue(active).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let removed = queue.cleanup_expired_intents();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].agent_id, "agent1");
+        assert_eq!(queue.len(), 1);
     }
 }

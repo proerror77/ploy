@@ -20,6 +20,8 @@ use crate::platform::{
 };
 use crate::strategy::nba_comeback::core::{ComebackOpportunity, NbaComebackCore};
 
+const DEPLOYMENT_ID_NBA_COMEBACK: &str = "sports.pm.nba.comeback";
+
 /// NBA Q3→Q4 Comeback Trading Agent
 pub struct NbaComebackAgent {
     core: NbaComebackCore,
@@ -85,6 +87,7 @@ impl NbaComebackAgent {
         )
         .with_priority(OrderPriority::Normal)
         .with_metadata("strategy", "nba_comeback")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_COMEBACK)
         .with_metadata("game_id", &opp.game.espn_game_id)
         .with_metadata("trailing_team", &opp.trailing_abbrev)
         .with_metadata("deficit", &opp.deficit.to_string())

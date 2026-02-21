@@ -19,6 +19,8 @@ use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPr
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
 
+const DEPLOYMENT_ID_EVENT_EDGE: &str = "politics.pm.event_edge";
+
 /// Configuration for the PoliticsTradingAgent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoliticsTradingConfig {
@@ -85,7 +87,7 @@ impl PoliticsTradingAgent {
         );
 
         for pos in positions {
-            let intent = OrderIntent::new(
+            let mut intent = OrderIntent::new(
                 &self.config.agent_id,
                 pos.domain,
                 &pos.market_slug,
@@ -99,6 +101,21 @@ impl PoliticsTradingAgent {
             .with_metadata("intent_reason", "force_close")
             .with_metadata("position_id", &pos.position_id)
             .with_metadata("force_close_price_floor", "0.01");
+            if let Some(deployment_id) = pos
+                .metadata
+                .get("deployment_id")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_deployment_id(deployment_id);
+            } else if let Some(strategy) = pos
+                .metadata
+                .get("strategy")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_metadata("strategy", strategy);
+            }
 
             if let Err(e) = ctx.submit_order(intent).await {
                 warn!(
@@ -198,7 +215,7 @@ impl TradingAgent for PoliticsTradingAgent {
                     for event_id in &event_ids {
                         match self.core.scan_and_decide(event_id, arena.clone()).await {
                             Ok(Some(decision)) => {
-                                let intent = OrderIntent::new(
+                                let mut intent = OrderIntent::new(
                                     &self.config.agent_id,
                                     Domain::Politics,
                                     &decision.market_slug,
@@ -210,6 +227,7 @@ impl TradingAgent for PoliticsTradingAgent {
                                 )
                                 .with_priority(OrderPriority::Normal)
                                 .with_metadata("strategy", "event_edge")
+                                .with_deployment_id(DEPLOYMENT_ID_EVENT_EDGE)
                                 .with_metadata("event_id", &decision.event_id)
                                 .with_metadata("outcome", &decision.outcome)
                                 .with_metadata("edge", &decision.edge.to_string())
@@ -220,6 +238,14 @@ impl TradingAgent for PoliticsTradingAgent {
                                 .with_metadata("signal_market_price", &decision.limit_price.to_string())
                                 .with_metadata("signal_edge", &decision.edge.to_string())
                                 .with_metadata("config_hash", &config_hash);
+                                if let Some(condition_id) = decision
+                                    .condition_id
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty())
+                                {
+                                    intent = intent.with_condition_id(condition_id);
+                                }
 
                                 info!(
                                     agent = self.config.agent_id,

@@ -795,7 +795,7 @@ pub enum RlCommands {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Run live trading with trained lead-lag model
+    /// Run lead-lag signal simulation with trained model (legacy dry-run only)
     LeadLagLive {
         /// Binance symbol to trade
         #[arg(short, long, default_value = "BTCUSDT")]
@@ -812,7 +812,7 @@ pub enum RlCommands {
         /// Checkpoint directory to load model from
         #[arg(short, long, default_value = "./models/leadlag")]
         checkpoint: String,
-        /// Dry run mode (no real orders)
+        /// Dry run mode (required for legacy lead-lag runner)
         #[arg(long)]
         dry_run: bool,
         /// Minimum confidence to trade (0.0-1.0)

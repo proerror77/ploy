@@ -14,6 +14,24 @@ A high-performance Polymarket trading bot covering crypto, sports, and political
 - **Persistence** -- PostgreSQL event store, checkpoints, dead-letter queue, and crash recovery
 - **Risk management** -- Position limits, circuit breaker, daily loss limit, slippage protection, emergency stop
 
+## Architecture (Agent-Based)
+
+Production runtime uses a 3-plane model:
+
+- **Strategy Plane (Poly Agents)**: direction/timing/pricing decisions and intent generation.
+- **Execution Plane (Ploy Coordinator)**: single live ingestion path (`OrderIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail.
+- **Control Plane (OpenClaw / AI Scheduler)**: global capital policy, deployment enable/disable, pause/halt/force-close.
+
+Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; agents decide entries/exits inside those boundaries.
+For machine-readable control-plane discovery, query `GET /api/capabilities`.
+For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
+For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
+`strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
+Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
+Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
+
+Canonical agent namespace is now `crate::agent_system::{ai,runtime,legacy_platform}` (legacy paths kept for compatibility).
+
 ## Prerequisites
 
 - **Rust** 1.75+ (2021 edition)
@@ -88,6 +106,18 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 ## Usage
 
+### Live Trading (Recommended)
+
+Ploy is migrating to a **Coordinator-only** live execution plane. For live orders, use the multi-agent platform entry point:
+
+```bash
+ploy platform start --crypto --sports --politics   # Coordinator + Agents (live)
+ploy platform start --crypto --dry-run             # Safe dry-run
+```
+
+Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
+Legacy live overrides are now removed to enforce a single audited execution path.
+
 ### Global Flags
 
 ```
@@ -99,7 +129,7 @@ See the inline comments in `config/default.toml` for a full explanation of every
 ### Core Commands
 
 ```bash
-ploy run                                       # Start the main trading loop
+ploy run                                       # Legacy bot loop (dry-run only; live is blocked)
 ploy test                                      # Test Polymarket API connectivity
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
@@ -116,10 +146,10 @@ ploy ev --price 95 --probability 97            # Calculate expected value for ne
 ### Strategies
 
 ```bash
-ploy trade --series 10423 --shares 50          # Two-leg arbitrage on a price series
-ploy momentum --symbols BTCUSDT --shares 100   # CEX momentum strategy
-ploy momentum --predictive --min-time 300      # Predictive mode: early entry with TP/SL
-ploy split-arb --max-entry 35 --shares 100     # Split arbitrage (time-separated hedge)
+ploy trade --series 10423 --shares 50 --dry-run          # Two-leg arbitrage on a price series
+ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # CEX momentum strategy
+ploy momentum --predictive --min-time 300 --dry-run      # Predictive mode: early entry with TP/SL
+ploy split-arb --max-entry 35 --shares 100 --dry-run     # Split arbitrage (time-separated hedge)
 ploy market-make --token <token_id>            # Market making opportunity analysis
 ploy scan --series 10423 --watch               # Continuous arbitrage scan
 ploy analyze --event <event_id>                # Analyze multi-outcome market
@@ -135,6 +165,24 @@ export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
 export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix match)
 export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
 ```
+
+Recommended for gasless redeem via Polymarket Builder Relayer:
+
+```bash
+# Official Rust relayer client path is enabled by default
+cargo run -- momentum --live
+
+export CLAIMER_RELAYER_ENABLED=true
+export POLY_BUILDER_API_KEY=xxx
+export POLY_BUILDER_SECRET=base64_secret
+export POLY_BUILDER_PASSPHRASE=xxx
+
+# Keep false in production to avoid falling back to direct on-chain redeem.
+# If true, fallback path requires native MATIC gas.
+export CLAIMER_RELAYER_FALLBACK_ONCHAIN=false
+```
+
+If relayer credentials are incomplete, claimer will warn and require native MATIC for direct on-chain fallback.
 
 Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
 
@@ -157,7 +205,7 @@ ploy event-edge --event <id> --watch --trade --min-edge 0.08     # Auto-trade wh
 
 ```bash
 ploy agent --mode advisory                     # Get trading recommendations
-ploy agent --mode autonomous --enable-trading  # AI-controlled trading
+ploy agent --mode autonomous --enable-trading  # (blocked by default; prefer platform mode)
 ploy agent --chat                              # Interactive conversation
 ploy agent --mode sports --sports-url <url>    # Sports-specific analysis
 ploy rpc                                       # JSON-RPC 2.0 server over stdin/stdout
@@ -166,14 +214,14 @@ ploy rpc                                       # JSON-RPC 2.0 server over stdin/
 ### Domain: Crypto
 
 ```bash
-ploy crypto split-arb --coins SOL,ETH,BTC      # Split-arb on crypto UP/DOWN markets
+ploy crypto split-arb --coins SOL,ETH,BTC --dry-run      # Split-arb on crypto UP/DOWN markets
 ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
 ```
 
 ### Domain: Sports
 
 ```bash
-ploy sports split-arb --leagues NBA,NFL          # Split-arb on sports markets
+ploy sports split-arb --leagues NBA,NFL --dry-run          # Split-arb on sports markets
 ploy sports monitor --leagues NBA                # Monitor sports markets
 ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
 ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup

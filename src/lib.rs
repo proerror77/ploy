@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod agent;
+pub mod agent_system;
 pub mod agents;
 #[cfg(feature = "api")]
 pub mod api;
@@ -13,6 +14,7 @@ pub mod error;
 pub mod ml;
 pub mod persistence;
 pub mod platform;
+pub mod safety;
 pub mod services;
 pub mod signing;
 pub mod strategy;
