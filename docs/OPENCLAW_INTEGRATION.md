@@ -124,6 +124,7 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將該 domain 設為 `halted`，避免命令傳遞期間仍接收新 BUY intents。
 
 已支援的 method（起步集合）：
+- `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）
 - `pm.get_balance`
 - `pm.get_positions`
 - `pm.get_open_orders`

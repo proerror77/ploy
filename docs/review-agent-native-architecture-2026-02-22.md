@@ -24,10 +24,10 @@ Review target: current platform runtime (`Coordinator + agents + sidecar/governa
 | Shared Workspace | 88% | ✅ | 控制面與 runtime 共享 DB/部署矩陣/治理狀態 |
 | CRUD Completeness | 80% | ✅ | Deployments/Governance 具備完整讀寫與歷史；策略配置 CRUD 仍不一致 |
 | UI Integration | 74% | ⚠️ | WebSocket + API 可觀測；控制面全景在 UI 還不完整 |
-| Capability Discovery | 68% | ⚠️ | 文檔有列出 API/RPC；缺少機器可讀 capability endpoint |
+| Capability Discovery | 76% | ⚠️ | 已新增 `/api/capabilities` 機器可讀能力發現；仍缺 UI 端引導 |
 | Prompt-Native Features | 70% | ⚠️ | 已支持 AI sidecar 調度，但策略行為仍大量硬編碼在 Rust agent |
 
-**Overall: 76% (Partial, architecture is viable for staged production).**
+**Overall: 77% (Partial, architecture is viable for staged production).**
 
 ## What Was Fixed In This Pass
 
@@ -48,4 +48,3 @@ Review target: current platform runtime (`Coordinator + agents + sidecar/governa
 1. 拆分 `main.rs`：保留 platform runtime 入口，legacy runner 移入 `bin/legacy_*`。
 2. 統一 agent namespace：收斂到單一 `agents/`（保留 adapter 與 domain 子模組）。
 3. 新增 Strategy Control API（版本、啟停、參數變更、評估指標），讓上層 AI 調度可閉環管理「策略迭代」而非只做風控治理。
-
