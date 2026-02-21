@@ -29,7 +29,8 @@ use crate::strategy::executor::OrderExecutor;
 
 use super::command::{
     AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
-    GovernancePolicySnapshot, GovernancePolicyUpdate, GovernanceStatusSnapshot,
+    DeploymentLedgerSnapshot, GovernancePolicySnapshot, GovernancePolicyUpdate,
+    GovernanceStatusSnapshot,
 };
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
@@ -908,10 +909,42 @@ impl CoordinatorHandle {
             )
         };
 
-        let crypto = self.crypto_allocator.read().await.ledger_snapshot();
-        let sports = self.sports_allocator.read().await.ledger_snapshot();
-        let politics = self.politics_allocator.read().await.ledger_snapshot();
-        let economics = self.economics_allocator.read().await.ledger_snapshot();
+        let (crypto, mut deployments) = {
+            let allocator = self.crypto_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        let (sports, sports_deployments) = {
+            let allocator = self.sports_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        deployments.extend(sports_deployments);
+        let (politics, politics_deployments) = {
+            let allocator = self.politics_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        deployments.extend(politics_deployments);
+        let (economics, economics_deployments) = {
+            let allocator = self.economics_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        deployments.extend(economics_deployments);
+        deployments.sort_by(|a, b| {
+            a.domain
+                .cmp(&b.domain)
+                .then_with(|| a.deployment_id.cmp(&b.deployment_id))
+        });
         let allocator_open_notional = crypto.open_notional_usd
             + sports.open_notional_usd
             + politics.open_notional_usd
@@ -935,6 +968,7 @@ impl CoordinatorHandle {
             daily_loss_limit_usd,
             queue,
             allocators: vec![crypto, sports, politics, economics],
+            deployments,
             updated_at: Utc::now(),
         }
     }
@@ -1592,6 +1626,41 @@ impl CryptoCapitalAllocator {
             available_notional_usd,
         }
     }
+
+    fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
+        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
+
+        for position in self.open.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.0 += position.amount;
+        }
+
+        for position in self.pending.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.1 += position.amount;
+        }
+
+        let mut rows = by_deployment
+            .into_iter()
+            .map(
+                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
+                    DeploymentLedgerSnapshot {
+                        deployment_id,
+                        domain: "crypto".to_string(),
+                        open_notional_usd,
+                        pending_notional_usd,
+                        total_notional_usd: open_notional_usd + pending_notional_usd,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
+        rows
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2010,6 +2079,41 @@ impl MarketCapitalAllocator {
             pending_notional_usd,
             available_notional_usd,
         }
+    }
+
+    fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
+        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
+
+        for position in self.open.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.0 += position.amount;
+        }
+
+        for position in self.pending.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.1 += position.amount;
+        }
+
+        let mut rows = by_deployment
+            .into_iter()
+            .map(
+                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
+                    DeploymentLedgerSnapshot {
+                        deployment_id,
+                        domain: self.domain_label.to_string(),
+                        open_notional_usd,
+                        pending_notional_usd,
+                        total_notional_usd: open_notional_usd + pending_notional_usd,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
+        rows
     }
 }
 
@@ -4453,5 +4557,76 @@ mod tests {
         assert_eq!(snap.open_notional_usd, dec!(5));
         assert_eq!(snap.pending_notional_usd, dec!(4));
         assert_eq!(snap.available_notional_usd, dec!(41));
+    }
+
+    #[test]
+    fn test_crypto_allocator_deployment_ledger_snapshot_groups_open_and_pending() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let buy_a = make_crypto_intent("BTC", "15m", true, 100, dec!(0.5))
+            .with_deployment_id("deploy.crypto.alpha");
+        assert!(allocator.reserve_buy(&buy_a).is_ok());
+        allocator.settle_buy_execution(&buy_a, 80, dec!(0.5)); // open $40
+
+        let pending_a = make_crypto_intent("BTC", "15m", true, 20, dec!(0.5))
+            .with_deployment_id("deploy.crypto.alpha");
+        assert!(allocator.reserve_buy(&pending_a).is_ok()); // pending $10
+
+        let buy_b = make_crypto_intent("ETH", "5m", true, 50, dec!(0.4))
+            .with_deployment_id("deploy.crypto.beta");
+        assert!(allocator.reserve_buy(&buy_b).is_ok());
+        allocator.settle_buy_execution(&buy_b, 25, dec!(0.4)); // open $10
+
+        let deployments = allocator.deployment_ledger_snapshot();
+        assert_eq!(deployments.len(), 2);
+        assert_eq!(deployments[0].deployment_id, "deploy.crypto.alpha");
+        assert_eq!(deployments[0].domain, "crypto");
+        assert_eq!(deployments[0].open_notional_usd, dec!(40));
+        assert_eq!(deployments[0].pending_notional_usd, dec!(10));
+        assert_eq!(deployments[0].total_notional_usd, dec!(50));
+
+        assert_eq!(deployments[1].deployment_id, "deploy.crypto.beta");
+        assert_eq!(deployments[1].domain, "crypto");
+        assert_eq!(deployments[1].open_notional_usd, dec!(10));
+        assert_eq!(deployments[1].pending_notional_usd, Decimal::ZERO);
+        assert_eq!(deployments[1].total_notional_usd, dec!(10));
+    }
+
+    #[test]
+    fn test_market_allocator_deployment_ledger_snapshot_groups_open_and_pending() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(60));
+        cfg.sports_market_cap_pct = dec!(1.0);
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let buy_a = make_sports_intent("nba-game-1", true, 100, dec!(0.2))
+            .with_deployment_id("deploy.sports.alpha");
+        assert!(allocator.reserve_buy(&buy_a).is_ok());
+        allocator.settle_buy_execution(&buy_a, 50, dec!(0.2)); // open $10
+
+        let pending_a = make_sports_intent("nba-game-2", true, 20, dec!(0.2))
+            .with_deployment_id("deploy.sports.alpha");
+        assert!(allocator.reserve_buy(&pending_a).is_ok()); // pending $4
+
+        let buy_b = make_sports_intent("nba-game-3", true, 40, dec!(0.25))
+            .with_deployment_id("deploy.sports.beta");
+        assert!(allocator.reserve_buy(&buy_b).is_ok());
+        allocator.settle_buy_execution(&buy_b, 20, dec!(0.25)); // open $5
+
+        let deployments = allocator.deployment_ledger_snapshot();
+        assert_eq!(deployments.len(), 2);
+        assert_eq!(deployments[0].deployment_id, "deploy.sports.alpha");
+        assert_eq!(deployments[0].domain, "sports");
+        assert_eq!(deployments[0].open_notional_usd, dec!(10));
+        assert_eq!(deployments[0].pending_notional_usd, dec!(4));
+        assert_eq!(deployments[0].total_notional_usd, dec!(14));
+
+        assert_eq!(deployments[1].deployment_id, "deploy.sports.beta");
+        assert_eq!(deployments[1].domain, "sports");
+        assert_eq!(deployments[1].open_notional_usd, dec!(5));
+        assert_eq!(deployments[1].pending_notional_usd, Decimal::ZERO);
+        assert_eq!(deployments[1].total_notional_usd, dec!(5));
     }
 }

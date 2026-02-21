@@ -90,6 +90,16 @@ pub struct AllocatorLedgerSnapshot {
     pub available_notional_usd: Decimal,
 }
 
+/// Per-deployment capital occupancy snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentLedgerSnapshot {
+    pub deployment_id: String,
+    pub domain: String,
+    pub open_notional_usd: Decimal,
+    pub pending_notional_usd: Decimal,
+    pub total_notional_usd: Decimal,
+}
+
 /// Runtime governance + risk + capital view for OpenClaw control-plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceStatusSnapshot {
@@ -103,5 +113,6 @@ pub struct GovernanceStatusSnapshot {
     pub daily_loss_limit_usd: Decimal,
     pub queue: QueueStatsSnapshot,
     pub allocators: Vec<AllocatorLedgerSnapshot>,
+    pub deployments: Vec<DeploymentLedgerSnapshot>,
     pub updated_at: DateTime<Utc>,
 }
