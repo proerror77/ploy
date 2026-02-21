@@ -13,7 +13,6 @@ use ploy::cli::legacy::{
 };
 use ploy::config::AppConfig;
 use ploy::error::{PloyError, Result};
-use ploy::safety::legacy_live::legacy_live_allowed;
 use ploy::services::{DataCollector, HealthServer, HealthState, Metrics};
 use ploy::strategy::{IdempotencyManager, OrderExecutor, StrategyEngine};
 use std::sync::Arc;
@@ -2054,9 +2053,10 @@ async fn run_bot(cli: &Cli) -> Result<()> {
         config.market.market_slug, config.dry_run.enabled
     );
 
-    if !config.dry_run.enabled && !legacy_live_allowed() {
+    if !config.dry_run.enabled {
         return Err(PloyError::Validation(
-            "legacy `ploy run` live runtime is disabled by default; use `ploy platform start` (Coordinator-only live) or set PLOY_ALLOW_LEGACY_LIVE=true for explicit override".to_string(),
+            "legacy `ploy run` live runtime is disabled; use `ploy platform start` (Coordinator-only live execution path)"
+                .to_string(),
         ));
     }
 
@@ -2552,12 +2552,8 @@ async fn run_simple_bot(
 }
 
 fn enforce_coordinator_only_live(cmd: &str) -> Result<()> {
-    if legacy_live_allowed() {
-        return Ok(());
-    }
-
     let msg = format!(
-        "legacy `{}` live runtime is disabled by default; use `ploy platform start` (Coordinator-only live) or set PLOY_ALLOW_LEGACY_LIVE=true for explicit override",
+        "legacy `{}` live runtime is disabled; use `ploy platform start` (Coordinator-only live execution path)",
         cmd
     );
     warn!("{msg}");
