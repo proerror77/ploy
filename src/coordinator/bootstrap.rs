@@ -2897,6 +2897,10 @@ impl PlatformBootstrapConfig {
                 .max(rust_decimal::Decimal::ZERO)
                 .min(rust_decimal::Decimal::ONE);
         }
+        cfg.coordinator.kelly_min_shares = env_u64(
+            "PLOY_COORDINATOR__KELLY_MIN_SHARES",
+            cfg.coordinator.kelly_min_shares,
+        );
 
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.

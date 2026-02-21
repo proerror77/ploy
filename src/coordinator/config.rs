@@ -80,6 +80,12 @@ pub struct CoordinatorConfig {
     pub kelly_fraction_multiplier: Decimal,
     /// Optional minimum edge (p - price) required to allow sizing; set 0 to disable.
     pub kelly_min_edge: Decimal,
+    /// Optional floor for Kelly sizing (shares). If >0, entries that would size to 0 shares
+    /// will be bumped to this minimum (bounded by the strategy-provided max shares).
+    ///
+    /// This helps keep the system "alive" under conservative bankroll/caps without disabling
+    /// Kelly entirely. Set 0 to preserve strict Kelly behavior (block when < 1 share).
+    pub kelly_min_shares: u64,
 }
 
 impl Default for CoordinatorConfig {
@@ -116,6 +122,7 @@ impl Default for CoordinatorConfig {
             kelly_sizing_enabled: false,
             kelly_fraction_multiplier: Decimal::new(25, 2), // 0.25 (quarter-Kelly)
             kelly_min_edge: Decimal::ZERO,
+            kelly_min_shares: 0,
         }
     }
 }

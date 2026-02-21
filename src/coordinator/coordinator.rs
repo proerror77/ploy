@@ -1795,18 +1795,32 @@ impl Coordinator {
             return Some("kelly target_notional <= 0".to_string());
         }
 
-        let shares = (target_notional / price)
+        let sized_shares = (target_notional / price)
             .floor()
             .to_u64()
             .unwrap_or(0)
             .min(intent.shares);
 
-        if shares == 0 {
-            return Some("kelly sizing produced 0 shares".to_string());
+        let mut final_shares = sized_shares;
+        if final_shares == 0 {
+            let floor_shares = self.config.kelly_min_shares.min(intent.shares);
+            if floor_shares > 0 {
+                final_shares = floor_shares;
+                intent.metadata.insert(
+                    "kelly_min_shares_applied".to_string(),
+                    "true".to_string(),
+                );
+                intent.metadata.insert(
+                    "kelly_min_shares_floor".to_string(),
+                    floor_shares.to_string(),
+                );
+            } else {
+                return Some("kelly sizing produced 0 shares".to_string());
+            }
         }
 
-        if shares < intent.shares {
-            intent.shares = shares;
+        if final_shares < intent.shares {
+            intent.shares = final_shares;
         }
 
         intent
@@ -1829,7 +1843,12 @@ impl Coordinator {
         );
         intent
             .metadata
-            .insert("kelly_sized_shares".to_string(), shares.to_string());
+            .insert("kelly_sized_shares".to_string(), sized_shares.to_string());
+        if final_shares != sized_shares {
+            intent
+                .metadata
+                .insert("kelly_final_shares".to_string(), final_shares.to_string());
+        }
 
         None
     }
