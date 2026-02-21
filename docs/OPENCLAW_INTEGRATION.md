@@ -125,7 +125,7 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 - `pm.get_event_details`（params: `event_id`）
 - `pm.get_market`（params: `condition_id`）
 - `pm.get_order_book`（params: `token_id`）
-- `pm.submit_limit`（params: `token_id`, `order_side`=`BUY|SELL`, `shares`, `limit_price`, `market_side`=`UP|DOWN`(optional), `idempotency_key`）
+- `pm.submit_limit`（params: `deployment_id`(required), `token_id`, `order_side`=`BUY|SELL`, `shares`, `limit_price`, `market_side`=`UP|DOWN`(optional), `market_slug`(optional), `idempotency_key`）
 - `gateway.submit_intent`（params: `deployment_id`, `domain`, `market_slug`, `token_id`, `side`, `order_side`, `size`, `price_limit`, `idempotency_key`）
 - `event_edge.scan`（params: `event_id` 或 `title`）
 - `multi_outcome.analyze`（params: `event_id`；回傳 outcome summary + 偵測到的套利訊號）

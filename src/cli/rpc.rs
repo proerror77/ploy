@@ -1015,8 +1015,21 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
             };
             let agent_id = parse_optional_str(&params, "agent_id")
                 .unwrap_or_else(|| "openclaw_rpc".to_string());
-            let deployment_id = parse_optional_str(&params, "deployment_id")
-                .unwrap_or_else(|| "openclaw_rpc.default".to_string());
+            let deployment_id = match parse_str(&params, "deployment_id") {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "{}",
+                        jsonrpc_err(
+                            req.id,
+                            -32602,
+                            "invalid params",
+                            Some(json!({"detail": e.to_string()}))
+                        )
+                    );
+                    return Ok(());
+                }
+            };
             let market_slug =
                 parse_optional_str(&params, "market_slug").unwrap_or_else(|| token_id.clone());
 
