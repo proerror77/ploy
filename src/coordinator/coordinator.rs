@@ -165,6 +165,12 @@ fn governance_block_reason(
     intent: &OrderIntent,
     current_account_notional: Decimal,
 ) -> Option<String> {
+    // Binary-options runtime: sell intents are treated as risk-reducing closes.
+    // Governance "new intent" gates must not block exits/de-risking.
+    if !intent.is_buy {
+        return None;
+    }
+
     if policy.block_new_intents {
         return Some("global governance policy blocks new intents".to_string());
     }
@@ -201,6 +207,146 @@ fn governance_block_reason(
     None
 }
 
+async fn persist_governance_policy(
+    pool: &PgPool,
+    account_id: &str,
+    policy: &GovernancePolicy,
+) -> Result<()> {
+    let mut blocked_domains = policy
+        .blocked_domains
+        .iter()
+        .map(|d| governance_domain_label(*d).to_string())
+        .collect::<Vec<_>>();
+    blocked_domains.sort();
+
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_governance_policies (
+            account_id,
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (account_id) DO UPDATE SET
+            block_new_intents = EXCLUDED.block_new_intents,
+            blocked_domains = EXCLUDED.blocked_domains,
+            max_intent_notional_usd = EXCLUDED.max_intent_notional_usd,
+            max_total_notional_usd = EXCLUDED.max_total_notional_usd,
+            updated_at = EXCLUDED.updated_at,
+            updated_by = EXCLUDED.updated_by,
+            reason = EXCLUDED.reason
+        "#,
+    )
+    .bind(account_id)
+    .bind(policy.block_new_intents)
+    .bind(sqlx::types::Json(blocked_domains))
+    .bind(policy.max_intent_notional_usd)
+    .bind(policy.max_total_notional_usd)
+    .bind(policy.updated_at)
+    .bind(policy.updated_by.clone())
+    .bind(policy.reason.clone())
+    .execute(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("persist governance policy: {}", e)))?;
+
+    Ok(())
+}
+
+async fn load_governance_policy(
+    pool: &PgPool,
+    account_id: &str,
+) -> Result<Option<GovernancePolicy>> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            bool,
+            sqlx::types::Json<Vec<String>>,
+            Option<Decimal>,
+            Option<Decimal>,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        FROM coordinator_governance_policies
+        WHERE account_id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("load governance policy: {}", e)))?;
+
+    let Some((
+        block_new_intents,
+        sqlx::types::Json(raw_blocked_domains),
+        max_intent_notional_usd,
+        max_total_notional_usd,
+        updated_at,
+        updated_by,
+        reason,
+    )) = row
+    else {
+        return Ok(None);
+    };
+
+    let mut blocked_domains = HashSet::new();
+    let mut unknown_domains = Vec::new();
+    for raw in raw_blocked_domains {
+        if let Some(domain) = parse_governance_domain(&raw) {
+            blocked_domains.insert(domain);
+        } else {
+            unknown_domains.push(raw);
+        }
+    }
+    if !unknown_domains.is_empty() {
+        warn!(
+            account_id = %account_id,
+            domains = ?unknown_domains,
+            "ignoring unknown governance blocked domains from DB"
+        );
+    }
+
+    let max_intent_notional_usd = max_intent_notional_usd.filter(|v| *v > Decimal::ZERO);
+    let max_total_notional_usd = max_total_notional_usd.filter(|v| *v > Decimal::ZERO);
+    let updated_by = {
+        let trimmed = updated_by.trim();
+        if trimmed.is_empty() {
+            "db.restore".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let reason = reason.and_then(|v| {
+        let trimmed = v.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+
+    Ok(Some(GovernancePolicy {
+        block_new_intents,
+        blocked_domains,
+        max_intent_notional_usd,
+        max_total_notional_usd,
+        updated_at,
+        updated_by,
+        reason,
+    }))
+}
+
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
@@ -215,6 +361,7 @@ pub struct CoordinatorHandle {
     sports_allocator: Arc<RwLock<SportsCapitalAllocator>>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
+    governance_store_pool: Option<PgPool>,
 }
 
 impl CoordinatorHandle {
@@ -312,6 +459,9 @@ impl CoordinatorHandle {
     ) -> Result<GovernancePolicySnapshot> {
         let next = GovernancePolicy::try_from_update(update)
             .map_err(crate::error::PloyError::Validation)?;
+        if let Some(pool) = self.governance_store_pool.as_ref() {
+            persist_governance_policy(pool, &self.account_id, &next).await?;
+        }
         let snapshot = next.to_snapshot();
         let mut policy = self.governance_policy.write().await;
         *policy = next;
@@ -326,14 +476,21 @@ impl CoordinatorHandle {
         let platform_exposure_usd = self.risk_gate.total_exposure().await;
         let (daily_pnl_usd, _, _) = self.risk_gate.daily_stats().await;
         let daily_loss_limit_usd = self.risk_gate.daily_loss_limit();
-        let queue = QueueStatsSnapshot::from(self.order_queue.read().await.stats());
+        let (queue, other_pending_buy_notional_usd) = {
+            let queue = self.order_queue.read().await;
+            (
+                QueueStatsSnapshot::from(queue.stats()),
+                queue.pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]),
+            )
+        };
 
         let crypto = self.crypto_allocator.read().await.ledger_snapshot();
         let sports = self.sports_allocator.read().await.ledger_snapshot();
-        let account_notional_usd = crypto.open_notional_usd
-            + crypto.pending_notional_usd
-            + sports.open_notional_usd
-            + sports.pending_notional_usd;
+        let allocator_open_notional = crypto.open_notional_usd + sports.open_notional_usd;
+        let allocator_pending_notional = crypto.pending_notional_usd + sports.pending_notional_usd;
+        let open_notional_usd = platform_exposure_usd.max(allocator_open_notional);
+        let account_notional_usd =
+            open_notional_usd + allocator_pending_notional + other_pending_buy_notional_usd;
 
         GovernanceStatusSnapshot {
             account_id: self.account_id.clone(),
@@ -364,6 +521,7 @@ pub struct Coordinator {
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
     execution_log_pool: Option<PgPool>,
+    governance_store_pool: Option<PgPool>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
@@ -1390,6 +1548,7 @@ impl Coordinator {
             executor,
             global_state,
             execution_log_pool: None,
+            governance_store_pool: None,
             ingress_mode,
             governance_policy,
             stale_heartbeat_warn_at,
@@ -1408,6 +1567,33 @@ impl Coordinator {
         self.execution_log_pool = Some(pool);
     }
 
+    /// Enable DB persistence for coordinator governance policy.
+    pub fn set_governance_store_pool(&mut self, pool: PgPool) {
+        self.governance_store_pool = Some(pool);
+    }
+
+    /// Restore runtime governance policy from DB (if a persisted row exists).
+    pub async fn load_persisted_governance_policy(&self) -> Result<()> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let Some(policy) = load_governance_policy(pool, &self.account_id).await? else {
+            return Ok(());
+        };
+
+        let snapshot = policy.to_snapshot();
+        let mut state = self.governance_policy.write().await;
+        *state = policy;
+        info!(
+            account_id = %self.account_id,
+            updated_by = %snapshot.updated_by,
+            updated_at = %snapshot.updated_at,
+            "restored governance policy from DB"
+        );
+        Ok(())
+    }
+
     /// Create a clonable handle for agents
     pub fn handle(&self) -> CoordinatorHandle {
         CoordinatorHandle {
@@ -1422,6 +1608,7 @@ impl Coordinator {
             sports_allocator: self.sports_allocator.clone(),
             ingress_mode: self.ingress_mode.clone(),
             governance_policy: self.governance_policy.clone(),
+            governance_store_pool: self.governance_store_pool.clone(),
         }
     }
 
@@ -1702,15 +1889,26 @@ impl Coordinator {
     }
 
     async fn current_account_notional(&self) -> Decimal {
-        let crypto_total = {
+        let platform_exposure = self.risk_gate.total_exposure().await;
+
+        let (crypto_open, crypto_pending) = {
             let allocator = self.crypto_allocator.read().await;
-            allocator.open.total + allocator.pending.total
+            (allocator.open.total, allocator.pending.total)
         };
-        let sports_total = {
+        let (sports_open, sports_pending) = {
             let allocator = self.sports_allocator.read().await;
-            allocator.open.total + allocator.pending.total
+            (allocator.open.total, allocator.pending.total)
         };
-        crypto_total + sports_total
+        let other_pending_buy_notional = self
+            .order_queue
+            .read()
+            .await
+            .pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]);
+
+        let allocator_open = crypto_open + sports_open;
+        let open_notional = platform_exposure.max(allocator_open);
+        let allocator_pending = crypto_pending + sports_pending;
+        open_notional + allocator_pending + other_pending_buy_notional
     }
 
     async fn reserve_domain_capital(&self, intent: &OrderIntent) -> Option<String> {
@@ -2914,6 +3112,32 @@ mod tests {
         assert!(reason
             .unwrap_or_default()
             .contains("max_total_notional_usd"));
+    }
+
+    #[test]
+    fn test_governance_policy_allows_sell_when_new_intents_blocked() {
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: true,
+            blocked_domains: vec!["sports".to_string()],
+            max_intent_notional_usd: Some(dec!(1)),
+            max_total_notional_usd: Some(dec!(1)),
+            updated_by: "openclaw".to_string(),
+            reason: Some("circuit".to_string()),
+        })
+        .expect("valid policy");
+
+        let intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            false, // sell/close
+            10,
+            dec!(0.45),
+        );
+        let reason = governance_block_reason(&policy, &intent, dec!(999));
+        assert!(reason.is_none(), "sell intent should remain allowed");
     }
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {

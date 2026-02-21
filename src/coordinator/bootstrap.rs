@@ -343,6 +343,33 @@ pub(crate) async fn ensure_agent_order_executions_table(pool: &PgPool) -> Result
     Ok(())
 }
 
+pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS coordinator_governance_policies (
+            account_id TEXT PRIMARY KEY,
+            block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
+            blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+            max_intent_notional_usd NUMERIC,
+            max_total_notional_usd NUMERIC,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_by TEXT NOT NULL,
+            reason TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_coordinator_governance_policies_updated_at ON coordinator_governance_policies(updated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub(crate) async fn ensure_pm_token_settlements_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"
@@ -2849,10 +2876,17 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.sports_auto_split_by_active_markets,
         );
 
-        cfg.coordinator.governance_block_new_intents = env_bool(
+        cfg.coordinator.governance_block_new_intents = std::env::var(
             "PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS",
-            cfg.coordinator.governance_block_new_intents,
-        );
+        )
+        .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCK_NEW_INTENTS"))
+        .ok()
+        .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => cfg.coordinator.governance_block_new_intents,
+        })
+        .unwrap_or(cfg.coordinator.governance_block_new_intents);
         cfg.coordinator.governance_max_intent_notional_usd =
             env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_INTENT_NOTIONAL_USD")
                 .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_INTENT_NOTIONAL_USD"))
@@ -3412,6 +3446,32 @@ pub async fn start_platform(
                 )));
             }
             warn!(error = %e, "failed to upsert account metadata");
+        }
+        if let Err(e) = ensure_coordinator_governance_policies_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure coordinator_governance_policies table: {}",
+                    e
+                )));
+            }
+            warn!(
+                error = %e,
+                "failed to ensure coordinator_governance_policies table; governance persistence disabled"
+            );
+        } else {
+            coordinator.set_governance_store_pool(pool.clone());
+            if let Err(e) = coordinator.load_persisted_governance_policy().await {
+                if require_startup_schema {
+                    return Err(crate::error::PloyError::Internal(format!(
+                        "failed to restore coordinator governance policy: {}",
+                        e
+                    )));
+                }
+                warn!(
+                    error = %e,
+                    "failed to restore coordinator governance policy from DB"
+                );
+            }
         }
         if let Err(e) = ensure_agent_order_executions_table(pool).await {
             if require_startup_schema {

@@ -1,11 +1,12 @@
 //! Order Queue - 優先級訂單隊列
 
 use chrono::Utc;
+use rust_decimal::Decimal;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
-use super::types::OrderIntent;
+use super::types::{Domain, OrderIntent};
 
 /// 包裝 OrderIntent 以支持優先級排序
 #[derive(Debug)]
@@ -222,6 +223,17 @@ impl OrderQueue {
             low_count: priority_counts[3],
         }
     }
+
+    /// Sum buy-intent notionals in queue, excluding specific domains.
+    pub fn pending_buy_notional_excluding_domains(&self, excluded: &[Domain]) -> Decimal {
+        self.heap
+            .iter()
+            .filter_map(|item| {
+                let intent = &item.intent;
+                (intent.is_buy && !excluded.contains(&intent.domain)).then_some(intent.notional_value())
+            })
+            .sum()
+    }
 }
 
 /// 隊列統計
@@ -366,5 +378,50 @@ mod tests {
         assert_eq!(stats.high_count, 1);
         assert_eq!(stats.normal_count, 1);
         assert_eq!(stats.low_count, 1);
+    }
+
+    #[test]
+    fn test_pending_buy_notional_excluding_domains() {
+        let mut queue = OrderQueue::new(100);
+
+        let crypto_buy = OrderIntent::new(
+            "a1",
+            Domain::Crypto,
+            "btc-up",
+            "token-btc",
+            Side::Up,
+            true,
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        ); // 5
+        let politics_buy = OrderIntent::new(
+            "a2",
+            Domain::Politics,
+            "election-yes",
+            "token-pol",
+            Side::Up,
+            true,
+            20,
+            Decimal::from_str_exact("0.50").unwrap(),
+        ); // 10
+        let mut politics_sell = OrderIntent::new(
+            "a3",
+            Domain::Politics,
+            "election-yes",
+            "token-pol",
+            Side::Up,
+            false,
+            30,
+            Decimal::from_str_exact("0.50").unwrap(),
+        ); // ignored
+        politics_sell.priority = OrderPriority::Low;
+
+        queue.enqueue(crypto_buy).unwrap();
+        queue.enqueue(politics_buy).unwrap();
+        queue.enqueue(politics_sell).unwrap();
+
+        let notional =
+            queue.pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]);
+        assert_eq!(notional, Decimal::from_str_exact("10.00").unwrap());
     }
 }
