@@ -1,9 +1,11 @@
 name: Deploy to tango-2-1
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["Test"]
+    branches: [main]
+    types:
+      - completed
   workflow_dispatch:  # 允許手動觸發
 
 env:
@@ -14,6 +16,7 @@ env:
 
 jobs:
   deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-latest
 
     steps:
