@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -60,6 +61,52 @@ impl PoliticsTradingAgent {
         self.data_source = ds;
         self
     }
+
+    async fn submit_force_close_exits(&self, ctx: &AgentContext) {
+        let global = ctx.read_global_state().await;
+        let positions = global
+            .positions
+            .into_iter()
+            .filter(|p| p.agent_id == self.config.agent_id && p.shares > 0)
+            .collect::<Vec<_>>();
+
+        if positions.is_empty() {
+            info!(agent = self.config.agent_id, "force close: no open positions");
+            return;
+        }
+
+        info!(
+            agent = self.config.agent_id,
+            positions = positions.len(),
+            "force close: submitting reduce-only exits"
+        );
+
+        for pos in positions {
+            let intent = OrderIntent::new(
+                &self.config.agent_id,
+                pos.domain,
+                &pos.market_slug,
+                &pos.token_id,
+                pos.side,
+                false,
+                pos.shares,
+                dec!(0.01),
+            )
+            .with_priority(OrderPriority::Critical)
+            .with_metadata("intent_reason", "force_close")
+            .with_metadata("position_id", &pos.position_id)
+            .with_metadata("force_close_price_floor", "0.01");
+
+            if let Err(e) = ctx.submit_order(intent).await {
+                warn!(
+                    agent = self.config.agent_id,
+                    position_id = %pos.position_id,
+                    error = %e,
+                    "force close exit submit failed"
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -98,6 +145,7 @@ impl TradingAgent for PoliticsTradingAgent {
         }
 
         let mut status = AgentStatus::Running;
+        let mut force_close_requested = false;
         let mut position_count: usize = 0;
         let mut total_exposure = Decimal::ZERO;
         let daily_pnl = Decimal::ZERO;
@@ -213,6 +261,7 @@ impl TradingAgent for PoliticsTradingAgent {
                         }
                         Some(CoordinatorCommand::ForceClose) => {
                             warn!(agent = self.config.agent_id, "force close");
+                            force_close_requested = true;
                             break;
                         }
                         Some(CoordinatorCommand::HealthCheck(tx)) => {
@@ -253,6 +302,10 @@ impl TradingAgent for PoliticsTradingAgent {
                     ).await;
                 }
             }
+        }
+
+        if force_close_requested {
+            self.submit_force_close_exits(&ctx).await;
         }
 
         info!(agent = self.config.agent_id, "politics agent stopped");
