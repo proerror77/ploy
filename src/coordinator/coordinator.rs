@@ -2170,20 +2170,23 @@ impl Coordinator {
     async fn handle_state_update(&self, snapshot: AgentSnapshot) {
         let agent_id = snapshot.agent_id.clone();
 
-        // Update risk gate with latest exposure data
-        self.risk_gate
-            .update_agent_exposure(
-                &agent_id,
-                snapshot.exposure,
-                snapshot.unrealized_pnl,
-                snapshot.position_count,
-                0, // unhedged count not tracked in snapshot
-            )
-            .await;
-
         // Store snapshot
         let mut state = self.global_state.write().await;
         state.agents.insert(agent_id, snapshot);
+    }
+
+    async fn refresh_risk_exposure_for_agent(&self, agent_id: &str) {
+        // RiskGate exposure should be derived from executed positions, not agent self-reporting.
+        let stats = self.positions.agent_stats(agent_id).await;
+        self.risk_gate
+            .update_agent_exposure(
+                agent_id,
+                stats.exposure,
+                stats.unrealized_pnl,
+                stats.position_count,
+                stats.unhedged_count.min(u32::MAX as usize) as u32,
+            )
+            .await;
     }
 
     /// Drain the order queue and execute via OrderExecutor
@@ -2261,6 +2264,8 @@ impl Coordinator {
                             )
                             .await;
                         }
+
+                        self.refresh_risk_exposure_for_agent(&agent_id).await;
                     }
                 }
                 Err(e) => {
