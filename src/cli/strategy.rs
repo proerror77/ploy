@@ -19,21 +19,10 @@ use tracing::{error, info, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
+use crate::safety::legacy_live::legacy_strategy_live_allowed;
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};
-
-fn legacy_strategy_live_allowed() -> bool {
-    matches!(
-        std::env::var("PLOY_ALLOW_LEGACY_STRATEGY_LIVE")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoLobDatasetFormat {

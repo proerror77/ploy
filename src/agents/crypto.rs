@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,24 @@ use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 const STRATEGY_ID: &str = "crypto_momentum";
+
+/// Standard normal CDF approximation (Abramowitz-Stegun), ~4dp accuracy.
+fn normal_cdf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
+
+    0.5 * (1.0 + sign * y)
+}
 
 fn default_exit_edge_floor() -> Decimal {
     dec!(0.02)
@@ -478,7 +497,8 @@ impl TradingAgent for CryptoTradingAgent {
                     let long_momentum_opt = spot.momentum(30);
                     let short_momentum = short_momentum_opt.unwrap_or(Decimal::ZERO);
                     let long_momentum = long_momentum_opt.unwrap_or(Decimal::ZERO);
-                    let rolling_volatility = spot.volatility(60).unwrap_or(Decimal::ZERO);
+                    let rolling_volatility_opt = spot.volatility(60);
+                    let rolling_volatility = rolling_volatility_opt.unwrap_or(Decimal::ZERO);
 
                     // Helper: infer the correct direction from the net move since the event window start.
                     // For UP/DOWN markets, resolution is based on end_price >= start_price, not micro-momentum.
@@ -723,9 +743,23 @@ impl TradingAgent for CryptoTradingAgent {
                             Side::Down => (event.down_token_id.clone(), down_ask),
                         };
 
-                        // Best-effort fair value estimate from window move (metadata only).
-                        let shift = (window_move * dec!(100)).clamp(dec!(-0.45), dec!(0.45));
-                        let p_up = (dec!(0.50) + shift).max(dec!(0.05)).min(dec!(0.95));
+                        // Best-effort fair value estimate: P(UP) from window move + remaining-time volatility.
+                        // Model: future return ~ Normal(0, sigma_1s^2 * remaining_secs).
+                        let p_up = if window_remaining_secs > 0 {
+                            let sigma_1s = rolling_volatility_opt.unwrap_or(Decimal::ZERO);
+                            let sigma_1s_f = sigma_1s.to_f64().unwrap_or(0.0);
+                            let sigma_rem = sigma_1s_f * (window_remaining_secs as f64).sqrt();
+                            let w = window_move.to_f64().unwrap_or(0.0);
+                            if sigma_rem.is_finite() && sigma_rem > 0.0 && w.is_finite() {
+                                normal_cdf(w / sigma_rem)
+                            } else {
+                                0.5
+                            }
+                        } else {
+                            0.5
+                        };
+                        let p_up = Decimal::from_f64(p_up).unwrap_or(dec!(0.5));
+                        let p_up = p_up.max(dec!(0.01)).min(dec!(0.99));
                         let fair_value = match side {
                             Side::Up => p_up,
                             Side::Down => Decimal::ONE - p_up,
@@ -774,6 +808,7 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("signal_short_ma", &short_momentum.to_string())
                         .with_metadata("signal_long_ma", &long_momentum.to_string())
                         .with_metadata("signal_rolling_volatility", &rolling_volatility.to_string())
+                        .with_metadata("p_up", &p_up.to_string())
                         .with_metadata("signal_fair_value", &fair_value.to_string())
                         .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("signal_edge", &signal_edge.to_string())

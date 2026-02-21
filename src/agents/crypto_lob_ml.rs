@@ -913,6 +913,8 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
                         .with_metadata("signal_edge", &edge.to_string())
                         .with_metadata("signal_confidence", &confidence.to_string())
+                        .with_metadata("signal_fair_value", &confidence.to_string())
+                        .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("pm_up_ask", &up_ask.to_string())
                         .with_metadata("pm_down_ask", &down_ask.to_string())
                         .with_metadata("lob_best_bid", &lob.best_bid.to_string())

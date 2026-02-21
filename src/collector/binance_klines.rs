@@ -134,6 +134,92 @@ impl BinanceKlineClient {
         Ok(klines)
     }
 
+    /// Fetch klines for a given time range (inclusive start, exclusive-ish end).
+    ///
+    /// Binance returns at most 1000 rows per request, so this paginates forward by `close_time`.
+    /// `interval` examples: "1m", "5m", "15m".
+    pub async fn fetch_klines_range(
+        &self,
+        symbol: &str,
+        interval: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<Kline>> {
+        let mut out: Vec<Kline> = Vec::new();
+        let mut start_ms = start.timestamp_millis();
+        let end_ms = end.timestamp_millis();
+
+        if end_ms <= start_ms {
+            return Ok(out);
+        }
+
+        // Safety: avoid infinite loops on unexpected API behavior.
+        for _ in 0..20_000 {
+            if start_ms >= end_ms {
+                break;
+            }
+
+            let url = format!(
+                "{}/api/v3/klines?symbol={}&interval={}&limit=1000&startTime={}&endTime={}",
+                BINANCE_API_URL, symbol, interval, start_ms, end_ms
+            );
+
+            debug!("Fetching K-lines range: {}", url);
+
+            let response = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| PloyError::Internal(format!("K-line request failed: {}", e)))?;
+
+            if !response.status().is_success() {
+                return Err(PloyError::Internal(format!(
+                    "K-line API error: {}",
+                    response.status()
+                )));
+            }
+
+            let data: Vec<Vec<serde_json::Value>> = response
+                .json()
+                .await
+                .map_err(|e| PloyError::Internal(format!("K-line parse error: {}", e)))?;
+
+            if data.is_empty() {
+                break;
+            }
+
+            let mut parsed_batch: Vec<Kline> = data
+                .iter()
+                .filter_map(|row| self.parse_kline_row(row))
+                .collect();
+
+            if parsed_batch.is_empty() {
+                break;
+            }
+
+            // Advance paging cursor by the last candle close_time.
+            let last_close_ms = parsed_batch
+                .last()
+                .map(|k| k.close_time.timestamp_millis())
+                .unwrap_or(start_ms);
+            let next_start_ms = last_close_ms.saturating_add(1);
+            if next_start_ms <= start_ms {
+                break;
+            }
+            start_ms = next_start_ms;
+
+            out.append(&mut parsed_batch);
+
+            // Light rate limit.
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+
+        out.sort_by_key(|k| k.open_time);
+        out.dedup_by_key(|k| k.open_time);
+        Ok(out)
+    }
+
     /// Parse a single K-line row from Binance API response
     fn parse_kline_row(&self, row: &[serde_json::Value]) -> Option<Kline> {
         if row.len() < 11 {

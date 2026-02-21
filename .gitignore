@@ -18,6 +18,7 @@ __pycache__/
 # Environment
 .env
 .env.local
+.env.production.backup
 *.pem
 *.key
 

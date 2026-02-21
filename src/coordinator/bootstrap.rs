@@ -2873,6 +2873,22 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.sports_auto_split_by_active_markets,
         );
 
+        // Coordinator-level Kelly sizing (optional; applied when intents carry `signal_fair_value`).
+        cfg.coordinator.kelly_sizing_enabled = env_bool(
+            "PLOY_COORDINATOR__KELLY_SIZING_ENABLED",
+            cfg.coordinator.kelly_sizing_enabled,
+        );
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__KELLY_FRACTION_MULTIPLIER").and_then(normalize_pct)
+        {
+            cfg.coordinator.kelly_fraction_multiplier = v;
+        }
+        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__KELLY_MIN_EDGE") {
+            cfg.coordinator.kelly_min_edge = v
+                .max(rust_decimal::Decimal::ZERO)
+                .min(rust_decimal::Decimal::ONE);
+        }
+
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
         cfg.crypto.default_shares = app.strategy.shares.max(1);

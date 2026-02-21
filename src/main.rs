@@ -13,6 +13,7 @@ use ploy::cli::legacy::{
 };
 use ploy::config::AppConfig;
 use ploy::error::{PloyError, Result};
+use ploy::safety::legacy_live::legacy_live_allowed;
 use ploy::services::{DataCollector, HealthServer, HealthState, Metrics};
 use ploy::strategy::{IdempotencyManager, OrderExecutor, StrategyEngine};
 use std::sync::Arc;
@@ -101,6 +102,9 @@ async fn main() -> Result<()> {
             dry_run,
         }) => {
             init_logging();
+            if !*dry_run {
+                enforce_coordinator_only_live("ploy trade")?;
+            }
             run_trade_mode(series, *shares, *move_pct, *sum_target, *dry_run).await?;
         }
         Some(Commands::Scan {
@@ -134,6 +138,9 @@ async fn main() -> Result<()> {
                 return Err(PloyError::Validation(
                     "event-edge runtime is disabled in openclaw lockdown mode".to_string(),
                 ));
+            }
+            if *trade && !*dry_run {
+                enforce_coordinator_only_live("ploy event-edge --trade")?;
             }
             run_event_edge_mode(
                 event.as_deref(),
@@ -188,6 +195,9 @@ async fn main() -> Result<()> {
             vwap_min_dev,
         }) => {
             init_logging();
+            if !*dry_run {
+                enforce_coordinator_only_live("ploy momentum")?;
+            }
             run_momentum_mode(
                 symbols,
                 *min_move,
@@ -219,6 +229,9 @@ async fn main() -> Result<()> {
             dry_run,
         }) => {
             init_logging();
+            if !*dry_run {
+                enforce_coordinator_only_live("ploy split-arb")?;
+            }
             run_split_arb_mode(
                 *max_entry,
                 *target_cost,
@@ -242,6 +255,9 @@ async fn main() -> Result<()> {
             chat,
         }) => {
             init_logging();
+            if *enable_trading {
+                enforce_coordinator_only_live("ploy agent --enable-trading")?;
+            }
             run_agent_mode(
                 mode,
                 market.as_deref(),
@@ -2038,6 +2054,12 @@ async fn run_bot(cli: &Cli) -> Result<()> {
         config.market.market_slug, config.dry_run.enabled
     );
 
+    if !config.dry_run.enabled && !legacy_live_allowed() {
+        return Err(PloyError::Validation(
+            "legacy `ploy run` live runtime is disabled by default; use `ploy platform start` (Coordinator-only live) or set PLOY_ALLOW_LEGACY_LIVE=true for explicit override".to_string(),
+        ));
+    }
+
     let parse_bool_env = |key: &str, default: bool| -> bool {
         std::env::var(key)
             .ok()
@@ -2527,6 +2549,20 @@ async fn run_simple_bot(
 
     info!("Shutdown complete");
     Ok(())
+}
+
+fn enforce_coordinator_only_live(cmd: &str) -> Result<()> {
+    if legacy_live_allowed() {
+        return Ok(());
+    }
+
+    let msg = format!(
+        "legacy `{}` live runtime is disabled by default; use `ploy platform start` (Coordinator-only live) or set PLOY_ALLOW_LEGACY_LIVE=true for explicit override",
+        cmd
+    );
+    warn!("{msg}");
+    println!("\x1b[31m✗ {}\x1b[0m", msg);
+    Err(PloyError::Validation(msg))
 }
 
 fn init_logging() {
@@ -3774,6 +3810,9 @@ async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             dry_run,
         } => {
             info!("Starting crypto split-arb strategy");
+            if !*dry_run {
+                enforce_coordinator_only_live("ploy crypto split-arb")?;
+            }
 
             // Map coins to series IDs
             let series_ids: Vec<String> = coins
@@ -3823,6 +3862,53 @@ async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             // TODO: Implement monitoring mode
             println!("Crypto monitoring mode not yet implemented");
         }
+        CryptoCommands::BacktestUpDown {
+            symbols,
+            days,
+            max_events_per_series,
+            entry_remaining_secs,
+            min_window_move_pcts,
+            binance_interval,
+            vol_lookback_minutes,
+            use_db_prices,
+            db_url,
+            max_snapshot_age_secs,
+        } => {
+            use ploy::analysis::updown_backtest::{run_updown_backtest, UpDownBacktestConfig};
+
+            let parse_u64_list = |raw: &str| -> Vec<u64> {
+                raw.split(',')
+                    .filter_map(|s| s.trim().parse::<u64>().ok())
+                    .collect()
+            };
+            let parse_decimal_list = |raw: &str| -> Vec<Decimal> {
+                raw.split(',')
+                    .filter_map(|s| s.trim().parse::<Decimal>().ok())
+                    .collect()
+            };
+
+            let symbols: Vec<String> = symbols
+                .split(',')
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let cfg = UpDownBacktestConfig {
+                symbols,
+                lookback_days: *days,
+                max_events_per_series: *max_events_per_series,
+                entry_remaining_secs: parse_u64_list(entry_remaining_secs),
+                min_window_move_pcts: parse_decimal_list(min_window_move_pcts),
+                binance_interval: binance_interval.clone(),
+                vol_lookback_minutes: *vol_lookback_minutes,
+                use_db_prices: *use_db_prices,
+                db_url: db_url.clone(),
+                max_snapshot_age_secs: *max_snapshot_age_secs,
+                ..Default::default()
+            };
+
+            run_updown_backtest(cfg).await?;
+        }
     }
 
     Ok(())
@@ -3852,6 +3938,9 @@ async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
             dry_run,
         } => {
             info!("Starting sports split-arb strategy");
+            if !*dry_run {
+                enforce_coordinator_only_live("ploy sports split-arb")?;
+            }
 
             // Parse leagues
             let league_list: Vec<SportsLeague> = leagues

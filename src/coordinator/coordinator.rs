@@ -9,6 +9,7 @@
 //!   - Periodically refresh GlobalState from aggregators
 
 use chrono::{Duration as ChronoDuration, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -751,6 +752,32 @@ impl CryptoCapitalAllocator {
         Ok(())
     }
 
+    fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
+        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
+            return None;
+        }
+
+        if self.total_cap <= Decimal::ZERO {
+            return Some(Decimal::ZERO);
+        }
+
+        let dims = CryptoIntentDimensions::from_intent(intent);
+        let remaining_total =
+            (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
+
+        let coin_cap = self.total_cap * self.coin_cap_for(&dims.coin);
+        let projected_coin =
+            self.open.value_for_coin(&dims.coin) + self.pending.value_for_coin(&dims.coin);
+        let remaining_coin = (coin_cap - projected_coin).max(Decimal::ZERO);
+
+        let horizon_cap = self.total_cap * self.horizon_cap_for(dims.horizon);
+        let projected_horizon = self.open.value_for_horizon(dims.horizon)
+            + self.pending.value_for_horizon(dims.horizon);
+        let remaining_horizon = (horizon_cap - projected_horizon).max(Decimal::ZERO);
+
+        Some(remaining_total.min(remaining_coin).min(remaining_horizon))
+    }
+
     fn release_buy_reservation(&mut self, intent_id: Uuid) {
         let Some(reservation) = self.pending_by_intent.remove(&intent_id) else {
             return;
@@ -1172,6 +1199,27 @@ impl SportsCapitalAllocator {
         let dynamic_cap = self.total_cap / Decimal::from(market_count);
         dynamic_cap.min(fixed_cap)
     }
+
+    fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
+        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
+            return None;
+        }
+
+        if self.total_cap <= Decimal::ZERO {
+            return Some(Decimal::ZERO);
+        }
+
+        let dims = SportsIntentDimensions::from_intent(intent);
+        let remaining_total =
+            (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
+
+        let market_cap = self.market_cap_for(&dims.market_key);
+        let projected_market = self.open.value_for_market(&dims.market_key)
+            + self.pending.value_for_market(&dims.market_key);
+        let remaining_market = (market_cap - projected_market).max(Decimal::ZERO);
+
+        Some(remaining_total.min(remaining_market))
+    }
 }
 
 impl Coordinator {
@@ -1495,6 +1543,7 @@ impl Coordinator {
 
     /// Risk-check an incoming order intent and enqueue if passed
     async fn handle_order_intent(&self, intent: OrderIntent) {
+        let mut intent = intent;
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
 
@@ -1548,59 +1597,222 @@ impl Coordinator {
             return;
         }
 
-        match self.risk_gate.check_order(&intent).await {
-            RiskCheckResult::Passed => {
-                if let Some(reason) = self.reserve_domain_capital(&intent).await {
-                    self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+        if let Some(reason) = self.apply_kelly_sizing(&mut intent).await {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by kelly sizing policy"
+            );
+            return;
+        }
+
+        let mut adjusted: Option<(u64, String)> = None;
+        let mut evaluated = intent;
+        for attempt in 0..3 {
+            match self.risk_gate.check_order(&evaluated).await {
+                RiskCheckResult::Passed => {
+                    if let Some(reason) = self.reserve_domain_capital(&evaluated).await {
+                        self.persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.clone()),
+                            adjusted.clone(),
+                        )
                         .await;
+                        warn!(
+                            %agent_id, %intent_id, reason = %reason,
+                            "order blocked by domain allocator"
+                        );
+                        return;
+                    }
+
+                    self.persist_risk_decision(&evaluated, "PASSED", None, adjusted.clone())
+                        .await;
+                    let mut queue = self.order_queue.write().await;
+                    match queue.enqueue(evaluated) {
+                        Ok(()) => {
+                            debug!(
+                                %agent_id, %intent_id,
+                                "order enqueued"
+                            );
+                        }
+                        Err(e) => {
+                            self.release_domain_reservation(intent_id).await;
+                            warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
+                        }
+                    }
+                    return;
+                }
+                RiskCheckResult::Blocked(reason) => {
+                    self.persist_risk_decision(
+                        &evaluated,
+                        "BLOCKED",
+                        Some(reason.to_string()),
+                        adjusted.clone(),
+                    )
+                    .await;
                     warn!(
-                        %agent_id, %intent_id, reason = %reason,
-                        "order blocked by domain allocator"
+                        %agent_id, %intent_id,
+                        reason = ?reason,
+                        "order blocked by risk gate"
                     );
                     return;
                 }
+                RiskCheckResult::Adjusted(suggestion) => {
+                    // Apply adjustment locally and re-evaluate; agents do not automatically resubmit.
+                    if suggestion.max_shares == 0 {
+                        let reason =
+                            format!("risk-gate suggested max_shares=0: {}", suggestion.reason);
+                        self.persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.clone()),
+                            adjusted.clone(),
+                        )
+                        .await;
+                        warn!(%agent_id, %intent_id, reason = %reason, "order blocked after risk adjustment");
+                        return;
+                    }
 
-                self.persist_risk_decision(&intent, "PASSED", None, None)
-                    .await;
-                let mut queue = self.order_queue.write().await;
-                match queue.enqueue(intent) {
-                    Ok(()) => {
-                        debug!(
-                            %agent_id, %intent_id,
-                            "order enqueued"
-                        );
-                    }
-                    Err(e) => {
-                        self.release_domain_reservation(intent_id).await;
-                        warn!(%agent_id, %intent_id, error = %e, "queue full, order dropped");
-                    }
+                    adjusted = Some((suggestion.max_shares, suggestion.reason.clone()));
+                    evaluated.shares = suggestion.max_shares;
+                    info!(
+                        %agent_id, %intent_id,
+                        attempt,
+                        max_shares = suggestion.max_shares,
+                        reason = %suggestion.reason,
+                        "order adjusted by risk gate; re-evaluating"
+                    );
                 }
             }
-            RiskCheckResult::Blocked(reason) => {
-                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
-                    .await;
-                warn!(
-                    %agent_id, %intent_id,
-                    reason = ?reason,
-                    "order blocked by risk gate"
-                );
-            }
-            RiskCheckResult::Adjusted(suggestion) => {
-                self.persist_risk_decision(
-                    &intent,
-                    "ADJUSTED",
-                    None,
-                    Some((suggestion.max_shares, suggestion.reason.clone())),
-                )
-                .await;
-                info!(
-                    %agent_id, %intent_id,
-                    max_shares = suggestion.max_shares,
-                    reason = %suggestion.reason,
-                    "order adjusted by risk gate — dropping (agent should resubmit)"
-                );
-            }
         }
+
+        let reason = "risk-gate adjustment loop exceeded max attempts".to_string();
+        self.persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
+            .await;
+        warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
+    }
+
+    async fn apply_kelly_sizing(&self, intent: &mut OrderIntent) -> Option<String> {
+        if !self.config.kelly_sizing_enabled {
+            return None;
+        }
+        if !intent.is_buy {
+            return None;
+        }
+        if intent.priority == OrderPriority::Critical {
+            return None;
+        }
+        if intent.limit_price <= Decimal::ZERO || intent.limit_price >= Decimal::ONE {
+            return None;
+        }
+
+        let p = intent
+            .metadata
+            .get("signal_fair_value")
+            .or_else(|| intent.metadata.get("signal_win_prob"))
+            .and_then(|v| Decimal::from_str(v).ok())?;
+        let p = p.max(Decimal::ZERO).min(Decimal::ONE);
+        let price = intent.limit_price;
+        let edge = p - price;
+
+        if edge < self.config.kelly_min_edge {
+            return Some(format!(
+                "kelly edge {} below min {}",
+                edge, self.config.kelly_min_edge
+            ));
+        }
+
+        let denom = Decimal::ONE - price;
+        if denom <= Decimal::ZERO {
+            return Some("kelly denom <= 0".to_string());
+        }
+
+        let raw_kelly = ((p - price) / denom).max(Decimal::ZERO).min(Decimal::ONE);
+        if raw_kelly <= Decimal::ZERO {
+            return Some("kelly fraction <= 0 (no positive edge)".to_string());
+        }
+
+        let mut effective_fraction = (raw_kelly * self.config.kelly_fraction_multiplier)
+            .max(Decimal::ZERO)
+            .min(Decimal::ONE);
+        if let Some(conf) = intent
+            .metadata
+            .get("signal_confidence")
+            .and_then(|v| Decimal::from_str(v).ok())
+        {
+            effective_fraction *= conf.max(Decimal::ZERO).min(Decimal::ONE);
+        }
+
+        if effective_fraction <= Decimal::ZERO {
+            return Some("kelly effective fraction <= 0".to_string());
+        }
+
+        // Prefer sizing against allocator remaining budget when enabled; otherwise,
+        // treat the strategy-provided notional as the bankroll for relative sizing.
+        let bankroll = match intent.domain {
+            Domain::Crypto => {
+                let allocator = self.crypto_allocator.read().await;
+                allocator
+                    .available_notional_for(intent)
+                    .unwrap_or_else(|| intent.notional_value())
+            }
+            Domain::Sports => {
+                let allocator = self.sports_allocator.read().await;
+                allocator
+                    .available_notional_for(intent)
+                    .unwrap_or_else(|| intent.notional_value())
+            }
+            _ => intent.notional_value(),
+        };
+
+        if bankroll <= Decimal::ZERO {
+            return Some("kelly bankroll <= 0".to_string());
+        }
+
+        let target_notional = (bankroll * effective_fraction).max(Decimal::ZERO);
+        if target_notional <= Decimal::ZERO {
+            return Some("kelly target_notional <= 0".to_string());
+        }
+
+        let shares = (target_notional / price)
+            .floor()
+            .to_u64()
+            .unwrap_or(0)
+            .min(intent.shares);
+
+        if shares == 0 {
+            return Some("kelly sizing produced 0 shares".to_string());
+        }
+
+        if shares < intent.shares {
+            intent.shares = shares;
+        }
+
+        intent
+            .metadata
+            .insert("kelly_fraction_raw".to_string(), raw_kelly.to_string());
+        intent.metadata.insert(
+            "kelly_fraction_multiplier".to_string(),
+            self.config.kelly_fraction_multiplier.to_string(),
+        );
+        intent.metadata.insert(
+            "kelly_fraction_effective".to_string(),
+            effective_fraction.to_string(),
+        );
+        intent
+            .metadata
+            .insert("kelly_bankroll_usd".to_string(), bankroll.to_string());
+        intent.metadata.insert(
+            "kelly_target_notional_usd".to_string(),
+            target_notional.to_string(),
+        );
+        intent
+            .metadata
+            .insert("kelly_sized_shares".to_string(), shares.to_string());
+
+        None
     }
 
     async fn check_duplicate_intent(&self, intent: &OrderIntent) -> Option<String> {

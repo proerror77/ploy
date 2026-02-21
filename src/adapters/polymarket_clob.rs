@@ -1216,6 +1216,31 @@ impl PolymarketClient {
         Ok(active_events)
     }
 
+    /// Get all events from a series (includes closed events).
+    #[instrument(skip(self))]
+    pub async fn get_all_events_in_series(&self, series_id: &str) -> Result<Vec<GammaEventInfo>> {
+        let req = SeriesByIdRequest::builder().id(series_id).build();
+        let series = self
+            .gamma_client
+            .series_by_id(&req)
+            .await
+            .map_err(|e| PloyError::Internal(format!("Failed to fetch series: {}", e)))?;
+
+        let events: Vec<GammaEventInfo> = series
+            .events
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| self.convert_sdk_event(&e))
+            .collect();
+
+        debug!(
+            "Found {} total events in series {}",
+            events.len(),
+            series_id
+        );
+        Ok(events)
+    }
+
     /// Get active sports events matching a keyword
     #[instrument(skip(self))]
     pub async fn get_active_sports_events(&self, keyword: &str) -> Result<Vec<GammaEventInfo>> {

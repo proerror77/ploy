@@ -49,6 +49,16 @@ pub struct CoordinatorConfig {
     pub sports_market_cap_pct: Decimal,
     /// If true, auto-split sports cap by active market count.
     pub sports_auto_split_by_active_markets: bool,
+
+    // === Sizing policy (Coordinator-level) ===
+    /// Enable Kelly-based sizing for buy intents when a strategy provides `signal_fair_value`.
+    ///
+    /// This is applied in the coordinator before risk checks and capital allocation.
+    pub kelly_sizing_enabled: bool,
+    /// Conservative Kelly multiplier (e.g., 0.25 = quarter-Kelly).
+    pub kelly_fraction_multiplier: Decimal,
+    /// Optional minimum edge (p - price) required to allow sizing; set 0 to disable.
+    pub kelly_min_edge: Decimal,
 }
 
 impl Default for CoordinatorConfig {
@@ -79,6 +89,11 @@ impl Default for CoordinatorConfig {
             sports_allocator_total_cap_usd: None,
             sports_market_cap_pct: Decimal::new(35, 2), // 35%
             sports_auto_split_by_active_markets: true,
+
+            // Kelly sizing is opt-in by env to preserve legacy behavior.
+            kelly_sizing_enabled: false,
+            kelly_fraction_multiplier: Decimal::new(25, 2), // 0.25 (quarter-Kelly)
+            kelly_min_edge: Decimal::ZERO,
         }
     }
 }
