@@ -29,7 +29,7 @@ use crate::platform::{
 use crate::strategy::executor::OrderExecutor;
 
 use super::command::{CoordinatorCommand, CoordinatorControlCommand};
-use super::config::CoordinatorConfig;
+use super::config::{CoordinatorConfig, DuplicateGuardScope};
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,16 +240,18 @@ pub struct Coordinator {
 struct IntentDuplicateGuard {
     enabled: bool,
     window: ChronoDuration,
+    scope: DuplicateGuardScope,
     recent_buys: HashMap<String, chrono::DateTime<Utc>>,
 }
 
 impl IntentDuplicateGuard {
-    fn new(window_ms: u64, enabled: bool) -> Self {
+    fn new(window_ms: u64, enabled: bool, scope: DuplicateGuardScope) -> Self {
         let clamped_ms = window_ms.min(i64::MAX as u64) as i64;
         let window = ChronoDuration::milliseconds(clamped_ms.max(1));
         Self {
             enabled,
             window,
+            scope,
             recent_buys: HashMap::new(),
         }
     }
@@ -278,21 +280,37 @@ impl IntentDuplicateGuard {
         )
     }
 
-    fn buy_key(intent: &OrderIntent) -> Option<String> {
+    fn buy_key(&self, intent: &OrderIntent) -> Option<String> {
         // Only guard normal/high-priority ENTRY orders.
         // Use market-level key so opposite-side re-entries on the same round
         // are also blocked within the duplicate window.
-        // Scope by deployment to avoid blocking independent strategy deployments.
+        // Scope is configurable:
+        // - Market: block across all strategies/deployments (safer, avoids double-entries).
+        // - Deployment: legacy behavior; allow different deployments to each enter.
         if !intent.is_buy || intent.priority == OrderPriority::Critical {
             return None;
         }
 
-        Some(format!(
-            "{}|{}|{}",
-            intent.domain,
-            Self::deployment_scope(intent),
-            intent.market_slug.trim().to_ascii_lowercase()
-        ))
+        let scope = match intent
+            .metadata
+            .get("duplicate_guard_scope")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("deployment") | Some("dep") => DuplicateGuardScope::Deployment,
+            Some("market") | Some("global") => DuplicateGuardScope::Market,
+            _ => self.scope,
+        };
+
+        let market = intent.market_slug.trim().to_ascii_lowercase();
+        let base = format!("{}|{}", intent.domain, market);
+
+        match scope {
+            DuplicateGuardScope::Market => Some(base),
+            DuplicateGuardScope::Deployment => {
+                Some(format!("{}|{}", base, Self::deployment_scope(intent)))
+            }
+        }
     }
 
     fn prune(&mut self, now: chrono::DateTime<Utc>) {
@@ -309,7 +327,7 @@ impl IntentDuplicateGuard {
             return None;
         }
 
-        let key = Self::buy_key(intent)?;
+        let key = self.buy_key(intent)?;
         self.prune(now);
 
         if let Some(last) = self.recent_buys.get(&key) {
@@ -1237,6 +1255,7 @@ impl Coordinator {
         let duplicate_guard = Arc::new(RwLock::new(IntentDuplicateGuard::new(
             config.duplicate_guard_window_ms,
             config.duplicate_guard_enabled,
+            config.duplicate_guard_scope,
         )));
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
         let sports_allocator = Arc::new(RwLock::new(SportsCapitalAllocator::new(&config)));
@@ -2658,7 +2677,11 @@ impl Coordinator {
         out
     }
 
-    fn stable_idempotency_key(account_id: &str, intent: &OrderIntent) -> String {
+    fn stable_idempotency_key(
+        account_id: &str,
+        intent: &OrderIntent,
+        default_scope: DuplicateGuardScope,
+    ) -> String {
         if let Some(key) = intent
             .metadata
             .get("idempotency_key")
@@ -2668,25 +2691,28 @@ impl Coordinator {
             return Self::sanitize_idempotency_component(key);
         }
 
-        let deployment_id = intent
+        // Align idempotency with duplicate-guard semantics.
+        // - When the guard is market-scoped, avoid including deployment_id in the key so
+        //   cross-deployment duplicate intents resolve to the same idempotency key.
+        // - When deployment-scoped, keep legacy behavior (key includes deployment_id).
+        let scope = match intent
             .metadata
-            .get("deployment_id")
-            .map(String::as_str)
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_ascii_lowercase())
-            .unwrap_or_else(|| {
-                let strategy = intent
-                    .metadata
-                    .get("strategy")
-                    .map(|v| v.trim().to_ascii_lowercase())
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| "default".to_string());
-                format!(
-                    "agent:{}|strategy:{}",
-                    intent.agent_id.trim().to_ascii_lowercase(),
-                    strategy
-                )
-            });
+            .get("duplicate_guard_scope")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("deployment") | Some("dep") => DuplicateGuardScope::Deployment,
+            Some("market") | Some("global") => DuplicateGuardScope::Market,
+            _ => default_scope,
+        };
+        let scope_label = match scope {
+            DuplicateGuardScope::Market => "market",
+            DuplicateGuardScope::Deployment => "deployment",
+        };
+        let dep_label = match scope {
+            DuplicateGuardScope::Market => "market".to_string(),
+            DuplicateGuardScope::Deployment => IntentDuplicateGuard::deployment_scope(intent),
+        };
 
         let window_secs = Self::infer_time_bucket_seconds(intent);
         let ts = intent
@@ -2701,9 +2727,10 @@ impl Coordinator {
         let order_kind = if intent.is_buy { "buy" } else { "sell" };
 
         Self::sanitize_idempotency_component(&format!(
-            "acct:{account}|dep:{dep}|dom:{dom}|mkt:{mkt}|side:{side}|kind:{kind}|bucket:{bucket}",
+            "acct:{account}|scope:{scope}|dep:{dep}|dom:{dom}|mkt:{mkt}|side:{side}|kind:{kind}|bucket:{bucket}",
             account = account_id,
-            dep = deployment_id,
+            scope = scope_label,
+            dep = dep_label,
             dom = intent.domain.to_string().to_ascii_lowercase(),
             mkt = intent.market_slug.trim().to_ascii_lowercase(),
             side = side.to_ascii_lowercase(),
@@ -2722,7 +2749,11 @@ impl Coordinator {
             OrderSide::Sell
         };
 
-        let idempotency_key = Self::stable_idempotency_key(&self.account_id, intent);
+        let idempotency_key = Self::stable_idempotency_key(
+            &self.account_id,
+            intent,
+            self.config.duplicate_guard_scope,
+        );
         OrderRequest {
             client_order_id: format!("intent:{}", intent.intent_id),
             idempotency_key: Some(idempotency_key),
@@ -2815,7 +2846,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_blocks_repeated_buy_within_window() {
-        let mut guard = IntentDuplicateGuard::new(1000, true);
+        let mut guard = IntentDuplicateGuard::new(1000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(true, OrderPriority::Normal);
 
@@ -2827,7 +2858,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_allows_after_window() {
-        let mut guard = IntentDuplicateGuard::new(500, true);
+        let mut guard = IntentDuplicateGuard::new(500, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(true, OrderPriority::Normal);
 
@@ -2839,7 +2870,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_blocks_same_market_even_if_token_differs() {
-        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let first = make_intent(true, OrderPriority::Normal);
         let mut second = make_intent(true, OrderPriority::Normal);
@@ -2854,7 +2885,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_allows_same_market_for_different_deployments() {
-        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Deployment);
         let now = Utc::now();
         let mut first = make_intent(true, OrderPriority::Normal);
         let mut second = make_intent(true, OrderPriority::Normal);
@@ -2875,8 +2906,30 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_guard_blocks_same_market_for_different_deployments_in_market_scope() {
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Market);
+        let now = Utc::now();
+        let mut first = make_intent(true, OrderPriority::Normal);
+        let mut second = make_intent(true, OrderPriority::Normal);
+
+        first.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.momentum".to_string(),
+        );
+        second.metadata.insert(
+            "deployment_id".to_string(),
+            "crypto.pm.btc.15m.patternmem".to_string(),
+        );
+
+        assert!(guard.register_or_block(&first, now).is_none());
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_some());
+    }
+
+    #[test]
     fn test_duplicate_guard_does_not_block_sells() {
-        let mut guard = IntentDuplicateGuard::new(10_000, true);
+        let mut guard = IntentDuplicateGuard::new(10_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(false, OrderPriority::Normal);
 
@@ -2888,7 +2941,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_skips_critical_orders() {
-        let mut guard = IntentDuplicateGuard::new(10_000, true);
+        let mut guard = IntentDuplicateGuard::new(10_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let intent = make_intent(true, OrderPriority::Critical);
 
@@ -2921,11 +2974,13 @@ mod tests {
             .metadata
             .insert("event_time".to_string(), "2026-02-19T12:07:00Z".to_string());
 
-        let key = Coordinator::stable_idempotency_key("acct-main", &intent);
+        let key =
+            Coordinator::stable_idempotency_key("acct-main", &intent, DuplicateGuardScope::Market);
 
         assert_ne!(key, intent.intent_id.to_string());
         assert!(key.contains("acct-main"));
-        assert!(key.contains("crypto.pm.btc.15m.patternmem"));
+        assert!(key.contains("scope:market"));
+        assert!(key.contains("dep:market"));
         assert!(key.contains("btc-updown-15m-20260219-1200"));
     }
 
@@ -2949,8 +3004,10 @@ mod tests {
             .expect("valid timestamp")
             .with_timezone(&Utc);
 
-        let first_key = Coordinator::stable_idempotency_key("acct-main", &first);
-        let second_key = Coordinator::stable_idempotency_key("acct-main", &second);
+        let first_key =
+            Coordinator::stable_idempotency_key("acct-main", &first, DuplicateGuardScope::Market);
+        let second_key =
+            Coordinator::stable_idempotency_key("acct-main", &second, DuplicateGuardScope::Market);
 
         assert_ne!(first_key, second_key);
     }

@@ -20,6 +20,7 @@ use crate::agents::{
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
+use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
@@ -2800,6 +2801,14 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.duplicate_guard_window_ms,
         )
         .max(100);
+        if let Ok(raw) = std::env::var("PLOY_COORDINATOR__DUPLICATE_GUARD_SCOPE") {
+            let v = raw.trim().to_ascii_lowercase();
+            cfg.coordinator.duplicate_guard_scope = match v.as_str() {
+                "deployment" | "dep" => DuplicateGuardScope::Deployment,
+                "market" | "global" => DuplicateGuardScope::Market,
+                _ => cfg.coordinator.duplicate_guard_scope,
+            };
+        }
         cfg.coordinator.heartbeat_stale_warn_cooldown_secs = env_u64(
             "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS",
             cfg.coordinator.heartbeat_stale_warn_cooldown_secs,

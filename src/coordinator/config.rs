@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform::RiskConfig;
 
+/// Scope for duplicate-intent guard.
+///
+/// - `market`: block repeated BUY intents for the same (domain, market_slug) within the guard window,
+///   regardless of which strategy deployment produced them. This is safer when multiple strategies
+///   can overlap and would otherwise double-enter the same event.
+/// - `deployment`: legacy behavior; scope duplicates by deployment_id (or agent+strategy fallback).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateGuardScope {
+    Market,
+    Deployment,
+}
+
+impl Default for DuplicateGuardScope {
+    fn default() -> Self {
+        Self::Market
+    }
+}
+
 /// Configuration for the coordinator
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,6 +44,8 @@ pub struct CoordinatorConfig {
     pub duplicate_guard_window_ms: u64,
     /// Enable/disable duplicate-intent guard.
     pub duplicate_guard_enabled: bool,
+    /// Duplicate-intent guard scope (market vs deployment).
+    pub duplicate_guard_scope: DuplicateGuardScope,
     /// Cooldown in seconds between repeated stale heartbeat warnings for same agent.
     pub heartbeat_stale_warn_cooldown_secs: u64,
     /// Enable/disable crypto capital allocator.
@@ -72,6 +93,7 @@ impl Default for CoordinatorConfig {
             batch_size: 10,
             duplicate_guard_window_ms: 60_000,
             duplicate_guard_enabled: true,
+            duplicate_guard_scope: DuplicateGuardScope::Market,
             heartbeat_stale_warn_cooldown_secs: 300,
             crypto_allocator_enabled: true,
             crypto_allocator_total_cap_usd: None,
