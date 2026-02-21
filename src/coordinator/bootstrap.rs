@@ -3385,8 +3385,14 @@ pub async fn start_platform(
     if let Some(pool) = shared_pool.as_ref() {
         // Run migrations by default whenever a DB connection is available, even in dry-run.
         // This prevents long-lived services from starting on a stale schema.
-        let run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", true);
+        let mut run_sqlx_migrations = env_bool("PLOY_RUN_SQLX_MIGRATIONS", true);
         let require_sqlx_migrations = env_bool("PLOY_REQUIRE_SQLX_MIGRATIONS", true);
+        if require_sqlx_migrations && !run_sqlx_migrations {
+            warn!(
+                "PLOY_RUN_SQLX_MIGRATIONS=false but PLOY_REQUIRE_SQLX_MIGRATIONS=true; forcing migrations"
+            );
+            run_sqlx_migrations = true;
+        }
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
         let migration_store = PostgresStore::from_pool(pool.clone());
