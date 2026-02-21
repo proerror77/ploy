@@ -485,6 +485,36 @@ fn buy_intent_missing_deployment_reason(intent: &OrderIntent) -> Option<String> 
     }
 }
 
+fn sell_reduce_only_violation_reason(
+    intent: &OrderIntent,
+    tracked_open_shares: u64,
+) -> Option<String> {
+    if intent.is_buy {
+        return None;
+    }
+
+    if tracked_open_shares == 0 {
+        return Some(format!(
+            "SELL intent reduce-only violation: no tracked open shares for token_id={} side={} in domain={}",
+            intent.token_id,
+            intent.side.as_str(),
+            intent.domain
+        ));
+    }
+
+    if intent.shares > tracked_open_shares {
+        return Some(format!(
+            "SELL intent reduce-only violation: requested shares {} exceeds tracked open shares {} for token_id={} side={}",
+            intent.shares,
+            tracked_open_shares,
+            intent.token_id,
+            intent.side.as_str()
+        ));
+    }
+
+    None
+}
+
 /// Resolve the notional reference price for sell-side exposure release.
 ///
 /// Returns `(price, has_explicit_entry_price)` where `has_explicit_entry_price`
@@ -824,6 +854,7 @@ pub struct CoordinatorHandle {
     sports_allocator: Arc<RwLock<MarketCapitalAllocator>>,
     politics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
     economics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    positions: Arc<PositionAggregator>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
@@ -835,6 +866,21 @@ impl CoordinatorHandle {
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
             return Err(crate::error::PloyError::Validation(reason));
+        }
+
+        if !intent.is_buy {
+            let tracked_open_shares = self
+                .positions
+                .agent_open_shares_for_token_side(
+                    &intent.agent_id,
+                    intent.domain,
+                    &intent.token_id,
+                    intent.side,
+                )
+                .await;
+            if let Some(reason) = sell_reduce_only_violation_reason(&intent, tracked_open_shares) {
+                return Err(crate::error::PloyError::Validation(reason));
+            }
         }
 
         // Binary-options semantics (Polymarket): SELL intents are treated as
@@ -2514,6 +2560,7 @@ impl Coordinator {
             sports_allocator: self.sports_allocator.clone(),
             politics_allocator: self.politics_allocator.clone(),
             economics_allocator: self.economics_allocator.clone(),
+            positions: self.positions.clone(),
             ingress_mode: self.ingress_mode.clone(),
             domain_ingress_mode: self.domain_ingress_mode.clone(),
             governance_policy: self.governance_policy.clone(),
@@ -3999,6 +4046,31 @@ mod tests {
     fn test_sell_intent_does_not_require_deployment_id_metadata() {
         let intent = make_intent(false, OrderPriority::Normal);
         assert!(buy_intent_missing_deployment_reason(&intent).is_none());
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_no_tracked_shares() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 0);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("no tracked open shares"));
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_requested_exceeds_tracked() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 30);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("requested shares 100 exceeds tracked open shares 30"));
+    }
+
+    #[test]
+    fn test_sell_reduce_only_allows_with_sufficient_tracked_shares() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        assert!(sell_reduce_only_violation_reason(&intent, 100).is_none());
+        assert!(sell_reduce_only_violation_reason(&intent, 150).is_none());
     }
 
     #[test]

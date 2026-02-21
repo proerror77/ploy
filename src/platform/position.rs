@@ -328,6 +328,28 @@ impl PositionAggregator {
             .collect()
     }
 
+    /// Agent 在特定 token/side 的可用持倉股數（reduce-only SELL 檢查使用）
+    pub async fn agent_open_shares_for_token_side(
+        &self,
+        agent_id: &str,
+        domain: Domain,
+        token_id: &str,
+        side: Side,
+    ) -> u64 {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| {
+                p.agent_id == agent_id
+                    && p.domain == domain
+                    && p.side == side
+                    && p.token_id.eq_ignore_ascii_case(token_id)
+            })
+            .map(|p| p.shares)
+            .sum()
+    }
+
     /// 獲取市場所有倉位
     pub async fn get_market_positions(&self, market_slug: &str) -> Vec<Position> {
         self.positions
@@ -709,5 +731,45 @@ mod tests {
         let stats2 = agg.agent_stats("agent2").await;
         assert_eq!(stats2.exposure, Decimal::from(120));
         assert_eq!(stats2.position_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_open_shares_for_token_side() {
+        let agg = PositionAggregator::new();
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "TOKEN-YES",
+            Side::Up,
+            70,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m-2",
+            "token-yes",
+            Side::Up,
+            30,
+            Decimal::from_str_exact("0.45").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "token-no",
+            Side::Down,
+            50,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+
+        let shares = agg
+            .agent_open_shares_for_token_side("agent1", Domain::Crypto, "token-yes", Side::Up)
+            .await;
+        assert_eq!(shares, 100);
     }
 }
