@@ -101,7 +101,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("deployment_id")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             self.metadata
@@ -110,7 +110,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("intent_reason")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(reason) = self.reason.clone() {
@@ -120,7 +120,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("signal_confidence")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(confidence) = self.confidence {
@@ -133,7 +133,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("signal_edge")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(edge) = self.edge {
@@ -144,7 +144,7 @@ impl TradeIntent {
         if self
             .metadata
             .get("event_time")
-            .map(|v| v.is_empty())
+            .map(|v| v.trim().is_empty())
             .unwrap_or(true)
         {
             if let Some(ts) = self.event_time {
@@ -255,5 +255,33 @@ mod tests {
             mapped.metadata.get("intent_reason").map(String::as_str),
             Some("signal_edge")
         );
+    }
+
+    #[test]
+    fn trade_intent_into_order_intent_normalizes_blank_deployment_metadata() {
+        let mut intent = TradeIntent {
+            intent_id: Uuid::new_v4(),
+            deployment_id: "deploy.crypto.15m".to_string(),
+            agent_id: "openclaw-agent".to_string(),
+            domain: Domain::Crypto,
+            market_slug: "btc-updown-15m".to_string(),
+            token_id: "token-yes".to_string(),
+            side: Side::Up,
+            is_buy: true,
+            size: 10,
+            price_limit: dec!(0.42),
+            confidence: None,
+            edge: None,
+            event_time: None,
+            reason: None,
+            priority: None,
+            metadata: HashMap::new(),
+        };
+        intent
+            .metadata
+            .insert("deployment_id".to_string(), "   ".to_string());
+
+        let mapped = intent.into_order_intent();
+        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
     }
 }

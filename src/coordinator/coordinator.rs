@@ -8,7 +8,7 @@
 //!   - Periodically drain the queue and execute orders
 //!   - Periodically refresh GlobalState from aggregators
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use sqlx::PgPool;
 
-use crate::domain::OrderRequest;
+use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
     AgentRiskParams, Domain, OrderIntent, OrderPriority, OrderQueue, PositionAggregator,
@@ -164,6 +164,203 @@ fn governance_domain_label(domain: Domain) -> &'static str {
     }
 }
 
+fn parse_persisted_domain(raw: &str) -> Option<Domain> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized.as_str() {
+        "sports" => Some(Domain::Sports),
+        "crypto" => Some(Domain::Crypto),
+        "politics" => Some(Domain::Politics),
+        "economics" => Some(Domain::Economics),
+        _ => {
+            if let Some(raw_id) = normalized.strip_prefix("custom:") {
+                return raw_id.trim().parse::<u32>().ok().map(Domain::Custom);
+            }
+            if let Some(raw_id) = normalized
+                .strip_prefix("custom(")
+                .and_then(|v| v.strip_suffix(')'))
+            {
+                return raw_id.trim().parse::<u32>().ok().map(Domain::Custom);
+            }
+            None
+        }
+    }
+}
+
+fn parse_persisted_side(raw: &str) -> Option<Side> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "UP" | "YES" => Some(Side::Up),
+        "DOWN" | "NO" => Some(Side::Down),
+        _ => None,
+    }
+}
+
+fn string_metadata_from_json(
+    raw: Option<sqlx::types::Json<serde_json::Value>>,
+) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    let Some(sqlx::types::Json(value)) = raw else {
+        return metadata;
+    };
+    let Some(object) = value.as_object() else {
+        return metadata;
+    };
+
+    for (key, value) in object {
+        if value.is_null() {
+            continue;
+        }
+        if let Some(v) = value.as_str() {
+            metadata.insert(key.clone(), v.to_string());
+        } else {
+            metadata.insert(key.clone(), value.to_string());
+        }
+    }
+
+    metadata
+}
+
+#[derive(Debug)]
+struct PersistedExecutionFill {
+    intent_id: Uuid,
+    agent_id: String,
+    domain: Domain,
+    market_slug: String,
+    token_id: String,
+    side: Side,
+    is_buy: bool,
+    filled_shares: u64,
+    fill_price: Decimal,
+    executed_at: DateTime<Utc>,
+    metadata: HashMap<String, String>,
+}
+
+async fn load_execution_log_fills(
+    pool: &PgPool,
+    account_id: &str,
+    dry_run: bool,
+) -> Result<Vec<PersistedExecutionFill>> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            Option<Decimal>,
+            Decimal,
+            DateTime<Utc>,
+            Option<sqlx::types::Json<serde_json::Value>>,
+        ),
+    >(
+        r#"
+        SELECT
+            intent_id,
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            market_side,
+            is_buy,
+            filled_shares,
+            avg_fill_price,
+            limit_price,
+            executed_at,
+            metadata
+        FROM agent_order_executions
+        WHERE account_id = $1
+          AND dry_run = $2
+          AND filled_shares > 0
+        ORDER BY executed_at ASC, id ASC
+        "#,
+    )
+    .bind(account_id)
+    .bind(dry_run)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("load execution log fills: {}", e)))?;
+
+    let mut fills = Vec::new();
+    for (
+        intent_id,
+        agent_id,
+        domain_raw,
+        market_slug,
+        token_id,
+        side_raw,
+        is_buy,
+        filled_shares_raw,
+        avg_fill_price,
+        limit_price,
+        executed_at,
+        metadata_raw,
+    ) in rows
+    {
+        let Some(domain) = parse_persisted_domain(&domain_raw) else {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                domain = %domain_raw,
+                "skipping execution-log row with unknown domain during restore"
+            );
+            continue;
+        };
+        let Some(side) = parse_persisted_side(&side_raw) else {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                side = %side_raw,
+                "skipping execution-log row with unknown side during restore"
+            );
+            continue;
+        };
+        let Ok(filled_shares) = u64::try_from(filled_shares_raw) else {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                filled_shares = filled_shares_raw,
+                "skipping execution-log row with invalid filled_shares during restore"
+            );
+            continue;
+        };
+        if filled_shares == 0 {
+            continue;
+        }
+        let fill_price = avg_fill_price.unwrap_or(limit_price);
+        if fill_price <= Decimal::ZERO {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                fill_price = %fill_price,
+                "skipping execution-log row with non-positive fill price during restore"
+            );
+            continue;
+        }
+
+        fills.push(PersistedExecutionFill {
+            intent_id,
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            filled_shares,
+            fill_price,
+            executed_at,
+            metadata: string_metadata_from_json(metadata_raw),
+        });
+    }
+
+    Ok(fills)
+}
+
 fn normalized_identity_component(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
@@ -223,6 +420,33 @@ fn buy_intent_missing_deployment_reason(intent: &OrderIntent) -> Option<String> 
     } else {
         Some("BUY intent missing required metadata field 'deployment_id'".to_string())
     }
+}
+
+/// Resolve the notional reference price for sell-side exposure release.
+///
+/// Returns `(price, has_explicit_entry_price)` where `has_explicit_entry_price`
+/// indicates whether the value came from metadata.
+fn sell_release_reference_price(
+    intent: &OrderIntent,
+    execution_price: Decimal,
+) -> Option<(Decimal, bool)> {
+    if let Some(entry_price) = intent
+        .metadata
+        .get("entry_price")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| Decimal::from_str(v).ok())
+        .filter(|v| *v > Decimal::ZERO)
+    {
+        return Some((entry_price, true));
+    }
+
+    if execution_price > Decimal::ZERO {
+        return Some((execution_price, false));
+    }
+
+    (intent.limit_price > Decimal::ZERO).then_some((intent.limit_price, false))
 }
 
 fn governance_block_reason(
@@ -1143,6 +1367,12 @@ impl CryptoCapitalAllocator {
         }
     }
 
+    fn reset_runtime_state(&mut self) {
+        self.open = ExposureBook::default();
+        self.pending = ExposureBook::default();
+        self.pending_by_intent.clear();
+    }
+
     fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
         if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
             return Ok(());
@@ -1255,12 +1485,11 @@ impl CryptoCapitalAllocator {
         }
 
         let dims = CryptoIntentDimensions::from_intent(intent);
-        let reference_price = intent
-            .metadata
-            .get("entry_price")
-            .and_then(|v| Decimal::from_str(v).ok())
-            .or_else(|| (execution_price > Decimal::ZERO).then_some(execution_price))
-            .unwrap_or(intent.limit_price);
+        let Some((reference_price, has_explicit_entry_price)) =
+            sell_release_reference_price(intent, execution_price)
+        else {
+            return;
+        };
 
         if reference_price <= Decimal::ZERO {
             return;
@@ -1270,7 +1499,7 @@ impl CryptoCapitalAllocator {
         let removed_by_key = self
             .open
             .subtract_from_position_key(&dims.position_key, requested_release);
-        if removed_by_key < requested_release {
+        if has_explicit_entry_price && removed_by_key < requested_release {
             let remaining = requested_release - removed_by_key;
             self.open.subtract_matching_bucket(
                 &dims.deployment_scope,
@@ -1555,6 +1784,12 @@ impl MarketCapitalAllocator {
         }
     }
 
+    fn reset_runtime_state(&mut self) {
+        self.open = MarketExposureBook::default();
+        self.pending = MarketExposureBook::default();
+        self.pending_by_intent.clear();
+    }
+
     fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
         if !self.enabled || intent.domain != self.domain || !intent.is_buy {
             return Ok(());
@@ -1660,12 +1895,11 @@ impl MarketCapitalAllocator {
         }
 
         let dims = MarketIntentDimensions::from_intent(intent);
-        let reference_price = intent
-            .metadata
-            .get("entry_price")
-            .and_then(|v| Decimal::from_str(v).ok())
-            .or_else(|| (execution_price > Decimal::ZERO).then_some(execution_price))
-            .unwrap_or(intent.limit_price);
+        let Some((reference_price, has_explicit_entry_price)) =
+            sell_release_reference_price(intent, execution_price)
+        else {
+            return;
+        };
 
         if reference_price <= Decimal::ZERO {
             return;
@@ -1675,7 +1909,7 @@ impl MarketCapitalAllocator {
         let removed_by_key = self
             .open
             .subtract_from_position_key(&dims.position_key, requested_release);
-        if removed_by_key < requested_release {
+        if has_explicit_entry_price && removed_by_key < requested_release {
             let remaining = requested_release - removed_by_key;
             self.open
                 .subtract_matching_market(&dims.deployment_scope, &dims.market_key, remaining);
@@ -1818,6 +2052,93 @@ impl Coordinator {
             updated_by = %snapshot.updated_by,
             updated_at = %snapshot.updated_at,
             "restored governance policy from DB"
+        );
+        Ok(())
+    }
+
+    /// Rebuild runtime position/allocator state from persisted execution fills.
+    ///
+    /// This prevents cold-start underestimation of account exposure when a process restarts.
+    pub async fn restore_runtime_state_from_execution_log(&self) -> Result<()> {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let fills =
+            load_execution_log_fills(pool, &self.account_id, self.executor.is_dry_run()).await?;
+        if fills.is_empty() {
+            return Ok(());
+        }
+
+        self.positions.clear().await;
+        {
+            let mut allocator = self.crypto_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+        {
+            let mut allocator = self.sports_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+        {
+            let mut allocator = self.politics_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+        {
+            let mut allocator = self.economics_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+
+        let restored_fill_count = fills.len();
+        let mut restored_agents = HashSet::new();
+
+        for fill in fills {
+            let mut intent = OrderIntent::new(
+                fill.agent_id.clone(),
+                fill.domain,
+                fill.market_slug.clone(),
+                fill.token_id.clone(),
+                fill.side,
+                fill.is_buy,
+                fill.filled_shares,
+                fill.fill_price,
+            );
+            intent.intent_id = fill.intent_id;
+            intent.created_at = fill.executed_at;
+            intent.metadata = fill.metadata;
+
+            self.settle_domain_success(&intent, fill.filled_shares, fill.fill_price)
+                .await;
+
+            if fill.is_buy {
+                let _ = self
+                    .positions
+                    .open_position(
+                        &fill.agent_id,
+                        fill.domain,
+                        &fill.market_slug,
+                        &fill.token_id,
+                        fill.side,
+                        fill.filled_shares,
+                        fill.fill_price,
+                    )
+                    .await;
+            } else {
+                self.apply_sell_fill_to_positions(&intent, fill.filled_shares, fill.fill_price)
+                    .await;
+            }
+            restored_agents.insert(fill.agent_id);
+        }
+
+        for agent_id in &restored_agents {
+            self.refresh_risk_exposure_for_agent(agent_id).await;
+        }
+        self.refresh_global_state().await;
+
+        info!(
+            account_id = %self.account_id,
+            fill_count = restored_fill_count,
+            restored_agents = restored_agents.len(),
+            "restored coordinator runtime state from execution log"
         );
         Ok(())
     }
@@ -3620,6 +3941,45 @@ mod tests {
         assert!(reason.is_none(), "sell intent should remain allowed");
     }
 
+    #[test]
+    fn test_parse_persisted_domain_supports_runtime_and_custom_encodings() {
+        assert_eq!(parse_persisted_domain("Crypto"), Some(Domain::Crypto));
+        assert_eq!(
+            parse_persisted_domain("custom:42"),
+            Some(Domain::Custom(42))
+        );
+        assert_eq!(parse_persisted_domain("Custom(7)"), Some(Domain::Custom(7)));
+        assert_eq!(parse_persisted_domain(""), None);
+        assert_eq!(parse_persisted_domain("custom:oops"), None);
+    }
+
+    #[test]
+    fn test_parse_persisted_side_accepts_yes_no_aliases() {
+        assert_eq!(parse_persisted_side("UP"), Some(crate::domain::Side::Up));
+        assert_eq!(parse_persisted_side("NO"), Some(crate::domain::Side::Down));
+        assert_eq!(parse_persisted_side("flat"), None);
+    }
+
+    #[test]
+    fn test_string_metadata_from_json_normalizes_scalar_values() {
+        let metadata = string_metadata_from_json(Some(sqlx::types::Json(serde_json::json!({
+            "deployment_id": "deploy.crypto.15m",
+            "signal_confidence": 0.73,
+            "flag": true,
+            "skip": null
+        }))));
+        assert_eq!(
+            metadata.get("deployment_id").map(String::as_str),
+            Some("deploy.crypto.15m")
+        );
+        assert_eq!(
+            metadata.get("signal_confidence").map(String::as_str),
+            Some("0.73")
+        );
+        assert_eq!(metadata.get("flag").map(String::as_str), Some("true"));
+        assert!(!metadata.contains_key("skip"));
+    }
+
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {
         let mut cfg = CoordinatorConfig::default();
         cfg.crypto_allocator_enabled = true;
@@ -3722,6 +4082,41 @@ mod tests {
         assert_eq!(allocator.open.total, dec!(20));
     }
 
+    #[test]
+    fn test_crypto_allocator_sell_without_entry_price_does_not_release_other_positions() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let mut buy_a = make_crypto_intent("BTC", "15m", true, 100, dec!(0.2)); // $20
+        buy_a.market_slug = "btc-updown-a".to_string();
+        buy_a.token_id = "token-up-a".to_string();
+        buy_a = buy_a.with_deployment_id("deploy.crypto.btc.15m");
+
+        let mut buy_b = make_crypto_intent("BTC", "15m", true, 100, dec!(0.2)); // $20
+        buy_b.market_slug = "btc-updown-b".to_string();
+        buy_b.token_id = "token-up-b".to_string();
+        buy_b.side = crate::domain::Side::Down;
+        buy_b = buy_b.with_deployment_id("deploy.crypto.btc.15m");
+
+        assert!(allocator.reserve_buy(&buy_a).is_ok());
+        allocator.settle_buy_execution(&buy_a, 100, dec!(0.2));
+        assert!(allocator.reserve_buy(&buy_b).is_ok());
+        allocator.settle_buy_execution(&buy_b, 100, dec!(0.2));
+        assert_eq!(allocator.open.total, dec!(40));
+
+        let mut sell_a = make_crypto_intent("BTC", "15m", false, 100, dec!(0.2));
+        sell_a.market_slug = buy_a.market_slug.clone();
+        sell_a.token_id = buy_a.token_id.clone();
+        sell_a.side = buy_a.side;
+        sell_a = sell_a.with_deployment_id("deploy.crypto.btc.15m");
+        sell_a.metadata.remove("entry_price");
+
+        // Missing entry_price + high execution price must not release other bucket positions.
+        allocator.settle_sell_execution(&sell_a, 100, dec!(0.8));
+        assert_eq!(allocator.open.total, dec!(20));
+        assert_eq!(allocator.open.by_position.len(), 1);
+    }
+
     fn make_sports_intent(
         market_slug: &str,
         is_buy: bool,
@@ -3817,6 +4212,41 @@ mod tests {
 
         let allocator = MarketCapitalAllocator::for_sports(&cfg);
         assert_eq!(allocator.total_cap, dec!(25));
+    }
+
+    #[test]
+    fn test_market_allocator_sell_without_entry_price_does_not_release_other_positions() {
+        let mut cfg = make_allocator_config(dec!(200));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(200));
+        cfg.sports_market_cap_pct = dec!(1.0);
+
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let mut buy_yes = make_sports_intent("nba-game-1", true, 100, dec!(0.2)); // $20
+        buy_yes = buy_yes.with_deployment_id("deploy.sports.nba.comeback");
+
+        let mut buy_no = make_sports_intent("nba-game-1", true, 100, dec!(0.2)); // $20
+        buy_no.token_id = "sports-token-no".to_string();
+        buy_no.side = crate::domain::Side::Down;
+        buy_no = buy_no.with_deployment_id("deploy.sports.nba.comeback");
+
+        assert!(allocator.reserve_buy(&buy_yes).is_ok());
+        allocator.settle_buy_execution(&buy_yes, 100, dec!(0.2));
+        assert!(allocator.reserve_buy(&buy_no).is_ok());
+        allocator.settle_buy_execution(&buy_no, 100, dec!(0.2));
+        assert_eq!(allocator.open.total, dec!(40));
+
+        let mut sell_yes = make_sports_intent("nba-game-1", false, 100, dec!(0.2));
+        sell_yes.token_id = buy_yes.token_id.clone();
+        sell_yes.side = buy_yes.side;
+        sell_yes = sell_yes.with_deployment_id("deploy.sports.nba.comeback");
+        sell_yes.metadata.remove("entry_price");
+
+        // Missing entry_price + high execution price must not release opposite-side position.
+        allocator.settle_sell_execution(&sell_yes, 100, dec!(0.8));
+        assert_eq!(allocator.open.total, dec!(20));
+        assert_eq!(allocator.open.by_position.len(), 1);
     }
 
     #[test]
