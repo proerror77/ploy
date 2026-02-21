@@ -66,6 +66,8 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
 | `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
+| `PLOY_ALLOW_LEGACY_LIVE` | No | Allow legacy (non-Coordinator) live order paths. Not recommended. |
+| `PLOY_ALLOW_LEGACY_STRATEGY_LIVE` | No | Allow legacy `ploy strategy start` live runtime. Prefer `ploy platform start`. |
 
 ### Config File
 
@@ -88,6 +90,23 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 ## Usage
 
+### Live Trading (Recommended)
+
+Ploy is migrating to a **Coordinator-only** live execution plane. For live orders, use the multi-agent platform entry point:
+
+```bash
+ploy platform start --crypto --sports --politics   # Coordinator + Agents (live)
+ploy platform start --crypto --dry-run             # Safe dry-run
+```
+
+Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
+
+If you need an explicit override (not recommended), set:
+
+```bash
+export PLOY_ALLOW_LEGACY_LIVE=true
+```
+
 ### Global Flags
 
 ```
@@ -99,7 +118,7 @@ See the inline comments in `config/default.toml` for a full explanation of every
 ### Core Commands
 
 ```bash
-ploy run                                       # Start the main trading loop
+ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_LEGACY_LIVE=true)
 ploy test                                      # Test Polymarket API connectivity
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
@@ -116,10 +135,10 @@ ploy ev --price 95 --probability 97            # Calculate expected value for ne
 ### Strategies
 
 ```bash
-ploy trade --series 10423 --shares 50          # Two-leg arbitrage on a price series
-ploy momentum --symbols BTCUSDT --shares 100   # CEX momentum strategy
-ploy momentum --predictive --min-time 300      # Predictive mode: early entry with TP/SL
-ploy split-arb --max-entry 35 --shares 100     # Split arbitrage (time-separated hedge)
+ploy trade --series 10423 --shares 50 --dry-run          # Two-leg arbitrage on a price series
+ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # CEX momentum strategy
+ploy momentum --predictive --min-time 300 --dry-run      # Predictive mode: early entry with TP/SL
+ploy split-arb --max-entry 35 --shares 100 --dry-run     # Split arbitrage (time-separated hedge)
 ploy market-make --token <token_id>            # Market making opportunity analysis
 ploy scan --series 10423 --watch               # Continuous arbitrage scan
 ploy analyze --event <event_id>                # Analyze multi-outcome market
@@ -157,7 +176,7 @@ ploy event-edge --event <id> --watch --trade --min-edge 0.08     # Auto-trade wh
 
 ```bash
 ploy agent --mode advisory                     # Get trading recommendations
-ploy agent --mode autonomous --enable-trading  # AI-controlled trading
+ploy agent --mode autonomous --enable-trading  # (blocked by default; prefer platform mode)
 ploy agent --chat                              # Interactive conversation
 ploy agent --mode sports --sports-url <url>    # Sports-specific analysis
 ploy rpc                                       # JSON-RPC 2.0 server over stdin/stdout
@@ -166,14 +185,14 @@ ploy rpc                                       # JSON-RPC 2.0 server over stdin/
 ### Domain: Crypto
 
 ```bash
-ploy crypto split-arb --coins SOL,ETH,BTC      # Split-arb on crypto UP/DOWN markets
+ploy crypto split-arb --coins SOL,ETH,BTC --dry-run      # Split-arb on crypto UP/DOWN markets
 ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
 ```
 
 ### Domain: Sports
 
 ```bash
-ploy sports split-arb --leagues NBA,NFL          # Split-arb on sports markets
+ploy sports split-arb --leagues NBA,NFL --dry-run          # Split-arb on sports markets
 ploy sports monitor --leagues NBA                # Monitor sports markets
 ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
 ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup
