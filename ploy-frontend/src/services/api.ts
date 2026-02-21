@@ -13,13 +13,76 @@ import type {
 const API_BASE = '/api';
 
 class ApiService {
+  private readonly ADMIN_TOKEN_KEY = 'ploy_admin_token';
+  private readonly SIDECAR_TOKEN_KEY = 'ploy_sidecar_token';
+
+  private getStoredToken(key: string): string | null {
+    if (typeof window === 'undefined') return null;
+    try {
+      return sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  private setStoredToken(key: string, value: string | null) {
+    if (typeof window === 'undefined') return;
+    try {
+      if (value) {
+        sessionStorage.setItem(key, value);
+      } else {
+        sessionStorage.removeItem(key);
+      }
+    } catch {
+      // storage not available in this environment
+    }
+  }
+
+  setAdminToken(token: string) {
+    const trimmed = token.trim();
+    if (trimmed) {
+      this.setStoredToken(this.ADMIN_TOKEN_KEY, trimmed);
+    } else {
+      this.setStoredToken(this.ADMIN_TOKEN_KEY, null);
+    }
+  }
+
+  setSidecarToken(token: string) {
+    const trimmed = token.trim();
+    if (trimmed) {
+      this.setStoredToken(this.SIDECAR_TOKEN_KEY, trimmed);
+    } else {
+      this.setStoredToken(this.SIDECAR_TOKEN_KEY, null);
+    }
+  }
+
+  clearAdminToken() {
+    this.setStoredToken(this.ADMIN_TOKEN_KEY, null);
+  }
+
+  clearSidecarToken() {
+    this.setStoredToken(this.SIDECAR_TOKEN_KEY, null);
+  }
+
   private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
+    const headers = new Headers(options?.headers ? options.headers : {});
+    headers.set('Content-Type', 'application/json');
+
+    const adminToken = this.getStoredToken(this.ADMIN_TOKEN_KEY);
+    const sidecarToken = this.getStoredToken(this.SIDECAR_TOKEN_KEY);
+    if (adminToken && !headers.has('x-ploy-admin-token')) {
+      headers.set('x-ploy-admin-token', adminToken);
+    }
+    if (adminToken && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${adminToken}`);
+    }
+    if (sidecarToken && !headers.has('x-ploy-sidecar-token')) {
+      headers.set('x-ploy-sidecar-token', sidecarToken);
+    }
+
     const response = await fetch(`${API_BASE}${endpoint}`, {
       credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
+      headers,
       ...options,
     });
 
@@ -36,15 +99,19 @@ class ApiService {
   }
 
   async login(adminToken: string): Promise<{ success: boolean }> {
-    return this.fetch<{ success: boolean }>('/auth/login', {
+    const result = await this.fetch<{ success: boolean }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({
         admin_token: adminToken,
       }),
     });
+    this.setAdminToken(adminToken);
+    return result;
   }
 
   async logout(): Promise<{ success: boolean }> {
+    this.clearAdminToken();
+    this.clearSidecarToken();
     return this.fetch<{ success: boolean }>('/auth/logout', {
       method: 'POST',
     });

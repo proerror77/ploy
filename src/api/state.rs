@@ -109,6 +109,14 @@ impl AppState {
         if container_data_root.exists() {
             return container_data_root.join("state/deployments.json");
         }
+        let repo_root_deployment = Path::new("deployment/deployments.json");
+        if repo_root_deployment.exists() {
+            return repo_root_deployment.to_path_buf();
+        }
+        let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
+        if container_deployment.exists() {
+            return container_deployment.to_path_buf();
+        }
         PathBuf::from("data/state/deployments.json")
     }
 
@@ -120,8 +128,19 @@ impl AppState {
             return Self::parse_deployments(&raw);
         }
 
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            return Self::parse_deployments(&contents);
+        let deployment_file_candidates = [
+            path.to_path_buf(),
+            Path::new("deployment/deployments.json").to_path_buf(),
+            Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
+        ];
+
+        for candidate in deployment_file_candidates {
+            if let Ok(contents) = std::fs::read_to_string(&candidate) {
+                let items = Self::parse_deployments(&contents);
+                if !items.is_empty() {
+                    return items;
+                }
+            }
         }
 
         HashMap::new()

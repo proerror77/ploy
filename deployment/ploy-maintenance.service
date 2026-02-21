@@ -1,0 +1,28 @@
+[Unit]
+Description=Ploy Host + DB Maintenance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ploy
+
+Environment=LOG_DIR=/opt/ploy/logs
+EnvironmentFile=-/opt/ploy/.env
+
+ExecStart=/bin/bash /opt/ploy/scripts/ploy_maintenance.sh
+
+# Reduce blast radius
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ploy/logs /var/log /var/lib/systemd/coredump
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ploy-maintenance
+
+[Install]
+WantedBy=multi-user.target
+

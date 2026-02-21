@@ -408,15 +408,13 @@ impl RiskGate {
             return RiskCheckResult::Blocked(BlockReason::OrderExpired);
         }
 
-        // 3. Critical 優先級可以跳過部分檢查
+        // 3. Critical 訂單不再繞過風控檢查
         let is_critical = intent.priority == OrderPriority::Critical;
         if is_critical && self.config.critical_bypass_exposure {
-            debug!(
-                "Critical order {} bypassing exposure checks",
+            warn!(
+                "critical_bypass_exposure is enabled for intent {} but is ignored by policy",
                 intent.intent_id
             );
-            // 只檢查基本有效性，跳過暴露限制
-            return RiskCheckResult::Passed;
         }
 
         // 4. 獲取 Agent 風控參數
@@ -949,7 +947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_critical_bypass() {
+    async fn test_critical_bypass_still_checked() {
         let mut config = RiskConfig::default();
         config.max_platform_exposure = Decimal::from(10); // 很低
         config.critical_bypass_exposure = true;
@@ -963,10 +961,10 @@ mod tests {
         let result = gate.check_order(&intent).await;
         assert!(result.is_blocked());
 
-        // Critical 訂單繞過檢查
+        // Critical 訂單也要經過完整檢查
         let critical_intent = intent.with_priority(OrderPriority::Critical);
         let result = gate.check_order(&critical_intent).await;
-        assert!(result.is_passed());
+        assert!(result.is_blocked());
     }
 
     #[tokio::test]

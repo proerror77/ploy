@@ -9,7 +9,7 @@ USER_NAME="ubuntu"
 SSH_KEY=""
 START_AFTER_DEPLOY="true"
 ENABLE_ON_BOOT="true"
-SERVICES="ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer"
+SERVICES="ploy,ploy-orderbook-history,ploy-maintenance.timer"
 
 usage() {
   cat <<'USAGE'
@@ -24,7 +24,7 @@ Options:
   --enable <true|false>    Enable services on boot (default: true)
   --services <csv>         Services to enable/start
                            allowed: ploy,ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
-                           default: ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer
+                           default: ploy,ploy-orderbook-history,ploy-maintenance.timer
   -h, --help               Show help
 
 Examples:
@@ -292,6 +292,14 @@ fi
 if [[ -f "$REMOTE_ROOT/deployment/config/crypto_dry_run.toml" && ! -f "$REMOTE_ROOT/config/crypto_dry_run.toml" ]]; then
   sudo cp "$REMOTE_ROOT/deployment/config/crypto_dry_run.toml" "$REMOTE_ROOT/config/crypto_dry_run.toml"
 fi
+sudo mkdir -p "$REMOTE_ROOT/data/state"
+if [[ ! -f "$REMOTE_ROOT/data/state/deployments.json" ]]; then
+  if [[ -f "$REMOTE_ROOT/deployment/deployments.json" ]]; then
+    sudo cp "$REMOTE_ROOT/deployment/deployments.json" "$REMOTE_ROOT/data/state/deployments.json"
+  elif [[ -f "$REMOTE_ROOT/data/state/deployments.json.sample" ]]; then
+    sudo cp "$REMOTE_ROOT/data/state/deployments.json.sample" "$REMOTE_ROOT/data/state/deployments.json"
+  fi
+fi
 
 # Install env templates (do not overwrite local edits)
 if [[ -f "$REMOTE_ROOT/deployment/env.example" && ! -f "$REMOTE_ROOT/.env" ]]; then
@@ -352,6 +360,18 @@ ensure_account_budget_defaults() {
   ensure_env_default "$env_file" "PLOY_RISK__CIRCUIT_BREAKER_COOLDOWN_SECS" "300"
 }
 
+ensure_coordinator_heartbeat_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS" "300"
+}
+
+ensure_deployments_file_default() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  ensure_env_default "$env_file" "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
+}
+
 ensure_sports_allocator_defaults() {
   local env_file="$1"
   [[ -f "$env_file" ]] || return 0
@@ -366,6 +386,12 @@ ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/crypto-dryrun.env"
 ensure_account_budget_defaults "$REMOTE_ROOT/.env"
 ensure_account_budget_defaults "$REMOTE_ROOT/env/sports-pm.env"
 ensure_account_budget_defaults "$REMOTE_ROOT/env/crypto-dryrun.env"
+ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/.env"
+ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/sports-pm.env"
+ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/crypto-dryrun.env"
+ensure_deployments_file_default "$REMOTE_ROOT/.env"
+ensure_deployments_file_default "$REMOTE_ROOT/env/sports-pm.env"
+ensure_deployments_file_default "$REMOTE_ROOT/env/crypto-dryrun.env"
 ensure_sports_allocator_defaults "$REMOTE_ROOT/.env"
 ensure_sports_allocator_defaults "$REMOTE_ROOT/env/sports-pm.env"
 

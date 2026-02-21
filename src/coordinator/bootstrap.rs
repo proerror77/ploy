@@ -2338,6 +2338,14 @@ fn deployments_state_path() -> PathBuf {
     if container_data_root.exists() {
         return container_data_root.join("state/deployments.json");
     }
+    let repo_root_deployment = Path::new("deployment/deployments.json");
+    if repo_root_deployment.exists() {
+        return repo_root_deployment.to_path_buf();
+    }
+    let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
+    if container_deployment.exists() {
+        return container_deployment.to_path_buf();
+    }
     PathBuf::from("data/state/deployments.json")
 }
 
@@ -2362,9 +2370,20 @@ fn load_strategy_deployments() -> Vec<StrategyDeployment> {
         return parse_strategy_deployments(&raw);
     }
 
-    let path = deployments_state_path();
-    if let Ok(contents) = std::fs::read_to_string(path) {
-        return parse_strategy_deployments(&contents);
+    let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
+    let deployment_file_candidates = [
+        deployments_state_path(),
+        Path::new("deployment/deployments.json").to_path_buf(),
+        container_data_path.to_path_buf(),
+    ];
+
+    for path in deployment_file_candidates {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let items = parse_strategy_deployments(&contents);
+            if !items.is_empty() {
+                return items;
+            }
+        }
     }
     Vec::new()
 }
@@ -2781,6 +2800,11 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.duplicate_guard_window_ms,
         )
         .max(100);
+        cfg.coordinator.heartbeat_stale_warn_cooldown_secs = env_u64(
+            "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS",
+            cfg.coordinator.heartbeat_stale_warn_cooldown_secs,
+        )
+        .max(10);
 
         cfg.coordinator.crypto_allocator_enabled = env_bool(
             "PLOY_COORDINATOR__CRYPTO_ALLOCATOR_ENABLED",

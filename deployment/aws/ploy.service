@@ -1,0 +1,62 @@
+[Unit]
+Description=Ploy Lead-Lag Trading Bot
+Documentation=https://github.com/yourusername/ploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ploy
+Group=ploy
+WorkingDirectory=/opt/ploy
+
+# Main command - adjust parameters as needed
+ExecStart=/opt/ploy/bin/ploy rl lead-lag-live \
+    --symbol ${TRADING_SYMBOL:-BTCUSDT} \
+    --market ${TRADING_MARKET:-will-btc-go-up-15m} \
+    --trade-size ${TRADE_SIZE:-1.0} \
+    --max-position ${MAX_POSITION:-50.0} \
+    --min-confidence ${MIN_CONFIDENCE:-0.6}
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Environment
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+EnvironmentFile=/opt/ploy/.env
+
+# Timeouts
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+
+# Allow write access to specific directories
+ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/models
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ploy
+
+[Install]
+WantedBy=multi-user.target

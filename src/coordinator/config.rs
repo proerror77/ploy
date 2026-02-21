@@ -25,6 +25,8 @@ pub struct CoordinatorConfig {
     pub duplicate_guard_window_ms: u64,
     /// Enable/disable duplicate-intent guard.
     pub duplicate_guard_enabled: bool,
+    /// Cooldown in seconds between repeated stale heartbeat warnings for same agent.
+    pub heartbeat_stale_warn_cooldown_secs: u64,
     /// Enable/disable crypto capital allocator.
     pub crypto_allocator_enabled: bool,
     /// Total crypto capital cap (USD). If None, falls back to risk caps.
@@ -60,6 +62,7 @@ impl Default for CoordinatorConfig {
             batch_size: 10,
             duplicate_guard_window_ms: 60_000,
             duplicate_guard_enabled: true,
+            heartbeat_stale_warn_cooldown_secs: 300,
             crypto_allocator_enabled: true,
             crypto_allocator_total_cap_usd: None,
             // Conservative baseline allocator (can be overridden by env).

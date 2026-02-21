@@ -3,6 +3,7 @@
 use tokio::sync::oneshot;
 
 use super::state::AgentSnapshot;
+use crate::platform::Domain;
 
 /// Commands sent from the coordinator to individual agents
 #[derive(Debug)]
@@ -24,12 +25,20 @@ pub enum CoordinatorCommand {
 pub enum CoordinatorControlCommand {
     /// Pause all agents (stop submitting orders, keep feeds alive)
     PauseAll,
+    /// Pause agents for specific domain
+    PauseDomain(Domain),
     /// Resume all agents after pause
     ResumeAll,
+    /// Resume agents for specific domain
+    ResumeDomain(Domain),
     /// Force-close all positions and stop agents
     ForceCloseAll,
+    /// Force-close only positions for specific domain
+    ForceCloseDomain(Domain),
     /// Graceful shutdown for all agents
     ShutdownAll,
+    /// Graceful shutdown for specific domain
+    ShutdownDomain(Domain),
 }
 
 /// Response to a HealthCheck command

@@ -1,0 +1,37 @@
+[Unit]
+Description=Ploy Strategy momentum (Dry Run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ploy
+Group=ploy
+WorkingDirectory=/opt/ploy
+
+Environment=RUST_LOG=info,ploy=info,sqlx=warn
+Environment=LOG_DIR=/opt/ploy/logs
+Environment=PLOY_ALLOW_LEGACY_STRATEGY_LIVE=false
+EnvironmentFile=-/opt/ploy/.env
+
+ExecStart=/opt/ploy/bin/ploy strategy start momentum --config /opt/ploy/config/strategies/momentum.toml --dry-run --foreground
+
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/config /opt/ploy/env /opt/ploy/run
+PrivateTmp=true
+
+MemoryMax=256M
+CPUQuota=80%
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ploy-strategy-momentum-dryrun
+
+[Install]
+WantedBy=multi-user.target

@@ -1020,22 +1020,7 @@ fn parse_sidecar_domain(
     raw: Option<&str>,
     default_domain: Domain,
 ) -> std::result::Result<Domain, (StatusCode, String)> {
-    let Some(raw) = raw else {
-        return Ok(default_domain);
-    };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "crypto" => Ok(Domain::Crypto),
-        "sports" => Ok(Domain::Sports),
-        "politics" => Ok(Domain::Politics),
-        "economics" => Ok(Domain::Economics),
-        other => Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "invalid domain '{}', expected crypto|sports|politics|economics",
-                other
-            ),
-        )),
-    }
+    Domain::parse_optional(raw, default_domain).map_err(|msg| (StatusCode::BAD_REQUEST, msg))
 }
 
 fn parse_binary_side(raw: Option<&str>) -> std::result::Result<Side, (StatusCode, String)> {
@@ -1633,6 +1618,7 @@ mod tests {
     fn parse_domain_rejects_unknown_values() {
         assert!(parse_sidecar_domain(Some("crypto"), Domain::Sports).is_ok());
         assert!(parse_sidecar_domain(Some("sports"), Domain::Crypto).is_ok());
+        assert!(parse_sidecar_domain(Some("custom:42"), Domain::Crypto).is_ok());
         assert!(parse_sidecar_domain(Some("bad-domain"), Domain::Crypto).is_err());
     }
 

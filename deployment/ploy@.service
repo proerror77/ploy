@@ -1,0 +1,37 @@
+[Unit]
+Description=Ploy Polymarket Trading Bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ploy
+Group=ploy
+WorkingDirectory=/opt/ploy
+Environment=RUST_LOG=info,ploy=info,sqlx=warn
+Environment=LOG_DIR=/opt/ploy/logs
+EnvironmentFile=-/opt/ploy/.env
+EnvironmentFile=-/opt/ploy/env/%i.env
+ExecStart=/opt/ploy/bin/ploy run --config /opt/ploy/config/%i.toml
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/config /opt/ploy/env
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+LimitNOFILE=65535
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ploy-%i
+
+[Install]
+WantedBy=multi-user.target

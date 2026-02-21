@@ -7,29 +7,33 @@ use crate::api::{
     state::{AppState, SystemRunStatus},
     types::*,
 };
+use crate::platform::Domain;
 
 #[derive(Debug, Deserialize)]
 pub struct DomainControlRequest {
     pub domain: Option<String>,
 }
 
-fn reject_domain_scoped_control(
+fn parse_domain_control_request(
     req: Option<Json<DomainControlRequest>>,
-) -> std::result::Result<(), (StatusCode, String)> {
+) -> std::result::Result<Option<Domain>, (StatusCode, String)> {
     let Some(Json(r)) = req else {
-        return Ok(());
+        return Ok(None);
     };
-    if r.domain
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|v| !v.is_empty())
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "domain-scoped pause/resume/halt is not implemented yet; omit `domain`".to_string(),
-        ));
-    }
-    Ok(())
+    let Some(raw) = r.domain.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    Domain::parse_optional(Some(raw), Domain::Crypto)
+        .map(Some)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "invalid domain '{}', expected crypto|sports|politics|economics|custom:<id>",
+                    raw
+                ),
+            )
+        })
 }
 
 /// GET /health -- lightweight liveness/readiness probe
@@ -242,17 +246,24 @@ pub async fn pause_system(
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
     ensure_admin_authorized(&headers)?;
-    reject_domain_scoped_control(req)?;
+    let domain = parse_domain_control_request(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "coordinator unavailable in this runtime".to_string(),
         ));
     };
-    coordinator
-        .pause_all()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(domain) = domain {
+        coordinator
+            .pause_domain(domain)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        coordinator
+            .pause_all()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
     let mut status_state = state.system_status.write().await;
     status_state.status = SystemRunStatus::Stopped;
     drop(status_state);
@@ -262,7 +273,7 @@ pub async fn pause_system(
 
     Ok(Json(SystemControlResponse {
         success: true,
-        message: "已暂停所有策略".to_string(),
+        message: "已暂停".to_string(),
     }))
 }
 
@@ -273,17 +284,24 @@ pub async fn resume_system(
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
     ensure_admin_authorized(&headers)?;
-    reject_domain_scoped_control(req)?;
+    let domain = parse_domain_control_request(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "coordinator unavailable in this runtime".to_string(),
         ));
     };
-    coordinator
-        .resume_all()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(domain) = domain {
+        coordinator
+            .resume_domain(domain)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        coordinator
+            .resume_all()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
     let mut status_state = state.system_status.write().await;
     status_state.status = SystemRunStatus::Running;
     drop(status_state);
@@ -293,7 +311,7 @@ pub async fn resume_system(
 
     Ok(Json(SystemControlResponse {
         success: true,
-        message: "已恢复所有策略".to_string(),
+        message: "已恢复".to_string(),
     }))
 }
 
@@ -306,17 +324,24 @@ pub async fn halt_system(
     req: Option<Json<DomainControlRequest>>,
 ) -> std::result::Result<Json<SystemControlResponse>, (StatusCode, String)> {
     ensure_admin_authorized(&headers)?;
-    reject_domain_scoped_control(req)?;
+    let domain = parse_domain_control_request(req)?;
     let Some(coordinator) = state.coordinator.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "coordinator unavailable in this runtime".to_string(),
         ));
     };
-    coordinator
-        .force_close_all()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(domain) = domain {
+        coordinator
+            .force_close_domain(domain)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        coordinator
+            .force_close_all()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     // Update system status and broadcast
     {

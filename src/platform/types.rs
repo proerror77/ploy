@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use std::str::FromStr;
+
 use crate::domain::Side;
 
 /// 領域類型
@@ -31,6 +33,49 @@ impl std::fmt::Display for Domain {
             Domain::Politics => write!(f, "Politics"),
             Domain::Economics => write!(f, "Economics"),
             Domain::Custom(id) => write!(f, "Custom({})", id),
+        }
+    }
+}
+
+impl FromStr for Domain {
+    type Err = &'static str;
+
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Err("domain is empty");
+        }
+
+        if let Some(custom) = normalized.strip_prefix("custom:") {
+            let id = custom
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "custom domain id must be a non-negative integer")?;
+            return Ok(Domain::Custom(id));
+        }
+
+        match normalized.as_str() {
+            "crypto" => Ok(Domain::Crypto),
+            "sports" => Ok(Domain::Sports),
+            "politics" => Ok(Domain::Politics),
+            "economics" => Ok(Domain::Economics),
+            _ => Err("invalid domain; expected crypto|sports|politics|economics|custom:<id>"),
+        }
+    }
+}
+
+impl Domain {
+    pub fn parse_optional(raw: Option<&str>, default: Domain) -> std::result::Result<Self, String> {
+        match raw {
+            None => Ok(default),
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    Ok(default)
+                } else {
+                    Self::from_str(trimmed).map_err(|e| e.to_string())
+                }
+            }
         }
     }
 }
