@@ -34,6 +34,24 @@ use crate::strategy::momentum::{EventInfo, EventMatcher};
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 const STRATEGY_ID: &str = "crypto_lob_ml";
 
+/// Standard normal CDF approximation (Abramowitz-Stegun), ~4dp accuracy.
+fn normal_cdf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
+
+    0.5 * (1.0 + sign * y)
+}
+
 fn default_exit_edge_floor() -> Decimal {
     dec!(0.02)
 }
@@ -458,6 +476,33 @@ impl CryptoLobMlAgent {
         1.0 / (1.0 + (-x).exp())
     }
 
+    fn estimate_p_up_window(
+        window_move: Decimal,
+        sigma_1s: Option<Decimal>,
+        remaining_secs: i64,
+    ) -> Decimal {
+        let remaining_secs = remaining_secs.max(0) as f64;
+        let Some(sig_1s) = sigma_1s.and_then(|v| v.to_f64()) else {
+            return dec!(0.50);
+        };
+        if !sig_1s.is_finite() || sig_1s <= 0.0 {
+            return dec!(0.50);
+        }
+
+        let sigma_rem = sig_1s * remaining_secs.sqrt();
+        if !sigma_rem.is_finite() || sigma_rem <= 0.0 {
+            return dec!(0.50);
+        }
+
+        let w = window_move.to_f64().unwrap_or(0.0);
+        if !w.is_finite() {
+            return dec!(0.50);
+        }
+
+        let p = normal_cdf(w / sigma_rem).clamp(0.001, 0.999);
+        Decimal::from_f64_retain(p).unwrap_or(dec!(0.50))
+    }
+
     /// Estimate p(UP) from LOB snapshot + short-horizon momentum.
     fn estimate_p_up_logistic(
         &self,
@@ -724,13 +769,19 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    // Momentum from trade-tick cache.
+                    // Momentum + volatility from trade-tick cache.
                     let spot_cache = self.binance_ws.price_cache();
-                    let momentum_1s = spot_cache.momentum(&update.symbol, 1).await.unwrap_or(Decimal::ZERO);
-                    let momentum_5s = spot_cache.momentum(&update.symbol, 5).await.unwrap_or(Decimal::ZERO);
+                    let Some(spot) = spot_cache.get(&update.symbol).await else {
+                        continue;
+                    };
+                    let momentum_1s = spot.momentum(1).unwrap_or(Decimal::ZERO);
+                    let momentum_5s = spot.momentum(5).unwrap_or(Decimal::ZERO);
+                    let rolling_volatility_opt = spot.volatility(60);
 
-                    let (p_up, model_type_used) = self.estimate_p_up(&lob, momentum_1s, momentum_5s);
-                    let p_up_dec = Decimal::from_f64_retain(p_up).unwrap_or(dec!(0.5));
+                    let (p_up_model, model_type_used) =
+                        self.estimate_p_up(&lob, momentum_1s, momentum_5s);
+                    let p_up_model_dec =
+                        Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
 
                     let (obi_1, obi_2, obi_3, obi_20) = (
                         self.lob_cache
@@ -760,10 +811,51 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         // Only trade events that have actually started.
                         // Gamma can surface future windows early; avoid "pre-trading" them.
-                        let now = update.timestamp;
+                        let now = spot.timestamp;
                         if now < event.start_time || now >= event.end_time {
                             continue;
                         }
+
+                        // Window-context baseline probability: ties the bet to event resolution
+                        // (end_price >= start_price). This avoids pathological "always buy cheap tail"
+                        // behavior when p_up_model is neutral (~0.5) or uncalibrated.
+                        let elapsed_secs = now
+                            .signed_duration_since(event.start_time)
+                            .num_seconds()
+                            .max(0);
+                        let remaining_secs = event.end_time.signed_duration_since(now).num_seconds();
+                        if remaining_secs <= 0 {
+                            continue;
+                        }
+
+                        let target_time = now - chrono::Duration::seconds(elapsed_secs);
+                        if let Some(oldest) = spot.oldest_timestamp() {
+                            if oldest > target_time {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+
+                        let Some(start_price) = spot.price_secs_ago(elapsed_secs as u64) else {
+                            continue;
+                        };
+                        if start_price <= Decimal::ZERO {
+                            continue;
+                        }
+                        let window_move = (spot.price - start_price) / start_price;
+                        let p_up_window_dec = Self::estimate_p_up_window(
+                            window_move,
+                            rolling_volatility_opt,
+                            remaining_secs,
+                        );
+                        let (w_model, w_window) = match model_type_used {
+                            "onnx" | "mlp_json" => (dec!(0.50), dec!(0.50)),
+                            _ => (dec!(0.20), dec!(0.80)),
+                        };
+                        let p_up_dec = (p_up_window_dec * w_window + p_up_model_dec * w_model)
+                            .max(dec!(0.001))
+                            .min(dec!(0.999));
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
@@ -785,7 +877,13 @@ impl TradingAgent for CryptoLobMlAgent {
                         let (side, token_id, limit_price, edge, confidence) = if up_edge >= down_edge {
                             (Side::Up, event.up_token_id.clone(), up_ask, up_edge, p_up_dec)
                         } else {
-                            (Side::Down, event.down_token_id.clone(), down_ask, down_edge, Decimal::ONE - p_up_dec)
+                            (
+                                Side::Down,
+                                event.down_token_id.clone(),
+                                down_ask,
+                                down_edge,
+                                Decimal::ONE - p_up_dec,
+                            )
                         };
 
                         if edge < self.config.min_edge {
@@ -794,6 +892,18 @@ impl TradingAgent for CryptoLobMlAgent {
                         if limit_price > self.config.max_entry_price {
                             continue;
                         }
+
+                        let signal_confidence = {
+                            // Scale confidence by edge size; keep within [0,1].
+                            let mut c = (edge / dec!(0.10))
+                                .max(Decimal::ZERO)
+                                .min(Decimal::ONE);
+                            // Heuristic logistic model is less trustworthy than a trained model.
+                            if model_type_used == "logistic" {
+                                c *= dec!(0.70);
+                            }
+                            c
+                        };
 
                         if let Some(pos) = positions.get(&event.slug).cloned() {
                             if pos.side != side {
@@ -837,7 +947,14 @@ impl TradingAgent for CryptoLobMlAgent {
                                         .with_metadata("entry_price", &pos.entry_price.to_string())
                                         .with_metadata("exit_price", &exit_price.to_string())
                                         .with_metadata("held_secs", &held_secs.to_string())
-                                        .with_metadata("p_up", &format!("{p_up:.6}"))
+                                        .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
+                                        .with_metadata("p_up_window", &p_up_window_dec.to_string())
+                                        .with_metadata("p_up_blended", &p_up_dec.to_string())
+                                        .with_metadata("p_up_blend_w_model", &w_model.to_string())
+                                        .with_metadata(
+                                            "p_up_blend_w_window",
+                                            &w_window.to_string(),
+                                        )
                                         .with_metadata("signal_edge", &edge.to_string())
                                         .with_metadata("config_hash", &config_hash);
 
@@ -849,7 +966,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                                     old_side = %pos.side,
                                                     new_side = %side,
                                                     held_secs,
-                                                    p_up = %p_up,
+                                                    p_up = %p_up_dec,
                                                     "signal flip detected, submitting sell order"
                                                 );
                                             }
@@ -871,7 +988,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         if should_skip_entry(
                             &event.slug,
                             entry_key.as_str(),
-                            Utc::now(),
+                            now,
                             &positions,
                             &traded_events,
                             &last_trade_by_key,
@@ -908,11 +1025,15 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("horizon", &event.horizon)
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
                         .with_metadata("event_title", &event.title)
-                        .with_metadata("p_up", &format!("{p_up:.6}"))
+                        .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
+                        .with_metadata("p_up_window", &p_up_window_dec.to_string())
+                        .with_metadata("p_up_blended", &p_up_dec.to_string())
+                        .with_metadata("p_up_blend_w_model", &w_model.to_string())
+                        .with_metadata("p_up_blend_w_window", &w_window.to_string())
                         .with_metadata("model_type", model_type_used)
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
                         .with_metadata("signal_edge", &edge.to_string())
-                        .with_metadata("signal_confidence", &confidence.to_string())
+                        .with_metadata("signal_confidence", &signal_confidence.to_string())
                         .with_metadata("signal_fair_value", &confidence.to_string())
                         .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("pm_up_ask", &up_ask.to_string())
@@ -933,6 +1054,10 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
                         .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
                         .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
+                        .with_metadata("window_start_price", &start_price.to_string())
+                        .with_metadata("window_move_pct", &window_move.to_string())
+                        .with_metadata("window_elapsed_secs", &elapsed_secs.to_string())
+                        .with_metadata("window_remaining_secs", &remaining_secs.to_string())
                         .with_metadata("config_hash", &config_hash);
 
                         info!(
@@ -942,7 +1067,7 @@ impl TradingAgent for CryptoLobMlAgent {
                             %side,
                             %limit_price,
                             %edge,
-                            p_up = %p_up,
+                            p_up = %p_up_dec,
                             model = model_type_used,
                             "lob-ml signal detected, submitting order"
                         );
