@@ -9,6 +9,15 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+#[cfg(feature = "builder_relayer_sdk")]
+use builder_relayer_client_rust::signer::DummySigner;
+#[cfg(feature = "builder_relayer_sdk")]
+use builder_relayer_client_rust::{
+    CallType as BuilderCallType, ProxyTransaction as BuilderProxyTransaction, RelayClient,
+    RelayerTxType as BuilderRelayerTxType,
+};
+#[cfg(feature = "builder_relayer_sdk")]
+use builder_signing_sdk_rs::BuilderApiKeyCreds;
 use chrono::{NaiveDate, Utc};
 use ethers::abi::{encode as abi_encode, AbiParser, Token};
 use ethers::middleware::SignerMiddleware;
@@ -1235,6 +1244,119 @@ impl AutoClaimer {
         Ok(headers)
     }
 
+    #[cfg(feature = "builder_relayer_sdk")]
+    async fn claim_position_via_relayer_proxy_sdk(
+        &self,
+        pos: &RedeemablePosition,
+        builder_creds: &RelayerBuilderCredentials,
+        private_key: &str,
+    ) -> Result<Option<String>> {
+        let signer = DummySigner::new(private_key).map_err(|e| {
+            crate::error::PloyError::Wallet(format!("Invalid private key for relayer SDK: {}", e))
+        })?;
+        let condition_hex = pos
+            .condition_id
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        let condition_bytes: [u8; 32] = hex::decode(condition_hex)
+            .map_err(|e| crate::error::PloyError::Internal(format!("Invalid condition ID: {}", e)))?
+            .try_into()
+            .map_err(|_| crate::error::PloyError::Internal("Condition ID wrong length".into()))?;
+        let redeem_call_data = Self::encode_ctf_redeem_calldata(condition_bytes)?;
+        let metadata = format!(
+            "redeem {}",
+            &condition_hex.chars().take(16).collect::<String>()
+        );
+        let polygon_rpc = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+
+        let relayer_client = RelayClient::new_with_type(
+            relayer_base_url(),
+            POLYGON_CHAIN_ID,
+            BuilderRelayerTxType::Proxy,
+        )
+        .with_signer(Box::new(signer.clone()), Box::new(signer))
+        .with_builder_api_key(BuilderApiKeyCreds {
+            key: builder_creds.api_key.clone(),
+            secret: builder_creds.secret.clone(),
+            passphrase: builder_creds.passphrase.clone(),
+        })
+        .with_gas_estimate_rpc(polygon_rpc);
+
+        let submitted = relayer_client
+            .execute_proxy_transactions(
+                vec![BuilderProxyTransaction {
+                    to: CONDITIONAL_TOKENS_POLYGON.to_string(),
+                    type_code: BuilderCallType::Call,
+                    data: format!("0x{}", hex::encode(redeem_call_data)),
+                    value: "0".to_string(),
+                }],
+                Some(metadata.clone()),
+            )
+            .await
+            .map_err(|e| {
+                crate::error::PloyError::OrderSubmission(format!(
+                    "Relayer SDK submit failed: {}",
+                    e
+                ))
+            })?;
+
+        info!(
+            "Relayer SDK redeem submitted: id={}, state={}, condition={}",
+            submitted.transaction_id,
+            submitted.state,
+            &condition_hex.chars().take(16).collect::<String>()
+        );
+
+        for _ in 0..relayer_poll_max() {
+            let transactions = relayer_client
+                .get_transaction(&submitted.transaction_id)
+                .await
+                .map_err(|e| {
+                    crate::error::PloyError::OrderSubmission(format!(
+                        "Relayer SDK polling failed: {}",
+                        e
+                    ))
+                })?;
+
+            if let Some(txn) = transactions.first() {
+                match txn.state.as_str() {
+                    "STATE_MINED" | "STATE_CONFIRMED" => {
+                        let tx_hash = if !txn.transaction_hash.trim().is_empty() {
+                            txn.transaction_hash.clone()
+                        } else if !submitted.transaction_hash.trim().is_empty() {
+                            submitted.transaction_hash.clone()
+                        } else {
+                            submitted.hash.clone()
+                        };
+                        info!(
+                            "Relayer SDK redeem confirmed: state={}, tx={}",
+                            txn.state, tx_hash
+                        );
+                        return Ok(Some(tx_hash));
+                    }
+                    "STATE_FAILED" | "STATE_INVALID" => {
+                        return Err(crate::error::PloyError::OrderSubmission(format!(
+                            "Relayer redeem failed: id={}, state={}",
+                            submitted.transaction_id, txn.state
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+
+            sleep(Duration::from_millis(relayer_poll_interval_ms())).await;
+        }
+
+        Err(crate::error::PloyError::OrderTimeout(format!(
+            "Relayer redeem polling timed out: id={}",
+            submitted.transaction_id
+        )))
+    }
+
     async fn claim_position_via_relayer_proxy(
         &self,
         pos: &RedeemablePosition,
@@ -1250,6 +1372,20 @@ impl AutoClaimer {
         let private_key = self.config.private_key.as_ref().ok_or_else(|| {
             crate::error::PloyError::Wallet("No private key for relayer redeem".into())
         })?;
+
+        #[cfg(feature = "builder_relayer_sdk")]
+        match self
+            .claim_position_via_relayer_proxy_sdk(pos, &builder_creds, private_key)
+            .await
+        {
+            Ok(tx_hash) => return Ok(tx_hash),
+            Err(e) => {
+                warn!(
+                    "Relayer SDK path failed, falling back to legacy relayer flow: {}",
+                    e
+                );
+            }
+        }
 
         let signer_wallet = private_key
             .parse::<LocalWallet>()
