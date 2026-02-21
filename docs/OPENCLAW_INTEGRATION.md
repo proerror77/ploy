@@ -60,7 +60,7 @@ ssh ploy@TRADING_HOST "svc-logs crypto 200"
 4. 在 OpenClaw 裡建立一個自訂 skill，內容用 bash 直接跑：
 
 - 掃描一次（不下單）：`ploy event-edge --title "Which company has the best AI model end of February?"`
-- 常駐自動循環：`ploy run`（由 `config/default.toml` 的 `[event_edge_agent]` 控制）
+- 常駐自動循環：`ploy platform start --politics`（由 `config/default.toml` 的 `[event_edge_agent]` 控制）
 - 或改用 wrapper：`scripts/event_edge_daemon.sh start false true`
 
 這樣 OpenClaw 可以用自己的 always-on daemon + channel inbox 來觸發、監控、或切換策略；而交易邏輯仍由 `ploy` 控制（含 `dry_run` / risk guard）。
