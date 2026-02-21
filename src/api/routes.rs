@@ -1,6 +1,6 @@
 use axum::{
     http::{header, HeaderValue, Method},
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -94,6 +94,7 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::disable_deployment),
         )
         // Account-level governance policy (OpenClaw control-plane)
+        .route("/api/governance/status", get(handlers::get_governance_status))
         .route(
             "/api/governance/policy",
             get(handlers::get_governance_policy).put(handlers::put_governance_policy),

@@ -5,7 +5,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use super::state::AgentSnapshot;
+use super::state::{AgentSnapshot, QueueStatsSnapshot};
+use crate::platform::PlatformRiskState;
 
 /// Commands sent from the coordinator to individual agents
 #[derive(Debug)]
@@ -68,4 +69,31 @@ pub struct GovernancePolicyUpdate {
     pub updated_by: String,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// Per-domain allocator ledger snapshot (account-level capital tracking).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocatorLedgerSnapshot {
+    pub domain: String,
+    pub enabled: bool,
+    pub cap_notional_usd: Decimal,
+    pub open_notional_usd: Decimal,
+    pub pending_notional_usd: Decimal,
+    pub available_notional_usd: Decimal,
+}
+
+/// Runtime governance + risk + capital view for OpenClaw control-plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceStatusSnapshot {
+    pub account_id: String,
+    pub ingress_mode: String,
+    pub policy: GovernancePolicySnapshot,
+    pub account_notional_usd: Decimal,
+    pub platform_exposure_usd: Decimal,
+    pub risk_state: PlatformRiskState,
+    pub daily_pnl_usd: Decimal,
+    pub daily_loss_limit_usd: Decimal,
+    pub queue: QueueStatsSnapshot,
+    pub allocators: Vec<AllocatorLedgerSnapshot>,
+    pub updated_at: DateTime<Utc>,
 }

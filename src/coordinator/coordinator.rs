@@ -28,7 +28,8 @@ use crate::platform::{
 use crate::strategy::executor::OrderExecutor;
 
 use super::command::{
-    CoordinatorCommand, CoordinatorControlCommand, GovernancePolicySnapshot, GovernancePolicyUpdate,
+    AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
+    GovernancePolicySnapshot, GovernancePolicyUpdate, GovernanceStatusSnapshot,
 };
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
@@ -38,6 +39,16 @@ enum IngressMode {
     Running,
     Paused,
     Halted,
+}
+
+impl IngressMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Halted => "halted",
+        }
+    }
 }
 
 const HEARTBEAT_STALE_WARN_COOLDOWN_SECS: i64 = 60;
@@ -193,10 +204,15 @@ fn governance_block_reason(
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
+    account_id: String,
     order_tx: mpsc::Sender<OrderIntent>,
     state_tx: mpsc::Sender<AgentSnapshot>,
     control_tx: mpsc::Sender<CoordinatorControlCommand>,
     global_state: Arc<RwLock<GlobalState>>,
+    risk_gate: Arc<RiskGate>,
+    order_queue: Arc<RwLock<OrderQueue>>,
+    crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
+    sports_allocator: Arc<RwLock<SportsCapitalAllocator>>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
 }
@@ -300,6 +316,38 @@ impl CoordinatorHandle {
         let mut policy = self.governance_policy.write().await;
         *policy = next;
         Ok(snapshot)
+    }
+
+    /// Read runtime governance + risk + capital ledger snapshot.
+    pub async fn governance_status(&self) -> GovernanceStatusSnapshot {
+        let ingress_mode = self.ingress_mode.read().await.as_str().to_string();
+        let policy = self.governance_policy.read().await.to_snapshot();
+        let risk_state = self.risk_gate.state().await;
+        let platform_exposure_usd = self.risk_gate.total_exposure().await;
+        let (daily_pnl_usd, _, _) = self.risk_gate.daily_stats().await;
+        let daily_loss_limit_usd = self.risk_gate.daily_loss_limit();
+        let queue = QueueStatsSnapshot::from(self.order_queue.read().await.stats());
+
+        let crypto = self.crypto_allocator.read().await.ledger_snapshot();
+        let sports = self.sports_allocator.read().await.ledger_snapshot();
+        let account_notional_usd = crypto.open_notional_usd
+            + crypto.pending_notional_usd
+            + sports.open_notional_usd
+            + sports.pending_notional_usd;
+
+        GovernanceStatusSnapshot {
+            account_id: self.account_id.clone(),
+            ingress_mode,
+            policy,
+            account_notional_usd,
+            platform_exposure_usd,
+            risk_state,
+            daily_pnl_usd,
+            daily_loss_limit_usd,
+            queue,
+            allocators: vec![crypto, sports],
+            updated_at: Utc::now(),
+        }
     }
 }
 
@@ -937,6 +985,21 @@ impl CryptoCapitalAllocator {
             .or_else(|| self.horizon_cap_pct.get(&CryptoHorizon::Other).copied())
             .unwrap_or(Decimal::ZERO)
     }
+
+    fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
+        let open_notional_usd = self.open.total;
+        let pending_notional_usd = self.pending.total;
+        let used = open_notional_usd + pending_notional_usd;
+        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
+        AllocatorLedgerSnapshot {
+            domain: "crypto".to_string(),
+            enabled: self.enabled,
+            cap_notional_usd: self.total_cap,
+            open_notional_usd,
+            pending_notional_usd,
+            available_notional_usd,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1269,6 +1332,21 @@ impl SportsCapitalAllocator {
         let dynamic_cap = self.total_cap / Decimal::from(market_count);
         dynamic_cap.min(fixed_cap)
     }
+
+    fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
+        let open_notional_usd = self.open.total;
+        let pending_notional_usd = self.pending.total;
+        let used = open_notional_usd + pending_notional_usd;
+        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
+        AllocatorLedgerSnapshot {
+            domain: "sports".to_string(),
+            enabled: self.enabled,
+            cap_notional_usd: self.total_cap,
+            open_notional_usd,
+            pending_notional_usd,
+            available_notional_usd,
+        }
+    }
 }
 
 impl Coordinator {
@@ -1333,10 +1411,15 @@ impl Coordinator {
     /// Create a clonable handle for agents
     pub fn handle(&self) -> CoordinatorHandle {
         CoordinatorHandle {
+            account_id: self.account_id.clone(),
             order_tx: self.order_tx.clone(),
             state_tx: self.state_tx.clone(),
             control_tx: self.control_tx.clone(),
             global_state: self.global_state.clone(),
+            risk_gate: self.risk_gate.clone(),
+            order_queue: self.order_queue.clone(),
+            crypto_allocator: self.crypto_allocator.clone(),
+            sports_allocator: self.sports_allocator.clone(),
             ingress_mode: self.ingress_mode.clone(),
             governance_policy: self.governance_policy.clone(),
         }
@@ -3005,5 +3088,47 @@ mod tests {
 
         let allocator = SportsCapitalAllocator::new(&cfg);
         assert_eq!(allocator.total_cap, dec!(25));
+    }
+
+    #[test]
+    fn test_crypto_allocator_ledger_snapshot_reports_open_pending_and_available() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let buy = make_crypto_intent("BTC", "15m", true, 100, dec!(0.5)); // reserve $50
+        assert!(allocator.reserve_buy(&buy).is_ok());
+        allocator.settle_buy_execution(&buy, 80, dec!(0.5)); // open $40
+
+        let second = make_crypto_intent("ETH", "5m", true, 20, dec!(0.5)); // pending $10
+        assert!(allocator.reserve_buy(&second).is_ok());
+
+        let snap = allocator.ledger_snapshot();
+        assert_eq!(snap.domain, "crypto");
+        assert_eq!(snap.cap_notional_usd, dec!(200));
+        assert_eq!(snap.open_notional_usd, dec!(40));
+        assert_eq!(snap.pending_notional_usd, dec!(10));
+        assert_eq!(snap.available_notional_usd, dec!(150));
+    }
+
+    #[test]
+    fn test_sports_allocator_ledger_snapshot_reports_open_pending_and_available() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(50));
+        let mut allocator = SportsCapitalAllocator::new(&cfg);
+
+        let buy = make_sports_intent("nba-game-1", true, 100, dec!(0.10)); // reserve $10
+        assert!(allocator.reserve_buy(&buy).is_ok());
+        allocator.settle_buy_execution(&buy, 50, dec!(0.10)); // open $5
+
+        let pending = make_sports_intent("nba-game-2", true, 40, dec!(0.10)); // pending $4
+        assert!(allocator.reserve_buy(&pending).is_ok());
+
+        let snap = allocator.ledger_snapshot();
+        assert_eq!(snap.domain, "sports");
+        assert_eq!(snap.cap_notional_usd, dec!(50));
+        assert_eq!(snap.open_notional_usd, dec!(5));
+        assert_eq!(snap.pending_notional_usd, dec!(4));
+        assert_eq!(snap.available_notional_usd, dec!(41));
     }
 }

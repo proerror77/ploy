@@ -7,7 +7,9 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::api::{auth::ensure_admin_authorized, state::AppState};
-use crate::coordinator::{GovernancePolicySnapshot, GovernancePolicyUpdate};
+use crate::coordinator::{
+    GovernancePolicySnapshot, GovernancePolicyUpdate, GovernanceStatusSnapshot,
+};
 use crate::error::PloyError;
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +38,21 @@ pub async fn get_governance_policy(
         ));
     };
     Ok(Json(coordinator.governance_policy().await))
+}
+
+/// GET /api/governance/status
+pub async fn get_governance_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> std::result::Result<Json<GovernanceStatusSnapshot>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "coordinator unavailable in this runtime".to_string(),
+        ));
+    };
+    Ok(Json(coordinator.governance_status().await))
 }
 
 /// PUT /api/governance/policy
