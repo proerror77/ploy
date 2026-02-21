@@ -1041,22 +1041,33 @@ fn parse_is_buy(
     order_side: Option<&str>,
     is_buy: Option<bool>,
 ) -> std::result::Result<bool, (StatusCode, String)> {
+    let parsed_order_side = match order_side.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => match raw.to_ascii_uppercase().as_str() {
+            "BUY" => Some(true),
+            "SELL" => Some(false),
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid order_side '{}', expected BUY|SELL", other),
+                ));
+            }
+        },
+        None => None,
+    };
+
     if let Some(v) = is_buy {
+        if let Some(side_bool) = parsed_order_side {
+            if side_bool != v {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "order_side conflicts with is_buy".to_string(),
+                ));
+            }
+        }
         return Ok(v);
     }
-    match order_side
-        .unwrap_or("BUY")
-        .trim()
-        .to_ascii_uppercase()
-        .as_str()
-    {
-        "BUY" => Ok(true),
-        "SELL" => Ok(false),
-        other => Err((
-            StatusCode::BAD_REQUEST,
-            format!("invalid order_side '{}', expected BUY|SELL", other),
-        )),
-    }
+
+    Ok(parsed_order_side.unwrap_or(true))
 }
 
 fn parse_order_priority(
@@ -1644,6 +1655,13 @@ mod tests {
         assert_eq!(parse_is_buy(Some("BUY"), None).unwrap(), true);
         assert_eq!(parse_is_buy(Some("SELL"), None).unwrap(), false);
         assert!(parse_is_buy(Some("HOLD"), None).is_err());
+    }
+
+    #[test]
+    fn parse_order_side_rejects_conflicting_is_buy() {
+        assert!(parse_is_buy(Some("BUY"), Some(false)).is_err());
+        assert!(parse_is_buy(Some("SELL"), Some(true)).is_err());
+        assert_eq!(parse_is_buy(Some("SELL"), Some(false)).unwrap(), false);
     }
 
     #[test]
