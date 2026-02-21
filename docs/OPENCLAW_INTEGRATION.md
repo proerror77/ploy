@@ -132,6 +132,11 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 - `events.upsert`（params: upsert 欄位 + `idempotency_key`）
 - `events.update_status`（params: `id`, `status`, `idempotency_key`）
 
+`pm.submit_limit` 的 SELL 在 Coordinator 入口採用 **reduce-only** 驗證：
+- 必須命中同 `agent_id/domain/token_id/side` 的已追蹤持倉，否則會被拒絕
+- SELL 張數不得超過已追蹤持倉張數
+- 若是全局熔斷/降風險，請優先使用 deployment/governance 控制與 force-close 流程，而不是跨 agent 手動 SELL
+
 #### OpenClaw skill（bash）建議寫法
 
 在 OpenClaw 的自訂 skill 裡（bash），把 `TRADING_HOST` 固定成你的交易機器，然後每個工具都只是送一個 JSON：
