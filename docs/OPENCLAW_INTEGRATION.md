@@ -135,6 +135,7 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 `pm.submit_limit` 的 SELL 在 Coordinator 入口採用 **reduce-only** 驗證：
 - 必須命中同 `agent_id/domain/token_id/side` 的已追蹤持倉，否則會被拒絕
 - SELL 張數不得超過已追蹤持倉張數
+- 佇列內同 bucket 的待執行 SELL 會先占用可減倉位（避免並發超賣）
 - 若是全局熔斷/降風險，請優先使用 deployment/governance 控制與 force-close 流程，而不是跨 agent 手動 SELL
 
 #### OpenClaw skill（bash）建議寫法

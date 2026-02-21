@@ -488,6 +488,7 @@ fn buy_intent_missing_deployment_reason(intent: &OrderIntent) -> Option<String> 
 fn sell_reduce_only_violation_reason(
     intent: &OrderIntent,
     tracked_open_shares: u64,
+    pending_sell_shares: u64,
 ) -> Option<String> {
     if intent.is_buy {
         return None;
@@ -502,11 +503,24 @@ fn sell_reduce_only_violation_reason(
         ));
     }
 
-    if intent.shares > tracked_open_shares {
+    let available_shares = tracked_open_shares.saturating_sub(pending_sell_shares);
+    if available_shares == 0 {
         return Some(format!(
-            "SELL intent reduce-only violation: requested shares {} exceeds tracked open shares {} for token_id={} side={}",
-            intent.shares,
+            "SELL intent reduce-only violation: tracked open shares {} are fully reserved by pending SELL intents {} for token_id={} side={}",
             tracked_open_shares,
+            pending_sell_shares,
+            intent.token_id,
+            intent.side.as_str()
+        ));
+    }
+
+    if intent.shares > available_shares {
+        return Some(format!(
+            "SELL intent reduce-only violation: requested shares {} exceeds available reduce-only shares {} (tracked={}, pending_sell={}) for token_id={} side={}",
+            intent.shares,
+            available_shares,
+            tracked_open_shares,
+            pending_sell_shares,
             intent.token_id,
             intent.side.as_str()
         ));
@@ -878,7 +892,15 @@ impl CoordinatorHandle {
                     intent.side,
                 )
                 .await;
-            if let Some(reason) = sell_reduce_only_violation_reason(&intent, tracked_open_shares) {
+            let pending_sell_shares = self.order_queue.read().await.pending_sell_shares_for(
+                &intent.agent_id,
+                intent.domain,
+                &intent.token_id,
+                intent.side,
+            );
+            if let Some(reason) =
+                sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
+            {
                 return Err(crate::error::PloyError::Validation(reason));
             }
         }
@@ -2831,6 +2853,36 @@ impl Coordinator {
             return;
         }
 
+        if !intent.is_buy {
+            let tracked_open_shares = self
+                .positions
+                .agent_open_shares_for_token_side(
+                    &intent.agent_id,
+                    intent.domain,
+                    &intent.token_id,
+                    intent.side,
+                )
+                .await;
+            let pending_sell_shares = self.order_queue.read().await.pending_sell_shares_for(
+                &intent.agent_id,
+                intent.domain,
+                &intent.token_id,
+                intent.side,
+            );
+
+            if let Some(reason) =
+                sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
+            {
+                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                    .await;
+                warn!(
+                    %agent_id, %intent_id, reason = %reason,
+                    "order blocked by reduce-only sell guard"
+                );
+                return;
+            }
+        }
+
         let ingress_mode = *self.ingress_mode.read().await;
         if intent.is_buy && ingress_mode != IngressMode::Running {
             let reason = format!(
@@ -4051,7 +4103,7 @@ mod tests {
     #[test]
     fn test_sell_reduce_only_violation_when_no_tracked_shares() {
         let intent = make_intent(false, OrderPriority::Normal);
-        let reason = sell_reduce_only_violation_reason(&intent, 0);
+        let reason = sell_reduce_only_violation_reason(&intent, 0, 0);
         assert!(reason
             .unwrap_or_default()
             .contains("no tracked open shares"));
@@ -4060,17 +4112,35 @@ mod tests {
     #[test]
     fn test_sell_reduce_only_violation_when_requested_exceeds_tracked() {
         let intent = make_intent(false, OrderPriority::Normal);
-        let reason = sell_reduce_only_violation_reason(&intent, 30);
+        let reason = sell_reduce_only_violation_reason(&intent, 30, 0);
         assert!(reason
             .unwrap_or_default()
-            .contains("requested shares 100 exceeds tracked open shares 30"));
+            .contains("requested shares 100 exceeds available reduce-only shares 30"));
     }
 
     #[test]
     fn test_sell_reduce_only_allows_with_sufficient_tracked_shares() {
         let intent = make_intent(false, OrderPriority::Normal);
-        assert!(sell_reduce_only_violation_reason(&intent, 100).is_none());
-        assert!(sell_reduce_only_violation_reason(&intent, 150).is_none());
+        assert!(sell_reduce_only_violation_reason(&intent, 100, 0).is_none());
+        assert!(sell_reduce_only_violation_reason(&intent, 150, 0).is_none());
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_pending_sells_exhaust_available() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 100, 100);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("fully reserved by pending SELL intents 100"));
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_requested_exceeds_available_after_pending() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 100, 40);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("requested shares 100 exceeds available reduce-only shares 60"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
 use super::types::{Domain, OrderIntent};
+use crate::domain::Side;
 
 /// 包裝 OrderIntent 以支持優先級排序
 #[derive(Debug)]
@@ -235,6 +236,29 @@ impl OrderQueue {
             })
             .sum()
     }
+
+    /// Sum pending SELL shares in queue for one reduce-only bucket.
+    pub fn pending_sell_shares_for(
+        &self,
+        agent_id: &str,
+        domain: Domain,
+        token_id: &str,
+        side: Side,
+    ) -> u64 {
+        self.heap
+            .iter()
+            .filter_map(|item| {
+                let intent = &item.intent;
+                (!intent.is_buy
+                    && !intent.is_expired()
+                    && intent.agent_id == agent_id
+                    && intent.domain == domain
+                    && intent.side == side
+                    && intent.token_id.eq_ignore_ascii_case(token_id))
+                .then_some(intent.shares)
+            })
+            .fold(0u64, |acc, shares| acc.saturating_add(shares))
+    }
 }
 
 /// 隊列統計
@@ -424,5 +448,55 @@ mod tests {
         let notional =
             queue.pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]);
         assert_eq!(notional, Decimal::from_str_exact("10.00").unwrap());
+    }
+
+    #[test]
+    fn test_pending_sell_shares_for_filters_bucket() {
+        let mut queue = OrderQueue::new(100);
+
+        let mut sell_a = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "TOKEN-UP",
+            Side::Up,
+            false,
+            40,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        sell_a.priority = OrderPriority::High;
+
+        let mut sell_b = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "token-up",
+            Side::Up,
+            false,
+            35,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        sell_b.priority = OrderPriority::Normal;
+
+        let mut other_side = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "token-up",
+            Side::Down,
+            false,
+            20,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        other_side.priority = OrderPriority::Low;
+
+        queue.enqueue(sell_a).unwrap();
+        queue.enqueue(sell_b).unwrap();
+        queue.enqueue(other_side).unwrap();
+
+        assert_eq!(
+            queue.pending_sell_shares_for("agent1", Domain::Crypto, "token-up", Side::Up),
+            75
+        );
     }
 }
