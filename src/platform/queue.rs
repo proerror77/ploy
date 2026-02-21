@@ -243,6 +243,26 @@ impl OrderQueue {
         before - self.heap.len()
     }
 
+    /// 移除 queue 中待執行 BUY 訂單（可選限定 domain），並返回被移除的 intents。
+    pub fn remove_buy_orders(&mut self, domain: Option<Domain>) -> Vec<OrderIntent> {
+        let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
+        let mut removed = Vec::new();
+
+        for item in items {
+            let should_remove = item.intent.is_buy
+                && domain
+                    .map(|target| item.intent.domain == target)
+                    .unwrap_or(true);
+            if should_remove {
+                removed.push(item.intent);
+            } else {
+                self.heap.push(item);
+            }
+        }
+
+        removed
+    }
+
     /// 獲取隊列統計
     pub fn stats(&self) -> QueueStats {
         let mut priority_counts = [0usize; 4];
@@ -508,6 +528,38 @@ mod tests {
         let notional =
             queue.pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]);
         assert_eq!(notional, Decimal::from_str_exact("10.00").unwrap());
+    }
+
+    #[test]
+    fn test_remove_buy_orders_with_domain_filter() {
+        let mut queue = OrderQueue::new(100);
+        let crypto_buy = make_intent("a1", OrderPriority::Normal);
+        let sports_buy = OrderIntent::new(
+            "a2",
+            Domain::Sports,
+            "nba",
+            "token-s",
+            Side::Up,
+            true,
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        let mut crypto_sell = make_intent("a3", OrderPriority::Low);
+        crypto_sell.is_buy = false;
+
+        queue.enqueue(crypto_buy).unwrap();
+        queue.enqueue(sports_buy).unwrap();
+        queue.enqueue(crypto_sell).unwrap();
+
+        let removed = queue.remove_buy_orders(Some(Domain::Crypto));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].domain, Domain::Crypto);
+        assert_eq!(queue.len(), 2);
+
+        let removed_all = queue.remove_buy_orders(None);
+        assert_eq!(removed_all.len(), 1);
+        assert_eq!(removed_all[0].domain, Domain::Sports);
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]

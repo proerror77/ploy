@@ -2661,6 +2661,23 @@ impl Coordinator {
         }
     }
 
+    async fn cancel_queued_buy_intents(&self, domain: Option<Domain>, reason: &str) {
+        let dropped = {
+            let mut queue = self.order_queue.write().await;
+            queue.remove_buy_orders(domain)
+        };
+
+        if dropped.is_empty() {
+            return;
+        }
+
+        for intent in dropped {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
+                .await;
+            self.settle_domain_failure(&intent).await;
+        }
+    }
+
     /// Pause all agents
     pub async fn pause_all(&self) {
         {
@@ -2696,6 +2713,8 @@ impl Coordinator {
             *mode = IngressMode::Halted;
         }
         self.domain_ingress_mode.write().await.clear();
+        self.cancel_queued_buy_intents(None, "dropped by coordinator global halt")
+            .await;
         info!("coordinator: sending force-close to all agents");
         for (id, entry) in &self.agent_commands {
             if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
@@ -2711,6 +2730,8 @@ impl Coordinator {
             *mode = IngressMode::Halted;
         }
         self.domain_ingress_mode.write().await.clear();
+        self.cancel_queued_buy_intents(None, "dropped by coordinator shutdown")
+            .await;
         info!("coordinator: sending shutdown to all agents");
         for (id, entry) in &self.agent_commands {
             if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
@@ -2746,6 +2767,8 @@ impl Coordinator {
     /// Force-close all agents in one domain
     pub async fn force_close_domain(&self, domain: Domain) {
         self.set_domain_mode(domain, IngressMode::Halted).await;
+        self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain halt")
+            .await;
         for (id, entry) in &self.agent_commands {
             if self.should_apply_domain_cmd(entry, domain) {
                 if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
@@ -2758,6 +2781,8 @@ impl Coordinator {
     /// Shutdown all agents in one domain
     pub async fn shutdown_domain(&self, domain: Domain) {
         self.set_domain_mode(domain, IngressMode::Halted).await;
+        self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain shutdown")
+            .await;
         for (id, entry) in &self.agent_commands {
             if self.should_apply_domain_cmd(entry, domain) {
                 if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
