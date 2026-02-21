@@ -2483,9 +2483,11 @@ fn apply_strategy_deployments(
     }
     cfg.enable_sports = false;
     cfg.enable_politics = false;
+    cfg.enable_economics = false;
 
     let mut coins: HashSet<String> = HashSet::new();
     let mut timeframe_summary: HashMap<String, usize> = HashMap::new();
+    let mut custom_domains: HashSet<String> = HashSet::new();
 
     for dep in enabled.iter().copied() {
         *timeframe_summary
@@ -2527,7 +2529,10 @@ fn apply_strategy_deployments(
             }
             Domain::Sports => cfg.enable_sports = true,
             Domain::Politics => cfg.enable_politics = true,
-            Domain::Economics | Domain::Custom(_) => {}
+            Domain::Economics => cfg.enable_economics = true,
+            Domain::Custom(ref custom_domain) => {
+                custom_domains.insert(format!("custom:{}", custom_domain));
+            }
         }
     }
 
@@ -2560,6 +2565,14 @@ fn apply_strategy_deployments(
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
     tf.sort();
+    if !custom_domains.is_empty() {
+        let mut custom: Vec<String> = custom_domains.into_iter().collect();
+        custom.sort();
+        warn!(
+            domains = ?custom,
+            "custom deployments detected without built-in runtime agent registration"
+        );
+    }
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = cfg.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
@@ -2574,6 +2587,7 @@ fn apply_strategy_deployments(
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = cfg.enable_sports,
         politics = cfg.enable_politics,
+        economics = cfg.enable_economics,
         coins = ?cfg.crypto.coins,
         timeframes = ?tf,
         "applied strategy deployment matrix to platform runtime"
@@ -2705,6 +2719,8 @@ pub struct PlatformBootstrapConfig {
     pub enable_crypto_rl_policy: bool,
     pub enable_sports: bool,
     pub enable_politics: bool,
+    #[serde(default)]
+    pub enable_economics: bool,
     pub dry_run: bool,
     pub crypto: CryptoTradingConfig,
     pub crypto_lob_ml: CryptoLobMlConfig,
@@ -2726,6 +2742,7 @@ impl Default for PlatformBootstrapConfig {
             enable_crypto_rl_policy: false,
             enable_sports: false,
             enable_politics: false,
+            enable_economics: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
             crypto_lob_ml: CryptoLobMlConfig::default(),
@@ -3383,6 +3400,7 @@ impl PlatformBootstrapConfig {
             }
             cfg.enable_sports = false;
             cfg.enable_politics = false;
+            cfg.enable_economics = false;
             info!("agent framework lockdown active (mode=openclaw): built-in agents are disabled");
         }
 
@@ -3425,9 +3443,15 @@ pub async fn start_platform(
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
+        economics = config.enable_economics,
         dry_run = config.dry_run,
         "starting multi-agent platform"
     );
+    if config.enable_economics {
+        warn!(
+            "economics domain enabled, but no built-in economics agent is registered; coordinator-level risk and allocator gates remain active"
+        );
+    }
 
     let db_required = env_bool(
         "PLOY_DB_REQUIRED",
@@ -3489,6 +3513,10 @@ pub async fn start_platform(
         }
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
+        let require_runtime_restore = env_bool(
+            "PLOY_REQUIRE_RUNTIME_STATE_RESTORE",
+            !app_config.dry_run.enabled,
+        );
         let migration_store = PostgresStore::from_pool(pool.clone());
         if run_sqlx_migrations {
             if let Err(e) = migration_store.migrate().await {
@@ -3559,6 +3587,18 @@ pub async fn start_platform(
             warn!(error = %e, "failed to ensure agent_order_executions table; execution logging disabled");
         } else {
             coordinator.set_execution_log_pool(pool.clone());
+            if let Err(e) = coordinator.restore_runtime_state_from_execution_log().await {
+                if require_runtime_restore {
+                    return Err(crate::error::PloyError::Internal(format!(
+                        "failed to restore coordinator runtime state from execution log: {}",
+                        e
+                    )));
+                }
+                warn!(
+                    error = %e,
+                    "failed to restore coordinator runtime state from execution log"
+                );
+            }
         }
         if let Err(e) = ensure_strategy_observability_tables(pool).await {
             if require_startup_schema {
@@ -4319,5 +4359,53 @@ pub fn print_platform_status(state: &GlobalState) {
             agent.daily_pnl,
             agent.last_heartbeat.format("%H:%M:%S")
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::Timeframe;
+
+    fn economics_deployment(enabled: bool) -> StrategyDeployment {
+        StrategyDeployment {
+            id: "deploy.econ.fed.15m".to_string(),
+            strategy: "macro_regime".to_string(),
+            domain: Domain::Economics,
+            market_selector: MarketSelector::Static {
+                symbol: None,
+                series_id: None,
+                market_slug: Some("fed-rate-15m".to_string()),
+            },
+            timeframe: Timeframe::M15,
+            enabled,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 0,
+            cooldown_secs: 60,
+        }
+    }
+
+    #[test]
+    fn apply_strategy_deployments_enables_economics_domain() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![economics_deployment(true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments);
+
+        assert!(cfg.enable_economics);
+        assert!(!cfg.enable_crypto);
+        assert!(!cfg.enable_sports);
+        assert!(!cfg.enable_politics);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_ignores_disabled_economics_domain() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![economics_deployment(false)];
+
+        apply_strategy_deployments(&mut cfg, &deployments);
+
+        assert!(!cfg.enable_economics);
     }
 }
