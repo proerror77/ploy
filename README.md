@@ -155,6 +155,21 @@ export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix m
 export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
 ```
 
+Recommended for gasless redeem via Polymarket Builder Relayer:
+
+```bash
+export CLAIMER_RELAYER_ENABLED=true
+export POLY_BUILDER_API_KEY=xxx
+export POLY_BUILDER_SECRET=base64_secret
+export POLY_BUILDER_PASSPHRASE=xxx
+
+# Keep false in production to avoid falling back to direct on-chain redeem.
+# If true, fallback path requires native MATIC gas.
+export CLAIMER_RELAYER_FALLBACK_ONCHAIN=false
+```
+
+If relayer credentials are incomplete, claimer will warn and require native MATIC for direct on-chain fallback.
+
 Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
 
 ```bash

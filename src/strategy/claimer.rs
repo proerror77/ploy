@@ -204,23 +204,50 @@ fn relayer_claim_enabled() -> bool {
     )
 }
 
+const RELAYER_BUILDER_API_KEY_ENV_KEYS: [&str; 3] = [
+    "CLAIMER_BUILDER_API_KEY",
+    "POLY_BUILDER_API_KEY",
+    "BUILDER_API_KEY",
+];
+const RELAYER_BUILDER_SECRET_ENV_KEYS: [&str; 3] = [
+    "CLAIMER_BUILDER_SECRET",
+    "POLY_BUILDER_SECRET",
+    "BUILDER_SECRET",
+];
+const RELAYER_BUILDER_PASSPHRASE_ENV_KEYS: [&str; 4] = [
+    "CLAIMER_BUILDER_PASSPHRASE",
+    "POLY_BUILDER_PASSPHRASE",
+    "BUILDER_PASS_PHRASE",
+    "BUILDER_PASSPHRASE",
+];
+
+fn first_present_env_key(keys: &[&'static str]) -> Option<&'static str> {
+    keys.iter().copied().find(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn missing_relayer_builder_credential_groups() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if first_present_env_key(&RELAYER_BUILDER_API_KEY_ENV_KEYS).is_none() {
+        missing.push("api_key");
+    }
+    if first_present_env_key(&RELAYER_BUILDER_SECRET_ENV_KEYS).is_none() {
+        missing.push("secret");
+    }
+    if first_present_env_key(&RELAYER_BUILDER_PASSPHRASE_ENV_KEYS).is_none() {
+        missing.push("passphrase");
+    }
+    missing
+}
+
 fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
-    let api_key = env_string_any(&[
-        "CLAIMER_BUILDER_API_KEY",
-        "POLY_BUILDER_API_KEY",
-        "BUILDER_API_KEY",
-    ])?;
-    let secret = env_string_any(&[
-        "CLAIMER_BUILDER_SECRET",
-        "POLY_BUILDER_SECRET",
-        "BUILDER_SECRET",
-    ])?;
-    let passphrase = env_string_any(&[
-        "CLAIMER_BUILDER_PASSPHRASE",
-        "POLY_BUILDER_PASSPHRASE",
-        "BUILDER_PASS_PHRASE",
-        "BUILDER_PASSPHRASE",
-    ])?;
+    let api_key = env_string_any(&RELAYER_BUILDER_API_KEY_ENV_KEYS)?;
+    let secret = env_string_any(&RELAYER_BUILDER_SECRET_ENV_KEYS)?;
+    let passphrase = env_string_any(&RELAYER_BUILDER_PASSPHRASE_ENV_KEYS)?;
     Some(RelayerBuilderCredentials {
         api_key,
         secret,
@@ -525,7 +552,29 @@ impl AutoClaimer {
             return Ok(vec![]);
         }
 
-        let relayer_ready = relayer_claim_enabled() && relayer_builder_credentials().is_some();
+        let relayer_enabled = relayer_claim_enabled();
+        let relayer_creds = relayer_builder_credentials();
+        let relayer_ready = relayer_enabled && relayer_creds.is_some();
+        if self.config.auto_claim {
+            if relayer_ready {
+                info!(
+                    relayer_url = %relayer_base_url(),
+                    onchain_fallback = relayer_fallback_onchain_enabled(),
+                    "Gasless redeem path enabled (Builder relayer)"
+                );
+            } else if relayer_enabled {
+                let missing = missing_relayer_builder_credential_groups().join(",");
+                warn!(
+                    missing = %missing,
+                    "Relayer redeem is enabled but builder credentials are incomplete; claimer will require native MATIC for on-chain redeem"
+                );
+            } else {
+                warn!(
+                    "Relayer redeem is disabled; claimer will use direct on-chain redeem and require native MATIC gas"
+                );
+            }
+        }
+
         let preflight_required = needs_native_gas_preflight(self.config.auto_claim, relayer_ready);
         if preflight_required && !self.preflight_wallet_can_claim().await? {
             return Ok(vec![]);
@@ -1546,6 +1595,16 @@ impl AutoClaimer {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 
     #[test]
     fn test_claimer_config_default() {
@@ -1644,6 +1703,36 @@ mod tests {
         assert!(!needs_native_gas_preflight(false, false));
         assert!(needs_native_gas_preflight(true, false));
         assert!(!needs_native_gas_preflight(true, true));
+    }
+
+    #[test]
+    fn test_missing_relayer_builder_credential_groups() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        let all_keys: Vec<&str> = RELAYER_BUILDER_API_KEY_ENV_KEYS
+            .iter()
+            .chain(RELAYER_BUILDER_SECRET_ENV_KEYS.iter())
+            .chain(RELAYER_BUILDER_PASSPHRASE_ENV_KEYS.iter())
+            .copied()
+            .collect();
+        let prev: Vec<(&str, Option<String>)> = all_keys
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+
+        for key in &all_keys {
+            set_env(key, None);
+        }
+        set_env("POLY_BUILDER_API_KEY", Some("k"));
+        set_env("POLY_BUILDER_PASSPHRASE", Some("p"));
+        assert_eq!(missing_relayer_builder_credential_groups(), vec!["secret"]);
+
+        set_env("BUILDER_SECRET", Some("s"));
+        assert!(missing_relayer_builder_credential_groups().is_empty());
+
+        for (key, val) in prev {
+            set_env(key, val.as_deref());
+        }
     }
 
     #[test]
