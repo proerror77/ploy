@@ -778,9 +778,8 @@ impl PolymarketClient {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            PloyError::Auth("Polymarket authentication failed".to_string())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| PloyError::Auth("Polymarket authentication failed".to_string())))
     }
 
     /// Create a new CLOB client (dry run mode)

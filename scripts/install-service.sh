@@ -165,6 +165,14 @@ ensure_kelly_defaults() {
   ensure_env_default "$env_file" "PLOY_COORDINATOR__KELLY_MIN_SHARES" "1"
 }
 
+ensure_venue_minimum_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  # Prevent deterministic 400s from Polymarket (min shares / min notional).
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__MIN_ORDER_SHARES" "5"
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__MIN_ORDER_NOTIONAL_USD" "1"
+}
+
 ensure_sqlx_migrations_enabled /opt/ploy/.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/sports-pm.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-dryrun.env
@@ -188,6 +196,11 @@ ensure_kelly_defaults /opt/ploy/env/crypto-dryrun.env
 ensure_kelly_defaults /opt/ploy/env/crypto-live.env
 ensure_kelly_defaults /opt/ploy/env/sports-live.env
 ensure_kelly_defaults /opt/ploy/env/platform-live.env
+ensure_venue_minimum_defaults /opt/ploy/env/sports-pm.env
+ensure_venue_minimum_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_venue_minimum_defaults /opt/ploy/env/crypto-live.env
+ensure_venue_minimum_defaults /opt/ploy/env/sports-live.env
+ensure_venue_minimum_defaults /opt/ploy/env/platform-live.env
 ensure_env_default "/opt/ploy/.env" "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_env_default /opt/ploy/env/sports-pm.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_env_default /opt/ploy/env/crypto-dryrun.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"

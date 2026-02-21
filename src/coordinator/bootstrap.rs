@@ -2902,6 +2902,16 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.kelly_min_shares,
         );
 
+        // Execution venue minimums (used to prevent deterministic 400s that would otherwise
+        // trip the circuit breaker and make the system look like it "stops after one loop").
+        cfg.coordinator.min_order_shares = env_u64(
+            "PLOY_COORDINATOR__MIN_ORDER_SHARES",
+            cfg.coordinator.min_order_shares,
+        );
+        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__MIN_ORDER_NOTIONAL_USD") {
+            cfg.coordinator.min_order_notional_usd = v.max(rust_decimal::Decimal::ZERO);
+        }
+
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
         cfg.crypto.default_shares = app.strategy.shares.max(1);

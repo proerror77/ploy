@@ -86,6 +86,16 @@ pub struct CoordinatorConfig {
     /// This helps keep the system "alive" under conservative bankroll/caps without disabling
     /// Kelly entirely. Set 0 to preserve strict Kelly behavior (block when < 1 share).
     pub kelly_min_shares: u64,
+
+    // === Exchange / venue minimums ===
+    /// Minimum buy order size in shares required by the execution venue.
+    ///
+    /// Polymarket CLOB rejects orders below 5 shares; keep this >= 5 in production.
+    pub min_order_shares: u64,
+    /// Minimum buy order notional (USD) required by the execution venue.
+    ///
+    /// Polymarket enforces a $1 minimum on marketable orders; keep this >= 1 in production.
+    pub min_order_notional_usd: Decimal,
 }
 
 impl Default for CoordinatorConfig {
@@ -123,6 +133,10 @@ impl Default for CoordinatorConfig {
             kelly_fraction_multiplier: Decimal::new(25, 2), // 0.25 (quarter-Kelly)
             kelly_min_edge: Decimal::ZERO,
             kelly_min_shares: 0,
+
+            // Venue minimums (Polymarket defaults).
+            min_order_shares: 5,
+            min_order_notional_usd: Decimal::from(1),
         }
     }
 }

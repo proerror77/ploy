@@ -1565,6 +1565,7 @@ impl Coordinator {
         let mut intent = intent;
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
+        let strategy_max_shares = intent.shares;
 
         let ingress_mode = *self.ingress_mode.read().await;
         if ingress_mode != IngressMode::Running {
@@ -1622,6 +1623,16 @@ impl Coordinator {
             warn!(
                 %agent_id, %intent_id, reason = %reason,
                 "order blocked by kelly sizing policy"
+            );
+            return;
+        }
+
+        if let Some(reason) = self.apply_min_order_constraints(&mut intent, strategy_max_shares) {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by venue minimum constraints"
             );
             return;
         }
@@ -1806,10 +1817,9 @@ impl Coordinator {
             let floor_shares = self.config.kelly_min_shares.min(intent.shares);
             if floor_shares > 0 {
                 final_shares = floor_shares;
-                intent.metadata.insert(
-                    "kelly_min_shares_applied".to_string(),
-                    "true".to_string(),
-                );
+                intent
+                    .metadata
+                    .insert("kelly_min_shares_applied".to_string(), "true".to_string());
                 intent.metadata.insert(
                     "kelly_min_shares_floor".to_string(),
                     floor_shares.to_string(),
@@ -1848,6 +1858,74 @@ impl Coordinator {
             intent
                 .metadata
                 .insert("kelly_final_shares".to_string(), final_shares.to_string());
+        }
+
+        None
+    }
+
+    fn apply_min_order_constraints(
+        &self,
+        intent: &mut OrderIntent,
+        strategy_max_shares: u64,
+    ) -> Option<String> {
+        if !intent.is_buy {
+            return None;
+        }
+        // Never force-size emergency/critical intents.
+        if intent.priority == OrderPriority::Critical {
+            return None;
+        }
+        if intent.limit_price <= Decimal::ZERO {
+            return None;
+        }
+
+        let min_shares_cfg = self.config.min_order_shares.max(1);
+        let min_notional = self.config.min_order_notional_usd.max(Decimal::ZERO);
+
+        let mut required_shares = min_shares_cfg;
+        if min_notional > Decimal::ZERO {
+            // Exchange enforces a minimum order notional for (marketable) buys.
+            // We enforce it pre-submit to avoid deterministic 400s that trip the circuit breaker.
+            let min_shares_for_notional = (min_notional / intent.limit_price)
+                .ceil()
+                .to_u64()
+                .unwrap_or(u64::MAX);
+            required_shares = required_shares.max(min_shares_for_notional);
+        }
+
+        if required_shares <= 1 {
+            return None;
+        }
+
+        if required_shares > strategy_max_shares {
+            return Some(format!(
+                "venue minimum requires {} shares (min_shares={}, min_notional_usd={}) but strategy_max_shares={}",
+                required_shares, min_shares_cfg, min_notional, strategy_max_shares
+            ));
+        }
+
+        if intent.shares < required_shares {
+            let before = intent.shares;
+            intent.shares = required_shares;
+            intent
+                .metadata
+                .insert("venue_min_order_applied".to_string(), "true".to_string());
+            intent.metadata.insert(
+                "venue_min_order_before_shares".to_string(),
+                before.to_string(),
+            );
+            intent.metadata.insert(
+                "venue_min_order_required_shares".to_string(),
+                required_shares.to_string(),
+            );
+            intent.metadata.insert(
+                "venue_min_order_min_shares".to_string(),
+                min_shares_cfg.to_string(),
+            );
+            intent.metadata.insert(
+                "venue_min_order_min_notional_usd".to_string(),
+                min_notional.to_string(),
+            );
         }
 
         None
