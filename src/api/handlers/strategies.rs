@@ -1,4 +1,9 @@
-use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
+use axum::{
+    extract::{Path, State},
+    http::HeaderMap,
+    http::StatusCode,
+    Json,
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
@@ -29,6 +34,31 @@ pub struct StrategiesControlResponse {
     pub ingress_mode: Option<String>,
     pub items: Vec<StrategyControlEntry>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyControlMutationResponse {
+    pub success: bool,
+    pub deployment_id: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub cooldown_secs: u64,
+    pub allocator_profile: String,
+    pub risk_profile: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UpdateStrategyControlRequest {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub cooldown_secs: Option<u64>,
+    #[serde(default)]
+    pub allocator_profile: Option<String>,
+    #[serde(default)]
+    pub risk_profile: Option<String>,
 }
 
 fn domain_key(domain: Domain) -> String {
@@ -222,4 +252,84 @@ pub async fn get_strategies_control(
         items,
         updated_at: Utc::now(),
     }))
+}
+
+/// PUT /api/strategies/control/:id
+///
+/// Targeted deployment control patch for AI scheduler/control-plane.
+pub async fn update_strategy_control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateStrategyControlRequest>,
+) -> std::result::Result<Json<StrategyControlMutationResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+
+    let key = id.trim();
+    if key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "deployment id is required".to_string(),
+        ));
+    }
+    if let Some(priority) = req.priority {
+        if !(-10_000..=10_000).contains(&priority) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "priority must be between -10000 and 10000".to_string(),
+            ));
+        }
+    }
+
+    let response = {
+        let mut deployments = state.deployments.write().await;
+        let Some(dep) = deployments.get_mut(key) else {
+            return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
+        };
+
+        if let Some(enabled) = req.enabled {
+            dep.enabled = enabled;
+        }
+        if let Some(priority) = req.priority {
+            dep.priority = priority;
+        }
+        if let Some(cooldown_secs) = req.cooldown_secs {
+            dep.cooldown_secs = cooldown_secs;
+        }
+        if let Some(allocator_profile) = req
+            .allocator_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            dep.allocator_profile = allocator_profile.to_string();
+        }
+        if let Some(risk_profile) = req
+            .risk_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            dep.risk_profile = risk_profile.to_string();
+        }
+
+        StrategyControlMutationResponse {
+            success: true,
+            deployment_id: dep.id.clone(),
+            enabled: dep.enabled,
+            priority: dep.priority,
+            cooldown_secs: dep.cooldown_secs,
+            allocator_profile: dep.allocator_profile.clone(),
+            risk_profile: dep.risk_profile.clone(),
+        }
+    };
+
+    state.persist_deployments().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist deployments: {}", e),
+        )
+    })?;
+
+    Ok(Json(response))
 }
