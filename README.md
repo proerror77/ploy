@@ -26,6 +26,8 @@ Key rule: OpenClaw does not sit in the synchronous per-order decision path for H
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
 For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
 For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
+`strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
+Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
 
 ## Prerequisites
 

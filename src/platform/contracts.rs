@@ -56,10 +56,66 @@ pub enum MarketSelector {
 }
 
 /// Runtime deployment unit: strategy x market scope x risk/allocator profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyLifecycleStage {
+    Backtest,
+    Paper,
+    Shadow,
+    Live,
+}
+
+impl StrategyLifecycleStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backtest => "backtest",
+            Self::Paper => "paper",
+            Self::Shadow => "shadow",
+            Self::Live => "live",
+        }
+    }
+
+    pub fn allows_live_ingress(&self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyProductType {
+    BinaryOption,
+    MultiOutcome,
+    Scalar,
+}
+
+impl StrategyProductType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BinaryOption => "binary_option",
+            Self::MultiOutcome => "multi_outcome",
+            Self::Scalar => "scalar",
+        }
+    }
+}
+
+fn default_strategy_version() -> String {
+    "v1".to_string()
+}
+
+fn default_lifecycle_stage() -> StrategyLifecycleStage {
+    StrategyLifecycleStage::Live
+}
+
+fn default_strategy_product_type() -> StrategyProductType {
+    StrategyProductType::BinaryOption
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyDeployment {
     pub id: String,
     pub strategy: String,
+    #[serde(default = "default_strategy_version")]
+    pub strategy_version: String,
     pub domain: Domain,
     pub market_selector: MarketSelector,
     pub timeframe: Timeframe,
@@ -68,6 +124,14 @@ pub struct StrategyDeployment {
     pub risk_profile: String,
     pub priority: i32,
     pub cooldown_secs: u64,
+    #[serde(default = "default_lifecycle_stage")]
+    pub lifecycle_stage: StrategyLifecycleStage,
+    #[serde(default = "default_strategy_product_type")]
+    pub product_type: StrategyProductType,
+    #[serde(default)]
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_evaluation_score: Option<f64>,
 }
 
 /// Unified strategy output contract (agent -> coordinator).

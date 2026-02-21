@@ -132,6 +132,11 @@ Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將�
   - 供 OpenClaw/AI scheduler 做策略調度與運行態比對
 - `PUT /api/strategies/control/:id`
   - 單 deployment patch（`enabled`/`priority`/`cooldown_secs`/`allocator_profile`/`risk_profile`）
+  - 已支援策略治理欄位：`strategy_version`、`lifecycle_stage`（`backtest|paper|shadow|live`）、`product_type`（預設 `binary_option`）、`last_evaluation_score`
+
+Ingress lifecycle contract:
+- sidecar live ingress 預設只接受 `lifecycle_stage=live` 的 deployment（避免未審核策略直接進 live queue）
+- 遷移期可暫時設 `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true` 放寬，但不建議 production
 
 已支援的 method（起步集合）：
 - `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）

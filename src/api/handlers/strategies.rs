@@ -10,20 +10,28 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 use crate::api::{auth::ensure_admin_authorized, state::AppState, types::RunningStrategy};
-use crate::platform::{AgentStatus, Domain, MarketSelector, StrategyDeployment};
+use crate::platform::{
+    AgentStatus, Domain, MarketSelector, StrategyDeployment, StrategyLifecycleStage,
+    StrategyProductType,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyControlEntry {
     pub deployment_id: String,
     pub strategy: String,
+    pub strategy_version: String,
     pub domain: String,
     pub enabled: bool,
     pub timeframe: String,
+    pub lifecycle_stage: String,
+    pub product_type: String,
     pub market_selector_mode: String,
     pub allocator_profile: String,
     pub risk_profile: String,
     pub priority: i32,
     pub cooldown_secs: u64,
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+    pub last_evaluation_score: Option<f64>,
     pub domain_ingress_mode: String,
     pub running_agents: Vec<String>,
 }
@@ -40,9 +48,14 @@ pub struct StrategiesControlResponse {
 pub struct StrategyControlMutationResponse {
     pub success: bool,
     pub deployment_id: String,
+    pub strategy_version: String,
     pub enabled: bool,
     pub priority: i32,
     pub cooldown_secs: u64,
+    pub lifecycle_stage: String,
+    pub product_type: String,
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+    pub last_evaluation_score: Option<f64>,
     pub allocator_profile: String,
     pub risk_profile: String,
 }
@@ -59,6 +72,22 @@ pub struct UpdateStrategyControlRequest {
     pub allocator_profile: Option<String>,
     #[serde(default)]
     pub risk_profile: Option<String>,
+    #[serde(default)]
+    pub strategy_version: Option<String>,
+    #[serde(default)]
+    pub lifecycle_stage: Option<StrategyLifecycleStage>,
+    #[serde(default)]
+    pub product_type: Option<StrategyProductType>,
+    #[serde(default)]
+    pub last_evaluation_score: Option<f64>,
+}
+
+fn valid_strategy_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 64
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn domain_key(domain: Domain) -> String {
@@ -226,14 +255,19 @@ pub async fn get_strategies_control(
                 StrategyControlEntry {
                     deployment_id: dep.id.clone(),
                     strategy: dep.strategy.clone(),
+                    strategy_version: dep.strategy_version.clone(),
                     domain: domain.clone(),
                     enabled: dep.enabled,
                     timeframe: dep.timeframe.as_str().to_string(),
+                    lifecycle_stage: dep.lifecycle_stage.as_str().to_string(),
+                    product_type: dep.product_type.as_str().to_string(),
                     market_selector_mode: selector_mode(&dep.market_selector).to_string(),
                     allocator_profile: dep.allocator_profile.clone(),
                     risk_profile: dep.risk_profile.clone(),
                     priority: dep.priority,
                     cooldown_secs: dep.cooldown_secs,
+                    last_evaluated_at: dep.last_evaluated_at,
+                    last_evaluation_score: dep.last_evaluation_score,
                     domain_ingress_mode: domain_modes
                         .get(&domain)
                         .cloned()
@@ -280,6 +314,22 @@ pub async fn update_strategy_control(
             ));
         }
     }
+    if let Some(score) = req.last_evaluation_score {
+        if !(0.0..=1.0).contains(&score) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "last_evaluation_score must be between 0 and 1".to_string(),
+            ));
+        }
+    }
+    if let Some(version) = req.strategy_version.as_deref().map(str::trim) {
+        if !valid_strategy_version(version) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "strategy_version must match [A-Za-z0-9._-] and be <= 64 chars".to_string(),
+            ));
+        }
+    }
 
     let response = {
         let mut deployments = state.deployments.write().await;
@@ -312,13 +362,38 @@ pub async fn update_strategy_control(
         {
             dep.risk_profile = risk_profile.to_string();
         }
+        if let Some(strategy_version) = req
+            .strategy_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            dep.strategy_version = strategy_version.to_string();
+            dep.last_evaluated_at = Some(Utc::now());
+        }
+        if let Some(lifecycle_stage) = req.lifecycle_stage {
+            dep.lifecycle_stage = lifecycle_stage;
+            dep.last_evaluated_at = Some(Utc::now());
+        }
+        if let Some(product_type) = req.product_type {
+            dep.product_type = product_type;
+        }
+        if let Some(last_evaluation_score) = req.last_evaluation_score {
+            dep.last_evaluation_score = Some(last_evaluation_score);
+            dep.last_evaluated_at = Some(Utc::now());
+        }
 
         StrategyControlMutationResponse {
             success: true,
             deployment_id: dep.id.clone(),
+            strategy_version: dep.strategy_version.clone(),
             enabled: dep.enabled,
             priority: dep.priority,
             cooldown_secs: dep.cooldown_secs,
+            lifecycle_stage: dep.lifecycle_stage.as_str().to_string(),
+            product_type: dep.product_type.as_str().to_string(),
+            last_evaluated_at: dep.last_evaluated_at,
+            last_evaluation_score: dep.last_evaluation_score,
             allocator_profile: dep.allocator_profile.clone(),
             risk_profile: dep.risk_profile.clone(),
         }
@@ -332,4 +407,23 @@ pub async fn update_strategy_control(
     })?;
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_strategy_version;
+
+    #[test]
+    fn strategy_version_validation_allows_semver_like_values() {
+        assert!(valid_strategy_version("v1"));
+        assert!(valid_strategy_version("v2.3.1"));
+        assert!(valid_strategy_version("alpha_2026-02"));
+    }
+
+    #[test]
+    fn strategy_version_validation_rejects_invalid_values() {
+        assert!(!valid_strategy_version(""));
+        assert!(!valid_strategy_version("bad version"));
+        assert!(!valid_strategy_version("v1/../../"));
+    }
 }

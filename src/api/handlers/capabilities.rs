@@ -17,6 +17,7 @@ pub struct CapabilityFlags {
     pub coordinator_only_live_execution: bool,
     pub governance_api_available: bool,
     pub deployment_gate_required: bool,
+    pub strategy_lifecycle_gate_required: bool,
     pub sidecar_auth_required: bool,
     pub sidecar_orders_live_enabled: bool,
     pub openclaw_mode: bool,
@@ -79,6 +80,13 @@ fn capability_endpoints(governance_available: bool) -> Vec<CapabilityEndpoint> {
             auth: "x-ploy-admin-token".to_string(),
         },
         CapabilityEndpoint {
+            path: "/api/strategies/control|/api/strategies/control/:id".to_string(),
+            method: "GET/PUT".to_string(),
+            description: "Strategy control projection and targeted lifecycle/version mutation"
+                .to_string(),
+            auth: "x-ploy-admin-token".to_string(),
+        },
+        CapabilityEndpoint {
             path: "/api/system/pause|resume|halt".to_string(),
             method: "POST".to_string(),
             description: "Global/domain runtime control commands".to_string(),
@@ -99,27 +107,28 @@ fn capability_endpoints(governance_available: bool) -> Vec<CapabilityEndpoint> {
 }
 
 /// GET /api/capabilities
-pub async fn get_capabilities(
-    State(state): State<AppState>,
-) -> Json<CapabilityResponse> {
+pub async fn get_capabilities(State(state): State<AppState>) -> Json<CapabilityResponse> {
     let coordinator_present = state.coordinator.is_some();
     let governance_available = coordinator_present;
 
     let deployment_gate_required = env_bool_default_true("PLOY_DEPLOYMENT_GATE_REQUIRED");
+    let strategy_lifecycle_gate_required =
+        !env_bool_default_false("PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS");
     let sidecar_auth_required = env_bool_default_true("PLOY_SIDECAR_AUTH_REQUIRED");
     let sidecar_orders_live_enabled = env_bool_default_false("PLOY_SIDECAR_ORDERS_LIVE_ENABLED");
     let openclaw_mode = std::env::var("PLOY_AGENT_FRAMEWORK_MODE")
         .map(|v| v.trim().eq_ignore_ascii_case("openclaw"))
         .unwrap_or(false);
-    let internal_agents_hard_disabled = env_bool_default_false(
-        "PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS",
-    ) || env_bool_default_false("PLOY_OPENCLAW_ONLY");
+    let internal_agents_hard_disabled =
+        env_bool_default_false("PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS")
+            || env_bool_default_false("PLOY_OPENCLAW_ONLY");
 
     let flags = CapabilityFlags {
         coordinator_present,
         coordinator_only_live_execution: true,
         governance_api_available: governance_available,
         deployment_gate_required,
+        strategy_lifecycle_gate_required,
         sidecar_auth_required,
         sidecar_orders_live_enabled,
         openclaw_mode,

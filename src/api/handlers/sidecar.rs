@@ -343,6 +343,30 @@ fn deployment_gate_required() -> bool {
     }
 }
 
+fn allow_non_live_deployment_ingress() -> bool {
+    env_bool(&["PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS"])
+}
+
+fn ensure_deployment_accepts_live_ingress(
+    deployment: &StrategyDeployment,
+) -> std::result::Result<(), (StatusCode, String)> {
+    if allow_non_live_deployment_ingress() {
+        return Ok(());
+    }
+    if deployment.lifecycle_stage.allows_live_ingress() {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::CONFLICT,
+        format!(
+            "deployment {} lifecycle_stage={} does not allow live ingress",
+            deployment.id,
+            deployment.lifecycle_stage.as_str()
+        ),
+    ))
+}
+
 async fn resolve_intent_deployment(
     state: &AppState,
     deployment_id: &str,
@@ -378,6 +402,7 @@ async fn resolve_intent_deployment(
             format!("deployment {} is disabled", key),
         ));
     }
+    ensure_deployment_accepts_live_ingress(dep)?;
     Ok(Some(dep.clone()))
 }
 
@@ -509,11 +534,30 @@ fn apply_deployment_metadata(
         .entry("deployment_strategy".to_string())
         .or_insert_with(|| deployment.strategy.clone());
     metadata
+        .entry("strategy_version".to_string())
+        .or_insert_with(|| deployment.strategy_version.clone());
+    metadata
+        .entry("lifecycle_stage".to_string())
+        .or_insert_with(|| deployment.lifecycle_stage.as_str().to_string());
+    metadata
+        .entry("product_type".to_string())
+        .or_insert_with(|| deployment.product_type.as_str().to_string());
+    metadata
         .entry("deployment_priority".to_string())
         .or_insert_with(|| deployment.priority.to_string());
     metadata
         .entry("deployment_cooldown_secs".to_string())
         .or_insert_with(|| deployment.cooldown_secs.to_string());
+    if let Some(ts) = deployment.last_evaluated_at.as_ref() {
+        metadata
+            .entry("last_evaluated_at".to_string())
+            .or_insert_with(|| ts.to_rfc3339());
+    }
+    if let Some(score) = deployment.last_evaluation_score {
+        metadata
+            .entry("last_evaluation_score".to_string())
+            .or_insert_with(|| score.to_string());
+    }
 
     if let MarketSelector::Static {
         symbol,
@@ -1624,6 +1668,7 @@ async fn persist_sidecar_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{StrategyLifecycleStage, StrategyProductType, Timeframe};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1632,6 +1677,30 @@ mod tests {
         match value {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
+        }
+    }
+
+    fn sample_deployment(lifecycle_stage: StrategyLifecycleStage) -> StrategyDeployment {
+        StrategyDeployment {
+            id: "deploy.test.crypto".to_string(),
+            strategy: "momentum".to_string(),
+            strategy_version: "v2.1.0".to_string(),
+            domain: Domain::Crypto,
+            market_selector: MarketSelector::Static {
+                symbol: None,
+                series_id: None,
+                market_slug: Some("btc-price-series-15m".to_string()),
+            },
+            timeframe: Timeframe::M15,
+            enabled: true,
+            allocator_profile: "balanced".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 80,
+            cooldown_secs: 30,
+            lifecycle_stage,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: Some(Utc::now()),
+            last_evaluation_score: Some(0.73),
         }
     }
 
@@ -1734,5 +1803,54 @@ mod tests {
         assert!(msg.contains("missing/invalid token"));
 
         set_env(key, prev.as_deref());
+    }
+
+    #[test]
+    fn non_live_deployment_ingress_is_blocked_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS";
+        let prev = std::env::var(key).ok();
+        set_env(key, None);
+
+        let deployment = sample_deployment(StrategyLifecycleStage::Paper);
+        let err = ensure_deployment_accepts_live_ingress(&deployment)
+            .expect_err("paper lifecycle should be blocked without override");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1.contains("lifecycle_stage=paper"));
+
+        set_env(key, prev.as_deref());
+    }
+
+    #[test]
+    fn non_live_deployment_ingress_can_be_enabled_for_migration() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS";
+        let prev = std::env::var(key).ok();
+        set_env(key, Some("true"));
+
+        let deployment = sample_deployment(StrategyLifecycleStage::Backtest);
+        assert!(ensure_deployment_accepts_live_ingress(&deployment).is_ok());
+
+        set_env(key, prev.as_deref());
+    }
+
+    #[test]
+    fn deployment_metadata_includes_strategy_contract_fields() {
+        let deployment = sample_deployment(StrategyLifecycleStage::Live);
+        let mut metadata = HashMap::new();
+        apply_deployment_metadata(&mut metadata, &deployment);
+
+        assert_eq!(
+            metadata.get("strategy_version").map(String::as_str),
+            Some("v2.1.0")
+        );
+        assert_eq!(
+            metadata.get("lifecycle_stage").map(String::as_str),
+            Some("live")
+        );
+        assert_eq!(
+            metadata.get("product_type").map(String::as_str),
+            Some("binary_option")
+        );
     }
 }

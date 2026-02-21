@@ -4406,12 +4406,13 @@ pub fn print_platform_status(state: &GlobalState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Timeframe;
+    use crate::platform::{StrategyLifecycleStage, StrategyProductType, Timeframe};
 
     fn economics_deployment(enabled: bool) -> StrategyDeployment {
         StrategyDeployment {
             id: "deploy.econ.fed.15m".to_string(),
             strategy: "macro_regime".to_string(),
+            strategy_version: "v1".to_string(),
             domain: Domain::Economics,
             market_selector: MarketSelector::Static {
                 symbol: None,
@@ -4424,6 +4425,10 @@ mod tests {
             risk_profile: "default".to_string(),
             priority: 0,
             cooldown_secs: 60,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
         }
     }
 
