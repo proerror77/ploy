@@ -48,6 +48,8 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Health check (top-level, used by docker/scripts for readiness probes)
         .route("/health", get(handlers::health_handler))
+        // Capability discovery (machine-readable control-plane surface)
+        .route("/api/capabilities", get(handlers::get_capabilities))
         // Auth endpoints
         .route("/api/auth/session", get(handlers::get_auth_session))
         .route("/api/auth/login", post(handlers::login_admin))
