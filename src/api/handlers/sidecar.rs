@@ -292,14 +292,14 @@ fn extract_bearer_token(raw: &str) -> Option<&str> {
 
 fn ensure_sidecar_authorized(headers: &HeaderMap) -> std::result::Result<(), (StatusCode, String)> {
     let expected = sidecar_expected_auth_token();
-    if expected.is_none() && !sidecar_auth_required() {
-        return Ok(());
-    }
+    let required = sidecar_auth_required();
     let Some(expected) = expected else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sidecar auth is required but token is not configured".to_string(),
-        ));
+        let msg = if required {
+            "sidecar auth is required but token is not configured"
+        } else {
+            "sidecar auth token is not configured (write endpoints are fail-closed)"
+        };
+        return Err((StatusCode::SERVICE_UNAVAILABLE, msg.to_string()));
     };
 
     let token = headers
@@ -1613,6 +1613,16 @@ async fn persist_sidecar_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 
     #[test]
     fn parse_domain_rejects_unknown_values() {
@@ -1634,5 +1644,77 @@ mod tests {
         assert_eq!(parse_is_buy(Some("BUY"), None).unwrap(), true);
         assert_eq!(parse_is_buy(Some("SELL"), None).unwrap(), false);
         assert!(parse_is_buy(Some("HOLD"), None).is_err());
+    }
+
+    #[test]
+    fn sidecar_auth_fails_closed_when_token_not_configured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let keys = [
+            "PLOY_SIDECAR_AUTH_TOKEN",
+            "PLOY_API_SIDECAR_AUTH_TOKEN",
+            "PLOY_SIDECAR_AUTH_REQUIRED",
+            "PLOY_GATEWAY_ONLY",
+            "PLOY_ENFORCE_GATEWAY_ONLY",
+            "PLOY_ENFORCE_COORDINATOR_GATEWAY_ONLY",
+        ];
+        let prev: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+
+        for k in keys {
+            set_env(k, None);
+        }
+
+        let result = ensure_sidecar_authorized(&HeaderMap::new());
+        assert!(result.is_err());
+        let (status, msg) = result.unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(msg.contains("not configured"));
+
+        for (k, v) in prev {
+            set_env(&k, v.as_deref());
+        }
+    }
+
+    #[test]
+    fn sidecar_auth_accepts_valid_bearer_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_SIDECAR_AUTH_TOKEN";
+        let prev = std::env::var(key).ok();
+        set_env(key, Some("expected-token"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer expected-token"),
+        );
+
+        let result = ensure_sidecar_authorized(&headers);
+        assert!(result.is_ok());
+
+        set_env(key, prev.as_deref());
+    }
+
+    #[test]
+    fn sidecar_auth_rejects_invalid_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_SIDECAR_AUTH_TOKEN";
+        let prev = std::env::var(key).ok();
+        set_env(key, Some("expected-token"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ploy-sidecar-token",
+            axum::http::HeaderValue::from_static("wrong-token"),
+        );
+
+        let result = ensure_sidecar_authorized(&headers);
+        assert!(result.is_err());
+        let (status, msg) = result.unwrap_err();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(msg.contains("missing/invalid token"));
+
+        set_env(key, prev.as_deref());
     }
 }

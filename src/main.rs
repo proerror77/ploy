@@ -5279,25 +5279,26 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             policy_output,
             policy_version,
         } => {
-            use ploy::adapters::{
-                polymarket_clob::POLYGON_CHAIN_ID, BinanceWebSocket, PolymarketClient,
-                PolymarketWebSocket,
-            };
+            use ploy::adapters::{BinanceWebSocket, PolymarketWebSocket};
             use ploy::domain::Side;
             use ploy::platform::{
                 AgentSubscription, CryptoEvent, Domain, DomainAgent, DomainEvent, EventRouter,
-                OrderPlatform, PlatformConfig, QuoteData, RLCryptoAgent, RLCryptoAgentConfig,
+                QuoteData, RLCryptoAgent, RLCryptoAgentConfig,
             };
             use ploy::rl::config::RLConfig;
-            use ploy::signing::Wallet;
             use rust_decimal::prelude::ToPrimitive;
             use rust_decimal::Decimal;
             use std::sync::Arc;
-            use tokio::sync::RwLock;
             use tracing::debug;
 
+            if !*dry_run {
+                return Err(ploy::error::PloyError::Validation(
+                    "legacy `ploy rl agent` live execution is disabled; run via `ploy platform start` with a coordinator-managed RL deployment".to_string(),
+                ));
+            }
+
             println!("╔══════════════════════════════════════════════════════════════╗");
-            println!("║           Ploy RL Agent - Order Platform                     ║");
+            println!("║           Ploy RL Agent - Dry Run                            ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!(
                 "║  Symbol:         {:>10}                                    ║",
@@ -5418,29 +5419,6 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             println!("🚀 Agent started. Listening for market data...\n");
             println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
 
-            // Create OrderPlatform for live execution (when not dry-run)
-            let platform: Option<Arc<RwLock<OrderPlatform>>> = if !*dry_run {
-                info!("Setting up live order execution...");
-                let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
-                info!("Wallet loaded: {:?}", wallet.address());
-
-                let client = PolymarketClient::new_authenticated(
-                    "https://clob.polymarket.com",
-                    wallet,
-                    true, // neg_risk for UP/DOWN markets
-                )
-                .await?;
-                info!("✅ Authenticated with Polymarket CLOB");
-
-                let platform_config = PlatformConfig::default();
-                Some(Arc::new(RwLock::new(OrderPlatform::new(
-                    client,
-                    platform_config,
-                ))))
-            } else {
-                None
-            };
-
             // Main loop
             let tick_duration = std::time::Duration::from_millis(*tick_interval);
             let mut interval = tokio::time::interval(tick_duration);
@@ -5537,34 +5515,13 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                         match router.dispatch(event).await {
                             Ok(intents) => {
                                 for intent in intents {
-                                    if *dry_run {
-                                        println!("📝 [DRY] Intent: {} {} {} @ {} ({})",
-                                            if intent.is_buy { "BUY" } else { "SELL" },
-                                            intent.shares,
-                                            intent.side,
-                                            intent.limit_price,
-                                            intent.market_slug,
-                                        );
-                                    } else if let Some(ref p) = platform {
-                                        // Live execution via OrderPlatform
-                                        println!("🔴 [LIVE] Executing: {} {} {} @ {} ({})",
-                                            if intent.is_buy { "BUY" } else { "SELL" },
-                                            intent.shares,
-                                            intent.side,
-                                            intent.limit_price,
-                                            intent.market_slug,
-                                        );
-                                        let platform_guard = p.write().await;
-                                        if let Err(e) = platform_guard.enqueue_intent(intent.clone()).await {
-                                            error!("Failed to enqueue intent: {}", e);
-                                        }
-                                        if let Err(e) = platform_guard.process_queue().await {
-                                            error!("Failed to process queue: {}", e);
-                                        }
-                                        drop(platform_guard);
-                                    } else {
-                                        warn!("Live mode but no platform initialized");
-                                    }
+                                    println!("📝 [DRY] Intent: {} {} {} @ {} ({})",
+                                        if intent.is_buy { "BUY" } else { "SELL" },
+                                        intent.shares,
+                                        intent.side,
+                                        intent.limit_price,
+                                        intent.market_slug,
+                                    );
                                 }
                             }
                             Err(e) => {
