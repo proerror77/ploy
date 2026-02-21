@@ -758,11 +758,10 @@ impl TradingAgent for CryptoLobMlAgent {
                         let timeframe = normalize_timeframe(&event.horizon);
                         let entry_key = format!("{}|{}", update.symbol, &timeframe);
 
-                        // Only trade events that are within their own active window.
-                        // Gamma can surface the next windows early; avoid "pre-trading" future markets.
-                        let remaining_secs = event.time_remaining().num_seconds();
-                        let window_secs = event_window_secs_for_horizon(&timeframe) as i64;
-                        if remaining_secs > window_secs {
+                        // Only trade events that have actually started.
+                        // Gamma can surface future windows early; avoid "pre-trading" them.
+                        let now = update.timestamp;
+                        if now < event.start_time || now >= event.end_time {
                             continue;
                         }
 

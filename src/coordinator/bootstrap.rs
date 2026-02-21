@@ -2927,6 +2927,10 @@ impl PlatformBootstrapConfig {
                 }
             }
         }
+        cfg.crypto.min_window_move_pct = env_decimal(
+            "PLOY_CRYPTO_AGENT__MIN_WINDOW_MOVE_PCT",
+            cfg.crypto.min_window_move_pct,
+        );
         cfg.crypto.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_AGENT__EVENT_REFRESH_SECS",
             cfg.crypto.event_refresh_secs,

@@ -502,6 +502,9 @@ pub struct GammaEventInfo {
     pub id: String,
     pub slug: Option<String>,
     pub title: Option<String>,
+    /// Event start time (often the start of the resolution window for recurring markets).
+    #[serde(rename = "startTime")]
+    pub start_time: Option<String>,
     #[serde(rename = "endDate")]
     pub end_date: Option<String>,
     #[serde(default)]
@@ -519,6 +522,9 @@ pub struct GammaMarketInfo {
     pub tokens: Option<Vec<GammaTokenInfo>>,
     #[serde(rename = "groupItemTitle")]
     pub group_item_title: Option<String>,
+    /// JSON-encoded outcome labels aligned with clob_token_ids/outcome_prices by index.
+    #[serde(default)]
+    pub outcomes: Option<String>,
     #[serde(rename = "clobTokenIds")]
     pub clob_token_ids: Option<String>,
     #[serde(rename = "outcomePrices")]
@@ -1792,6 +1798,7 @@ impl PolymarketClient {
             id: event.id.clone(),
             slug: event.slug.clone(),
             title: event.title.clone(),
+            start_time: event.start_time.map(|d| d.to_rfc3339()),
             end_date: event.end_date.map(|d| d.to_rfc3339()),
             closed: event.closed.unwrap_or(false),
             markets: event
@@ -1805,6 +1812,7 @@ impl PolymarketClient {
                             question: m.question.clone(),
                             tokens: None,
                             group_item_title: m.group_item_title.clone(),
+                            outcomes: m.outcomes.clone(),
                             clob_token_ids: m.clob_token_ids.clone(),
                             outcome_prices: m.outcome_prices.clone(),
                         })

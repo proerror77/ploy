@@ -41,6 +41,12 @@ pub struct CryptoTradingConfig {
     pub coins: Vec<String>,
     pub sum_threshold: Decimal,
     pub min_momentum_1s: f64,
+    /// Minimum absolute move since the event start required to trade.
+    ///
+    /// For UP/DOWN markets, resolution depends on the net change over the full window, so this
+    /// threshold helps avoid "coin-flip" windows near flat.
+    #[serde(default)]
+    pub min_window_move_pct: Decimal,
     /// Refresh interval for Gamma event discovery (seconds)
     pub event_refresh_secs: u64,
     /// Minimum time remaining for selected event (seconds)
@@ -83,6 +89,7 @@ impl Default for CryptoTradingConfig {
             coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
             sum_threshold: dec!(0.96),
             min_momentum_1s: 0.001,
+            min_window_move_pct: dec!(0.0001), // 0.01%
             event_refresh_secs: 30,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,
@@ -460,38 +467,75 @@ impl TradingAgent for CryptoTradingAgent {
                         _ => continue,
                     };
 
-                    // Check momentum from binance price cache
+                    // Spot price + derived signals from the Binance tick cache.
                     let spot_cache = self.binance_ws.price_cache();
-                    let Some(momentum_1s) = spot_cache.momentum(&update.symbol, 1).await else {
+                    let Some(spot) = spot_cache.get(&update.symbol).await else {
                         continue;
                     };
-                    let short_momentum_opt = spot_cache.momentum(&update.symbol, 5).await;
-                    let long_momentum_opt = spot_cache.momentum(&update.symbol, 30).await;
+
+                    let momentum_1s = spot.momentum(1).unwrap_or(Decimal::ZERO);
+                    let short_momentum_opt = spot.momentum(5);
+                    let long_momentum_opt = spot.momentum(30);
                     let short_momentum = short_momentum_opt.unwrap_or(Decimal::ZERO);
                     let long_momentum = long_momentum_opt.unwrap_or(Decimal::ZERO);
-                    let rolling_volatility = spot_cache
-                        .volatility(&update.symbol, 60)
-                        .await
-                        .unwrap_or(Decimal::ZERO);
+                    let rolling_volatility = spot.volatility(60).unwrap_or(Decimal::ZERO);
 
-                    // Check momentum threshold
-                    let mom_ok = momentum_1s.abs()
-                        >= Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001));
+                    // Helper: infer the correct direction from the net move since the event window start.
+                    // For UP/DOWN markets, resolution is based on end_price >= start_price, not micro-momentum.
+                    let window_signal = |event: &EventInfo| -> Option<(Side, Decimal, i64, i64, Decimal)> {
+                        let now = spot.timestamp;
+                        if now < event.start_time || now >= event.end_time {
+                            return None;
+                        }
 
-                    if !mom_ok {
-                        continue;
-                    }
+                        let elapsed_secs = now.signed_duration_since(event.start_time).num_seconds();
+                        if elapsed_secs < 0 {
+                            return None;
+                        }
 
-                    let side = if momentum_1s > Decimal::ZERO {
-                        Side::Up
-                    } else {
-                        Side::Down
+                        let remaining_secs = event.end_time.signed_duration_since(now).num_seconds();
+                        if remaining_secs <= 0 {
+                            return None;
+                        }
+
+                        let target_time = now - chrono::Duration::seconds(elapsed_secs);
+                        if let Some(oldest) = spot.oldest_timestamp() {
+                            if oldest > target_time {
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        }
+
+                        let start_price = spot.price_secs_ago(elapsed_secs as u64)?;
+                        if start_price <= Decimal::ZERO {
+                            return None;
+                        }
+                        let window_move = (spot.price - start_price) / start_price;
+                        let side = if window_move >= Decimal::ZERO {
+                            Side::Up
+                        } else {
+                            Side::Down
+                        };
+                        Some((side, window_move, elapsed_secs, remaining_secs, start_price))
                     };
+
                     let quote_cache = self.pm_ws.quote_cache();
 
                     // Binary options default: exit on signal flip instead of TP/SL.
                     for (slug, pos) in &positions {
-                        if pos.symbol != update.symbol || pos.side == side {
+                        if pos.symbol != update.symbol {
+                            continue;
+                        }
+
+                        let Some(event) = events.iter().find(|e| e.slug == pos.market_slug) else {
+                            continue;
+                        };
+                        let Some((side, window_move, window_elapsed_secs, window_remaining_secs, window_start_price)) = window_signal(event) else {
+                            continue;
+                        };
+
+                        if pos.side == side {
                             continue;
                         }
 
@@ -540,6 +584,11 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("exit_price", &best_bid.to_string())
                         .with_metadata("held_secs", &held_secs.to_string())
                         .with_metadata("signal_momentum_value", &momentum_1s.to_string())
+                        .with_metadata("event_start_time", &event.start_time.to_rfc3339())
+                        .with_metadata("window_start_price", &window_start_price.to_string())
+                        .with_metadata("window_move_pct", &window_move.to_string())
+                        .with_metadata("window_elapsed_secs", &window_elapsed_secs.to_string())
+                        .with_metadata("window_remaining_secs", &window_remaining_secs.to_string())
                         .with_metadata("config_hash", &config_hash);
 
                         match ctx.submit_order(intent).await {
@@ -576,18 +625,20 @@ impl TradingAgent for CryptoTradingAgent {
                             continue;
                         }
 
+                        let Some((side, window_move, window_elapsed_secs, window_remaining_secs, window_start_price)) = window_signal(&event) else {
+                            continue;
+                        };
+
                         // Only trade events that are within their own active window.
                         // Gamma may surface upcoming windows early; without this guard, we'd "pre-trade"
                         // multiple future markets and then look idle later.
-                        let remaining_secs = event.time_remaining().num_seconds();
-                        if remaining_secs < self.config.min_time_remaining_secs as i64 {
+                        if window_remaining_secs < self.config.min_time_remaining_secs as i64 {
                             continue;
                         }
-                        if remaining_secs > self.config.max_time_remaining_secs as i64 {
+                        if window_remaining_secs > self.config.max_time_remaining_secs as i64 {
                             continue;
                         }
-                        let window_secs = event_window_secs_for_horizon(&timeframe) as i64;
-                        if remaining_secs > window_secs {
+                        if window_move.abs() < self.config.min_window_move_pct {
                             continue;
                         }
 
@@ -607,6 +658,10 @@ impl TradingAgent for CryptoTradingAgent {
                         }
 
                         if self.config.require_mtf_agreement {
+                            let dir_sign = match side {
+                                Side::Up => 1,
+                                Side::Down => -1,
+                            };
                             let mom_sign = if momentum_1s > Decimal::ZERO {
                                 1
                             } else if momentum_1s < Decimal::ZERO {
@@ -614,9 +669,6 @@ impl TradingAgent for CryptoTradingAgent {
                             } else {
                                 0
                             };
-                            if mom_sign == 0 {
-                                continue;
-                            }
 
                             let sign = |v: Decimal| {
                                 if v > Decimal::ZERO {
@@ -631,13 +683,16 @@ impl TradingAgent for CryptoTradingAgent {
                             let short_sign = short_momentum_opt.map(sign).unwrap_or(0);
                             let long_sign = long_momentum_opt.map(sign).unwrap_or(0);
 
+                            if mom_sign != 0 && mom_sign != dir_sign {
+                                continue;
+                            }
                             if timeframe == "15m" {
-                                if (short_sign != 0 && short_sign != mom_sign)
-                                    || (long_sign != 0 && long_sign != mom_sign)
+                                if (short_sign != 0 && short_sign != dir_sign)
+                                    || (long_sign != 0 && long_sign != dir_sign)
                                 {
                                     continue;
                                 }
-                            } else if short_sign != 0 && short_sign != mom_sign {
+                            } else if short_sign != 0 && short_sign != dir_sign {
                                 continue;
                             }
                         }
@@ -668,7 +723,13 @@ impl TradingAgent for CryptoTradingAgent {
                             Side::Down => (event.down_token_id.clone(), down_ask),
                         };
 
-                        let fair_value = Self::estimate_fair_value(momentum_1s);
+                        // Best-effort fair value estimate from window move (metadata only).
+                        let shift = (window_move * dec!(100)).clamp(dec!(-0.45), dec!(0.45));
+                        let p_up = (dec!(0.50) + shift).max(dec!(0.05)).min(dec!(0.95));
+                        let fair_value = match side {
+                            Side::Up => p_up,
+                            Side::Down => Decimal::ONE - p_up,
+                        };
                         let signal_edge = fair_value - limit_price;
                         let confidence = Self::signal_confidence(
                             sum_of_asks,
@@ -703,6 +764,7 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("series_id", &event.series_id)
                         .with_metadata("event_series_id", &event.series_id)
                         .with_metadata("horizon", &event.horizon)
+                        .with_metadata("event_start_time", &event.start_time.to_rfc3339())
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
                         .with_metadata("sum_of_asks", &sum_of_asks.to_string())
                         .with_metadata("event_title", &event.title)
@@ -715,6 +777,10 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("signal_fair_value", &fair_value.to_string())
                         .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("signal_edge", &signal_edge.to_string())
+                        .with_metadata("window_start_price", &window_start_price.to_string())
+                        .with_metadata("window_move_pct", &window_move.to_string())
+                        .with_metadata("window_elapsed_secs", &window_elapsed_secs.to_string())
+                        .with_metadata("window_remaining_secs", &window_remaining_secs.to_string())
                         .with_metadata("config_hash", &config_hash);
 
                         info!(
@@ -724,6 +790,7 @@ impl TradingAgent for CryptoTradingAgent {
                             %sum_of_asks,
                             %side,
                             %limit_price,
+                            window_move = %window_move,
                             "signal detected, submitting order"
                         );
 
