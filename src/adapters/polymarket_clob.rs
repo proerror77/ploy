@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 use zeroize::Zeroize;
 
 /// Chain ID for Polygon Mainnet
@@ -67,6 +67,8 @@ pub struct PolymarketClient {
     neg_risk: bool,
     /// Mutex to serialize order submissions (prevents auth race condition)
     order_mutex: Arc<Mutex<()>>,
+    /// Cached authenticated CLOB client (API key) to avoid spamming `/auth/api-key`.
+    auth_client: Arc<Mutex<Option<AuthClobClient>>>,
 }
 
 impl Clone for PolymarketClient {
@@ -81,6 +83,7 @@ impl Clone for PolymarketClient {
             dry_run: self.dry_run,
             neg_risk: self.neg_risk,
             order_mutex: self.order_mutex.clone(), // Share mutex across clones
+            auth_client: self.auth_client.clone(),
         }
     }
 }
@@ -709,11 +712,12 @@ impl PolymarketClient {
         Ok(out)
     }
 
-    async fn authenticate_fresh(&self, signer: &PrivateKeySigner) -> Result<AuthClobClient> {
-        // Serialize auth handshakes. The upstream SDK requires unique ownership when
-        // transitioning unauthenticated -> authenticated, so we create a fresh client per call.
-        let _guard = self.order_mutex.lock().await;
+    async fn clear_cached_auth(&self) {
+        let mut guard = self.auth_client.lock().await;
+        *guard = None;
+    }
 
+    async fn authenticate_new(&self, signer: &PrivateKeySigner) -> Result<AuthClobClient> {
         let fresh_client = ClobClient::new(&self.base_url, ClobConfig::default())
             .map_err(|e| PloyError::Internal(format!("Failed to create CLOB client: {}", e)))?;
 
@@ -736,6 +740,47 @@ impl PolymarketClient {
         };
 
         Ok(auth_client)
+    }
+
+    async fn authenticate_cached(&self, signer: &PrivateKeySigner) -> Result<AuthClobClient> {
+        // Fast-path: reuse cached authenticated client (API key).
+        {
+            let guard = self.auth_client.lock().await;
+            if let Some(client) = guard.as_ref() {
+                return Ok(client.clone());
+            }
+        }
+
+        // Upstream `/auth/api-key` can be flaky and/or rate-limited. Retry a few times with
+        // bounded backoff to avoid tripping global circuit breakers on transient failures.
+        let mut backoff_ms: u64 = 250;
+        let mut last_err: Option<PloyError> = None;
+        for attempt in 0..3 {
+            match self.authenticate_new(signer).await {
+                Ok(client) => {
+                    let mut guard = self.auth_client.lock().await;
+                    *guard = Some(client.clone());
+                    return Ok(client);
+                }
+                Err(e) => {
+                    warn!(
+                        attempt = attempt + 1,
+                        backoff_ms,
+                        error = %e,
+                        "Polymarket authentication handshake failed"
+                    );
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(5_000);
+                    }
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            PloyError::Auth("Polymarket authentication failed".to_string())
+        }))
     }
 
     /// Create a new CLOB client (dry run mode)
@@ -762,6 +807,7 @@ impl PolymarketClient {
             dry_run,
             neg_risk: false,
             order_mutex: Arc::new(Mutex::new(())),
+            auth_client: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -812,6 +858,7 @@ impl PolymarketClient {
             dry_run: false,
             neg_risk,
             order_mutex: Arc::new(Mutex::new(())),
+            auth_client: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -873,6 +920,7 @@ impl PolymarketClient {
             dry_run: false,
             neg_risk,
             order_mutex: Arc::new(Mutex::new(())),
+            auth_client: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1336,7 +1384,9 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        // Serialize order submit + auth handshake to avoid repeatedly creating API keys.
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         // Build the order
         let sdk_side = match request.order_side {
@@ -1374,7 +1424,6 @@ impl PolymarketClient {
             .map_err(|e| PloyError::OrderSubmission(format!("Failed to post order: {}", e)))?;
 
         info!("Order submitted successfully: {:?}", resp);
-        // Mutex guard dropped here, releasing lock for next order
 
         Ok(OrderResponse {
             id: resp.order_id,
@@ -1401,7 +1450,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let order = auth_client
             .order(order_id)
@@ -1438,7 +1488,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         auth_client
             .cancel_order(order_id)
@@ -1464,7 +1515,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let req = CancelMarketOrderRequest::builder()
             .asset_id(token_id)
@@ -1508,7 +1560,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let req = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Collateral)
@@ -1547,7 +1600,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let req = OrdersRequest::builder().build();
 
@@ -1592,7 +1646,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let req = OrdersRequest::builder().asset_id(token_id).build();
 
@@ -1632,7 +1687,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let req = OrdersRequest::builder().build();
         let orders_data = self
@@ -1759,7 +1815,8 @@ impl PolymarketClient {
             .as_ref()
             .ok_or_else(|| PloyError::Auth("Not authenticated".to_string()))?;
 
-        let auth_client = self.authenticate_fresh(signer).await?;
+        let _guard = self.order_mutex.lock().await;
+        let auth_client = self.authenticate_cached(signer).await?;
 
         let req = TradesRequest::builder().build();
 

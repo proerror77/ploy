@@ -579,52 +579,82 @@ impl EventMatcher {
             };
             let condition_id = market.condition_id.clone().unwrap_or_default();
 
-            // Parse token IDs from clobTokenIds field (JSON string array).
+            let is_up_label = |label: &str| -> bool {
+                let o = label.trim().to_ascii_lowercase();
+                o == "up" || o.contains("up") || o == "yes" || o.starts_with('↑')
+            };
+            let is_down_label = |label: &str| -> bool {
+                let o = label.trim().to_ascii_lowercase();
+                o == "down" || o.contains("down") || o == "no" || o.starts_with('↓')
+            };
+
+            // Prefer token-id mapping from `tokens` (token_id + outcome) when available.
+            // This is the most reliable source and avoids assuming outcome ordering.
+            let mut up_token_id: Option<String> = None;
+            let mut down_token_id: Option<String> = None;
+            if let Some(token_infos) = market.tokens.as_ref() {
+                for t in token_infos {
+                    if up_token_id.is_none() && is_up_label(&t.outcome) {
+                        up_token_id = Some(t.token_id.clone());
+                    }
+                    if down_token_id.is_none() && is_down_label(&t.outcome) {
+                        down_token_id = Some(t.token_id.clone());
+                    }
+                }
+            }
+
+            // Fallback: parse token IDs from clobTokenIds field (JSON string array).
             // Gamma aligns indices across `outcomes`, `clobTokenIds`, and `outcomePrices`.
-            let tokens: Vec<String> = market
+            let mut token_ids: Vec<String> = market
                 .clob_token_ids
                 .as_ref()
                 .and_then(|ids_str| serde_json::from_str::<Vec<String>>(ids_str).ok())
                 .unwrap_or_default();
 
-            if tokens.len() < 2 {
+            if token_ids.len() < 2 {
+                if let Some(token_infos) = market.tokens.as_ref() {
+                    token_ids = token_infos.iter().map(|t| t.token_id.clone()).collect();
+                }
+            }
+
+            if token_ids.len() < 2 {
                 debug!(
-                    "Market {} has insufficient tokens: {:?}",
-                    condition_id, tokens
+                    "Market {} has insufficient tokens (clobTokenIds/tokens missing)",
+                    condition_id
                 );
                 continue;
             }
 
-            // Default mapping (fallback): first token is UP, second is DOWN.
-            let mut up_token_id = tokens[0].clone();
-            let mut down_token_id = tokens[1].clone();
-
-            // If outcomes are available, map by label to avoid any ordering assumptions.
-            if let Some(outcomes_raw) = market.outcomes.as_ref() {
-                if let Ok(outcomes) = serde_json::from_str::<Vec<String>>(outcomes_raw) {
-                    if outcomes.len() == tokens.len() {
-                        let mut up_idx: Option<usize> = None;
-                        let mut down_idx: Option<usize> = None;
-                        for (idx, outcome) in outcomes.iter().enumerate() {
-                            let o = outcome.trim().to_ascii_lowercase();
-                            if up_idx.is_none() && (o == "up" || o == "yes" || o.starts_with('↑'))
-                            {
-                                up_idx = Some(idx);
+            // If we didn't resolve via `tokens`, try mapping by the `outcomes` array indices.
+            if up_token_id.is_none() || down_token_id.is_none() {
+                if let Some(outcomes_raw) = market.outcomes.as_ref() {
+                    if let Ok(outcomes) = serde_json::from_str::<Vec<String>>(outcomes_raw) {
+                        if outcomes.len() == token_ids.len() {
+                            let mut up_idx: Option<usize> = None;
+                            let mut down_idx: Option<usize> = None;
+                            for (idx, outcome) in outcomes.iter().enumerate() {
+                                if up_idx.is_none() && is_up_label(outcome) {
+                                    up_idx = Some(idx);
+                                }
+                                if down_idx.is_none() && is_down_label(outcome) {
+                                    down_idx = Some(idx);
+                                }
                             }
-                            if down_idx.is_none()
-                                && (o == "down" || o == "no" || o.starts_with('↓'))
-                            {
-                                down_idx = Some(idx);
-                            }
-                        }
 
-                        if let (Some(u), Some(d)) = (up_idx, down_idx) {
-                            up_token_id = tokens[u].clone();
-                            down_token_id = tokens[d].clone();
+                            if let Some(u) = up_idx {
+                                up_token_id = Some(token_ids[u].clone());
+                            }
+                            if let Some(d) = down_idx {
+                                down_token_id = Some(token_ids[d].clone());
+                            }
                         }
                     }
                 }
             }
+
+            // Final fallback: assume first token is UP, second is DOWN.
+            let up_token_id = up_token_id.unwrap_or_else(|| token_ids[0].clone());
+            let down_token_id = down_token_id.unwrap_or_else(|| token_ids[1].clone());
 
             // Parse end time
             let end_time = match event_details.end_date.as_ref().and_then(|s| {
