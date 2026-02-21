@@ -78,13 +78,22 @@ impl OrderQueue {
     /// - `Ok(())` 成功入隊
     /// - `Err(reason)` 隊列已滿或訂單無效
     pub fn enqueue(&mut self, intent: OrderIntent) -> Result<(), String> {
+        self.enqueue_with_eviction(intent).map(|_| ())
+    }
+
+    /// Enqueue and return evicted low-priority intent when queue is full.
+    pub fn enqueue_with_eviction(
+        &mut self,
+        intent: OrderIntent,
+    ) -> Result<Option<OrderIntent>, String> {
+        let mut evicted: Option<OrderIntent> = None;
         // 檢查隊列是否已滿
         if self.heap.len() >= self.max_size {
             // 如果新訂單優先級更高，嘗試移除最低優先級的
-            if let Some(lowest) = self.heap.peek() {
-                if intent.priority < lowest.intent.priority {
+            if let Some(lowest_priority) = self.heap.iter().map(|item| item.intent.priority).max() {
+                if intent.priority < lowest_priority {
                     // 新訂單優先級更高，移除最低的
-                    self.heap.pop();
+                    evicted = self.pop_lowest_priority().map(|v| v.intent);
                     warn!(
                         "Queue full, dropped lowest priority order to make room for {:?}",
                         intent.priority
@@ -111,7 +120,32 @@ impl OrderQueue {
         self.heap.push(PrioritizedIntent { intent, sequence });
         self.enqueued_count += 1;
 
-        Ok(())
+        Ok(evicted)
+    }
+
+    /// Pop one lowest-priority item from queue.
+    /// When priorities tie, evict the newest item in that lowest bucket.
+    fn pop_lowest_priority(&mut self) -> Option<PrioritizedIntent> {
+        let mut items: Vec<PrioritizedIntent> = std::mem::take(&mut self.heap).into_vec();
+        if items.is_empty() {
+            return None;
+        }
+
+        let mut lowest_idx = 0usize;
+        for idx in 1..items.len() {
+            let current = &items[idx];
+            let lowest = &items[lowest_idx];
+            if current.intent.priority > lowest.intent.priority
+                || (current.intent.priority == lowest.intent.priority
+                    && current.sequence > lowest.sequence)
+            {
+                lowest_idx = idx;
+            }
+        }
+
+        let dropped = items.swap_remove(lowest_idx);
+        self.heap = BinaryHeap::from(items);
+        Some(dropped)
     }
 
     /// 取出下一個要執行的訂單
@@ -384,6 +418,25 @@ mod tests {
         queue
             .enqueue(make_intent("a4", OrderPriority::Critical))
             .unwrap();
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn test_enqueue_with_eviction_returns_dropped_intent() {
+        let mut queue = OrderQueue::new(2);
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Low))
+            .unwrap();
+
+        let dropped = queue
+            .enqueue_with_eviction(make_intent("a3", OrderPriority::Critical))
+            .unwrap()
+            .expect("expected an evicted intent");
+
+        assert_eq!(dropped.agent_id, "a2");
         assert_eq!(queue.len(), 2);
     }
 

@@ -2960,8 +2960,18 @@ impl Coordinator {
                 self.persist_risk_decision(&intent, "PASSED", None, None)
                     .await;
                 let mut queue = self.order_queue.write().await;
-                match queue.enqueue(intent) {
-                    Ok(()) => {
+                match queue.enqueue_with_eviction(intent) {
+                    Ok(evicted) => {
+                        drop(queue);
+                        if let Some(dropped) = evicted {
+                            self.settle_domain_failure(&dropped).await;
+                            warn!(
+                                dropped_intent_id = %dropped.intent_id,
+                                dropped_agent_id = %dropped.agent_id,
+                                dropped_priority = ?dropped.priority,
+                                "queue full: evicted lower-priority intent"
+                            );
+                        }
                         debug!(
                             %agent_id, %intent_id,
                             "order enqueued"
