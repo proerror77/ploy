@@ -25,6 +25,7 @@ Production runtime uses a 3-plane model:
 Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; agents decide entries/exits inside those boundaries.
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
 For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
+For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
 
 ## Prerequisites
 
