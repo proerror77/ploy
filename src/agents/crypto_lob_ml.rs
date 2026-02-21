@@ -191,11 +191,11 @@ pub struct CryptoLobMlAgent {
 
 fn should_skip_entry(
     event_slug: &str,
-    symbol: &str,
+    entry_key: &str,
     now: DateTime<Utc>,
     positions: &HashMap<String, TrackedPosition>,
     traded_events: &HashMap<String, DateTime<Utc>>,
-    last_trade_by_symbol: &HashMap<String, DateTime<Utc>>,
+    last_trade_by_key: &HashMap<String, DateTime<Utc>>,
     cooldown_secs: u64,
 ) -> bool {
     if positions.contains_key(event_slug) {
@@ -206,7 +206,7 @@ fn should_skip_entry(
         return true;
     }
 
-    if let Some(last) = last_trade_by_symbol.get(symbol) {
+    if let Some(last) = last_trade_by_key.get(entry_key) {
         if now.signed_duration_since(*last).num_seconds() < cooldown_secs as i64 {
             return true;
         }
@@ -601,7 +601,7 @@ impl TradingAgent for CryptoLobMlAgent {
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
         let mut active_events: HashMap<String, Vec<EventInfo>> = HashMap::new(); // symbol -> events
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
-        let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut last_trade_by_key: HashMap<String, DateTime<Utc>> = HashMap::new(); // symbol|timeframe -> ts
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         let daily_pnl = Decimal::ZERO;
@@ -755,6 +755,17 @@ impl TradingAgent for CryptoLobMlAgent {
 
                     let quote_cache = self.pm_ws.quote_cache();
                     for event in events {
+                        let timeframe = normalize_timeframe(&event.horizon);
+                        let entry_key = format!("{}|{}", update.symbol, &timeframe);
+
+                        // Only trade events that are within their own active window.
+                        // Gamma can surface the next windows early; avoid "pre-trading" future markets.
+                        let remaining_secs = event.time_remaining().num_seconds();
+                        let window_secs = event_window_secs_for_horizon(&timeframe) as i64;
+                        if remaining_secs > window_secs {
+                            continue;
+                        }
+
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
                         let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
@@ -860,11 +871,11 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         if should_skip_entry(
                             &event.slug,
-                            &update.symbol,
+                            entry_key.as_str(),
                             Utc::now(),
                             &positions,
                             &traded_events,
-                            &last_trade_by_symbol,
+                            &last_trade_by_key,
                             self.config.cooldown_secs,
                         ) {
                             continue;
@@ -881,7 +892,6 @@ impl TradingAgent for CryptoLobMlAgent {
                             limit_price,
                         );
                         let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
-                        let timeframe = normalize_timeframe(&event.horizon);
                         let event_window_secs =
                             event_window_secs_for_horizon(&timeframe).to_string();
                         let intent = intent
@@ -942,7 +952,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         }
 
                         let now = Utc::now();
-                        last_trade_by_symbol.insert(update.symbol.clone(), now);
+                        last_trade_by_key.insert(entry_key, now);
                         traded_events.insert(event.slug.clone(), now);
                     }
                 }

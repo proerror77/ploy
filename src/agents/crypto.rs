@@ -49,7 +49,10 @@ pub struct CryptoTradingConfig {
     pub max_time_remaining_secs: u64,
     /// Prefer events closest to end (confirmatory mode)
     pub prefer_close_to_end: bool,
-    /// Entry cooldown; `0` uses the event window for the horizon (5m=300s, 15m=900s).
+    /// Optional entry cooldown per (symbol,timeframe), in seconds.
+    ///
+    /// This is a safety throttle to prevent bursty duplicate entries from noisy feeds.
+    /// Use `0` to disable and rely on per-market idempotency + duplicate guards.
     #[serde(default)]
     pub entry_cooldown_secs: u64,
     /// Require multi-timeframe momentum agreement for entries.
@@ -275,11 +278,8 @@ impl CryptoTradingAgent {
         format!("{:x}", hasher.finalize())
     }
 
-    fn entry_cooldown_secs(&self, horizon: &str) -> u64 {
-        if self.config.entry_cooldown_secs > 0 {
-            return self.config.entry_cooldown_secs;
-        }
-        event_window_secs_for_horizon(horizon).max(1)
+    fn entry_cooldown_secs(&self) -> u64 {
+        self.config.entry_cooldown_secs
     }
 
     fn estimate_fair_value(momentum: Decimal) -> Decimal {
@@ -346,7 +346,7 @@ impl TradingAgent for CryptoTradingAgent {
         let mut active_events: HashMap<String, Vec<EventInfo>> = HashMap::new(); // symbol -> events
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
-        let mut last_entry_at: HashMap<String, DateTime<Utc>> = HashMap::new(); // symbol|timeframe -> ts
+        let mut last_entry_at: HashMap<String, DateTime<Utc>> = HashMap::new(); // symbol|timeframe -> ts (optional throttle)
         let daily_pnl = Decimal::ZERO;
         sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
 
@@ -576,16 +576,33 @@ impl TradingAgent for CryptoTradingAgent {
                             continue;
                         }
 
-                        // Prevent "pre-trading" multiple future windows: enforce cooldown per (symbol,timeframe).
-                        let entry_key = format!("{}|{}", update.symbol, timeframe);
-                        let cooldown_secs = self.entry_cooldown_secs(&timeframe);
-                        if let Some(prev) = last_entry_at.get(&entry_key) {
-                            let elapsed = now
-                                .signed_duration_since(*prev)
-                                .num_seconds()
-                                .max(0) as u64;
-                            if elapsed < cooldown_secs {
-                                continue;
+                        // Only trade events that are within their own active window.
+                        // Gamma may surface upcoming windows early; without this guard, we'd "pre-trade"
+                        // multiple future markets and then look idle later.
+                        let remaining_secs = event.time_remaining().num_seconds();
+                        if remaining_secs < self.config.min_time_remaining_secs as i64 {
+                            continue;
+                        }
+                        if remaining_secs > self.config.max_time_remaining_secs as i64 {
+                            continue;
+                        }
+                        let window_secs = event_window_secs_for_horizon(&timeframe) as i64;
+                        if remaining_secs > window_secs {
+                            continue;
+                        }
+
+                        // Optional throttle: avoid burst entries from noisy feeds.
+                        let cooldown_secs = self.entry_cooldown_secs();
+                        if cooldown_secs > 0 {
+                            let entry_key = format!("{}|{}", update.symbol, &timeframe);
+                            if let Some(prev) = last_entry_at.get(&entry_key) {
+                                let elapsed = now
+                                    .signed_duration_since(*prev)
+                                    .num_seconds()
+                                    .max(0) as u64;
+                                if elapsed < cooldown_secs {
+                                    continue;
+                                }
                             }
                         }
 
@@ -717,7 +734,10 @@ impl TradingAgent for CryptoTradingAgent {
 
                         // Track position locally
                         traded_events.insert(event.slug.clone(), now);
-                        last_entry_at.insert(entry_key, now);
+                        if self.config.entry_cooldown_secs > 0 {
+                            last_entry_at
+                                .insert(format!("{}|{}", update.symbol, &timeframe), now);
+                        }
                         entered_timeframes.insert(timeframe);
                     }
                 }
