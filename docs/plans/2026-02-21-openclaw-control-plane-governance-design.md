@@ -74,3 +74,7 @@ Date: 2026-02-21
 2. 任一 intent 被擋下時可給出明確 policy reason。
 3. Poly Agent 在 policy 允許範圍內保持自主高頻執行。
 4. Coordinator 成為唯一可審計的 live 下單入口。
+
+## CI Note
+
+GitHub Actions 的 Rust toolchain step 請使用 `dtolnay/rust-toolchain`（`dtolnay/rust-action` 已不可用）。
