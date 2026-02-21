@@ -113,11 +113,32 @@ pub struct DeploymentLedgerSnapshot {
     pub total_notional_usd: Decimal,
 }
 
+/// Domain-level ingress mode snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainIngressSnapshot {
+    pub domain: String,
+    pub mode: String,
+}
+
+/// Agent runtime health snapshot for control-plane scheduling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceAgentSnapshot {
+    pub agent_id: String,
+    pub name: String,
+    pub domain: String,
+    pub status: String,
+    pub exposure: Decimal,
+    pub daily_pnl: Decimal,
+    pub last_heartbeat: DateTime<Utc>,
+    pub error_message: Option<String>,
+}
+
 /// Runtime governance + risk + capital view for OpenClaw control-plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceStatusSnapshot {
     pub account_id: String,
     pub ingress_mode: String,
+    pub domain_ingress_modes: Vec<DomainIngressSnapshot>,
     pub policy: GovernancePolicySnapshot,
     pub account_notional_usd: Decimal,
     pub platform_exposure_usd: Decimal,
@@ -125,6 +146,7 @@ pub struct GovernanceStatusSnapshot {
     pub daily_pnl_usd: Decimal,
     pub daily_loss_limit_usd: Decimal,
     pub queue: QueueStatsSnapshot,
+    pub agents: Vec<GovernanceAgentSnapshot>,
     pub allocators: Vec<AllocatorLedgerSnapshot>,
     pub deployments: Vec<DeploymentLedgerSnapshot>,
     pub updated_at: DateTime<Utc>,

@@ -29,8 +29,9 @@ use crate::strategy::executor::OrderExecutor;
 
 use super::command::{
     AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
-    DeploymentLedgerSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,
-    GovernancePolicyUpdate, GovernanceStatusSnapshot,
+    DeploymentLedgerSnapshot, DomainIngressSnapshot, GovernanceAgentSnapshot,
+    GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
+    GovernanceStatusSnapshot,
 };
 use super::config::CoordinatorConfig;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
@@ -162,6 +163,13 @@ fn governance_domain_label(domain: Domain) -> &'static str {
         Domain::Politics => "politics",
         Domain::Economics => "economics",
         Domain::Custom(_) => "custom",
+    }
+}
+
+fn governance_domain_snapshot_label(domain: Domain) -> String {
+    match domain {
+        Domain::Custom(id) => format!("custom:{}", id),
+        _ => governance_domain_label(domain).to_string(),
     }
 }
 
@@ -1033,6 +1041,10 @@ impl CoordinatorHandle {
 
     /// Force-close positions for one domain
     pub async fn force_close_domain(&self, domain: Domain) -> Result<()> {
+        {
+            let mut domain_mode = self.domain_ingress_mode.write().await;
+            domain_mode.insert(domain, IngressMode::Halted);
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseDomain(domain))
             .await
@@ -1043,6 +1055,10 @@ impl CoordinatorHandle {
 
     /// Shutdown one domain
     pub async fn shutdown_domain(&self, domain: Domain) -> Result<()> {
+        {
+            let mut domain_mode = self.domain_ingress_mode.write().await;
+            domain_mode.insert(domain, IngressMode::Halted);
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownDomain(domain))
             .await
@@ -1093,6 +1109,18 @@ impl CoordinatorHandle {
     /// Read runtime governance + risk + capital ledger snapshot.
     pub async fn governance_status(&self) -> GovernanceStatusSnapshot {
         let ingress_mode = self.ingress_mode.read().await.as_str().to_string();
+        let domain_ingress_modes = {
+            let modes = self.domain_ingress_mode.read().await;
+            let mut rows = modes
+                .iter()
+                .map(|(domain, mode)| DomainIngressSnapshot {
+                    domain: governance_domain_snapshot_label(*domain),
+                    mode: mode.as_str().to_string(),
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by(|a, b| a.domain.cmp(&b.domain));
+            rows
+        };
         let policy = self.governance_policy.read().await.to_snapshot();
         let risk_state = self.risk_gate.state().await;
         let platform_exposure_usd = self.risk_gate.total_exposure().await;
@@ -1109,6 +1137,25 @@ impl CoordinatorHandle {
                     Domain::Economics,
                 ]),
             )
+        };
+        let agents = {
+            let global = self.global_state.read().await;
+            let mut rows = global
+                .agents
+                .values()
+                .map(|snap| GovernanceAgentSnapshot {
+                    agent_id: snap.agent_id.clone(),
+                    name: snap.name.clone(),
+                    domain: governance_domain_snapshot_label(snap.domain),
+                    status: snap.status.to_string().to_ascii_lowercase(),
+                    exposure: snap.exposure,
+                    daily_pnl: snap.daily_pnl,
+                    last_heartbeat: snap.last_heartbeat,
+                    error_message: snap.error_message.clone(),
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+            rows
         };
 
         let (crypto, mut deployments) = {
@@ -1162,6 +1209,7 @@ impl CoordinatorHandle {
         GovernanceStatusSnapshot {
             account_id: self.account_id.clone(),
             ingress_mode,
+            domain_ingress_modes,
             policy,
             account_notional_usd,
             platform_exposure_usd,
@@ -1169,6 +1217,7 @@ impl CoordinatorHandle {
             daily_pnl_usd,
             daily_loss_limit_usd,
             queue,
+            agents,
             allocators: vec![crypto, sports, politics, economics],
             deployments,
             updated_at: Utc::now(),
@@ -4051,9 +4100,13 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::PolymarketClient;
+    use crate::config::ExecutionConfig;
     use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
+    use crate::strategy::executor::OrderExecutor;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
         AgentSnapshot {
@@ -4069,6 +4122,19 @@ mod tests {
             last_heartbeat: Utc::now(),
             error_message: None,
         }
+    }
+
+    fn make_test_handle() -> (CoordinatorHandle, Coordinator) {
+        let client = PolymarketClient::new("https://clob.polymarket.com", true)
+            .expect("build dry-run polymarket client");
+        let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+        let coordinator = Coordinator::new(
+            CoordinatorConfig::default(),
+            executor,
+            "acct-test".to_string(),
+        );
+        let handle = coordinator.handle();
+        (handle, coordinator)
     }
 
     #[test]
@@ -4478,6 +4544,105 @@ mod tests {
         );
         let reason = governance_block_reason(&policy, &intent, dec!(999));
         assert!(reason.is_none(), "sell intent should remain allowed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_force_close_domain_blocks_new_buy_immediately() {
+        let (handle, _coordinator) = make_test_handle();
+        handle
+            .force_close_domain(Domain::Sports)
+            .await
+            .expect("force-close domain command accepted");
+
+        let intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        )
+        .with_deployment_id("deploy.sports.nba.test");
+
+        let err = handle
+            .submit_order(intent)
+            .await
+            .expect_err("buy intent should be blocked once domain is force-closed");
+        assert!(err.to_string().contains("new intents are blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_shutdown_domain_blocks_new_buy_immediately() {
+        let (handle, _coordinator) = make_test_handle();
+        handle
+            .shutdown_domain(Domain::Politics)
+            .await
+            .expect("shutdown domain command accepted");
+
+        let intent = OrderIntent::new(
+            "politics",
+            Domain::Politics,
+            "election-market",
+            "politics-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.40),
+        )
+        .with_deployment_id("deploy.politics.election.test");
+
+        let err = handle
+            .submit_order(intent)
+            .await
+            .expect_err("buy intent should be blocked once domain is shut down");
+        assert!(err.to_string().contains("new intents are blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_governance_status_includes_domain_ingress_and_agents() {
+        let (handle, _coordinator) = make_test_handle();
+        handle
+            .pause_domain(Domain::Sports)
+            .await
+            .expect("pause domain command accepted");
+        {
+            let mut state = handle.global_state.write().await;
+            state.agents.insert(
+                "sports_agent".to_string(),
+                AgentSnapshot {
+                    agent_id: "sports_agent".to_string(),
+                    name: "sports_agent".to_string(),
+                    domain: Domain::Sports,
+                    status: AgentStatus::Running,
+                    position_count: 0,
+                    exposure: dec!(12.5),
+                    daily_pnl: dec!(1.2),
+                    unrealized_pnl: dec!(0.3),
+                    metrics: HashMap::new(),
+                    last_heartbeat: Utc::now(),
+                    error_message: None,
+                },
+            );
+        }
+
+        let snapshot = handle.governance_status().await;
+
+        assert!(
+            snapshot
+                .domain_ingress_modes
+                .iter()
+                .any(|row| row.domain == "sports" && row.mode == "paused")
+        );
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.agent_id == "sports_agent"
+                    && agent.domain == "sports"
+                    && agent.status == "running")
+        );
     }
 
     #[test]
