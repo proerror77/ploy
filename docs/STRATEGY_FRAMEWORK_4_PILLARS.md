@@ -27,7 +27,7 @@
   - `src/strategy/event_models/arena_text.rs`（外部資料源：Arena leaderboard）
 - 主要入口
   - CLI：`ploy event-edge ...`（Legacy CLI，見 `src/main.rs` 的 `run_event_edge_mode`）
-  - 常駐背景 agent（跟著 `ploy run` 起）：`[event_edge_agent]`（見 `config/default.toml`、`docs/EVENT_EDGE_AGENT.md`）
+  - 常駐背景 agent（跟著 `ploy platform start --politics` 起）：`[event_edge_agent]`（見 `config/default.toml`、`docs/EVENT_EDGE_AGENT.md`）
   - 三種 framework runner：
     - `src/services/event_edge_agent.rs`（deterministic）
     - `src/services/event_edge_event_driven.rs`（event-driven + persisted state）
@@ -109,7 +109,7 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
 
 目前 repo 同時存在 3 套「跑策略」的方式：
 
-1. Legacy bot loop（`ploy run` / `src/main.rs`）
+1. Legacy bot loop（`ploy run` / `src/main.rs`，live 已封鎖）
 2. StrategyManager（`src/strategy/traits.rs` + `src/strategy/manager.rs` + `src/strategy/feeds.rs`）
 3. Multi-agent platform（`src/agents/*` + `src/coordinator/*` + `src/platform/*`）
 

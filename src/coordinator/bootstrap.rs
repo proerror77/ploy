@@ -11,14 +11,14 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agent::PolymarketSportsClient;
-use crate::agents::{
+use crate::agent_system::ai::PolymarketSportsClient;
+use crate::agent_system::runtime::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
     PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
     TradingAgent,
 };
 #[cfg(feature = "rl")]
-use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agent_system::runtime::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
@@ -337,6 +337,63 @@ pub(crate) async fn ensure_agent_order_executions_table(pool: &PgPool) -> Result
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_agent_order_executions_account_time ON agent_order_executions(account_id, executed_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS coordinator_governance_policies (
+            account_id TEXT PRIMARY KEY,
+            block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
+            blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+            max_intent_notional_usd NUMERIC,
+            max_total_notional_usd NUMERIC,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_by TEXT NOT NULL,
+            reason TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_coordinator_governance_policies_updated_at ON coordinator_governance_policies(updated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub(crate) async fn ensure_coordinator_governance_policy_history_table(
+    pool: &PgPool,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS coordinator_governance_policy_history (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
+            blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+            max_intent_notional_usd NUMERIC,
+            max_total_notional_usd NUMERIC,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_by TEXT NOT NULL,
+            reason TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_coord_gov_policy_hist_account_time ON coordinator_governance_policy_history(account_id, updated_at DESC, id DESC)",
     )
     .execute(pool)
     .await?;
@@ -2457,9 +2514,11 @@ fn apply_strategy_deployments(
     }
     cfg.enable_sports = false;
     cfg.enable_politics = false;
+    cfg.enable_economics = false;
 
     let mut coins: HashSet<String> = HashSet::new();
     let mut timeframe_summary: HashMap<String, usize> = HashMap::new();
+    let mut custom_domains: HashSet<String> = HashSet::new();
 
     for dep in enabled.iter().copied() {
         *timeframe_summary
@@ -2501,7 +2560,10 @@ fn apply_strategy_deployments(
             }
             Domain::Sports => cfg.enable_sports = true,
             Domain::Politics => cfg.enable_politics = true,
-            Domain::Economics | Domain::Custom(_) => {}
+            Domain::Economics => cfg.enable_economics = true,
+            Domain::Custom(ref custom_domain) => {
+                custom_domains.insert(format!("custom:{}", custom_domain));
+            }
         }
     }
 
@@ -2534,6 +2596,14 @@ fn apply_strategy_deployments(
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
     tf.sort();
+    if !custom_domains.is_empty() {
+        let mut custom: Vec<String> = custom_domains.into_iter().collect();
+        custom.sort();
+        warn!(
+            domains = ?custom,
+            "custom deployments detected without built-in runtime agent registration"
+        );
+    }
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = cfg.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
@@ -2548,6 +2618,7 @@ fn apply_strategy_deployments(
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = cfg.enable_sports,
         politics = cfg.enable_politics,
+        economics = cfg.enable_economics,
         coins = ?cfg.crypto.coins,
         timeframes = ?tf,
         "applied strategy deployment matrix to platform runtime"
@@ -2679,6 +2750,8 @@ pub struct PlatformBootstrapConfig {
     pub enable_crypto_rl_policy: bool,
     pub enable_sports: bool,
     pub enable_politics: bool,
+    #[serde(default)]
+    pub enable_economics: bool,
     pub dry_run: bool,
     pub crypto: CryptoTradingConfig,
     pub crypto_lob_ml: CryptoLobMlConfig,
@@ -2700,6 +2773,7 @@ impl Default for PlatformBootstrapConfig {
             enable_crypto_rl_policy: false,
             enable_sports: false,
             enable_politics: false,
+            enable_economics: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
             crypto_lob_ml: CryptoLobMlConfig::default(),
@@ -2882,6 +2956,72 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.sports_auto_split_by_active_markets,
         );
 
+        cfg.coordinator.politics_allocator_enabled = env_bool(
+            "PLOY_COORDINATOR__POLITICS_ALLOCATOR_ENABLED",
+            cfg.coordinator.politics_allocator_enabled,
+        );
+        cfg.coordinator.politics_allocator_total_cap_usd =
+            env_decimal_opt("PLOY_COORDINATOR__POLITICS_ALLOCATOR_TOTAL_CAP_USD")
+                .or(cfg.coordinator.politics_allocator_total_cap_usd);
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__POLITICS_MARKET_CAP_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.politics_market_cap_pct = v;
+        }
+        cfg.coordinator.politics_auto_split_by_active_markets = env_bool(
+            "PLOY_COORDINATOR__POLITICS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
+            cfg.coordinator.politics_auto_split_by_active_markets,
+        );
+
+        cfg.coordinator.economics_allocator_enabled = env_bool(
+            "PLOY_COORDINATOR__ECONOMICS_ALLOCATOR_ENABLED",
+            cfg.coordinator.economics_allocator_enabled,
+        );
+        cfg.coordinator.economics_allocator_total_cap_usd =
+            env_decimal_opt("PLOY_COORDINATOR__ECONOMICS_ALLOCATOR_TOTAL_CAP_USD")
+                .or(cfg.coordinator.economics_allocator_total_cap_usd);
+        if let Some(v) =
+            env_decimal_opt("PLOY_COORDINATOR__ECONOMICS_MARKET_CAP_PCT").and_then(normalize_pct)
+        {
+            cfg.coordinator.economics_market_cap_pct = v;
+        }
+        cfg.coordinator.economics_auto_split_by_active_markets = env_bool(
+            "PLOY_COORDINATOR__ECONOMICS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
+            cfg.coordinator.economics_auto_split_by_active_markets,
+        );
+
+        cfg.coordinator.governance_block_new_intents =
+            std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS")
+                .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCK_NEW_INTENTS"))
+                .ok()
+                .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => true,
+                    "0" | "false" | "no" | "off" => false,
+                    _ => cfg.coordinator.governance_block_new_intents,
+                })
+                .unwrap_or(cfg.coordinator.governance_block_new_intents);
+        cfg.coordinator.governance_max_intent_notional_usd =
+            env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_INTENT_NOTIONAL_USD")
+                .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_INTENT_NOTIONAL_USD"))
+                .or(cfg.coordinator.governance_max_intent_notional_usd);
+        cfg.coordinator.governance_max_total_notional_usd =
+            env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_TOTAL_NOTIONAL_USD")
+                .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_TOTAL_NOTIONAL_USD"))
+                .or(cfg.coordinator.governance_max_total_notional_usd);
+
+        if let Ok(raw) = std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCKED_DOMAINS")
+            .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCKED_DOMAINS"))
+        {
+            let domains = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            if !domains.is_empty() {
+                cfg.coordinator.governance_blocked_domains = domains;
+            }
+        }
         // Coordinator-level Kelly sizing (optional; applied when intents carry `signal_fair_value`).
         cfg.coordinator.kelly_sizing_enabled = env_bool(
             "PLOY_COORDINATOR__KELLY_SIZING_ENABLED",
@@ -2911,7 +3051,6 @@ impl PlatformBootstrapConfig {
         if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__MIN_ORDER_NOTIONAL_USD") {
             cfg.coordinator.min_order_notional_usd = v.max(rust_decimal::Decimal::ZERO);
         }
-
         // Map legacy [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
         cfg.crypto.default_shares = app.strategy.shares.max(1);
@@ -3332,6 +3471,7 @@ impl PlatformBootstrapConfig {
             }
             cfg.enable_sports = false;
             cfg.enable_politics = false;
+            cfg.enable_economics = false;
             info!("agent framework lockdown active (mode=openclaw): built-in agents are disabled");
         }
 
@@ -3374,9 +3514,15 @@ pub async fn start_platform(
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
+        economics = config.enable_economics,
         dry_run = config.dry_run,
         "starting multi-agent platform"
     );
+    if config.enable_economics {
+        warn!(
+            "economics domain enabled, but no built-in economics agent is registered; coordinator-level risk and allocator gates remain active"
+        );
+    }
 
     let db_required = env_bool(
         "PLOY_DB_REQUIRED",
@@ -3438,6 +3584,10 @@ pub async fn start_platform(
         }
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
+        let require_runtime_restore = env_bool(
+            "PLOY_REQUIRE_RUNTIME_STATE_RESTORE",
+            !app_config.dry_run.enabled,
+        );
         let migration_store = PostgresStore::from_pool(pool.clone());
         if run_sqlx_migrations {
             if let Err(e) = migration_store.migrate().await {
@@ -3472,6 +3622,43 @@ pub async fn start_platform(
             }
             warn!(error = %e, "failed to upsert account metadata");
         }
+        if let Err(e) = ensure_coordinator_governance_policies_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure coordinator_governance_policies table: {}",
+                    e
+                )));
+            }
+            warn!(
+                error = %e,
+                "failed to ensure coordinator_governance_policies table; governance persistence disabled"
+            );
+        } else if let Err(e) = ensure_coordinator_governance_policy_history_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure coordinator_governance_policy_history table: {}",
+                    e
+                )));
+            }
+            warn!(
+                error = %e,
+                "failed to ensure coordinator_governance_policy_history table; governance history persistence disabled"
+            );
+        } else {
+            coordinator.set_governance_store_pool(pool.clone());
+            if let Err(e) = coordinator.load_persisted_governance_policy().await {
+                if require_startup_schema {
+                    return Err(crate::error::PloyError::Internal(format!(
+                        "failed to restore coordinator governance policy: {}",
+                        e
+                    )));
+                }
+                warn!(
+                    error = %e,
+                    "failed to restore coordinator governance policy from DB"
+                );
+            }
+        }
         if let Err(e) = ensure_agent_order_executions_table(pool).await {
             if require_startup_schema {
                 return Err(crate::error::PloyError::Internal(format!(
@@ -3482,6 +3669,18 @@ pub async fn start_platform(
             warn!(error = %e, "failed to ensure agent_order_executions table; execution logging disabled");
         } else {
             coordinator.set_execution_log_pool(pool.clone());
+            if let Err(e) = coordinator.restore_runtime_state_from_execution_log().await {
+                if require_runtime_restore {
+                    return Err(crate::error::PloyError::Internal(format!(
+                        "failed to restore coordinator runtime state from execution log: {}",
+                        e
+                    )));
+                }
+                warn!(
+                    error = %e,
+                    "failed to restore coordinator runtime state from execution log"
+                );
+            }
         }
         if let Err(e) = ensure_strategy_observability_tables(pool).await {
             if require_startup_schema {
@@ -4242,5 +4441,58 @@ pub fn print_platform_status(state: &GlobalState) {
             agent.daily_pnl,
             agent.last_heartbeat.format("%H:%M:%S")
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{StrategyLifecycleStage, StrategyProductType, Timeframe};
+
+    fn economics_deployment(enabled: bool) -> StrategyDeployment {
+        StrategyDeployment {
+            id: "deploy.econ.fed.15m".to_string(),
+            strategy: "macro_regime".to_string(),
+            strategy_version: "v1".to_string(),
+            domain: Domain::Economics,
+            market_selector: MarketSelector::Static {
+                symbol: None,
+                series_id: None,
+                market_slug: Some("fed-rate-15m".to_string()),
+            },
+            timeframe: Timeframe::M15,
+            enabled,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 0,
+            cooldown_secs: 60,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        }
+    }
+
+    #[test]
+    fn apply_strategy_deployments_enables_economics_domain() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![economics_deployment(true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments);
+
+        assert!(cfg.enable_economics);
+        assert!(!cfg.enable_crypto);
+        assert!(!cfg.enable_sports);
+        assert!(!cfg.enable_politics);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_ignores_disabled_economics_domain() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![economics_deployment(false)];
+
+        apply_strategy_deployments(&mut cfg, &deployments);
+
+        assert!(!cfg.enable_economics);
     }
 }

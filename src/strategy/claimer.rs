@@ -9,6 +9,15 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+#[cfg(feature = "builder_relayer_sdk")]
+use builder_relayer_client_rust::signer::DummySigner;
+#[cfg(feature = "builder_relayer_sdk")]
+use builder_relayer_client_rust::{
+    CallType as BuilderCallType, ProxyTransaction as BuilderProxyTransaction, RelayClient,
+    RelayerTxType as BuilderRelayerTxType,
+};
+#[cfg(feature = "builder_relayer_sdk")]
+use builder_signing_sdk_rs::BuilderApiKeyCreds;
 use chrono::{NaiveDate, Utc};
 use ethers::abi::{encode as abi_encode, AbiParser, Token};
 use ethers::middleware::SignerMiddleware;
@@ -204,23 +213,50 @@ fn relayer_claim_enabled() -> bool {
     )
 }
 
+const RELAYER_BUILDER_API_KEY_ENV_KEYS: [&str; 3] = [
+    "CLAIMER_BUILDER_API_KEY",
+    "POLY_BUILDER_API_KEY",
+    "BUILDER_API_KEY",
+];
+const RELAYER_BUILDER_SECRET_ENV_KEYS: [&str; 3] = [
+    "CLAIMER_BUILDER_SECRET",
+    "POLY_BUILDER_SECRET",
+    "BUILDER_SECRET",
+];
+const RELAYER_BUILDER_PASSPHRASE_ENV_KEYS: [&str; 4] = [
+    "CLAIMER_BUILDER_PASSPHRASE",
+    "POLY_BUILDER_PASSPHRASE",
+    "BUILDER_PASS_PHRASE",
+    "BUILDER_PASSPHRASE",
+];
+
+fn first_present_env_key(keys: &[&'static str]) -> Option<&'static str> {
+    keys.iter().copied().find(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn missing_relayer_builder_credential_groups() -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if first_present_env_key(&RELAYER_BUILDER_API_KEY_ENV_KEYS).is_none() {
+        missing.push("api_key");
+    }
+    if first_present_env_key(&RELAYER_BUILDER_SECRET_ENV_KEYS).is_none() {
+        missing.push("secret");
+    }
+    if first_present_env_key(&RELAYER_BUILDER_PASSPHRASE_ENV_KEYS).is_none() {
+        missing.push("passphrase");
+    }
+    missing
+}
+
 fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
-    let api_key = env_string_any(&[
-        "CLAIMER_BUILDER_API_KEY",
-        "POLY_BUILDER_API_KEY",
-        "BUILDER_API_KEY",
-    ])?;
-    let secret = env_string_any(&[
-        "CLAIMER_BUILDER_SECRET",
-        "POLY_BUILDER_SECRET",
-        "BUILDER_SECRET",
-    ])?;
-    let passphrase = env_string_any(&[
-        "CLAIMER_BUILDER_PASSPHRASE",
-        "POLY_BUILDER_PASSPHRASE",
-        "BUILDER_PASS_PHRASE",
-        "BUILDER_PASSPHRASE",
-    ])?;
+    let api_key = env_string_any(&RELAYER_BUILDER_API_KEY_ENV_KEYS)?;
+    let secret = env_string_any(&RELAYER_BUILDER_SECRET_ENV_KEYS)?;
+    let passphrase = env_string_any(&RELAYER_BUILDER_PASSPHRASE_ENV_KEYS)?;
     Some(RelayerBuilderCredentials {
         api_key,
         secret,
@@ -525,7 +561,29 @@ impl AutoClaimer {
             return Ok(vec![]);
         }
 
-        let relayer_ready = relayer_claim_enabled() && relayer_builder_credentials().is_some();
+        let relayer_enabled = relayer_claim_enabled();
+        let relayer_creds = relayer_builder_credentials();
+        let relayer_ready = relayer_enabled && relayer_creds.is_some();
+        if self.config.auto_claim {
+            if relayer_ready {
+                info!(
+                    relayer_url = %relayer_base_url(),
+                    onchain_fallback = relayer_fallback_onchain_enabled(),
+                    "Gasless redeem path enabled (Builder relayer)"
+                );
+            } else if relayer_enabled {
+                let missing = missing_relayer_builder_credential_groups().join(",");
+                warn!(
+                    missing = %missing,
+                    "Relayer redeem is enabled but builder credentials are incomplete; claimer will require native MATIC for on-chain redeem"
+                );
+            } else {
+                warn!(
+                    "Relayer redeem is disabled; claimer will use direct on-chain redeem and require native MATIC gas"
+                );
+            }
+        }
+
         let preflight_required = needs_native_gas_preflight(self.config.auto_claim, relayer_ready);
         if preflight_required && !self.preflight_wallet_can_claim().await? {
             return Ok(vec![]);
@@ -1186,6 +1244,119 @@ impl AutoClaimer {
         Ok(headers)
     }
 
+    #[cfg(feature = "builder_relayer_sdk")]
+    async fn claim_position_via_relayer_proxy_sdk(
+        &self,
+        pos: &RedeemablePosition,
+        builder_creds: &RelayerBuilderCredentials,
+        private_key: &str,
+    ) -> Result<Option<String>> {
+        let signer = DummySigner::new(private_key).map_err(|e| {
+            crate::error::PloyError::Wallet(format!("Invalid private key for relayer SDK: {}", e))
+        })?;
+        let condition_hex = pos
+            .condition_id
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        let condition_bytes: [u8; 32] = hex::decode(condition_hex)
+            .map_err(|e| crate::error::PloyError::Internal(format!("Invalid condition ID: {}", e)))?
+            .try_into()
+            .map_err(|_| crate::error::PloyError::Internal("Condition ID wrong length".into()))?;
+        let redeem_call_data = Self::encode_ctf_redeem_calldata(condition_bytes)?;
+        let metadata = format!(
+            "redeem {}",
+            &condition_hex.chars().take(16).collect::<String>()
+        );
+        let polygon_rpc = std::env::var("POLYGON_RPC_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+
+        let relayer_client = RelayClient::new_with_type(
+            relayer_base_url(),
+            POLYGON_CHAIN_ID,
+            BuilderRelayerTxType::Proxy,
+        )
+        .with_signer(Box::new(signer.clone()), Box::new(signer))
+        .with_builder_api_key(BuilderApiKeyCreds {
+            key: builder_creds.api_key.clone(),
+            secret: builder_creds.secret.clone(),
+            passphrase: builder_creds.passphrase.clone(),
+        })
+        .with_gas_estimate_rpc(polygon_rpc);
+
+        let submitted = relayer_client
+            .execute_proxy_transactions(
+                vec![BuilderProxyTransaction {
+                    to: CONDITIONAL_TOKENS_POLYGON.to_string(),
+                    type_code: BuilderCallType::Call,
+                    data: format!("0x{}", hex::encode(redeem_call_data)),
+                    value: "0".to_string(),
+                }],
+                Some(metadata.clone()),
+            )
+            .await
+            .map_err(|e| {
+                crate::error::PloyError::OrderSubmission(format!(
+                    "Relayer SDK submit failed: {}",
+                    e
+                ))
+            })?;
+
+        info!(
+            "Relayer SDK redeem submitted: id={}, state={}, condition={}",
+            submitted.transaction_id,
+            submitted.state,
+            &condition_hex.chars().take(16).collect::<String>()
+        );
+
+        for _ in 0..relayer_poll_max() {
+            let transactions = relayer_client
+                .get_transaction(&submitted.transaction_id)
+                .await
+                .map_err(|e| {
+                    crate::error::PloyError::OrderSubmission(format!(
+                        "Relayer SDK polling failed: {}",
+                        e
+                    ))
+                })?;
+
+            if let Some(txn) = transactions.first() {
+                match txn.state.as_str() {
+                    "STATE_MINED" | "STATE_CONFIRMED" => {
+                        let tx_hash = if !txn.transaction_hash.trim().is_empty() {
+                            txn.transaction_hash.clone()
+                        } else if !submitted.transaction_hash.trim().is_empty() {
+                            submitted.transaction_hash.clone()
+                        } else {
+                            submitted.hash.clone()
+                        };
+                        info!(
+                            "Relayer SDK redeem confirmed: state={}, tx={}",
+                            txn.state, tx_hash
+                        );
+                        return Ok(Some(tx_hash));
+                    }
+                    "STATE_FAILED" | "STATE_INVALID" => {
+                        return Err(crate::error::PloyError::OrderSubmission(format!(
+                            "Relayer redeem failed: id={}, state={}",
+                            submitted.transaction_id, txn.state
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+
+            sleep(Duration::from_millis(relayer_poll_interval_ms())).await;
+        }
+
+        Err(crate::error::PloyError::OrderTimeout(format!(
+            "Relayer redeem polling timed out: id={}",
+            submitted.transaction_id
+        )))
+    }
+
     async fn claim_position_via_relayer_proxy(
         &self,
         pos: &RedeemablePosition,
@@ -1201,6 +1372,20 @@ impl AutoClaimer {
         let private_key = self.config.private_key.as_ref().ok_or_else(|| {
             crate::error::PloyError::Wallet("No private key for relayer redeem".into())
         })?;
+
+        #[cfg(feature = "builder_relayer_sdk")]
+        match self
+            .claim_position_via_relayer_proxy_sdk(pos, &builder_creds, private_key)
+            .await
+        {
+            Ok(tx_hash) => return Ok(tx_hash),
+            Err(e) => {
+                warn!(
+                    "Relayer SDK path failed, falling back to legacy relayer flow: {}",
+                    e
+                );
+            }
+        }
 
         let signer_wallet = private_key
             .parse::<LocalWallet>()
@@ -1546,6 +1731,16 @@ impl AutoClaimer {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 
     #[test]
     fn test_claimer_config_default() {
@@ -1644,6 +1839,36 @@ mod tests {
         assert!(!needs_native_gas_preflight(false, false));
         assert!(needs_native_gas_preflight(true, false));
         assert!(!needs_native_gas_preflight(true, true));
+    }
+
+    #[test]
+    fn test_missing_relayer_builder_credential_groups() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        let all_keys: Vec<&str> = RELAYER_BUILDER_API_KEY_ENV_KEYS
+            .iter()
+            .chain(RELAYER_BUILDER_SECRET_ENV_KEYS.iter())
+            .chain(RELAYER_BUILDER_PASSPHRASE_ENV_KEYS.iter())
+            .copied()
+            .collect();
+        let prev: Vec<(&str, Option<String>)> = all_keys
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+
+        for key in &all_keys {
+            set_env(key, None);
+        }
+        set_env("POLY_BUILDER_API_KEY", Some("k"));
+        set_env("POLY_BUILDER_PASSPHRASE", Some("p"));
+        assert_eq!(missing_relayer_builder_credential_groups(), vec!["secret"]);
+
+        set_env("BUILDER_SECRET", Some("s"));
+        assert!(missing_relayer_builder_credential_groups().is_empty());
+
+        for (key, val) in prev {
+            set_env(key, val.as_deref());
+        }
     }
 
     #[test]

@@ -14,6 +14,24 @@ A high-performance Polymarket trading bot covering crypto, sports, and political
 - **Persistence** -- PostgreSQL event store, checkpoints, dead-letter queue, and crash recovery
 - **Risk management** -- Position limits, circuit breaker, daily loss limit, slippage protection, emergency stop
 
+## Architecture (Agent-Based)
+
+Production runtime uses a 3-plane model:
+
+- **Strategy Plane (Poly Agents)**: direction/timing/pricing decisions and intent generation.
+- **Execution Plane (Ploy Coordinator)**: single live ingestion path (`OrderIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail.
+- **Control Plane (OpenClaw / AI Scheduler)**: global capital policy, deployment enable/disable, pause/halt/force-close.
+
+Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; agents decide entries/exits inside those boundaries.
+For machine-readable control-plane discovery, query `GET /api/capabilities`.
+For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
+For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
+`strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
+Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
+Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
+
+Canonical agent namespace is now `crate::agent_system::{ai,runtime,legacy_platform}` (legacy paths kept for compatibility).
+
 ## Prerequisites
 
 - **Rust** 1.75+ (2021 edition)
@@ -66,8 +84,6 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
 | `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
-| `PLOY_ALLOW_LEGACY_LIVE` | No | Allow legacy (non-Coordinator) live order paths. Not recommended. |
-| `PLOY_ALLOW_LEGACY_STRATEGY_LIVE` | No | Allow legacy `ploy strategy start` live runtime. Prefer `ploy platform start`. |
 
 ### Config File
 
@@ -100,12 +116,7 @@ ploy platform start --crypto --dry-run             # Safe dry-run
 ```
 
 Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
-
-If you need an explicit override (not recommended), set:
-
-```bash
-export PLOY_ALLOW_LEGACY_LIVE=true
-```
+Legacy live overrides are now removed to enforce a single audited execution path.
 
 ### Global Flags
 
@@ -118,7 +129,7 @@ export PLOY_ALLOW_LEGACY_LIVE=true
 ### Core Commands
 
 ```bash
-ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_LEGACY_LIVE=true)
+ploy run                                       # Legacy bot loop (dry-run only; live is blocked)
 ploy test                                      # Test Polymarket API connectivity
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
@@ -154,6 +165,24 @@ export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
 export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix match)
 export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
 ```
+
+Recommended for gasless redeem via Polymarket Builder Relayer:
+
+```bash
+# Official Rust relayer client path is enabled by default
+cargo run -- momentum --live
+
+export CLAIMER_RELAYER_ENABLED=true
+export POLY_BUILDER_API_KEY=xxx
+export POLY_BUILDER_SECRET=base64_secret
+export POLY_BUILDER_PASSPHRASE=xxx
+
+# Keep false in production to avoid falling back to direct on-chain redeem.
+# If true, fallback path requires native MATIC gas.
+export CLAIMER_RELAYER_FALLBACK_ONCHAIN=false
+```
+
+If relayer credentials are incomplete, claimer will warn and require native MATIC for direct on-chain fallback.
 
 Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
 

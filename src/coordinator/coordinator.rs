@@ -8,7 +8,7 @@
 //!   - Periodically drain the queue and execute orders
 //!   - Periodically refresh GlobalState from aggregators
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use sqlx::PgPool;
 
-use crate::domain::OrderRequest;
+use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
     AgentRiskParams, Domain, OrderIntent, OrderPriority, OrderQueue, PositionAggregator,
@@ -28,7 +28,12 @@ use crate::platform::{
 };
 use crate::strategy::executor::OrderExecutor;
 
-use super::command::{CoordinatorCommand, CoordinatorControlCommand};
+use super::command::{
+    AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
+    DeploymentLedgerSnapshot, DomainIngressSnapshot, GovernanceAgentSnapshot,
+    GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
+    GovernanceStatusSnapshot,
+};
 use super::config::{CoordinatorConfig, DuplicateGuardScope};
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
@@ -39,47 +44,901 @@ enum IngressMode {
     Halted,
 }
 
+impl IngressMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Halted => "halted",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AgentCommandChannel {
     domain: Domain,
     tx: mpsc::Sender<CoordinatorCommand>,
 }
 
+#[derive(Debug, Clone)]
+struct GovernancePolicy {
+    block_new_intents: bool,
+    blocked_domains: HashSet<Domain>,
+    max_intent_notional_usd: Option<Decimal>,
+    max_total_notional_usd: Option<Decimal>,
+    updated_at: chrono::DateTime<Utc>,
+    updated_by: String,
+    reason: Option<String>,
+}
+
+impl GovernancePolicy {
+    fn from_config(config: &CoordinatorConfig) -> Self {
+        let blocked_domains = config
+            .governance_blocked_domains
+            .iter()
+            .filter_map(|raw| parse_governance_domain(raw))
+            .collect::<HashSet<_>>();
+
+        Self {
+            block_new_intents: config.governance_block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd: config.governance_max_intent_notional_usd,
+            max_total_notional_usd: config.governance_max_total_notional_usd,
+            updated_at: Utc::now(),
+            updated_by: "boot".to_string(),
+            reason: Some("loaded from coordinator config".to_string()),
+        }
+    }
+
+    fn try_from_update(update: GovernancePolicyUpdate) -> std::result::Result<Self, String> {
+        let mut blocked_domains = HashSet::new();
+        for raw in &update.blocked_domains {
+            let Some(domain) = parse_governance_domain(raw) else {
+                return Err(format!("unknown blocked domain '{}'", raw));
+            };
+            blocked_domains.insert(domain);
+        }
+
+        if update.updated_by.trim().is_empty() {
+            return Err("updated_by is required".to_string());
+        }
+
+        if let Some(v) = update.max_intent_notional_usd {
+            if v <= Decimal::ZERO {
+                return Err("max_intent_notional_usd must be > 0".to_string());
+            }
+        }
+        if let Some(v) = update.max_total_notional_usd {
+            if v <= Decimal::ZERO {
+                return Err("max_total_notional_usd must be > 0".to_string());
+            }
+        }
+
+        Ok(Self {
+            block_new_intents: update.block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd: update.max_intent_notional_usd,
+            max_total_notional_usd: update.max_total_notional_usd,
+            updated_at: Utc::now(),
+            updated_by: update.updated_by.trim().to_string(),
+            reason: update.reason.and_then(|v| {
+                let trimmed = v.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }),
+        })
+    }
+
+    fn to_snapshot(&self) -> GovernancePolicySnapshot {
+        let mut blocked_domains = self
+            .blocked_domains
+            .iter()
+            .map(|d| governance_domain_label(*d).to_string())
+            .collect::<Vec<_>>();
+        blocked_domains.sort();
+        GovernancePolicySnapshot {
+            block_new_intents: self.block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd: self.max_intent_notional_usd,
+            max_total_notional_usd: self.max_total_notional_usd,
+            updated_at: self.updated_at,
+            updated_by: self.updated_by.clone(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+fn parse_governance_domain(raw: &str) -> Option<Domain> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "sports" => Some(Domain::Sports),
+        "crypto" => Some(Domain::Crypto),
+        "politics" => Some(Domain::Politics),
+        "economics" => Some(Domain::Economics),
+        _ => None,
+    }
+}
+
+fn governance_domain_label(domain: Domain) -> &'static str {
+    match domain {
+        Domain::Sports => "sports",
+        Domain::Crypto => "crypto",
+        Domain::Politics => "politics",
+        Domain::Economics => "economics",
+        Domain::Custom(_) => "custom",
+    }
+}
+
+fn governance_domain_snapshot_label(domain: Domain) -> String {
+    match domain {
+        Domain::Custom(id) => format!("custom:{}", id),
+        _ => governance_domain_label(domain).to_string(),
+    }
+}
+
+fn governance_policy_blocked_domains_sorted(policy: &GovernancePolicy) -> Vec<String> {
+    let mut blocked_domains = policy
+        .blocked_domains
+        .iter()
+        .map(|d| governance_domain_label(*d).to_string())
+        .collect::<Vec<_>>();
+    blocked_domains.sort();
+    blocked_domains
+}
+
+fn parse_persisted_domain(raw: &str) -> Option<Domain> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized.as_str() {
+        "sports" => Some(Domain::Sports),
+        "crypto" => Some(Domain::Crypto),
+        "politics" => Some(Domain::Politics),
+        "economics" => Some(Domain::Economics),
+        _ => {
+            if let Some(raw_id) = normalized.strip_prefix("custom:") {
+                return raw_id.trim().parse::<u32>().ok().map(Domain::Custom);
+            }
+            if let Some(raw_id) = normalized
+                .strip_prefix("custom(")
+                .and_then(|v| v.strip_suffix(')'))
+            {
+                return raw_id.trim().parse::<u32>().ok().map(Domain::Custom);
+            }
+            None
+        }
+    }
+}
+
+fn parse_persisted_side(raw: &str) -> Option<Side> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "UP" | "YES" => Some(Side::Up),
+        "DOWN" | "NO" => Some(Side::Down),
+        _ => None,
+    }
+}
+
+fn string_metadata_from_json(
+    raw: Option<sqlx::types::Json<serde_json::Value>>,
+) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    let Some(sqlx::types::Json(value)) = raw else {
+        return metadata;
+    };
+    let Some(object) = value.as_object() else {
+        return metadata;
+    };
+
+    for (key, value) in object {
+        if value.is_null() {
+            continue;
+        }
+        if let Some(v) = value.as_str() {
+            metadata.insert(key.clone(), v.to_string());
+        } else {
+            metadata.insert(key.clone(), value.to_string());
+        }
+    }
+
+    metadata
+}
+
+#[derive(Debug)]
+struct PersistedExecutionFill {
+    intent_id: Uuid,
+    agent_id: String,
+    domain: Domain,
+    market_slug: String,
+    token_id: String,
+    side: Side,
+    is_buy: bool,
+    filled_shares: u64,
+    fill_price: Decimal,
+    executed_at: DateTime<Utc>,
+    metadata: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+struct PersistedExecutionOutcome {
+    agent_id: String,
+    executed_at: DateTime<Utc>,
+    is_failure: bool,
+}
+
+fn execution_error_is_failure(error: Option<&str>) -> bool {
+    error.map(str::trim).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+async fn load_execution_log_fills(
+    pool: &PgPool,
+    account_id: &str,
+    dry_run: bool,
+) -> Result<Vec<PersistedExecutionFill>> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            Option<Decimal>,
+            Decimal,
+            DateTime<Utc>,
+            Option<sqlx::types::Json<serde_json::Value>>,
+        ),
+    >(
+        r#"
+        SELECT
+            intent_id,
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            market_side,
+            is_buy,
+            filled_shares,
+            avg_fill_price,
+            limit_price,
+            executed_at,
+            metadata
+        FROM agent_order_executions
+        WHERE account_id = $1
+          AND dry_run = $2
+          AND filled_shares > 0
+        ORDER BY executed_at ASC, id ASC
+        "#,
+    )
+    .bind(account_id)
+    .bind(dry_run)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("load execution log fills: {}", e)))?;
+
+    let mut fills = Vec::new();
+    for (
+        intent_id,
+        agent_id,
+        domain_raw,
+        market_slug,
+        token_id,
+        side_raw,
+        is_buy,
+        filled_shares_raw,
+        avg_fill_price,
+        limit_price,
+        executed_at,
+        metadata_raw,
+    ) in rows
+    {
+        let Some(domain) = parse_persisted_domain(&domain_raw) else {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                domain = %domain_raw,
+                "skipping execution-log row with unknown domain during restore"
+            );
+            continue;
+        };
+        let Some(side) = parse_persisted_side(&side_raw) else {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                side = %side_raw,
+                "skipping execution-log row with unknown side during restore"
+            );
+            continue;
+        };
+        let Ok(filled_shares) = u64::try_from(filled_shares_raw) else {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                filled_shares = filled_shares_raw,
+                "skipping execution-log row with invalid filled_shares during restore"
+            );
+            continue;
+        };
+        if filled_shares == 0 {
+            continue;
+        }
+        let fill_price = avg_fill_price.unwrap_or(limit_price);
+        if fill_price <= Decimal::ZERO {
+            warn!(
+                account_id = %account_id,
+                intent_id = %intent_id,
+                fill_price = %fill_price,
+                "skipping execution-log row with non-positive fill price during restore"
+            );
+            continue;
+        }
+
+        fills.push(PersistedExecutionFill {
+            intent_id,
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            filled_shares,
+            fill_price,
+            executed_at,
+            metadata: string_metadata_from_json(metadata_raw),
+        });
+    }
+
+    Ok(fills)
+}
+
+async fn load_execution_log_outcomes(
+    pool: &PgPool,
+    account_id: &str,
+    dry_run: bool,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+) -> Result<Vec<PersistedExecutionOutcome>> {
+    let rows = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
+        r#"
+        SELECT
+            agent_id,
+            executed_at,
+            error
+        FROM agent_order_executions
+        WHERE account_id = $1
+          AND dry_run = $2
+          AND executed_at >= $3
+          AND executed_at < $4
+        ORDER BY executed_at ASC, id ASC
+        "#,
+    )
+    .bind(account_id)
+    .bind(dry_run)
+    .bind(window_start)
+    .bind(window_end)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        crate::error::PloyError::Internal(format!("load execution log outcomes: {}", e))
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(agent_id, executed_at, error)| PersistedExecutionOutcome {
+            agent_id,
+            executed_at,
+            is_failure: execution_error_is_failure(error.as_deref()),
+        })
+        .collect())
+}
+
+fn normalized_identity_component(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
+}
+
+fn intent_condition_id(intent: &OrderIntent) -> Option<String> {
+    intent
+        .condition_id()
+        .and_then(normalized_identity_component)
+}
+
+fn intent_market_identity(intent: &OrderIntent) -> String {
+    if let Some(condition_id) = intent_condition_id(intent) {
+        return format!("condition:{}", condition_id);
+    }
+    if let Some(slug) = normalized_identity_component(&intent.market_slug) {
+        return format!("slug:{}", slug);
+    }
+    if let Some(token) = normalized_identity_component(&intent.token_id) {
+        return format!("token:{}", token);
+    }
+    "unknown".to_string()
+}
+
+fn intent_deployment_scope(intent: &OrderIntent) -> String {
+    if let Some(scope) = intent
+        .deployment_id()
+        .and_then(normalized_identity_component)
+    {
+        return scope;
+    }
+
+    let strategy = intent
+        .metadata
+        .get("strategy")
+        .and_then(|v| normalized_identity_component(v))
+        .unwrap_or_else(|| "default".to_string());
+    format!(
+        "agent:{}|strategy:{}",
+        intent.agent_id.trim().to_ascii_lowercase(),
+        strategy
+    )
+}
+
+fn buy_intent_missing_deployment_reason(intent: &OrderIntent) -> Option<String> {
+    if !intent.is_buy {
+        return None;
+    }
+
+    let has_deployment_id = intent
+        .deployment_id()
+        .and_then(normalized_identity_component)
+        .is_some();
+
+    if has_deployment_id {
+        None
+    } else {
+        Some("BUY intent missing required metadata field 'deployment_id'".to_string())
+    }
+}
+
+fn sell_reduce_only_violation_reason(
+    intent: &OrderIntent,
+    tracked_open_shares: u64,
+    pending_sell_shares: u64,
+) -> Option<String> {
+    if intent.is_buy {
+        return None;
+    }
+
+    if tracked_open_shares == 0 {
+        return Some(format!(
+            "SELL intent reduce-only violation: no tracked open shares for token_id={} side={} in domain={}",
+            intent.token_id,
+            intent.side.as_str(),
+            intent.domain
+        ));
+    }
+
+    let available_shares = tracked_open_shares.saturating_sub(pending_sell_shares);
+    if available_shares == 0 {
+        return Some(format!(
+            "SELL intent reduce-only violation: tracked open shares {} are fully reserved by pending SELL intents {} for token_id={} side={}",
+            tracked_open_shares,
+            pending_sell_shares,
+            intent.token_id,
+            intent.side.as_str()
+        ));
+    }
+
+    if intent.shares > available_shares {
+        return Some(format!(
+            "SELL intent reduce-only violation: requested shares {} exceeds available reduce-only shares {} (tracked={}, pending_sell={}) for token_id={} side={}",
+            intent.shares,
+            available_shares,
+            tracked_open_shares,
+            pending_sell_shares,
+            intent.token_id,
+            intent.side.as_str()
+        ));
+    }
+
+    None
+}
+
+/// Resolve the notional reference price for sell-side exposure release.
+///
+/// Returns `(price, has_explicit_entry_price)` where `has_explicit_entry_price`
+/// indicates whether the value came from metadata.
+fn sell_release_reference_price(
+    intent: &OrderIntent,
+    execution_price: Decimal,
+) -> Option<(Decimal, bool)> {
+    if let Some(entry_price) = intent
+        .metadata
+        .get("entry_price")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| Decimal::from_str(v).ok())
+        .filter(|v| *v > Decimal::ZERO)
+    {
+        return Some((entry_price, true));
+    }
+
+    if execution_price > Decimal::ZERO {
+        return Some((execution_price, false));
+    }
+
+    (intent.limit_price > Decimal::ZERO).then_some((intent.limit_price, false))
+}
+
+fn governance_block_reason(
+    policy: &GovernancePolicy,
+    intent: &OrderIntent,
+    current_account_notional: Decimal,
+) -> Option<String> {
+    // Binary-options runtime: sell intents are treated as risk-reducing closes.
+    // Governance "new intent" gates must not block exits/de-risking.
+    if !intent.is_buy {
+        return None;
+    }
+
+    if policy.block_new_intents {
+        return Some("global governance policy blocks new intents".to_string());
+    }
+
+    if policy.blocked_domains.contains(&intent.domain) {
+        return Some(format!(
+            "domain '{}' is blocked by global governance policy",
+            governance_domain_label(intent.domain)
+        ));
+    }
+
+    let intent_notional = intent.notional_value();
+    if let Some(max_intent) = policy.max_intent_notional_usd {
+        if intent_notional > max_intent {
+            return Some(format!(
+                "intent notional {} exceeds governance max_intent_notional_usd {}",
+                intent_notional, max_intent
+            ));
+        }
+    }
+
+    if intent.is_buy {
+        if let Some(max_total) = policy.max_total_notional_usd {
+            let projected = current_account_notional + intent_notional;
+            if projected > max_total {
+                return Some(format!(
+                    "projected account notional {} exceeds governance max_total_notional_usd {}",
+                    projected, max_total
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+async fn persist_governance_policy(
+    pool: &PgPool,
+    account_id: &str,
+    policy: &GovernancePolicy,
+) -> Result<()> {
+    let blocked_domains = governance_policy_blocked_domains_sorted(policy);
+    let mut tx = pool.begin().await.map_err(|e| {
+        crate::error::PloyError::Internal(format!("begin governance policy tx: {}", e))
+    })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_governance_policies (
+            account_id,
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (account_id) DO UPDATE SET
+            block_new_intents = EXCLUDED.block_new_intents,
+            blocked_domains = EXCLUDED.blocked_domains,
+            max_intent_notional_usd = EXCLUDED.max_intent_notional_usd,
+            max_total_notional_usd = EXCLUDED.max_total_notional_usd,
+            updated_at = EXCLUDED.updated_at,
+            updated_by = EXCLUDED.updated_by,
+            reason = EXCLUDED.reason
+        "#,
+    )
+    .bind(account_id)
+    .bind(policy.block_new_intents)
+    .bind(sqlx::types::Json(blocked_domains.clone()))
+    .bind(policy.max_intent_notional_usd)
+    .bind(policy.max_total_notional_usd)
+    .bind(policy.updated_at)
+    .bind(policy.updated_by.clone())
+    .bind(policy.reason.clone())
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("persist governance policy: {}", e)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_governance_policy_history (
+            account_id,
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        "#,
+    )
+    .bind(account_id)
+    .bind(policy.block_new_intents)
+    .bind(sqlx::types::Json(blocked_domains))
+    .bind(policy.max_intent_notional_usd)
+    .bind(policy.max_total_notional_usd)
+    .bind(policy.updated_at)
+    .bind(policy.updated_by.clone())
+    .bind(policy.reason.clone())
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        crate::error::PloyError::Internal(format!("append governance policy history entry: {}", e))
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        crate::error::PloyError::Internal(format!("commit governance policy tx: {}", e))
+    })?;
+
+    Ok(())
+}
+
+fn clamp_governance_history_limit(limit: usize) -> usize {
+    limit.clamp(1, 500)
+}
+
+async fn load_governance_policy_history(
+    pool: &PgPool,
+    account_id: &str,
+    limit: usize,
+) -> Result<Vec<GovernancePolicyHistoryEntry>> {
+    let limit = clamp_governance_history_limit(limit) as i64;
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            bool,
+            sqlx::types::Json<Vec<String>>,
+            Option<Decimal>,
+            Option<Decimal>,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT
+            id,
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        FROM coordinator_governance_policy_history
+        WHERE account_id = $1
+        ORDER BY updated_at DESC, id DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(account_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        crate::error::PloyError::Internal(format!("load governance policy history: {}", e))
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                block_new_intents,
+                sqlx::types::Json(blocked_domains),
+                max_intent_notional_usd,
+                max_total_notional_usd,
+                updated_at,
+                updated_by,
+                reason,
+            )| GovernancePolicyHistoryEntry {
+                id,
+                block_new_intents,
+                blocked_domains: blocked_domains
+                    .into_iter()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect(),
+                max_intent_notional_usd,
+                max_total_notional_usd,
+                updated_at,
+                updated_by,
+                reason: reason.and_then(|v| {
+                    let trimmed = v.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }),
+            },
+        )
+        .collect())
+}
+
+async fn load_governance_policy(
+    pool: &PgPool,
+    account_id: &str,
+) -> Result<Option<GovernancePolicy>> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            bool,
+            sqlx::types::Json<Vec<String>>,
+            Option<Decimal>,
+            Option<Decimal>,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason
+        FROM coordinator_governance_policies
+        WHERE account_id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("load governance policy: {}", e)))?;
+
+    let Some((
+        block_new_intents,
+        sqlx::types::Json(raw_blocked_domains),
+        max_intent_notional_usd,
+        max_total_notional_usd,
+        updated_at,
+        updated_by,
+        reason,
+    )) = row
+    else {
+        return Ok(None);
+    };
+
+    let mut blocked_domains = HashSet::new();
+    let mut unknown_domains = Vec::new();
+    for raw in raw_blocked_domains {
+        if let Some(domain) = parse_governance_domain(&raw) {
+            blocked_domains.insert(domain);
+        } else {
+            unknown_domains.push(raw);
+        }
+    }
+    if !unknown_domains.is_empty() {
+        warn!(
+            account_id = %account_id,
+            domains = ?unknown_domains,
+            "ignoring unknown governance blocked domains from DB"
+        );
+    }
+
+    let max_intent_notional_usd = max_intent_notional_usd.filter(|v| *v > Decimal::ZERO);
+    let max_total_notional_usd = max_total_notional_usd.filter(|v| *v > Decimal::ZERO);
+    let updated_by = {
+        let trimmed = updated_by.trim();
+        if trimmed.is_empty() {
+            "db.restore".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let reason = reason.and_then(|v| {
+        let trimmed = v.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+
+    Ok(Some(GovernancePolicy {
+        block_new_intents,
+        blocked_domains,
+        max_intent_notional_usd,
+        max_total_notional_usd,
+        updated_at,
+        updated_by,
+        reason,
+    }))
+}
+
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
+    account_id: String,
     order_tx: mpsc::Sender<OrderIntent>,
     state_tx: mpsc::Sender<AgentSnapshot>,
     control_tx: mpsc::Sender<CoordinatorControlCommand>,
     global_state: Arc<RwLock<GlobalState>>,
+    risk_gate: Arc<RiskGate>,
+    order_queue: Arc<RwLock<OrderQueue>>,
+    crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
+    sports_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    politics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    economics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    positions: Arc<PositionAggregator>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
+    governance_policy: Arc<RwLock<GovernancePolicy>>,
+    governance_store_pool: Option<PgPool>,
 }
 
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
-        let global_mode = *self.ingress_mode.read().await;
-        let domain_mode = self
-            .domain_ingress_mode
-            .read()
-            .await
-            .get(&intent.domain)
-            .copied()
-            .unwrap_or(IngressMode::Running);
-
-        if global_mode != IngressMode::Running {
-            return Err(crate::error::PloyError::Validation(format!(
-                "coordinator global ingress is {:?}; new intents are blocked",
-                global_mode
-            )));
+        if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
+            return Err(crate::error::PloyError::Validation(reason));
         }
 
-        if domain_mode != IngressMode::Running {
-            return Err(crate::error::PloyError::Validation(format!(
-                "coordinator {:?} ingress is {:?}; new intents are blocked",
-                intent.domain, domain_mode
-            )));
+        if !intent.is_buy {
+            let tracked_open_shares = self
+                .positions
+                .agent_open_shares_for_token_side(
+                    &intent.agent_id,
+                    intent.domain,
+                    &intent.token_id,
+                    intent.side,
+                )
+                .await;
+            let pending_sell_shares = self.order_queue.read().await.pending_sell_shares_for(
+                &intent.agent_id,
+                intent.domain,
+                &intent.token_id,
+                intent.side,
+            );
+            if let Some(reason) =
+                sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
+            {
+                return Err(crate::error::PloyError::Validation(reason));
+            }
+        }
+
+        // Binary-options semantics (Polymarket): SELL intents are treated as
+        // reduce-only exits and must remain allowed during pause/halt.
+        if intent.is_buy {
+            let global_mode = *self.ingress_mode.read().await;
+            let domain_mode = self
+                .domain_ingress_mode
+                .read()
+                .await
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(IngressMode::Running);
+
+            if global_mode != IngressMode::Running {
+                return Err(crate::error::PloyError::Validation(format!(
+                    "coordinator global ingress is {:?}; new intents are blocked",
+                    global_mode
+                )));
+            }
+
+            if domain_mode != IngressMode::Running {
+                return Err(crate::error::PloyError::Validation(format!(
+                    "coordinator {:?} ingress is {:?}; new intents are blocked",
+                    intent.domain, domain_mode
+                )));
+            }
         }
         self.order_tx.send(intent).await.map_err(|_| {
             crate::error::PloyError::Internal("coordinator order channel closed".into())
@@ -183,6 +1042,10 @@ impl CoordinatorHandle {
 
     /// Force-close positions for one domain
     pub async fn force_close_domain(&self, domain: Domain) -> Result<()> {
+        {
+            let mut domain_mode = self.domain_ingress_mode.write().await;
+            domain_mode.insert(domain, IngressMode::Halted);
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseDomain(domain))
             .await
@@ -193,6 +1056,10 @@ impl CoordinatorHandle {
 
     /// Shutdown one domain
     pub async fn shutdown_domain(&self, domain: Domain) -> Result<()> {
+        {
+            let mut domain_mode = self.domain_ingress_mode.write().await;
+            domain_mode.insert(domain, IngressMode::Halted);
+        }
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownDomain(domain))
             .await
@@ -205,6 +1072,158 @@ impl CoordinatorHandle {
     pub async fn read_state(&self) -> GlobalState {
         self.global_state.read().await.clone()
     }
+
+    /// Read current account-level governance policy.
+    pub async fn governance_policy(&self) -> GovernancePolicySnapshot {
+        self.governance_policy.read().await.to_snapshot()
+    }
+
+    /// Read account-level governance policy change history (latest first).
+    pub async fn governance_policy_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<GovernancePolicyHistoryEntry>> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Err(crate::error::PloyError::Validation(
+                "governance history store is unavailable in this runtime".to_string(),
+            ));
+        };
+        load_governance_policy_history(pool, &self.account_id, limit).await
+    }
+
+    /// Replace account-level governance policy (control-plane managed).
+    pub async fn update_governance_policy(
+        &self,
+        update: GovernancePolicyUpdate,
+    ) -> Result<GovernancePolicySnapshot> {
+        let next = GovernancePolicy::try_from_update(update)
+            .map_err(crate::error::PloyError::Validation)?;
+        if let Some(pool) = self.governance_store_pool.as_ref() {
+            persist_governance_policy(pool, &self.account_id, &next).await?;
+        }
+        let snapshot = next.to_snapshot();
+        let mut policy = self.governance_policy.write().await;
+        *policy = next;
+        Ok(snapshot)
+    }
+
+    /// Read runtime governance + risk + capital ledger snapshot.
+    pub async fn governance_status(&self) -> GovernanceStatusSnapshot {
+        let ingress_mode = self.ingress_mode.read().await.as_str().to_string();
+        let domain_ingress_modes = {
+            let modes = self.domain_ingress_mode.read().await;
+            let mut rows = modes
+                .iter()
+                .map(|(domain, mode)| DomainIngressSnapshot {
+                    domain: governance_domain_snapshot_label(*domain),
+                    mode: mode.as_str().to_string(),
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by(|a, b| a.domain.cmp(&b.domain));
+            rows
+        };
+        let policy = self.governance_policy.read().await.to_snapshot();
+        let risk_state = self.risk_gate.state().await;
+        let platform_exposure_usd = self.risk_gate.total_exposure().await;
+        let (daily_pnl_usd, _, _) = self.risk_gate.daily_stats().await;
+        let daily_loss_limit_usd = self.risk_gate.daily_loss_limit();
+        let (queue, other_pending_buy_notional_usd) = {
+            let queue = self.order_queue.read().await;
+            (
+                QueueStatsSnapshot::from(queue.stats()),
+                queue.pending_buy_notional_excluding_domains(&[
+                    Domain::Crypto,
+                    Domain::Sports,
+                    Domain::Politics,
+                    Domain::Economics,
+                ]),
+            )
+        };
+        let agents = {
+            let global = self.global_state.read().await;
+            let mut rows = global
+                .agents
+                .values()
+                .map(|snap| GovernanceAgentSnapshot {
+                    agent_id: snap.agent_id.clone(),
+                    name: snap.name.clone(),
+                    domain: governance_domain_snapshot_label(snap.domain),
+                    status: snap.status.to_string().to_ascii_lowercase(),
+                    exposure: snap.exposure,
+                    daily_pnl: snap.daily_pnl,
+                    last_heartbeat: snap.last_heartbeat,
+                    error_message: snap.error_message.clone(),
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by(|a, b| a.domain.cmp(&b.domain).then_with(|| a.name.cmp(&b.name)));
+            rows
+        };
+
+        let (crypto, mut deployments) = {
+            let allocator = self.crypto_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        let (sports, sports_deployments) = {
+            let allocator = self.sports_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        deployments.extend(sports_deployments);
+        let (politics, politics_deployments) = {
+            let allocator = self.politics_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        deployments.extend(politics_deployments);
+        let (economics, economics_deployments) = {
+            let allocator = self.economics_allocator.read().await;
+            (
+                allocator.ledger_snapshot(),
+                allocator.deployment_ledger_snapshot(),
+            )
+        };
+        deployments.extend(economics_deployments);
+        deployments.sort_by(|a, b| {
+            a.domain
+                .cmp(&b.domain)
+                .then_with(|| a.deployment_id.cmp(&b.deployment_id))
+        });
+        let allocator_open_notional = crypto.open_notional_usd
+            + sports.open_notional_usd
+            + politics.open_notional_usd
+            + economics.open_notional_usd;
+        let allocator_pending_notional = crypto.pending_notional_usd
+            + sports.pending_notional_usd
+            + politics.pending_notional_usd
+            + economics.pending_notional_usd;
+        let open_notional_usd = platform_exposure_usd.max(allocator_open_notional);
+        let account_notional_usd =
+            open_notional_usd + allocator_pending_notional + other_pending_buy_notional_usd;
+
+        GovernanceStatusSnapshot {
+            account_id: self.account_id.clone(),
+            ingress_mode,
+            domain_ingress_modes,
+            policy,
+            account_notional_usd,
+            platform_exposure_usd,
+            risk_state,
+            daily_pnl_usd,
+            daily_loss_limit_usd,
+            queue,
+            agents,
+            allocators: vec![crypto, sports, politics, economics],
+            deployments,
+            updated_at: Utc::now(),
+        }
+    }
 }
 
 /// The Coordinator — owns shared infrastructure and runs the main event loop
@@ -215,13 +1234,17 @@ pub struct Coordinator {
     order_queue: Arc<RwLock<OrderQueue>>,
     duplicate_guard: Arc<RwLock<IntentDuplicateGuard>>,
     crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
-    sports_allocator: Arc<RwLock<SportsCapitalAllocator>>,
+    sports_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    politics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    economics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
     positions: Arc<PositionAggregator>,
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
     execution_log_pool: Option<PgPool>,
+    governance_store_pool: Option<PgPool>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
+    governance_policy: Arc<RwLock<GovernancePolicy>>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
 
     // Channels
@@ -257,33 +1280,13 @@ impl IntentDuplicateGuard {
     }
 
     fn deployment_scope(intent: &OrderIntent) -> String {
-        if let Some(scope) = intent
-            .metadata
-            .get("deployment_id")
-            .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| !v.is_empty())
-        {
-            return scope;
-        }
-
-        let strategy = intent
-            .metadata
-            .get("strategy")
-            .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "default".to_string());
-
-        format!(
-            "agent:{}|strategy:{}",
-            intent.agent_id.trim().to_ascii_lowercase(),
-            strategy
-        )
+        intent_deployment_scope(intent)
     }
 
     fn buy_key(&self, intent: &OrderIntent) -> Option<String> {
         // Only guard normal/high-priority ENTRY orders.
-        // Use market-level key so opposite-side re-entries on the same round
-        // are also blocked within the duplicate window.
+        // Use condition_id-first identity so opposite-side re-entries
+        // on the same contract are blocked within the duplicate window.
         // Scope is configurable:
         // - Market: block across all strategies/deployments (safer, avoids double-entries).
         // - Deployment: legacy behavior; allow different deployments to each enter.
@@ -302,7 +1305,7 @@ impl IntentDuplicateGuard {
             _ => self.scope,
         };
 
-        let market = intent.market_slug.trim().to_ascii_lowercase();
+        let market = intent_market_identity(intent);
         let base = format!("{}|{}", intent.domain, market);
 
         match scope {
@@ -389,6 +1392,7 @@ impl CryptoHorizon {
 struct CryptoIntentDimensions {
     coin: String,
     horizon: CryptoHorizon,
+    deployment_scope: String,
     position_key: String,
 }
 
@@ -396,16 +1400,19 @@ impl CryptoIntentDimensions {
     fn from_intent(intent: &OrderIntent) -> Self {
         let coin = Self::parse_coin(intent).unwrap_or_else(|| "OTHER".to_string());
         let horizon = Self::parse_horizon(intent).unwrap_or(CryptoHorizon::Other);
+        let market_identity = intent_market_identity(intent);
+        let deployment_scope = intent_deployment_scope(intent);
         let position_key = format!(
             "{}|{}|{}|{}",
-            intent.agent_id,
-            intent.market_slug,
+            deployment_scope,
+            market_identity,
             intent.token_id,
             intent.side.as_str()
         );
         Self {
             coin,
             horizon,
+            deployment_scope,
             position_key,
         }
     }
@@ -493,6 +1500,7 @@ impl CryptoIntentDimensions {
 
 #[derive(Debug, Clone)]
 struct PositionExposure {
+    deployment_scope: String,
     coin: String,
     horizon: CryptoHorizon,
     amount: Decimal,
@@ -532,10 +1540,12 @@ impl ExposureBook {
             .entry(dims.position_key.clone())
             .and_modify(|pos| {
                 pos.amount += amount;
+                pos.deployment_scope = dims.deployment_scope.clone();
                 pos.coin = dims.coin.clone();
                 pos.horizon = dims.horizon;
             })
             .or_insert_with(|| PositionExposure {
+                deployment_scope: dims.deployment_scope.clone(),
                 coin: dims.coin.clone(),
                 horizon: dims.horizon,
                 amount,
@@ -595,6 +1605,7 @@ impl ExposureBook {
 
     fn subtract_matching_bucket(
         &mut self,
+        deployment_scope: &str,
         coin: &str,
         horizon: CryptoHorizon,
         amount: Decimal,
@@ -607,7 +1618,9 @@ impl ExposureBook {
         let keys: Vec<String> = self
             .by_position
             .iter()
-            .filter(|(_, p)| p.coin == coin && p.horizon == horizon)
+            .filter(|(_, p)| {
+                p.deployment_scope == deployment_scope && p.coin == coin && p.horizon == horizon
+            })
             .map(|(k, _)| k.clone())
             .collect();
 
@@ -708,6 +1721,12 @@ impl CryptoCapitalAllocator {
         } else {
             value
         }
+    }
+
+    fn reset_runtime_state(&mut self) {
+        self.open = ExposureBook::default();
+        self.pending = ExposureBook::default();
+        self.pending_by_intent.clear();
     }
 
     fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
@@ -848,12 +1867,11 @@ impl CryptoCapitalAllocator {
         }
 
         let dims = CryptoIntentDimensions::from_intent(intent);
-        let reference_price = intent
-            .metadata
-            .get("entry_price")
-            .and_then(|v| Decimal::from_str(v).ok())
-            .or_else(|| (execution_price > Decimal::ZERO).then_some(execution_price))
-            .unwrap_or(intent.limit_price);
+        let Some((reference_price, has_explicit_entry_price)) =
+            sell_release_reference_price(intent, execution_price)
+        else {
+            return;
+        };
 
         if reference_price <= Decimal::ZERO {
             return;
@@ -863,10 +1881,14 @@ impl CryptoCapitalAllocator {
         let removed_by_key = self
             .open
             .subtract_from_position_key(&dims.position_key, requested_release);
-        if removed_by_key < requested_release {
+        if has_explicit_entry_price && removed_by_key < requested_release {
             let remaining = requested_release - removed_by_key;
-            self.open
-                .subtract_matching_bucket(&dims.coin, dims.horizon, remaining);
+            self.open.subtract_matching_bucket(
+                &dims.deployment_scope,
+                &dims.coin,
+                dims.horizon,
+                remaining,
+            );
         }
     }
 
@@ -885,45 +1907,99 @@ impl CryptoCapitalAllocator {
             .or_else(|| self.horizon_cap_pct.get(&CryptoHorizon::Other).copied())
             .unwrap_or(Decimal::ZERO)
     }
+
+    fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
+        let open_notional_usd = self.open.total;
+        let pending_notional_usd = self.pending.total;
+        let used = open_notional_usd + pending_notional_usd;
+        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
+        AllocatorLedgerSnapshot {
+            domain: "crypto".to_string(),
+            enabled: self.enabled,
+            cap_notional_usd: self.total_cap,
+            open_notional_usd,
+            pending_notional_usd,
+            available_notional_usd,
+        }
+    }
+
+    fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
+        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
+
+        for position in self.open.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.0 += position.amount;
+        }
+
+        for position in self.pending.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.1 += position.amount;
+        }
+
+        let mut rows = by_deployment
+            .into_iter()
+            .map(
+                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
+                    DeploymentLedgerSnapshot {
+                        deployment_id,
+                        domain: "crypto".to_string(),
+                        open_notional_usd,
+                        pending_notional_usd,
+                        total_notional_usd: open_notional_usd + pending_notional_usd,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
+        rows
+    }
 }
 
 #[derive(Debug, Clone)]
-struct SportsIntentDimensions {
+struct MarketIntentDimensions {
     market_key: String,
+    deployment_scope: String,
     position_key: String,
 }
 
-impl SportsIntentDimensions {
+impl MarketIntentDimensions {
     fn from_intent(intent: &OrderIntent) -> Self {
-        let market_key = intent.market_slug.trim().to_ascii_lowercase();
+        let market_key = intent_market_identity(intent);
+        let deployment_scope = intent_deployment_scope(intent);
         let position_key = format!(
             "{}|{}|{}|{}",
-            intent.agent_id,
+            deployment_scope,
             market_key,
             intent.token_id,
             intent.side.as_str()
         );
         Self {
             market_key,
+            deployment_scope,
             position_key,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct SportsPositionExposure {
+struct MarketPositionExposure {
     market_key: String,
+    deployment_scope: String,
     amount: Decimal,
 }
 
 #[derive(Debug, Default)]
-struct SportsExposureBook {
+struct MarketExposureBook {
     total: Decimal,
     by_market: HashMap<String, Decimal>,
-    by_position: HashMap<String, SportsPositionExposure>,
+    by_position: HashMap<String, MarketPositionExposure>,
 }
 
-impl SportsExposureBook {
+impl MarketExposureBook {
     fn value_for_market(&self, market_key: &str) -> Decimal {
         self.by_market
             .get(market_key)
@@ -931,7 +2007,7 @@ impl SportsExposureBook {
             .unwrap_or(Decimal::ZERO)
     }
 
-    fn add(&mut self, dims: &SportsIntentDimensions, amount: Decimal) {
+    fn add(&mut self, dims: &MarketIntentDimensions, amount: Decimal) {
         if amount <= Decimal::ZERO {
             return;
         }
@@ -946,9 +2022,11 @@ impl SportsExposureBook {
             .and_modify(|pos| {
                 pos.amount += amount;
                 pos.market_key = dims.market_key.clone();
+                pos.deployment_scope = dims.deployment_scope.clone();
             })
-            .or_insert_with(|| SportsPositionExposure {
+            .or_insert_with(|| MarketPositionExposure {
                 market_key: dims.market_key.clone(),
+                deployment_scope: dims.deployment_scope.clone(),
                 amount,
             });
     }
@@ -992,7 +2070,12 @@ impl SportsExposureBook {
         removed
     }
 
-    fn subtract_matching_market(&mut self, market_key: &str, amount: Decimal) -> Decimal {
+    fn subtract_matching_market(
+        &mut self,
+        deployment_scope: &str,
+        market_key: &str,
+        amount: Decimal,
+    ) -> Decimal {
         if amount <= Decimal::ZERO {
             return Decimal::ZERO;
         }
@@ -1001,7 +2084,7 @@ impl SportsExposureBook {
         let keys: Vec<String> = self
             .by_position
             .iter()
-            .filter(|(_, p)| p.market_key == market_key)
+            .filter(|(_, p)| p.deployment_scope == deployment_scope && p.market_key == market_key)
             .map(|(k, _)| k.clone())
             .collect();
 
@@ -1018,42 +2101,92 @@ impl SportsExposureBook {
 }
 
 #[derive(Debug, Clone)]
-struct PendingSportsIntent {
-    dims: SportsIntentDimensions,
+struct PendingMarketIntent {
+    dims: MarketIntentDimensions,
     requested_notional: Decimal,
 }
 
 #[derive(Debug)]
-struct SportsCapitalAllocator {
+struct MarketCapitalAllocator {
+    domain: Domain,
+    domain_label: &'static str,
     enabled: bool,
     total_cap: Decimal,
     market_cap_pct: Decimal,
     auto_split_by_active_markets: bool,
-    open: SportsExposureBook,
-    pending: SportsExposureBook,
-    pending_by_intent: HashMap<Uuid, PendingSportsIntent>,
+    open: MarketExposureBook,
+    pending: MarketExposureBook,
+    pending_by_intent: HashMap<Uuid, PendingMarketIntent>,
 }
 
-impl SportsCapitalAllocator {
-    fn new(config: &CoordinatorConfig) -> Self {
-        let configured_cap = config
-            .sports_allocator_total_cap_usd
-            .or(config.risk.sports_max_exposure)
+impl MarketCapitalAllocator {
+    fn for_sports(config: &CoordinatorConfig) -> Self {
+        Self::new_for_domain(config, Domain::Sports)
+    }
+
+    fn for_politics(config: &CoordinatorConfig) -> Self {
+        Self::new_for_domain(config, Domain::Politics)
+    }
+
+    fn for_economics(config: &CoordinatorConfig) -> Self {
+        Self::new_for_domain(config, Domain::Economics)
+    }
+
+    fn new_for_domain(config: &CoordinatorConfig, domain: Domain) -> Self {
+        let (
+            domain_label,
+            enabled,
+            configured_cap,
+            risk_cap,
+            market_cap_pct,
+            auto_split_by_active_markets,
+        ) = match domain {
+            Domain::Sports => (
+                "sports",
+                config.sports_allocator_enabled,
+                config.sports_allocator_total_cap_usd,
+                config.risk.sports_max_exposure,
+                config.sports_market_cap_pct,
+                config.sports_auto_split_by_active_markets,
+            ),
+            Domain::Politics => (
+                "politics",
+                config.politics_allocator_enabled,
+                config.politics_allocator_total_cap_usd,
+                config.risk.politics_max_exposure,
+                config.politics_market_cap_pct,
+                config.politics_auto_split_by_active_markets,
+            ),
+            Domain::Economics => (
+                "economics",
+                config.economics_allocator_enabled,
+                config.economics_allocator_total_cap_usd,
+                config.risk.economics_max_exposure,
+                config.economics_market_cap_pct,
+                config.economics_auto_split_by_active_markets,
+            ),
+            Domain::Crypto | Domain::Custom(_) => {
+                panic!("market allocator does not support domain {:?}", domain)
+            }
+        };
+
+        let configured_cap = configured_cap
+            .or(risk_cap)
             .unwrap_or(config.risk.max_platform_exposure);
-        let total_cap = config
-            .risk
-            .sports_max_exposure
-            .map(|risk_cap| configured_cap.min(risk_cap))
+        let total_cap = risk_cap
+            .map(|cap| configured_cap.min(cap))
             .unwrap_or(configured_cap)
             .max(Decimal::ZERO);
 
         Self {
-            enabled: config.sports_allocator_enabled,
+            domain,
+            domain_label,
+            enabled,
             total_cap,
-            market_cap_pct: Self::normalize_pct(config.sports_market_cap_pct),
-            auto_split_by_active_markets: config.sports_auto_split_by_active_markets,
-            open: SportsExposureBook::default(),
-            pending: SportsExposureBook::default(),
+            market_cap_pct: Self::normalize_pct(market_cap_pct),
+            auto_split_by_active_markets,
+            open: MarketExposureBook::default(),
+            pending: MarketExposureBook::default(),
             pending_by_intent: HashMap::new(),
         }
     }
@@ -1068,27 +2201,39 @@ impl SportsCapitalAllocator {
         }
     }
 
+    fn reset_runtime_state(&mut self) {
+        self.open = MarketExposureBook::default();
+        self.pending = MarketExposureBook::default();
+        self.pending_by_intent.clear();
+    }
+
     fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
-        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
+        if !self.enabled || intent.domain != self.domain || !intent.is_buy {
             return Ok(());
         }
 
         if self.total_cap <= Decimal::ZERO {
-            return Err("Sports allocator cap is 0; buy intent blocked".to_string());
+            return Err(format!(
+                "{} allocator cap is 0; buy intent blocked",
+                self.domain_label
+            ));
         }
 
         let requested = intent.notional_value();
         if requested <= Decimal::ZERO {
-            return Err("Sports buy intent has non-positive notional".to_string());
+            return Err(format!(
+                "{} buy intent has non-positive notional",
+                self.domain_label
+            ));
         }
 
-        let dims = SportsIntentDimensions::from_intent(intent);
+        let dims = MarketIntentDimensions::from_intent(intent);
 
         let projected_total = self.open.total + self.pending.total + requested;
         if projected_total > self.total_cap {
             return Err(format!(
-                "Sports total cap exceeded: projected={} cap={}",
-                projected_total, self.total_cap
+                "{} total cap exceeded: projected={} cap={}",
+                self.domain_label, projected_total, self.total_cap
             ));
         }
 
@@ -1098,15 +2243,15 @@ impl SportsCapitalAllocator {
             + requested;
         if projected_market > market_cap {
             return Err(format!(
-                "Sports market cap exceeded: market={} projected={} cap={}",
-                dims.market_key, projected_market, market_cap
+                "{} market cap exceeded: market={} projected={} cap={}",
+                self.domain_label, dims.market_key, projected_market, market_cap
             ));
         }
 
         self.pending.add(&dims, requested);
         self.pending_by_intent.insert(
             intent.intent_id,
-            PendingSportsIntent {
+            PendingMarketIntent {
                 dims,
                 requested_notional: requested,
             },
@@ -1131,15 +2276,15 @@ impl SportsCapitalAllocator {
         filled_shares: u64,
         fill_price: Decimal,
     ) {
-        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
+        if !self.enabled || intent.domain != self.domain || !intent.is_buy {
             return;
         }
 
         let reservation = self
             .pending_by_intent
             .remove(&intent.intent_id)
-            .unwrap_or_else(|| PendingSportsIntent {
-                dims: SportsIntentDimensions::from_intent(intent),
+            .unwrap_or_else(|| PendingMarketIntent {
+                dims: MarketIntentDimensions::from_intent(intent),
                 requested_notional: intent.notional_value(),
             });
 
@@ -1162,17 +2307,16 @@ impl SportsCapitalAllocator {
         filled_shares: u64,
         execution_price: Decimal,
     ) {
-        if !self.enabled || intent.domain != Domain::Sports || intent.is_buy || filled_shares == 0 {
+        if !self.enabled || intent.domain != self.domain || intent.is_buy || filled_shares == 0 {
             return;
         }
 
-        let dims = SportsIntentDimensions::from_intent(intent);
-        let reference_price = intent
-            .metadata
-            .get("entry_price")
-            .and_then(|v| Decimal::from_str(v).ok())
-            .or_else(|| (execution_price > Decimal::ZERO).then_some(execution_price))
-            .unwrap_or(intent.limit_price);
+        let dims = MarketIntentDimensions::from_intent(intent);
+        let Some((reference_price, has_explicit_entry_price)) =
+            sell_release_reference_price(intent, execution_price)
+        else {
+            return;
+        };
 
         if reference_price <= Decimal::ZERO {
             return;
@@ -1182,10 +2326,10 @@ impl SportsCapitalAllocator {
         let removed_by_key = self
             .open
             .subtract_from_position_key(&dims.position_key, requested_release);
-        if removed_by_key < requested_release {
+        if has_explicit_entry_price && removed_by_key < requested_release {
             let remaining = requested_release - removed_by_key;
             self.open
-                .subtract_matching_market(&dims.market_key, remaining);
+                .subtract_matching_market(&dims.deployment_scope, &dims.market_key, remaining);
         }
     }
 
@@ -1217,6 +2361,55 @@ impl SportsCapitalAllocator {
         let dynamic_cap = self.total_cap / Decimal::from(market_count);
         dynamic_cap.min(fixed_cap)
     }
+    fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
+        let open_notional_usd = self.open.total;
+        let pending_notional_usd = self.pending.total;
+        let used = open_notional_usd + pending_notional_usd;
+        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
+        AllocatorLedgerSnapshot {
+            domain: self.domain_label.to_string(),
+            enabled: self.enabled,
+            cap_notional_usd: self.total_cap,
+            open_notional_usd,
+            pending_notional_usd,
+            available_notional_usd,
+        }
+    }
+
+    fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
+        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
+
+        for position in self.open.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.0 += position.amount;
+        }
+
+        for position in self.pending.by_position.values() {
+            let entry = by_deployment
+                .entry(position.deployment_scope.clone())
+                .or_insert((Decimal::ZERO, Decimal::ZERO));
+            entry.1 += position.amount;
+        }
+
+        let mut rows = by_deployment
+            .into_iter()
+            .map(
+                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
+                    DeploymentLedgerSnapshot {
+                        deployment_id,
+                        domain: self.domain_label.to_string(),
+                        open_notional_usd,
+                        pending_notional_usd,
+                        total_notional_usd: open_notional_usd + pending_notional_usd,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
+        rows
+    }
 
     fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
         if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
@@ -1227,7 +2420,7 @@ impl SportsCapitalAllocator {
             return Some(Decimal::ZERO);
         }
 
-        let dims = SportsIntentDimensions::from_intent(intent);
+        let dims = MarketIntentDimensions::from_intent(intent);
         let remaining_total =
             (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
 
@@ -1258,10 +2451,15 @@ impl Coordinator {
             config.duplicate_guard_scope,
         )));
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
-        let sports_allocator = Arc::new(RwLock::new(SportsCapitalAllocator::new(&config)));
+        let sports_allocator = Arc::new(RwLock::new(MarketCapitalAllocator::for_sports(&config)));
+        let politics_allocator =
+            Arc::new(RwLock::new(MarketCapitalAllocator::for_politics(&config)));
+        let economics_allocator =
+            Arc::new(RwLock::new(MarketCapitalAllocator::for_economics(&config)));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
+        let governance_policy = Arc::new(RwLock::new(GovernancePolicy::from_config(&config)));
         let domain_ingress_mode = Arc::new(RwLock::new(HashMap::new()));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
@@ -1278,12 +2476,16 @@ impl Coordinator {
             duplicate_guard,
             crypto_allocator,
             sports_allocator,
+            politics_allocator,
+            economics_allocator,
             positions,
             executor,
             global_state,
             execution_log_pool: None,
+            governance_store_pool: None,
             ingress_mode,
             domain_ingress_mode,
+            governance_policy,
             stale_heartbeat_warn_at,
             order_tx,
             order_rx,
@@ -1300,15 +2502,206 @@ impl Coordinator {
         self.execution_log_pool = Some(pool);
     }
 
+    /// Enable DB persistence for coordinator governance policy.
+    pub fn set_governance_store_pool(&mut self, pool: PgPool) {
+        self.governance_store_pool = Some(pool);
+    }
+
+    /// Restore runtime governance policy from DB (if a persisted row exists).
+    pub async fn load_persisted_governance_policy(&self) -> Result<()> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let Some(policy) = load_governance_policy(pool, &self.account_id).await? else {
+            return Ok(());
+        };
+
+        let snapshot = policy.to_snapshot();
+        let mut state = self.governance_policy.write().await;
+        *state = policy;
+        info!(
+            account_id = %self.account_id,
+            updated_by = %snapshot.updated_by,
+            updated_at = %snapshot.updated_at,
+            "restored governance policy from DB"
+        );
+        Ok(())
+    }
+
+    /// Rebuild runtime position/allocator state from persisted execution fills.
+    ///
+    /// This prevents cold-start underestimation of account exposure when a process restarts.
+    pub async fn restore_runtime_state_from_execution_log(&self) -> Result<()> {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let today = Utc::now().date_naive();
+        let window_start = DateTime::<Utc>::from_naive_utc_and_offset(
+            today
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is always a valid UTC time"),
+            Utc,
+        );
+        let window_end = window_start + ChronoDuration::days(1);
+        let dry_run = self.executor.is_dry_run();
+
+        let fills = load_execution_log_fills(pool, &self.account_id, dry_run).await?;
+        let outcomes_today =
+            load_execution_log_outcomes(pool, &self.account_id, dry_run, window_start, window_end)
+                .await?;
+
+        if fills.is_empty() && outcomes_today.is_empty() {
+            return Ok(());
+        }
+
+        self.positions.clear().await;
+        {
+            let mut allocator = self.crypto_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+        {
+            let mut allocator = self.sports_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+        {
+            let mut allocator = self.politics_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+        {
+            let mut allocator = self.economics_allocator.write().await;
+            allocator.reset_runtime_state();
+        }
+
+        let restored_fill_count = fills.len();
+        let mut restored_agents = HashSet::new();
+        let mut daily_total_pnl = Decimal::ZERO;
+        let mut daily_domain_pnl: HashMap<Domain, Decimal> = HashMap::new();
+        let mut daily_agent_pnl: HashMap<String, Decimal> = HashMap::new();
+
+        for fill in fills {
+            let mut intent = OrderIntent::new(
+                fill.agent_id.clone(),
+                fill.domain,
+                fill.market_slug.clone(),
+                fill.token_id.clone(),
+                fill.side,
+                fill.is_buy,
+                fill.filled_shares,
+                fill.fill_price,
+            );
+            intent.intent_id = fill.intent_id;
+            intent.created_at = fill.executed_at;
+            intent.metadata = fill.metadata;
+
+            self.settle_domain_success(&intent, fill.filled_shares, fill.fill_price)
+                .await;
+
+            if fill.is_buy {
+                let _ = self
+                    .positions
+                    .open_position(
+                        &fill.agent_id,
+                        fill.domain,
+                        &fill.market_slug,
+                        &fill.token_id,
+                        fill.side,
+                        fill.filled_shares,
+                        fill.fill_price,
+                    )
+                    .await;
+            } else {
+                let realized_pnl = self
+                    .apply_sell_fill_to_positions(&intent, fill.filled_shares, fill.fill_price)
+                    .await;
+                if fill.executed_at >= window_start && fill.executed_at < window_end {
+                    daily_total_pnl += realized_pnl;
+                    *daily_domain_pnl.entry(fill.domain).or_insert(Decimal::ZERO) += realized_pnl;
+                    *daily_agent_pnl
+                        .entry(fill.agent_id.clone())
+                        .or_insert(Decimal::ZERO) += realized_pnl;
+                }
+            }
+            restored_agents.insert(fill.agent_id);
+        }
+
+        let mut daily_order_count: u32 = 0;
+        let mut daily_success_count: u32 = 0;
+        let mut daily_failure_count: u32 = 0;
+        let mut global_consecutive_failures: u32 = 0;
+        let mut per_agent_consecutive_failures: HashMap<String, u32> = HashMap::new();
+        let mut last_risk_event_at: Option<DateTime<Utc>> = None;
+
+        for outcome in outcomes_today {
+            daily_order_count = daily_order_count.saturating_add(1);
+            last_risk_event_at = Some(outcome.executed_at);
+            if outcome.is_failure {
+                daily_failure_count = daily_failure_count.saturating_add(1);
+                global_consecutive_failures = global_consecutive_failures.saturating_add(1);
+                let entry = per_agent_consecutive_failures
+                    .entry(outcome.agent_id)
+                    .or_insert(0);
+                *entry = entry.saturating_add(1);
+            } else {
+                daily_success_count = daily_success_count.saturating_add(1);
+                global_consecutive_failures = 0;
+                per_agent_consecutive_failures.insert(outcome.agent_id, 0);
+            }
+        }
+
+        self.risk_gate
+            .restore_runtime_counters(
+                today,
+                daily_total_pnl,
+                daily_domain_pnl,
+                daily_order_count,
+                daily_success_count,
+                daily_failure_count,
+                global_consecutive_failures,
+                daily_agent_pnl,
+                per_agent_consecutive_failures,
+                last_risk_event_at,
+            )
+            .await;
+
+        for agent_id in &restored_agents {
+            self.refresh_risk_exposure_for_agent(agent_id).await;
+        }
+        self.refresh_global_state().await;
+
+        info!(
+            account_id = %self.account_id,
+            fill_count = restored_fill_count,
+            restored_agents = restored_agents.len(),
+            daily_order_count,
+            daily_success_count,
+            daily_failure_count,
+            global_consecutive_failures,
+            "restored coordinator runtime state from execution log"
+        );
+        Ok(())
+    }
+
     /// Create a clonable handle for agents
     pub fn handle(&self) -> CoordinatorHandle {
         CoordinatorHandle {
+            account_id: self.account_id.clone(),
             order_tx: self.order_tx.clone(),
             state_tx: self.state_tx.clone(),
             control_tx: self.control_tx.clone(),
             global_state: self.global_state.clone(),
+            risk_gate: self.risk_gate.clone(),
+            order_queue: self.order_queue.clone(),
+            crypto_allocator: self.crypto_allocator.clone(),
+            sports_allocator: self.sports_allocator.clone(),
+            politics_allocator: self.politics_allocator.clone(),
+            economics_allocator: self.economics_allocator.clone(),
+            positions: self.positions.clone(),
             ingress_mode: self.ingress_mode.clone(),
             domain_ingress_mode: self.domain_ingress_mode.clone(),
+            governance_policy: self.governance_policy.clone(),
+            governance_store_pool: self.governance_store_pool.clone(),
         }
     }
 
@@ -1383,6 +2776,23 @@ impl Coordinator {
         }
     }
 
+    async fn cancel_queued_buy_intents(&self, domain: Option<Domain>, reason: &str) {
+        let dropped = {
+            let mut queue = self.order_queue.write().await;
+            queue.remove_buy_orders(domain)
+        };
+
+        if dropped.is_empty() {
+            return;
+        }
+
+        for intent in dropped {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
+                .await;
+            self.settle_domain_failure(&intent).await;
+        }
+    }
+
     /// Pause all agents
     pub async fn pause_all(&self) {
         {
@@ -1418,6 +2828,8 @@ impl Coordinator {
             *mode = IngressMode::Halted;
         }
         self.domain_ingress_mode.write().await.clear();
+        self.cancel_queued_buy_intents(None, "dropped by coordinator global halt")
+            .await;
         info!("coordinator: sending force-close to all agents");
         for (id, entry) in &self.agent_commands {
             if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
@@ -1433,6 +2845,8 @@ impl Coordinator {
             *mode = IngressMode::Halted;
         }
         self.domain_ingress_mode.write().await.clear();
+        self.cancel_queued_buy_intents(None, "dropped by coordinator shutdown")
+            .await;
         info!("coordinator: sending shutdown to all agents");
         for (id, entry) in &self.agent_commands {
             if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
@@ -1468,6 +2882,8 @@ impl Coordinator {
     /// Force-close all agents in one domain
     pub async fn force_close_domain(&self, domain: Domain) {
         self.set_domain_mode(domain, IngressMode::Halted).await;
+        self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain halt")
+            .await;
         for (id, entry) in &self.agent_commands {
             if self.should_apply_domain_cmd(entry, domain) {
                 if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
@@ -1480,6 +2896,8 @@ impl Coordinator {
     /// Shutdown all agents in one domain
     pub async fn shutdown_domain(&self, domain: Domain) {
         self.set_domain_mode(domain, IngressMode::Halted).await;
+        self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain shutdown")
+            .await;
         for (id, entry) in &self.agent_commands {
             if self.should_apply_domain_cmd(entry, domain) {
                 if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
@@ -1567,10 +2985,50 @@ impl Coordinator {
         let intent_id = intent.intent_id;
         let strategy_max_shares = intent.shares;
 
+        if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked due to missing deployment identity"
+            );
+            return;
+        }
+
+        if !intent.is_buy {
+            let tracked_open_shares = self
+                .positions
+                .agent_open_shares_for_token_side(
+                    &intent.agent_id,
+                    intent.domain,
+                    &intent.token_id,
+                    intent.side,
+                )
+                .await;
+            let pending_sell_shares = self.order_queue.read().await.pending_sell_shares_for(
+                &intent.agent_id,
+                intent.domain,
+                &intent.token_id,
+                intent.side,
+            );
+
+            if let Some(reason) =
+                sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
+            {
+                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                    .await;
+                warn!(
+                    %agent_id, %intent_id, reason = %reason,
+                    "order blocked by reduce-only sell guard"
+                );
+                return;
+            }
+        }
+
         let ingress_mode = *self.ingress_mode.read().await;
-        if ingress_mode != IngressMode::Running {
+        if intent.is_buy && ingress_mode != IngressMode::Running {
             let reason = format!(
-                "Coordinator ingress is {:?}; blocking new intent while paused/halted",
+                "Coordinator ingress is {:?}; blocking BUY intent while paused/halted",
                 ingress_mode
             );
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
@@ -1581,23 +3039,35 @@ impl Coordinator {
             );
             return;
         }
-        let domain_mode = self
-            .domain_ingress_mode
-            .read()
-            .await
-            .get(&intent.domain)
-            .copied()
-            .unwrap_or(IngressMode::Running);
-        if domain_mode != IngressMode::Running {
-            let reason = format!(
-                "Domain {:?} ingress is {:?}; blocking new intent while paused/halted",
-                intent.domain, domain_mode
-            );
+        if intent.is_buy {
+            let domain_mode = self
+                .domain_ingress_mode
+                .read()
+                .await
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(IngressMode::Running);
+            if domain_mode != IngressMode::Running {
+                let reason = format!(
+                    "Domain {:?} ingress is {:?}; blocking BUY intent while paused/halted",
+                    intent.domain, domain_mode
+                );
+                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                    .await;
+                warn!(
+                    %agent_id, %intent_id, reason = %reason,
+                    "order blocked by coordinator domain ingress state"
+                );
+                return;
+            }
+        }
+
+        if let Some(reason) = self.check_governance_policy(&intent).await {
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
-                "order blocked by coordinator domain ingress state"
+                "order blocked by global governance policy"
             );
             return;
         }
@@ -1936,6 +3406,49 @@ impl Coordinator {
         guard.register_or_block(intent, Utc::now())
     }
 
+    async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {
+        let policy = self.governance_policy.read().await.clone();
+        let current_notional = self.current_account_notional().await;
+        governance_block_reason(&policy, intent, current_notional)
+    }
+
+    async fn current_account_notional(&self) -> Decimal {
+        let platform_exposure = self.risk_gate.total_exposure().await;
+
+        let (crypto_open, crypto_pending) = {
+            let allocator = self.crypto_allocator.read().await;
+            (allocator.open.total, allocator.pending.total)
+        };
+        let (sports_open, sports_pending) = {
+            let allocator = self.sports_allocator.read().await;
+            (allocator.open.total, allocator.pending.total)
+        };
+        let (politics_open, politics_pending) = {
+            let allocator = self.politics_allocator.read().await;
+            (allocator.open.total, allocator.pending.total)
+        };
+        let (economics_open, economics_pending) = {
+            let allocator = self.economics_allocator.read().await;
+            (allocator.open.total, allocator.pending.total)
+        };
+        let other_pending_buy_notional = self
+            .order_queue
+            .read()
+            .await
+            .pending_buy_notional_excluding_domains(&[
+                Domain::Crypto,
+                Domain::Sports,
+                Domain::Politics,
+                Domain::Economics,
+            ]);
+
+        let allocator_open = crypto_open + sports_open + politics_open + economics_open;
+        let open_notional = platform_exposure.max(allocator_open);
+        let allocator_pending =
+            crypto_pending + sports_pending + politics_pending + economics_pending;
+        open_notional + allocator_pending + other_pending_buy_notional
+    }
+
     async fn reserve_domain_capital(&self, intent: &OrderIntent) -> Option<String> {
         if !intent.is_buy {
             return None;
@@ -1949,6 +3462,14 @@ impl Coordinator {
                 let mut allocator = self.sports_allocator.write().await;
                 allocator.reserve_buy(intent).err()
             }
+            Domain::Politics => {
+                let mut allocator = self.politics_allocator.write().await;
+                allocator.reserve_buy(intent).err()
+            }
+            Domain::Economics => {
+                let mut allocator = self.economics_allocator.write().await;
+                allocator.reserve_buy(intent).err()
+            }
             _ => None,
         }
     }
@@ -1958,8 +3479,16 @@ impl Coordinator {
             let mut allocator = self.crypto_allocator.write().await;
             allocator.release_buy_reservation(intent_id);
         }
-        let mut sports_allocator = self.sports_allocator.write().await;
-        sports_allocator.release_buy_reservation(intent_id);
+        {
+            let mut allocator = self.sports_allocator.write().await;
+            allocator.release_buy_reservation(intent_id);
+        }
+        {
+            let mut allocator = self.politics_allocator.write().await;
+            allocator.release_buy_reservation(intent_id);
+        }
+        let mut allocator = self.economics_allocator.write().await;
+        allocator.release_buy_reservation(intent_id);
     }
 
     async fn settle_domain_success(
@@ -1985,6 +3514,22 @@ impl Coordinator {
                     allocator.settle_sell_execution(intent, filled_shares, fill_price);
                 }
             }
+            Domain::Politics => {
+                let mut allocator = self.politics_allocator.write().await;
+                if intent.is_buy {
+                    allocator.settle_buy_execution(intent, filled_shares, fill_price);
+                } else {
+                    allocator.settle_sell_execution(intent, filled_shares, fill_price);
+                }
+            }
+            Domain::Economics => {
+                let mut allocator = self.economics_allocator.write().await;
+                if intent.is_buy {
+                    allocator.settle_buy_execution(intent, filled_shares, fill_price);
+                } else {
+                    allocator.settle_sell_execution(intent, filled_shares, fill_price);
+                }
+            }
             _ => {}
         }
     }
@@ -2002,6 +3547,14 @@ impl Coordinator {
                 let mut allocator = self.sports_allocator.write().await;
                 allocator.release_buy_reservation(intent.intent_id);
             }
+            Domain::Politics => {
+                let mut allocator = self.politics_allocator.write().await;
+                allocator.release_buy_reservation(intent.intent_id);
+            }
+            Domain::Economics => {
+                let mut allocator = self.economics_allocator.write().await;
+                allocator.release_buy_reservation(intent.intent_id);
+            }
             _ => {}
         }
     }
@@ -2010,29 +3563,37 @@ impl Coordinator {
     async fn handle_state_update(&self, snapshot: AgentSnapshot) {
         let agent_id = snapshot.agent_id.clone();
 
-        // Update risk gate with latest exposure data
-        self.risk_gate
-            .update_agent_exposure(
-                &agent_id,
-                snapshot.exposure,
-                snapshot.unrealized_pnl,
-                snapshot.position_count,
-                0, // unhedged count not tracked in snapshot
-            )
-            .await;
-
         // Store snapshot
         let mut state = self.global_state.write().await;
         state.agents.insert(agent_id, snapshot);
     }
 
+    async fn refresh_risk_exposure_for_agent(&self, agent_id: &str) {
+        // RiskGate exposure should be derived from executed positions, not agent self-reporting.
+        let stats = self.positions.agent_stats(agent_id).await;
+        self.risk_gate
+            .update_agent_exposure(
+                agent_id,
+                stats.exposure,
+                stats.unrealized_pnl,
+                stats.position_count,
+                stats.unhedged_count.min(u32::MAX as usize) as u32,
+            )
+            .await;
+    }
+
     /// Drain the order queue and execute via OrderExecutor
     async fn drain_and_execute(&self) {
-        let batch = {
+        let (expired, batch) = {
             let mut queue = self.order_queue.write().await;
-            queue.cleanup_expired();
-            queue.dequeue_batch(self.config.batch_size)
+            let expired = queue.cleanup_expired_intents();
+            let batch = queue.dequeue_batch(self.config.batch_size);
+            (expired, batch)
         };
+
+        for intent in expired {
+            self.settle_domain_failure(&intent).await;
+        }
 
         if batch.is_empty() {
             return;
@@ -2070,15 +3631,11 @@ impl Coordinator {
                     )
                     .await;
 
-                    // Record success with risk gate
-                    self.risk_gate
-                        .record_success(&agent_id, Decimal::ZERO)
-                        .await;
-
                     let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
                     self.settle_domain_success(&intent, result.filled_shares, fill_price)
                         .await;
 
+                    let mut realized_pnl = Decimal::ZERO;
                     if result.filled_shares > 0 {
                         if intent.is_buy {
                             let _ = self
@@ -2094,13 +3651,29 @@ impl Coordinator {
                                 )
                                 .await;
                         } else {
-                            self.apply_sell_fill_to_positions(
-                                &intent,
-                                result.filled_shares,
-                                fill_price,
-                            )
-                            .await;
+                            realized_pnl = self
+                                .apply_sell_fill_to_positions(
+                                    &intent,
+                                    result.filled_shares,
+                                    fill_price,
+                                )
+                                .await;
                         }
+
+                        self.refresh_risk_exposure_for_agent(&agent_id).await;
+                    }
+
+                    // Record execution outcome with RiskGate (including realized PnL on exits).
+                    // For binary options, PnL is realized on SELL fills (reduce/close).
+                    if realized_pnl < Decimal::ZERO {
+                        self.risk_gate
+                            .record_success(&agent_id, Decimal::ZERO)
+                            .await;
+                        self.risk_gate
+                            .record_loss(&agent_id, realized_pnl.abs())
+                            .await;
+                    } else {
+                        self.risk_gate.record_success(&agent_id, realized_pnl).await;
                     }
                 }
                 Err(e) => {
@@ -2134,11 +3707,12 @@ impl Coordinator {
         intent: &OrderIntent,
         filled_shares: u64,
         exit_price: Decimal,
-    ) {
+    ) -> Decimal {
         if filled_shares == 0 {
-            return;
+            return Decimal::ZERO;
         }
 
+        let mut realized_pnl = Decimal::ZERO;
         let mut remaining = filled_shares;
         let mut matching_positions = self
             .positions
@@ -2160,10 +3734,13 @@ impl Coordinator {
                 break;
             }
             let reduce_by = remaining.min(pos.shares);
-            let _ = self
+            if let Some(pnl) = self
                 .positions
                 .reduce_position(&pos.position_id, reduce_by, exit_price)
-                .await;
+                .await
+            {
+                realized_pnl += pnl;
+            }
             remaining -= reduce_by;
         }
 
@@ -2175,6 +3752,8 @@ impl Coordinator {
                 "sell fill exceeded tracked position shares; allocator adjusted, position book partially unmatched"
             );
         }
+
+        realized_pnl
     }
 
     async fn persist_execution(
@@ -2829,7 +4408,7 @@ impl Coordinator {
             scope = scope_label,
             dep = dep_label,
             dom = intent.domain.to_string().to_ascii_lowercase(),
-            mkt = intent.market_slug.trim().to_ascii_lowercase(),
+            mkt = intent_market_identity(intent),
             side = side.to_ascii_lowercase(),
             kind = order_kind,
             bucket = bucket,
@@ -2868,9 +4447,13 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::PolymarketClient;
+    use crate::config::ExecutionConfig;
     use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
+    use crate::strategy::executor::OrderExecutor;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
         AgentSnapshot {
@@ -2886,6 +4469,19 @@ mod tests {
             last_heartbeat: Utc::now(),
             error_message: None,
         }
+    }
+
+    fn make_test_handle() -> (CoordinatorHandle, Coordinator) {
+        let client = PolymarketClient::new("https://clob.polymarket.com", true)
+            .expect("build dry-run polymarket client");
+        let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+        let coordinator = Coordinator::new(
+            CoordinatorConfig::default(),
+            executor,
+            "acct-test".to_string(),
+        );
+        let handle = coordinator.handle();
+        (handle, coordinator)
     }
 
     #[test]
@@ -2942,6 +4538,65 @@ mod tests {
     }
 
     #[test]
+    fn test_buy_intent_requires_deployment_id_metadata() {
+        let intent = make_intent(true, OrderPriority::Normal);
+        let reason = buy_intent_missing_deployment_reason(&intent);
+        assert_eq!(
+            reason.as_deref(),
+            Some("BUY intent missing required metadata field 'deployment_id'")
+        );
+    }
+
+    #[test]
+    fn test_sell_intent_does_not_require_deployment_id_metadata() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        assert!(buy_intent_missing_deployment_reason(&intent).is_none());
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_no_tracked_shares() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 0, 0);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("no tracked open shares"));
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_requested_exceeds_tracked() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 30, 0);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("requested shares 100 exceeds available reduce-only shares 30"));
+    }
+
+    #[test]
+    fn test_sell_reduce_only_allows_with_sufficient_tracked_shares() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        assert!(sell_reduce_only_violation_reason(&intent, 100, 0).is_none());
+        assert!(sell_reduce_only_violation_reason(&intent, 150, 0).is_none());
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_pending_sells_exhaust_available() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 100, 100);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("fully reserved by pending SELL intents 100"));
+    }
+
+    #[test]
+    fn test_sell_reduce_only_violation_when_requested_exceeds_available_after_pending() {
+        let intent = make_intent(false, OrderPriority::Normal);
+        let reason = sell_reduce_only_violation_reason(&intent, 100, 40);
+        assert!(reason
+            .unwrap_or_default()
+            .contains("requested shares 100 exceeds available reduce-only shares 60"));
+    }
+
+    #[test]
     fn test_duplicate_guard_blocks_repeated_buy_within_window() {
         let mut guard = IntentDuplicateGuard::new(1000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
@@ -2973,6 +4628,29 @@ mod tests {
         let mut second = make_intent(true, OrderPriority::Normal);
         second.token_id = "token-down-123".to_string();
         second.side = crate::domain::Side::Down;
+
+        assert!(guard.register_or_block(&first, now).is_none());
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_some());
+    }
+
+    #[test]
+    fn test_duplicate_guard_blocks_same_condition_with_different_slugs() {
+        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let now = Utc::now();
+        let mut first = make_intent(true, OrderPriority::Normal);
+        let mut second = make_intent(true, OrderPriority::Normal);
+        first.market_slug = "slug-a".to_string();
+        second.market_slug = "slug-b".to_string();
+        first.metadata.insert(
+            "condition_id".to_string(),
+            "0xABCD00000000000000000000000000000000000000000000000000000000".to_string(),
+        );
+        second.metadata.insert(
+            "condition_id".to_string(),
+            "0xabcd00000000000000000000000000000000000000000000000000000000".to_string(),
+        );
 
         assert!(guard.register_or_block(&first, now).is_none());
         assert!(guard
@@ -3070,6 +4748,10 @@ mod tests {
         intent
             .metadata
             .insert("event_time".to_string(), "2026-02-19T12:07:00Z".to_string());
+        intent.metadata.insert(
+            "condition_id".to_string(),
+            "0xABCD00000000000000000000000000000000000000000000000000000000".to_string(),
+        );
 
         let key =
             Coordinator::stable_idempotency_key("acct-main", &intent, DuplicateGuardScope::Market);
@@ -3078,7 +4760,8 @@ mod tests {
         assert!(key.contains("acct-main"));
         assert!(key.contains("scope:market"));
         assert!(key.contains("dep:market"));
-        assert!(key.contains("btc-updown-15m-20260219-1200"));
+        assert!(key
+            .contains("condition:0xabcd00000000000000000000000000000000000000000000000000000000"));
     }
 
     #[test]
@@ -3107,6 +4790,285 @@ mod tests {
             Coordinator::stable_idempotency_key("acct-main", &second, DuplicateGuardScope::Market);
 
         assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn test_stable_idempotency_key_is_slug_independent_when_condition_present() {
+        let mut first = OrderIntent::new(
+            "openclaw",
+            Domain::Sports,
+            "nba-lakers-celtics-v1",
+            "token-up-1",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        );
+        first.metadata.insert(
+            "deployment_id".to_string(),
+            "sports.pm.nba.moneyline".to_string(),
+        );
+        first.metadata.insert(
+            "condition_id".to_string(),
+            "0x1111000000000000000000000000000000000000000000000000000000000000".to_string(),
+        );
+        first
+            .metadata
+            .insert("event_time".to_string(), "2026-02-20T12:00:00Z".to_string());
+
+        let mut second = first.clone();
+        second.market_slug = "nba-lakers-celtics-v2".to_string();
+
+        let first_key = Coordinator::stable_idempotency_key("acct-main", &first);
+        let second_key = Coordinator::stable_idempotency_key("acct-main", &second);
+        assert_eq!(first_key, second_key);
+    }
+
+    #[test]
+    fn test_governance_policy_update_rejects_unknown_domain() {
+        let update = GovernancePolicyUpdate {
+            block_new_intents: false,
+            blocked_domains: vec!["unknown".to_string()],
+            max_intent_notional_usd: None,
+            max_total_notional_usd: None,
+            updated_by: "openclaw".to_string(),
+            reason: None,
+        };
+
+        let parsed = GovernancePolicy::try_from_update(update);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_governance_policy_blocks_domain() {
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: false,
+            blocked_domains: vec!["sports".to_string()],
+            max_intent_notional_usd: None,
+            max_total_notional_usd: None,
+            updated_by: "openclaw".to_string(),
+            reason: Some("maintenance".to_string()),
+        })
+        .expect("valid policy");
+
+        let intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        );
+        let reason = governance_block_reason(&policy, &intent, dec!(0));
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn test_governance_policy_blocks_projected_total_notional() {
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: false,
+            blocked_domains: vec![],
+            max_intent_notional_usd: Some(dec!(50)),
+            max_total_notional_usd: Some(dec!(100)),
+            updated_by: "openclaw".to_string(),
+            reason: None,
+        })
+        .expect("valid policy");
+
+        let intent = OrderIntent::new(
+            "crypto",
+            Domain::Crypto,
+            "btc-updown-5m-1",
+            "token-up",
+            crate::domain::Side::Up,
+            true,
+            50,
+            dec!(0.50),
+        ); // 25 notional
+        let reason = governance_block_reason(&policy, &intent, dec!(90));
+        assert!(reason
+            .unwrap_or_default()
+            .contains("max_total_notional_usd"));
+    }
+
+    #[test]
+    fn test_governance_policy_allows_sell_when_new_intents_blocked() {
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: true,
+            blocked_domains: vec!["sports".to_string()],
+            max_intent_notional_usd: Some(dec!(1)),
+            max_total_notional_usd: Some(dec!(1)),
+            updated_by: "openclaw".to_string(),
+            reason: Some("circuit".to_string()),
+        })
+        .expect("valid policy");
+
+        let intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            false, // sell/close
+            10,
+            dec!(0.45),
+        );
+        let reason = governance_block_reason(&policy, &intent, dec!(999));
+        assert!(reason.is_none(), "sell intent should remain allowed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_force_close_domain_blocks_new_buy_immediately() {
+        let (handle, _coordinator) = make_test_handle();
+        handle
+            .force_close_domain(Domain::Sports)
+            .await
+            .expect("force-close domain command accepted");
+
+        let intent = OrderIntent::new(
+            "sports",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        )
+        .with_deployment_id("deploy.sports.nba.test");
+
+        let err = handle
+            .submit_order(intent)
+            .await
+            .expect_err("buy intent should be blocked once domain is force-closed");
+        assert!(err.to_string().contains("new intents are blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_shutdown_domain_blocks_new_buy_immediately() {
+        let (handle, _coordinator) = make_test_handle();
+        handle
+            .shutdown_domain(Domain::Politics)
+            .await
+            .expect("shutdown domain command accepted");
+
+        let intent = OrderIntent::new(
+            "politics",
+            Domain::Politics,
+            "election-market",
+            "politics-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.40),
+        )
+        .with_deployment_id("deploy.politics.election.test");
+
+        let err = handle
+            .submit_order(intent)
+            .await
+            .expect_err("buy intent should be blocked once domain is shut down");
+        assert!(err.to_string().contains("new intents are blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_governance_status_includes_domain_ingress_and_agents() {
+        let (handle, _coordinator) = make_test_handle();
+        handle
+            .pause_domain(Domain::Sports)
+            .await
+            .expect("pause domain command accepted");
+        {
+            let mut state = handle.global_state.write().await;
+            state.agents.insert(
+                "sports_agent".to_string(),
+                AgentSnapshot {
+                    agent_id: "sports_agent".to_string(),
+                    name: "sports_agent".to_string(),
+                    domain: Domain::Sports,
+                    status: AgentStatus::Running,
+                    position_count: 0,
+                    exposure: dec!(12.5),
+                    daily_pnl: dec!(1.2),
+                    unrealized_pnl: dec!(0.3),
+                    metrics: HashMap::new(),
+                    last_heartbeat: Utc::now(),
+                    error_message: None,
+                },
+            );
+        }
+
+        let snapshot = handle.governance_status().await;
+
+        assert!(
+            snapshot
+                .domain_ingress_modes
+                .iter()
+                .any(|row| row.domain == "sports" && row.mode == "paused")
+        );
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.agent_id == "sports_agent"
+                    && agent.domain == "sports"
+                    && agent.status == "running")
+        );
+    }
+
+    #[test]
+    fn test_clamp_governance_history_limit_bounds() {
+        assert_eq!(clamp_governance_history_limit(0), 1);
+        assert_eq!(clamp_governance_history_limit(25), 25);
+        assert_eq!(clamp_governance_history_limit(999), 500);
+    }
+
+    #[test]
+    fn test_parse_persisted_domain_supports_runtime_and_custom_encodings() {
+        assert_eq!(parse_persisted_domain("Crypto"), Some(Domain::Crypto));
+        assert_eq!(
+            parse_persisted_domain("custom:42"),
+            Some(Domain::Custom(42))
+        );
+        assert_eq!(parse_persisted_domain("Custom(7)"), Some(Domain::Custom(7)));
+        assert_eq!(parse_persisted_domain(""), None);
+        assert_eq!(parse_persisted_domain("custom:oops"), None);
+    }
+
+    #[test]
+    fn test_parse_persisted_side_accepts_yes_no_aliases() {
+        assert_eq!(parse_persisted_side("UP"), Some(crate::domain::Side::Up));
+        assert_eq!(parse_persisted_side("NO"), Some(crate::domain::Side::Down));
+        assert_eq!(parse_persisted_side("flat"), None);
+    }
+
+    #[test]
+    fn test_string_metadata_from_json_normalizes_scalar_values() {
+        let metadata = string_metadata_from_json(Some(sqlx::types::Json(serde_json::json!({
+            "deployment_id": "deploy.crypto.15m",
+            "signal_confidence": 0.73,
+            "flag": true,
+            "skip": null
+        }))));
+        assert_eq!(
+            metadata.get("deployment_id").map(String::as_str),
+            Some("deploy.crypto.15m")
+        );
+        assert_eq!(
+            metadata.get("signal_confidence").map(String::as_str),
+            Some("0.73")
+        );
+        assert_eq!(metadata.get("flag").map(String::as_str), Some("true"));
+        assert!(!metadata.contains_key("skip"));
+    }
+
+    #[test]
+    fn test_execution_error_is_failure_treats_blank_as_success() {
+        assert!(execution_error_is_failure(Some("transport timeout")));
+        assert!(!execution_error_is_failure(Some("   ")));
+        assert!(!execution_error_is_failure(None));
     }
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {
@@ -3211,6 +5173,41 @@ mod tests {
         assert_eq!(allocator.open.total, dec!(20));
     }
 
+    #[test]
+    fn test_crypto_allocator_sell_without_entry_price_does_not_release_other_positions() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let mut buy_a = make_crypto_intent("BTC", "15m", true, 100, dec!(0.2)); // $20
+        buy_a.market_slug = "btc-updown-a".to_string();
+        buy_a.token_id = "token-up-a".to_string();
+        buy_a = buy_a.with_deployment_id("deploy.crypto.btc.15m");
+
+        let mut buy_b = make_crypto_intent("BTC", "15m", true, 100, dec!(0.2)); // $20
+        buy_b.market_slug = "btc-updown-b".to_string();
+        buy_b.token_id = "token-up-b".to_string();
+        buy_b.side = crate::domain::Side::Down;
+        buy_b = buy_b.with_deployment_id("deploy.crypto.btc.15m");
+
+        assert!(allocator.reserve_buy(&buy_a).is_ok());
+        allocator.settle_buy_execution(&buy_a, 100, dec!(0.2));
+        assert!(allocator.reserve_buy(&buy_b).is_ok());
+        allocator.settle_buy_execution(&buy_b, 100, dec!(0.2));
+        assert_eq!(allocator.open.total, dec!(40));
+
+        let mut sell_a = make_crypto_intent("BTC", "15m", false, 100, dec!(0.2));
+        sell_a.market_slug = buy_a.market_slug.clone();
+        sell_a.token_id = buy_a.token_id.clone();
+        sell_a.side = buy_a.side;
+        sell_a = sell_a.with_deployment_id("deploy.crypto.btc.15m");
+        sell_a.metadata.remove("entry_price");
+
+        // Missing entry_price + high execution price must not release other bucket positions.
+        allocator.settle_sell_execution(&sell_a, 100, dec!(0.8));
+        assert_eq!(allocator.open.total, dec!(20));
+        assert_eq!(allocator.open.by_position.len(), 1);
+    }
+
     fn make_sports_intent(
         market_slug: &str,
         is_buy: bool,
@@ -3235,6 +5232,31 @@ mod tests {
         intent
     }
 
+    fn make_domain_market_intent(
+        domain: Domain,
+        market_slug: &str,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+    ) -> OrderIntent {
+        let mut intent = OrderIntent::new(
+            "domain-agent",
+            domain,
+            market_slug,
+            "domain-token-yes",
+            crate::domain::Side::Up,
+            is_buy,
+            shares,
+            limit_price,
+        );
+        if !is_buy {
+            intent
+                .metadata
+                .insert("entry_price".to_string(), limit_price.to_string());
+        }
+        intent
+    }
+
     #[test]
     fn test_sports_allocator_auto_splits_by_active_markets() {
         let mut cfg = make_allocator_config(dec!(100));
@@ -3243,7 +5265,7 @@ mod tests {
         cfg.sports_market_cap_pct = dec!(0.70);
         cfg.sports_auto_split_by_active_markets = true;
 
-        let mut allocator = SportsCapitalAllocator::new(&cfg);
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
 
         let game1_buy = make_sports_intent("nba-game-1", true, 100, dec!(0.15)); // $15
         let game2_buy = make_sports_intent("nba-game-2", true, 100, dec!(0.15)); // $15
@@ -3260,7 +5282,7 @@ mod tests {
         cfg.sports_allocator_enabled = true;
         cfg.sports_allocator_total_cap_usd = Some(dec!(30));
 
-        let mut allocator = SportsCapitalAllocator::new(&cfg);
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
         let intent = make_sports_intent("nba-game-1", true, 100, dec!(0.10)); // $10
 
         assert!(allocator.reserve_buy(&intent).is_ok());
@@ -3279,7 +5301,193 @@ mod tests {
         cfg.sports_allocator_total_cap_usd = Some(dec!(50));
         cfg.risk.sports_max_exposure = Some(dec!(25));
 
-        let allocator = SportsCapitalAllocator::new(&cfg);
+        let allocator = MarketCapitalAllocator::for_sports(&cfg);
         assert_eq!(allocator.total_cap, dec!(25));
+    }
+
+    #[test]
+    fn test_market_allocator_sell_without_entry_price_does_not_release_other_positions() {
+        let mut cfg = make_allocator_config(dec!(200));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(200));
+        cfg.sports_market_cap_pct = dec!(1.0);
+
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let mut buy_yes = make_sports_intent("nba-game-1", true, 100, dec!(0.2)); // $20
+        buy_yes = buy_yes.with_deployment_id("deploy.sports.nba.comeback");
+
+        let mut buy_no = make_sports_intent("nba-game-1", true, 100, dec!(0.2)); // $20
+        buy_no.token_id = "sports-token-no".to_string();
+        buy_no.side = crate::domain::Side::Down;
+        buy_no = buy_no.with_deployment_id("deploy.sports.nba.comeback");
+
+        assert!(allocator.reserve_buy(&buy_yes).is_ok());
+        allocator.settle_buy_execution(&buy_yes, 100, dec!(0.2));
+        assert!(allocator.reserve_buy(&buy_no).is_ok());
+        allocator.settle_buy_execution(&buy_no, 100, dec!(0.2));
+        assert_eq!(allocator.open.total, dec!(40));
+
+        let mut sell_yes = make_sports_intent("nba-game-1", false, 100, dec!(0.2));
+        sell_yes.token_id = buy_yes.token_id.clone();
+        sell_yes.side = buy_yes.side;
+        sell_yes = sell_yes.with_deployment_id("deploy.sports.nba.comeback");
+        sell_yes.metadata.remove("entry_price");
+
+        // Missing entry_price + high execution price must not release opposite-side position.
+        allocator.settle_sell_execution(&sell_yes, 100, dec!(0.8));
+        assert_eq!(allocator.open.total, dec!(20));
+        assert_eq!(allocator.open.by_position.len(), 1);
+    }
+
+    #[test]
+    fn test_politics_allocator_clamps_total_cap_to_risk_domain_cap() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.politics_allocator_enabled = true;
+        cfg.politics_allocator_total_cap_usd = Some(dec!(40));
+        cfg.risk.politics_max_exposure = Some(dec!(18));
+
+        let allocator = MarketCapitalAllocator::for_politics(&cfg);
+        assert_eq!(allocator.total_cap, dec!(18));
+    }
+
+    #[test]
+    fn test_economics_allocator_reserves_with_condition_identity() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.economics_allocator_enabled = true;
+        cfg.economics_allocator_total_cap_usd = Some(dec!(30));
+        cfg.economics_market_cap_pct = dec!(0.60);
+        cfg.economics_auto_split_by_active_markets = true;
+
+        let mut allocator = MarketCapitalAllocator::for_economics(&cfg);
+        let mut first =
+            make_domain_market_intent(Domain::Economics, "fed-rate-cut-v1", true, 100, dec!(0.10));
+        first.metadata.insert(
+            "condition_id".to_string(),
+            "0x2222000000000000000000000000000000000000000000000000000000000000".to_string(),
+        );
+        let mut second =
+            make_domain_market_intent(Domain::Economics, "fed-rate-cut-v2", true, 100, dec!(0.10));
+        second.metadata.insert(
+            "condition_id".to_string(),
+            "0x2222000000000000000000000000000000000000000000000000000000000000".to_string(),
+        );
+
+        assert!(allocator.reserve_buy(&first).is_ok());
+        // same condition_id should hit the same market bucket and exceed per-market cap
+        assert!(allocator.reserve_buy(&second).is_err());
+    }
+
+    #[test]
+    fn test_crypto_allocator_ledger_snapshot_reports_open_pending_and_available() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let buy = make_crypto_intent("BTC", "15m", true, 100, dec!(0.5)); // reserve $50
+        assert!(allocator.reserve_buy(&buy).is_ok());
+        allocator.settle_buy_execution(&buy, 80, dec!(0.5)); // open $40
+
+        let second = make_crypto_intent("ETH", "5m", true, 20, dec!(0.5)); // pending $10
+        assert!(allocator.reserve_buy(&second).is_ok());
+
+        let snap = allocator.ledger_snapshot();
+        assert_eq!(snap.domain, "crypto");
+        assert_eq!(snap.cap_notional_usd, dec!(200));
+        assert_eq!(snap.open_notional_usd, dec!(40));
+        assert_eq!(snap.pending_notional_usd, dec!(10));
+        assert_eq!(snap.available_notional_usd, dec!(150));
+    }
+
+    #[test]
+    fn test_sports_allocator_ledger_snapshot_reports_open_pending_and_available() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(50));
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let buy = make_sports_intent("nba-game-1", true, 100, dec!(0.10)); // reserve $10
+        assert!(allocator.reserve_buy(&buy).is_ok());
+        allocator.settle_buy_execution(&buy, 50, dec!(0.10)); // open $5
+
+        let pending = make_sports_intent("nba-game-2", true, 40, dec!(0.10)); // pending $4
+        assert!(allocator.reserve_buy(&pending).is_ok());
+
+        let snap = allocator.ledger_snapshot();
+        assert_eq!(snap.domain, "sports");
+        assert_eq!(snap.cap_notional_usd, dec!(50));
+        assert_eq!(snap.open_notional_usd, dec!(5));
+        assert_eq!(snap.pending_notional_usd, dec!(4));
+        assert_eq!(snap.available_notional_usd, dec!(41));
+    }
+
+    #[test]
+    fn test_crypto_allocator_deployment_ledger_snapshot_groups_open_and_pending() {
+        let cfg = make_allocator_config(dec!(200));
+        let mut allocator = CryptoCapitalAllocator::new(&cfg);
+
+        let buy_a = make_crypto_intent("BTC", "15m", true, 100, dec!(0.5))
+            .with_deployment_id("deploy.crypto.alpha");
+        assert!(allocator.reserve_buy(&buy_a).is_ok());
+        allocator.settle_buy_execution(&buy_a, 80, dec!(0.5)); // open $40
+
+        let pending_a = make_crypto_intent("BTC", "15m", true, 20, dec!(0.5))
+            .with_deployment_id("deploy.crypto.alpha");
+        assert!(allocator.reserve_buy(&pending_a).is_ok()); // pending $10
+
+        let buy_b = make_crypto_intent("ETH", "5m", true, 50, dec!(0.4))
+            .with_deployment_id("deploy.crypto.beta");
+        assert!(allocator.reserve_buy(&buy_b).is_ok());
+        allocator.settle_buy_execution(&buy_b, 25, dec!(0.4)); // open $10
+
+        let deployments = allocator.deployment_ledger_snapshot();
+        assert_eq!(deployments.len(), 2);
+        assert_eq!(deployments[0].deployment_id, "deploy.crypto.alpha");
+        assert_eq!(deployments[0].domain, "crypto");
+        assert_eq!(deployments[0].open_notional_usd, dec!(40));
+        assert_eq!(deployments[0].pending_notional_usd, dec!(10));
+        assert_eq!(deployments[0].total_notional_usd, dec!(50));
+
+        assert_eq!(deployments[1].deployment_id, "deploy.crypto.beta");
+        assert_eq!(deployments[1].domain, "crypto");
+        assert_eq!(deployments[1].open_notional_usd, dec!(10));
+        assert_eq!(deployments[1].pending_notional_usd, Decimal::ZERO);
+        assert_eq!(deployments[1].total_notional_usd, dec!(10));
+    }
+
+    #[test]
+    fn test_market_allocator_deployment_ledger_snapshot_groups_open_and_pending() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(60));
+        cfg.sports_market_cap_pct = dec!(1.0);
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let buy_a = make_sports_intent("nba-game-1", true, 100, dec!(0.2))
+            .with_deployment_id("deploy.sports.alpha");
+        assert!(allocator.reserve_buy(&buy_a).is_ok());
+        allocator.settle_buy_execution(&buy_a, 50, dec!(0.2)); // open $10
+
+        let pending_a = make_sports_intent("nba-game-2", true, 20, dec!(0.2))
+            .with_deployment_id("deploy.sports.alpha");
+        assert!(allocator.reserve_buy(&pending_a).is_ok()); // pending $4
+
+        let buy_b = make_sports_intent("nba-game-3", true, 40, dec!(0.25))
+            .with_deployment_id("deploy.sports.beta");
+        assert!(allocator.reserve_buy(&buy_b).is_ok());
+        allocator.settle_buy_execution(&buy_b, 20, dec!(0.25)); // open $5
+
+        let deployments = allocator.deployment_ledger_snapshot();
+        assert_eq!(deployments.len(), 2);
+        assert_eq!(deployments[0].deployment_id, "deploy.sports.alpha");
+        assert_eq!(deployments[0].domain, "sports");
+        assert_eq!(deployments[0].open_notional_usd, dec!(10));
+        assert_eq!(deployments[0].pending_notional_usd, dec!(4));
+        assert_eq!(deployments[0].total_notional_usd, dec!(14));
+
+        assert_eq!(deployments[1].deployment_id, "deploy.sports.beta");
+        assert_eq!(deployments[1].domain, "sports");
+        assert_eq!(deployments[1].open_notional_usd, dec!(5));
+        assert_eq!(deployments[1].pending_notional_usd, Decimal::ZERO);
+        assert_eq!(deployments[1].total_notional_usd, dec!(5));
     }
 }

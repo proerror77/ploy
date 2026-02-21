@@ -2,7 +2,7 @@ use crate::adapters::PostgresStore;
 use crate::agent::grok::GrokClient;
 use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
 use crate::coordinator::CoordinatorHandle;
-use crate::platform::StrategyDeployment;
+use crate::platform::{StrategyDeployment, StrategyEvaluationEvidence};
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -42,6 +42,10 @@ pub struct AppState {
     pub deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
     /// Persistence path for deployment matrix state.
     pub deployments_path: Arc<PathBuf>,
+    /// Strategy evaluation evidence ledger (backtest/paper/live artifacts).
+    pub strategy_evaluations: Arc<RwLock<Vec<StrategyEvaluationEvidence>>>,
+    /// Persistence path for strategy evaluation evidence.
+    pub strategy_evaluations_path: Arc<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +91,22 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
+    fn parse_strategy_evaluations(raw: &str) -> Vec<StrategyEvaluationEvidence> {
+        let mut out = serde_json::from_str::<Vec<StrategyEvaluationEvidence>>(raw)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| {
+                !item.evaluation_id.trim().is_empty() && !item.deployment_id.trim().is_empty()
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(|a, b| {
+            b.evaluated_at
+                .cmp(&a.evaluated_at)
+                .then_with(|| b.evaluation_id.cmp(&a.evaluation_id))
+        });
+        out
+    }
+
     fn parse_deployments(raw: &str) -> HashMap<String, StrategyDeployment> {
         let mut out = HashMap::new();
         if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
@@ -120,6 +140,17 @@ impl AppState {
         PathBuf::from("data/state/deployments.json")
     }
 
+    fn strategy_evaluations_state_path() -> PathBuf {
+        if let Ok(path) = std::env::var("PLOY_STRATEGY_EVALUATIONS_FILE") {
+            return PathBuf::from(path);
+        }
+        let container_data_root = Path::new("/opt/ploy/data");
+        if container_data_root.exists() {
+            return container_data_root.join("state/strategy_evaluations.json");
+        }
+        PathBuf::from("data/state/strategy_evaluations.json")
+    }
+
     fn load_deployments(path: &Path) -> HashMap<String, StrategyDeployment> {
         let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
             .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
@@ -146,6 +177,28 @@ impl AppState {
         HashMap::new()
     }
 
+    fn load_strategy_evaluations(path: &Path) -> Vec<StrategyEvaluationEvidence> {
+        let raw = std::env::var("PLOY_STRATEGY_EVALUATIONS_JSON").unwrap_or_default();
+        if !raw.trim().is_empty() {
+            return Self::parse_strategy_evaluations(&raw);
+        }
+
+        let candidates = [
+            path.to_path_buf(),
+            Path::new("data/state/strategy_evaluations.json").to_path_buf(),
+            Path::new("/opt/ploy/data/state/strategy_evaluations.json").to_path_buf(),
+        ];
+        for candidate in candidates {
+            if let Ok(contents) = std::fs::read_to_string(&candidate) {
+                let items = Self::parse_strategy_evaluations(&contents);
+                if !items.is_empty() {
+                    return items;
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub async fn persist_deployments(&self) -> std::result::Result<(), String> {
         let mut items = {
             let deployments = self.deployments.read().await;
@@ -166,11 +219,36 @@ impl AppState {
             .map_err(|e| format!("failed to write deployment state file: {}", e))
     }
 
+    pub async fn persist_strategy_evaluations(&self) -> std::result::Result<(), String> {
+        let mut items = { self.strategy_evaluations.read().await.clone() };
+        items.sort_by(|a, b| {
+            b.evaluated_at
+                .cmp(&a.evaluated_at)
+                .then_with(|| b.evaluation_id.cmp(&a.evaluation_id))
+        });
+
+        let payload = serde_json::to_vec_pretty(&items)
+            .map_err(|e| format!("failed to serialize strategy evaluations: {}", e))?;
+        let path = self.strategy_evaluations_path.as_ref().clone();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("failed to create strategy evaluations state dir: {}", e))?;
+        }
+        tokio::fs::write(&path, payload)
+            .await
+            .map_err(|e| format!("failed to write strategy evaluations state file: {}", e))
+    }
+
     pub fn new(store: Arc<PostgresStore>, config: StrategyConfigState) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
         let deployments_path = Arc::new(Self::deployments_state_path());
         let deployments = Arc::new(RwLock::new(Self::load_deployments(
             deployments_path.as_ref(),
+        )));
+        let strategy_evaluations_path = Arc::new(Self::strategy_evaluations_state_path());
+        let strategy_evaluations = Arc::new(RwLock::new(Self::load_strategy_evaluations(
+            strategy_evaluations_path.as_ref(),
         )));
 
         Self {
@@ -188,6 +266,8 @@ impl AppState {
             grok_client: None,
             deployments,
             deployments_path,
+            strategy_evaluations,
+            strategy_evaluations_path,
         }
     }
 
@@ -202,6 +282,10 @@ impl AppState {
         let deployments_path = Arc::new(Self::deployments_state_path());
         let deployments = Arc::new(RwLock::new(Self::load_deployments(
             deployments_path.as_ref(),
+        )));
+        let strategy_evaluations_path = Arc::new(Self::strategy_evaluations_state_path());
+        let strategy_evaluations = Arc::new(RwLock::new(Self::load_strategy_evaluations(
+            strategy_evaluations_path.as_ref(),
         )));
 
         Self {
@@ -219,6 +303,8 @@ impl AppState {
             grok_client,
             deployments,
             deployments_path,
+            strategy_evaluations,
+            strategy_evaluations_path,
         }
     }
 
