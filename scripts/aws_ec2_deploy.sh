@@ -333,6 +333,20 @@ if [[ -f "$REMOTE_ROOT/deployment/env.platform-live.example" && ! -f "$REMOTE_RO
   sudo cp "$REMOTE_ROOT/deployment/env.platform-live.example" "$REMOTE_ROOT/env/platform-live.env"
 fi
 
+# Avoid a common foot-gun: env overlay templates often ship with empty placeholders like
+# `POLYMARKET_PRIVATE_KEY=` which would override a correctly-set value in `/opt/ploy/.env`.
+# Remove any empty assignments in workload env files (but leave `/opt/ploy/.env` untouched).
+sanitize_env_overlay() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  sudo sed -i.bak -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d; /^[A-Za-z_][A-Za-z0-9_]*=\"\"$/d' "$env_file"
+}
+sanitize_env_overlay "$REMOTE_ROOT/env/sports-pm.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/crypto-dryrun.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/crypto-live.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/sports-live.env"
+sanitize_env_overlay "$REMOTE_ROOT/env/platform-live.env"
+
 # Keep crypto/sports DB target aligned by default (avoid split persistence DBs).
 if [[ -f "$REMOTE_ROOT/env/sports-pm.env" && -f "$REMOTE_ROOT/env/crypto-dryrun.env" ]]; then
   sports_db_line="$(sudo grep -E '^PLOY_DATABASE__URL=' "$REMOTE_ROOT/env/sports-pm.env" | tail -n 1 || true)"
@@ -401,6 +415,13 @@ ensure_sports_allocator_defaults() {
   ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT" "0.35"
 }
 
+ensure_kelly_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  # Keep the system active under conservative caps: floor tiny-but-positive Kelly sizes.
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__KELLY_MIN_SHARES" "1"
+}
+
 ensure_sqlx_migrations_enabled "$REMOTE_ROOT/.env"
 ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/sports-pm.env"
 ensure_sqlx_migrations_enabled "$REMOTE_ROOT/env/crypto-dryrun.env"
@@ -419,6 +440,10 @@ ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/crypto-dryrun.env"
 ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/crypto-live.env"
 ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/sports-live.env"
 ensure_coordinator_heartbeat_defaults "$REMOTE_ROOT/env/platform-live.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/sports-pm.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/crypto-live.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/sports-live.env"
+ensure_kelly_defaults "$REMOTE_ROOT/env/platform-live.env"
 ensure_deployments_file_default "$REMOTE_ROOT/.env"
 ensure_deployments_file_default "$REMOTE_ROOT/env/sports-pm.env"
 ensure_deployments_file_default "$REMOTE_ROOT/env/crypto-dryrun.env"

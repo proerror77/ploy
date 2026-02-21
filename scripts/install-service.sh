@@ -58,6 +58,15 @@ if [[ -f /opt/ploy/deployment/env.crypto-dryrun.example && ! -f /opt/ploy/env/cr
   sudo cp /opt/ploy/deployment/env.crypto-dryrun.example /opt/ploy/env/crypto-dryrun.env
 fi
 
+# Avoid empty placeholders in workload env overlays overriding real values from /opt/ploy/.env.
+sanitize_env_overlay() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  sudo sed -i.bak -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d; /^[A-Za-z_][A-Za-z0-9_]*=\"\"$/d' "$env_file"
+}
+sanitize_env_overlay /opt/ploy/env/sports-pm.env
+sanitize_env_overlay /opt/ploy/env/crypto-dryrun.env
+
 # Keep SQLx migration runner enabled by default to prevent startup on stale schema.
 ensure_env_true() {
   local env_file="$1"
@@ -110,6 +119,13 @@ ensure_sports_allocator_defaults() {
   ensure_env_default "$env_file" "PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT" "0.35"
 }
 
+ensure_kelly_defaults() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  # Keep the system active under conservative caps: floor tiny-but-positive Kelly sizes.
+  ensure_env_default "$env_file" "PLOY_COORDINATOR__KELLY_MIN_SHARES" "1"
+}
+
 ensure_sqlx_migrations_enabled /opt/ploy/.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/sports-pm.env
 ensure_sqlx_migrations_enabled /opt/ploy/env/crypto-dryrun.env
@@ -119,6 +135,7 @@ ensure_account_budget_defaults /opt/ploy/env/crypto-dryrun.env
 ensure_coordinator_heartbeat_defaults /opt/ploy/.env
 ensure_coordinator_heartbeat_defaults /opt/ploy/env/sports-pm.env
 ensure_coordinator_heartbeat_defaults /opt/ploy/env/crypto-dryrun.env
+ensure_kelly_defaults /opt/ploy/env/sports-pm.env
 ensure_env_default "/opt/ploy/.env" "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_env_default /opt/ploy/env/sports-pm.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
 ensure_env_default /opt/ploy/env/crypto-dryrun.env "PLOY_DEPLOYMENTS_FILE" "/opt/ploy/data/state/deployments.json"
