@@ -5043,8 +5043,16 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
             use ploy::rl::environment::{LeadLagAction, LobDataPoint};
             use rust_decimal::Decimal;
 
+            if !*dry_run {
+                return Err(ploy::error::PloyError::Validation(
+                    "legacy `ploy rl leadlag-live` live execution is disabled; use `ploy platform start` for coordinator-managed live trading, or pass `--dry-run` for signal simulation"
+                        .to_string(),
+                )
+                .into());
+            }
+
             println!("╔══════════════════════════════════════════════════════════════╗");
-            println!("║             Ploy Lead-Lag Live Trading                       ║");
+            println!("║           Ploy Lead-Lag Signal Simulation                    ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!(
                 "║  Symbol:         {:>10}                                    ║",
@@ -5182,46 +5190,26 @@ async fn run_rl_command(cmd: &RlCommands) -> Result<()> {
                                     LeadLagAction::Hold => { /* do nothing */ }
                                     LeadLagAction::BuyYes if can_buy && obs.pm_yes_price > Decimal::ZERO => {
                                         trade_count += 1;
-                                        if *dry_run {
-                                            println!("🟢 [DRY] BuyYes @ {:.4} (conf: {:.2}%) - OBI={:.4}, Mom={:.4}",
-                                                obs.pm_yes_price, confidence * 100.0, obs.bn_obi_5, obs.momentum_1s);
-                                        } else {
-                                            println!("🟢 BuyYes @ {:.4} (conf: {:.2}%)", obs.pm_yes_price, confidence * 100.0);
-                                            // TODO: Execute real order via PolymarketClient
-                                        }
+                                        println!("🟢 [DRY] BuyYes @ {:.4} (conf: {:.2}%) - OBI={:.4}, Mom={:.4}",
+                                            obs.pm_yes_price, confidence * 100.0, obs.bn_obi_5, obs.momentum_1s);
                                         yes_position += trade_sz;
                                     }
                                     LeadLagAction::BuyNo if can_buy && obs.pm_no_price > Decimal::ZERO => {
                                         trade_count += 1;
-                                        if *dry_run {
-                                            println!("🔴 [DRY] BuyNo @ {:.4} (conf: {:.2}%) - OBI={:.4}, Mom={:.4}",
-                                                obs.pm_no_price, confidence * 100.0, obs.bn_obi_5, obs.momentum_1s);
-                                        } else {
-                                            println!("🔴 BuyNo @ {:.4} (conf: {:.2}%)", obs.pm_no_price, confidence * 100.0);
-                                            // TODO: Execute real order via PolymarketClient
-                                        }
+                                        println!("🔴 [DRY] BuyNo @ {:.4} (conf: {:.2}%) - OBI={:.4}, Mom={:.4}",
+                                            obs.pm_no_price, confidence * 100.0, obs.bn_obi_5, obs.momentum_1s);
                                         no_position += trade_sz;
                                     }
                                     LeadLagAction::CloseYes if yes_position > Decimal::ZERO => {
                                         trade_count += 1;
                                         let sell_price = obs.pm_yes_price;
-                                        if *dry_run {
-                                            println!("⬜ [DRY] CloseYes @ {:.4} (conf: {:.2}%)", sell_price, confidence * 100.0);
-                                        } else {
-                                            println!("⬜ CloseYes @ {:.4} (conf: {:.2}%)", sell_price, confidence * 100.0);
-                                            // TODO: Execute real order
-                                        }
+                                        println!("⬜ [DRY] CloseYes @ {:.4} (conf: {:.2}%)", sell_price, confidence * 100.0);
                                         yes_position -= trade_sz.min(yes_position);
                                     }
                                     LeadLagAction::CloseNo if no_position > Decimal::ZERO => {
                                         trade_count += 1;
                                         let sell_price = obs.pm_no_price;
-                                        if *dry_run {
-                                            println!("⬜ [DRY] CloseNo @ {:.4} (conf: {:.2}%)", sell_price, confidence * 100.0);
-                                        } else {
-                                            println!("⬜ CloseNo @ {:.4} (conf: {:.2}%)", sell_price, confidence * 100.0);
-                                            // TODO: Execute real order
-                                        }
+                                        println!("⬜ [DRY] CloseNo @ {:.4} (conf: {:.2}%)", sell_price, confidence * 100.0);
                                         no_position -= trade_sz.min(no_position);
                                     }
                                     _ => {}
