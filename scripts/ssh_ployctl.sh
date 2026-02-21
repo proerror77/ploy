@@ -36,14 +36,16 @@ fi
 resolve_service() {
   local input="$1"
   case "$input" in
-    sports|ploy-sports-pm) echo "ploy-sports-pm" ;;
-    crypto|ploy-crypto-dryrun) echo "ploy-crypto-dryrun" ;;
+    platform|platform-live|ploy-platform-live) echo "ploy-platform-live" ;;
+    sports|sports-dryrun|ploy-sports-pm) echo "ploy-sports-pm" ;;
+    crypto|crypto-dryrun|ploy-crypto-dryrun) echo "ploy-crypto-dryrun" ;;
+    crypto-live|ploy-crypto-live) echo "ploy-crypto-live" ;;
     obh|orderbook-history|collector|ploy-orderbook-history) echo "ploy-orderbook-history" ;;
     maint|maintenance|ploy-maintenance.timer) echo "ploy-maintenance.timer" ;;
     core|ploy) echo "ploy" ;;
     *)
       echo "invalid service: $input" >&2
-      echo "allowed: sports|crypto|obh|maint|core" >&2
+      echo "allowed: platform|sports|sports-dryrun|crypto|crypto-dryrun|crypto-live|obh|maint|core" >&2
       return 1
       ;;
   esac
@@ -64,7 +66,7 @@ case "$cmd" in
     ;;
   svc-status)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-status requires: svc-status <sports|crypto|obh|maint|core>" >&2
+      echo "svc-status requires: svc-status <platform|sports|crypto|crypto-live|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -72,7 +74,7 @@ case "$cmd" in
     ;;
   svc-start)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-start requires: svc-start <sports|crypto|obh|maint|core>" >&2
+      echo "svc-start requires: svc-start <platform|sports|crypto|crypto-live|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -80,7 +82,7 @@ case "$cmd" in
     ;;
   svc-stop)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-stop requires: svc-stop <sports|crypto|obh|maint|core>" >&2
+      echo "svc-stop requires: svc-stop <platform|sports|crypto|crypto-live|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -88,7 +90,7 @@ case "$cmd" in
     ;;
   svc-restart)
     if [[ -z "${arg1:-}" || -n "${arg2:-}" ]]; then
-      echo "svc-restart requires: svc-restart <sports|crypto|obh|maint|core>" >&2
+      echo "svc-restart requires: svc-restart <platform|sports|crypto|crypto-live|obh|maint|core>" >&2
       exit 2
     fi
     service_name="$(resolve_service "$arg1")" || exit 2
@@ -96,7 +98,7 @@ case "$cmd" in
     ;;
   svc-logs)
     if [[ -z "${arg1:-}" ]]; then
-      echo "svc-logs requires: svc-logs <sports|crypto|obh|maint|core> [lines]" >&2
+      echo "svc-logs requires: svc-logs <platform|sports|crypto|crypto-live|obh|maint|core> [lines]" >&2
       exit 2
     fi
     if [[ -n "${arg2:-}" ]] && ! [[ "$arg2" =~ ^[0-9]+$ ]]; then
@@ -109,7 +111,7 @@ case "$cmd" in
     ;;
   *)
     echo "unsupported command" >&2
-    echo "allowed: rpc | svc-status <sports|crypto|obh|maint|core> | svc-start <sports|crypto|obh|maint|core> | svc-stop <sports|crypto|obh|maint|core> | svc-restart <sports|crypto|obh|maint|core> | svc-logs <sports|crypto|obh|maint|core> [n]" >&2
+    echo "allowed: rpc | svc-status <platform|sports|crypto|crypto-live|obh|maint|core> | svc-start <platform|sports|crypto|crypto-live|obh|maint|core> | svc-stop <platform|sports|crypto|crypto-live|obh|maint|core> | svc-restart <platform|sports|crypto|crypto-live|obh|maint|core> | svc-logs <platform|sports|crypto|crypto-live|obh|maint|core> [n]" >&2
     exit 2
     ;;
 esac
