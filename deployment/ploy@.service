@@ -12,7 +12,7 @@ Environment=RUST_LOG=info,ploy=info,sqlx=warn
 Environment=LOG_DIR=/opt/ploy/logs
 EnvironmentFile=-/opt/ploy/.env
 EnvironmentFile=-/opt/ploy/env/%i.env
-ExecStart=/opt/ploy/bin/ploy platform start --config /opt/ploy/config/%i.toml
+ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/%i.toml platform start
 Restart=always
 RestartSec=5
 

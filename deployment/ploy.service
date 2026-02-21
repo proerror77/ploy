@@ -8,7 +8,7 @@ Type=simple
 User=ploy
 Group=ploy
 WorkingDirectory=/opt/ploy
-ExecStart=/opt/ploy/bin/ploy platform start --config /opt/ploy/config/default.toml
+ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/default.toml platform start
 Restart=always
 RestartSec=5
 
