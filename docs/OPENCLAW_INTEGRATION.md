@@ -123,6 +123,14 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 
 Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將該 domain 設為 `halted`，避免命令傳遞期間仍接收新 BUY intents。
 
+### Strategy Control API
+
+新增聚合控制面視圖（需 admin token）：
+
+- `GET /api/strategies/control`
+  - 回傳 deployment matrix + domain ingress mode + running agents 的單一視圖
+  - 供 OpenClaw/AI scheduler 做策略調度與運行態比對
+
 已支援的 method（起步集合）：
 - `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）
 - `pm.get_balance`

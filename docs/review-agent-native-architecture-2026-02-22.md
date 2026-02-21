@@ -20,14 +20,14 @@ Review target: current platform runtime (`Coordinator + agents + sidecar/governa
 |---|---:|---|---|
 | Action Parity | 82% | ✅ | 控制面核心動作（部署、治理、pause/resume/halt、intent ingress）可 API 化 |
 | Tools as Primitives | 78% | ⚠️ | Coordinator 與 sidecar ingress 已偏 primitive；仍有 legacy command workflow code 混在同 binary |
-| Context Injection | 65% | ⚠️ | `governance/status` 提供風險與資金上下文，但策略優化上下文仍分散 |
+| Context Injection | 70% | ⚠️ | `governance/status` + `strategies/control` 提供控制面上下文，但策略優化上下文仍分散 |
 | Shared Workspace | 88% | ✅ | 控制面與 runtime 共享 DB/部署矩陣/治理狀態 |
-| CRUD Completeness | 80% | ✅ | Deployments/Governance 具備完整讀寫與歷史；策略配置 CRUD 仍不一致 |
+| CRUD Completeness | 82% | ✅ | Deployments/Governance 具備完整讀寫與歷史；策略配置 CRUD 仍不一致 |
 | UI Integration | 74% | ⚠️ | WebSocket + API 可觀測；控制面全景在 UI 還不完整 |
 | Capability Discovery | 76% | ⚠️ | 已新增 `/api/capabilities` 機器可讀能力發現；仍缺 UI 端引導 |
 | Prompt-Native Features | 70% | ⚠️ | 已支持 AI sidecar 調度，但策略行為仍大量硬編碼在 Rust agent |
 
-**Overall: 77% (Partial, architecture is viable for staged production).**
+**Overall: 78% (Partial, architecture is viable for staged production).**
 
 ## What Was Fixed In This Pass
 
@@ -41,7 +41,7 @@ Review target: current platform runtime (`Coordinator + agents + sidecar/governa
 
 1. `main.rs` 仍承載大量 legacy mode，雖然 live path 已收斂到 coordinator，但程式結構仍過重。
 2. `src/agent` / `src/agents` / `src/platform/agents` 三套命名並存，對新策略接入有認知成本。
-3. 尚缺「策略優化控制面」標準契約（例如：策略版本、目標函數、回測/線上評估切換）。
+3. 已有 `GET /api/strategies/control` 聚合視圖，但仍缺寫操作（例如策略版本、目標函數、回測/線上評估切換）。
 
 ## Recommended Next Refactors (ordered)
 
