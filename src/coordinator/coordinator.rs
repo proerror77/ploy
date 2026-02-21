@@ -3183,11 +3183,16 @@ impl Coordinator {
 
     /// Drain the order queue and execute via OrderExecutor
     async fn drain_and_execute(&self) {
-        let batch = {
+        let (expired, batch) = {
             let mut queue = self.order_queue.write().await;
-            queue.cleanup_expired();
-            queue.dequeue_batch(self.config.batch_size)
+            let expired = queue.cleanup_expired_intents();
+            let batch = queue.dequeue_batch(self.config.batch_size);
+            (expired, batch)
         };
+
+        for intent in expired {
+            self.settle_domain_failure(&intent).await;
+        }
 
         if batch.is_empty() {
             return;

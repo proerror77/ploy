@@ -164,8 +164,14 @@ impl OrderQueue {
 
     /// 清理過期訂單
     pub fn cleanup_expired(&mut self) -> usize {
+        self.cleanup_expired_intents().len()
+    }
+
+    /// 清理過期訂單並返回被移除的 intents（供上層釋放預留資金）
+    pub fn cleanup_expired_intents(&mut self) -> Vec<OrderIntent> {
         let before = self.heap.len();
         let now = Utc::now();
+        let mut expired = Vec::new();
 
         // 需要重建堆，因為 BinaryHeap 不支持條件刪除
         let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
@@ -174,6 +180,7 @@ impl OrderQueue {
             if let Some(expires) = item.intent.expires_at {
                 if now > expires {
                     self.expired_count += 1;
+                    expired.push(item.intent);
                     continue;
                 }
             }
@@ -184,7 +191,7 @@ impl OrderQueue {
         if cleaned > 0 {
             debug!("Cleaned {} expired orders from queue", cleaned);
         }
-        cleaned
+        expired
     }
 
     /// 移除指定 Agent 的所有訂單
@@ -498,5 +505,24 @@ mod tests {
             queue.pending_sell_shares_for("agent1", Domain::Crypto, "token-up", Side::Up),
             75
         );
+    }
+
+    #[test]
+    fn test_cleanup_expired_intents_returns_removed_items() {
+        let mut queue = OrderQueue::new(100);
+        let mut expired = make_intent("agent1", OrderPriority::Normal);
+        expired.is_buy = false;
+        expired.expires_at = Some(Utc::now() + chrono::Duration::milliseconds(10));
+
+        let active = make_intent("agent2", OrderPriority::High);
+
+        queue.enqueue(expired).unwrap();
+        queue.enqueue(active).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let removed = queue.cleanup_expired_intents();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].agent_id, "agent1");
+        assert_eq!(queue.len(), 1);
     }
 }
