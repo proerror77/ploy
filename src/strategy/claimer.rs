@@ -505,6 +505,26 @@ impl AutoClaimer {
             return Ok(vec![]);
         }
 
+        // Filter out dust before logging "Found ..."; otherwise users see scary counts
+        // for positions that we will always skip.
+        let mut eligible = Vec::new();
+        let mut skipped_small = 0usize;
+        for pos in positions {
+            if pos.payout < self.config.min_claim_size {
+                skipped_small += 1;
+                continue;
+            }
+            eligible.push(pos);
+        }
+        if eligible.is_empty() {
+            debug!(
+                min_claim_size = %self.config.min_claim_size,
+                skipped_small,
+                "No redeemable positions above min_claim_size"
+            );
+            return Ok(vec![]);
+        }
+
         let relayer_ready = relayer_claim_enabled() && relayer_builder_credentials().is_some();
         let preflight_required = needs_native_gas_preflight(self.config.auto_claim, relayer_ready);
         if preflight_required && !self.preflight_wallet_can_claim().await? {
@@ -516,12 +536,17 @@ impl AutoClaimer {
             );
         }
 
-        info!("Found {} redeemable condition(s)", positions.len());
+        info!(
+            eligible = eligible.len(),
+            min_claim_size = %self.config.min_claim_size,
+            skipped_small,
+            "Found redeemable conditions"
+        );
 
         let mut results = Vec::new();
         let mut abort_remaining_claims = false;
 
-        for pos in positions {
+        for pos in eligible {
             if abort_remaining_claims {
                 debug!(
                     "Skipping remaining redeemable conditions in this cycle after terminal claim error"
@@ -535,12 +560,6 @@ impl AutoClaimer {
                     debug!("Already claimed condition {}", pos.condition_id);
                     continue;
                 }
-            }
-
-            // Skip if below minimum size
-            if pos.payout < self.config.min_claim_size {
-                debug!("Skipping small position: ${:.2}", pos.payout);
-                continue;
             }
 
             // Log the opportunity
