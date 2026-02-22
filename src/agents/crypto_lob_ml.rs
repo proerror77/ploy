@@ -140,6 +140,10 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_entry_early_window_secs_5m")]
     pub entry_early_window_secs_5m: u64,
 
+    /// For 15m markets, only allow entries in the first N seconds of the window.
+    #[serde(default = "default_entry_early_window_secs_15m")]
+    pub entry_early_window_secs_15m: u64,
+
     /// Taker fee rate used in net EV calculation (e.g. 0.02 = 2%).
     #[serde(default = "default_taker_fee_rate")]
     pub taker_fee_rate: Decimal,
@@ -188,6 +192,10 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_ev_exit_buffer")]
     pub ev_exit_buffer: Decimal,
 
+    /// Volatility-scaled EV exit buffer component (uses window uncertainty).
+    #[serde(default = "default_ev_exit_vol_scale")]
+    pub ev_exit_vol_scale: Decimal,
+
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
 }
@@ -202,6 +210,10 @@ fn default_window_fallback_weight() -> Decimal {
 
 fn default_ev_exit_buffer() -> Decimal {
     dec!(0.005)
+}
+
+fn default_ev_exit_vol_scale() -> Decimal {
+    dec!(0.02)
 }
 
 fn default_taker_fee_rate() -> Decimal {
@@ -228,6 +240,10 @@ fn default_entry_early_window_secs_5m() -> u64 {
     120
 }
 
+fn default_entry_early_window_secs_15m() -> u64 {
+    300
+}
+
 impl Default for CryptoLobMlConfig {
     fn default() -> Self {
         Self {
@@ -248,6 +264,7 @@ impl Default for CryptoLobMlConfig {
             max_entry_price: dec!(0.70),
             entry_side_policy: default_entry_side_policy(),
             entry_early_window_secs_5m: default_entry_early_window_secs_5m(),
+            entry_early_window_secs_15m: default_entry_early_window_secs_15m(),
             taker_fee_rate: default_taker_fee_rate(),
             entry_slippage_bps: default_entry_slippage_bps(),
             use_price_to_beat: default_use_price_to_beat(),
@@ -260,6 +277,7 @@ impl Default for CryptoLobMlConfig {
             model_version: None,
             window_fallback_weight: default_window_fallback_weight(),
             ev_exit_buffer: default_ev_exit_buffer(),
+            ev_exit_vol_scale: default_ev_exit_vol_scale(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }
@@ -669,6 +687,21 @@ impl CryptoLobMlAgent {
             CryptoLobMlExitMode::SignalFlip => "signal_flip",
             CryptoLobMlExitMode::PriceExit => "price_exit",
         }
+    }
+
+    fn ev_exit_buffer(&self, window: &WindowContext) -> Decimal {
+        let base = self
+            .config
+            .ev_exit_buffer
+            .max(Decimal::ZERO)
+            .min(dec!(0.50));
+        let scale = self
+            .config
+            .ev_exit_vol_scale
+            .max(Decimal::ZERO)
+            .min(dec!(0.50));
+        let uncertainty = (dec!(0.5) - (window.p_up_window - dec!(0.5)).abs()).max(Decimal::ZERO);
+        (base + scale * uncertainty).min(dec!(0.50))
     }
 
     fn net_ev_for_binary_side(&self, prob_win: Decimal, ask: Decimal) -> Decimal {
@@ -1124,6 +1157,13 @@ impl TradingAgent for CryptoLobMlAgent {
                                 continue;
                             }
                         }
+                        if timeframe == "15m" && self.config.entry_early_window_secs_15m > 0 {
+                            if window_ctx.elapsed_secs as u64
+                                > self.config.entry_early_window_secs_15m
+                            {
+                                continue;
+                            }
+                        }
                         let p_up_threshold = self.estimate_p_up_threshold_anchor(
                             spot.price,
                             event.price_to_beat,
@@ -1174,11 +1214,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                             Side::Up => blended.p_up_blended,
                                             Side::Down => Decimal::ONE - blended.p_up_blended,
                                         };
-                                        let ev_buffer = self
-                                            .config
-                                            .ev_exit_buffer
-                                            .max(Decimal::ZERO)
-                                            .min(dec!(0.50));
+                                        let ev_buffer = self.ev_exit_buffer(&window_ctx);
                                         let ev_edge = bid_net - fair_value;
                                         if ev_edge >= ev_buffer {
                                             let exit_intent = OrderIntent::new(
@@ -1894,6 +1930,8 @@ mod tests {
         );
         assert_eq!(cfg.entry_early_window_secs_5m, 120);
         assert_eq!(cfg.ev_exit_buffer, dec!(0.005));
+        assert_eq!(cfg.entry_early_window_secs_15m, 300);
+        assert_eq!(cfg.ev_exit_vol_scale, dec!(0.02));
         assert_eq!(cfg.min_hold_secs, 20);
         assert!(cfg.prefer_close_to_end);
     }

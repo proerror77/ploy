@@ -12,7 +12,9 @@
 - 退出默认走 `ev_exit`：当市场价格高于模型公平价值时退出（纯模型驱动）。
 - 进场默认走 `lagging_only`：只考虑更便宜的一侧做 EV 判断。
 - 5m 市场仅允许在前 `120s` 内进场（可用 env 调整）。
+- 15m 市场仅允许在前 `300s` 内进场（可用 env 调整）。
 - `ev_exit_buffer` 提供退出阈值，避免过度抖动。
+- `ev_exit_vol_scale` 让退出阈值随窗口不确定性动态放大。
 
 ## 3. 训练层（Offline ML）
 - 新训练入口：`scripts/train_crypto_lob_tcn_onnx_from_db.py --source sync_records --horizon 5m|15m`。
