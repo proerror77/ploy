@@ -203,12 +203,14 @@ fn event_window_secs_for_horizon(horizon: &str) -> u64 {
 }
 
 fn deployment_id_for(strategy: &str, coin: &str, horizon: &str) -> String {
-    format!(
-        "crypto.pm.{}.{}.{}",
-        normalize_component(coin),
-        normalize_timeframe(horizon),
-        normalize_component(strategy)
-    )
+    let strategy_slug = normalize_component(strategy).replace('_', "-");
+    let strategy_slug = strategy_slug
+        .strip_prefix("crypto-")
+        .unwrap_or(strategy_slug.as_str())
+        .to_string();
+    // Deployment matrix is strategy+timeframe scoped; coin routing stays in metadata.
+    let _ = coin;
+    format!("crypto-{}-{}", strategy_slug, normalize_timeframe(horizon))
 }
 
 fn infer_coin_from_market_slug(slug: &str) -> String {
@@ -1143,8 +1145,12 @@ mod tests {
         assert_eq!(event_window_secs_for_horizon("15m"), 900);
         assert_eq!(event_window_secs_for_horizon("5m"), 300);
         assert_eq!(
+            deployment_id_for("momentum", "ETH", "5m"),
+            "crypto-momentum-5m"
+        );
+        assert_eq!(
             deployment_id_for("crypto_momentum", "BTC", "15m"),
-            "crypto.pm.btc.15m.crypto_momentum"
+            "crypto-momentum-15m"
         );
     }
 }
