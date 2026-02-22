@@ -94,7 +94,7 @@ pub(crate) async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
             min_edge,
             all,
         } => {
-            use ploy::agent::{Market, OddsProvider, Sport};
+            use ploy::ai_agents::{Market, OddsProvider, Sport};
 
             println!("\n\x1b[33m{}\x1b[0m", "═".repeat(63));
             println!("\x1b[33m           DRAFTKINGS ODDS SCANNER\x1b[0m");
@@ -189,7 +189,7 @@ pub(crate) async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
             }
         }
         SportsCommands::Analyze { url, team1, team2 } => {
-            use ploy::agent::{SportsAnalysisWithDK, SportsAnalyst};
+            use ploy::ai_agents::{SportsAnalysisWithDK, SportsAnalyst};
 
             println!("\n\x1b[33m{}\x1b[0m", "═".repeat(63));
             println!("\x1b[33m        SPORTS ANALYSIS WITH DRAFTKINGS COMPARISON\x1b[0m");

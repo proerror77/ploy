@@ -12,8 +12,8 @@ pub(crate) async fn run_agent_mode(
     enable_trading: bool,
     chat: bool,
 ) -> Result<()> {
-    use ploy::agent::autonomous::AutonomyLevel;
-    use ploy::agent::{
+    use ploy::ai_agents::autonomous::AutonomyLevel;
+    use ploy::ai_agents::{
         protocol::{AgentContext, DailyStats, MarketSnapshot},
         sports_analyst::TradeAction,
         AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient, SportsAnalyst,
@@ -158,7 +158,7 @@ pub(crate) async fn run_agent_mode(
             }
 
             // Use longer timeout for autonomous mode (3 minutes)
-            use ploy::agent::AgentClientConfig;
+            use ploy::ai_agents::AgentClientConfig;
             let client = ClaudeAgentClient::with_config(AgentClientConfig::for_autonomous());
             let mut agent = AutonomousAgent::new(client, config);
 
@@ -173,7 +173,7 @@ pub(crate) async fn run_agent_mode(
             }
 
             // Add Grok for real-time search if configured
-            use ploy::agent::{GrokClient, GrokConfig};
+            use ploy::ai_agents::{GrokClient, GrokConfig};
             if let Ok(grok) = GrokClient::new(GrokConfig::from_env()) {
                 if grok.is_configured() {
                     println!("  Grok: \x1b[32m✓ Enabled\x1b[0m (real-time market intelligence)");
@@ -410,10 +410,12 @@ pub(crate) async fn run_agent_mode(
 }
 
 /// Fetch market data from Polymarket and create a populated MarketSnapshot
-async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::agent::protocol::MarketSnapshot> {
+async fn fetch_market_snapshot(
+    market_slug: &str,
+) -> Result<ploy::ai_agents::protocol::MarketSnapshot> {
     use chrono::Utc;
     use ploy::adapters::polymarket_clob::GAMMA_API_URL;
-    use ploy::agent::protocol::MarketSnapshot;
+    use ploy::ai_agents::protocol::MarketSnapshot;
     use ploy::error::PloyError;
     use polymarket_client_sdk::gamma::types::request::SearchRequest;
     use polymarket_client_sdk::gamma::Client as GammaClient;
