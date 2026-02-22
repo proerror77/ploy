@@ -139,9 +139,9 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_entry_side_policy")]
     pub entry_side_policy: CryptoLobMlEntrySidePolicy,
 
-    /// For 5m markets, only allow entries in the first N seconds of the window.
-    #[serde(default = "default_entry_early_window_secs_5m")]
-    pub entry_early_window_secs_5m: u64,
+    /// For 5m markets, only allow entries in the last N seconds of the window.
+    #[serde(default = "default_entry_late_window_secs_5m")]
+    pub entry_late_window_secs_5m: u64,
 
     /// For 15m markets, only allow entries in the last N seconds of the window.
     #[serde(default = "default_entry_late_window_secs_15m")]
@@ -208,7 +208,7 @@ fn default_lob_ml_model_type() -> String {
 }
 
 fn default_window_fallback_weight() -> Decimal {
-    dec!(0.10)
+    Decimal::ZERO
 }
 
 fn default_ev_exit_buffer() -> Decimal {
@@ -239,8 +239,8 @@ fn default_threshold_prob_weight() -> Decimal {
     dec!(0.35)
 }
 
-fn default_entry_early_window_secs_5m() -> u64 {
-    120
+fn default_entry_late_window_secs_5m() -> u64 {
+    180
 }
 
 fn default_entry_late_window_secs_15m() -> u64 {
@@ -264,9 +264,9 @@ impl Default for CryptoLobMlConfig {
             exit_mode: default_exit_mode(),
             min_hold_secs: 20,
             min_edge: dec!(0.02),
-            max_entry_price: dec!(0.70),
+            max_entry_price: dec!(0.30),
             entry_side_policy: default_entry_side_policy(),
-            entry_early_window_secs_5m: default_entry_early_window_secs_5m(),
+            entry_late_window_secs_5m: default_entry_late_window_secs_5m(),
             entry_late_window_secs_15m: default_entry_late_window_secs_15m(),
             taker_fee_rate: default_taker_fee_rate(),
             entry_slippage_bps: default_entry_slippage_bps(),
@@ -743,6 +743,22 @@ impl CryptoLobMlAgent {
             .min(dec!(0.90))
     }
 
+    fn entry_late_window_secs(&self, horizon: &str) -> u64 {
+        match normalize_timeframe(horizon).as_str() {
+            "15m" => self.config.entry_late_window_secs_15m,
+            _ => self.config.entry_late_window_secs_5m,
+        }
+    }
+
+    fn is_within_entry_late_window(&self, horizon: &str, remaining_secs: i64) -> bool {
+        if remaining_secs <= 0 {
+            return false;
+        }
+
+        let window_secs = self.entry_late_window_secs(horizon);
+        window_secs == 0 || remaining_secs as u64 <= window_secs
+    }
+
     fn allows_signal_flip_exit(&self) -> bool {
         matches!(self.config.exit_mode, CryptoLobMlExitMode::SignalFlip)
     }
@@ -990,7 +1006,10 @@ impl CryptoLobMlAgent {
                 }
             };
 
-        if edge < self.config.min_edge || limit_price > self.config.max_entry_price {
+        if limit_price > self.config.max_entry_price {
+            return None;
+        }
+        if edge < self.config.min_edge {
             return None;
         }
 
@@ -1209,19 +1228,10 @@ impl TradingAgent for CryptoLobMlAgent {
                         else {
                             continue;
                         };
-                        if timeframe == "5m" && self.config.entry_early_window_secs_5m > 0 {
-                            if window_ctx.elapsed_secs as u64
-                                > self.config.entry_early_window_secs_5m
-                            {
-                                continue;
-                            }
-                        }
-                        if timeframe == "15m" && self.config.entry_late_window_secs_15m > 0 {
-                            if window_ctx.remaining_secs as u64
-                                > self.config.entry_late_window_secs_15m
-                            {
-                                continue;
-                            }
+                        if !self
+                            .is_within_entry_late_window(&timeframe, window_ctx.remaining_secs)
+                        {
+                            continue;
                         }
                         let p_up_threshold = self.estimate_p_up_threshold_anchor(
                             spot.price,
@@ -2112,11 +2122,13 @@ mod tests {
         assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
         assert_eq!(cfg.max_time_remaining_secs, 900);
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(cfg.max_entry_price, dec!(0.30));
+        assert_eq!(cfg.window_fallback_weight, Decimal::ZERO);
         assert_eq!(
             cfg.entry_side_policy,
             CryptoLobMlEntrySidePolicy::LaggingOnly
         );
-        assert_eq!(cfg.entry_early_window_secs_5m, 120);
+        assert_eq!(cfg.entry_late_window_secs_5m, 180);
         assert_eq!(cfg.ev_exit_buffer, dec!(0.005));
         assert_eq!(cfg.entry_late_window_secs_15m, 180);
         assert_eq!(cfg.ev_exit_vol_scale, dec!(0.02));
@@ -2221,8 +2233,28 @@ mod tests {
         };
 
         let (w_model, w_window) = agent.model_window_blend_weights();
-        assert_eq!(w_model, dec!(0.90));
-        assert_eq!(w_window, dec!(0.10));
+        assert_eq!(w_model, Decimal::ONE);
+        assert_eq!(w_window, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_entry_window_enforces_late_windows_for_5m_and_15m() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        assert!(agent.is_within_entry_late_window("5m", 180));
+        assert!(!agent.is_within_entry_late_window("5m", 181));
+        assert!(agent.is_within_entry_late_window("15m", 180));
+        assert!(!agent.is_within_entry_late_window("15m", 181));
     }
 
     #[test]
@@ -2249,8 +2281,8 @@ mod tests {
                 Some(dec!(0.42)),
                 "up-token",
                 "down-token",
-                dec!(0.52),
-                dec!(0.49),
+                dec!(0.28),
+                dec!(0.25),
             )
             .expect("signal should pass filters");
 
@@ -2284,6 +2316,35 @@ mod tests {
             dec!(0.95),
         );
         assert!(signal.is_none());
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_rejects_price_above_strict_cap() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.max_entry_price = dec!(0.30);
+        let agent = CryptoLobMlAgent {
+            config: cfg,
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let blended = sample_blended_prob(&agent);
+        let signal = agent.evaluate_entry_signal(
+            &blended,
+            &sample_window_context(),
+            Some(dec!(0.50)),
+            "up-token",
+            "down-token",
+            dec!(0.31),
+            dec!(0.32),
+        );
+        assert!(signal.is_none(), "ask > 0.30 must be rejected");
     }
 
     #[test]

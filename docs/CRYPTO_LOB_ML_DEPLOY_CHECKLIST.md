@@ -6,7 +6,8 @@
 - 策略：`crypto_lob_ml`
 - 关键变更：
   - runtime 正确读取 `MODEL_TYPE / MODEL_PATH / MODEL_VERSION`
-  - `model-first` 决策（window 仅小权重 fallback）
+  - `model-first` 决策（默认纯模型，window fallback 默认关闭）
+  - 进场强约束：`ask <= 0.30` + `EV >= min_edge` + 5m/15m 最后 180s 才允许进场
   - 模型不可用时启动失败（fail-fast），避免误跑旧逻辑
 
 ## 2. 上线前（Pre-Deploy）
@@ -19,9 +20,10 @@
 - `PLOY_CRYPTO_LOB_ML__MODEL_VERSION=<version>`
 - `PLOY_CRYPTO_LOB_ML__EXIT_MODE=ev_exit`
 - `PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY=lagging_only`
-- `PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M=120`
+- `PLOY_CRYPTO_LOB_ML__MAX_ENTRY_PRICE=0.30`
+- `PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M=180`
 - `PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_15M=180`
-- `PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.10`
+- `PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.00`（默认纯模型，可显式调大）
 - `PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER=0.005`
 - `PLOY_CRYPTO_LOB_ML__EV_EXIT_VOL_SCALE=0.02`
 
@@ -59,6 +61,21 @@ SELECT horizon, COUNT(*) AS resolved_markets
 FROM by_market
 GROUP BY horizon
 ORDER BY horizon;
+```
+
+```sql
+-- C) 门槛价元数据覆盖（price_to_beat + end_time）
+SELECT
+  horizon,
+  symbol,
+  COUNT(*) AS markets,
+  COUNT(*) FILTER (WHERE price_to_beat IS NOT NULL) AS with_price_to_beat,
+  COUNT(*) FILTER (WHERE end_time IS NOT NULL) AS with_end_time,
+  MAX(updated_at) AS last_updated_at
+FROM pm_market_metadata
+WHERE horizon IN ('5m', '15m')
+GROUP BY horizon, symbol
+ORDER BY horizon, symbol;
 ```
 
 ### 2.3 模型训练（可选示例）
@@ -138,11 +155,27 @@ GROUP BY decision
 ORDER BY cnt DESC;
 ```
 
+### 4.5 进场硬约束校验（SQL）
+```sql
+SELECT
+  COUNT(*) AS entry_cnt,
+  COUNT(*) FILTER (
+    WHERE (metadata->>'signal_market_price')::numeric <= 0.30
+  ) AS capped_price_cnt,
+  COUNT(*) FILTER (
+    WHERE (metadata->>'window_remaining_secs')::bigint <= 180
+  ) AS late_window_cnt
+FROM agent_order_executions
+WHERE agent_id = 'crypto_lob_ml'
+  AND metadata->>'signal_type' = 'crypto_lob_ml_entry'
+  AND executed_at >= NOW() - INTERVAL '30 minutes';
+```
+
 ## 5. Go / No-Go 标准
 Go（通过）
 - `sync_records` 最新 lag 在可接受范围（例如 < 10s，按你们实际 SLA）
 - `model_type` 统计显示为 `onnx`
-- 混合权重符合预期（默认 `0.90 / 0.10`）
+- 混合权重符合预期（默认 `1.00 / 0.00`）
 - `risk_gate_decisions` 有正常记录，未出现异常大面积 `BLOCKED`
 
 No-Go（阻断）
