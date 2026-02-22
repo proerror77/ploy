@@ -140,9 +140,9 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_entry_early_window_secs_5m")]
     pub entry_early_window_secs_5m: u64,
 
-    /// For 15m markets, only allow entries in the first N seconds of the window.
-    #[serde(default = "default_entry_early_window_secs_15m")]
-    pub entry_early_window_secs_15m: u64,
+    /// For 15m markets, only allow entries in the last N seconds of the window.
+    #[serde(default = "default_entry_late_window_secs_15m")]
+    pub entry_late_window_secs_15m: u64,
 
     /// Taker fee rate used in net EV calculation (e.g. 0.02 = 2%).
     #[serde(default = "default_taker_fee_rate")]
@@ -240,8 +240,8 @@ fn default_entry_early_window_secs_5m() -> u64 {
     120
 }
 
-fn default_entry_early_window_secs_15m() -> u64 {
-    300
+fn default_entry_late_window_secs_15m() -> u64 {
+    180
 }
 
 impl Default for CryptoLobMlConfig {
@@ -264,7 +264,7 @@ impl Default for CryptoLobMlConfig {
             max_entry_price: dec!(0.70),
             entry_side_policy: default_entry_side_policy(),
             entry_early_window_secs_5m: default_entry_early_window_secs_5m(),
-            entry_early_window_secs_15m: default_entry_early_window_secs_15m(),
+            entry_late_window_secs_15m: default_entry_late_window_secs_15m(),
             taker_fee_rate: default_taker_fee_rate(),
             entry_slippage_bps: default_entry_slippage_bps(),
             use_price_to_beat: default_use_price_to_beat(),
@@ -1157,9 +1157,9 @@ impl TradingAgent for CryptoLobMlAgent {
                                 continue;
                             }
                         }
-                        if timeframe == "15m" && self.config.entry_early_window_secs_15m > 0 {
-                            if window_ctx.elapsed_secs as u64
-                                > self.config.entry_early_window_secs_15m
+                        if timeframe == "15m" && self.config.entry_late_window_secs_15m > 0 {
+                            if window_ctx.remaining_secs as u64
+                                > self.config.entry_late_window_secs_15m
                             {
                                 continue;
                             }
@@ -1930,7 +1930,7 @@ mod tests {
         );
         assert_eq!(cfg.entry_early_window_secs_5m, 120);
         assert_eq!(cfg.ev_exit_buffer, dec!(0.005));
-        assert_eq!(cfg.entry_early_window_secs_15m, 300);
+        assert_eq!(cfg.entry_late_window_secs_15m, 180);
         assert_eq!(cfg.ev_exit_vol_scale, dec!(0.02));
         assert_eq!(cfg.min_hold_secs, 20);
         assert!(cfg.prefer_close_to_end);

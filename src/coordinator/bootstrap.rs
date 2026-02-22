@@ -3137,9 +3137,9 @@ impl PlatformBootstrapConfig {
             cfg.crypto_lob_ml.entry_early_window_secs_5m,
         )
         .min(300);
-        cfg.crypto_lob_ml.entry_early_window_secs_15m = env_u64(
-            "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_15M",
-            cfg.crypto_lob_ml.entry_early_window_secs_15m,
+        cfg.crypto_lob_ml.entry_late_window_secs_15m = env_u64(
+            "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_15M",
+            cfg.crypto_lob_ml.entry_late_window_secs_15m,
         )
         .min(900);
         cfg.crypto_lob_ml.taker_fee_rate = env_decimal(
@@ -4345,7 +4345,7 @@ mod tests {
         let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
         let entry_side_policy_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY";
         let entry_early_window_key = "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M";
-        let entry_early_window_15m_key = "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_15M";
+        let entry_late_window_15m_key = "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_15M";
 
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
@@ -4361,7 +4361,7 @@ mod tests {
         let prev_exit_mode = std::env::var(exit_mode_key).ok();
         let prev_entry_side_policy = std::env::var(entry_side_policy_key).ok();
         let prev_entry_early_window = std::env::var(entry_early_window_key).ok();
-        let prev_entry_early_window_15m = std::env::var(entry_early_window_15m_key).ok();
+        let prev_entry_late_window_15m = std::env::var(entry_late_window_15m_key).ok();
 
         set_env(model_type_key, Some("onnx"));
         set_env(model_path_key, Some("/tmp/models/lob_tcn_v2.onnx"));
@@ -4377,7 +4377,7 @@ mod tests {
         set_env(exit_mode_key, Some("ev_exit"));
         set_env(entry_side_policy_key, Some("lagging_only"));
         set_env(entry_early_window_key, Some("120"));
-        set_env(entry_early_window_15m_key, Some("300"));
+        set_env(entry_late_window_15m_key, Some("180"));
 
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
@@ -4423,7 +4423,7 @@ mod tests {
             CryptoLobMlEntrySidePolicy::LaggingOnly
         );
         assert_eq!(cfg.crypto_lob_ml.entry_early_window_secs_5m, 120);
-        assert_eq!(cfg.crypto_lob_ml.entry_early_window_secs_15m, 300);
+        assert_eq!(cfg.crypto_lob_ml.entry_late_window_secs_15m, 180);
 
         match prev_model_type.as_deref() {
             Some(v) => set_env(model_type_key, Some(v)),
@@ -4481,9 +4481,9 @@ mod tests {
             Some(v) => set_env(entry_early_window_key, Some(v)),
             None => set_env(entry_early_window_key, None),
         }
-        match prev_entry_early_window_15m.as_deref() {
-            Some(v) => set_env(entry_early_window_15m_key, Some(v)),
-            None => set_env(entry_early_window_15m_key, None),
+        match prev_entry_late_window_15m.as_deref() {
+            Some(v) => set_env(entry_late_window_15m_key, Some(v)),
+            None => set_env(entry_late_window_15m_key, None),
         }
     }
 
