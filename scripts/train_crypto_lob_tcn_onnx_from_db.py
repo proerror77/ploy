@@ -38,7 +38,13 @@ FEATURE_ORDER = [
     "ask_volume_5",
     "momentum_1s",
     "momentum_5s",
+    "spot_price",
+    "remaining_secs",
+    "price_to_beat",
+    "distance_to_beat",
 ]
+
+SEQ_LEN_BY_HORIZON = {"5m": 60, "15m": 180}
 
 
 @dataclass
@@ -46,6 +52,15 @@ class Dataset:
     x: List[List[float]]
     y: List[int]
     ts: List[str]  # RFC3339
+
+
+@dataclass
+class SequenceRow:
+    market_slug: str
+    horizon: str
+    ts: datetime
+    y_up: int
+    features: List[float]
 
 
 def mean_std(x: List[List[float]]) -> Tuple[List[float], List[float]]:
@@ -125,6 +140,57 @@ def chronological_split(ds: Dataset, test_ratio: float) -> Tuple[Dataset, Datase
         )
 
     return take(idx[:cut]), take(idx[cut:])
+
+
+def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int) -> Dataset:
+    grouped: dict[str, List[SequenceRow]] = {}
+    for row in rows:
+        grouped.setdefault(row.market_slug, []).append(row)
+
+    x: List[List[float]] = []
+    y: List[int] = []
+    ts: List[str] = []
+
+    for market_slug, bucket in grouped.items():
+        bucket.sort(key=lambda r: r.ts)
+
+        # Keep one snapshot per second to stabilize sequence spacing.
+        one_sec: List[SequenceRow] = []
+        for row in bucket:
+            row_ts = row.ts
+            if row_ts.tzinfo is None:
+                row_ts = row_ts.replace(tzinfo=timezone.utc)
+            sec = int(row_ts.timestamp())
+            if one_sec:
+                last_ts = one_sec[-1].ts
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                if int(last_ts.timestamp()) == sec:
+                    one_sec[-1] = row
+                    continue
+            one_sec.append(row)
+
+        if len(one_sec) < sequence_len:
+            continue
+
+        for i in range(sequence_len - 1, len(one_sec)):
+            window = one_sec[i - sequence_len + 1 : i + 1]
+            flat: List[float] = []
+            for snap in window:
+                flat.extend(snap.features)
+            x.append(flat)
+            y.append(int(window[-1].y_up))
+            out_ts = window[-1].ts
+            if out_ts.tzinfo is None:
+                out_ts = out_ts.replace(tzinfo=timezone.utc)
+            ts.append(out_ts.isoformat())
+
+    if not x:
+        raise SystemExit(
+            f"no usable sequence windows (seq_len={sequence_len}); check horizon/lookback/data density"
+        )
+
+    return Dataset(x=x, y=y, ts=ts)
 
 
 def fetch_from_order_executions(
@@ -208,7 +274,7 @@ def fetch_from_order_executions(
             cur.execute(sql, params)
             for row in cur.fetchall():
                 executed_at = row[0]
-                feats = list(row[1:8])
+                feats = list(row[1:8]) + [0.0, 0.0, 0.0, 0.0]
                 yi = row[8]
                 if yi not in (0, 1):
                     continue
@@ -247,27 +313,22 @@ def fetch_from_sync_records(
     if limit <= 0:
         raise SystemExit("--limit must be > 0")
 
-    horizon_norm: Optional[str] = None
-    if horizon is not None:
-        h = horizon.strip().lower()
-        if h not in ("5m", "15m"):
-            raise SystemExit("--horizon must be one of: 5m, 15m")
-        horizon_norm = h
+    if horizon is None:
+        raise SystemExit("--horizon is required for sequence training (5m or 15m)")
+    horizon_norm = horizon.strip().lower()
+    if horizon_norm not in ("5m", "15m"):
+        raise SystemExit("--horizon must be one of: 5m, 15m")
+    sequence_len = SEQ_LEN_BY_HORIZON[horizon_norm]
 
     where = [
         "sr.timestamp >= NOW() - (%s::bigint * INTERVAL '1 hour')",
         "sr.pm_market_slug IS NOT NULL",
-        "LOWER(sr.pm_market_slug) LIKE '%up%'",
-        "LOWER(sr.pm_market_slug) LIKE '%down%'",
-        """(
-            (sr.symbol = 'BTCUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%btc%' OR LOWER(sr.pm_market_slug) LIKE '%bitcoin%')) OR
-            (sr.symbol = 'ETHUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%eth%' OR LOWER(sr.pm_market_slug) LIKE '%ethereum%')) OR
-            (sr.symbol = 'SOLUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%sol%' OR LOWER(sr.pm_market_slug) LIKE '%solana%')) OR
-            (sr.symbol = 'XRPUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%xrp%' OR LOWER(sr.pm_market_slug) LIKE '%ripple%'))
-        )""",
         "ml.y_up IS NOT NULL",
-        "ml.horizon IS NOT NULL",
-        "sr.timestamp <= COALESCE(ml.resolved_at, NOW())",
+        "md.price_to_beat IS NOT NULL",
+        "md.horizon = %s",
+        "md.end_time IS NOT NULL",
+        "sr.timestamp <= md.end_time",
+        "sr.bn_mid_price IS NOT NULL",
         "sr.bn_obi_5 IS NOT NULL",
         "sr.bn_obi_10 IS NOT NULL",
         "sr.bn_spread_bps IS NOT NULL",
@@ -276,20 +337,16 @@ def fetch_from_sync_records(
         "sr.bn_price_change_1s IS NOT NULL",
         "sr.bn_price_change_5s IS NOT NULL",
     ]
-    params: List[object] = [lookback_hours]
+    params: List[object] = [lookback_hours, horizon_norm]
 
     if symbol:
         where.append("sr.symbol = %s")
         params.append(symbol.strip().upper())
-    if horizon_norm:
-        where.append("ml.horizon = %s")
-        params.append(horizon_norm)
 
     sql = f"""
     WITH market_labels AS (
       SELECT
         market_slug,
-        MAX(resolved_at) AS resolved_at,
         CASE
           WHEN SUM(CASE WHEN LOWER(outcome) LIKE '%up%' THEN 1 ELSE 0 END) > 0 THEN
             MAX(CASE WHEN LOWER(outcome) LIKE '%up%' THEN CASE WHEN settled_price > 0.5 THEN 1 ELSE 0 END END)
@@ -300,12 +357,7 @@ def fetch_from_sync_records(
           WHEN SUM(CASE WHEN LOWER(outcome) IN ('no', 'false') THEN 1 ELSE 0 END) > 0 THEN
             MAX(CASE WHEN LOWER(outcome) IN ('no', 'false') THEN CASE WHEN settled_price > 0.5 THEN 0 ELSE 1 END END)
           ELSE NULL
-        END AS y_up,
-        CASE
-          WHEN market_slug ILIKE '%15m%' OR market_slug ILIKE '%15-minute%' OR market_slug ILIKE '%15_minute%' THEN '15m'
-          WHEN market_slug ILIKE '%5m%' OR market_slug ILIKE '%5-minute%' OR market_slug ILIKE '%5_minute%' THEN '5m'
-          ELSE NULL
-        END AS horizon
+        END AS y_up
       FROM pm_token_settlements
       WHERE resolved = TRUE
         AND settled_price IS NOT NULL
@@ -314,6 +366,10 @@ def fetch_from_sync_records(
     )
     SELECT
       sr.timestamp,
+      sr.pm_market_slug,
+      md.horizon,
+      sr.symbol,
+      sr.bn_mid_price::double precision AS spot_price,
       sr.bn_obi_5::double precision AS obi5,
       sr.bn_obi_10::double precision AS obi10,
       sr.bn_spread_bps::double precision AS spread_bps,
@@ -321,18 +377,20 @@ def fetch_from_sync_records(
       sr.bn_ask_volume::double precision AS ask_volume_5,
       sr.bn_price_change_1s::double precision AS momentum_1s,
       sr.bn_price_change_5s::double precision AS momentum_5s,
+      md.price_to_beat::double precision AS price_to_beat,
+      EXTRACT(EPOCH FROM (md.end_time - sr.timestamp))::double precision AS remaining_secs,
       ml.y_up
     FROM sync_records sr
     JOIN market_labels ml
       ON ml.market_slug = sr.pm_market_slug
+    JOIN pm_market_metadata md
+      ON md.market_slug = sr.pm_market_slug
     WHERE {" AND ".join(where)}
-    ORDER BY sr.timestamp ASC
+    ORDER BY sr.pm_market_slug ASC, sr.timestamp ASC
     LIMIT {int(limit)}
     """
 
-    x: List[List[float]] = []
-    y: List[int] = []
-    ts: List[str] = []
+    rows: List[SequenceRow] = []
 
     conn = psycopg2.connect(db_url)
     try:
@@ -340,24 +398,64 @@ def fetch_from_sync_records(
             cur.execute(sql, params)
             for row in cur.fetchall():
                 timestamp = row[0]
-                feats = list(row[1:8])
-                yi = row[8]
+                market_slug = row[1]
+                horizon_value = row[2]
+                _symbol = row[3]
+                spot_price = row[4]
+                base_feats = list(row[5:12])
+                price_to_beat = row[12]
+                remaining_secs = row[13]
+                yi = row[14]
+
                 if yi not in (0, 1):
                     continue
-                if any(v is None or (isinstance(v, float) and not math.isfinite(v)) for v in feats):
+                if (
+                    market_slug is None
+                    or horizon_value not in ("5m", "15m")
+                    or spot_price is None
+                    or price_to_beat is None
+                    or remaining_secs is None
+                    or remaining_secs < 0
+                ):
                     continue
-                x.append([float(v) for v in feats])
-                y.append(int(yi))
-                if hasattr(timestamp, "isoformat"):
-                    ts.append(timestamp.replace(tzinfo=timezone.utc).isoformat())
+                if any(v is None or (isinstance(v, float) and not math.isfinite(v)) for v in base_feats):
+                    continue
+                if not isinstance(spot_price, (int, float)) or not math.isfinite(float(spot_price)):
+                    continue
+                if not isinstance(price_to_beat, (int, float)) or not math.isfinite(float(price_to_beat)):
+                    continue
+                if not isinstance(remaining_secs, (int, float)) or not math.isfinite(float(remaining_secs)):
+                    continue
+
+                spot = float(spot_price)
+                threshold = float(price_to_beat)
+                remaining = float(remaining_secs)
+                distance = 0.0 if abs(spot) < 1e-12 else (threshold - spot) / spot
+                feats = [float(v) for v in base_feats] + [spot, remaining, threshold, distance]
+
+                if hasattr(timestamp, "replace"):
+                    ts_dt = timestamp
+                    if ts_dt.tzinfo is None:
+                        ts_dt = ts_dt.replace(tzinfo=timezone.utc)
                 else:
-                    ts.append(str(timestamp))
+                    continue
+
+                rows.append(
+                    SequenceRow(
+                        market_slug=str(market_slug),
+                        horizon=str(horizon_value),
+                        ts=ts_dt,
+                        y_up=int(yi),
+                        features=feats,
+                    )
+                )
     finally:
         conn.close()
 
-    if not x:
-        raise SystemExit("no usable rows fetched from sync_records")
-    return Dataset(x=x, y=y, ts=ts)
+    if not rows:
+        raise SystemExit("no usable rows fetched from sync_records + pm_market_metadata")
+
+    return build_sequence_dataset(rows, sequence_len)
 
 
 def maybe_save_parquet(ds: Dataset, path: str) -> None:
@@ -390,6 +488,7 @@ def maybe_save_parquet(ds: Dataset, path: str) -> None:
 def train_and_export_onnx(
     train_ds: Dataset,
     test_ds: Dataset,
+    sequence_len: int,
     channels: int,
     kernel_size: int,
     dropout: float,
@@ -414,6 +513,13 @@ def train_and_export_onnx(
     random.seed(seed)
 
     in_dim = len(train_ds.x[0])
+    feature_dim = len(FEATURE_ORDER)
+    expected_dim = sequence_len * feature_dim
+    if in_dim != expected_dim:
+        raise SystemExit(
+            f"flattened input_dim mismatch: got {in_dim}, expected {expected_dim} "
+            f"(sequence_len={sequence_len}, feature_dim={feature_dim})"
+        )
     mean, std = mean_std(train_ds.x)
     x_train = zscore(train_ds.x, mean, std)
     x_test = zscore(test_ds.x, mean, std)
@@ -426,13 +532,24 @@ def train_and_export_onnx(
         raise SystemExit("--dropout must be in [0, 1)")
 
     class LobTCN(nn.Module):
-        def __init__(self, mean_vec, std_vec, ch: int, k: int, p_drop: float):
+        def __init__(
+            self,
+            mean_vec,
+            std_vec,
+            ch: int,
+            k: int,
+            p_drop: float,
+            seq_len: int,
+            feat_dim: int,
+        ):
             super().__init__()
             self.register_buffer("mean", torch.tensor(mean_vec, dtype=torch.float32))
             self.register_buffer("std", torch.tensor(std_vec, dtype=torch.float32))
+            self.seq_len = seq_len
+            self.feat_dim = feat_dim
             pad = k // 2
             self.net = nn.Sequential(
-                nn.Conv1d(1, ch, kernel_size=k, padding=pad),
+                nn.Conv1d(feat_dim, ch, kernel_size=k, padding=pad),
                 nn.GELU(),
                 nn.Dropout(p_drop),
                 nn.Conv1d(ch, ch, kernel_size=k, padding=pad),
@@ -446,13 +563,13 @@ def train_and_export_onnx(
 
         def forward(self, x):
             x = (x - self.mean) / self.std
-            x = x.unsqueeze(1)
+            x = x.view(-1, self.seq_len, self.feat_dim).transpose(1, 2).contiguous()
             h = self.net(x)
             h = self.pool(h).squeeze(-1)
             logits = self.head(h)
             return torch.sigmoid(logits)
 
-    model = LobTCN(mean, std, channels, kernel_size, dropout)
+    model = LobTCN(mean, std, channels, kernel_size, dropout, sequence_len, feature_dim)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.BCELoss()
 
@@ -517,6 +634,8 @@ def train_and_export_onnx(
     return {
         "type": "tcn_binary_classifier",
         "feature_order": FEATURE_ORDER,
+        "sequence_len": sequence_len,
+        "feature_dim": feature_dim,
         "input_dim": in_dim,
         "channels": channels,
         "kernel_size": kernel_size,
@@ -550,7 +669,7 @@ def main() -> None:
         "--horizon",
         choices=["5m", "15m"],
         default=None,
-        help="optional horizon filter for sync_records source",
+        help="horizon for sync_records sequence training (required for sync_records)",
     )
     ap.add_argument("--account-id", default=None)
     ap.add_argument("--agent-id", default=None)
@@ -573,6 +692,9 @@ def main() -> None:
 
     print(f"Fetching from DB (source={args.source})...")
     if args.source == "sync_records":
+        if args.horizon is None:
+            raise SystemExit("--horizon is required when --source=sync_records")
+        sequence_len = SEQ_LEN_BY_HORIZON[args.horizon]
         ds = fetch_from_sync_records(
             db_url=args.db_url,
             lookback_hours=args.lookback_hours,
@@ -581,6 +703,7 @@ def main() -> None:
             limit=args.limit,
         )
     else:
+        sequence_len = 1
         ds = fetch_from_order_executions(
             db_url=args.db_url,
             lookback_hours=args.lookback_hours,
@@ -600,6 +723,7 @@ def main() -> None:
     meta = train_and_export_onnx(
         train_ds=train_ds,
         test_ds=test_ds,
+        sequence_len=sequence_len,
         channels=args.channels,
         kernel_size=args.kernel_size,
         dropout=args.dropout,
@@ -628,6 +752,7 @@ def main() -> None:
     print("  PLOY_CRYPTO_LOB_ML__MODEL_TYPE=onnx")
     print(f"  PLOY_CRYPTO_LOB_ML__MODEL_PATH={args.output}")
     print("  PLOY_CRYPTO_LOB_ML__MODEL_VERSION=lob_tcn_v1")
+    print(f"  PLOY_CRYPTO_LOB_ML__MODEL_INPUT_DIM={meta['input_dim']}")
     print("  PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.10")
 
 

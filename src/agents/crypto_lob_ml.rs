@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate, SpotPrice};
 use crate::agents::{AgentContext, TradingAgent};
-use crate::collector::{LobCache, LobSnapshot};
+use crate::collector::LobCache;
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::{PloyError, Result};
