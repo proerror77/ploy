@@ -3209,65 +3209,12 @@ impl PlatformBootstrapConfig {
                 Some(v.to_string())
             };
         }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__COLLECT_ONLY_ON_MODEL_ERROR") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.collect_only_on_model_error = true,
-                "0" | "false" | "no" | "off" => {
-                    cfg.crypto_lob_ml.collect_only_on_model_error = false
-                }
-                _ => {}
-            }
-        }
         cfg.crypto_lob_ml.window_fallback_weight = env_decimal(
             "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT",
             cfg.crypto_lob_ml.window_fallback_weight,
         )
         .max(rust_decimal::Decimal::ZERO)
         .min(rust_decimal::Decimal::new(49, 2));
-
-        // Weight overrides (baseline logistic model).
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_BIAS") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() {
-                    cfg.crypto_lob_ml.weights.bias = v;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_OBI_5") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() {
-                    cfg.crypto_lob_ml.weights.w_obi_5 = v;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_OBI_10") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() {
-                    cfg.crypto_lob_ml.weights.w_obi_10 = v;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_MOMENTUM_1S") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() {
-                    cfg.crypto_lob_ml.weights.w_momentum_1s = v;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_MOMENTUM_5S") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() {
-                    cfg.crypto_lob_ml.weights.w_momentum_5s = v;
-                }
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_SPREAD_BPS") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() {
-                    cfg.crypto_lob_ml.weights.w_spread_bps = v;
-                }
-            }
-        }
 
         #[cfg(feature = "rl")]
         {
@@ -4050,18 +3997,17 @@ pub async fn start_platform(
         if lob_agent_enabled {
             if let Some(lob_cache) = lob_cache_opt.clone() {
                 let risk_params = lob_cfg.risk_params.clone();
-                let cmd_rx = coordinator.register_agent(
-                    lob_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    risk_params,
-                );
-
                 let agent = CryptoLobMlAgent::new(
                     lob_cfg.clone(),
                     binance_ws.clone(),
                     pm_ws.clone(),
                     event_matcher.clone(),
                     lob_cache,
+                )?;
+                let cmd_rx = coordinator.register_agent(
+                    lob_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                    risk_params,
                 );
                 let ctx = AgentContext::new(
                     lob_cfg.agent_id.clone(),
@@ -4352,7 +4298,6 @@ mod tests {
         let model_type_key = "PLOY_CRYPTO_LOB_ML__MODEL_TYPE";
         let model_path_key = "PLOY_CRYPTO_LOB_ML__MODEL_PATH";
         let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
-        let collect_only_key = "PLOY_CRYPTO_LOB_ML__COLLECT_ONLY_ON_MODEL_ERROR";
         let window_weight_key = "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT";
         let taker_fee_key = "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE";
         let slippage_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS";
@@ -4364,7 +4309,6 @@ mod tests {
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
         let prev_model_version = std::env::var(model_version_key).ok();
-        let prev_collect_only = std::env::var(collect_only_key).ok();
         let prev_window_weight = std::env::var(window_weight_key).ok();
         let prev_taker_fee = std::env::var(taker_fee_key).ok();
         let prev_slippage = std::env::var(slippage_key).ok();
@@ -4374,9 +4318,8 @@ mod tests {
         let prev_exit_mode = std::env::var(exit_mode_key).ok();
 
         set_env(model_type_key, Some("onnx"));
-        set_env(model_path_key, Some("/tmp/models/lob_mlp_v2.onnx"));
-        set_env(model_version_key, Some("lob_mlp_v2"));
-        set_env(collect_only_key, Some("false"));
+        set_env(model_path_key, Some("/tmp/models/lob_tcn_v2.onnx"));
+        set_env(model_version_key, Some("lob_tcn_v2"));
         set_env(window_weight_key, Some("0.15"));
         set_env(taker_fee_key, Some("0.03"));
         set_env(slippage_key, Some("12"));
@@ -4391,13 +4334,12 @@ mod tests {
         assert_eq!(cfg.crypto_lob_ml.model_type, "onnx");
         assert_eq!(
             cfg.crypto_lob_ml.model_path.as_deref(),
-            Some("/tmp/models/lob_mlp_v2.onnx")
+            Some("/tmp/models/lob_tcn_v2.onnx")
         );
         assert_eq!(
             cfg.crypto_lob_ml.model_version.as_deref(),
-            Some("lob_mlp_v2")
+            Some("lob_tcn_v2")
         );
-        assert!(!cfg.crypto_lob_ml.collect_only_on_model_error);
         assert_eq!(
             cfg.crypto_lob_ml.window_fallback_weight,
             rust_decimal::Decimal::new(15, 2)
@@ -4429,10 +4371,6 @@ mod tests {
         match prev_model_version.as_deref() {
             Some(v) => set_env(model_version_key, Some(v)),
             None => set_env(model_version_key, None),
-        }
-        match prev_collect_only.as_deref() {
-            Some(v) => set_env(collect_only_key, Some(v)),
-            None => set_env(collect_only_key, None),
         }
         match prev_window_weight.as_deref() {
             Some(v) => set_env(window_weight_key, Some(v)),

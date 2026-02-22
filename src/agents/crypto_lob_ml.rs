@@ -24,8 +24,7 @@ use crate::agents::{AgentContext, TradingAgent};
 use crate::collector::{LobCache, LobSnapshot};
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
-use crate::error::Result;
-use crate::ml::DenseNetwork;
+use crate::error::{PloyError, Result};
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
@@ -74,34 +73,6 @@ pub enum CryptoLobMlExitMode {
 fn default_exit_mode() -> CryptoLobMlExitMode {
     // Binary option architecture default: hold to settlement.
     CryptoLobMlExitMode::SettleOnly
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LobMlWeights {
-    pub bias: f64,
-    pub w_obi_5: f64,
-    pub w_obi_10: f64,
-    pub w_momentum_1s: f64,
-    pub w_momentum_5s: f64,
-    pub w_spread_bps: f64,
-}
-
-impl Default for LobMlWeights {
-    fn default() -> Self {
-        // Reasonable starting point; tune via env-config + backtests.
-        // Typical ranges:
-        // - OBI: [-1, 1]
-        // - momentum_1s: ~[-0.002, 0.002] in calm markets
-        // - spread_bps: single digits
-        Self {
-            bias: 0.0,
-            w_obi_5: 1.5,
-            w_obi_10: 0.5,
-            w_momentum_1s: 150.0,
-            w_momentum_5s: 50.0,
-            w_spread_bps: -0.01,
-        }
-    }
 }
 
 /// Configuration for the CryptoLobMlAgent
@@ -172,24 +143,17 @@ pub struct CryptoLobMlConfig {
     /// Reject LOB snapshots older than this age (seconds).
     pub max_lob_snapshot_age_secs: u64,
 
-    pub weights: LobMlWeights,
-
-    /// Prediction model type: "logistic" (default) or "mlp".
+    /// Prediction model type. Must be "onnx".
     #[serde(default = "default_lob_ml_model_type")]
     pub model_type: String,
 
-    /// Optional JSON model path used when `model_type = "mlp"`.
+    /// ONNX model path used for online inference.
     #[serde(default)]
     pub model_path: Option<String>,
 
     /// Optional model version label recorded in order metadata (helps audit).
     #[serde(default)]
     pub model_version: Option<String>,
-
-    /// If true and a trained model is requested but unavailable, run in
-    /// collect-only mode and skip entry orders.
-    #[serde(default = "default_collect_only_on_model_error")]
-    pub collect_only_on_model_error: bool,
 
     /// Safety fallback blend weight for window baseline probability.
     /// p_up = p_up_model * (1 - w_window) + p_up_window * w_window
@@ -201,11 +165,7 @@ pub struct CryptoLobMlConfig {
 }
 
 fn default_lob_ml_model_type() -> String {
-    "logistic".to_string()
-}
-
-fn default_collect_only_on_model_error() -> bool {
-    true
+    "onnx".to_string()
 }
 
 fn default_window_fallback_weight() -> Decimal {
@@ -257,11 +217,9 @@ impl Default for CryptoLobMlConfig {
             threshold_prob_weight: default_threshold_prob_weight(),
             cooldown_secs: 30,
             max_lob_snapshot_age_secs: 2,
-            weights: LobMlWeights::default(),
             model_type: default_lob_ml_model_type(),
             model_path: None,
             model_version: None,
-            collect_only_on_model_error: default_collect_only_on_model_error(),
             window_fallback_weight: default_window_fallback_weight(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
@@ -321,10 +279,8 @@ pub struct CryptoLobMlAgent {
     pm_ws: Arc<PolymarketWebSocket>,
     event_matcher: Arc<EventMatcher>,
     lob_cache: LobCache,
-    nn_model: Option<DenseNetwork>,
     #[cfg(feature = "onnx")]
     onnx_model: Option<OnnxModel>,
-    entry_trading_enabled: bool,
 }
 
 fn should_skip_entry(
@@ -484,135 +440,53 @@ impl CryptoLobMlAgent {
         pm_ws: Arc<PolymarketWebSocket>,
         event_matcher: Arc<EventMatcher>,
         lob_cache: LobCache,
-    ) -> Self {
+    ) -> Result<Self> {
         let model_type = config.model_type.trim().to_ascii_lowercase();
-        let mut model_load_failed = false;
-        let model_type_supported = matches!(
-            model_type.as_str(),
-            "logistic" | "mlp" | "mlp_json" | "onnx"
-        );
-        if !model_type_supported {
-            warn!(
-                agent = config.agent_id,
-                model_type = %model_type,
-                "unsupported model_type configured; treating as model load failure and using logistic fallback"
-            );
-            model_load_failed = true;
+        if model_type != "onnx" {
+            return Err(PloyError::Validation(format!(
+                "crypto_lob_ml only accepts model_type=onnx, got '{model_type}'"
+            )));
         }
-
-        let nn_model = if model_type == "mlp" || model_type == "mlp_json" {
-            match config.model_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => match DenseNetwork::from_file(path) {
-                    Ok(m) => {
-                        info!(
-                            agent = config.agent_id,
-                            model_type = "mlp_json",
-                            model_path = %path,
-                            input_dim = m.input_dim,
-                            output_dim = m.output_dim(),
-                            "loaded lob-ml neural model"
-                        );
-                        Some(m)
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = config.agent_id,
-                            model_type = "mlp_json",
-                            model_path = %path,
-                            error = %e,
-                            "failed to load lob-ml neural model; falling back to logistic"
-                        );
-                        model_load_failed = true;
-                        None
-                    }
-                },
-                _ => {
-                    warn!(
-                        agent = config.agent_id,
-                        model_type = "mlp_json",
-                        "model_type=mlp but model_path is not set; falling back to logistic"
-                    );
-                    model_load_failed = true;
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
         #[cfg(feature = "onnx")]
-        let onnx_model: Option<OnnxModel> = if model_type == "onnx" {
-            match config.model_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => {
-                    match OnnxModel::load_for_vec_input(path, 7) {
-                        Ok(m) => {
-                            info!(
-                                agent = config.agent_id,
-                                model_type = "onnx",
-                                model_path = %path,
-                                input_dim = m.input_dim(),
-                                output_dim = m.output_dim(),
-                                "loaded lob-ml onnx model"
-                            );
-                            Some(m)
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent = config.agent_id,
-                                model_type = "onnx",
-                                model_path = %path,
-                                error = %e,
-                                "failed to load lob-ml onnx model; falling back to logistic"
-                            );
-                            model_load_failed = true;
-                            None
-                        }
-                    }
-                }
-                _ => {
-                    warn!(
-                        agent = config.agent_id,
-                        model_type = "onnx",
-                        "model_type=onnx but model_path is not set; falling back to logistic"
-                    );
-                    model_load_failed = true;
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        {
+            let model_path = config
+                .model_path
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| {
+                    PloyError::Validation(
+                        "crypto_lob_ml requires PLOY_CRYPTO_LOB_ML__MODEL_PATH for ONNX inference"
+                            .to_string(),
+                    )
+                })?;
 
-        #[cfg(not(feature = "onnx"))]
-        if model_type == "onnx" {
-            warn!(
+            let m = OnnxModel::load_for_vec_input(model_path, 7)?;
+            info!(
                 agent = config.agent_id,
-                "model_type=onnx requested but binary is built without --features onnx; falling back to logistic"
+                model_type = "onnx",
+                model_path = %model_path,
+                input_dim = m.input_dim(),
+                output_dim = m.output_dim(),
+                "loaded lob-ml onnx model"
             );
-            model_load_failed = true;
+
+            return Ok(Self {
+                config,
+                binance_ws,
+                pm_ws,
+                event_matcher,
+                lob_cache,
+                onnx_model: Some(m),
+            });
         }
 
-        let entry_trading_enabled = if model_load_failed && config.collect_only_on_model_error {
-            warn!(
-                agent = config.agent_id,
-                requested_model_type = %model_type,
-                "trained model unavailable; switching to collect-only mode (entry orders disabled)"
-            );
-            false
-        } else {
-            true
-        };
-
-        Self {
-            config,
-            binance_ws,
-            pm_ws,
-            event_matcher,
-            lob_cache,
-            nn_model,
-            #[cfg(feature = "onnx")]
-            onnx_model,
-            entry_trading_enabled,
+        #[cfg(not(feature = "onnx"))]
+        {
+            let _ = (binance_ws, pm_ws, event_matcher, lob_cache);
+            Err(PloyError::Validation(
+                "crypto_lob_ml requires building with --features onnx".to_string(),
+            ))
         }
     }
 
@@ -623,6 +497,7 @@ impl CryptoLobMlAgent {
         format!("{:x}", hasher.finalize())
     }
 
+    #[cfg(feature = "onnx")]
     fn sigmoid(x: f64) -> f64 {
         1.0 / (1.0 + (-x).exp())
     }
@@ -654,120 +529,60 @@ impl CryptoLobMlAgent {
         Decimal::from_f64_retain(p).unwrap_or(dec!(0.50))
     }
 
-    /// Estimate p(UP) from LOB snapshot + short-horizon momentum.
-    fn estimate_p_up_logistic(
-        &self,
-        lob: &LobSnapshot,
-        momentum_1s: Decimal,
-        momentum_5s: Decimal,
-    ) -> f64 {
-        let w = &self.config.weights;
-
-        let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
-        let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
-        let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
-        let m1 = momentum_1s.to_f64().unwrap_or(0.0);
-        let m5 = momentum_5s.to_f64().unwrap_or(0.0);
-
-        let z = w.bias
-            + w.w_obi_5 * obi5
-            + w.w_obi_10 * obi10
-            + w.w_momentum_1s * m1
-            + w.w_momentum_5s * m5
-            + w.w_spread_bps * spread;
-
-        // Avoid exact 0/1 probabilities.
-        Self::sigmoid(z).clamp(0.001, 0.999)
-    }
-
-    /// Estimate p(UP) using configured model. Returns (p_up, model_type_used).
+    /// Estimate p(UP) using ONNX model. Returns (p_up, model_type_used).
     fn estimate_p_up(
         &self,
         lob: &LobSnapshot,
         momentum_1s: Decimal,
         momentum_5s: Decimal,
-    ) -> (f64, &'static str) {
-        let model_type = self.config.model_type.trim().to_ascii_lowercase();
+    ) -> Result<(f64, &'static str)> {
+        #[cfg(feature = "onnx")]
+        {
+            // Shared feature order (must match training/export):
+            // [obi5, obi10, spread_bps, bid_volume_5, ask_volume_5, momentum_1s, momentum_5s]
+            let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
+            let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
+            let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
+            let bidv5 = lob.bid_volume_5.to_f64().unwrap_or(0.0);
+            let askv5 = lob.ask_volume_5.to_f64().unwrap_or(0.0);
+            let m1 = momentum_1s.to_f64().unwrap_or(0.0);
+            let m5 = momentum_5s.to_f64().unwrap_or(0.0);
 
-        // Shared feature order (must match training/export):
-        // [obi5, obi10, spread_bps, bid_volume_5, ask_volume_5, momentum_1s, momentum_5s]
-        let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
-        let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
-        let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
-        let bidv5 = lob.bid_volume_5.to_f64().unwrap_or(0.0);
-        let askv5 = lob.ask_volume_5.to_f64().unwrap_or(0.0);
-        let m1 = momentum_1s.to_f64().unwrap_or(0.0);
-        let m5 = momentum_5s.to_f64().unwrap_or(0.0);
-
-        if model_type == "onnx" {
-            #[cfg(feature = "onnx")]
-            {
-                if let Some(m) = &self.onnx_model {
-                    let features = [
-                        obi5 as f32,
-                        obi10 as f32,
-                        spread as f32,
-                        bidv5 as f32,
-                        askv5 as f32,
-                        m1 as f32,
-                        m5 as f32,
-                    ];
-                    match m.predict_scalar(&features) {
-                        Ok(raw) if raw.is_finite() => {
-                            // Prefer probability output, but tolerate logits.
-                            let p = if raw < -0.001 || raw > 1.001 {
-                                Self::sigmoid(raw as f64)
-                            } else {
-                                raw as f64
-                            };
-                            return (p.clamp(0.001, 0.999), "onnx");
-                        }
-                        Ok(_) => {
-                            warn!(
-                                agent = self.config.agent_id,
-                                "lob-ml onnx returned non-finite output; falling back to logistic"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent = self.config.agent_id,
-                                error = %e,
-                                "lob-ml onnx inference failed; falling back to logistic"
-                            );
-                        }
-                    }
-                }
+            let m = self
+                .onnx_model
+                .as_ref()
+                .ok_or_else(|| PloyError::InvalidState("onnx model not initialized".to_string()))?;
+            let features = [
+                obi5 as f32,
+                obi10 as f32,
+                spread as f32,
+                bidv5 as f32,
+                askv5 as f32,
+                m1 as f32,
+                m5 as f32,
+            ];
+            let raw = m.predict_scalar(&features)?;
+            if !raw.is_finite() {
+                return Err(PloyError::Internal(
+                    "lob-ml onnx returned non-finite output".to_string(),
+                ));
             }
+            // Prefer probability output, but tolerate logits.
+            let p = if raw < -0.001 || raw > 1.001 {
+                Self::sigmoid(raw as f64)
+            } else {
+                raw as f64
+            };
+            return Ok((p.clamp(0.001, 0.999), "onnx"));
         }
 
-        if model_type == "mlp" || model_type == "mlp_json" {
-            if let Some(nn) = &self.nn_model {
-                // Feature order must match training/export.
-                let features = [obi5, obi10, spread, bidv5, askv5, m1, m5];
-
-                match nn.forward_scalar(&features) {
-                    Ok(p) if p.is_finite() => return (p.clamp(0.001, 0.999), "mlp_json"),
-                    Ok(_) => {
-                        warn!(
-                            agent = self.config.agent_id,
-                            "lob-ml nn returned non-finite p_up; falling back to logistic"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = self.config.agent_id,
-                            error = %e,
-                            "lob-ml nn inference failed; falling back to logistic"
-                        );
-                    }
-                }
-            }
+        #[cfg(not(feature = "onnx"))]
+        {
+            let _ = (lob, momentum_1s, momentum_5s);
+            Err(PloyError::Validation(
+                "crypto_lob_ml requires --features onnx".to_string(),
+            ))
         }
-
-        (
-            self.estimate_p_up_logistic(lob, momentum_1s, momentum_5s),
-            "logistic",
-        )
     }
 
     fn model_window_blend_weights(&self) -> (Decimal, Decimal) {
@@ -917,7 +732,6 @@ impl CryptoLobMlAgent {
 
     fn evaluate_entry_signal(
         &self,
-        model_type_used: &str,
         p_up_model_dec: Decimal,
         window: &WindowContext,
         p_up_threshold: Option<Decimal>,
@@ -980,10 +794,7 @@ impl CryptoLobMlAgent {
             return None;
         }
 
-        let mut signal_confidence = (edge / dec!(0.10)).max(Decimal::ZERO).min(Decimal::ONE);
-        if model_type_used == "logistic" {
-            signal_confidence *= dec!(0.70);
-        }
+        let signal_confidence = (edge / dec!(0.10)).max(Decimal::ZERO).min(Decimal::ONE);
 
         Some(EntrySignal {
             side,
@@ -1006,11 +817,6 @@ impl CryptoLobMlAgent {
             up_ask,
             down_ask,
         })
-    }
-
-    #[cfg(test)]
-    fn allows_entry_orders(&self) -> bool {
-        self.entry_trading_enabled
     }
 }
 
@@ -1035,11 +841,6 @@ impl TradingAgent for CryptoLobMlAgent {
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "crypto lob-ml agent starting");
         let config_hash = self.config_hash();
-        let collect_only_error = if self.entry_trading_enabled {
-            None
-        } else {
-            Some("collect_only_model_error".to_string())
-        };
 
         let mut status = AgentStatus::Running;
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
@@ -1177,8 +978,20 @@ impl TradingAgent for CryptoLobMlAgent {
                     let momentum_5s = spot.momentum(5).unwrap_or(Decimal::ZERO);
                     let rolling_volatility_opt = spot.volatility(60);
 
-                    let (p_up_model, model_type_used) =
-                        self.estimate_p_up(&lob, momentum_1s, momentum_5s);
+                    let (p_up_model, model_type_used) = match self
+                        .estimate_p_up(&lob, momentum_1s, momentum_5s)
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(
+                                agent = self.config.agent_id,
+                                symbol = %update.symbol,
+                                error = %e,
+                                "onnx inference failed, skipping this tick"
+                            );
+                            continue;
+                        }
+                    };
                     let p_up_model_dec =
                         Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
 
@@ -1231,7 +1044,6 @@ impl TradingAgent for CryptoLobMlAgent {
                             _ => continue,
                         };
                         let Some(signal) = self.evaluate_entry_signal(
-                            model_type_used,
                             p_up_model_dec,
                             &window_ctx,
                             p_up_threshold,
@@ -1357,10 +1169,6 @@ impl TradingAgent for CryptoLobMlAgent {
                                     }
                                 }
                             }
-                            continue;
-                        }
-
-                        if !self.entry_trading_enabled {
                             continue;
                         }
 
@@ -1687,10 +1495,6 @@ impl TradingAgent for CryptoLobMlAgent {
                             .await;
                             let mut metrics = HashMap::new();
                             metrics.insert(
-                                "entry_trading_enabled".to_string(),
-                                self.entry_trading_enabled.to_string(),
-                            );
-                            metrics.insert(
                                 "model_type_configured".to_string(),
                                 self.config.model_type.clone(),
                             );
@@ -1709,12 +1513,11 @@ impl TradingAgent for CryptoLobMlAgent {
                                 unrealized_pnl: Decimal::ZERO,
                                 metrics,
                                 last_heartbeat: Utc::now(),
-                                error_message: collect_only_error.clone(),
+                                error_message: None,
                             };
                             let _ = tx.send(crate::coordinator::AgentHealthResponse {
                                 snapshot,
-                                is_healthy: matches!(status, AgentStatus::Running)
-                                    && self.entry_trading_enabled,
+                                is_healthy: matches!(status, AgentStatus::Running),
                                 uptime_secs: 0,
                                 orders_submitted: 0,
                                 orders_filled: 0,
@@ -1737,10 +1540,6 @@ impl TradingAgent for CryptoLobMlAgent {
                     .await;
                     let mut metrics = HashMap::new();
                     metrics.insert(
-                        "entry_trading_enabled".to_string(),
-                        self.entry_trading_enabled.to_string(),
-                    );
-                    metrics.insert(
                         "model_type_configured".to_string(),
                         self.config.model_type.clone(),
                     );
@@ -1756,7 +1555,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         daily_pnl,
                         Decimal::ZERO,
                         metrics,
-                        collect_only_error.clone(),
+                        None,
                     ).await;
                 }
             }
@@ -1806,10 +1605,8 @@ mod tests {
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
             lob_cache: LobCache::new(),
-            nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
-            entry_trading_enabled: true,
         };
 
         let settle = mk_agent(CryptoLobMlExitMode::SettleOnly);
@@ -1826,46 +1623,33 @@ mod tests {
     }
 
     #[test]
-    fn test_probability_clamps() {
-        // Minimal snapshot just for the estimator.
-        let snap = LobSnapshot {
-            timestamp: Utc::now(),
-            symbol: "BTCUSDT".into(),
-            best_bid: dec!(1),
-            best_ask: dec!(1),
-            mid_price: dec!(1),
-            spread_bps: dec!(1),
-            obi_5: dec!(0),
-            obi_10: dec!(0),
-            bid_volume_5: dec!(1),
-            ask_volume_5: dec!(1),
-            update_id: 1,
-        };
-        let agent = CryptoLobMlAgent {
-            config: CryptoLobMlConfig::default(),
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
-            event_matcher: Arc::new(EventMatcher::new(
+    fn test_new_requires_onnx_model_type() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.model_type = "mlp_json".to_string();
+        cfg.model_path = Some("/tmp/does-not-matter.onnx".to_string());
+
+        let result = CryptoLobMlAgent::new(
+            cfg,
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
-            lob_cache: LobCache::new(),
-            nn_model: None,
-            #[cfg(feature = "onnx")]
-            onnx_model: None,
-            entry_trading_enabled: true,
-        };
-        let (p, _model) = agent.estimate_p_up(&snap, Decimal::ZERO, Decimal::ZERO);
-        assert!(p > 0.0 && p < 1.0);
+            LobCache::new(),
+        );
+        assert!(result.is_err(), "non-onnx model_type must be rejected");
+        let err = result.err().expect("result should be err");
+
+        assert!(err.to_string().contains("model_type=onnx"));
     }
 
     #[test]
-    fn test_collect_only_mode_when_trained_model_missing() {
+    fn test_new_requires_model_path() {
         let mut cfg = CryptoLobMlConfig::default();
-        cfg.model_type = "mlp".to_string();
+        cfg.model_type = "onnx".to_string();
         cfg.model_path = None;
-        cfg.collect_only_on_model_error = true;
 
-        let agent = CryptoLobMlAgent::new(
+        let result = CryptoLobMlAgent::new(
             cfg,
             Arc::new(BinanceWebSocket::new(vec![])),
             Arc::new(PolymarketWebSocket::new("wss://example.com")),
@@ -1874,45 +1658,12 @@ mod tests {
             )),
             LobCache::new(),
         );
-
-        assert!(!agent.allows_entry_orders());
-    }
-
-    #[test]
-    fn test_fallback_mode_when_collect_only_disabled() {
-        let mut cfg = CryptoLobMlConfig::default();
-        cfg.model_type = "mlp".to_string();
-        cfg.model_path = None;
-        cfg.collect_only_on_model_error = false;
-
-        let agent = CryptoLobMlAgent::new(
-            cfg,
-            Arc::new(BinanceWebSocket::new(vec![])),
-            Arc::new(PolymarketWebSocket::new("wss://example.com")),
-            Arc::new(EventMatcher::new(
-                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
-            )),
-            LobCache::new(),
-        );
-
-        assert!(agent.allows_entry_orders());
-    }
-
-    #[test]
-    fn test_invalid_model_type_defaults_to_collect_only() {
-        let mut cfg = CryptoLobMlConfig::default();
-        cfg.model_type = "onxx".to_string();
-        let agent = CryptoLobMlAgent::new(
-            cfg,
-            Arc::new(BinanceWebSocket::new(vec![])),
-            Arc::new(PolymarketWebSocket::new("wss://example.com")),
-            Arc::new(EventMatcher::new(
-                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
-            )),
-            LobCache::new(),
-        );
-
-        assert!(!agent.allows_entry_orders());
+        assert!(result.is_err(), "missing model_path must be rejected");
+        let err = result.err().expect("result should be err");
+        #[cfg(feature = "onnx")]
+        assert!(err.to_string().contains("MODEL_PATH"));
+        #[cfg(not(feature = "onnx"))]
+        assert!(err.to_string().contains("--features onnx"));
     }
 
     #[test]
@@ -1925,10 +1676,8 @@ mod tests {
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
             lob_cache: LobCache::new(),
-            nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
-            entry_trading_enabled: true,
         };
 
         let (w_model, w_window) = agent.model_window_blend_weights();
@@ -1946,15 +1695,12 @@ mod tests {
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
             lob_cache: LobCache::new(),
-            nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
-            entry_trading_enabled: true,
         };
 
         let signal = agent
             .evaluate_entry_signal(
-                "mlp_json",
                 dec!(0.62),
                 &sample_window_context(),
                 Some(dec!(0.58)),
@@ -1980,14 +1726,11 @@ mod tests {
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
             lob_cache: LobCache::new(),
-            nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
-            entry_trading_enabled: true,
         };
 
         let signal = agent.evaluate_entry_signal(
-            "mlp_json",
             dec!(0.99),
             &sample_window_context(),
             Some(dec!(0.50)),
@@ -2012,14 +1755,11 @@ mod tests {
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
             lob_cache: LobCache::new(),
-            nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
-            entry_trading_enabled: true,
         };
 
         let signal = agent.evaluate_entry_signal(
-            "mlp_json",
             dec!(0.60),
             &sample_window_context(),
             None,

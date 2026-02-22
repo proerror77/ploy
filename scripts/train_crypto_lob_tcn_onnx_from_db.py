@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-DEPRECATED: prefer `scripts/train_crypto_lob_tcn_onnx_from_db.py`.
-
-Train a small MLP (DL) to predict y_up (Polymarket official settlement) from
-Binance LOB-derived features, and export the model to ONNX.
+Train a Temporal Convolutional Network (TCN) to predict y_up
+(Polymarket official settlement) from Binance LOB-derived features,
+and export the model to ONNX.
 
 This script reads directly from Postgres (no dataset file required).
 Default source is `sync_records + pm_token_settlements`, with optional
@@ -391,7 +390,9 @@ def maybe_save_parquet(ds: Dataset, path: str) -> None:
 def train_and_export_onnx(
     train_ds: Dataset,
     test_ds: Dataset,
-    hidden: List[int],
+    channels: int,
+    kernel_size: int,
+    dropout: float,
     epochs: int,
     batch_size: int,
     lr: float,
@@ -417,27 +418,41 @@ def train_and_export_onnx(
     x_train = zscore(train_ds.x, mean, std)
     x_test = zscore(test_ds.x, mean, std)
 
-    class LobMLP(nn.Module):
-        def __init__(self, mean_vec, std_vec, hidden_dims):
+    if channels < 4:
+        raise SystemExit("--channels must be >= 4")
+    if kernel_size % 2 == 0 or kernel_size < 3:
+        raise SystemExit("--kernel-size must be odd and >= 3")
+    if not (0.0 <= dropout < 1.0):
+        raise SystemExit("--dropout must be in [0, 1)")
+
+    class LobTCN(nn.Module):
+        def __init__(self, mean_vec, std_vec, ch: int, k: int, p_drop: float):
             super().__init__()
-            # Embed normalization in the ONNX graph.
             self.register_buffer("mean", torch.tensor(mean_vec, dtype=torch.float32))
             self.register_buffer("std", torch.tensor(std_vec, dtype=torch.float32))
-            layers = []
-            prev = in_dim
-            for h in hidden_dims:
-                layers.append(nn.Linear(prev, h))
-                layers.append(nn.ReLU())
-                prev = h
-            layers.append(nn.Linear(prev, 1))  # logits
-            self.net = nn.Sequential(*layers)
+            pad = k // 2
+            self.net = nn.Sequential(
+                nn.Conv1d(1, ch, kernel_size=k, padding=pad),
+                nn.GELU(),
+                nn.Dropout(p_drop),
+                nn.Conv1d(ch, ch, kernel_size=k, padding=pad),
+                nn.GELU(),
+                nn.Dropout(p_drop),
+                nn.Conv1d(ch, ch * 2, kernel_size=k, padding=pad),
+                nn.GELU(),
+            )
+            self.pool = nn.AdaptiveAvgPool1d(1)
+            self.head = nn.Linear(ch * 2, 1)
 
         def forward(self, x):
             x = (x - self.mean) / self.std
-            logits = self.net(x)
+            x = x.unsqueeze(1)
+            h = self.net(x)
+            h = self.pool(h).squeeze(-1)
+            logits = self.head(h)
             return torch.sigmoid(logits)
 
-    model = LobMLP(mean, std, hidden)
+    model = LobTCN(mean, std, channels, kernel_size, dropout)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.BCELoss()
 
@@ -500,10 +515,12 @@ def train_and_export_onnx(
     )
 
     return {
-        "type": "mlp_binary_classifier",
+        "type": "tcn_binary_classifier",
         "feature_order": FEATURE_ORDER,
         "input_dim": in_dim,
-        "hidden": hidden,
+        "channels": channels,
+        "kernel_size": kernel_size,
+        "dropout": dropout,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "metrics": metrics,
         "note": "Model includes z-score normalization inside ONNX graph.",
@@ -511,10 +528,6 @@ def train_and_export_onnx(
 
 
 def main() -> None:
-    print(
-        "[deprecated] train_crypto_lob_mlp_onnx_from_db.py is legacy; "
-        "use train_crypto_lob_tcn_onnx_from_db.py for current production models."
-    )
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--db-url",
@@ -544,21 +557,19 @@ def main() -> None:
     ap.add_argument("--live-only", action="store_true")
     ap.add_argument("--limit", type=int, default=50000)
     ap.add_argument("--test-ratio", type=float, default=0.2)
-    ap.add_argument("--hidden", default="32,16")
+    ap.add_argument("--channels", type=int, default=32)
+    ap.add_argument("--kernel-size", type=int, default=3)
+    ap.add_argument("--dropout", type=float, default=0.10)
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch-size", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--opset", type=int, default=17)
-    ap.add_argument("--output", default="./models/crypto/lob_mlp_v1.onnx")
-    ap.add_argument("--meta", default="./models/crypto/lob_mlp_v1.meta.json")
+    ap.add_argument("--output", default="./models/crypto/lob_tcn_v1.onnx")
+    ap.add_argument("--meta", default="./models/crypto/lob_tcn_v1.meta.json")
     ap.add_argument("--save-parquet", default=None)
 
     args = ap.parse_args()
-
-    hidden = [int(s) for s in args.hidden.split(",") if s.strip()]
-    if not hidden:
-        raise SystemExit("--hidden must not be empty")
 
     print(f"Fetching from DB (source={args.source})...")
     if args.source == "sync_records":
@@ -589,7 +600,9 @@ def main() -> None:
     meta = train_and_export_onnx(
         train_ds=train_ds,
         test_ds=test_ds,
-        hidden=hidden,
+        channels=args.channels,
+        kernel_size=args.kernel_size,
+        dropout=args.dropout,
         epochs=args.epochs,
         batch_size=max(1, args.batch_size),
         lr=args.lr,
@@ -614,7 +627,7 @@ def main() -> None:
     print("  PLOY_CRYPTO_LOB_ML__ENABLED=true")
     print("  PLOY_CRYPTO_LOB_ML__MODEL_TYPE=onnx")
     print(f"  PLOY_CRYPTO_LOB_ML__MODEL_PATH={args.output}")
-    print("  PLOY_CRYPTO_LOB_ML__MODEL_VERSION=lob_mlp_v1")
+    print("  PLOY_CRYPTO_LOB_ML__MODEL_VERSION=lob_tcn_v1")
     print("  PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.10")
 
 

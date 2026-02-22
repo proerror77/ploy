@@ -16,7 +16,7 @@ Recommended split: chronological (no look-ahead leakage).
 
 NOTE: This is a legacy path (JSON weights).
 Preferred production path is ONNX:
-  - Train from DB (no dataset file): scripts/train_crypto_lob_mlp_onnx_from_db.py
+  - Train from DB (no dataset file): scripts/train_crypto_lob_tcn_onnx_from_db.py
   - Runtime inference (Rust): model_type=onnx (compiled with --features onnx)
 """
 
