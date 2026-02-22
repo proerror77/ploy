@@ -13,9 +13,9 @@ use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agent::PolymarketSportsClient;
 use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlExitMode, CryptoTradingAgent,
-    CryptoTradingConfig, PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent,
-    SportsTradingConfig, TradingAgent,
+    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
+    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent,
+    PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig, TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -3121,6 +3121,22 @@ impl PlatformBootstrapConfig {
             "PLOY_CRYPTO_LOB_ML__MAX_ENTRY_PRICE",
             cfg.crypto_lob_ml.max_entry_price,
         );
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "best_ev" | "best" => {
+                    cfg.crypto_lob_ml.entry_side_policy = CryptoLobMlEntrySidePolicy::BestEv
+                }
+                "lagging_only" | "lagging" => {
+                    cfg.crypto_lob_ml.entry_side_policy = CryptoLobMlEntrySidePolicy::LaggingOnly
+                }
+                _ => {}
+            }
+        }
+        cfg.crypto_lob_ml.entry_early_window_secs_5m = env_u64(
+            "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M",
+            cfg.crypto_lob_ml.entry_early_window_secs_5m,
+        )
+        .min(300);
         cfg.crypto_lob_ml.taker_fee_rate = env_decimal(
             "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE",
             cfg.crypto_lob_ml.taker_fee_rate,
@@ -3218,6 +3234,12 @@ impl PlatformBootstrapConfig {
         )
         .max(rust_decimal::Decimal::ZERO)
         .min(rust_decimal::Decimal::new(49, 2));
+        cfg.crypto_lob_ml.ev_exit_buffer = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER",
+            cfg.crypto_lob_ml.ev_exit_buffer,
+        )
+        .max(rust_decimal::Decimal::ZERO)
+        .min(rust_decimal::Decimal::new(50, 2));
 
         #[cfg(feature = "rl")]
         {
@@ -4302,34 +4324,43 @@ mod tests {
         let model_path_key = "PLOY_CRYPTO_LOB_ML__MODEL_PATH";
         let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
         let window_weight_key = "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT";
+        let ev_exit_buffer_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER";
         let taker_fee_key = "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE";
         let slippage_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS";
         let use_threshold_key = "PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT";
         let require_threshold_key = "PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT";
         let threshold_weight_key = "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT";
         let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
+        let entry_side_policy_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY";
+        let entry_early_window_key = "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M";
 
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
         let prev_model_version = std::env::var(model_version_key).ok();
         let prev_window_weight = std::env::var(window_weight_key).ok();
+        let prev_ev_exit_buffer = std::env::var(ev_exit_buffer_key).ok();
         let prev_taker_fee = std::env::var(taker_fee_key).ok();
         let prev_slippage = std::env::var(slippage_key).ok();
         let prev_use_threshold = std::env::var(use_threshold_key).ok();
         let prev_require_threshold = std::env::var(require_threshold_key).ok();
         let prev_threshold_weight = std::env::var(threshold_weight_key).ok();
         let prev_exit_mode = std::env::var(exit_mode_key).ok();
+        let prev_entry_side_policy = std::env::var(entry_side_policy_key).ok();
+        let prev_entry_early_window = std::env::var(entry_early_window_key).ok();
 
         set_env(model_type_key, Some("onnx"));
         set_env(model_path_key, Some("/tmp/models/lob_tcn_v2.onnx"));
         set_env(model_version_key, Some("lob_tcn_v2"));
         set_env(window_weight_key, Some("0.15"));
+        set_env(ev_exit_buffer_key, Some("0.01"));
         set_env(taker_fee_key, Some("0.03"));
         set_env(slippage_key, Some("12"));
         set_env(use_threshold_key, Some("true"));
         set_env(require_threshold_key, Some("false"));
         set_env(threshold_weight_key, Some("0.40"));
-        set_env(exit_mode_key, Some("settle_only"));
+        set_env(exit_mode_key, Some("ev_exit"));
+        set_env(entry_side_policy_key, Some("lagging_only"));
+        set_env(entry_early_window_key, Some("120"));
 
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
@@ -4348,6 +4379,10 @@ mod tests {
             rust_decimal::Decimal::new(15, 2)
         );
         assert_eq!(
+            cfg.crypto_lob_ml.ev_exit_buffer,
+            rust_decimal::Decimal::new(1, 2)
+        );
+        assert_eq!(
             cfg.crypto_lob_ml.taker_fee_rate,
             rust_decimal::Decimal::new(3, 2)
         );
@@ -4361,7 +4396,12 @@ mod tests {
             cfg.crypto_lob_ml.threshold_prob_weight,
             rust_decimal::Decimal::new(40, 2)
         );
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::SettleOnly);
+        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(
+            cfg.crypto_lob_ml.entry_side_policy,
+            CryptoLobMlEntrySidePolicy::LaggingOnly
+        );
+        assert_eq!(cfg.crypto_lob_ml.entry_early_window_secs_5m, 120);
 
         match prev_model_type.as_deref() {
             Some(v) => set_env(model_type_key, Some(v)),
@@ -4378,6 +4418,10 @@ mod tests {
         match prev_window_weight.as_deref() {
             Some(v) => set_env(window_weight_key, Some(v)),
             None => set_env(window_weight_key, None),
+        }
+        match prev_ev_exit_buffer.as_deref() {
+            Some(v) => set_env(ev_exit_buffer_key, Some(v)),
+            None => set_env(ev_exit_buffer_key, None),
         }
         match prev_taker_fee.as_deref() {
             Some(v) => set_env(taker_fee_key, Some(v)),
@@ -4402,6 +4446,14 @@ mod tests {
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),
             None => set_env(exit_mode_key, None),
+        }
+        match prev_entry_side_policy.as_deref() {
+            Some(v) => set_env(entry_side_policy_key, Some(v)),
+            None => set_env(entry_side_policy_key, None),
+        }
+        match prev_entry_early_window.as_deref() {
+            Some(v) => set_env(entry_early_window_key, Some(v)),
+            None => set_env(entry_early_window_key, None),
         }
     }
 

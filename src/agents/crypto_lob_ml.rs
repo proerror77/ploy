@@ -72,9 +72,22 @@ pub enum CryptoLobMlExitMode {
     PriceExit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoLobMlEntrySidePolicy {
+    /// Choose the side with the highest net EV.
+    BestEv,
+    /// Only consider the cheaper side (lagging price) for entry.
+    LaggingOnly,
+}
+
 fn default_exit_mode() -> CryptoLobMlExitMode {
     // Model-driven exit by default (pure ML policy).
     CryptoLobMlExitMode::EvExit
+}
+
+fn default_entry_side_policy() -> CryptoLobMlEntrySidePolicy {
+    CryptoLobMlEntrySidePolicy::LaggingOnly
 }
 
 /// Configuration for the CryptoLobMlAgent
@@ -118,6 +131,14 @@ pub struct CryptoLobMlConfig {
 
     /// Max ask price to pay for entry (YES/NO).
     pub max_entry_price: Decimal,
+
+    /// Entry-side selection policy (best_ev or lagging_only).
+    #[serde(default = "default_entry_side_policy")]
+    pub entry_side_policy: CryptoLobMlEntrySidePolicy,
+
+    /// For 5m markets, only allow entries in the first N seconds of the window.
+    #[serde(default = "default_entry_early_window_secs_5m")]
+    pub entry_early_window_secs_5m: u64,
 
     /// Taker fee rate used in net EV calculation (e.g. 0.02 = 2%).
     #[serde(default = "default_taker_fee_rate")]
@@ -163,6 +184,10 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_window_fallback_weight")]
     pub window_fallback_weight: Decimal,
 
+    /// Minimum positive EV gap required to trigger EV exit.
+    #[serde(default = "default_ev_exit_buffer")]
+    pub ev_exit_buffer: Decimal,
+
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
 }
@@ -173,6 +198,10 @@ fn default_lob_ml_model_type() -> String {
 
 fn default_window_fallback_weight() -> Decimal {
     dec!(0.10)
+}
+
+fn default_ev_exit_buffer() -> Decimal {
+    dec!(0.005)
 }
 
 fn default_taker_fee_rate() -> Decimal {
@@ -195,6 +224,10 @@ fn default_threshold_prob_weight() -> Decimal {
     dec!(0.35)
 }
 
+fn default_entry_early_window_secs_5m() -> u64 {
+    120
+}
+
 impl Default for CryptoLobMlConfig {
     fn default() -> Self {
         Self {
@@ -213,6 +246,8 @@ impl Default for CryptoLobMlConfig {
             min_hold_secs: 20,
             min_edge: dec!(0.02),
             max_entry_price: dec!(0.70),
+            entry_side_policy: default_entry_side_policy(),
+            entry_early_window_secs_5m: default_entry_early_window_secs_5m(),
             taker_fee_rate: default_taker_fee_rate(),
             entry_slippage_bps: default_entry_slippage_bps(),
             use_price_to_beat: default_use_price_to_beat(),
@@ -224,6 +259,7 @@ impl Default for CryptoLobMlConfig {
             model_path: None,
             model_version: None,
             window_fallback_weight: default_window_fallback_weight(),
+            ev_exit_buffer: default_ev_exit_buffer(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }
@@ -801,24 +837,49 @@ impl CryptoLobMlAgent {
         let down_edge_net = self.net_ev_for_binary_side(Decimal::ONE - p_up_blended, down_ask);
 
         let (side, token_id, limit_price, edge, gross_edge, fair_value) =
-            if up_edge_net >= down_edge_net {
-                (
-                    Side::Up,
-                    up_token_id.to_string(),
-                    up_ask,
-                    up_edge_net,
-                    up_edge_gross,
-                    p_up_blended,
-                )
-            } else {
-                (
-                    Side::Down,
-                    down_token_id.to_string(),
-                    down_ask,
-                    down_edge_net,
-                    down_edge_gross,
-                    Decimal::ONE - p_up_blended,
-                )
+            match self.config.entry_side_policy {
+                CryptoLobMlEntrySidePolicy::BestEv => {
+                    if up_edge_net >= down_edge_net {
+                        (
+                            Side::Up,
+                            up_token_id.to_string(),
+                            up_ask,
+                            up_edge_net,
+                            up_edge_gross,
+                            p_up_blended,
+                        )
+                    } else {
+                        (
+                            Side::Down,
+                            down_token_id.to_string(),
+                            down_ask,
+                            down_edge_net,
+                            down_edge_gross,
+                            Decimal::ONE - p_up_blended,
+                        )
+                    }
+                }
+                CryptoLobMlEntrySidePolicy::LaggingOnly => {
+                    if up_ask <= down_ask {
+                        (
+                            Side::Up,
+                            up_token_id.to_string(),
+                            up_ask,
+                            up_edge_net,
+                            up_edge_gross,
+                            p_up_blended,
+                        )
+                    } else {
+                        (
+                            Side::Down,
+                            down_token_id.to_string(),
+                            down_ask,
+                            down_edge_net,
+                            down_edge_gross,
+                            Decimal::ONE - p_up_blended,
+                        )
+                    }
+                }
             };
 
         if edge < self.config.min_edge || limit_price > self.config.max_entry_price {
@@ -1056,6 +1117,13 @@ impl TradingAgent for CryptoLobMlAgent {
                         else {
                             continue;
                         };
+                        if timeframe == "5m" && self.config.entry_early_window_secs_5m > 0 {
+                            if window_ctx.elapsed_secs as u64
+                                > self.config.entry_early_window_secs_5m
+                            {
+                                continue;
+                            }
+                        }
                         let p_up_threshold = self.estimate_p_up_threshold_anchor(
                             spot.price,
                             event.price_to_beat,
@@ -1106,7 +1174,13 @@ impl TradingAgent for CryptoLobMlAgent {
                                             Side::Up => blended.p_up_blended,
                                             Side::Down => Decimal::ONE - blended.p_up_blended,
                                         };
-                                        if bid_net >= fair_value {
+                                        let ev_buffer = self
+                                            .config
+                                            .ev_exit_buffer
+                                            .max(Decimal::ZERO)
+                                            .min(dec!(0.50));
+                                        let ev_edge = bid_net - fair_value;
+                                        if ev_edge >= ev_buffer {
                                             let exit_intent = OrderIntent::new(
                                                 &self.config.agent_id,
                                                 Domain::Crypto,
@@ -1164,8 +1238,12 @@ impl TradingAgent for CryptoLobMlAgent {
                                                     &fair_value.to_string(),
                                                 )
                                                 .with_metadata(
-                                                    "exit_ev_gap",
-                                                    &(bid_net - fair_value).to_string(),
+                                                    "exit_ev_edge",
+                                                    &ev_edge.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_ev_buffer",
+                                                    &ev_buffer.to_string(),
                                                 )
                                                 .with_metadata(
                                                     "held_secs",
@@ -1413,6 +1491,13 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("timeframe", &timeframe)
                         .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("signal_type", "crypto_lob_ml_entry")
+                        .with_metadata(
+                            "entry_side_policy",
+                            match self.config.entry_side_policy {
+                                CryptoLobMlEntrySidePolicy::BestEv => "best_ev",
+                                CryptoLobMlEntrySidePolicy::LaggingOnly => "lagging_only",
+                            },
+                        )
                         .with_metadata("coin", &coin)
                         .with_metadata("symbol", &update.symbol)
                         .with_metadata("condition_id", &event.condition_id)
@@ -1803,6 +1888,12 @@ mod tests {
         assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
         assert_eq!(cfg.max_time_remaining_secs, 900);
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(
+            cfg.entry_side_policy,
+            CryptoLobMlEntrySidePolicy::LaggingOnly
+        );
+        assert_eq!(cfg.entry_early_window_secs_5m, 120);
+        assert_eq!(cfg.ev_exit_buffer, dec!(0.005));
         assert_eq!(cfg.min_hold_secs, 20);
         assert!(cfg.prefer_close_to_end);
     }
@@ -1909,7 +2000,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_entry_signal_prefers_higher_edge() {
+    fn test_evaluate_entry_signal_uses_lagging_side_default() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
             binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
@@ -1922,12 +2013,14 @@ mod tests {
             onnx_model: None,
         };
 
-        let blended = sample_blended_prob(&agent);
+        let blended = agent
+            .compute_blended_probability(dec!(0.40), &sample_window_context(), Some(dec!(0.42)))
+            .expect("blended probability should be available");
         let signal = agent
             .evaluate_entry_signal(
                 &blended,
                 &sample_window_context(),
-                Some(dec!(0.58)),
+                Some(dec!(0.42)),
                 "up-token",
                 "down-token",
                 dec!(0.52),
@@ -1935,8 +2028,8 @@ mod tests {
             )
             .expect("signal should pass filters");
 
-        assert_eq!(signal.side, Side::Up);
-        assert_eq!(signal.token_id, "up-token");
+        assert_eq!(signal.side, Side::Down);
+        assert_eq!(signal.token_id, "down-token");
         assert!(signal.edge >= dec!(0.02));
     }
 
