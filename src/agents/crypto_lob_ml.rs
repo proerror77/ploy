@@ -64,6 +64,8 @@ fn default_exit_price_band() -> Decimal {
 pub enum CryptoLobMlExitMode {
     /// Hold position until market settlement.
     SettleOnly,
+    /// Exit when model says current market is overpriced (EV turns negative).
+    EvExit,
     /// Exit when model side flips (after min hold time).
     SignalFlip,
     /// Exit on mark-to-market price thresholds.
@@ -71,8 +73,8 @@ pub enum CryptoLobMlExitMode {
 }
 
 fn default_exit_mode() -> CryptoLobMlExitMode {
-    // Binary option architecture default: hold to settlement.
-    CryptoLobMlExitMode::SettleOnly
+    // Model-driven exit by default (pure ML policy).
+    CryptoLobMlExitMode::EvExit
 }
 
 /// Configuration for the CryptoLobMlAgent
@@ -102,6 +104,7 @@ pub struct CryptoLobMlConfig {
     pub exit_price_band: Decimal,
     /// Exit policy:
     /// - settle_only: hold until settlement
+    /// - ev_exit: exit when model EV turns negative
     /// - signal_flip: exit on side flip
     /// - price_exit: exit on mark-to-market thresholds
     #[serde(default = "default_exit_mode")]
@@ -248,6 +251,14 @@ struct WindowContext {
     elapsed_secs: i64,
     remaining_secs: i64,
     p_up_window: Decimal,
+}
+
+#[derive(Debug, Clone)]
+struct BlendedProb {
+    p_up_blended: Decimal,
+    w_threshold: Decimal,
+    w_model: Decimal,
+    w_window: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +618,10 @@ impl CryptoLobMlAgent {
         matches!(self.config.exit_mode, CryptoLobMlExitMode::SignalFlip)
     }
 
+    fn allows_ev_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::EvExit)
+    }
+
     fn allows_price_exit(&self) -> bool {
         matches!(self.config.exit_mode, CryptoLobMlExitMode::PriceExit)
     }
@@ -614,6 +629,7 @@ impl CryptoLobMlAgent {
     fn exit_mode_label(&self) -> &'static str {
         match self.config.exit_mode {
             CryptoLobMlExitMode::SettleOnly => "settle_only",
+            CryptoLobMlExitMode::EvExit => "ev_exit",
             CryptoLobMlExitMode::SignalFlip => "signal_flip",
             CryptoLobMlExitMode::PriceExit => "price_exit",
         }
@@ -730,20 +746,12 @@ impl CryptoLobMlAgent {
         })
     }
 
-    fn evaluate_entry_signal(
+    fn compute_blended_probability(
         &self,
         p_up_model_dec: Decimal,
         window: &WindowContext,
         p_up_threshold: Option<Decimal>,
-        up_token_id: &str,
-        down_token_id: &str,
-        up_ask: Decimal,
-        down_ask: Decimal,
-    ) -> Option<EntrySignal> {
-        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
-            return None;
-        }
-
+    ) -> Option<BlendedProb> {
         let (w_model, w_window) = self.model_window_blend_weights();
         let p_up_base = (window.p_up_window * w_window + p_up_model_dec * w_model)
             .max(dec!(0.001))
@@ -764,6 +772,29 @@ impl CryptoLobMlAgent {
             p_up_base
         };
 
+        Some(BlendedProb {
+            p_up_blended,
+            w_threshold,
+            w_model,
+            w_window,
+        })
+    }
+
+    fn evaluate_entry_signal(
+        &self,
+        blended: &BlendedProb,
+        window: &WindowContext,
+        p_up_threshold: Option<Decimal>,
+        up_token_id: &str,
+        down_token_id: &str,
+        up_ask: Decimal,
+        down_ask: Decimal,
+    ) -> Option<EntrySignal> {
+        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+            return None;
+        }
+
+        let p_up_blended = blended.p_up_blended;
         let up_edge_gross = p_up_blended - up_ask;
         let down_edge_gross = (Decimal::ONE - p_up_blended) - down_ask;
         let up_edge_net = self.net_ev_for_binary_side(p_up_blended, up_ask);
@@ -807,9 +838,9 @@ impl CryptoLobMlAgent {
             p_up_window: window.p_up_window,
             p_up_threshold,
             p_up_blended,
-            w_threshold,
-            w_model,
-            w_window,
+            w_threshold: blended.w_threshold,
+            w_model: blended.w_model,
+            w_window: blended.w_window,
             up_edge_gross,
             down_edge_gross,
             up_edge_net,
@@ -1034,7 +1065,7 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
-                        let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
+                        let (up_bid, up_ask, down_bid, down_ask) = match (up, down) {
                             (Some(uq), Some(dq)) => (
                                 uq.best_bid.unwrap_or(Decimal::ZERO),
                                 uq.best_ask.unwrap_or(Decimal::ZERO),
@@ -1043,8 +1074,303 @@ impl TradingAgent for CryptoLobMlAgent {
                             ),
                             _ => continue,
                         };
-                        let Some(signal) = self.evaluate_entry_signal(
+                        let Some(blended) = self.compute_blended_probability(
                             p_up_model_dec,
+                            &window_ctx,
+                            p_up_threshold,
+                        ) else {
+                            continue;
+                        };
+
+                        if let Some(pos) = positions.get(&event.slug).cloned() {
+                            if self.allows_ev_exit() {
+                                let held_secs = Utc::now()
+                                    .signed_duration_since(pos.entry_time)
+                                    .num_seconds();
+                                if held_secs >= self.config.min_hold_secs as i64 {
+                                    let held_bid = match pos.side {
+                                        Side::Up => up_bid,
+                                        Side::Down => down_bid,
+                                    };
+                                    if held_bid > Decimal::ZERO {
+                                        let fee_rate = self
+                                            .config
+                                            .taker_fee_rate
+                                            .max(Decimal::ZERO)
+                                            .min(dec!(0.25));
+                                        let bid_net =
+                                            (held_bid * (Decimal::ONE - fee_rate))
+                                                .max(Decimal::ZERO)
+                                                .min(dec!(0.999));
+                                        let fair_value = match pos.side {
+                                            Side::Up => blended.p_up_blended,
+                                            Side::Down => Decimal::ONE - blended.p_up_blended,
+                                        };
+                                        if bid_net >= fair_value {
+                                            let exit_intent = OrderIntent::new(
+                                                &self.config.agent_id,
+                                                Domain::Crypto,
+                                                &pos.market_slug,
+                                                &pos.token_id,
+                                                pos.side,
+                                                false,
+                                                pos.shares,
+                                                held_bid,
+                                            );
+                                            let position_coin = pos.symbol.replace("USDT", "");
+                                            let deployment_id = deployment_id_for(
+                                                STRATEGY_ID,
+                                                &position_coin,
+                                                &pos.horizon,
+                                            );
+                                            let timeframe = normalize_timeframe(&pos.horizon);
+                                            let event_window_secs =
+                                                event_window_secs_for_horizon(&timeframe)
+                                                    .to_string();
+                                            let exit_intent = exit_intent
+                                                .with_priority(OrderPriority::High)
+                                                .with_metadata("strategy", STRATEGY_ID)
+                                                .with_metadata("deployment_id", &deployment_id)
+                                                .with_metadata("timeframe", &timeframe)
+                                                .with_metadata(
+                                                    "event_window_secs",
+                                                    &event_window_secs,
+                                                )
+                                                .with_metadata(
+                                                    "signal_type",
+                                                    "crypto_lob_ml_exit",
+                                                )
+                                                .with_metadata("coin", &position_coin)
+                                                .with_metadata("symbol", &pos.symbol)
+                                                .with_metadata("series_id", &pos.series_id)
+                                                .with_metadata("event_series_id", &pos.series_id)
+                                                .with_metadata("horizon", &pos.horizon)
+                                                .with_metadata("exit_mode", self.exit_mode_label())
+                                                .with_metadata("exit_reason", "model_ev")
+                                                .with_metadata(
+                                                    "entry_price",
+                                                    &pos.entry_price.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_price",
+                                                    &held_bid.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_bid_net",
+                                                    &bid_net.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_fair_value",
+                                                    &fair_value.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_ev_gap",
+                                                    &(bid_net - fair_value).to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "held_secs",
+                                                    &held_secs.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_model",
+                                                    &format!("{p_up_model:.6}"),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_window",
+                                                    &window_ctx.p_up_window.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_threshold",
+                                                    &p_up_threshold
+                                                        .unwrap_or(dec!(0.5))
+                                                        .to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blended",
+                                                    &blended.p_up_blended.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blend_w_threshold",
+                                                    &blended.w_threshold.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blend_w_model",
+                                                    &blended.w_model.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blend_w_window",
+                                                    &blended.w_window.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "cost_taker_fee_rate",
+                                                    &self.config.taker_fee_rate.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "config_hash",
+                                                    &config_hash,
+                                                );
+
+                                            match ctx.submit_order(exit_intent).await {
+                                                Ok(()) => {
+                                                    info!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        side = %pos.side,
+                                                        held_secs,
+                                                        fair_value = %fair_value,
+                                                        bid_net = %bid_net,
+                                                        "model EV exit triggered, submitting sell order"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        error = %e,
+                                                        "failed to submit model-EV exit order"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if self.allows_signal_flip_exit() {
+                                let Some(signal) = self.evaluate_entry_signal(
+                                    &blended,
+                                    &window_ctx,
+                                    p_up_threshold,
+                                    &event.up_token_id,
+                                    &event.down_token_id,
+                                    up_ask,
+                                    down_ask,
+                                ) else {
+                                    continue;
+                                };
+                                if pos.side != signal.side {
+                                    let held_secs =
+                                        Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                                    if held_secs >= self.config.min_hold_secs as i64 {
+                                        let exit_price = quote_cache
+                                            .get(&pos.token_id)
+                                            .and_then(|q| q.best_bid)
+                                            .unwrap_or(Decimal::ZERO);
+
+                                        if exit_price > Decimal::ZERO {
+                                            let exit_intent = OrderIntent::new(
+                                                &self.config.agent_id,
+                                                Domain::Crypto,
+                                                &pos.market_slug,
+                                                &pos.token_id,
+                                                pos.side,
+                                                false,
+                                                pos.shares,
+                                                exit_price,
+                                            );
+                                            let position_coin = pos.symbol.replace("USDT", "");
+                                            let deployment_id = deployment_id_for(
+                                                STRATEGY_ID,
+                                                &position_coin,
+                                                &pos.horizon,
+                                            );
+                                            let timeframe = normalize_timeframe(&pos.horizon);
+                                            let event_window_secs =
+                                                event_window_secs_for_horizon(&timeframe).to_string();
+                                            let exit_intent = exit_intent
+                                            .with_priority(OrderPriority::High)
+                                            .with_metadata("strategy", STRATEGY_ID)
+                                            .with_metadata("deployment_id", &deployment_id)
+                                            .with_metadata("timeframe", &timeframe)
+                                            .with_metadata("event_window_secs", &event_window_secs)
+                                            .with_metadata("signal_type", "crypto_lob_ml_exit")
+                                            .with_metadata("coin", &position_coin)
+                                            .with_metadata("symbol", &pos.symbol)
+                                            .with_metadata("series_id", &pos.series_id)
+                                            .with_metadata("event_series_id", &pos.series_id)
+                                            .with_metadata("horizon", &pos.horizon)
+                                            .with_metadata("exit_mode", self.exit_mode_label())
+                                            .with_metadata("exit_reason", "signal_flip")
+                                            .with_metadata("entry_price", &pos.entry_price.to_string())
+                                            .with_metadata("exit_price", &exit_price.to_string())
+                                            .with_metadata("held_secs", &held_secs.to_string())
+                                            .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
+                                            .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                                            .with_metadata(
+                                                "p_up_threshold",
+                                                &signal
+                                                    .p_up_threshold
+                                                    .unwrap_or(dec!(0.5))
+                                                    .to_string(),
+                                            )
+                                            .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                                            .with_metadata(
+                                                "p_up_blend_w_threshold",
+                                                &signal.w_threshold.to_string(),
+                                            )
+                                            .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
+                                            .with_metadata(
+                                                "p_up_blend_w_window",
+                                                &signal.w_window.to_string(),
+                                            )
+                                            .with_metadata("signal_edge", &signal.edge.to_string())
+                                            .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
+                                            .with_metadata(
+                                                "signal_up_edge_gross",
+                                                &signal.up_edge_gross.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "signal_down_edge_gross",
+                                                &signal.down_edge_gross.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "signal_up_edge_net",
+                                                &signal.up_edge_net.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "signal_down_edge_net",
+                                                &signal.down_edge_net.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "cost_taker_fee_rate",
+                                                &self.config.taker_fee_rate.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "cost_entry_slippage_bps",
+                                                &self.config.entry_slippage_bps.to_string(),
+                                            )
+                                            .with_metadata("config_hash", &config_hash);
+
+                                            match ctx.submit_order(exit_intent).await {
+                                                Ok(()) => {
+                                                    info!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        old_side = %pos.side,
+                                                        new_side = %signal.side,
+                                                        held_secs,
+                                                        p_up = %signal.p_up_blended,
+                                                        "signal flip detected, submitting sell order"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        error = %e,
+                                                        "failed to submit signal-flip exit order"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        let Some(signal) = self.evaluate_entry_signal(
+                            &blended,
                             &window_ctx,
                             p_up_threshold,
                             &event.up_token_id,
@@ -1054,123 +1380,6 @@ impl TradingAgent for CryptoLobMlAgent {
                         ) else {
                             continue;
                         };
-
-                        if let Some(pos) = positions.get(&event.slug).cloned() {
-                            if pos.side != signal.side && self.allows_signal_flip_exit() {
-                                let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
-                                if held_secs >= self.config.min_hold_secs as i64 {
-                                    let exit_price = quote_cache
-                                        .get(&pos.token_id)
-                                        .and_then(|q| q.best_bid)
-                                        .unwrap_or(Decimal::ZERO);
-
-                                    if exit_price > Decimal::ZERO {
-                                        let exit_intent = OrderIntent::new(
-                                            &self.config.agent_id,
-                                            Domain::Crypto,
-                                            &pos.market_slug,
-                                            &pos.token_id,
-                                            pos.side,
-                                            false,
-                                            pos.shares,
-                                            exit_price,
-                                        );
-                                        let position_coin = pos.symbol.replace("USDT", "");
-                                        let deployment_id =
-                                            deployment_id_for(STRATEGY_ID, &position_coin, &pos.horizon);
-                                        let timeframe = normalize_timeframe(&pos.horizon);
-                                        let event_window_secs =
-                                            event_window_secs_for_horizon(&timeframe).to_string();
-                                        let exit_intent = exit_intent
-                                        .with_priority(OrderPriority::High)
-                                        .with_metadata("strategy", STRATEGY_ID)
-                                        .with_metadata("deployment_id", &deployment_id)
-                                        .with_metadata("timeframe", &timeframe)
-                                        .with_metadata("event_window_secs", &event_window_secs)
-                                        .with_metadata("signal_type", "crypto_lob_ml_exit")
-                                        .with_metadata("coin", &position_coin)
-                                        .with_metadata("symbol", &pos.symbol)
-                                        .with_metadata("series_id", &pos.series_id)
-                                        .with_metadata("event_series_id", &pos.series_id)
-                                        .with_metadata("horizon", &pos.horizon)
-                                        .with_metadata("exit_mode", self.exit_mode_label())
-                                        .with_metadata("exit_reason", "signal_flip")
-                                        .with_metadata("entry_price", &pos.entry_price.to_string())
-                                        .with_metadata("exit_price", &exit_price.to_string())
-                                        .with_metadata("held_secs", &held_secs.to_string())
-                                        .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                                        .with_metadata("p_up_window", &signal.p_up_window.to_string())
-                                        .with_metadata(
-                                            "p_up_threshold",
-                                            &signal
-                                                .p_up_threshold
-                                                .unwrap_or(dec!(0.5))
-                                                .to_string(),
-                                        )
-                                        .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
-                                        .with_metadata(
-                                            "p_up_blend_w_threshold",
-                                            &signal.w_threshold.to_string(),
-                                        )
-                                        .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
-                                        .with_metadata(
-                                            "p_up_blend_w_window",
-                                            &signal.w_window.to_string(),
-                                        )
-                                        .with_metadata("signal_edge", &signal.edge.to_string())
-                                        .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
-                                        .with_metadata(
-                                            "signal_up_edge_gross",
-                                            &signal.up_edge_gross.to_string(),
-                                        )
-                                        .with_metadata(
-                                            "signal_down_edge_gross",
-                                            &signal.down_edge_gross.to_string(),
-                                        )
-                                        .with_metadata(
-                                            "signal_up_edge_net",
-                                            &signal.up_edge_net.to_string(),
-                                        )
-                                        .with_metadata(
-                                            "signal_down_edge_net",
-                                            &signal.down_edge_net.to_string(),
-                                        )
-                                        .with_metadata(
-                                            "cost_taker_fee_rate",
-                                            &self.config.taker_fee_rate.to_string(),
-                                        )
-                                        .with_metadata(
-                                            "cost_entry_slippage_bps",
-                                            &self.config.entry_slippage_bps.to_string(),
-                                        )
-                                        .with_metadata("config_hash", &config_hash);
-
-                                        match ctx.submit_order(exit_intent).await {
-                                            Ok(()) => {
-                                                info!(
-                                                    agent = self.config.agent_id,
-                                                    slug = %event.slug,
-                                                    old_side = %pos.side,
-                                                    new_side = %signal.side,
-                                                    held_secs,
-                                                    p_up = %signal.p_up_blended,
-                                                    "signal flip detected, submitting sell order"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                warn!(
-                                                    agent = self.config.agent_id,
-                                                    slug = %event.slug,
-                                                    error = %e,
-                                                    "failed to submit signal-flip exit order"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            continue;
-                        }
 
                         if should_skip_entry(
                             &event.slug,
@@ -1581,13 +1790,19 @@ mod tests {
         }
     }
 
+    fn sample_blended_prob(agent: &CryptoLobMlAgent) -> BlendedProb {
+        agent
+            .compute_blended_probability(dec!(0.62), &sample_window_context(), Some(dec!(0.58)))
+            .expect("blended probability should be available")
+    }
+
     #[test]
     fn test_config_defaults() {
         let cfg = CryptoLobMlConfig::default();
         assert_eq!(cfg.agent_id, "crypto_lob_ml");
         assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
         assert_eq!(cfg.max_time_remaining_secs, 900);
-        assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::SettleOnly);
+        assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(cfg.min_hold_secs, 20);
         assert!(cfg.prefer_close_to_end);
     }
@@ -1611,14 +1826,22 @@ mod tests {
 
         let settle = mk_agent(CryptoLobMlExitMode::SettleOnly);
         assert!(!settle.allows_signal_flip_exit());
+        assert!(!settle.allows_ev_exit());
         assert!(!settle.allows_price_exit());
+
+        let ev_exit = mk_agent(CryptoLobMlExitMode::EvExit);
+        assert!(!ev_exit.allows_signal_flip_exit());
+        assert!(ev_exit.allows_ev_exit());
+        assert!(!ev_exit.allows_price_exit());
 
         let flip = mk_agent(CryptoLobMlExitMode::SignalFlip);
         assert!(flip.allows_signal_flip_exit());
+        assert!(!flip.allows_ev_exit());
         assert!(!flip.allows_price_exit());
 
         let price = mk_agent(CryptoLobMlExitMode::PriceExit);
         assert!(!price.allows_signal_flip_exit());
+        assert!(!price.allows_ev_exit());
         assert!(price.allows_price_exit());
     }
 
@@ -1699,9 +1922,10 @@ mod tests {
             onnx_model: None,
         };
 
+        let blended = sample_blended_prob(&agent);
         let signal = agent
             .evaluate_entry_signal(
-                dec!(0.62),
+                &blended,
                 &sample_window_context(),
                 Some(dec!(0.58)),
                 "up-token",
@@ -1730,8 +1954,9 @@ mod tests {
             onnx_model: None,
         };
 
+        let blended = sample_blended_prob(&agent);
         let signal = agent.evaluate_entry_signal(
-            dec!(0.99),
+            &blended,
             &sample_window_context(),
             Some(dec!(0.50)),
             "up-token",
@@ -1759,16 +1984,8 @@ mod tests {
             onnx_model: None,
         };
 
-        let signal = agent.evaluate_entry_signal(
-            dec!(0.60),
-            &sample_window_context(),
-            None,
-            "up-token",
-            "down-token",
-            dec!(0.51),
-            dec!(0.49),
-        );
-        assert!(signal.is_none());
+        let blended = agent.compute_blended_probability(dec!(0.60), &sample_window_context(), None);
+        assert!(blended.is_none());
     }
 
     #[test]

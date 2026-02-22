@@ -3089,6 +3089,9 @@ impl PlatformBootstrapConfig {
                 "settle_only" | "settle" => {
                     cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SettleOnly
                 }
+                "ev_exit" | "ev" | "model_ev" => {
+                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::EvExit
+                }
                 "signal_flip" | "flip" => {
                     cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SignalFlip
                 }
