@@ -4,6 +4,9 @@
 //! updates to MarketUpdate events for the StrategyManager.
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +23,142 @@ use crate::error::Result;
 
 const MAX_EVENTS_PER_SERIES: usize = 6;
 const POLYMARKET_REFRESH_SECS: u64 = 30;
+
+fn infer_symbol_from_text(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("bitcoin") || lower.contains("btc") {
+        Some("BTCUSDT")
+    } else if lower.contains("ethereum") || lower.contains("eth") {
+        Some("ETHUSDT")
+    } else if lower.contains("solana") || lower.contains("sol") {
+        Some("SOLUSDT")
+    } else if lower.contains("ripple") || lower.contains("xrp") {
+        Some("XRPUSDT")
+    } else {
+        None
+    }
+}
+
+fn infer_horizon_from_text(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("15m")
+        || lower.contains("15-minute")
+        || lower.contains("15 minute")
+        || lower.contains("15min")
+        || lower.contains("15 min")
+    {
+        Some("15m")
+    } else if lower.contains("5m")
+        || lower.contains("5-minute")
+        || lower.contains("5 minute")
+        || lower.contains("5min")
+        || lower.contains("5 min")
+    {
+        Some("5m")
+    } else {
+        None
+    }
+}
+
+fn apply_dimension_candidate(
+    text: &str,
+    symbol: &mut Option<String>,
+    horizon: &mut Option<String>,
+) {
+    if symbol.is_none() {
+        if let Some(s) = infer_symbol_from_text(text) {
+            *symbol = Some(s.to_string());
+        }
+    }
+    if horizon.is_none() {
+        if let Some(h) = infer_horizon_from_text(text) {
+            *horizon = Some(h.to_string());
+        }
+    }
+}
+
+fn infer_symbol_horizon_from_event(
+    details: &crate::adapters::polymarket_clob::GammaEventInfo,
+) -> (Option<String>, Option<String>) {
+    let mut symbol: Option<String> = None;
+    let mut horizon: Option<String> = None;
+
+    if let Some(slug) = details.slug.as_deref() {
+        apply_dimension_candidate(slug, &mut symbol, &mut horizon);
+    }
+    if let Some(title) = details.title.as_deref() {
+        apply_dimension_candidate(title, &mut symbol, &mut horizon);
+    }
+
+    for market in &details.markets {
+        if let Some(group_title) = market.group_item_title.as_deref() {
+            apply_dimension_candidate(group_title, &mut symbol, &mut horizon);
+        }
+        if let Some(question) = market.question.as_deref() {
+            apply_dimension_candidate(question, &mut symbol, &mut horizon);
+        }
+        if symbol.is_some() && horizon.is_some() {
+            break;
+        }
+    }
+
+    (symbol, horizon)
+}
+
+fn parse_rfc3339_utc(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+async fn upsert_pm_market_metadata(
+    pool: Option<&PgPool>,
+    details: &crate::adapters::polymarket_clob::GammaEventInfo,
+    price_to_beat: rust_decimal::Decimal,
+    end_time: DateTime<Utc>,
+) -> Result<()> {
+    let Some(pool) = pool else {
+        return Ok(());
+    };
+
+    let market_slug = details.slug.clone().unwrap_or_else(|| details.id.clone());
+    let start_time = parse_rfc3339_utc(details.start_time.as_deref());
+    let (symbol, horizon) = infer_symbol_horizon_from_event(details);
+    let raw_market: Value = serde_json::to_value(details).unwrap_or_else(|_| Value::Null);
+
+    // Keep dataset clean for sequence training alignment: crypto symbols + 5m/15m only.
+    let (Some(symbol), Some(horizon)) = (symbol, horizon) else {
+        return Ok(());
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO pm_market_metadata (
+            market_slug, price_to_beat, start_time, end_time, horizon, symbol, raw_market, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        ON CONFLICT (market_slug) DO UPDATE SET
+            price_to_beat = EXCLUDED.price_to_beat,
+            start_time = COALESCE(EXCLUDED.start_time, pm_market_metadata.start_time),
+            end_time = COALESCE(EXCLUDED.end_time, pm_market_metadata.end_time),
+            horizon = COALESCE(EXCLUDED.horizon, pm_market_metadata.horizon),
+            symbol = COALESCE(EXCLUDED.symbol, pm_market_metadata.symbol),
+            raw_market = COALESCE(EXCLUDED.raw_market, pm_market_metadata.raw_market),
+            updated_at = NOW()
+        "#,
+    )
+    .bind(market_slug)
+    .bind(price_to_beat)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(horizon)
+    .bind(symbol)
+    .bind(raw_market)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
 
 fn parse_price_from_question(question: &str) -> Option<rust_decimal::Decimal> {
     // Intentionally strict: avoid mis-parsing dates/times in "Up or Down" titles.
@@ -70,6 +209,8 @@ pub struct DataFeedManager {
     active_feeds: Arc<RwLock<Vec<DataFeed>>>,
     /// Latest discovered events per series (bounded, for refresh + token reconciliation)
     series_events: Arc<RwLock<HashMap<String, HashMap<String, DiscoveredEvent>>>>,
+    /// Optional DB pool used to persist normalized market metadata for model training.
+    metadata_pool: Option<Arc<PgPool>>,
 }
 
 /// Mapping from token to event info
@@ -94,6 +235,16 @@ struct DiscoveredEvent {
 impl DataFeedManager {
     /// Create a new DataFeedManager
     pub fn new(manager: Arc<StrategyManager>) -> Self {
+        let metadata_pool = std::env::var("PLOY_DATABASE__URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+            .and_then(|url| {
+                PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect_lazy(&url)
+                    .ok()
+            })
+            .map(Arc::new);
         Self {
             manager,
             binance_ws: None,
@@ -107,6 +258,7 @@ impl DataFeedManager {
             token_events: Arc::new(RwLock::new(HashMap::new())),
             active_feeds: Arc::new(RwLock::new(Vec::new())),
             series_events: Arc::new(RwLock::new(HashMap::new())),
+            metadata_pool,
         }
     }
 
@@ -509,6 +661,26 @@ impl DataFeedManager {
                         let (Some(up_token), Some(down_token)) = (up_token, down_token) else {
                             continue;
                         };
+                        let Some(price_to_beat) = price_to_beat else {
+                            // Keep only events with explicit threshold to align labels/features.
+                            continue;
+                        };
+
+                        if let Err(e) = upsert_pm_market_metadata(
+                            self.metadata_pool.as_deref(),
+                            &details,
+                            price_to_beat,
+                            end_time,
+                        )
+                        .await
+                        {
+                            warn!(
+                                series_id = %series_id,
+                                event_id = %details.id,
+                                error = %e,
+                                "failed to upsert pm_market_metadata"
+                            );
+                        }
 
                         if let Some(ref pm_ws) = self.polymarket_ws {
                             pm_ws.register_token(&up_token, Side::Up).await;
@@ -521,7 +693,7 @@ impl DataFeedManager {
                             up_token: up_token.clone(),
                             down_token: down_token.clone(),
                             end_time,
-                            price_to_beat,
+                            price_to_beat: Some(price_to_beat),
                             title: title.clone(),
                         };
 
@@ -669,6 +841,7 @@ impl DataFeedManager {
 
         let manager = self.manager.clone();
         let series_events = self.series_events.clone();
+        let metadata_pool = self.metadata_pool.clone();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(POLYMARKET_REFRESH_SECS));
@@ -785,6 +958,25 @@ impl DataFeedManager {
                         let (Some(up_token), Some(down_token)) = (up_token, down_token) else {
                             continue;
                         };
+                        let Some(price_to_beat) = price_to_beat else {
+                            continue;
+                        };
+
+                        if let Err(e) = upsert_pm_market_metadata(
+                            metadata_pool.as_deref(),
+                            &details,
+                            price_to_beat,
+                            end_time,
+                        )
+                        .await
+                        {
+                            warn!(
+                                series_id = %series_id,
+                                event_id = %details.id,
+                                error = %e,
+                                "failed to upsert pm_market_metadata"
+                            );
+                        }
 
                         pm_ws
                             .register_token(&up_token, crate::domain::Side::Up)
@@ -801,7 +993,7 @@ impl DataFeedManager {
                                 up_token,
                                 down_token,
                                 end_time,
-                                price_to_beat,
+                                price_to_beat: Some(price_to_beat),
                                 title,
                             },
                         );
