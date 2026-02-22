@@ -234,7 +234,7 @@ cd "$REMOTE_ROOT"
 #
 # NOTE: This host is intentionally small; release LTO + single codegen unit
 # can OOM and stall deploys. Prefer faster/lower-memory release settings.
-features="${PLOY_CARGO_FEATURES:-onnx}"
+features="${PLOY_CARGO_FEATURES:-onnx,api}"
 if [[ -n "$features" ]]; then
   CARGO_PROFILE_RELEASE_LTO=off \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \

@@ -14,8 +14,8 @@ Environment=LOG_DIR=/opt/ploy/logs
 EnvironmentFile=-/opt/ploy/.env
 EnvironmentFile=-/opt/ploy/env/platform-live.env
 
-# Single coordinator controlling both domains with unified risk + allocator policies.
-ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/platform_live.toml platform start --crypto --sports
+# Single coordinator with deployment-matrix driven runtime scopes.
+ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/platform_live.toml platform start
 
 Restart=always
 RestartSec=5
@@ -36,4 +36,3 @@ SyslogIdentifier=ploy-platform-live
 
 [Install]
 WantedBy=multi-user.target
-
