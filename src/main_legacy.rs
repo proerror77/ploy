@@ -572,16 +572,33 @@ async fn run_platform_mode(
         .exchange
         .eq_ignore_ascii_case("polymarket")
     {
-        return Err(PloyError::Validation(format!(
-            "platform runtime currently requires execution.exchange=polymarket (got {})",
-            app_config.execution.exchange
-        )));
+        if explicit_selection {
+            return Err(PloyError::Validation(format!(
+                "execution.exchange={} does not support built-in --crypto/--sports/--politics agents yet",
+                app_config.execution.exchange
+            )));
+        }
+
+        if platform_cfg.enable_crypto || platform_cfg.enable_sports || platform_cfg.enable_politics
+        {
+            warn!(
+                exchange = %app_config.execution.exchange,
+                "non-polymarket exchange selected; disabling built-in agents for this platform run"
+            );
+            platform_cfg.enable_crypto = false;
+            platform_cfg.enable_crypto_momentum = false;
+            platform_cfg.enable_crypto_lob_ml = false;
+            #[cfg(feature = "rl")]
+            {
+                platform_cfg.enable_crypto_rl_policy = false;
+            }
+            platform_cfg.enable_sports = false;
+            platform_cfg.enable_politics = false;
+        }
     }
 
-    let pm_client = create_pm_client(&app_config.market.rest_url, platform_cfg.dry_run).await?;
-
     let control = PlatformStartControl { pause, resume };
-    start_platform(platform_cfg, pm_client, &app_config, control).await
+    start_platform(platform_cfg, &app_config, control).await
 }
 
 /// Run paper trading with real market data but no execution

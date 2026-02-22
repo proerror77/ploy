@@ -82,3 +82,15 @@
 3. `cargo test --lib config::tests`
 4. `cargo test --lib adapters::kalshi_rest::tests`
 
+### Task 7: Platform runtime exchange wiring
+
+**Files:**
+- Modify: `src/coordinator/bootstrap.rs`
+- Modify: `src/main_legacy.rs`
+
+**Steps:**
+1. Build runtime execution client from `execution.exchange` using exchange factory.
+2. Use `OrderExecutor::new_with_exchange(...)` in coordinator bootstrap.
+3. Load Polymarket client only for PM-bound built-in agents (crypto/politics).
+4. Allow `platform start` with non-Polymarket exchange when built-in agents are disabled.
+5. Keep explicit guardrails: reject non-Polymarket + built-in agent combinations.
