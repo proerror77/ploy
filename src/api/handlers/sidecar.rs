@@ -1341,81 +1341,50 @@ pub async fn sidecar_get_positions(
         return Ok(Json(positions));
     }
 
-    let rows = if table_has_account_scope(state.store.pool(), "positions").await {
-        sqlx::query_as::<
-            _,
-            (
-                i64,
-                String,
-                String,
-                String,
-                i64,
-                f64,
-                Option<f64>,
-                Option<f64>,
-                String,
-                chrono::DateTime<Utc>,
-            ),
-        >(
-            r#"
-            SELECT
-                id,
-                event_id as market_slug,
-                token_id,
-                market_side as side,
-                shares,
-                avg_entry_price::double precision as avg_price,
-                amount_usd::double precision as current_value,
-                pnl::double precision as pnl,
-                status,
-                opened_at
-            FROM positions
-            WHERE status = 'OPEN'
-              AND account_id = $1
-            ORDER BY opened_at DESC
-            LIMIT 100
-            "#,
-        )
-        .bind(state.account_id.as_str())
-        .fetch_all(state.store.pool())
-        .await
-    } else {
-        sqlx::query_as::<
-            _,
-            (
-                i64,
-                String,
-                String,
-                String,
-                i64,
-                f64,
-                Option<f64>,
-                Option<f64>,
-                String,
-                chrono::DateTime<Utc>,
-            ),
-        >(
-            r#"
-            SELECT
-                id,
-                event_id as market_slug,
-                token_id,
-                market_side as side,
-                shares,
-                avg_entry_price::double precision as avg_price,
-                amount_usd::double precision as current_value,
-                pnl::double precision as pnl,
-                status,
-                opened_at
-            FROM positions
-            WHERE status = 'OPEN'
-            ORDER BY opened_at DESC
-            LIMIT 100
-            "#,
-        )
-        .fetch_all(state.store.pool())
-        .await
+    if !table_has_account_scope(state.store.pool(), "positions").await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sidecar fallback requires positions.account_id scope".to_string(),
+        ));
     }
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            f64,
+            Option<f64>,
+            Option<f64>,
+            String,
+            chrono::DateTime<Utc>,
+        ),
+    >(
+        r#"
+        SELECT
+            id,
+            event_id as market_slug,
+            token_id,
+            market_side as side,
+            shares,
+            avg_entry_price::double precision as avg_price,
+            amount_usd::double precision as current_value,
+            pnl::double precision as pnl,
+            status,
+            opened_at
+        FROM positions
+        WHERE status = 'OPEN'
+          AND account_id = $1
+        ORDER BY opened_at DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(state.account_id.as_str())
+    .fetch_all(state.store.pool())
+    .await
     .map_err(|e| {
         warn!(error = %e, "failed to fetch positions for sidecar");
         (
@@ -1534,40 +1503,56 @@ pub async fn sidecar_get_risk(
                 table_has_account_scope(state.store.pool(), "daily_metrics").await;
             let positions_scoped = table_has_account_scope(state.store.pool(), "positions").await;
 
-            let runtime_row = if runtime_state_scoped {
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        Option<chrono::NaiveDate>,
-                        Decimal,
-                        Decimal,
-                        Decimal,
-                        Decimal,
-                        chrono::DateTime<Utc>,
+            if !runtime_state_scoped || !daily_metrics_scoped || !positions_scoped {
+                let mut missing = Vec::new();
+                if !runtime_state_scoped {
+                    missing.push("risk_runtime_state.account_id");
+                }
+                if !daily_metrics_scoped {
+                    missing.push("daily_metrics.account_id");
+                }
+                if !positions_scoped {
+                    missing.push("positions.account_id");
+                }
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "sidecar risk fallback requires account scope on: {}",
+                        missing.join(", ")
                     ),
-                >(
-                    r#"
-                    SELECT
-                        risk_state,
-                        daily_date,
-                        daily_pnl,
-                        daily_loss_limit,
-                        current_drawdown,
-                        max_drawdown_observed,
-                        updated_at
-                    FROM risk_runtime_state
-                    WHERE account_id = $1
-                    "#,
-                )
-                .bind(state.account_id.as_str())
-                .fetch_optional(state.store.pool())
-                .await
-                .ok()
-                .flatten()
-            } else {
-                None
-            };
+                ));
+            }
+
+            let runtime_row = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<chrono::NaiveDate>,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    chrono::DateTime<Utc>,
+                ),
+            >(
+                r#"
+                SELECT
+                    risk_state,
+                    daily_date,
+                    daily_pnl,
+                    daily_loss_limit,
+                    current_drawdown,
+                    max_drawdown_observed,
+                    updated_at
+                FROM risk_runtime_state
+                WHERE account_id = $1
+                "#,
+            )
+            .bind(state.account_id.as_str())
+            .fetch_optional(state.store.pool())
+            .await
+            .ok()
+            .flatten();
 
             // Fallback to daily_metrics when runtime snapshot is unavailable.
             let (
@@ -1610,47 +1595,25 @@ pub async fn sidecar_get_risk(
                     runtime_event,
                 )
             } else {
-                let halted = if daily_metrics_scoped {
-                    sqlx::query_scalar::<_, bool>(
-                            "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
-                        )
-                        .bind(state.account_id.as_str())
-                        .fetch_optional(state.store.pool())
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(false)
-                } else {
-                    sqlx::query_scalar::<_, bool>(
-                            "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE",
-                        )
-                        .fetch_optional(state.store.pool())
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(false)
-                };
+                let halted = sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+                )
+                .bind(state.account_id.as_str())
+                .fetch_optional(state.store.pool())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
 
-                let daily_pnl = if daily_metrics_scoped {
-                    sqlx::query_scalar::<_, Decimal>(
-                            "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
-                        )
-                        .bind(state.account_id.as_str())
-                        .fetch_optional(state.store.pool())
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(Decimal::ZERO)
-                } else {
-                    sqlx::query_scalar::<_, Decimal>(
-                            "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE",
-                        )
-                        .fetch_optional(state.store.pool())
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(Decimal::ZERO)
-                };
+                let daily_pnl = sqlx::query_scalar::<_, Decimal>(
+                    "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+                )
+                .bind(state.account_id.as_str())
+                .fetch_optional(state.store.pool())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(Decimal::ZERO);
                 (
                     if halted {
                         "Halted".to_string()
@@ -1669,43 +1632,24 @@ pub async fn sidecar_get_risk(
             };
 
             // Best-effort exposure table from persistent positions (legacy bot).
-            let rows = if positions_scoped {
-                sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
-                    r#"
-                    SELECT
-                        event_id as market,
-                        market_side as side,
-                        SUM(amount_usd)::double precision as size,
-                        SUM(pnl)::double precision as pnl_usd
-                    FROM positions
-                    WHERE status = 'OPEN'
-                      AND account_id = $1
-                    GROUP BY event_id, market_side
-                    ORDER BY market, side
-                    "#,
-                )
-                .bind(state.account_id.as_str())
-                .fetch_all(state.store.pool())
-                .await
-                .unwrap_or_default()
-            } else {
-                sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
-                    r#"
-                    SELECT
-                        event_id as market,
-                        market_side as side,
-                        SUM(amount_usd)::double precision as size,
-                        SUM(pnl)::double precision as pnl_usd
-                    FROM positions
-                    WHERE status = 'OPEN'
-                    GROUP BY event_id, market_side
-                    ORDER BY market, side
-                    "#,
-                )
-                .fetch_all(state.store.pool())
-                .await
-                .unwrap_or_default()
-            };
+            let rows = sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
+                r#"
+                SELECT
+                    event_id as market,
+                    market_side as side,
+                    SUM(amount_usd)::double precision as size,
+                    SUM(pnl)::double precision as pnl_usd
+                FROM positions
+                WHERE status = 'OPEN'
+                  AND account_id = $1
+                GROUP BY event_id, market_side
+                ORDER BY market, side
+                "#,
+            )
+            .bind(state.account_id.as_str())
+            .fetch_all(state.store.pool())
+            .await
+            .unwrap_or_default();
 
             let positions = rows
                 .into_iter()
@@ -1717,33 +1661,19 @@ pub async fn sidecar_get_risk(
                 })
                 .collect();
 
-            let row = if daily_metrics_scoped {
-                sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
-                    r#"
-                    SELECT halted, halt_reason, updated_at
-                    FROM daily_metrics
-                    WHERE date = CURRENT_DATE
-                      AND account_id = $1
-                    "#,
-                )
-                .bind(state.account_id.as_str())
-                .fetch_optional(state.store.pool())
-                .await
-                .ok()
-                .flatten()
-            } else {
-                sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
-                    r#"
-                    SELECT halted, halt_reason, updated_at
-                    FROM daily_metrics
-                    WHERE date = CURRENT_DATE
-                    "#,
-                )
-                .fetch_optional(state.store.pool())
-                .await
-                .ok()
-                .flatten()
-            };
+            let row = sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
+                r#"
+                SELECT halted, halt_reason, updated_at
+                FROM daily_metrics
+                WHERE date = CURRENT_DATE
+                  AND account_id = $1
+                "#,
+            )
+            .bind(state.account_id.as_str())
+            .fetch_optional(state.store.pool())
+            .await
+            .ok()
+            .flatten();
 
             let mut circuit_breaker_events = match row {
                 Some((true, reason, updated_at)) => vec![SidecarCircuitBreakerEvent {

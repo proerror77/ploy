@@ -603,3 +603,86 @@ async fn deployment_enable_rejects_stale_evidence() {
         "expected stale evidence error, got: {body}"
     );
 }
+
+#[tokio::test]
+async fn sidecar_positions_fallback_is_fail_closed_without_account_scope() {
+    let _guard = env_lock().lock().expect("failed to acquire env lock");
+    let Some(ctx) = TestContext::new(&[]).await else {
+        return;
+    };
+
+    sqlx::query("DROP TABLE IF EXISTS positions")
+        .execute(&ctx.pool)
+        .await
+        .expect("failed to drop positions");
+    sqlx::query(
+        r#"
+        CREATE TABLE positions (
+            id BIGSERIAL PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            market_side TEXT NOT NULL,
+            shares BIGINT NOT NULL,
+            avg_entry_price NUMERIC,
+            amount_usd NUMERIC,
+            pnl NUMERIC,
+            status TEXT NOT NULL,
+            opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(&ctx.pool)
+    .await
+    .expect("failed to create legacy positions table");
+
+    let (status, body) = send_json(
+        &ctx.app,
+        Method::GET,
+        "/api/sidecar/positions",
+        &[("x-ploy-sidecar-token", "sidecar-test-token")],
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body.contains("requires positions.account_id scope"),
+        "expected fail-closed message, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn sidecar_risk_fallback_is_fail_closed_without_account_scope() {
+    let _guard = env_lock().lock().expect("failed to acquire env lock");
+    let Some(ctx) = TestContext::new(&[]).await else {
+        return;
+    };
+
+    sqlx::query("DROP TABLE IF EXISTS risk_runtime_state")
+        .execute(&ctx.pool)
+        .await
+        .expect("failed to drop risk_runtime_state");
+    sqlx::query("DROP TABLE IF EXISTS daily_metrics")
+        .execute(&ctx.pool)
+        .await
+        .expect("failed to drop daily_metrics");
+    sqlx::query("DROP TABLE IF EXISTS positions")
+        .execute(&ctx.pool)
+        .await
+        .expect("failed to drop positions");
+
+    let (status, body) = send_json(
+        &ctx.app,
+        Method::GET,
+        "/api/sidecar/risk",
+        &[("x-ploy-sidecar-token", "sidecar-test-token")],
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body.contains("requires account scope"),
+        "expected fail-closed message, got: {body}"
+    );
+}
