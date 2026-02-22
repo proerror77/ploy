@@ -1642,7 +1642,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         let intent = intent
                         .with_priority(OrderPriority::Normal)
                         .with_metadata("strategy", STRATEGY_ID)
-                        .with_metadata("deployment_id", &deployment_id)
+                        .with_deployment_id(&deployment_id)
                         .with_metadata("timeframe", &timeframe)
                         .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("signal_type", "crypto_lob_ml_entry")
@@ -1655,7 +1655,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         )
                         .with_metadata("coin", &coin)
                         .with_metadata("symbol", &update.symbol)
-                        .with_metadata("condition_id", &event.condition_id)
+                        .with_condition_id(&event.condition_id)
                         .with_metadata("series_id", &event.series_id)
                         .with_metadata("event_series_id", &event.series_id)
                         .with_metadata("horizon", &event.horizon)
@@ -1823,7 +1823,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     let intent = intent
                     .with_priority(priority)
                     .with_metadata("strategy", STRATEGY_ID)
-                    .with_metadata("deployment_id", &deployment_id)
+                    .with_deployment_id(&deployment_id)
                     .with_metadata("timeframe", &timeframe)
                     .with_metadata("event_window_secs", &event_window_secs)
                     .with_metadata("signal_type", "crypto_lob_ml_exit")
@@ -1909,7 +1909,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 let intent = intent
                                 .with_priority(OrderPriority::Critical)
                                 .with_metadata("strategy", STRATEGY_ID)
-                                .with_metadata("deployment_id", &deployment_id)
+                                .with_deployment_id(&deployment_id)
                                 .with_metadata("timeframe", &timeframe)
                                 .with_metadata("event_window_secs", &event_window_secs)
                                 .with_metadata("signal_type", "crypto_lob_ml_exit")

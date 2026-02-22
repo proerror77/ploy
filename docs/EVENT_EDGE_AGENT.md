@@ -6,7 +6,7 @@
 - 讀取 Polymarket order book（best ask）
 - 當 `p_true - ask >= min_edge` 且 `ask <= max_entry` 時自動下單（若 `trade=true`）
 
-它不需要你盯盤，也不需要你一直手動啟動 `event-edge --watch`。只要啟動一次 `ploy run`（或交給系統服務管理），它就會自己循環跑。
+它不需要你盯盤，也不需要你一直手動啟動 `event-edge --watch`。只要啟動一次 `ploy platform start --politics`（或交給系統服務管理），它就會自己循環跑。
 
 ## 1) 開啟設定
 
@@ -52,14 +52,14 @@ event_ids = []
 ## 3) 啟動（一次就好）
 
 ```bash
-ploy run
+ploy platform start --politics
 ```
 
 啟動後它會跟著主程序一起常駐循環，Ctrl+C 才停止。
 
 ## 4) 讓它自動常駐（macOS launchd）
 
-本 repo 已包含 `deployment/com.ploy.trading.plist`，它會在開機/登入後自動跑 `ploy run` 並 KeepAlive。
+本 repo 已包含 `deployment/com.ploy.trading.plist`，它會在開機/登入後自動跑 `ploy platform start --politics` 並 KeepAlive。
 
 你只需要：
 1. 確保你的 `config/default.toml`（或 `PLOY_ENV` 對應設定）已開啟 `[event_edge_agent]`

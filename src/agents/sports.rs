@@ -116,6 +116,8 @@ struct DepthLevelJson {
 const CALENDAR_LOOKBACK_DAYS: i64 = 1;
 const CALENDAR_LOOKAHEAD_DAYS: i64 = 7;
 const CALENDAR_SYNC_INTERVAL_SECS: i64 = 30 * 60; // 30 minutes
+const DEPLOYMENT_ID_NBA_COMEBACK: &str = "sports.pm.nba.comeback";
+const DEPLOYMENT_ID_NBA_GROK_UNIFIED: &str = "sports.pm.nba.grok_unified";
 
 const NBA_TEAM_ABBREVS: &[&str] = &[
     "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW", "HOU", "IND", "LAC",
@@ -934,6 +936,7 @@ impl SportsTradingAgent {
         )
         .with_priority(OrderPriority::Normal)
         .with_metadata("strategy", "nba_comeback")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_COMEBACK)
         .with_metadata("game_id", &opp.game.espn_game_id)
         .with_metadata("trailing_team", &opp.trailing_abbrev)
         .with_metadata("deficit", &opp.deficit.to_string())
@@ -978,7 +981,8 @@ impl SportsTradingAgent {
             limit_price,
         )
         .with_priority(priority)
-        .with_metadata("strategy", "nba_comeback_exit")
+        .with_metadata("strategy", "nba_comeback")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_COMEBACK)
         .with_metadata("game_id", game_id)
         .with_metadata("trailing_team", trailing_team)
         .with_metadata("exit_reason", exit_reason)
@@ -1245,6 +1249,70 @@ impl SportsTradingAgent {
         metrics
     }
 
+    async fn submit_force_close_exits(&self, ctx: &AgentContext) {
+        let global = ctx.read_global_state().await;
+        let positions = global
+            .positions
+            .into_iter()
+            .filter(|p| p.agent_id == self.config.agent_id && p.shares > 0)
+            .collect::<Vec<_>>();
+
+        if positions.is_empty() {
+            info!(
+                agent = self.config.agent_id,
+                "force close: no open positions"
+            );
+            return;
+        }
+
+        info!(
+            agent = self.config.agent_id,
+            positions = positions.len(),
+            "force close: submitting reduce-only exits"
+        );
+
+        for pos in positions {
+            let mut intent = OrderIntent::new(
+                &self.config.agent_id,
+                pos.domain,
+                &pos.market_slug,
+                &pos.token_id,
+                pos.side,
+                false,
+                pos.shares,
+                dec!(0.01),
+            )
+            .with_priority(OrderPriority::Critical)
+            .with_metadata("intent_reason", "force_close")
+            .with_metadata("position_id", &pos.position_id)
+            .with_metadata("force_close_price_floor", "0.01");
+            if let Some(deployment_id) = pos
+                .metadata
+                .get("deployment_id")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_deployment_id(deployment_id);
+            } else if let Some(strategy) = pos
+                .metadata
+                .get("strategy")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_metadata("strategy", strategy);
+            }
+
+            if let Err(e) = ctx.submit_order(intent).await {
+                warn!(
+                    agent = self.config.agent_id,
+                    position_id = %pos.position_id,
+                    error = %e,
+                    "force close exit submit failed"
+                );
+            }
+        }
+    }
+
     fn classify_early_exit(
         avg_entry_price: Decimal,
         current_price: Decimal,
@@ -1298,6 +1366,7 @@ impl SportsTradingAgent {
         )
         .with_priority(OrderPriority::Normal)
         .with_metadata("strategy", "grok_unified_decision")
+        .with_deployment_id(DEPLOYMENT_ID_NBA_GROK_UNIFIED)
         .with_metadata("game_id", &req.game.espn_game_id)
         .with_metadata("trailing_team", &req.trailing_abbrev)
         .with_metadata("deficit", &req.deficit.to_string())
@@ -1635,6 +1704,7 @@ impl TradingAgent for SportsTradingAgent {
         }
 
         let mut status = AgentStatus::Running;
+        let mut force_close_requested = false;
         let mut pending_intents: HashMap<Uuid, ComebackOpportunity> = HashMap::new();
         let position_count: usize = 0;
         let total_exposure = Decimal::ZERO;
@@ -2734,7 +2804,8 @@ impl TradingAgent for SportsTradingAgent {
                             break;
                         }
                         Some(CoordinatorCommand::ForceClose) => {
-                            warn!(agent = self.config.agent_id, "force close (no exit logic for sports)");
+                            warn!(agent = self.config.agent_id, "force close requested");
+                            force_close_requested = true;
                             break;
                         }
                         Some(CoordinatorCommand::HealthCheck(tx)) => {
@@ -2776,6 +2847,10 @@ impl TradingAgent for SportsTradingAgent {
                     ).await;
                 }
             }
+        }
+
+        if force_close_requested {
+            self.submit_force_close_exits(&ctx).await;
         }
 
         info!(agent = self.config.agent_id, "sports agent stopped");

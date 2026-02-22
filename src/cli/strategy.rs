@@ -558,8 +558,8 @@ async fn start_strategy(
 ) -> Result<()> {
     info!("Starting strategy: {}", name);
 
-    if !dry_run && !legacy_strategy_live_allowed() {
-        let msg = "legacy `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path) or set PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true for explicit override";
+    if !dry_run {
+        let msg = "legacy `ploy strategy start` live runtime is disabled; use `ploy platform start` (Coordinator/Gateway execution path)";
         warn!("{msg}");
         println!("\x1b[31m✗ {}\x1b[0m", msg);
         return Err(anyhow::anyhow!(msg));

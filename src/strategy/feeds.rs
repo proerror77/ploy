@@ -60,7 +60,11 @@ fn infer_horizon_from_text(text: &str) -> Option<&'static str> {
     }
 }
 
-fn apply_dimension_candidate(text: &str, symbol: &mut Option<String>, horizon: &mut Option<String>) {
+fn apply_dimension_candidate(
+    text: &str,
+    symbol: &mut Option<String>,
+    horizon: &mut Option<String>,
+) {
     if symbol.is_none() {
         if let Some(s) = infer_symbol_from_text(text) {
             *symbol = Some(s.to_string());
@@ -234,7 +238,12 @@ impl DataFeedManager {
         let metadata_pool = std::env::var("PLOY_DATABASE__URL")
             .ok()
             .or_else(|| std::env::var("DATABASE_URL").ok())
-            .and_then(|url| PgPoolOptions::new().max_connections(2).connect_lazy(&url).ok())
+            .and_then(|url| {
+                PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect_lazy(&url)
+                    .ok()
+            })
             .map(Arc::new);
         Self {
             manager,

@@ -590,7 +590,7 @@ impl TradingAgent for CryptoTradingAgent {
                         let intent = intent
                         .with_priority(OrderPriority::High)
                         .with_metadata("strategy", STRATEGY_ID)
-                        .with_metadata("deployment_id", &deployment_id)
+                        .with_deployment_id(&deployment_id)
                         .with_metadata("timeframe", &timeframe)
                         .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("signal_type", "crypto_momentum_exit")
@@ -790,11 +790,11 @@ impl TradingAgent for CryptoTradingAgent {
                         let intent = intent
                         .with_priority(OrderPriority::Normal)
                         .with_metadata("strategy", STRATEGY_ID)
-                        .with_metadata("deployment_id", &deployment_id)
+                        .with_deployment_id(&deployment_id)
                         .with_metadata("timeframe", &timeframe)
                         .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("coin", &coin)
-                        .with_metadata("condition_id", &event.condition_id)
+                        .with_condition_id(&event.condition_id)
                         .with_metadata("series_id", &event.series_id)
                         .with_metadata("event_series_id", &event.series_id)
                         .with_metadata("horizon", &event.horizon)
@@ -922,7 +922,7 @@ impl TradingAgent for CryptoTradingAgent {
                     let intent = intent
                     .with_priority(priority)
                     .with_metadata("strategy", STRATEGY_ID)
-                    .with_metadata("deployment_id", &deployment_id)
+                    .with_deployment_id(&deployment_id)
                     .with_metadata("timeframe", &timeframe)
                     .with_metadata("event_window_secs", &event_window_secs)
                     .with_metadata("signal_type", "crypto_momentum_exit")
@@ -1007,7 +1007,7 @@ impl TradingAgent for CryptoTradingAgent {
                                 let intent = intent
                                 .with_priority(OrderPriority::Critical)
                                 .with_metadata("strategy", STRATEGY_ID)
-                                .with_metadata("deployment_id", &deployment_id)
+                                .with_deployment_id(&deployment_id)
                                 .with_metadata("timeframe", &timeframe)
                                 .with_metadata("event_window_secs", &event_window_secs)
                                 .with_metadata("signal_type", "crypto_momentum_exit")

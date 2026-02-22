@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     pub dry_run: DryRunConfig,
     #[serde(default)]
+    pub kalshi: KalshiConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
     /// Agent framework control-plane mode.
     #[serde(default)]
@@ -515,6 +517,12 @@ pub struct MarketConfig {
     /// Condition ID for the market (required for orders)
     #[serde(default)]
     pub condition_id: Option<String>,
+    /// Optional exchange-specific WS endpoint override.
+    #[serde(default)]
+    pub exchange_ws_url: Option<String>,
+    /// Optional exchange-specific REST endpoint override.
+    #[serde(default)]
+    pub exchange_rest_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -545,6 +553,9 @@ impl StrategyConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecutionConfig {
+    /// Exchange backend (`polymarket` or `kalshi`)
+    #[serde(default = "default_execution_exchange")]
+    pub exchange: String,
     /// Order timeout in milliseconds
     pub order_timeout_ms: u64,
     /// Maximum retry attempts for order submission
@@ -569,6 +580,10 @@ fn default_poll_interval() -> u64 {
     500
 }
 
+fn default_execution_exchange() -> String {
+    "polymarket".to_string()
+}
+
 fn default_confirm_fill_timeout_ms() -> u64 {
     2000
 }
@@ -580,6 +595,7 @@ fn default_max_quote_age() -> u64 {
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
+            exchange: default_execution_exchange(),
             order_timeout_ms: 5000,
             max_retries: 3,
             max_spread_bps: 500,
@@ -589,6 +605,33 @@ impl Default for ExecutionConfig {
             max_quote_age_secs: default_max_quote_age(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KalshiConfig {
+    /// Kalshi Trade API base URL.
+    #[serde(default = "default_kalshi_base_url")]
+    pub base_url: String,
+    /// Optional API key (can also be sourced from env).
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Optional API secret (can also be sourced from env).
+    #[serde(default)]
+    pub api_secret: Option<String>,
+}
+
+impl Default for KalshiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_kalshi_base_url(),
+            api_key: None,
+            api_secret: None,
+        }
+    }
+}
+
+fn default_kalshi_base_url() -> String {
+    "https://api.elections.kalshi.com/trade-api/v2".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -674,6 +717,7 @@ impl AppConfig {
             // Start with default values
             .set_default("logging.level", "info")?
             .set_default("logging.json", false)?
+            .set_default("execution.exchange", default_execution_exchange())?
             .set_default("execution.poll_interval_ms", 500)?
             .set_default("execution.confirm_fills", false)?
             .set_default(
@@ -681,6 +725,7 @@ impl AppConfig {
                 default_confirm_fill_timeout_ms(),
             )?
             .set_default("database.max_connections", 5)?
+            .set_default("kalshi.base_url", default_kalshi_base_url())?
             .set_default("api_port", 8081)?;
 
         // Accept either a config directory (`config/`) or a single TOML file
@@ -727,6 +772,8 @@ impl AppConfig {
                 rest_url: "https://clob.polymarket.com".to_string(),
                 market_slug: market_slug.to_string(),
                 condition_id: None,
+                exchange_ws_url: None,
+                exchange_rest_url: None,
             },
             strategy: StrategyConfig {
                 shares: 20,
@@ -738,6 +785,7 @@ impl AppConfig {
                 profit_buffer: dec!(0.01),
             },
             execution: ExecutionConfig {
+                exchange: default_execution_exchange(),
                 order_timeout_ms: 5000,
                 max_retries: 3,
                 max_spread_bps: 500,
@@ -764,6 +812,7 @@ impl AppConfig {
                 max_connections: 5,
             },
             dry_run: DryRunConfig { enabled: dry_run },
+            kalshi: KalshiConfig::default(),
             logging: LoggingConfig::default(),
             agent_framework: AgentFrameworkConfig::default(),
             health_port: Some(8080),
@@ -791,6 +840,14 @@ impl AppConfig {
         if eff_target <= Decimal::ZERO {
             errors.push(format!(
                 "Effective sum target is non-positive: {eff_target}. Check fee/slippage/profit buffers."
+            ));
+        }
+
+        let exchange = self.execution.exchange.trim().to_ascii_lowercase();
+        if exchange != "polymarket" && exchange != "kalshi" {
+            errors.push(format!(
+                "execution.exchange must be one of [polymarket, kalshi], got {}",
+                self.execution.exchange
             ));
         }
 
@@ -857,6 +914,52 @@ impl AppConfig {
 
         if let Some(v) = env_string(&["PLOY_MARKET__MARKET_SLUG", "PLOY__MARKET__MARKET_SLUG"]) {
             self.market.market_slug = v;
+        }
+
+        if let Some(v) = env_string(&[
+            "PLOY_EXECUTION__EXCHANGE",
+            "PLOY__EXECUTION__EXCHANGE",
+            "PLOY_EXECUTION_EXCHANGE",
+        ]) {
+            let normalized = v.trim().to_ascii_lowercase();
+            if matches!(normalized.as_str(), "polymarket" | "kalshi") {
+                self.execution.exchange = normalized;
+            }
+        }
+
+        if let Some(v) = env_string_raw(&[
+            "PLOY_KALSHI__BASE_URL",
+            "PLOY__KALSHI__BASE_URL",
+            "PLOY_KALSHI_BASE_URL",
+            "KALSHI_BASE_URL",
+        ]) {
+            if !v.trim().is_empty() {
+                self.kalshi.base_url = v;
+            }
+        }
+
+        if let Some(v) = env_string_raw(&[
+            "PLOY_KALSHI__API_KEY",
+            "PLOY__KALSHI__API_KEY",
+            "PLOY_KALSHI_API_KEY",
+            "KALSHI_API_KEY",
+            "KALSHI_ACCESS_KEY",
+        ]) {
+            if !v.trim().is_empty() {
+                self.kalshi.api_key = Some(v);
+            }
+        }
+
+        if let Some(v) = env_string_raw(&[
+            "PLOY_KALSHI__API_SECRET",
+            "PLOY__KALSHI__API_SECRET",
+            "PLOY_KALSHI_API_SECRET",
+            "KALSHI_API_SECRET",
+            "KALSHI_ACCESS_SECRET",
+        ]) {
+            if !v.trim().is_empty() {
+                self.kalshi.api_secret = Some(v);
+            }
         }
 
         if let Some(v) = env_u16(&["PLOY_API_PORT", "PLOY__API_PORT"]) {
@@ -951,9 +1054,16 @@ impl AppConfig {
 }
 
 fn env_string(keys: &[&str]) -> Option<String> {
+    env_string_raw(keys).map(|s| s.to_ascii_lowercase())
+}
+
+fn env_string_raw(keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Ok(v) = std::env::var(key) {
-            return Some(v);
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
         }
     }
     None
@@ -1034,5 +1144,25 @@ mod tests {
     fn test_parse_string_list_json_array() {
         let parsed = parse_string_list(r#"["id-1","id-2"]"#);
         assert_eq!(parsed, vec!["id-1", "id-2"]);
+    }
+
+    #[test]
+    fn test_default_config_uses_polymarket_exchange() {
+        let cfg = AppConfig::default_config(true, "test-market");
+        assert_eq!(cfg.execution.exchange, "polymarket");
+        assert_eq!(
+            cfg.kalshi.base_url,
+            "https://api.elections.kalshi.com/trade-api/v2"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_execution_exchange() {
+        let mut cfg = AppConfig::default_config(true, "test-market");
+        cfg.execution.exchange = "unknown".to_string();
+        let errors = cfg.validate().expect_err("validation should fail");
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("execution.exchange must be one of [polymarket, kalshi]")));
     }
 }

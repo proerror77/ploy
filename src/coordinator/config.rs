@@ -70,6 +70,30 @@ pub struct CoordinatorConfig {
     pub sports_market_cap_pct: Decimal,
     /// If true, auto-split sports cap by active market count.
     pub sports_auto_split_by_active_markets: bool,
+    /// Enable/disable politics capital allocator.
+    pub politics_allocator_enabled: bool,
+    /// Total politics capital cap (USD). If None, falls back to risk caps.
+    pub politics_allocator_total_cap_usd: Option<Decimal>,
+    /// Per-market cap as percentage of total politics cap.
+    pub politics_market_cap_pct: Decimal,
+    /// If true, auto-split politics cap by active market count.
+    pub politics_auto_split_by_active_markets: bool,
+    /// Enable/disable economics capital allocator.
+    pub economics_allocator_enabled: bool,
+    /// Total economics capital cap (USD). If None, falls back to risk caps.
+    pub economics_allocator_total_cap_usd: Option<Decimal>,
+    /// Per-market cap as percentage of total economics cap.
+    pub economics_market_cap_pct: Decimal,
+    /// If true, auto-split economics cap by active market count.
+    pub economics_auto_split_by_active_markets: bool,
+    /// Governance kill-switch for new intents (control-plane managed).
+    pub governance_block_new_intents: bool,
+    /// Governance hard cap for a single intent notional (USD).
+    pub governance_max_intent_notional_usd: Option<Decimal>,
+    /// Governance hard cap for total open+pending notional (USD, account-wide).
+    pub governance_max_total_notional_usd: Option<Decimal>,
+    /// Governance blocklist for domains (e.g. ["sports", "politics"]).
+    pub governance_blocked_domains: Vec<String>,
 
     // === Sizing policy (Coordinator-level) ===
     /// Enable Kelly-based sizing for buy intents when a strategy provides `signal_fair_value`.
@@ -127,6 +151,18 @@ impl Default for CoordinatorConfig {
             sports_allocator_total_cap_usd: None,
             sports_market_cap_pct: Decimal::new(35, 2), // 35%
             sports_auto_split_by_active_markets: true,
+            politics_allocator_enabled: true,
+            politics_allocator_total_cap_usd: None,
+            politics_market_cap_pct: Decimal::new(35, 2), // 35%
+            politics_auto_split_by_active_markets: true,
+            economics_allocator_enabled: true,
+            economics_allocator_total_cap_usd: None,
+            economics_market_cap_pct: Decimal::new(35, 2), // 35%
+            economics_auto_split_by_active_markets: true,
+            governance_block_new_intents: false,
+            governance_max_intent_notional_usd: None,
+            governance_max_total_notional_usd: None,
+            governance_blocked_domains: Vec::new(),
 
             // Kelly sizing is opt-in by env to preserve legacy behavior.
             kelly_sizing_enabled: false,
