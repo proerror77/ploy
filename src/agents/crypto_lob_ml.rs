@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate};
+use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate, SpotPrice};
 use crate::agents::{AgentContext, TradingAgent};
 use crate::collector::{LobCache, LobSnapshot};
 use crate::coordinator::CoordinatorCommand;
@@ -214,6 +214,32 @@ struct TrackedPosition {
     shares: u64,
     entry_price: Decimal,
     entry_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct WindowContext {
+    now: DateTime<Utc>,
+    start_price: Decimal,
+    window_move: Decimal,
+    elapsed_secs: i64,
+    remaining_secs: i64,
+    p_up_window: Decimal,
+}
+
+#[derive(Debug, Clone)]
+struct EntrySignal {
+    side: Side,
+    token_id: String,
+    limit_price: Decimal,
+    edge: Decimal,
+    fair_value: Decimal,
+    signal_confidence: Decimal,
+    p_up_window: Decimal,
+    p_up_blended: Decimal,
+    w_model: Decimal,
+    w_window: Decimal,
+    up_ask: Decimal,
+    down_ask: Decimal,
 }
 
 pub struct CryptoLobMlAgent {
@@ -682,6 +708,115 @@ impl CryptoLobMlAgent {
         (w_model, w_window)
     }
 
+    fn build_window_context(
+        &self,
+        spot: &SpotPrice,
+        event: &EventInfo,
+        rolling_volatility_opt: Option<Decimal>,
+    ) -> Option<WindowContext> {
+        let now = spot.timestamp;
+        if now < event.start_time || now >= event.end_time {
+            return None;
+        }
+
+        let elapsed_secs = now
+            .signed_duration_since(event.start_time)
+            .num_seconds()
+            .max(0);
+        let remaining_secs = event.end_time.signed_duration_since(now).num_seconds();
+        if remaining_secs <= 0 {
+            return None;
+        }
+
+        let target_time = now - chrono::Duration::seconds(elapsed_secs);
+        match spot.oldest_timestamp() {
+            Some(oldest) if oldest > target_time => return None,
+            Some(_) => {}
+            None => return None,
+        }
+
+        let start_price = spot.price_secs_ago(elapsed_secs as u64)?;
+        if start_price <= Decimal::ZERO {
+            return None;
+        }
+
+        let window_move = (spot.price - start_price) / start_price;
+        let p_up_window =
+            Self::estimate_p_up_window(window_move, rolling_volatility_opt, remaining_secs);
+
+        Some(WindowContext {
+            now,
+            start_price,
+            window_move,
+            elapsed_secs,
+            remaining_secs,
+            p_up_window,
+        })
+    }
+
+    fn evaluate_entry_signal(
+        &self,
+        event: &EventInfo,
+        model_type_used: &str,
+        p_up_model_dec: Decimal,
+        window: &WindowContext,
+        up_ask: Decimal,
+        down_ask: Decimal,
+    ) -> Option<EntrySignal> {
+        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+            return None;
+        }
+
+        let (w_model, w_window) = self.model_window_blend_weights();
+        let p_up_blended = (window.p_up_window * w_window + p_up_model_dec * w_model)
+            .max(dec!(0.001))
+            .min(dec!(0.999));
+
+        let up_edge = p_up_blended - up_ask;
+        let down_edge = (Decimal::ONE - p_up_blended) - down_ask;
+        let (side, token_id, limit_price, edge, fair_value) = if up_edge >= down_edge {
+            (
+                Side::Up,
+                event.up_token_id.clone(),
+                up_ask,
+                up_edge,
+                p_up_blended,
+            )
+        } else {
+            (
+                Side::Down,
+                event.down_token_id.clone(),
+                down_ask,
+                down_edge,
+                Decimal::ONE - p_up_blended,
+            )
+        };
+
+        if edge < self.config.min_edge || limit_price > self.config.max_entry_price {
+            return None;
+        }
+
+        let mut signal_confidence = (edge / dec!(0.10)).max(Decimal::ZERO).min(Decimal::ONE);
+        if model_type_used == "logistic" {
+            signal_confidence *= dec!(0.70);
+        }
+
+        Some(EntrySignal {
+            side,
+            token_id,
+            limit_price,
+            edge,
+            fair_value,
+            signal_confidence,
+            p_up_window: window.p_up_window,
+            p_up_blended,
+            w_model,
+            w_window,
+            up_ask,
+            down_ask,
+        })
+    }
+
     #[cfg(test)]
     fn allows_entry_orders(&self) -> bool {
         self.entry_trading_enabled
@@ -881,51 +1016,11 @@ impl TradingAgent for CryptoLobMlAgent {
                     for event in events {
                         let timeframe = normalize_timeframe(&event.horizon);
                         let entry_key = format!("{}|{}", update.symbol, &timeframe);
-
-                        // Only trade events that have actually started.
-                        // Gamma can surface future windows early; avoid "pre-trading" them.
-                        let now = spot.timestamp;
-                        if now < event.start_time || now >= event.end_time {
-                            continue;
-                        }
-
-                        // Window-context baseline probability: ties the bet to event resolution
-                        // (end_price >= start_price). This avoids pathological "always buy cheap tail"
-                        // behavior when p_up_model is neutral (~0.5) or uncalibrated.
-                        let elapsed_secs = now
-                            .signed_duration_since(event.start_time)
-                            .num_seconds()
-                            .max(0);
-                        let remaining_secs = event.end_time.signed_duration_since(now).num_seconds();
-                        if remaining_secs <= 0 {
-                            continue;
-                        }
-
-                        let target_time = now - chrono::Duration::seconds(elapsed_secs);
-                        if let Some(oldest) = spot.oldest_timestamp() {
-                            if oldest > target_time {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-
-                        let Some(start_price) = spot.price_secs_ago(elapsed_secs as u64) else {
+                        let Some(window_ctx) =
+                            self.build_window_context(&spot, &event, rolling_volatility_opt)
+                        else {
                             continue;
                         };
-                        if start_price <= Decimal::ZERO {
-                            continue;
-                        }
-                        let window_move = (spot.price - start_price) / start_price;
-                        let p_up_window_dec = Self::estimate_p_up_window(
-                            window_move,
-                            rolling_volatility_opt,
-                            remaining_secs,
-                        );
-                        let (w_model, w_window) = self.model_window_blend_weights();
-                        let p_up_dec = (p_up_window_dec * w_window + p_up_model_dec * w_model)
-                            .max(dec!(0.001))
-                            .min(dec!(0.999));
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
@@ -938,45 +1033,19 @@ impl TradingAgent for CryptoLobMlAgent {
                             ),
                             _ => continue,
                         };
-                        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+                        let Some(signal) = self.evaluate_entry_signal(
+                            &event,
+                            model_type_used,
+                            p_up_model_dec,
+                            &window_ctx,
+                            up_ask,
+                            down_ask,
+                        ) else {
                             continue;
-                        }
-
-                        let up_edge = p_up_dec - up_ask;
-                        let down_edge = (Decimal::ONE - p_up_dec) - down_ask;
-                        let (side, token_id, limit_price, edge, confidence) = if up_edge >= down_edge {
-                            (Side::Up, event.up_token_id.clone(), up_ask, up_edge, p_up_dec)
-                        } else {
-                            (
-                                Side::Down,
-                                event.down_token_id.clone(),
-                                down_ask,
-                                down_edge,
-                                Decimal::ONE - p_up_dec,
-                            )
-                        };
-
-                        if edge < self.config.min_edge {
-                            continue;
-                        }
-                        if limit_price > self.config.max_entry_price {
-                            continue;
-                        }
-
-                        let signal_confidence = {
-                            // Scale confidence by edge size; keep within [0,1].
-                            let mut c = (edge / dec!(0.10))
-                                .max(Decimal::ZERO)
-                                .min(Decimal::ONE);
-                            // Heuristic logistic model is less trustworthy than a trained model.
-                            if model_type_used == "logistic" {
-                                c *= dec!(0.70);
-                            }
-                            c
                         };
 
                         if let Some(pos) = positions.get(&event.slug).cloned() {
-                            if pos.side != side {
+                            if pos.side != signal.side {
                                 let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
                                 if held_secs >= self.config.min_hold_secs as i64 {
                                     let exit_price = quote_cache
@@ -1018,14 +1087,14 @@ impl TradingAgent for CryptoLobMlAgent {
                                         .with_metadata("exit_price", &exit_price.to_string())
                                         .with_metadata("held_secs", &held_secs.to_string())
                                         .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                                        .with_metadata("p_up_window", &p_up_window_dec.to_string())
-                                        .with_metadata("p_up_blended", &p_up_dec.to_string())
-                                        .with_metadata("p_up_blend_w_model", &w_model.to_string())
+                                        .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                                        .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                                        .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
                                         .with_metadata(
                                             "p_up_blend_w_window",
-                                            &w_window.to_string(),
+                                            &signal.w_window.to_string(),
                                         )
-                                        .with_metadata("signal_edge", &edge.to_string())
+                                        .with_metadata("signal_edge", &signal.edge.to_string())
                                         .with_metadata("config_hash", &config_hash);
 
                                         match ctx.submit_order(exit_intent).await {
@@ -1034,9 +1103,9 @@ impl TradingAgent for CryptoLobMlAgent {
                                                     agent = self.config.agent_id,
                                                     slug = %event.slug,
                                                     old_side = %pos.side,
-                                                    new_side = %side,
+                                                    new_side = %signal.side,
                                                     held_secs,
-                                                    p_up = %p_up_dec,
+                                                    p_up = %signal.p_up_blended,
                                                     "signal flip detected, submitting sell order"
                                                 );
                                             }
@@ -1062,7 +1131,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         if should_skip_entry(
                             &event.slug,
                             entry_key.as_str(),
-                            now,
+                            window_ctx.now,
                             &positions,
                             &traded_events,
                             &last_trade_by_key,
@@ -1075,11 +1144,11 @@ impl TradingAgent for CryptoLobMlAgent {
                             &self.config.agent_id,
                             Domain::Crypto,
                             event.slug.as_str(),
-                            &token_id,
-                            side,
+                            &signal.token_id,
+                            signal.side,
                             true,
                             self.config.default_shares.max(1),
-                            limit_price,
+                            signal.limit_price,
                         );
                         let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
                         let event_window_secs =
@@ -1100,18 +1169,18 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
                         .with_metadata("event_title", &event.title)
                         .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                        .with_metadata("p_up_window", &p_up_window_dec.to_string())
-                        .with_metadata("p_up_blended", &p_up_dec.to_string())
-                        .with_metadata("p_up_blend_w_model", &w_model.to_string())
-                        .with_metadata("p_up_blend_w_window", &w_window.to_string())
+                        .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                        .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                        .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
+                        .with_metadata("p_up_blend_w_window", &signal.w_window.to_string())
                         .with_metadata("model_type", model_type_used)
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
-                        .with_metadata("signal_edge", &edge.to_string())
-                        .with_metadata("signal_confidence", &signal_confidence.to_string())
-                        .with_metadata("signal_fair_value", &confidence.to_string())
-                        .with_metadata("signal_market_price", &limit_price.to_string())
-                        .with_metadata("pm_up_ask", &up_ask.to_string())
-                        .with_metadata("pm_down_ask", &down_ask.to_string())
+                        .with_metadata("signal_edge", &signal.edge.to_string())
+                        .with_metadata("signal_confidence", &signal.signal_confidence.to_string())
+                        .with_metadata("signal_fair_value", &signal.fair_value.to_string())
+                        .with_metadata("signal_market_price", &signal.limit_price.to_string())
+                        .with_metadata("pm_up_ask", &signal.up_ask.to_string())
+                        .with_metadata("pm_down_ask", &signal.down_ask.to_string())
                         .with_metadata("lob_best_bid", &lob.best_bid.to_string())
                         .with_metadata("lob_best_ask", &lob.best_ask.to_string())
                         .with_metadata("lob_mid_price", &lob.mid_price.to_string())
@@ -1128,20 +1197,20 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
                         .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
                         .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
-                        .with_metadata("window_start_price", &start_price.to_string())
-                        .with_metadata("window_move_pct", &window_move.to_string())
-                        .with_metadata("window_elapsed_secs", &elapsed_secs.to_string())
-                        .with_metadata("window_remaining_secs", &remaining_secs.to_string())
+                        .with_metadata("window_start_price", &window_ctx.start_price.to_string())
+                        .with_metadata("window_move_pct", &window_ctx.window_move.to_string())
+                        .with_metadata("window_elapsed_secs", &window_ctx.elapsed_secs.to_string())
+                        .with_metadata("window_remaining_secs", &window_ctx.remaining_secs.to_string())
                         .with_metadata("config_hash", &config_hash);
 
                         info!(
                             agent = self.config.agent_id,
                             slug = %event.slug,
                             horizon = %event.horizon,
-                            %side,
-                            %limit_price,
-                            %edge,
-                            p_up = %p_up_dec,
+                            side = %signal.side,
+                            limit_price = %signal.limit_price,
+                            edge = %signal.edge,
+                            p_up = %signal.p_up_blended,
                             model = model_type_used,
                             "lob-ml signal detected, submitting order"
                         );
@@ -1429,6 +1498,33 @@ impl TradingAgent for CryptoLobMlAgent {
 mod tests {
     use super::*;
 
+    fn sample_event() -> EventInfo {
+        let now = Utc::now();
+        EventInfo {
+            slug: "btc-up-or-down-5m".to_string(),
+            title: "BTC up or down".to_string(),
+            up_token_id: "up-token".to_string(),
+            down_token_id: "down-token".to_string(),
+            start_time: now - chrono::Duration::seconds(30),
+            end_time: now + chrono::Duration::seconds(270),
+            condition_id: "condition-id".to_string(),
+            series_id: "10684".to_string(),
+            horizon: "5m".to_string(),
+            price_to_beat: None,
+        }
+    }
+
+    fn sample_window_context() -> WindowContext {
+        WindowContext {
+            now: Utc::now(),
+            start_price: dec!(100),
+            window_move: dec!(0.01),
+            elapsed_secs: 30,
+            remaining_secs: 270,
+            p_up_window: dec!(0.60),
+        }
+    }
+
     #[test]
     fn test_config_defaults() {
         let cfg = CryptoLobMlConfig::default();
@@ -1549,6 +1645,65 @@ mod tests {
         let (w_model, w_window) = agent.model_window_blend_weights();
         assert_eq!(w_model, dec!(0.90));
         assert_eq!(w_window, dec!(0.10));
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_prefers_higher_edge() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            nn_model: None,
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+            entry_trading_enabled: true,
+        };
+
+        let signal = agent
+            .evaluate_entry_signal(
+                &sample_event(),
+                "mlp_json",
+                dec!(0.62),
+                &sample_window_context(),
+                dec!(0.52),
+                dec!(0.49),
+            )
+            .expect("signal should pass filters");
+
+        assert_eq!(signal.side, Side::Up);
+        assert_eq!(signal.token_id, "up-token");
+        assert!(signal.edge >= dec!(0.02));
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_rejects_expensive_entry() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            nn_model: None,
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+            entry_trading_enabled: true,
+        };
+
+        let signal = agent.evaluate_entry_signal(
+            &sample_event(),
+            "mlp_json",
+            dec!(0.99),
+            &sample_window_context(),
+            dec!(0.80),
+            dec!(0.95),
+        );
+        assert!(signal.is_none());
     }
 
     #[test]
