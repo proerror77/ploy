@@ -12,6 +12,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -23,8 +24,8 @@ use sqlx::{PgPool, Row};
 use crate::domain::OrderRequest;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, Domain, OrderIntent, OrderPriority, OrderQueue, PositionAggregator,
-    RiskCheckResult, RiskGate,
+    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue,
+    PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
 };
 use crate::strategy::executor::OrderExecutor;
 
@@ -211,6 +212,7 @@ impl CoordinatorHandle {
 pub struct Coordinator {
     config: CoordinatorConfig,
     account_id: String,
+    deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
     duplicate_guard: Arc<RwLock<IntentDuplicateGuard>>,
@@ -1257,6 +1259,7 @@ impl Coordinator {
             config.duplicate_guard_enabled,
             config.duplicate_guard_scope,
         )));
+        let deployments = Arc::new(RwLock::new(Self::load_strategy_deployments()));
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
         let sports_allocator = Arc::new(RwLock::new(SportsCapitalAllocator::new(&config)));
         let positions = Arc::new(PositionAggregator::new());
@@ -1273,6 +1276,7 @@ impl Coordinator {
         Self {
             config,
             account_id,
+            deployments,
             risk_gate,
             order_queue,
             duplicate_guard,
@@ -1662,6 +1666,16 @@ impl Coordinator {
             return;
         }
 
+        if let Err(reason) = self.enforce_live_buy_deployment_gate(&mut intent).await {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by deployment gate"
+            );
+            return;
+        }
+
         self.persist_signal_from_intent(&intent).await;
         if !intent.is_buy {
             self.persist_exit_reason_intent(&intent).await;
@@ -1782,6 +1796,383 @@ impl Coordinator {
         self.persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
             .await;
         warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
+    }
+
+    fn deployment_gate_required() -> bool {
+        match std::env::var("PLOY_DEPLOYMENT_GATE_REQUIRED")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+        {
+            Some(v) => !matches!(v.as_str(), "0" | "false" | "no" | "off"),
+            None => true,
+        }
+    }
+
+    fn deployments_state_path() -> PathBuf {
+        if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
+            return PathBuf::from(path);
+        }
+
+        let container_data_root = Path::new("/opt/ploy/data");
+        if container_data_root.exists() {
+            return container_data_root.join("state/deployments.json");
+        }
+
+        let repo_root_deployment = Path::new("deployment/deployments.json");
+        if repo_root_deployment.exists() {
+            return repo_root_deployment.to_path_buf();
+        }
+
+        let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
+        if container_deployment.exists() {
+            return container_deployment.to_path_buf();
+        }
+
+        PathBuf::from("data/state/deployments.json")
+    }
+
+    fn parse_strategy_deployments(raw: &str) -> HashMap<String, StrategyDeployment> {
+        let mut out = HashMap::new();
+        if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
+            for mut dep in items {
+                let id = dep.id.trim().to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                dep.id = id.clone();
+                dep.normalize_account_ids_in_place();
+                out.insert(id, dep);
+            }
+        }
+        out
+    }
+
+    fn load_strategy_deployments() -> HashMap<String, StrategyDeployment> {
+        let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
+            .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
+            .unwrap_or_default();
+        if !raw.trim().is_empty() {
+            return Self::parse_strategy_deployments(&raw);
+        }
+
+        let candidates = [
+            Self::deployments_state_path(),
+            Path::new("deployment/deployments.json").to_path_buf(),
+            Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
+        ];
+
+        for path in candidates {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                let parsed = Self::parse_strategy_deployments(&contents);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+            }
+        }
+
+        HashMap::new()
+    }
+
+    async fn refresh_strategy_deployments(&self) {
+        let loaded = Self::load_strategy_deployments();
+        let mut deployments = self.deployments.write().await;
+        *deployments = loaded;
+    }
+
+    fn metadata_value<'a>(metadata: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+        keys.iter()
+            .find_map(|k| metadata.get(*k))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }
+
+    fn normalized_token(raw: &str) -> String {
+        raw.trim()
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect()
+    }
+
+    fn strategy_matches(intent_strategy: &str, deployment_strategy: &str) -> bool {
+        let intent = Self::normalized_token(intent_strategy);
+        let dep = Self::normalized_token(deployment_strategy);
+        if intent.is_empty() || dep.is_empty() {
+            return false;
+        }
+        intent == dep || intent.contains(&dep) || dep.contains(&intent)
+    }
+
+    fn selector_matches_intent(
+        deployment: &StrategyDeployment,
+        market_slug: &str,
+        metadata: &HashMap<String, String>,
+    ) -> bool {
+        match &deployment.market_selector {
+            MarketSelector::Static {
+                symbol,
+                series_id,
+                market_slug: expected_market_slug,
+            } => {
+                if let Some(expected) = expected_market_slug
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    if !market_slug.eq_ignore_ascii_case(expected) {
+                        return false;
+                    }
+                }
+
+                if let Some(expected) = symbol.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    if let Some(actual) = Self::metadata_value(metadata, &["symbol"]) {
+                        if !actual.eq_ignore_ascii_case(expected) {
+                            return false;
+                        }
+                    }
+                }
+
+                if let Some(expected) = series_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    if let Some(actual) =
+                        Self::metadata_value(metadata, &["series_id", "event_series_id"])
+                    {
+                        if !actual.eq_ignore_ascii_case(expected) {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            }
+            MarketSelector::Dynamic { domain, .. } => *domain == deployment.domain,
+        }
+    }
+
+    fn timeframe_hint(intent: &OrderIntent) -> Option<String> {
+        if let Some(raw) = Self::metadata_value(&intent.metadata, &["timeframe", "horizon"]) {
+            if let Some(h) = CryptoHorizon::from_hint(raw) {
+                return Some(h.as_str().to_string());
+            }
+            return Some(raw.to_ascii_lowercase());
+        }
+
+        if let Some(raw) = Self::metadata_value(&intent.metadata, &["series_id", "event_series_id"])
+        {
+            if let Some(h) = CryptoHorizon::from_hint(raw) {
+                return Some(h.as_str().to_string());
+            }
+        }
+
+        CryptoHorizon::from_hint(&intent.market_slug).map(|h| h.as_str().to_string())
+    }
+
+    fn deployment_matches_timeframe(deployment: &StrategyDeployment, intent: &OrderIntent) -> bool {
+        let Some(timeframe) = Self::timeframe_hint(intent) else {
+            return true;
+        };
+        timeframe.eq_ignore_ascii_case(deployment.timeframe.as_str())
+    }
+
+    fn deployment_runtime_eligible(
+        deployment: &StrategyDeployment,
+        account_id: &str,
+        dry_run: bool,
+        intent: &OrderIntent,
+    ) -> bool {
+        deployment.is_enabled_for_runtime(account_id, dry_run)
+            && deployment.domain == intent.domain
+            && Self::deployment_matches_timeframe(deployment, intent)
+            && Self::selector_matches_intent(deployment, &intent.market_slug, &intent.metadata)
+    }
+
+    fn apply_deployment_metadata(intent: &mut OrderIntent, deployment: &StrategyDeployment) {
+        intent
+            .metadata
+            .insert("deployment_id".to_string(), deployment.id.clone());
+        intent
+            .metadata
+            .entry("timeframe".to_string())
+            .or_insert_with(|| deployment.timeframe.as_str().to_string());
+        intent
+            .metadata
+            .entry("allocator_profile".to_string())
+            .or_insert_with(|| deployment.allocator_profile.clone());
+        intent
+            .metadata
+            .entry("risk_profile".to_string())
+            .or_insert_with(|| deployment.risk_profile.clone());
+        intent
+            .metadata
+            .entry("deployment_strategy".to_string())
+            .or_insert_with(|| deployment.strategy.clone());
+        intent
+            .metadata
+            .entry("deployment_priority".to_string())
+            .or_insert_with(|| deployment.priority.to_string());
+        intent
+            .metadata
+            .entry("deployment_cooldown_secs".to_string())
+            .or_insert_with(|| deployment.cooldown_secs.to_string());
+
+        if let MarketSelector::Static {
+            symbol,
+            series_id,
+            market_slug,
+        } = &deployment.market_selector
+        {
+            if let Some(value) = symbol.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                intent
+                    .metadata
+                    .entry("symbol".to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+            if let Some(value) = series_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                intent
+                    .metadata
+                    .entry("series_id".to_string())
+                    .or_insert_with(|| value.to_string());
+                intent
+                    .metadata
+                    .entry("event_series_id".to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+            if let Some(value) = market_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                intent
+                    .metadata
+                    .entry("selector_market_slug".to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+        }
+    }
+
+    fn enforce_deployment_gate_with_snapshot(
+        account_id: &str,
+        dry_run: bool,
+        deployments: &HashMap<String, StrategyDeployment>,
+        intent: &mut OrderIntent,
+    ) -> std::result::Result<(), String> {
+        if !intent.is_buy || dry_run || !Self::deployment_gate_required() {
+            return Ok(());
+        }
+
+        if deployments.is_empty() {
+            return Err(
+                "deployment registry is empty while deployment gate is required".to_string(),
+            );
+        }
+
+        if let Some(deployment_id) = Self::metadata_value(&intent.metadata, &["deployment_id"]) {
+            let Some(deployment) = deployments.get(deployment_id) else {
+                return Err(format!("unknown deployment_id: {}", deployment_id));
+            };
+            if !Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent) {
+                return Err(format!(
+                    "deployment {} is not eligible for runtime/account/domain/timeframe/selector binding",
+                    deployment.id
+                ));
+            }
+            Self::apply_deployment_metadata(intent, deployment);
+            return Ok(());
+        }
+
+        let strategy = Self::metadata_value(&intent.metadata, &["strategy", "deployment_strategy"])
+            .ok_or_else(|| "strategy metadata is required for live BUY intents".to_string())?;
+
+        let mut candidates: Vec<&StrategyDeployment> = deployments
+            .values()
+            .filter(|deployment| {
+                Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent)
+                    && Self::strategy_matches(strategy, deployment.strategy.as_str())
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            let mut domain_candidates: Vec<&StrategyDeployment> = deployments
+                .values()
+                .filter(|deployment| {
+                    Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent)
+                })
+                .collect();
+            domain_candidates.sort_by(|a, b| a.id.cmp(&b.id));
+
+            if domain_candidates.len() == 1 {
+                let deployment = domain_candidates[0];
+                Self::apply_deployment_metadata(intent, deployment);
+                intent.metadata.insert(
+                    "deployment_resolution".to_string(),
+                    "domain_singleton_fallback".to_string(),
+                );
+                return Ok(());
+            }
+
+            return Err(format!(
+                "no eligible deployment found for strategy={} domain={} market={}",
+                strategy, intent.domain, intent.market_slug
+            ));
+        }
+
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
+
+        if candidates.len() > 1 {
+            let ids = candidates
+                .iter()
+                .map(|d| d.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "ambiguous deployment resolution for strategy={} market={}: {}",
+                strategy, intent.market_slug, ids
+            ));
+        }
+
+        let deployment = candidates[0];
+        Self::apply_deployment_metadata(intent, deployment);
+        Ok(())
+    }
+
+    async fn enforce_live_buy_deployment_gate(
+        &self,
+        intent: &mut OrderIntent,
+    ) -> std::result::Result<(), String> {
+        if !intent.is_buy || self.executor.is_dry_run() || !Self::deployment_gate_required() {
+            return Ok(());
+        }
+
+        let explicit_id =
+            Self::metadata_value(&intent.metadata, &["deployment_id"]).map(ToString::to_string);
+        let should_refresh = {
+            let deployments = self.deployments.read().await;
+            deployments.is_empty()
+                || explicit_id
+                    .as_ref()
+                    .is_some_and(|id| !deployments.contains_key(id.as_str()))
+        };
+        if should_refresh {
+            self.refresh_strategy_deployments().await;
+        }
+
+        let deployments = self.deployments.read().await;
+        Self::enforce_deployment_gate_with_snapshot(
+            self.account_id.as_str(),
+            self.executor.is_dry_run(),
+            &deployments,
+            intent,
+        )
     }
 
     async fn apply_kelly_sizing(&self, intent: &mut OrderIntent) -> Option<String> {
@@ -3132,7 +3523,10 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
+    use crate::platform::{
+        AgentStatus, DeploymentExecutionMode, Domain, MarketSelector, OrderPriority, QueueStats,
+        StrategyDeployment, Timeframe,
+    };
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
 
@@ -3203,6 +3597,36 @@ mod tests {
         );
         intent.priority = priority;
         intent
+    }
+
+    fn make_deployment(
+        id: &str,
+        strategy: &str,
+        domain: Domain,
+        timeframe: Timeframe,
+        execution_mode: DeploymentExecutionMode,
+    ) -> StrategyDeployment {
+        StrategyDeployment {
+            id: id.to_string(),
+            strategy: strategy.to_string(),
+            domain,
+            market_selector: MarketSelector::Dynamic {
+                domain,
+                query: None,
+                min_liquidity_usd: None,
+                max_spread_bps: None,
+                min_time_remaining_secs: None,
+                max_time_remaining_secs: None,
+            },
+            timeframe,
+            enabled: true,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 50,
+            cooldown_secs: 60,
+            account_ids: Vec::new(),
+            execution_mode,
+        }
     }
 
     #[test]
@@ -3310,6 +3734,185 @@ mod tests {
         assert!(guard
             .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
             .is_none());
+    }
+
+    #[test]
+    fn test_deployment_gate_blocks_live_buy_without_strategy_metadata() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-15m".to_string(),
+            make_deployment(
+                "crypto-momentum-15m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M15,
+                DeploymentExecutionMode::LiveOnly,
+            ),
+        );
+
+        let mut intent = make_intent(true, OrderPriority::Normal);
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("strategy metadata is required"));
+    }
+
+    #[test]
+    fn test_deployment_gate_accepts_explicit_deployment_and_applies_metadata() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-15m".to_string(),
+            make_deployment(
+                "crypto-momentum-15m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M15,
+                DeploymentExecutionMode::LiveOnly,
+            ),
+        );
+
+        let mut intent = make_intent(true, OrderPriority::Normal)
+            .with_metadata("strategy", "crypto_momentum")
+            .with_metadata("deployment_id", "crypto-momentum-15m");
+        intent.market_slug = "btc-updown-15m-xyz".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            intent.metadata.get("deployment_id").map(String::as_str),
+            Some("crypto-momentum-15m")
+        );
+        assert_eq!(
+            intent.metadata.get("timeframe").map(String::as_str),
+            Some("15m")
+        );
+    }
+
+    #[test]
+    fn test_deployment_gate_blocks_ambiguous_inferred_deployments() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-a".to_string(),
+            make_deployment(
+                "crypto-momentum-a",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::Other("other".to_string()),
+                DeploymentExecutionMode::Any,
+            ),
+        );
+        deployments.insert(
+            "crypto-momentum-b".to_string(),
+            make_deployment(
+                "crypto-momentum-b",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::Other("other".to_string()),
+                DeploymentExecutionMode::Any,
+            ),
+        );
+
+        let mut intent =
+            make_intent(true, OrderPriority::Normal).with_metadata("strategy", "momentum");
+        intent.market_slug = "btc-updown-unknown".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("ambiguous deployment resolution"));
+    }
+
+    #[test]
+    fn test_deployment_gate_blocks_runtime_scope_mismatch() {
+        let mut deployment = make_deployment(
+            "crypto-momentum-15m",
+            "momentum",
+            Domain::Crypto,
+            Timeframe::M15,
+            DeploymentExecutionMode::DryRunOnly,
+        );
+        deployment.account_ids = vec!["acct-b".to_string()];
+
+        let mut deployments = HashMap::new();
+        deployments.insert("crypto-momentum-15m".to_string(), deployment);
+
+        let mut intent = make_intent(true, OrderPriority::Normal)
+            .with_metadata("strategy", "momentum")
+            .with_metadata("deployment_id", "crypto-momentum-15m");
+        intent.market_slug = "btc-updown-15m-xyz".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not eligible"));
+    }
+
+    #[test]
+    fn test_deployment_gate_infers_unique_by_timeframe_hint() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-5m".to_string(),
+            make_deployment(
+                "crypto-momentum-5m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M5,
+                DeploymentExecutionMode::Any,
+            ),
+        );
+        deployments.insert(
+            "crypto-momentum-15m".to_string(),
+            make_deployment(
+                "crypto-momentum-15m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M15,
+                DeploymentExecutionMode::Any,
+            ),
+        );
+
+        let mut intent = make_intent(true, OrderPriority::Normal)
+            .with_metadata("strategy", "crypto_momentum")
+            .with_metadata("horizon", "15m");
+        intent.market_slug = "btc-updown-15m-xyz".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            intent.metadata.get("deployment_id").map(String::as_str),
+            Some("crypto-momentum-15m")
+        );
     }
 
     #[test]
