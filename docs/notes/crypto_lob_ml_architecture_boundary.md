@@ -15,3 +15,6 @@
 - 新训练入口：`scripts/train_crypto_lob_mlp_onnx_from_db.py --source sync_records --horizon 5m|15m`。
 - 标签来自 `pm_token_settlements`（resolved 结果），特征来自 `sync_records`（LOB + 短周期动量）。
 - 训练产物通过 `MODEL_TYPE/MODEL_PATH/MODEL_VERSION` 接入 runtime。
+
+## 4. 上线清单
+- 参考：`docs/CRYPTO_LOB_ML_DEPLOY_CHECKLIST.md`
