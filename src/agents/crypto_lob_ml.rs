@@ -14,7 +14,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -32,6 +32,9 @@ use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 const STRATEGY_ID: &str = "crypto_lob_ml";
+const SEQ_LEN_5M: usize = 60;
+const SEQ_LEN_15M: usize = 180;
+const SEQ_FEATURE_DIM: usize = 11;
 
 /// Standard normal CDF approximation (Abramowitz-Stegun), ~4dp accuracy.
 fn normal_cdf(x: f64) -> f64 {
@@ -338,6 +341,29 @@ struct EntrySignal {
     down_ask: Decimal,
 }
 
+#[derive(Debug, Clone)]
+struct SequenceSnapshot {
+    ts: DateTime<Utc>,
+    obi_5: Decimal,
+    obi_10: Decimal,
+    spread_bps: Decimal,
+    bid_volume_5: Decimal,
+    ask_volume_5: Decimal,
+    momentum_1s: Decimal,
+    momentum_5s: Decimal,
+    spot_price: Decimal,
+    remaining_secs: Decimal,
+    price_to_beat: Decimal,
+    distance_to_beat: Decimal,
+}
+
+fn sequence_len_for_horizon(horizon: &str) -> usize {
+    match normalize_timeframe(horizon).as_str() {
+        "15m" => SEQ_LEN_15M,
+        _ => SEQ_LEN_5M,
+    }
+}
+
 pub struct CryptoLobMlAgent {
     config: CryptoLobMlConfig,
     binance_ws: Arc<BinanceWebSocket>,
@@ -526,7 +552,12 @@ impl CryptoLobMlAgent {
                     )
                 })?;
 
-            let m = OnnxModel::load_for_vec_input(model_path, 7)?;
+            let configured_input_dim = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_INPUT_DIM")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(SEQ_LEN_5M * SEQ_FEATURE_DIM);
+
+            let m = OnnxModel::load_for_vec_input(model_path, configured_input_dim)?;
             info!(
                 agent = config.agent_id,
                 model_type = "onnx",
@@ -562,6 +593,56 @@ impl CryptoLobMlAgent {
         format!("{:x}", hasher.finalize())
     }
 
+    fn push_sequence_snapshot(
+        sequence_cache: &mut HashMap<String, VecDeque<SequenceSnapshot>>,
+        key: &str,
+        snapshot: SequenceSnapshot,
+    ) {
+        let window = sequence_cache.entry(key.to_string()).or_default();
+        if let Some(last) = window.back_mut() {
+            // Keep one row per second key to avoid dense duplicate ticks.
+            if last.ts == snapshot.ts {
+                *last = snapshot;
+                return;
+            }
+        }
+
+        window.push_back(snapshot);
+        while window.len() > SEQ_LEN_15M {
+            let _ = window.pop_front();
+        }
+    }
+
+    fn build_sequence(
+        sequence_cache: &HashMap<String, VecDeque<SequenceSnapshot>>,
+        key: &str,
+        horizon: &str,
+    ) -> Option<Vec<f32>> {
+        let seq_len = sequence_len_for_horizon(horizon);
+        let window = sequence_cache.get(key)?;
+        if window.len() < seq_len {
+            return None;
+        }
+
+        let mut flat: Vec<f32> = Vec::with_capacity(seq_len * SEQ_FEATURE_DIM);
+        let start_idx = window.len().saturating_sub(seq_len);
+        for snap in window.iter().skip(start_idx) {
+            flat.push(snap.obi_5.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.obi_10.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.spread_bps.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.bid_volume_5.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.ask_volume_5.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.momentum_1s.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.momentum_5s.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.spot_price.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.remaining_secs.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.price_to_beat.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.distance_to_beat.to_f64().unwrap_or(0.0) as f32);
+        }
+
+        Some(flat)
+    }
+
     #[cfg(feature = "onnx")]
     fn sigmoid(x: f64) -> f64 {
         1.0 / (1.0 + (-x).exp())
@@ -594,39 +675,33 @@ impl CryptoLobMlAgent {
         Decimal::from_f64_retain(p).unwrap_or(dec!(0.50))
     }
 
-    /// Estimate p(UP) using ONNX model. Returns (p_up, model_type_used).
-    fn estimate_p_up(
-        &self,
-        lob: &LobSnapshot,
-        momentum_1s: Decimal,
-        momentum_5s: Decimal,
-    ) -> Result<(f64, &'static str)> {
+    /// Estimate p(UP) using ONNX model from a flattened sequence input.
+    fn estimate_p_up(&self, horizon: &str, sequence: &[f32]) -> Result<(f64, &'static str)> {
         #[cfg(feature = "onnx")]
         {
-            // Shared feature order (must match training/export):
-            // [obi5, obi10, spread_bps, bid_volume_5, ask_volume_5, momentum_1s, momentum_5s]
-            let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
-            let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
-            let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
-            let bidv5 = lob.bid_volume_5.to_f64().unwrap_or(0.0);
-            let askv5 = lob.ask_volume_5.to_f64().unwrap_or(0.0);
-            let m1 = momentum_1s.to_f64().unwrap_or(0.0);
-            let m5 = momentum_5s.to_f64().unwrap_or(0.0);
+            let expected_len = sequence_len_for_horizon(horizon) * SEQ_FEATURE_DIM;
+            if sequence.len() != expected_len {
+                return Err(PloyError::Validation(format!(
+                    "sequence input dim mismatch: got {}, expected {} for horizon {}",
+                    sequence.len(),
+                    expected_len,
+                    normalize_timeframe(horizon),
+                )));
+            }
 
             let m = self
                 .onnx_model
                 .as_ref()
                 .ok_or_else(|| PloyError::InvalidState("onnx model not initialized".to_string()))?;
-            let features = [
-                obi5 as f32,
-                obi10 as f32,
-                spread as f32,
-                bidv5 as f32,
-                askv5 as f32,
-                m1 as f32,
-                m5 as f32,
-            ];
-            let raw = m.predict_scalar(&features)?;
+            if m.input_dim() != sequence.len() {
+                return Err(PloyError::Validation(format!(
+                    "onnx input dim mismatch: got {}, model expects {}",
+                    sequence.len(),
+                    m.input_dim(),
+                )));
+            }
+
+            let raw = m.predict_scalar(sequence)?;
             if !raw.is_finite() {
                 return Err(PloyError::Internal(
                     "lob-ml onnx returned non-finite output".to_string(),
@@ -643,7 +718,7 @@ impl CryptoLobMlAgent {
 
         #[cfg(not(feature = "onnx"))]
         {
-            let _ = (lob, momentum_1s, momentum_5s);
+            let _ = (horizon, sequence);
             Err(PloyError::Validation(
                 "crypto_lob_ml requires --features onnx".to_string(),
             ))
@@ -973,6 +1048,7 @@ impl TradingAgent for CryptoLobMlAgent {
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut last_trade_by_key: HashMap<String, DateTime<Utc>> = HashMap::new(); // symbol|timeframe -> ts
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut sequence_cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
 
         let daily_pnl = Decimal::ZERO;
         sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
@@ -1103,23 +1179,6 @@ impl TradingAgent for CryptoLobMlAgent {
                     let momentum_5s = spot.momentum(5).unwrap_or(Decimal::ZERO);
                     let rolling_volatility_opt = spot.volatility(60);
 
-                    let (p_up_model, model_type_used) = match self
-                        .estimate_p_up(&lob, momentum_1s, momentum_5s)
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!(
-                                agent = self.config.agent_id,
-                                symbol = %update.symbol,
-                                error = %e,
-                                "onnx inference failed, skipping this tick"
-                            );
-                            continue;
-                        }
-                    };
-                    let p_up_model_dec =
-                        Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
-
                     let (obi_1, obi_2, obi_3, obi_20) = (
                         self.lob_cache
                             .get_obi(&update.symbol, 1)
@@ -1170,6 +1229,56 @@ impl TradingAgent for CryptoLobMlAgent {
                             rolling_volatility_opt,
                             window_ctx.remaining_secs,
                         );
+
+                        let price_to_beat = event.price_to_beat.unwrap_or(spot.price);
+                        let distance_to_beat = if spot.price > Decimal::ZERO {
+                            (price_to_beat - spot.price) / spot.price
+                        } else {
+                            Decimal::ZERO
+                        };
+                        let second_bucket =
+                            chrono::DateTime::<Utc>::from_timestamp(spot.timestamp.timestamp(), 0)
+                                .unwrap_or(spot.timestamp);
+                        Self::push_sequence_snapshot(
+                            &mut sequence_cache,
+                            entry_key.as_str(),
+                            SequenceSnapshot {
+                                ts: second_bucket,
+                                obi_5: lob.obi_5,
+                                obi_10: lob.obi_10,
+                                spread_bps: lob.spread_bps,
+                                bid_volume_5: lob.bid_volume_5,
+                                ask_volume_5: lob.ask_volume_5,
+                                momentum_1s,
+                                momentum_5s,
+                                spot_price: spot.price,
+                                remaining_secs: Decimal::from(window_ctx.remaining_secs.max(0)),
+                                price_to_beat,
+                                distance_to_beat,
+                            },
+                        );
+
+                        let Some(sequence_input) =
+                            Self::build_sequence(&sequence_cache, entry_key.as_str(), &timeframe)
+                        else {
+                            continue;
+                        };
+                        let (p_up_model, model_type_used) =
+                            match self.estimate_p_up(&timeframe, &sequence_input) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        agent = self.config.agent_id,
+                                        symbol = %update.symbol,
+                                        timeframe = %timeframe,
+                                        error = %e,
+                                        "onnx inference failed for sequence input"
+                                    );
+                                    continue;
+                                }
+                            };
+                        let p_up_model_dec =
+                            Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
@@ -1915,6 +2024,85 @@ mod tests {
         agent
             .compute_blended_probability(dec!(0.62), &sample_window_context(), Some(dec!(0.58)))
             .expect("blended probability should be available")
+    }
+
+    fn sample_sequence_snapshot(ts: DateTime<Utc>) -> SequenceSnapshot {
+        SequenceSnapshot {
+            ts,
+            obi_5: dec!(0.10),
+            obi_10: dec!(0.12),
+            spread_bps: dec!(2.0),
+            bid_volume_5: dec!(1000),
+            ask_volume_5: dec!(980),
+            momentum_1s: dec!(0.001),
+            momentum_5s: dec!(0.003),
+            spot_price: dec!(102000),
+            remaining_secs: dec!(90),
+            price_to_beat: dec!(102500),
+            distance_to_beat: dec!(0.0049),
+        }
+    }
+
+    #[test]
+    fn test_build_sequence_lengths_for_5m_and_15m() {
+        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
+        let key = "BTCUSDT|15m";
+        let now = Utc::now();
+        for i in 0..SEQ_LEN_15M {
+            CryptoLobMlAgent::push_sequence_snapshot(
+                &mut cache,
+                key,
+                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
+            );
+        }
+
+        let seq_5m = CryptoLobMlAgent::build_sequence(&cache, key, "5m")
+            .expect("5m sequence should be available");
+        assert_eq!(seq_5m.len(), SEQ_LEN_5M * SEQ_FEATURE_DIM);
+
+        let seq_15m = CryptoLobMlAgent::build_sequence(&cache, key, "15m")
+            .expect("15m sequence should be available");
+        assert_eq!(seq_15m.len(), SEQ_LEN_15M * SEQ_FEATURE_DIM);
+    }
+
+    #[test]
+    fn test_build_sequence_returns_none_when_insufficient_history() {
+        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
+        let key = "BTCUSDT|5m";
+        let now = Utc::now();
+        for i in 0..(SEQ_LEN_5M - 1) {
+            CryptoLobMlAgent::push_sequence_snapshot(
+                &mut cache,
+                key,
+                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
+            );
+        }
+
+        assert!(CryptoLobMlAgent::build_sequence(&cache, key, "5m").is_none());
+    }
+
+    #[test]
+    fn test_estimate_p_up_validates_sequence_input_dim() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+        let bad = vec![0.0f32; (SEQ_LEN_5M * SEQ_FEATURE_DIM).saturating_sub(1)];
+        let err = agent
+            .estimate_p_up("5m", &bad)
+            .err()
+            .expect("bad input dim should fail");
+        #[cfg(feature = "onnx")]
+        assert!(err.to_string().contains("sequence input dim mismatch"));
+        #[cfg(not(feature = "onnx"))]
+        assert!(err.to_string().contains("--features onnx"));
     }
 
     #[test]
