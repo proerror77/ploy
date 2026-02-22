@@ -1,6 +1,7 @@
 use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
 use serde::Deserialize;
 use sqlx::{postgres::Postgres, QueryBuilder, Row};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::api::{
     auth::ensure_admin_authorized,
@@ -34,6 +35,16 @@ fn parse_domain_control_request(
                 ),
             )
         })
+}
+
+fn domain_label(domain: Domain) -> String {
+    match domain {
+        Domain::Crypto => "crypto".to_string(),
+        Domain::Sports => "sports".to_string(),
+        Domain::Politics => "politics".to_string(),
+        Domain::Economics => "economics".to_string(),
+        Domain::Custom(id) => format!("custom:{}", id),
+    }
 }
 
 /// GET /health -- lightweight liveness/readiness probe
@@ -94,6 +105,179 @@ pub async fn get_system_status(
         websocket_connected: status_state.websocket_connected,
         database_connected: status_state.database_connected,
         error_count_1h: error_count,
+    }))
+}
+
+/// GET /api/system/capabilities
+///
+/// Execution-plane capabilities for architecture/runtime introspection.
+pub async fn get_platform_capabilities(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<PlatformCapabilities>, (StatusCode, String)> {
+    let coordinator_running = state.coordinator.is_some();
+
+    let mut active_domains: BTreeSet<String> = BTreeSet::new();
+    if let Some(coordinator) = state.coordinator.as_ref() {
+        let global = coordinator.read_state().await;
+        for snapshot in global.agents.values() {
+            active_domains.insert(domain_label(snapshot.domain));
+        }
+    }
+
+    let (
+        total_deployments,
+        enabled_deployments,
+        scoped_total_deployments,
+        scoped_enabled_deployments,
+        deployments_by_domain,
+    ) = {
+        let deployments = state.deployments.read().await;
+        let mut by_domain: HashMap<String, usize> = HashMap::new();
+        let mut enabled = 0usize;
+        let mut scoped_total = 0usize;
+        let mut scoped_enabled = 0usize;
+        for deployment in deployments.values() {
+            let in_scope = deployment.matches_account(state.account_id.as_str())
+                && deployment.matches_execution_mode(state.dry_run);
+            if in_scope {
+                scoped_total += 1;
+            }
+            if deployment.enabled {
+                enabled += 1;
+                if in_scope {
+                    scoped_enabled += 1;
+                    active_domains.insert(domain_label(deployment.domain));
+                }
+            }
+            *by_domain
+                .entry(domain_label(deployment.domain))
+                .or_insert(0) += 1;
+        }
+        (
+            deployments.len(),
+            enabled,
+            scoped_total,
+            scoped_enabled,
+            by_domain,
+        )
+    };
+
+    let mut supported_domains = vec![
+        "crypto".to_string(),
+        "sports".to_string(),
+        "politics".to_string(),
+        "economics".to_string(),
+    ];
+    if deployments_by_domain
+        .keys()
+        .any(|k| k.starts_with("custom:"))
+    {
+        supported_domains.push("custom".to_string());
+    }
+
+    Ok(Json(PlatformCapabilities {
+        account_id: state.account_id.clone(),
+        runtime_mode: state.runtime_mode.clone(),
+        execution_plane: "coordinator".to_string(),
+        dry_run: state.dry_run,
+        coordinator_running,
+        supported_domains,
+        active_domains: active_domains.into_iter().collect(),
+        total_deployments,
+        enabled_deployments,
+        scoped_total_deployments,
+        scoped_enabled_deployments,
+        deployments_by_domain,
+        system_controls: vec![
+            "pause_all".to_string(),
+            "resume_all".to_string(),
+            "halt_all".to_string(),
+            "pause_domain".to_string(),
+            "resume_domain".to_string(),
+            "halt_domain".to_string(),
+            "deployment_gate".to_string(),
+        ],
+    }))
+}
+
+/// GET /api/system/accounts
+///
+/// Account registry and deployment coverage overview.
+pub async fn get_system_accounts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> std::result::Result<Json<AccountsOverview>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+
+    let runtime_account = state.account_id.trim().to_string();
+
+    let mut accounts: Vec<AccountRuntimeSummary> = Vec::new();
+    if let Ok(rows) = sqlx::query(
+        r#"
+        SELECT account_id, wallet_address, label
+        FROM accounts
+        ORDER BY account_id ASC
+        "#,
+    )
+    .fetch_all(state.store.pool())
+    .await
+    {
+        for row in rows {
+            let account_id: String = row.try_get("account_id").unwrap_or_default();
+            let account_id = account_id.trim().to_string();
+            if account_id.is_empty() {
+                continue;
+            }
+            accounts.push(AccountRuntimeSummary {
+                account_id,
+                wallet_address: row.try_get("wallet_address").ok(),
+                label: row.try_get("label").ok(),
+                runtime_active: false,
+                deployment_total: 0,
+                deployment_enabled: 0,
+            });
+        }
+    }
+
+    if !accounts
+        .iter()
+        .any(|a| a.account_id.eq_ignore_ascii_case(runtime_account.as_str()))
+    {
+        accounts.push(AccountRuntimeSummary {
+            account_id: runtime_account.clone(),
+            wallet_address: None,
+            label: Some("runtime".to_string()),
+            runtime_active: false,
+            deployment_total: 0,
+            deployment_enabled: 0,
+        });
+    }
+
+    let deployments = state.deployments.read().await;
+    for account in &mut accounts {
+        account.runtime_active = account
+            .account_id
+            .eq_ignore_ascii_case(runtime_account.as_str());
+
+        let mut total = 0usize;
+        let mut enabled = 0usize;
+        for dep in deployments.values() {
+            if dep.matches_account(account.account_id.as_str()) {
+                total += 1;
+                if dep.enabled {
+                    enabled += 1;
+                }
+            }
+        }
+        account.deployment_total = total;
+        account.deployment_enabled = enabled;
+    }
+    accounts.sort_by(|a, b| a.account_id.cmp(&b.account_id));
+
+    Ok(Json(AccountsOverview {
+        runtime_account_id: runtime_account,
+        dry_run: state.dry_run,
+        accounts,
     }))
 }
 

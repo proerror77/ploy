@@ -122,6 +122,7 @@ onnx = ["tract-onnx"]
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = true

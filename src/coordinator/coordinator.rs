@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::domain::OrderRequest;
 use crate::error::Result;
@@ -1300,6 +1300,66 @@ impl Coordinator {
         self.execution_log_pool = Some(pool);
     }
 
+    /// Restore persisted risk runtime state (drawdown + daily pnl continuity).
+    pub async fn restore_risk_runtime_state(&self) -> Result<()> {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                current_equity,
+                equity_peak,
+                current_drawdown,
+                max_drawdown_observed,
+                daily_pnl,
+                daily_date,
+                risk_state
+            FROM risk_runtime_state
+            WHERE account_id = $1
+            "#,
+        )
+        .bind(&self.account_id)
+        .fetch_optional(pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(());
+        };
+
+        let snapshot = crate::platform::DrawdownSnapshot {
+            current_equity: row.try_get("current_equity").unwrap_or(Decimal::ZERO),
+            equity_peak: row.try_get("equity_peak").unwrap_or(Decimal::ZERO),
+            current_drawdown: row.try_get("current_drawdown").unwrap_or(Decimal::ZERO),
+            max_drawdown_observed: row
+                .try_get("max_drawdown_observed")
+                .unwrap_or(Decimal::ZERO),
+        };
+        self.risk_gate.restore_drawdown_snapshot(snapshot).await;
+
+        let daily_date: Option<chrono::NaiveDate> = row.try_get("daily_date").ok();
+        let daily_pnl: Decimal = row.try_get("daily_pnl").unwrap_or(Decimal::ZERO);
+        if daily_date == Some(Utc::now().date_naive()) {
+            self.risk_gate.restore_daily_pnl_for_today(daily_pnl).await;
+        }
+
+        let risk_state_raw: String = row.try_get("risk_state").unwrap_or_default();
+        if risk_state_raw.eq_ignore_ascii_case("halted") {
+            self.risk_gate
+                .trigger_circuit_breaker("restored persisted halted risk state")
+                .await;
+        }
+
+        info!(
+            account_id = %self.account_id,
+            daily_pnl = %daily_pnl,
+            risk_state = %risk_state_raw,
+            "restored persisted risk runtime state"
+        );
+        Ok(())
+    }
+
     /// Create a clonable handle for agents
     pub fn handle(&self) -> CoordinatorHandle {
         CoordinatorHandle {
@@ -2070,15 +2130,11 @@ impl Coordinator {
                     )
                     .await;
 
-                    // Record success with risk gate
-                    self.risk_gate
-                        .record_success(&agent_id, Decimal::ZERO)
-                        .await;
-
                     let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
                     self.settle_domain_success(&intent, result.filled_shares, fill_price)
                         .await;
 
+                    let mut realized_pnl = Decimal::ZERO;
                     if result.filled_shares > 0 {
                         if intent.is_buy {
                             let _ = self
@@ -2094,14 +2150,18 @@ impl Coordinator {
                                 )
                                 .await;
                         } else {
-                            self.apply_sell_fill_to_positions(
-                                &intent,
-                                result.filled_shares,
-                                fill_price,
-                            )
-                            .await;
+                            realized_pnl = self
+                                .apply_sell_fill_to_positions(
+                                    &intent,
+                                    result.filled_shares,
+                                    fill_price,
+                                )
+                                .await;
                         }
                     }
+
+                    // Record execution outcome with realized PnL attribution.
+                    self.risk_gate.record_success(&agent_id, realized_pnl).await;
                 }
                 Err(e) => {
                     error!(
@@ -2134,12 +2194,13 @@ impl Coordinator {
         intent: &OrderIntent,
         filled_shares: u64,
         exit_price: Decimal,
-    ) {
+    ) -> Decimal {
         if filled_shares == 0 {
-            return;
+            return Decimal::ZERO;
         }
 
         let mut remaining = filled_shares;
+        let mut realized_pnl = Decimal::ZERO;
         let mut matching_positions = self
             .positions
             .get_agent_positions(&intent.agent_id)
@@ -2160,10 +2221,13 @@ impl Coordinator {
                 break;
             }
             let reduce_by = remaining.min(pos.shares);
-            let _ = self
+            if let Some(pnl) = self
                 .positions
                 .reduce_position(&pos.position_id, reduce_by, exit_price)
-                .await;
+                .await
+            {
+                realized_pnl += pnl;
+            }
             remaining -= reduce_by;
         }
 
@@ -2175,6 +2239,8 @@ impl Coordinator {
                 "sell fill exceeded tracked position shares; allocator adjusted, position book partially unmatched"
             );
         }
+
+        realized_pnl
     }
 
     async fn persist_execution(
@@ -2581,7 +2647,7 @@ impl Coordinator {
         &self,
         intent: &OrderIntent,
         request: &OrderRequest,
-        result: Option<&crate::strategy::executor::ExecutionResult>,
+        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
         queue_delay_ms: Option<i64>,
         config_hash: Option<String>,
     ) {
@@ -2590,8 +2656,8 @@ impl Coordinator {
         };
 
         let expected_price = request.limit_price;
-        let executed_price = result.and_then(|r| r.avg_fill_price);
-        let execution_latency_ms = result.map(|r| r.elapsed_ms as i64);
+        let executed_price = execution_result.and_then(|r| r.avg_fill_price);
+        let execution_latency_ms = execution_result.map(|r| r.elapsed_ms as i64);
         let total_latency_ms = match (queue_delay_ms, execution_latency_ms) {
             (Some(q), Some(e)) => Some(q + e),
             (Some(q), None) => Some(q),
@@ -2615,11 +2681,11 @@ impl Coordinator {
             .or_else(|| Self::metadata_decimal(intent, "signal_expected_slippage_bps"));
         let metadata =
             serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-        let status = result
+        let status = execution_result
             .map(|r| format!("{:?}", r.status))
             .unwrap_or_else(|| "Failed".to_string());
 
-        let result = sqlx::query(
+        let persist_result = sqlx::query(
             r#"
             INSERT INTO execution_analysis (
                 account_id, intent_id, agent_id, domain, market_slug, token_id, is_buy,
@@ -2668,12 +2734,201 @@ impl Coordinator {
         .execute(pool)
         .await;
 
-        if let Err(e) = result {
+        if let Err(e) = persist_result {
             warn!(
                 agent_id = %intent.agent_id,
                 intent_id = %intent.intent_id,
                 error = %e,
                 "failed to persist execution analysis"
+            );
+        }
+
+        self.persist_live_strategy_evaluation(
+            intent,
+            request,
+            execution_result,
+            expected_slippage_bps,
+            actual_slippage_bps,
+            total_latency_ms,
+        )
+        .await;
+    }
+
+    async fn persist_live_strategy_evaluation(
+        &self,
+        intent: &OrderIntent,
+        request: &OrderRequest,
+        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
+        expected_slippage_bps: Option<Decimal>,
+        actual_slippage_bps: Option<Decimal>,
+        total_latency_ms: Option<i64>,
+    ) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let strategy_id = intent
+            .metadata
+            .get("strategy")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let deployment_id = intent
+            .metadata
+            .get("deployment_id")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string);
+        let timeframe = intent
+            .metadata
+            .get("timeframe")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string);
+        let score = Self::metadata_decimal(intent, "signal_confidence")
+            .or_else(|| Self::metadata_decimal(intent, "signal_edge"));
+
+        let status = match execution_result {
+            Some(result) => match result.status {
+                crate::domain::OrderStatus::Submitted
+                | crate::domain::OrderStatus::PartiallyFilled
+                | crate::domain::OrderStatus::Filled => "PASS",
+                crate::domain::OrderStatus::Cancelled => "WARN",
+                crate::domain::OrderStatus::Pending
+                | crate::domain::OrderStatus::Rejected
+                | crate::domain::OrderStatus::Expired
+                | crate::domain::OrderStatus::Failed => "FAIL",
+            },
+            None => "FAIL",
+        };
+
+        let evidence_hash = intent.intent_id.to_string();
+        let evidence_payload = serde_json::json!({
+            "intent_id": intent.intent_id.to_string(),
+            "agent_id": intent.agent_id.clone(),
+            "is_buy": intent.is_buy,
+            "shares": intent.shares,
+            "request_limit_price": request.limit_price.to_string(),
+            "order_side": request.order_side.to_string(),
+            "expected_slippage_bps": expected_slippage_bps.map(|v| v.to_string()),
+            "actual_slippage_bps": actual_slippage_bps.map(|v| v.to_string()),
+            "total_latency_ms": total_latency_ms,
+            "dry_run": self.executor.is_dry_run(),
+            "execution": execution_result.map(|r| serde_json::json!({
+                "order_id": r.order_id.clone(),
+                "status": format!("{:?}", r.status),
+                "filled_shares": r.filled_shares,
+                "avg_fill_price": r.avg_fill_price.map(|p| p.to_string()),
+                "elapsed_ms": r.elapsed_ms
+            })),
+        });
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let insert = sqlx::query(
+            r#"
+            INSERT INTO strategy_evaluations (
+                account_id,
+                strategy_id,
+                deployment_id,
+                domain,
+                stage,
+                status,
+                score,
+                timeframe,
+                sample_size,
+                evidence_kind,
+                evidence_ref,
+                evidence_hash,
+                evidence_payload,
+                metadata
+            )
+            VALUES (
+                $1,$2,$3,$4,'LIVE',$5,$6,$7,1,
+                'execution_analysis',$8,$9,$10,$11
+            )
+            ON CONFLICT (account_id, strategy_id, stage, evidence_hash) DO NOTHING
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(strategy_id)
+        .bind(deployment_id)
+        .bind(intent.domain.to_string())
+        .bind(status)
+        .bind(score)
+        .bind(timeframe)
+        .bind(intent.intent_id.to_string())
+        .bind(evidence_hash)
+        .bind(sqlx::types::Json(evidence_payload))
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = insert {
+            warn!(
+                account_id = %self.account_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist live strategy evaluation evidence"
+            );
+        }
+    }
+
+    async fn persist_risk_runtime_state(&self) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let risk_state = self.risk_gate.state().await;
+        let (daily_pnl, _, _) = self.risk_gate.daily_stats().await;
+        let daily_loss_limit = self.risk_gate.daily_loss_limit();
+        let drawdown = self.risk_gate.drawdown_snapshot().await;
+        let daily_date = Utc::now().date_naive();
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO risk_runtime_state (
+                account_id,
+                risk_state,
+                daily_date,
+                daily_pnl,
+                daily_loss_limit,
+                current_equity,
+                equity_peak,
+                current_drawdown,
+                max_drawdown_observed
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (account_id) DO UPDATE SET
+                risk_state = EXCLUDED.risk_state,
+                daily_date = EXCLUDED.daily_date,
+                daily_pnl = EXCLUDED.daily_pnl,
+                daily_loss_limit = EXCLUDED.daily_loss_limit,
+                current_equity = EXCLUDED.current_equity,
+                equity_peak = EXCLUDED.equity_peak,
+                current_drawdown = EXCLUDED.current_drawdown,
+                max_drawdown_observed = EXCLUDED.max_drawdown_observed,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(format!("{:?}", risk_state))
+        .bind(daily_date)
+        .bind(daily_pnl)
+        .bind(daily_loss_limit)
+        .bind(drawdown.current_equity)
+        .bind(drawdown.equity_peak)
+        .bind(drawdown.current_drawdown)
+        .bind(drawdown.max_drawdown_observed)
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                account_id = %self.account_id,
+                error = %e,
+                "failed to persist risk runtime state"
             );
         }
     }
@@ -2685,6 +2940,8 @@ impl Coordinator {
         let risk_state = self.risk_gate.state().await;
         let (daily_pnl, _, _) = self.risk_gate.daily_stats().await;
         let daily_loss_limit = self.risk_gate.daily_loss_limit();
+        let (current_drawdown, max_drawdown_observed) = self.risk_gate.drawdown_stats().await;
+        let max_drawdown_limit = self.risk_gate.max_drawdown_limit();
         let circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
         let queue_stats = self.order_queue.read().await.stats();
         let total_realized = self.positions.total_realized_pnl().await;
@@ -2695,6 +2952,9 @@ impl Coordinator {
         state.risk_state = risk_state;
         state.daily_pnl = daily_pnl;
         state.daily_loss_limit = daily_loss_limit;
+        state.current_drawdown = current_drawdown;
+        state.max_drawdown_observed = max_drawdown_observed;
+        state.max_drawdown_limit = max_drawdown_limit;
         state.circuit_breaker_events = circuit_breaker_events;
         state.queue_stats = QueueStatsSnapshot::from(queue_stats);
         state.total_realized_pnl = total_realized;
@@ -2727,6 +2987,10 @@ impl Coordinator {
                 agent.error_message = Some("heartbeat timeout".into());
             }
         }
+        drop(stale_warn_at);
+        drop(state);
+
+        self.persist_risk_runtime_state().await;
     }
 
     fn infer_time_bucket_seconds(intent: &OrderIntent) -> i64 {

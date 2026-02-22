@@ -37,8 +37,17 @@ pub async fn start_api_server_with_platform(
     config: StrategyConfigState,
     coordinator: Option<CoordinatorHandle>,
     grok_client: Option<Arc<GrokClient>>,
+    account_id: String,
+    dry_run: bool,
 ) -> Result<()> {
-    let app_state = AppState::with_platform_services(store, config, coordinator, grok_client);
+    let app_state = AppState::with_platform_services(
+        store,
+        config,
+        coordinator,
+        grok_client,
+        account_id,
+        dry_run,
+    );
     app_state.spawn_realtime_broadcast_loop();
 
     let app = create_router(app_state);
@@ -70,9 +79,20 @@ pub async fn start_api_server_platform_background(
     config: StrategyConfigState,
     coordinator: Option<CoordinatorHandle>,
     grok_client: Option<Arc<GrokClient>>,
+    account_id: String,
+    dry_run: bool,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
     let handle = tokio::spawn(async move {
-        start_api_server_with_platform(store, port, config, coordinator, grok_client).await
+        start_api_server_with_platform(
+            store,
+            port,
+            config,
+            coordinator,
+            grok_client,
+            account_id,
+            dry_run,
+        )
+        .await
     });
 
     Ok(handle)

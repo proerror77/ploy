@@ -12,13 +12,6 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agent::PolymarketSportsClient;
-use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
-    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
-    TradingAgent,
-};
-#[cfg(feature = "rl")]
-use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
@@ -29,6 +22,13 @@ use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
+use crate::trading_agents::{
+    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
+    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
+    TradingAgent,
+};
+#[cfg(feature = "rl")]
+use crate::trading_agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use chrono::Utc;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -388,6 +388,35 @@ pub(crate) async fn ensure_pm_token_settlements_table(pool: &PgPool) -> Result<(
     Ok(())
 }
 
+pub(crate) async fn ensure_risk_runtime_state_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS risk_runtime_state (
+            account_id TEXT PRIMARY KEY,
+            risk_state TEXT NOT NULL DEFAULT 'Normal',
+            daily_date DATE,
+            daily_pnl NUMERIC(18,8) NOT NULL DEFAULT 0,
+            daily_loss_limit NUMERIC(18,8) NOT NULL DEFAULT 0,
+            current_equity NUMERIC(18,8) NOT NULL DEFAULT 0,
+            equity_peak NUMERIC(18,8) NOT NULL DEFAULT 0,
+            current_drawdown NUMERIC(18,8) NOT NULL DEFAULT 0,
+            max_drawdown_observed NUMERIC(18,8) NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_risk_runtime_state_updated_at ON risk_runtime_state(updated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub(crate) async fn ensure_strategy_observability_tables(pool: &PgPool) -> Result<()> {
     // Persist strategy signal calculations for audit/backtest attribution.
     sqlx::query(
@@ -602,6 +631,67 @@ pub(crate) async fn ensure_strategy_observability_tables(pool: &PgPool) -> Resul
     .execute(pool)
     .await?;
 
+    // Persist strategy-level evaluation evidence across backtest/paper/live stages.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS strategy_evaluations (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL DEFAULT 'default',
+            evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            strategy_id TEXT NOT NULL,
+            deployment_id TEXT,
+            domain TEXT NOT NULL,
+            stage TEXT NOT NULL CHECK (stage IN ('BACKTEST','PAPER','LIVE')),
+            status TEXT NOT NULL CHECK (status IN ('PASS','FAIL','WARN','UNKNOWN')),
+            score NUMERIC(12,6),
+            timeframe TEXT,
+            sample_size BIGINT,
+            pnl_usd NUMERIC(20,10),
+            win_rate NUMERIC(12,6),
+            sharpe NUMERIC(20,10),
+            max_drawdown_pct NUMERIC(12,6),
+            max_drawdown_usd NUMERIC(20,10),
+            evidence_kind TEXT NOT NULL DEFAULT 'report',
+            evidence_ref TEXT,
+            evidence_hash TEXT,
+            evidence_payload JSONB,
+            metadata JSONB
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE strategy_evaluations ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_account_time ON strategy_evaluations(account_id, evaluated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_strategy_stage_time ON strategy_evaluations(account_id, strategy_id, stage, evaluated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_status_time ON strategy_evaluations(account_id, status, evaluated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_evaluations_evidence_hash ON strategy_evaluations(account_id, strategy_id, stage, evidence_hash)",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
@@ -634,6 +724,27 @@ async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
                           AND column_name = 'opened_at'
                     ) THEN
                         EXECUTE 'CREATE INDEX IF NOT EXISTS idx_positions_status_opened ON positions(status, opened_at DESC) WHERE status = ''OPEN''';
+                    END IF;
+                END IF;
+            EXCEPTION WHEN insufficient_privilege THEN
+                NULL;
+            END;
+
+            BEGIN
+                -- positions multi-account scoping
+                IF to_regclass('public.positions') IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE positions ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''default''';
+                    EXECUTE 'ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_event_id_token_id_key';
+                    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_account_event_token_unique ON positions(account_id, event_id, token_id)';
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'positions'
+                          AND column_name = 'opened_at'
+                    ) THEN
+                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_positions_account_status_opened ON positions(account_id, status, opened_at DESC) WHERE status = ''OPEN''';
                     END IF;
                 END IF;
             EXCEPTION WHEN insufficient_privilege THEN
@@ -2353,10 +2464,11 @@ fn deployments_state_path() -> PathBuf {
 fn parse_strategy_deployments(raw: &str) -> Vec<StrategyDeployment> {
     let mut out = Vec::new();
     if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
-        for dep in items {
+        for mut dep in items {
             if dep.id.trim().is_empty() {
                 continue;
             }
+            dep.normalize_account_ids_in_place();
             out.push(dep);
         }
     }
@@ -2441,12 +2553,23 @@ fn add_coins_from_selector(selector: &MarketSelector, coins: &mut HashSet<String
 fn apply_strategy_deployments(
     cfg: &mut PlatformBootstrapConfig,
     deployments: &[StrategyDeployment],
+    runtime_account_id: &str,
+    runtime_dry_run: bool,
 ) {
     if deployments.is_empty() {
         return;
     }
 
-    let enabled: Vec<&StrategyDeployment> = deployments.iter().filter(|d| d.enabled).collect();
+    let runtime_scoped: Vec<&StrategyDeployment> = deployments
+        .iter()
+        .filter(|d| d.matches_account(runtime_account_id))
+        .filter(|d| d.matches_execution_mode(runtime_dry_run))
+        .collect();
+    let enabled: Vec<&StrategyDeployment> = runtime_scoped
+        .iter()
+        .copied()
+        .filter(|d| d.enabled)
+        .collect();
 
     cfg.enable_crypto = false;
     cfg.enable_crypto_momentum = false;
@@ -2541,7 +2664,10 @@ fn apply_strategy_deployments(
 
     info!(
         total = deployments.len(),
+        scoped = runtime_scoped.len(),
         enabled = enabled.len(),
+        runtime_account_id = runtime_account_id,
+        runtime_dry_run = runtime_dry_run,
         crypto = cfg.enable_crypto,
         crypto_momentum = cfg.enable_crypto_momentum,
         crypto_lob_ml = cfg.enable_crypto_lob_ml,
@@ -2712,6 +2838,26 @@ impl Default for PlatformBootstrapConfig {
 }
 
 impl PlatformBootstrapConfig {
+    /// Re-evaluate deployment matrix against the current runtime account + dry-run mode.
+    pub fn reapply_strategy_deployments_for_runtime(&mut self, app: &AppConfig) {
+        let strategy_deployments = load_strategy_deployments();
+        if strategy_deployments.is_empty() {
+            return;
+        }
+
+        let runtime_account_id = if app.account.id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            app.account.id.clone()
+        };
+        apply_strategy_deployments(
+            self,
+            &strategy_deployments,
+            &runtime_account_id,
+            self.dry_run,
+        );
+    }
+
     /// Build from AppConfig, enabling agents based on their config sections
     pub fn from_app_config(app: &AppConfig) -> Self {
         let mut cfg = Self::default();
@@ -2727,6 +2873,8 @@ impl PlatformBootstrapConfig {
             critical_bypass_exposure: false,
             ..Default::default()
         };
+        cfg.coordinator.risk.max_drawdown_limit = env_decimal_opt("PLOY_RISK__MAX_DRAWDOWN_USD")
+            .map(|v| v.max(rust_decimal::Decimal::ZERO));
         cfg.coordinator.risk.circuit_breaker_auto_recover = env_bool(
             "PLOY_RISK__CIRCUIT_BREAKER_AUTO_RECOVER",
             cfg.coordinator.risk.circuit_breaker_auto_recover,
@@ -3315,10 +3463,7 @@ impl PlatformBootstrapConfig {
             }
         }
 
-        let strategy_deployments = load_strategy_deployments();
-        if !strategy_deployments.is_empty() {
-            apply_strategy_deployments(&mut cfg, &strategy_deployments);
-        }
+        cfg.reapply_strategy_deployments_for_runtime(app);
 
         // OpenClaw-first runtime lockdown:
         // keep coordinator available, but disable built-in agent loops.
@@ -3501,6 +3646,17 @@ pub async fn start_platform(
             }
             warn!(error = %e, "failed to ensure pm_token_settlements table");
         }
+        if let Err(e) = ensure_risk_runtime_state_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure risk_runtime_state table: {}",
+                    e
+                )));
+            }
+            warn!(error = %e, "failed to ensure risk_runtime_state table");
+        } else if let Err(e) = coordinator.restore_risk_runtime_state().await {
+            warn!(error = %e, "failed to restore risk runtime state");
+        }
         if config.enable_crypto {
             if let Err(e) = ensure_clob_trade_alerts_table(pool).await {
                 if require_startup_schema {
@@ -3566,6 +3722,8 @@ pub async fn start_platform(
                 api_config,
                 Some(handle.clone()),
                 grok_client,
+                account_id.clone(),
+                config.dry_run,
             )
             .await
             {

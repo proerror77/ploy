@@ -66,6 +66,12 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
 | `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
+| `PLOY_RISK__MAX_DRAWDOWN_USD` | No | Hard drawdown stop (runtime cumulative realized curve) |
+| `PLOY_ACCOUNT_ID` | No | Runtime account scope identifier (default `default`) |
+| `PLOY_DRY_RUN__ENABLED` | No | Force runtime dry-run mode (`true`/`false`) |
+| `PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE` | No | Require strategy evidence before enabling deployments (`true`/`false`) |
+| `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
+| `PLOY_DEPLOYMENTS_MAX_EVIDENCE_AGE_HOURS` | No | Max evidence staleness window in hours (default `168`) |
 | `PLOY_ALLOW_LEGACY_LIVE` | No | Allow legacy (non-Coordinator) live order paths. Not recommended. |
 | `PLOY_ALLOW_LEGACY_STRATEGY_LIVE` | No | Allow legacy `ploy strategy start` live runtime. Prefer `ploy platform start`. |
 
@@ -233,6 +239,27 @@ ploy platform start --crypto --dry-run             # Crypto agent only, dry-run
 ploy platform start --sports --pause sports        # Start paused
 ```
 
+Deployment matrix entries support runtime scope controls:
+
+```json
+{
+  "id": "crypto-momentum-5m",
+  "strategy": "momentum",
+  "domain": "Crypto",
+  "enabled": true,
+  "account_ids": ["acct-main", "acct-paper"],
+  "execution_mode": "any"
+}
+```
+
+- `account_ids`: optional allow-list. Empty means all accounts.
+- `execution_mode`: `any` | `dry_run_only` | `live_only`.
+
+Strategy evidence is stored in `strategy_evaluations` and supports `BACKTEST` / `PAPER` / `LIVE` stages with auditable payloads (`evidence_ref`, `evidence_hash`, `evidence_payload`).  
+Sidecar/API can write and query evidence via:
+- `POST /api/sidecar/strategy-evaluations`
+- `GET /api/sidecar/strategy-evaluations`
+
 ### RL Commands (requires `--features rl`)
 
 ```bash
@@ -264,7 +291,9 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 ```
 src/
   adapters/      Polymarket CLOB, WebSocket, Binance WS
+  trading_agents.rs Canonical namespace (re-export of agents/)
   agents/        Domain trading agents (crypto, sports, politics)
+  ai_agents.rs   Canonical namespace (re-export of agent/)
   agent/         Claude AI agent integration
   coordinator/   Multi-agent coordinator + order queue
   domain/        Core types (Market, Order, Quote)

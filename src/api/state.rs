@@ -32,6 +32,15 @@ pub struct AppState {
     /// Application start time
     pub start_time: DateTime<Utc>,
 
+    /// Runtime mode (`standalone` or `platform`).
+    pub runtime_mode: String,
+
+    /// Account scope for this process/runtime.
+    pub account_id: String,
+
+    /// Whether execution is dry-run for this runtime.
+    pub dry_run: bool,
+
     /// Coordinator handle for sidecar order submission (optional — only set when platform is running)
     pub coordinator: Option<CoordinatorHandle>,
 
@@ -87,15 +96,43 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
+    fn normalize_account_id(raw: Option<&str>) -> String {
+        raw.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    fn parse_boolish(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }
+
+    fn default_account_id_from_env() -> String {
+        Self::normalize_account_id(std::env::var("PLOY_ACCOUNT_ID").ok().as_deref())
+    }
+
+    fn default_dry_run_from_env() -> bool {
+        std::env::var("PLOY_DRY_RUN__ENABLED")
+            .or_else(|_| std::env::var("PLOY_DRY_RUN"))
+            .ok()
+            .map(|v| Self::parse_boolish(&v))
+            .unwrap_or(true)
+    }
+
     fn parse_deployments(raw: &str) -> HashMap<String, StrategyDeployment> {
         let mut out = HashMap::new();
         if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
-            for deployment in items {
-                let id = deployment.id.trim();
+            for mut deployment in items {
+                let id = deployment.id.trim().to_string();
                 if id.is_empty() {
                     continue;
                 }
-                out.insert(id.to_string(), deployment);
+                deployment.id = id.clone();
+                deployment.normalize_account_ids_in_place();
+                out.insert(id, deployment);
             }
         }
         out
@@ -172,6 +209,7 @@ impl AppState {
         let deployments = Arc::new(RwLock::new(Self::load_deployments(
             deployments_path.as_ref(),
         )));
+        let account_id = Self::default_account_id_from_env();
 
         Self {
             store,
@@ -184,6 +222,9 @@ impl AppState {
             })),
             config: Arc::new(RwLock::new(config)),
             start_time: Utc::now(),
+            runtime_mode: "standalone".to_string(),
+            account_id,
+            dry_run: Self::default_dry_run_from_env(),
             coordinator: None,
             grok_client: None,
             deployments,
@@ -197,12 +238,15 @@ impl AppState {
         config: StrategyConfigState,
         coordinator: Option<CoordinatorHandle>,
         grok_client: Option<Arc<GrokClient>>,
+        account_id: String,
+        dry_run: bool,
     ) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
         let deployments_path = Arc::new(Self::deployments_state_path());
         let deployments = Arc::new(RwLock::new(Self::load_deployments(
             deployments_path.as_ref(),
         )));
+        let account_id = Self::normalize_account_id(Some(account_id.as_str()));
 
         Self {
             store,
@@ -215,6 +259,9 @@ impl AppState {
             })),
             config: Arc::new(RwLock::new(config)),
             start_time: Utc::now(),
+            runtime_mode: "platform".to_string(),
+            account_id,
+            dry_run,
             coordinator,
             grok_client,
             deployments,
