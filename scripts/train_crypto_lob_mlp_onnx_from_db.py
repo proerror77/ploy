@@ -256,6 +256,14 @@ def fetch_from_sync_records(
     where = [
         "sr.timestamp >= NOW() - (%s::bigint * INTERVAL '1 hour')",
         "sr.pm_market_slug IS NOT NULL",
+        "LOWER(sr.pm_market_slug) LIKE '%up%'",
+        "LOWER(sr.pm_market_slug) LIKE '%down%'",
+        """(
+            (sr.symbol = 'BTCUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%btc%' OR LOWER(sr.pm_market_slug) LIKE '%bitcoin%')) OR
+            (sr.symbol = 'ETHUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%eth%' OR LOWER(sr.pm_market_slug) LIKE '%ethereum%')) OR
+            (sr.symbol = 'SOLUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%sol%' OR LOWER(sr.pm_market_slug) LIKE '%solana%')) OR
+            (sr.symbol = 'XRPUSDT' AND (LOWER(sr.pm_market_slug) LIKE '%xrp%' OR LOWER(sr.pm_market_slug) LIKE '%ripple%'))
+        )""",
         "ml.y_up IS NOT NULL",
         "ml.horizon IS NOT NULL",
         "sr.timestamp <= COALESCE(ml.resolved_at, NOW())",

@@ -388,6 +388,18 @@ impl CryptoLobMlAgent {
     ) -> Self {
         let model_type = config.model_type.trim().to_ascii_lowercase();
         let mut model_load_failed = false;
+        let model_type_supported = matches!(
+            model_type.as_str(),
+            "logistic" | "mlp" | "mlp_json" | "onnx"
+        );
+        if !model_type_supported {
+            warn!(
+                agent = config.agent_id,
+                model_type = %model_type,
+                "unsupported model_type configured; treating as model load failure and using logistic fallback"
+            );
+            model_load_failed = true;
+        }
 
         let nn_model = if model_type == "mlp" || model_type == "mlp_json" {
             match config.model_path.as_deref() {
@@ -697,6 +709,11 @@ impl TradingAgent for CryptoLobMlAgent {
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "crypto lob-ml agent starting");
         let config_hash = self.config_hash();
+        let collect_only_error = if self.entry_trading_enabled {
+            None
+        } else {
+            Some("collect_only_model_error".to_string())
+        };
 
         let mut status = AgentStatus::Running;
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
@@ -798,9 +815,6 @@ impl TradingAgent for CryptoLobMlAgent {
                     };
 
                     if !matches!(status, AgentStatus::Running) {
-                        continue;
-                    }
-                    if !self.entry_trading_enabled {
                         continue;
                     }
 
@@ -1038,6 +1052,10 @@ impl TradingAgent for CryptoLobMlAgent {
                                     }
                                 }
                             }
+                            continue;
+                        }
+
+                        if !self.entry_trading_enabled {
                             continue;
                         }
 
@@ -1333,6 +1351,15 @@ impl TradingAgent for CryptoLobMlAgent {
                                 &mut positions,
                             )
                             .await;
+                            let mut metrics = HashMap::new();
+                            metrics.insert(
+                                "entry_trading_enabled".to_string(),
+                                self.entry_trading_enabled.to_string(),
+                            );
+                            metrics.insert(
+                                "model_type_configured".to_string(),
+                                self.config.model_type.clone(),
+                            );
                             let snapshot = crate::coordinator::AgentSnapshot {
                                 agent_id: self.config.agent_id.clone(),
                                 name: self.config.name.clone(),
@@ -1342,13 +1369,14 @@ impl TradingAgent for CryptoLobMlAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
-                                metrics: HashMap::new(),
+                                metrics,
                                 last_heartbeat: Utc::now(),
-                                error_message: None,
+                                error_message: collect_only_error.clone(),
                             };
                             let _ = tx.send(crate::coordinator::AgentHealthResponse {
                                 snapshot,
-                                is_healthy: matches!(status, AgentStatus::Running),
+                                is_healthy: matches!(status, AgentStatus::Running)
+                                    && self.entry_trading_enabled,
                                 uptime_secs: 0,
                                 orders_submitted: 0,
                                 orders_filled: 0,
@@ -1369,14 +1397,24 @@ impl TradingAgent for CryptoLobMlAgent {
                         &mut positions,
                     )
                     .await;
-                    let _ = ctx.report_state(
+                    let mut metrics = HashMap::new();
+                    metrics.insert(
+                        "entry_trading_enabled".to_string(),
+                        self.entry_trading_enabled.to_string(),
+                    );
+                    metrics.insert(
+                        "model_type_configured".to_string(),
+                        self.config.model_type.clone(),
+                    );
+                    let _ = ctx.report_state_with_metrics(
                         &self.config.name,
                         status,
                         positions.len(),
                         total_exposure,
                         daily_pnl,
                         Decimal::ZERO,
-                        None,
+                        metrics,
+                        collect_only_error.clone(),
                     ).await;
                 }
             }
@@ -1473,6 +1511,23 @@ mod tests {
         );
 
         assert!(agent.allows_entry_orders());
+    }
+
+    #[test]
+    fn test_invalid_model_type_defaults_to_collect_only() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.model_type = "onxx".to_string();
+        let agent = CryptoLobMlAgent::new(
+            cfg,
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            LobCache::new(),
+        );
+
+        assert!(!agent.allows_entry_orders());
     }
 
     #[test]
