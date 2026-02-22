@@ -1,0 +1,42 @@
+[Unit]
+Description=Ploy Crypto Data Collector (LOB + Threshold + Settlement)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ploy
+Group=ploy
+WorkingDirectory=/opt/ploy
+
+Environment=RUST_LOG=info,ploy=info,sqlx=warn
+Environment=LOG_DIR=/opt/ploy/logs
+EnvironmentFile=-/opt/ploy/.env
+EnvironmentFile=-/opt/ploy/env/crypto-collector.env
+
+# Collector runtime:
+# - keeps PM token targets and quote persistence alive
+# - writes trade ticks and settlement outcomes to Postgres
+# - stays in dry-run so no live order execution occurs
+ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/crypto_dry_run.toml platform start --crypto --dry-run
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/config /opt/ploy/env
+PrivateTmp=true
+
+MemoryMax=768M
+CPUQuota=80%
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ploy-crypto-collector
+
+[Install]
+WantedBy=multi-user.target

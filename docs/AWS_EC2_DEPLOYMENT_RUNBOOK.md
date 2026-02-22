@@ -1,7 +1,8 @@
 # AWS EC2 Deployment Runbook
 
-This runbook deploys two always-on workloads on one EC2 host:
+This runbook deploys always-on workloads on one EC2 host:
 - `ploy-sports-pm.service` (Sports PM / NBA comeback)
+- `ploy-crypto-collector.service` (Crypto event data collector: LOB + threshold + settlement)
 - `ploy-crypto-dryrun.service` (Crypto trading agents dry-run)
 - `ploy-orderbook-history.service` (Polymarket L2 orderbook-history backfill collector)
 - `ploy-maintenance.timer` (DB + log retention)
@@ -14,7 +15,7 @@ Run from your local machine:
 scripts/aws_ec2_deploy.sh \
   --host <EC2_PUBLIC_IP> \
   --key ~/.ssh/<your-key>.pem \
-  --services ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer
+  --services ploy-sports-pm,ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer
 ```
 
 Optional:
@@ -26,12 +27,13 @@ scripts/aws_ec2_deploy.sh \
   --key ~/.ssh/<your-key>.pem \
   --start true \
   --enable true \
-  --services ploy-sports-pm,ploy-crypto-dryrun,ploy-orderbook-history,ploy-maintenance.timer
+  --services ploy-sports-pm,ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer
 ```
 
 What it installs:
 - systemd units:
   - `ploy-sports-pm.service`
+  - `ploy-crypto-collector.service`
   - `ploy-crypto-dryrun.service`
   - `ploy-orderbook-history.service`
   - `ploy-maintenance.service`
@@ -42,6 +44,7 @@ What it installs:
 - env files:
   - `/opt/ploy/.env`
   - `/opt/ploy/env/sports-pm.env`
+  - `/opt/ploy/env/crypto-collector.env`
   - `/opt/ploy/env/crypto-dryrun.env`
 
 ## 2) Configure Environment
@@ -51,6 +54,7 @@ On EC2:
 ```bash
 sudoedit /opt/ploy/.env
 sudoedit /opt/ploy/env/sports-pm.env
+sudoedit /opt/ploy/env/crypto-collector.env
 sudoedit /opt/ploy/env/crypto-dryrun.env
 ```
 
@@ -67,6 +71,12 @@ PLOY_DRY_RUN__ENABLED=true
 # Keep this equal to sports-pm.env to store PM/CLOB data in the same DB.
 PLOY_DATABASE__URL=postgres://<user>:<pass>@<host>:5432/<db>
 PLOY_DRY_RUN__ENABLED=true
+
+# /opt/ploy/env/crypto-collector.env
+# Collector should point to the same DB so settlement + quote data are unified.
+PLOY_DATABASE__URL=postgres://<user>:<pass>@<host>:5432/<db>
+PLOY_DRY_RUN__ENABLED=true
+PM_SETTLEMENT_POLL_SECS=60
 ```
 
 ## 3) Sports PM DB Seed (Required)
@@ -82,6 +92,7 @@ cd /opt/ploy
 
 ```bash
 sudo systemctl status ploy-sports-pm
+sudo systemctl status ploy-crypto-collector
 sudo systemctl status ploy-crypto-dryrun
 sudo systemctl status ploy-orderbook-history
 sudo systemctl status ploy-maintenance.timer
@@ -89,6 +100,7 @@ sudo systemctl status ploy-maintenance.timer
 
 ```bash
 sudo journalctl -u ploy-sports-pm -f
+sudo journalctl -u ploy-crypto-collector -f
 sudo journalctl -u ploy-crypto-dryrun -f
 sudo journalctl -u ploy-orderbook-history -f
 sudo journalctl -u ploy-maintenance -n 200 --no-pager
