@@ -94,3 +94,4 @@
 3. Load Polymarket client only for PM-bound built-in agents (crypto/politics).
 4. Allow `platform start` with non-Polymarket exchange when built-in agents are disabled.
 5. Keep explicit guardrails: reject non-Polymarket + built-in agent combinations.
+6. Keep Kalshi runtime disabled by default behind env gate (`PLOY_ENABLE_KALSHI_EXPERIMENTAL=true`).

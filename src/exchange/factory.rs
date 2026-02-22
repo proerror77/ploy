@@ -2,10 +2,22 @@ use std::sync::Arc;
 
 use crate::adapters::{KalshiClient, PolymarketClient};
 use crate::config::AppConfig;
-use crate::error::Result;
+use crate::error::{PloyError, Result};
 use crate::signing::Wallet;
 
 use super::{parse_exchange_kind, ExchangeClient, ExchangeKind};
+
+fn kalshi_experimental_enabled() -> bool {
+    std::env::var("PLOY_ENABLE_KALSHI_EXPERIMENTAL")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
 
 /// Create the runtime exchange client from `AppConfig`.
 ///
@@ -57,6 +69,13 @@ pub async fn build_exchange_client_for(
             }
         }
         ExchangeKind::Kalshi => {
+            if !kalshi_experimental_enabled() {
+                return Err(PloyError::Validation(
+                    "Kalshi exchange is temporarily disabled. Set PLOY_ENABLE_KALSHI_EXPERIMENTAL=true to enable."
+                        .to_string(),
+                ));
+            }
+
             let base_url = app_config
                 .market
                 .exchange_rest_url
