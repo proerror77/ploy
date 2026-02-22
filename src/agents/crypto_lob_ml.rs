@@ -60,6 +60,23 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoLobMlExitMode {
+    /// Hold position until market settlement.
+    SettleOnly,
+    /// Exit when model side flips (after min hold time).
+    SignalFlip,
+    /// Exit on mark-to-market price thresholds.
+    PriceExit,
+}
+
+fn default_exit_mode() -> CryptoLobMlExitMode {
+    // Preserve current behavior: signal-flip exits are enabled by default,
+    // while mark-to-market exits are opt-in.
+    CryptoLobMlExitMode::SignalFlip
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobMlWeights {
     pub bias: f64,
@@ -113,8 +130,15 @@ pub struct CryptoLobMlConfig {
     pub exit_edge_floor: Decimal,
     #[serde(default = "default_exit_price_band")]
     pub exit_price_band: Decimal,
-    /// Optional mark-to-market binary exit thresholds (disabled by default)
+    /// Legacy mark-to-market toggle (kept for backward compatibility).
+    /// New deployments should use `exit_mode`.
     pub enable_price_exits: bool,
+    /// Exit policy:
+    /// - settle_only: hold until settlement
+    /// - signal_flip: exit on side flip
+    /// - price_exit: exit on mark-to-market thresholds
+    #[serde(default = "default_exit_mode")]
+    pub exit_mode: CryptoLobMlExitMode,
     /// Minimum hold time before edge/price-band exits are allowed (seconds)
     pub min_hold_secs: u64,
 
@@ -227,6 +251,7 @@ impl Default for CryptoLobMlConfig {
             exit_edge_floor: default_exit_edge_floor(),
             exit_price_band: default_exit_price_band(),
             enable_price_exits: false,
+            exit_mode: default_exit_mode(),
             min_hold_secs: 20,
             min_edge: dec!(0.02),
             max_entry_price: dec!(0.70),
@@ -768,6 +793,22 @@ impl CryptoLobMlAgent {
             .min(dec!(0.90))
     }
 
+    fn allows_signal_flip_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::SignalFlip)
+    }
+
+    fn allows_price_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::PriceExit)
+    }
+
+    fn exit_mode_label(&self) -> &'static str {
+        match self.config.exit_mode {
+            CryptoLobMlExitMode::SettleOnly => "settle_only",
+            CryptoLobMlExitMode::SignalFlip => "signal_flip",
+            CryptoLobMlExitMode::PriceExit => "price_exit",
+        }
+    }
+
     fn net_ev_for_binary_side(&self, prob_win: Decimal, ask: Decimal) -> Decimal {
         if ask <= Decimal::ZERO || ask >= Decimal::ONE {
             return Decimal::MIN;
@@ -1208,7 +1249,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         };
 
                         if let Some(pos) = positions.get(&event.slug).cloned() {
-                            if pos.side != signal.side {
+                            if pos.side != signal.side && self.allows_signal_flip_exit() {
                                 let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
                                 if held_secs >= self.config.min_hold_secs as i64 {
                                     let exit_price = quote_cache
@@ -1245,6 +1286,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                         .with_metadata("series_id", &pos.series_id)
                                         .with_metadata("event_series_id", &pos.series_id)
                                         .with_metadata("horizon", &pos.horizon)
+                                        .with_metadata("exit_mode", self.exit_mode_label())
                                         .with_metadata("exit_reason", "signal_flip")
                                         .with_metadata("entry_price", &pos.entry_price.to_string())
                                         .with_metadata("exit_price", &exit_price.to_string())
@@ -1365,6 +1407,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("series_id", &event.series_id)
                         .with_metadata("event_series_id", &event.series_id)
                         .with_metadata("horizon", &event.horizon)
+                        .with_metadata("exit_mode", self.exit_mode_label())
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
                         .with_metadata("event_title", &event.title)
                         .with_metadata(
@@ -1469,7 +1512,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    if !self.config.enable_price_exits {
+                    if !self.allows_price_exit() {
                         continue;
                     }
 
@@ -1537,6 +1580,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     .with_metadata("series_id", &pos.series_id)
                     .with_metadata("event_series_id", &pos.series_id)
                     .with_metadata("horizon", &pos.horizon)
+                    .with_metadata("exit_mode", self.exit_mode_label())
                     .with_metadata("exit_reason", exit_reason)
                     .with_metadata("entry_price", &pos.entry_price.to_string())
                     .with_metadata("exit_price", &best_bid.to_string())
@@ -1622,6 +1666,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 .with_metadata("series_id", &pos.series_id)
                                 .with_metadata("event_series_id", &pos.series_id)
                                 .with_metadata("horizon", &pos.horizon)
+                                .with_metadata("exit_mode", self.exit_mode_label())
                                 .with_metadata("exit_reason", "force_close")
                                 .with_metadata("entry_price", &pos.entry_price.to_string())
                                 .with_metadata("config_hash", &config_hash);
@@ -1653,6 +1698,10 @@ impl TradingAgent for CryptoLobMlAgent {
                             metrics.insert(
                                 "model_type_configured".to_string(),
                                 self.config.model_type.clone(),
+                            );
+                            metrics.insert(
+                                "exit_mode".to_string(),
+                                self.exit_mode_label().to_string(),
                             );
                             let snapshot = crate::coordinator::AgentSnapshot {
                                 agent_id: self.config.agent_id.clone(),
@@ -1700,6 +1749,10 @@ impl TradingAgent for CryptoLobMlAgent {
                         "model_type_configured".to_string(),
                         self.config.model_type.clone(),
                     );
+                    metrics.insert(
+                        "exit_mode".to_string(),
+                        self.exit_mode_label().to_string(),
+                    );
                     let _ = ctx.report_state_with_metrics(
                         &self.config.name,
                         status,
@@ -1741,8 +1794,41 @@ mod tests {
         assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
         assert_eq!(cfg.max_time_remaining_secs, 900);
         assert!(!cfg.enable_price_exits);
+        assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::SignalFlip);
         assert_eq!(cfg.min_hold_secs, 20);
         assert!(cfg.prefer_close_to_end);
+    }
+
+    #[test]
+    fn test_exit_mode_gate_helpers() {
+        let mk_agent = |exit_mode: CryptoLobMlExitMode| CryptoLobMlAgent {
+            config: CryptoLobMlConfig {
+                exit_mode,
+                ..CryptoLobMlConfig::default()
+            },
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            nn_model: None,
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+            entry_trading_enabled: true,
+        };
+
+        let settle = mk_agent(CryptoLobMlExitMode::SettleOnly);
+        assert!(!settle.allows_signal_flip_exit());
+        assert!(!settle.allows_price_exit());
+
+        let flip = mk_agent(CryptoLobMlExitMode::SignalFlip);
+        assert!(flip.allows_signal_flip_exit());
+        assert!(!flip.allows_price_exit());
+
+        let price = mk_agent(CryptoLobMlExitMode::PriceExit);
+        assert!(!price.allows_signal_flip_exit());
+        assert!(price.allows_price_exit());
     }
 
     #[test]
