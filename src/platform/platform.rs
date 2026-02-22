@@ -15,6 +15,7 @@ use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
+use crate::exchange::ExchangeClient;
 use crate::strategy::executor::OrderExecutor;
 
 use super::position::PositionAggregator;
@@ -110,7 +111,15 @@ impl OrderPlatform {
 
     /// 創建新的下單平台
     pub fn new(client: PolymarketClient, config: PlatformConfig) -> Self {
-        let executor = Arc::new(OrderExecutor::new(client, config.execution_config.clone()));
+        Self::new_with_exchange(Arc::new(client), config)
+    }
+
+    /// 使用通用交易所客戶端建立平台
+    pub fn new_with_exchange(client: Arc<dyn ExchangeClient>, config: PlatformConfig) -> Self {
+        let executor = Arc::new(OrderExecutor::new_with_exchange(
+            client,
+            config.execution_config.clone(),
+        ));
 
         Self {
             router: Arc::new(EventRouter::new()),

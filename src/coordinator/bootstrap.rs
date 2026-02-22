@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
+use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agent_system::ai::PolymarketSportsClient;
@@ -24,7 +25,9 @@ use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
+use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{Domain, MarketSelector, StrategyDeployment};
+use crate::signing::Wallet;
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
@@ -3492,10 +3495,46 @@ pub struct PlatformStartControl {
 /// and runs the coordinator loop until shutdown.
 pub async fn start_platform(
     config: PlatformBootstrapConfig,
-    pm_client: PolymarketClient,
     app_config: &AppConfig,
     control: PlatformStartControl,
 ) -> Result<()> {
+    let exchange_kind = parse_exchange_kind(&app_config.execution.exchange)?;
+    let exchange_client = build_exchange_client(app_config, config.dry_run).await?;
+    let non_pm_builtin_agents_enabled = exchange_kind != ExchangeKind::Polymarket
+        && (config.enable_crypto || config.enable_sports || config.enable_politics);
+    if non_pm_builtin_agents_enabled {
+        return Err(crate::error::PloyError::Validation(format!(
+            "execution.exchange={} is not yet supported with built-in agents (crypto/sports/politics). Disable built-in agents or set execution.exchange=polymarket",
+            exchange_kind
+        )));
+    }
+
+    let needs_polymarket_client = config.enable_crypto || config.enable_politics;
+    let pm_client = if needs_polymarket_client {
+        let rest_url = app_config
+            .market
+            .exchange_rest_url
+            .as_deref()
+            .unwrap_or(&app_config.market.rest_url);
+
+        if config.dry_run {
+            Some(PolymarketClient::new(rest_url, true)?)
+        } else {
+            let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+            let funder = std::env::var("POLYMARKET_FUNDER").ok();
+            if let Some(funder_addr) = funder {
+                Some(
+                    PolymarketClient::new_authenticated_proxy(rest_url, wallet, &funder_addr, true)
+                        .await?,
+                )
+            } else {
+                Some(PolymarketClient::new_authenticated(rest_url, wallet, true).await?)
+            }
+        }
+    } else {
+        None
+    };
+
     let account_id = if app_config.account.id.trim().is_empty() {
         "default".to_string()
     } else {
@@ -3515,6 +3554,7 @@ pub async fn start_platform(
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
+        exchange = %exchange_kind,
         dry_run = config.dry_run,
         "starting multi-agent platform"
     );
@@ -3553,8 +3593,9 @@ pub async fn start_platform(
     };
 
     // 1. Create shared executor (+ DB-backed idempotency when DB is available)
-    let exec_config = crate::config::ExecutionConfig::default();
-    let mut executor_builder = OrderExecutor::new(pm_client.clone(), exec_config);
+    let exec_config = app_config.execution.clone();
+    let mut executor_builder =
+        OrderExecutor::new_with_exchange(exchange_client.clone(), exec_config);
     if let Some(pool) = shared_pool.as_ref() {
         let idem_store = PostgresStore::from_pool(pool.clone());
         let idem_mgr = Arc::new(IdempotencyManager::new_with_account(
@@ -3818,7 +3859,12 @@ pub async fn start_platform(
         };
 
         // Discover active crypto events and token IDs (Gamma API) via EventMatcher
-        let event_matcher = Arc::new(EventMatcher::new(pm_client.clone()));
+        let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
+            crate::error::PloyError::Validation(
+                "crypto domain requires a Polymarket client, but none was initialized".to_string(),
+            )
+        })?;
+        let event_matcher = Arc::new(EventMatcher::new(pm_client_ref.clone()));
         if let Err(e) = event_matcher.refresh().await {
             warn!(error = %e, "crypto event matcher refresh failed (continuing)");
         }
@@ -4338,7 +4384,13 @@ pub async fn start_platform(
                 risk_params,
             );
 
-            let core = EventEdgeCore::new(pm_client.clone(), ee_cfg.clone());
+            let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
+                crate::error::PloyError::Validation(
+                    "politics domain requires a Polymarket client, but none was initialized"
+                        .to_string(),
+                )
+            })?;
+            let core = EventEdgeCore::new(pm_client_ref.clone(), ee_cfg.clone());
             let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);
             let ctx = AgentContext::new(
                 politics_cfg.agent_id.clone(),
