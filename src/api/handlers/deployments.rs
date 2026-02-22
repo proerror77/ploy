@@ -102,7 +102,12 @@ async fn ensure_required_strategy_evidence(
     for stage in required_stages {
         let row = sqlx::query(
             r#"
-            SELECT status, evaluated_at
+            SELECT
+                status,
+                evaluated_at,
+                NULLIF(BTRIM(evidence_ref), '') AS evidence_ref,
+                NULLIF(BTRIM(evidence_hash), '') AS evidence_hash,
+                (evidence_payload IS NOT NULL) AS has_payload
             FROM strategy_evaluations
             WHERE account_id = $1
               AND strategy_id = $2
@@ -137,12 +142,36 @@ async fn ensure_required_strategy_evidence(
         let evaluated_at = row
             .try_get::<chrono::DateTime<Utc>, _>("evaluated_at")
             .unwrap_or_else(|_| Utc::now());
+        let evidence_ref = row
+            .try_get::<Option<String>, _>("evidence_ref")
+            .ok()
+            .flatten();
+        let evidence_hash = row
+            .try_get::<Option<String>, _>("evidence_hash")
+            .ok()
+            .flatten();
+        let has_payload = row.try_get::<bool, _>("has_payload").unwrap_or(false);
         if !status.eq_ignore_ascii_case("PASS") {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
                     "deployment '{}' cannot be enabled: latest {} evidence status is {} for strategy '{}'",
                     deployment.id, stage, status, deployment.strategy
+                ),
+            ));
+        }
+        let has_ref = evidence_ref
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_hash = evidence_hash
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !(has_ref || has_hash || has_payload) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "deployment '{}' cannot be enabled: latest {} evidence is missing traceable artifacts (evidence_ref/evidence_hash/evidence_payload)",
+                    deployment.id, stage
                 ),
             ));
         }

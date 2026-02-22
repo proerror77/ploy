@@ -289,6 +289,57 @@ async fn insert_evaluation(
     status: &str,
     evaluated_at: DateTime<Utc>,
 ) {
+    let evidence_ref = format!(
+        "s3://ploy-evidence/{}/{}/{}.json",
+        strategy_id,
+        stage.to_ascii_lowercase(),
+        evaluated_at.timestamp()
+    );
+    let evidence_hash = format!(
+        "hash-{}-{}-{}",
+        strategy_id,
+        stage.to_ascii_lowercase(),
+        evaluated_at.timestamp()
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO strategy_evaluations (
+            account_id,
+            evaluated_at,
+            strategy_id,
+            deployment_id,
+            domain,
+            stage,
+            status,
+            evidence_kind,
+            evidence_ref,
+            evidence_hash
+        )
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind("default")
+    .bind(evaluated_at)
+    .bind(strategy_id)
+    .bind("CRYPTO")
+    .bind(stage)
+    .bind(status)
+    .bind("report")
+    .bind(evidence_ref)
+    .bind(evidence_hash)
+    .execute(pool)
+    .await
+    .expect("failed to insert strategy evaluation");
+}
+
+async fn insert_evaluation_without_traceable_artifacts(
+    pool: &PgPool,
+    strategy_id: &str,
+    stage: &str,
+    status: &str,
+    evaluated_at: DateTime<Utc>,
+) {
     sqlx::query(
         r#"
         INSERT INTO strategy_evaluations (
@@ -313,7 +364,7 @@ async fn insert_evaluation(
     .bind("report")
     .execute(pool)
     .await
-    .expect("failed to insert strategy evaluation");
+    .expect("failed to insert strategy evaluation without traceable artifacts");
 }
 
 async fn upsert_disabled_deployment(app: &Router, deployment_id: &str, strategy_id: &str) {
@@ -601,6 +652,56 @@ async fn deployment_enable_rejects_stale_evidence() {
     assert!(
         body.contains("stale"),
         "expected stale evidence error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn deployment_enable_rejects_untraceable_evidence() {
+    let _guard = env_lock().lock().expect("failed to acquire env lock");
+    let Some(ctx) = TestContext::new(&[
+        ("PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE", "true"),
+        ("PLOY_DEPLOYMENTS_REQUIRED_STAGES", "backtest,paper"),
+        ("PLOY_DEPLOYMENTS_MAX_EVIDENCE_AGE_HOURS", "24"),
+    ])
+    .await
+    else {
+        return;
+    };
+
+    let deployment_id = "dep-untraceable";
+    let strategy_id = "strategy-untraceable";
+
+    upsert_disabled_deployment(&ctx.app, deployment_id, strategy_id).await;
+    insert_evaluation(
+        &ctx.pool,
+        strategy_id,
+        "BACKTEST",
+        "PASS",
+        Utc::now() - ChronoDuration::minutes(30),
+    )
+    .await;
+    insert_evaluation_without_traceable_artifacts(
+        &ctx.pool,
+        strategy_id,
+        "PAPER",
+        "PASS",
+        Utc::now() - ChronoDuration::minutes(10),
+    )
+    .await;
+
+    let (status, body) = send_json(
+        &ctx.app,
+        Method::POST,
+        &format!("/api/deployments/{deployment_id}/enable"),
+        &[("x-ploy-admin-token", "admin-test-token")],
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body.contains("missing traceable artifacts"),
+        "expected untraceable-evidence error, got: {body}"
     );
 }
 
