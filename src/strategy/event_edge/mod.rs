@@ -368,7 +368,7 @@ pub async fn run_event_edge(client: &PolymarketClient, cfg: EventEdgeConfig) -> 
                         edge * dec!(100)
                     );
                     return Err(PloyError::Validation(
-                        "legacy direct order path disabled: submit TradeIntent via coordinator/gateway"
+                        "direct order path disabled: submit TradeIntent via coordinator/gateway"
                             .to_string(),
                     ));
                 }

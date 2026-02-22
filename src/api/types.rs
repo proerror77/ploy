@@ -255,7 +255,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn strategy_config_rejects_legacy_take_profit_stop_loss_fields() {
+    fn strategy_config_rejects_deprecated_take_profit_stop_loss_fields() {
         let payload = json!({
             "symbols": ["BTCUSDT"],
             "min_move": 0.1,

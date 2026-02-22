@@ -1,6 +1,6 @@
 //! Strategy Adapters
 //!
-//! Adapters that wrap legacy strategy implementations to implement the Strategy trait.
+//! Adapters that wrap existing strategy implementations to implement the Strategy trait.
 //! This enables using existing engines (MomentumEngine, SplitArbEngine) with the new
 //! StrategyManager infrastructure.
 
@@ -322,7 +322,7 @@ impl MomentumStrategyAdapter {
             )
             .unwrap_or(dec!(0.25)),
 
-            // VWAP confirmation (legacy momentum config)
+            // Optional VWAP confirmation
             require_vwap_confirmation: entry
                 .get("require_vwap_confirmation")
                 .and_then(|v| v.as_bool())
@@ -341,14 +341,25 @@ impl MomentumStrategyAdapter {
             .unwrap_or(dec!(0)),
         };
 
+        if exit.get("take_profit").is_some() {
+            return Err(crate::error::PloyError::Validation(
+                "deprecated key `exit.take_profit` is no longer supported; use `exit.exit_edge_floor_pct`"
+                    .to_string(),
+            ));
+        }
+        if exit.get("stop_loss").is_some() {
+            return Err(crate::error::PloyError::Validation(
+                "deprecated key `exit.stop_loss` is no longer supported; use `exit.exit_price_band_pct`"
+                    .to_string(),
+            ));
+        }
+
         let exit_config = ExitConfig {
             // Binary options semantics:
             // - exit_edge_floor_pct: minimum modeled edge before forced exit
             // - exit_price_band_pct: adverse price-band threshold
-            // Keep legacy take_profit/stop_loss keys as backward-compatible aliases.
             take_profit_pct: Decimal::try_from(
                 exit.get("exit_edge_floor_pct")
-                    .or_else(|| exit.get("take_profit"))
                     .and_then(|v| v.as_float())
                     .unwrap_or(20.0)
                     / 100.0,
@@ -356,7 +367,6 @@ impl MomentumStrategyAdapter {
             .unwrap_or(dec!(0.20)),
             stop_loss_pct: Decimal::try_from(
                 exit.get("exit_price_band_pct")
-                    .or_else(|| exit.get("stop_loss"))
                     .and_then(|v| v.as_float())
                     .unwrap_or(12.0)
                     / 100.0,
@@ -923,6 +933,8 @@ pub struct SplitArbStrategyAdapter {
     id: String,
     /// Configuration
     config: CoreSplitArbConfig,
+    /// Polymarket series IDs to monitor for event discovery.
+    series_ids: Vec<String>,
     /// Whether in dry-run mode
     dry_run: bool,
     /// Markets being monitored (market_id -> market)
@@ -988,12 +1000,26 @@ struct SplitStats {
     total_loss: Decimal,
 }
 
+fn default_split_arb_series_ids() -> Vec<String> {
+    vec![
+        "10684".to_string(), // BTC 5m
+        "10683".to_string(), // ETH 5m
+        "10686".to_string(), // SOL 5m
+        "10685".to_string(), // XRP 5m
+        "10192".to_string(), // BTC 15m
+        "10191".to_string(), // ETH 15m
+        "10423".to_string(), // SOL 15m
+        "10422".to_string(), // XRP 15m
+    ]
+}
+
 impl SplitArbStrategyAdapter {
     /// Create a new split arbitrage strategy adapter
     pub fn new(id: String, config: CoreSplitArbConfig, dry_run: bool) -> Self {
         Self {
             id,
             config,
+            series_ids: default_split_arb_series_ids(),
             dry_run,
             markets: Arc::new(RwLock::new(HashMap::new())),
             partial_positions: Arc::new(RwLock::new(HashMap::new())),
@@ -1015,17 +1041,38 @@ impl SplitArbStrategyAdapter {
         let empty_table = Value::Table(Default::default());
         let _strategy = config.get("strategy").unwrap_or(&empty_table);
         let entry = config.get("entry").unwrap_or(&empty_table);
-        let position = config.get("position").unwrap_or(&empty_table);
         let risk = config.get("risk").unwrap_or(&empty_table);
+        let position = config.get("position").unwrap_or(&empty_table);
+        let markets = config.get("markets").unwrap_or(&empty_table);
 
-        // Support both config field naming conventions
-        // Legacy: max_combined_price = total for YES+NO (e.g., 98 cents)
-        // New: target_sum = same meaning, max_entry = single side max
+        if entry.get("max_combined_price").is_some() {
+            return Err(crate::error::PloyError::Validation(
+                "deprecated key `entry.max_combined_price` is no longer supported; use `entry.target_sum`"
+                    .to_string(),
+            ));
+        }
+        if entry.get("min_spread").is_some() {
+            return Err(crate::error::PloyError::Validation(
+                "deprecated key `entry.min_spread` is no longer supported; use `entry.min_profit`"
+                    .to_string(),
+            ));
+        }
+        if position.get("shares_per_side").is_some() {
+            return Err(crate::error::PloyError::Validation(
+                "deprecated key `position.shares_per_side` is no longer supported; use `risk.shares`"
+                    .to_string(),
+            ));
+        }
+        if position.get("max_positions").is_some() {
+            return Err(crate::error::PloyError::Validation(
+                "deprecated key `position.max_positions` is no longer supported; use `risk.max_unhedged`"
+                    .to_string(),
+            ));
+        }
 
         // Get target total cost (YES + NO combined)
         let target_sum = entry
             .get("target_sum")
-            .or_else(|| entry.get("max_combined_price"))
             .and_then(|v| v.as_float())
             .map(|v| if v > 1.0 { v / 100.0 } else { v }) // Handle both cents and decimal
             .unwrap_or(0.98);
@@ -1037,18 +1084,15 @@ impl SplitArbStrategyAdapter {
             .map(|v| if v > 1.0 { v / 100.0 } else { v })
             .unwrap_or(target_sum / 2.0);
 
-        // min_profit (new) or min_spread (legacy)
+        // min_profit threshold
         let min_profit = entry
             .get("min_profit")
-            .or_else(|| entry.get("min_spread"))
             .and_then(|v| v.as_float())
             .map(|v| if v > 1.0 { v / 100.0 } else { v })
             .unwrap_or(0.02);
 
-        // shares: risk.shares (new) or position.shares_per_side (legacy)
         let shares = risk
             .get("shares")
-            .or_else(|| position.get("shares_per_side"))
             .and_then(|v| v.as_integer())
             .unwrap_or(50) as u64;
 
@@ -1063,7 +1107,6 @@ impl SplitArbStrategyAdapter {
             shares_per_trade: shares,
             max_unhedged_positions: risk
                 .get("max_unhedged")
-                .or_else(|| position.get("max_positions"))
                 .and_then(|v| v.as_integer())
                 .unwrap_or(3) as usize,
             unhedged_stop_loss: Decimal::try_from(
@@ -1074,8 +1117,26 @@ impl SplitArbStrategyAdapter {
             )
             .unwrap_or(dec!(0.10)),
         };
+        let mut series_ids: Vec<String> = markets
+            .get("series_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if series_ids.is_empty() {
+            series_ids = default_split_arb_series_ids();
+        } else {
+            series_ids.sort();
+            series_ids.dedup();
+        }
 
-        Ok(Self::new(id, split_config, dry_run))
+        let mut adapter = Self::new(id, split_config, dry_run);
+        adapter.series_ids = series_ids;
+        Ok(adapter)
     }
 
     /// Check if a market has an arbitrage opportunity
@@ -1168,7 +1229,7 @@ impl Strategy for SplitArbStrategyAdapter {
     fn required_feeds(&self) -> Vec<DataFeed> {
         vec![
             DataFeed::PolymarketEvents {
-                series_ids: vec![], // Will be configured per market type
+                series_ids: self.series_ids.clone(),
             },
             DataFeed::Tick {
                 interval_ms: 500, // Fast ticks for arb
@@ -1700,6 +1761,27 @@ max_positions = 5
     }
 
     #[test]
+    fn test_momentum_from_toml_rejects_deprecated_exit_keys() {
+        let toml = r#"
+[strategy]
+name = "momentum"
+mode = "predictive"
+
+[entry]
+symbols = ["BTCUSDT"]
+min_move = 0.5
+max_entry = 45
+
+[exit]
+take_profit = 20
+stop_loss = 12
+"#;
+
+        let result = MomentumStrategyAdapter::from_toml("test".into(), toml, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_split_arb_adapter_creation() {
         let config = CoreSplitArbConfig::default();
         let adapter = SplitArbStrategyAdapter::new("test_split".into(), config, true);
@@ -1724,6 +1806,9 @@ shares = 100
 max_hedge_wait = 30
 max_unhedged = 3
 unhedged_stop = 10
+
+[markets]
+series_ids = ["10684", "10192", "10684"]
 "#;
 
         let adapter = SplitArbStrategyAdapter::from_toml("test".into(), toml, true).unwrap();
@@ -1731,11 +1816,17 @@ unhedged_stop = 10
         assert_eq!(adapter.config.max_entry_price, dec!(0.35));
         assert_eq!(adapter.config.target_total_cost, dec!(0.70));
         assert_eq!(adapter.config.shares_per_trade, 100);
+        let feeds = adapter.required_feeds();
+        match &feeds[0] {
+            DataFeed::PolymarketEvents { series_ids } => {
+                assert_eq!(series_ids, &vec!["10192".to_string(), "10684".to_string()]);
+            }
+            _ => panic!("expected PolymarketEvents feed"),
+        }
     }
 
     #[test]
-    fn test_split_arb_from_legacy_toml() {
-        // Test with legacy config format (using cents and max_combined_price)
+    fn test_split_arb_from_toml_rejects_deprecated_keys() {
         let toml = r#"
 [strategy]
 name = "split_arb"
@@ -1749,13 +1840,7 @@ shares_per_side = 50
 max_positions = 10
 "#;
 
-        let adapter = SplitArbStrategyAdapter::from_toml("test".into(), toml, true).unwrap();
-
-        // max_combined_price maps to target_total_cost
-        assert_eq!(adapter.config.target_total_cost, dec!(0.98));
-        // max_entry defaults to half of target_sum
-        assert_eq!(adapter.config.max_entry_price, dec!(0.49));
-        assert_eq!(adapter.config.shares_per_trade, 50);
-        assert_eq!(adapter.config.max_unhedged_positions, 10);
+        let result = SplitArbStrategyAdapter::from_toml("test".into(), toml, true);
+        assert!(result.is_err());
     }
 }

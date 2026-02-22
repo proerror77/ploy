@@ -51,7 +51,7 @@ pub mod pattern_memory;
 pub mod sports;
 
 // =============================================================================
-// Legacy modules (to be phased out)
+// Operational modules used by current runtime
 // =============================================================================
 
 pub mod backtest;
@@ -87,7 +87,7 @@ pub mod validation;
 pub mod volatility;
 pub mod volatility_arb;
 
-// Legacy re-exports
+// Runtime re-exports
 pub use claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
 pub use engine::StrategyEngine;
 pub use executor::OrderExecutor;
@@ -115,7 +115,6 @@ pub use multi_outcome::{
     Outcome,
     OutcomeDirection,
     OutcomeSummary,
-    RiskLevel as LegacyRiskLevel,
     // Split/Merge arbitrage
     SplitMergeOpportunity,
     SplitMergeType,
@@ -139,8 +138,7 @@ pub use event_edge::{run_event_edge, EventEdgeConfig};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
-    MomentumDetector as LegacyMomentumDetector, MomentumEngine,
-    MomentumSignal as LegacyMomentumSignal, Position,
+    MomentumDetector, MomentumEngine, MomentumSignal, Position,
 };
 pub use nba_data_collector::{
     CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,

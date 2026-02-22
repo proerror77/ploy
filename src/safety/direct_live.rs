@@ -10,19 +10,18 @@ fn env_truthy(key: &str) -> bool {
     )
 }
 
-/// Global escape hatch for legacy "direct live trading" paths.
+/// Global escape hatch for direct live trading entrypoints.
 ///
-/// Ploy is migrating to a Coordinator-only live execution plane (via `ploy platform start`).
-/// Legacy entry points remain available for dry-run, but require explicit opt-in for live mode.
-pub fn legacy_live_allowed() -> bool {
-    env_truthy("PLOY_ALLOW_LEGACY_LIVE")
+/// Preferred production path is `ploy platform start` (Coordinator-only live).
+pub fn direct_live_allowed() -> bool {
+    env_truthy("PLOY_ALLOW_DIRECT_LIVE")
 }
 
-/// Legacy `ploy strategy start` live runtime gate.
+/// `ploy strategy start` live runtime gate.
 ///
-/// This accepts the per-command override and the global legacy-live override.
-pub fn legacy_strategy_live_allowed() -> bool {
-    legacy_live_allowed() || env_truthy("PLOY_ALLOW_LEGACY_STRATEGY_LIVE")
+/// Accepts the strategy-specific override and global direct-live override.
+pub fn strategy_direct_live_allowed() -> bool {
+    direct_live_allowed() || env_truthy("PLOY_ALLOW_DIRECT_STRATEGY_LIVE")
 }
 
 #[cfg(test)]
@@ -40,25 +39,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_live_allowed_parses_truthy_values() {
+    fn direct_live_allowed_parses_truthy_values() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        let key = "PLOY_ALLOW_LEGACY_LIVE";
+        let key = "PLOY_ALLOW_DIRECT_LIVE";
         let prev = std::env::var(key).ok();
 
         for v in ["1", "true", "yes", "y", "on", "TrUe"] {
             set_env(key, Some(v));
-            assert!(legacy_live_allowed(), "value {v} should be truthy");
+            assert!(direct_live_allowed(), "value {v} should be truthy");
         }
 
         set_env(key, Some("0"));
-        assert!(!legacy_live_allowed());
+        assert!(!direct_live_allowed());
 
         set_env(key, Some("false"));
-        assert!(!legacy_live_allowed());
+        assert!(!direct_live_allowed());
 
         set_env(key, Some("no"));
-        assert!(!legacy_live_allowed());
+        assert!(!direct_live_allowed());
 
         match prev.as_deref() {
             Some(v) => set_env(key, Some(v)),
@@ -67,24 +66,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_strategy_live_allowed_accepts_global_override() {
+    fn strategy_direct_live_allowed_accepts_global_override() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        let global_key = "PLOY_ALLOW_LEGACY_LIVE";
-        let strategy_key = "PLOY_ALLOW_LEGACY_STRATEGY_LIVE";
+        let global_key = "PLOY_ALLOW_DIRECT_LIVE";
+        let strategy_key = "PLOY_ALLOW_DIRECT_STRATEGY_LIVE";
         let prev_global = std::env::var(global_key).ok();
         let prev_strategy = std::env::var(strategy_key).ok();
 
         set_env(global_key, None);
         set_env(strategy_key, None);
-        assert!(!legacy_strategy_live_allowed());
+        assert!(!strategy_direct_live_allowed());
 
         set_env(strategy_key, Some("true"));
-        assert!(legacy_strategy_live_allowed());
+        assert!(strategy_direct_live_allowed());
 
         set_env(strategy_key, None);
         set_env(global_key, Some("true"));
-        assert!(legacy_strategy_live_allowed());
+        assert!(strategy_direct_live_allowed());
 
         match prev_global.as_deref() {
             Some(v) => set_env(global_key, Some(v)),

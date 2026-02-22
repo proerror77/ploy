@@ -98,6 +98,8 @@ async fn ensure_required_strategy_evidence(
         return Ok(());
     }
     let max_age = ChronoDuration::hours(max_evidence_age_hours());
+    let deployment_domain = deployment.domain.to_string();
+    let deployment_timeframe = deployment.timeframe.as_str().to_string();
 
     for stage in required_stages {
         let row = sqlx::query(
@@ -110,15 +112,26 @@ async fn ensure_required_strategy_evidence(
                 (evidence_payload IS NOT NULL) AS has_payload
             FROM strategy_evaluations
             WHERE account_id = $1
-              AND strategy_id = $2
-              AND stage = $3
+              AND stage = $2
+              AND (
+                    deployment_id = $3
+                 OR (
+                        strategy_id = $4
+                    AND UPPER(domain) = UPPER($5)
+                    AND COALESCE(NULLIF(BTRIM(timeframe), ''), '__none__')
+                        = COALESCE(NULLIF(BTRIM($6), ''), '__none__')
+                 )
+              )
             ORDER BY evaluated_at DESC
             LIMIT 1
             "#,
         )
         .bind(state.account_id.as_str())
-        .bind(deployment.strategy.as_str())
         .bind(stage.as_str())
+        .bind(deployment.id.as_str())
+        .bind(deployment.strategy.as_str())
+        .bind(deployment_domain.as_str())
+        .bind(deployment_timeframe.as_str())
         .fetch_optional(state.store.pool())
         .await
         .map_err(|e| {

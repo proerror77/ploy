@@ -1,10 +1,10 @@
 # Ploy
 
-A high-performance Polymarket trading bot covering crypto, sports, and political prediction markets. Ships with a terminal dashboard, multi-agent coordinator, AI-assisted analysis, and optional reinforcement learning.
+A high-performance Polymarket trading bot focused on crypto and sports prediction markets. Ships with a terminal dashboard, multi-agent coordinator, AI-assisted analysis, and optional reinforcement learning.
 
 ## Features
 
-- **Three trading domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds), Politics (elections, approval ratings)
+- **Two runtime domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds)
 - **Multiple strategies** -- Momentum, Split-Arb, Event-Edge mispricing scanner, NBA Q3-Q4 comeback, market making
 - **Multi-agent platform** -- Coordinator with central order queue, per-domain agents, risk gate, and position aggregation
 - **Event registry** -- Automated DISCOVER -> RESEARCH -> MONITOR -> TRADE pipeline for new markets
@@ -72,8 +72,8 @@ sqlx migrate run
 | `PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE` | No | Require strategy evidence before enabling deployments (`true`/`false`) |
 | `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
 | `PLOY_DEPLOYMENTS_MAX_EVIDENCE_AGE_HOURS` | No | Max evidence staleness window in hours (default `168`) |
-| `PLOY_ALLOW_LEGACY_LIVE` | No | Allow legacy (non-Coordinator) live order paths. Not recommended. |
-| `PLOY_ALLOW_LEGACY_STRATEGY_LIVE` | No | Allow legacy `ploy strategy start` live runtime. Prefer `ploy platform start`. |
+| `PLOY_ALLOW_DIRECT_LIVE` | No | Allow direct (non-Coordinator) live order paths. Not recommended. |
+| `PLOY_ALLOW_DIRECT_STRATEGY_LIVE` | No | Allow direct `ploy strategy start` live runtime. Prefer `ploy platform start`. |
 
 ### Config File
 
@@ -101,7 +101,7 @@ See the inline comments in `config/default.toml` for a full explanation of every
 Ploy is migrating to a **Coordinator-only** live execution plane. For live orders, use the multi-agent platform entry point:
 
 ```bash
-ploy platform start --crypto --sports --politics   # Coordinator + Agents (live)
+ploy platform start --crypto --sports              # Coordinator + Agents (live)
 ploy platform start --crypto --dry-run             # Safe dry-run
 ```
 
@@ -110,7 +110,7 @@ Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `pl
 If you need an explicit override (not recommended), set:
 
 ```bash
-export PLOY_ALLOW_LEGACY_LIVE=true
+export PLOY_ALLOW_DIRECT_LIVE=true
 ```
 
 ### Global Flags
@@ -124,7 +124,7 @@ export PLOY_ALLOW_LEGACY_LIVE=true
 ### Core Commands
 
 ```bash
-ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_LEGACY_LIVE=true)
+ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_DIRECT_LIVE=true)
 ploy test                                      # Test Polymarket API connectivity
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
@@ -198,23 +198,13 @@ ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
 ### Domain: Sports
 
 ```bash
-ploy sports split-arb --leagues NBA,NFL --dry-run          # Split-arb on sports markets
+ploy sports split-arb --leagues NBA --dry-run              # Split-arb on sports markets
 ploy sports monitor --leagues NBA                # Monitor sports markets
 ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
 ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup
 ploy sports polymarket --league nba --live       # Browse Polymarket sports markets
 ploy sports chain --team1 LAL --team2 BOS        # Full decision chain (Grok -> Claude -> DK -> PM)
 ploy sports live-scan --sport nba --min-edge 3   # Continuous live edge scanner
-```
-
-### Domain: Politics
-
-```bash
-ploy politics markets --category presidential   # Browse political markets
-ploy politics search "election"                 # Search political markets
-ploy politics analyze --candidate "Trump"       # Analyze a candidate's markets
-ploy politics trump --market-type favorability  # Trump-specific markets
-ploy politics elections --year 2026             # Election markets by year
 ```
 
 ### Strategy Management
@@ -234,7 +224,7 @@ ploy strategy accuracy --lookback-hours 12      # Report prediction accuracy
 ### Multi-Agent Platform
 
 ```bash
-ploy platform start --crypto --sports --politics   # Start all domain agents
+ploy platform start --crypto --sports              # Start all domain agents
 ploy platform start --crypto --dry-run             # Crypto agent only, dry-run
 ploy platform start --sports --pause sports        # Start paused
 ```
@@ -284,16 +274,14 @@ ploy orderbook-history --asset-ids <ids>             # Backfill L2 orderbook his
 
 ## Architecture
 
-Ploy is organized around a multi-domain platform where each prediction market category (crypto, sports, politics) has a dedicated trading agent. The agents submit orders through a central coordinator that applies risk checks, queues orders, and dispatches them to the Polymarket CLOB via authenticated API calls.
+Ploy is organized around a multi-domain platform where each prediction market category (currently crypto and sports/NBA) has a dedicated trading agent. The agents submit orders through a central coordinator that applies risk checks, queues orders, and dispatches them to the Polymarket CLOB via authenticated API calls.
 
 Strategies run independently and can be managed as daemons (start/stop/status). The event registry continuously discovers new markets, scores them for edge, and promotes them through a funnel from discovery to active trading. Persistence is handled by PostgreSQL with an event store for auditability, a checkpoint system for crash recovery, and a dead-letter queue for failed operations.
 
 ```
 src/
   adapters/      Polymarket CLOB, WebSocket, Binance WS
-  trading_agents.rs Canonical namespace (re-export of agents/)
-  agents/        Domain trading agents (crypto, sports, politics)
-  ai_agents.rs   Canonical namespace (re-export of agent/)
+  agents/        Domain trading agents (crypto, sports)
   agent/         Claude AI agent integration
   coordinator/   Multi-agent coordinator + order queue
   domain/        Core types (Market, Order, Quote)

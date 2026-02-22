@@ -1,8 +1,8 @@
-use crate::enforce_coordinator_only_live;
-use crate::OrderExecutor;
-use crate::PolymarketClient;
-use ploy::cli::legacy::CryptoCommands;
+use crate::main_runtime::enforce_coordinator_only_live;
+use ploy::adapters::PolymarketClient;
+use ploy::cli::runtime::CryptoCommands;
 use ploy::error::Result;
+use ploy::strategy::OrderExecutor;
 use tracing::info;
 
 pub(crate) fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
@@ -85,11 +85,6 @@ pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             // Run strategy
             run_crypto_split_arb(client, executor, config, *dry_run).await?;
         }
-        CryptoCommands::Monitor { coins } => {
-            info!("Monitoring crypto markets: {}", coins);
-            // TODO: Implement monitoring mode
-            println!("Crypto monitoring mode not yet implemented");
-        }
         CryptoCommands::BacktestUpDown {
             symbols,
             days,
@@ -140,4 +135,41 @@ pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_crypto_coin_to_series_ids;
+
+    #[test]
+    fn map_crypto_coin_to_series_ids_prefers_5m_with_15m_fallback() {
+        assert_eq!(
+            map_crypto_coin_to_series_ids("BTC"),
+            vec!["10684".to_string(), "10192".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("ETH"),
+            vec!["10683".to_string(), "10191".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("SOL"),
+            vec!["10686".to_string(), "10423".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("XRP"),
+            vec!["10685".to_string(), "10422".to_string()]
+        );
+    }
+
+    #[test]
+    fn map_crypto_coin_to_series_ids_accepts_raw_series() {
+        assert_eq!(
+            map_crypto_coin_to_series_ids("10192"),
+            vec!["10192".to_string()]
+        );
+        assert_eq!(
+            map_crypto_coin_to_series_ids("10684"),
+            vec!["10684".to_string()]
+        );
+    }
 }

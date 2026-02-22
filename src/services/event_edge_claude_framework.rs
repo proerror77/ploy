@@ -359,7 +359,7 @@ fn build_buy_tool(
                 let _ = notional;
                 Ok(tool_err(
                     "direct_submit_disabled",
-                    "legacy direct submit is disabled; route writes through coordinator intent ingress",
+                    "direct submit is disabled; route writes through coordinator intent ingress",
                 ))
             }
         }

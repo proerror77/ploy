@@ -5,7 +5,7 @@
 ## 0. 前置條件
 
 - `PLOY_DRY_RUN__ENABLED=true`
-- `PLOY_DEPLOYMENTS_FILE` 指向有效矩陣檔（建議 `deployment/deployments.json`）
+- `PLOY_DEPLOYMENTS_FILE` 指向有效矩陣檔（建議 `data/state/deployments.json`）
 - `PLOY_RUN_SQLX_MIGRATIONS=false` 僅限本機實驗，不建議上線前保留
 - `.env` / workload env 已備齊且 `ploy-sidecar` 相關憑證不可用於 dry-run
 
@@ -18,7 +18,7 @@
 
 ## 2. 策略矩陣檢查
 
-- `deployment/deployments.json` 存在且可讀
+- `data/state/deployments.json` 存在且可讀
 - 每筆 deployment 至少包含：`id`、`strategy`、`domain`、`market_selector`、`timeframe`、`enabled`
 - 時間週期策略包含 `5m` 與 `15m`（依需求可調）
 
@@ -36,7 +36,7 @@
   - `PLOY_REQUIRE_SQLX_MIGRATIONS=true`
   - `PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS=300`
   - `PLOY_DEPLOYMENTS_FILE=/opt/ploy/data/state/deployments.json`
-- 遠端首次部署若 `data/state/deployments.json` 不存在，會從 `deployment/deployments.json` 複製
+- 遠端首次部署若 `data/state/deployments.json` 不存在，會使用 repo 內 `data/state/deployments.json.sample` 初始化
 
 ## 5. 通過條件
 

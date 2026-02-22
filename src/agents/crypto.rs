@@ -52,6 +52,65 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
+/// Convert event threshold into required return from event start price.
+///
+/// For UP/DOWN markets:
+/// final_return = (end_price - start_price) / start_price
+/// UP wins when final_return > required_return
+fn required_return_from_threshold(start_price: Decimal, price_to_beat: Decimal) -> Option<Decimal> {
+    if start_price <= Decimal::ZERO || price_to_beat <= Decimal::ZERO {
+        return None;
+    }
+
+    let rr = (price_to_beat - start_price) / start_price;
+
+    // Guard against bad threshold parsing (e.g., timestamps misread as prices).
+    // Real 5m/15m crypto UP/DOWN thresholds should be close to start price.
+    if rr.abs() > dec!(0.20) {
+        return None;
+    }
+
+    Some(rr)
+}
+
+/// Estimate P(UP wins) over the remaining event window.
+///
+/// Model assumption:
+/// - Remaining return over the window is zero-mean normal:
+///   R_rem ~ N(0, sigma_1s^2 * t_rem)
+/// - Current realized return from start is `window_move`
+/// - UP wins when `window_move + R_rem > required_return`
+fn estimate_p_up_window(
+    window_move: Decimal,
+    required_return: Decimal,
+    rolling_volatility_opt: Option<Decimal>,
+    window_remaining_secs: i64,
+) -> Decimal {
+    if window_remaining_secs <= 0 {
+        return dec!(0.5);
+    }
+
+    let sigma_1s = rolling_volatility_opt.unwrap_or(Decimal::ZERO);
+    let sigma_1s_f = sigma_1s.to_f64().unwrap_or(0.0);
+    let sigma_rem = sigma_1s_f * (window_remaining_secs as f64).sqrt();
+
+    let z_num = (window_move - required_return).to_f64().unwrap_or(0.0);
+    let p_up = if sigma_rem.is_finite() && sigma_rem > 0.0 && z_num.is_finite() {
+        normal_cdf(z_num / sigma_rem)
+    } else if z_num > 0.0 {
+        1.0
+    } else if z_num < 0.0 {
+        0.0
+    } else {
+        0.5
+    };
+
+    Decimal::from_f64(p_up)
+        .unwrap_or(dec!(0.5))
+        .max(dec!(0.01))
+        .min(dec!(0.99))
+}
+
 /// Configuration for the CryptoTradingAgent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoTradingConfig {
@@ -66,6 +125,10 @@ pub struct CryptoTradingConfig {
     /// threshold helps avoid "coin-flip" windows near flat.
     #[serde(default)]
     pub min_window_move_pct: Decimal,
+    /// Minimum edge required for entry:
+    /// edge = fair_value - market_entry_price.
+    #[serde(default = "default_exit_edge_floor")]
+    pub min_edge: Decimal,
     /// Refresh interval for Gamma event discovery (seconds)
     pub event_refresh_secs: u64,
     /// Minimum time remaining for selected event (seconds)
@@ -109,6 +172,7 @@ impl Default for CryptoTradingConfig {
             sum_threshold: dec!(0.96),
             min_momentum_1s: 0.001,
             min_window_move_pct: dec!(0.0001), // 0.01%
+            min_edge: dec!(0.02),
             event_refresh_secs: 30,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,
@@ -745,28 +809,27 @@ impl TradingAgent for CryptoTradingAgent {
                             Side::Down => (event.down_token_id.clone(), down_ask),
                         };
 
-                        // Best-effort fair value estimate: P(UP) from window move + remaining-time volatility.
-                        // Model: future return ~ Normal(0, sigma_1s^2 * remaining_secs).
-                        let p_up = if window_remaining_secs > 0 {
-                            let sigma_1s = rolling_volatility_opt.unwrap_or(Decimal::ZERO);
-                            let sigma_1s_f = sigma_1s.to_f64().unwrap_or(0.0);
-                            let sigma_rem = sigma_1s_f * (window_remaining_secs as f64).sqrt();
-                            let w = window_move.to_f64().unwrap_or(0.0);
-                            if sigma_rem.is_finite() && sigma_rem > 0.0 && w.is_finite() {
-                                normal_cdf(w / sigma_rem)
-                            } else {
-                                0.5
-                            }
-                        } else {
-                            0.5
-                        };
-                        let p_up = Decimal::from_f64(p_up).unwrap_or(dec!(0.5));
-                        let p_up = p_up.max(dec!(0.01)).min(dec!(0.99));
+                        let required_return = event
+                            .price_to_beat
+                            .and_then(|thr| required_return_from_threshold(window_start_price, thr))
+                            .unwrap_or(Decimal::ZERO);
+
+                        // Best-effort fair value estimate with threshold awareness:
+                        // P(UP) = P(window_move + remaining_return > required_return).
+                        let p_up = estimate_p_up_window(
+                            window_move,
+                            required_return,
+                            rolling_volatility_opt,
+                            window_remaining_secs,
+                        );
                         let fair_value = match side {
                             Side::Up => p_up,
                             Side::Down => Decimal::ONE - p_up,
                         };
                         let signal_edge = fair_value - limit_price;
+                        if signal_edge < self.config.min_edge {
+                            continue;
+                        }
                         let confidence = Self::signal_confidence(
                             sum_of_asks,
                             self.config.sum_threshold,
@@ -802,6 +865,14 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("horizon", &event.horizon)
                         .with_metadata("event_start_time", &event.start_time.to_rfc3339())
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
+                        .with_metadata(
+                            "price_to_beat",
+                            &event
+                                .price_to_beat
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                        )
+                        .with_metadata("required_return", &required_return.to_string())
                         .with_metadata("sum_of_asks", &sum_of_asks.to_string())
                         .with_metadata("event_title", &event.title)
                         .with_metadata("signal_type", "crypto_momentum_entry")
@@ -814,6 +885,7 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("signal_fair_value", &fair_value.to_string())
                         .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("signal_edge", &signal_edge.to_string())
+                        .with_metadata("signal_min_edge", &self.config.min_edge.to_string())
                         .with_metadata("window_start_price", &window_start_price.to_string())
                         .with_metadata("window_move_pct", &window_move.to_string())
                         .with_metadata("window_elapsed_secs", &window_elapsed_secs.to_string())
@@ -1098,6 +1170,7 @@ impl TradingAgent for CryptoTradingAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_config_defaults() {
@@ -1105,8 +1178,37 @@ mod tests {
         assert_eq!(cfg.agent_id, "crypto");
         assert_eq!(cfg.coins.len(), 4);
         assert_eq!(cfg.sum_threshold, dec!(0.96));
+        assert_eq!(cfg.min_edge, dec!(0.02));
         assert!(!cfg.enable_price_exits);
         assert_eq!(cfg.min_hold_secs, 20);
+    }
+
+    #[test]
+    fn test_required_return_from_threshold_sanity() {
+        let start = dec!(100);
+        let threshold = dec!(101);
+        let rr = required_return_from_threshold(start, threshold).expect("required return");
+        assert_eq!(rr, dec!(0.01));
+
+        let impossible = required_return_from_threshold(start, dec!(200));
+        assert!(
+            impossible.is_none(),
+            "implausible threshold should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_estimate_p_up_window_respects_required_return() {
+        let window_move = dec!(0.01);
+        let vol = Some(dec!(0.002));
+        let rem = 300;
+
+        let base = estimate_p_up_window(window_move, dec!(0), vol, rem);
+        let harder = estimate_p_up_window(window_move, dec!(0.01), vol, rem);
+        let easier = estimate_p_up_window(window_move, dec!(-0.01), vol, rem);
+
+        assert!(harder < base, "higher threshold should reduce p_up");
+        assert!(easier > base, "lower threshold should increase p_up");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Official Polymarket CLOB Client using polymarket-client-sdk
 //!
 //! This module provides a client that uses the official Polymarket SDK internally
-//! while maintaining backward compatibility with our existing API.
+//! while preserving the current adapter API surface.
 
 use crate::domain::{OrderRequest, OrderSide};
 use crate::error::{PloyError, Result};
@@ -23,7 +23,7 @@ use tracing::{info, instrument};
 pub const POLYGON_CHAIN_ID: u64 = 137;
 pub const AMOY_CHAIN_ID: u64 = 80002;
 
-/// Order response compatible with our existing code
+/// Order response mapped to the existing adapter types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub id: String,

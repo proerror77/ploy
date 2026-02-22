@@ -4,7 +4,7 @@
 //! registers agents based on config flags, and runs the coordinator loop.
 
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -12,23 +12,29 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agent::PolymarketSportsClient;
-use crate::config::AppConfig;
-use crate::coordinator::config::DuplicateGuardScope;
-use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
-use crate::domain::Side;
-use crate::error::Result;
-use crate::platform::{Domain, MarketSelector, StrategyDeployment};
-use crate::strategy::event_edge::core::EventEdgeCore;
-use crate::strategy::executor::OrderExecutor;
-use crate::strategy::idempotency::IdempotencyManager;
-use crate::strategy::momentum::EventMatcher;
-use crate::trading_agents::{
+use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoTradingAgent, CryptoTradingConfig,
     PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
     TradingAgent,
 };
 #[cfg(feature = "rl")]
-use crate::trading_agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::config::AppConfig;
+use crate::coordinator::config::DuplicateGuardScope;
+use crate::coordinator::{
+    AgentHealthResponse, AgentSnapshot, Coordinator, CoordinatorCommand, CoordinatorConfig,
+    GlobalState,
+};
+use crate::domain::{OrderStatus, Side};
+use crate::error::Result;
+use crate::platform::{AgentRiskParams, AgentStatus, Domain, MarketSelector, StrategyDeployment};
+use crate::strategy::event_edge::core::EventEdgeCore;
+use crate::strategy::executor::OrderExecutor;
+use crate::strategy::idempotency::IdempotencyManager;
+use crate::strategy::momentum::EventMatcher;
+use crate::strategy::{
+    DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,
+};
 use chrono::Utc;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -39,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
@@ -631,66 +639,48 @@ pub(crate) async fn ensure_strategy_observability_tables(pool: &PgPool) -> Resul
     .execute(pool)
     .await?;
 
-    // Persist strategy-level evaluation evidence across backtest/paper/live stages.
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS strategy_evaluations (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            strategy_id TEXT NOT NULL,
-            deployment_id TEXT,
-            domain TEXT NOT NULL,
-            stage TEXT NOT NULL CHECK (stage IN ('BACKTEST','PAPER','LIVE')),
-            status TEXT NOT NULL CHECK (status IN ('PASS','FAIL','WARN','UNKNOWN')),
-            score NUMERIC(12,6),
-            timeframe TEXT,
-            sample_size BIGINT,
-            pnl_usd NUMERIC(20,10),
-            win_rate NUMERIC(12,6),
-            sharpe NUMERIC(20,10),
-            max_drawdown_pct NUMERIC(12,6),
-            max_drawdown_usd NUMERIC(20,10),
-            evidence_kind TEXT NOT NULL DEFAULT 'report',
-            evidence_ref TEXT,
-            evidence_hash TEXT,
-            evidence_payload JSONB,
-            metadata JSONB
+    // strategy_evaluations is migration-owned; only run lightweight startup repairs when present.
+    let strategy_evaluations_exists = sqlx::query(
+        "SELECT to_regclass('public.strategy_evaluations') IS NOT NULL AS table_exists",
+    )
+    .fetch_one(pool)
+    .await?
+    .try_get::<bool, _>("table_exists")
+    .unwrap_or(false);
+
+    if strategy_evaluations_exists {
+        sqlx::query(
+            "ALTER TABLE strategy_evaluations ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
         )
-        "#,
-    )
-    .execute(pool)
-    .await?;
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "ALTER TABLE strategy_evaluations ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_account_time ON strategy_evaluations(account_id, evaluated_at DESC)",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_account_time ON strategy_evaluations(account_id, evaluated_at DESC)",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_strategy_stage_time ON strategy_evaluations(account_id, strategy_id, stage, evaluated_at DESC)",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_strategy_stage_time ON strategy_evaluations(account_id, strategy_id, stage, evaluated_at DESC)",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_status_time ON strategy_evaluations(account_id, status, evaluated_at DESC)",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_status_time ON strategy_evaluations(account_id, status, evaluated_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_evaluations_evidence_hash ON strategy_evaluations(account_id, strategy_id, stage, evidence_hash)",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_evaluations_evidence_hash ON strategy_evaluations(account_id, strategy_id, stage, evidence_hash) WHERE evidence_hash IS NOT NULL",
+        )
+        .execute(pool)
+        .await?;
+    } else {
+        warn!("strategy_evaluations table missing at startup; run migrations to enable deployment evidence gating");
+    }
 
     Ok(())
 }
@@ -829,7 +819,7 @@ async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
             END;
 
             BEGIN
-                -- fills(timestamp) indexes (fallback to filled_at for legacy schemas)
+                -- fills(timestamp) indexes (fallback to filled_at for older schemas)
                 IF to_regclass('public.fills') IS NOT NULL THEN
                     EXECUTE 'DROP INDEX IF EXISTS idx_fills_position_time';
                     EXECUTE 'DROP INDEX IF EXISTS idx_fills_order_time';
@@ -977,7 +967,7 @@ async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
             END;
 
             BEGIN
-                -- Reconcile quote_freshness drift from partial/legacy migrations.
+                -- Reconcile quote_freshness drift from partial/older migrations.
                 IF to_regclass('public.quote_freshness') IS NOT NULL THEN
                     IF NOT EXISTS (
                         SELECT 1
@@ -2557,6 +2547,206 @@ fn add_coins_from_selector(selector: &MarketSelector, coins: &mut HashSet<String
     }
 }
 
+fn normalize_strategy_key(strategy: &str) -> String {
+    strategy.to_ascii_lowercase().replace(['-', '_', ' '], "")
+}
+
+fn strategy_is_momentum(strategy_key: &str) -> bool {
+    strategy_key.contains("momentum") || strategy_key.contains("mom")
+}
+
+fn strategy_is_pattern_memory(strategy_key: &str) -> bool {
+    strategy_key.contains("pattern")
+        || strategy_key.contains("memory")
+        || strategy_key.contains("pattenmem")
+}
+
+fn strategy_is_split_arb(strategy_key: &str) -> bool {
+    strategy_key.contains("splitarb")
+        || (strategy_key.contains("split") && strategy_key.contains("arb"))
+}
+
+fn strategy_is_lob_ml(strategy_key: &str) -> bool {
+    strategy_key.contains("lob")
+        || strategy_key.contains("ml")
+        || strategy_key.contains("dl")
+        || strategy_key.contains("deep")
+        || strategy_key.contains("learning")
+}
+
+fn normalize_horizon(value: &str) -> Option<&'static str> {
+    let key = value.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    if key == "5m" || key == "5min" || key == "5minute" {
+        return Some("5m");
+    }
+    if key == "15m" || key == "15min" || key == "15minute" {
+        return Some("15m");
+    }
+    None
+}
+
+fn crypto_series_id_for(coin: &str, horizon: &str) -> Option<&'static str> {
+    let c = coin.to_ascii_uppercase();
+    match (c.as_str(), horizon) {
+        ("BTC", "5m") => Some("10684"),
+        ("ETH", "5m") => Some("10683"),
+        ("SOL", "5m") => Some("10686"),
+        ("XRP", "5m") => Some("10685"),
+        ("BTC", "15m") => Some("10192"),
+        ("ETH", "15m") => Some("10191"),
+        ("SOL", "15m") => Some("10423"),
+        ("XRP", "15m") => Some("10422"),
+        _ => None,
+    }
+}
+
+fn coin_symbol_for(coin: &str) -> Option<String> {
+    let c = coin.to_ascii_uppercase();
+    if c.is_empty() {
+        return None;
+    }
+    Some(format!("{}USDT", c))
+}
+
+#[derive(Debug, Default)]
+struct RuntimeCryptoStrategyTargets {
+    pattern_memory_coins: HashSet<String>,
+    split_arb_coins: HashSet<String>,
+    split_arb_horizons: HashSet<String>,
+}
+
+fn collect_runtime_crypto_strategy_targets(
+    runtime_account_id: &str,
+    runtime_dry_run: bool,
+) -> RuntimeCryptoStrategyTargets {
+    let deployments = load_strategy_deployments();
+    let mut out = RuntimeCryptoStrategyTargets::default();
+
+    for dep in deployments
+        .iter()
+        .filter(|d| d.enabled)
+        .filter(|d| d.matches_account(runtime_account_id))
+        .filter(|d| d.matches_execution_mode(runtime_dry_run))
+    {
+        if !matches!(dep.domain, Domain::Crypto) {
+            continue;
+        }
+
+        let strategy_key = normalize_strategy_key(&dep.strategy);
+        if strategy_is_pattern_memory(&strategy_key) {
+            add_coins_from_selector(&dep.market_selector, &mut out.pattern_memory_coins);
+        }
+        if strategy_is_split_arb(&strategy_key) {
+            add_coins_from_selector(&dep.market_selector, &mut out.split_arb_coins);
+            if let Some(h) = normalize_horizon(dep.timeframe.as_str()) {
+                out.split_arb_horizons.insert(h.to_string());
+            }
+        }
+    }
+
+    out
+}
+
+fn build_pattern_memory_runtime_config(coins: &[String]) -> Result<String> {
+    let mut selected: Vec<String> = coins
+        .iter()
+        .filter_map(|c| {
+            c.strip_suffix("USDT")
+                .map(|s| s.to_string())
+                .or_else(|| Some(c.clone()))
+        })
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    selected.sort();
+    selected.dedup();
+
+    let mut markets_block = String::new();
+    for coin in selected {
+        if let (Some(symbol), Some(series_id)) =
+            (coin_symbol_for(&coin), crypto_series_id_for(&coin, "5m"))
+        {
+            markets_block.push_str("\n[[markets]]\n");
+            markets_block.push_str(&format!("symbol = \"{}\"\n", symbol));
+            markets_block.push_str(&format!("series_id = \"{}\"\n", series_id));
+        }
+    }
+
+    if markets_block.trim().is_empty() {
+        return Err(crate::error::PloyError::Validation(
+            "pattern_memory runtime has no recognized crypto coins/series ids".to_string(),
+        ));
+    }
+
+    Ok(format!(
+        r#"# Auto-generated by platform bootstrap
+[strategy]
+name = "pattern_memory"
+enabled = true
+{markets}
+[pattern]
+corr_threshold = 0.70
+alpha = 1.0
+beta = 1.0
+min_matches = 3
+min_n_eff = 2.0
+min_confidence = 0.60
+
+[filter_15m]
+enabled = true
+min_confidence = 0.55
+min_n_eff = 1.0
+
+[timing]
+target_remaining_secs = 300
+tolerance_secs = 45
+min_remaining_secs = 60
+
+[trade]
+shares = 100
+max_entry_price = 0.55
+min_net_ev = 0.0
+cooldown_secs = 30
+"#,
+        markets = markets_block
+    ))
+}
+
+fn build_split_arb_runtime_config(series_ids: &[String]) -> String {
+    let rendered_series = series_ids
+        .iter()
+        .map(|s| format!("\"{}\"", s))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        r#"# Auto-generated by platform bootstrap
+[strategy]
+name = "split_arb"
+enabled = true
+mode = "arbitrage"
+
+[entry]
+target_sum = 98
+min_profit = 2
+min_liquidity = 100
+
+[timing]
+min_time_remaining = 60
+max_time_remaining = 3600
+
+[risk]
+shares = 50
+max_unhedged = 10
+max_exposure = 500
+daily_loss_limit = 100
+
+[markets]
+series_ids = [{series_ids}]
+"#,
+        series_ids = rendered_series
+    )
+}
+
 fn apply_strategy_deployments(
     cfg: &mut PlatformBootstrapConfig,
     deployments: &[StrategyDeployment],
@@ -2580,6 +2770,8 @@ fn apply_strategy_deployments(
 
     cfg.enable_crypto = false;
     cfg.enable_crypto_momentum = false;
+    cfg.enable_crypto_pattern_memory = false;
+    cfg.enable_crypto_split_arb = false;
     cfg.enable_crypto_lob_ml = false;
     #[cfg(feature = "rl")]
     {
@@ -2599,22 +2791,22 @@ fn apply_strategy_deployments(
         match dep.domain {
             Domain::Crypto => {
                 cfg.enable_crypto = true;
-                let strategy_key = dep
-                    .strategy
-                    .to_ascii_lowercase()
-                    .replace(['-', '_', ' '], "");
+                let strategy_key = normalize_strategy_key(&dep.strategy);
 
                 let mut matched = false;
-                if strategy_key.contains("momentum") || strategy_key.contains("mom") {
+                if strategy_is_momentum(&strategy_key) {
                     cfg.enable_crypto_momentum = true;
                     matched = true;
                 }
-                if strategy_key.contains("pattern")
-                    || strategy_key.contains("memory")
-                    || strategy_key.contains("pattenmem")
-                    || strategy_key.contains("lob")
-                    || strategy_key.contains("dl")
-                {
+                if strategy_is_pattern_memory(&strategy_key) {
+                    cfg.enable_crypto_pattern_memory = true;
+                    matched = true;
+                }
+                if strategy_is_split_arb(&strategy_key) {
+                    cfg.enable_crypto_split_arb = true;
+                    matched = true;
+                }
+                if strategy_is_lob_ml(&strategy_key) {
                     cfg.enable_crypto_lob_ml = true;
                     matched = true;
                 }
@@ -2635,16 +2827,22 @@ fn apply_strategy_deployments(
         }
     }
 
-    if cfg.enable_crypto && !cfg.enable_crypto_momentum && !cfg.enable_crypto_lob_ml && {
-        #[cfg(feature = "rl")]
-        {
-            !cfg.enable_crypto_rl_policy
+    if cfg.enable_crypto
+        && !cfg.enable_crypto_momentum
+        && !cfg.enable_crypto_pattern_memory
+        && !cfg.enable_crypto_split_arb
+        && !cfg.enable_crypto_lob_ml
+        && {
+            #[cfg(feature = "rl")]
+            {
+                !cfg.enable_crypto_rl_policy
+            }
+            #[cfg(not(feature = "rl"))]
+            {
+                true
+            }
         }
-        #[cfg(not(feature = "rl"))]
-        {
-            true
-        }
-    } {
+    {
         cfg.enable_crypto_momentum = true;
     }
 
@@ -2677,6 +2875,8 @@ fn apply_strategy_deployments(
         runtime_dry_run = runtime_dry_run,
         crypto = cfg.enable_crypto,
         crypto_momentum = cfg.enable_crypto_momentum,
+        crypto_pattern_memory = cfg.enable_crypto_pattern_memory,
+        crypto_split_arb = cfg.enable_crypto_split_arb,
         crypto_lob_ml = cfg.enable_crypto_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = cfg.enable_sports,
@@ -2806,6 +3006,10 @@ pub struct PlatformBootstrapConfig {
     #[serde(default)]
     pub enable_crypto_momentum: bool,
     #[serde(default)]
+    pub enable_crypto_pattern_memory: bool,
+    #[serde(default)]
+    pub enable_crypto_split_arb: bool,
+    #[serde(default)]
     pub enable_crypto_lob_ml: bool,
     #[serde(default)]
     #[cfg(feature = "rl")]
@@ -2828,6 +3032,8 @@ impl Default for PlatformBootstrapConfig {
             coordinator: CoordinatorConfig::default(),
             enable_crypto: true,
             enable_crypto_momentum: true,
+            enable_crypto_pattern_memory: false,
+            enable_crypto_split_arb: false,
             enable_crypto_lob_ml: false,
             #[cfg(feature = "rl")]
             enable_crypto_rl_policy: false,
@@ -3067,7 +3273,7 @@ impl PlatformBootstrapConfig {
             cfg.coordinator.min_order_notional_usd = v.max(rust_decimal::Decimal::ZERO);
         }
 
-        // Map legacy [strategy]/[risk] values into crypto-agent defaults so
+        // Map config [strategy]/[risk] values into crypto-agent defaults so
         // platform mode follows deployed config instead of hardcoded defaults.
         cfg.crypto.default_shares = app.strategy.shares.max(1);
         let effective_threshold = app.strategy.effective_sum_target();
@@ -3125,6 +3331,7 @@ impl PlatformBootstrapConfig {
             "PLOY_CRYPTO_AGENT__MIN_WINDOW_MOVE_PCT",
             cfg.crypto.min_window_move_pct,
         );
+        cfg.crypto.min_edge = env_decimal("PLOY_CRYPTO_AGENT__MIN_EDGE", cfg.crypto.min_edge);
         cfg.crypto.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_AGENT__EVENT_REFRESH_SECS",
             cfg.crypto.event_refresh_secs,
@@ -3477,6 +3684,8 @@ impl PlatformBootstrapConfig {
         if app.openclaw_runtime_lockdown() {
             cfg.enable_crypto = false;
             cfg.enable_crypto_momentum = false;
+            cfg.enable_crypto_pattern_memory = false;
+            cfg.enable_crypto_split_arb = false;
             cfg.enable_crypto_lob_ml = false;
             #[cfg(feature = "rl")]
             {
@@ -3498,6 +3707,405 @@ pub struct PlatformStartControl {
     pub resume: Option<String>,
 }
 
+async fn handle_strategy_actions_runtime(
+    strategy_label: &str,
+    manager: Arc<StrategyManager>,
+    mut rx: mpsc::Receiver<(String, StrategyAction)>,
+    executor: Arc<OrderExecutor>,
+    paused: Arc<AtomicBool>,
+    orders_submitted: Arc<AtomicU64>,
+    orders_filled: Arc<AtomicU64>,
+) {
+    while let Some((strategy_id, action)) = rx.recv().await {
+        match action {
+            StrategyAction::SubmitOrder {
+                client_order_id,
+                order,
+                priority: _,
+            } => {
+                if paused.load(Ordering::Relaxed) {
+                    warn!(
+                        strategy = strategy_label,
+                        strategy_id = %strategy_id,
+                        "strategy submit-order rejected while paused"
+                    );
+                    manager.send_order_update(crate::strategy::OrderUpdate {
+                        order_id: client_order_id.clone(),
+                        client_order_id: Some(client_order_id),
+                        status: OrderStatus::Rejected,
+                        filled_qty: 0,
+                        avg_fill_price: None,
+                        timestamp: Utc::now(),
+                        error: Some("strategy paused by coordinator".to_string()),
+                    });
+                    continue;
+                }
+
+                orders_submitted.fetch_add(1, Ordering::Relaxed);
+                match executor.execute(&order).await {
+                    Ok(result) => {
+                        if matches!(result.status, OrderStatus::Filled) {
+                            orders_filled.fetch_add(1, Ordering::Relaxed);
+                        }
+                        manager.send_order_update(crate::strategy::OrderUpdate {
+                            order_id: result.order_id,
+                            client_order_id: Some(client_order_id),
+                            status: result.status,
+                            filled_qty: result.filled_shares,
+                            avg_fill_price: result.avg_fill_price,
+                            timestamp: Utc::now(),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            strategy = strategy_label,
+                            strategy_id = %strategy_id,
+                            error = %e,
+                            "strategy action order execution failed"
+                        );
+                        manager.send_order_update(crate::strategy::OrderUpdate {
+                            order_id: client_order_id.clone(),
+                            client_order_id: Some(client_order_id),
+                            status: OrderStatus::Failed,
+                            filled_qty: 0,
+                            avg_fill_price: None,
+                            timestamp: Utc::now(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                };
+            }
+            StrategyAction::CancelOrder { order_id } => match executor.cancel(&order_id).await {
+                Ok(cancelled) => {
+                    manager.send_order_update(crate::strategy::OrderUpdate {
+                        order_id: order_id.clone(),
+                        client_order_id: None,
+                        status: if cancelled {
+                            OrderStatus::Cancelled
+                        } else {
+                            OrderStatus::Rejected
+                        },
+                        filled_qty: 0,
+                        avg_fill_price: None,
+                        timestamp: Utc::now(),
+                        error: if cancelled {
+                            None
+                        } else {
+                            Some("order not found or already closed".to_string())
+                        },
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        strategy = strategy_label,
+                        strategy_id = %strategy_id,
+                        order_id = %order_id,
+                        error = %e,
+                        "strategy cancel failed"
+                    );
+                    manager.send_order_update(crate::strategy::OrderUpdate {
+                        order_id,
+                        client_order_id: None,
+                        status: OrderStatus::Failed,
+                        filled_qty: 0,
+                        avg_fill_price: None,
+                        timestamp: Utc::now(),
+                        error: Some(e.to_string()),
+                    });
+                }
+            },
+            StrategyAction::ModifyOrder {
+                order_id,
+                new_price,
+                new_size,
+            } => {
+                warn!(
+                    strategy = strategy_label,
+                    strategy_id = %strategy_id,
+                    order_id = %order_id,
+                    new_price = ?new_price,
+                    new_size = ?new_size,
+                    "strategy modify-order action is not implemented"
+                );
+            }
+            StrategyAction::Alert { level, message } => {
+                info!(
+                    strategy = strategy_label,
+                    strategy_id = %strategy_id,
+                    alert_level = ?level,
+                    message = message,
+                    "strategy alert"
+                );
+            }
+            StrategyAction::LogEvent { event } => {
+                debug!(
+                    strategy = strategy_label,
+                    strategy_id = %strategy_id,
+                    event_type = ?event.event_type,
+                    message = event.message,
+                    "strategy event"
+                );
+            }
+            StrategyAction::UpdateRisk { level, reason } => {
+                info!(
+                    strategy = strategy_label,
+                    strategy_id = %strategy_id,
+                    risk_level = ?level,
+                    reason = reason,
+                    "strategy risk update"
+                );
+            }
+            StrategyAction::SubscribeFeed { feed } => {
+                warn!(
+                    strategy = strategy_label,
+                    strategy_id = %strategy_id,
+                    feed = ?feed,
+                    "dynamic subscribe-feed action is not implemented in platform mode"
+                );
+            }
+            StrategyAction::UnsubscribeFeed { feed } => {
+                warn!(
+                    strategy = strategy_label,
+                    strategy_id = %strategy_id,
+                    feed = ?feed,
+                    "dynamic unsubscribe-feed action is not implemented in platform mode"
+                );
+            }
+        }
+    }
+}
+
+async fn run_managed_strategy_runtime(
+    strategy_label: &str,
+    agent_id: &str,
+    strategy_config_toml: String,
+    dry_run: bool,
+    pm_client: PolymarketClient,
+    pm_ws_url: String,
+    mut cmd_rx: mpsc::Receiver<CoordinatorCommand>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> Result<()> {
+    let strategy = StrategyFactory::from_toml(&strategy_config_toml, dry_run)?;
+    let strategy_id = strategy.id().to_string();
+    let required_feeds = strategy.required_feeds();
+    let started_at = Utc::now();
+    let paused = Arc::new(AtomicBool::new(false));
+    let orders_submitted = Arc::new(AtomicU64::new(0));
+    let orders_filled = Arc::new(AtomicU64::new(0));
+    let mut status = AgentStatus::Running;
+
+    let manager = Arc::new(StrategyManager::new(1000));
+    let action_rx = manager.take_action_receiver().await.ok_or_else(|| {
+        crate::error::PloyError::Internal(format!(
+            "strategy {} failed to take action receiver",
+            strategy_label
+        ))
+    })?;
+
+    let mut binance_spot_symbols: Vec<String> = Vec::new();
+    let mut binance_kline_symbols: Vec<String> = Vec::new();
+    let mut binance_kline_intervals: Vec<String> = Vec::new();
+    let mut binance_kline_closed_only = true;
+
+    for feed in &required_feeds {
+        match feed {
+            DataFeed::BinanceSpot { symbols } => {
+                binance_spot_symbols.extend(symbols.clone());
+            }
+            DataFeed::BinanceKlines {
+                symbols,
+                intervals,
+                closed_only,
+            } => {
+                binance_kline_symbols.extend(symbols.clone());
+                binance_kline_intervals.extend(intervals.clone());
+                if !*closed_only {
+                    binance_kline_closed_only = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    binance_spot_symbols.sort();
+    binance_spot_symbols.dedup();
+    binance_kline_symbols.sort();
+    binance_kline_symbols.dedup();
+    binance_kline_intervals.sort();
+    binance_kline_intervals.dedup();
+
+    let mut feed_manager = DataFeedManager::new(manager.clone());
+    if !binance_spot_symbols.is_empty() {
+        feed_manager = feed_manager.with_binance(binance_spot_symbols.clone());
+    }
+
+    if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
+        let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(300);
+        feed_manager = feed_manager.with_binance_klines(
+            binance_kline_symbols.clone(),
+            binance_kline_intervals.clone(),
+            binance_kline_closed_only,
+            backfill_limit,
+        );
+    }
+
+    let has_polymarket_feed = required_feeds.iter().any(|f| {
+        matches!(
+            f,
+            DataFeed::PolymarketEvents { .. } | DataFeed::PolymarketQuotes { .. }
+        )
+    });
+    if has_polymarket_feed {
+        let pm_ws = PolymarketWebSocket::new(&pm_ws_url);
+        feed_manager = feed_manager.with_polymarket(pm_ws, pm_client.clone());
+    }
+
+    manager.start_strategy(strategy, None).await?;
+    feed_manager.start().await?;
+    let subscribed_tokens = feed_manager.start_for_feeds(required_feeds).await?;
+
+    let executor = Arc::new(OrderExecutor::new(
+        pm_client.clone(),
+        crate::config::ExecutionConfig::default(),
+    ));
+    let manager_for_actions = manager.clone();
+    let paused_for_actions = paused.clone();
+    let orders_submitted_for_actions = orders_submitted.clone();
+    let orders_filled_for_actions = orders_filled.clone();
+    let strategy_label_owned = strategy_label.to_string();
+    let action_task = tokio::spawn(async move {
+        handle_strategy_actions_runtime(
+            &strategy_label_owned,
+            manager_for_actions,
+            action_rx,
+            executor,
+            paused_for_actions,
+            orders_submitted_for_actions,
+            orders_filled_for_actions,
+        )
+        .await;
+    });
+
+    info!(
+        strategy = strategy_label,
+        agent_id = agent_id,
+        strategy_id = %strategy_id,
+        subscribed_tokens = subscribed_tokens.len(),
+        dry_run = dry_run,
+        "managed strategy runtime started"
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                info!(
+                    strategy = strategy_label,
+                    agent_id = agent_id,
+                    strategy_id = %strategy_id,
+                    "managed strategy runtime shutdown requested"
+                );
+                break;
+            }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(CoordinatorCommand::Pause) => {
+                        paused.store(true, Ordering::Relaxed);
+                        status = AgentStatus::Paused;
+                        info!(
+                            strategy = strategy_label,
+                            agent_id = agent_id,
+                            strategy_id = %strategy_id,
+                            "managed strategy runtime paused"
+                        );
+                    }
+                    Some(CoordinatorCommand::Resume) => {
+                        paused.store(false, Ordering::Relaxed);
+                        status = AgentStatus::Running;
+                        info!(
+                            strategy = strategy_label,
+                            agent_id = agent_id,
+                            strategy_id = %strategy_id,
+                            "managed strategy runtime resumed"
+                        );
+                    }
+                    Some(CoordinatorCommand::ForceClose) => {
+                        warn!(
+                            strategy = strategy_label,
+                            agent_id = agent_id,
+                            strategy_id = %strategy_id,
+                            "managed strategy runtime force-close requested"
+                        );
+                        break;
+                    }
+                    Some(CoordinatorCommand::Shutdown) => {
+                        info!(
+                            strategy = strategy_label,
+                            agent_id = agent_id,
+                            strategy_id = %strategy_id,
+                            "managed strategy runtime shutdown command received"
+                        );
+                        break;
+                    }
+                    Some(CoordinatorCommand::HealthCheck(tx)) => {
+                        let position_count = manager
+                            .get_strategy_status(&strategy_id)
+                            .await
+                            .map(|s| s.position_count)
+                            .unwrap_or(0);
+                        let snapshot = AgentSnapshot {
+                            agent_id: agent_id.to_string(),
+                            name: strategy_label.to_string(),
+                            domain: Domain::Crypto,
+                            status,
+                            position_count,
+                            exposure: rust_decimal::Decimal::ZERO,
+                            daily_pnl: rust_decimal::Decimal::ZERO,
+                            unrealized_pnl: rust_decimal::Decimal::ZERO,
+                            metrics: HashMap::new(),
+                            last_heartbeat: Utc::now(),
+                            error_message: None,
+                        };
+                        let uptime_secs = (Utc::now() - started_at).num_seconds().max(0) as u64;
+                        let _ = tx.send(AgentHealthResponse {
+                            snapshot,
+                            is_healthy: matches!(status, AgentStatus::Running | AgentStatus::Paused),
+                            uptime_secs,
+                            orders_submitted: orders_submitted.load(Ordering::Relaxed),
+                            orders_filled: orders_filled.load(Ordering::Relaxed),
+                        });
+                    }
+                    None => {
+                        warn!(
+                            strategy = strategy_label,
+                            agent_id = agent_id,
+                            strategy_id = %strategy_id,
+                            "managed strategy runtime command channel closed"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Err(e) = manager.stop_all(true).await {
+        warn!(
+            strategy = strategy_label,
+            agent_id = agent_id,
+            strategy_id = %strategy_id,
+            error = %e,
+            "managed strategy runtime stop_all failed"
+        );
+    }
+    action_task.abort();
+
+    Ok(())
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -3513,6 +4121,8 @@ pub async fn start_platform(
     } else {
         app_config.account.id.clone()
     };
+    let runtime_crypto_targets =
+        collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
@@ -3522,6 +4132,8 @@ pub async fn start_platform(
         account_id = %account_id,
         crypto = config.enable_crypto,
         crypto_momentum = config.enable_crypto_momentum,
+        crypto_pattern_memory = config.enable_crypto_pattern_memory,
+        crypto_split_arb = config.enable_crypto_split_arb,
         crypto_lob_ml = config.enable_crypto_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = config.enable_sports,
@@ -3529,6 +4141,17 @@ pub async fn start_platform(
         dry_run = config.dry_run,
         "starting multi-agent platform"
     );
+
+    let mut allowed_domains: HashSet<Domain> = HashSet::new();
+    if config.enable_crypto {
+        allowed_domains.insert(Domain::Crypto);
+    }
+    if config.enable_sports {
+        allowed_domains.insert(Domain::Sports);
+    }
+    if config.enable_politics {
+        allowed_domains.insert(Domain::Politics);
+    }
 
     let db_required = env_bool(
         "PLOY_DB_REQUIRED",
@@ -3575,8 +4198,12 @@ pub async fn start_platform(
     let executor = Arc::new(executor_builder);
 
     // 2. Create coordinator
-    let mut coordinator =
-        Coordinator::new(config.coordinator.clone(), executor, account_id.clone());
+    let mut coordinator = Coordinator::new(
+        config.coordinator.clone(),
+        executor,
+        account_id.clone(),
+        allowed_domains.clone(),
+    );
     if let Some(pool) = shared_pool.as_ref() {
         // Run migrations by default whenever a DB connection is available, even in dry-run.
         // This prevents long-lived services from starting on a stale schema.
@@ -3679,6 +4306,18 @@ pub async fn start_platform(
             }
         }
     }
+
+    let ingress_agents = std::env::var("PLOY_EXTERNAL_INGRESS_AGENT_IDS")
+        .unwrap_or_else(|_| "openclaw_rpc,sidecar".to_string());
+    for agent_id in ingress_agents
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        coordinator
+            .authorize_external_agent(agent_id, AgentRiskParams::conservative())
+            .await;
+    }
     let handle = coordinator.handle();
     let _global_state = coordinator.global_state();
 
@@ -3763,6 +4402,8 @@ pub async fn start_platform(
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
         let momentum_enabled = config.enable_crypto_momentum;
+        let pattern_memory_enabled = config.enable_crypto_pattern_memory;
+        let split_arb_enabled = config.enable_crypto_split_arb;
         let lob_cfg = config.crypto_lob_ml.clone();
         let lob_agent_enabled = config.enable_crypto_lob_ml;
         #[cfg(feature = "rl")]
@@ -4124,6 +4765,136 @@ pub async fn start_platform(
                 agent = crypto_cfg.agent_id,
                 "crypto momentum agent disabled"
             );
+        }
+
+        if pattern_memory_enabled {
+            let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
+                crypto_cfg.coins.clone()
+            } else {
+                runtime_crypto_targets
+                    .pattern_memory_coins
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
+            coins.sort();
+            coins.dedup();
+
+            match build_pattern_memory_runtime_config(&coins) {
+                Ok(toml_cfg) => {
+                    let strategy_agent_id = "pattern_memory".to_string();
+                    let strategy_cmd_rx = coordinator.register_agent(
+                        strategy_agent_id.clone(),
+                        Domain::Crypto,
+                        crypto_cfg.risk_params.clone(),
+                    );
+                    let strategy_pm_client = pm_client.clone();
+                    let strategy_ws_url = app_config.market.ws_url.clone();
+                    let strategy_shutdown_rx = shutdown_tx.subscribe();
+                    let strategy_dry_run = config.dry_run;
+                    let jh = tokio::spawn(async move {
+                        if let Err(e) = run_managed_strategy_runtime(
+                            "pattern_memory",
+                            &strategy_agent_id,
+                            toml_cfg,
+                            strategy_dry_run,
+                            strategy_pm_client,
+                            strategy_ws_url,
+                            strategy_cmd_rx,
+                            strategy_shutdown_rx,
+                        )
+                        .await
+                        {
+                            error!(agent = "pattern_memory", error = %e, "managed strategy runtime exited with error");
+                        }
+                    });
+                    agent_handles.push(jh);
+                    info!("pattern_memory strategy runtime spawned");
+                }
+                Err(e) => {
+                    warn!(
+                        agent = "pattern_memory",
+                        error = %e,
+                        "pattern_memory enabled but no valid runtime config could be built"
+                    );
+                }
+            }
+        }
+
+        if split_arb_enabled {
+            let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
+                crypto_cfg.coins.clone()
+            } else {
+                runtime_crypto_targets
+                    .split_arb_coins
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
+            coins.sort();
+            coins.dedup();
+
+            let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty()
+            {
+                vec!["5m".to_string(), "15m".to_string()]
+            } else {
+                runtime_crypto_targets
+                    .split_arb_horizons
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
+            horizons.sort();
+            horizons.dedup();
+
+            let mut series_set: HashSet<String> = HashSet::new();
+            for coin in &coins {
+                let normalized = coin.trim_end_matches("USDT");
+                for horizon in &horizons {
+                    if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
+                        series_set.insert(series_id.to_string());
+                    }
+                }
+            }
+            let mut series_ids: Vec<String> = series_set.into_iter().collect();
+            series_ids.sort();
+
+            if series_ids.is_empty() {
+                warn!(
+                    agent = "split_arb",
+                    "split_arb enabled but no recognized coin/horizon series ids were resolved"
+                );
+            } else {
+                let toml_cfg = build_split_arb_runtime_config(&series_ids);
+                let strategy_agent_id = "split_arb".to_string();
+                let strategy_cmd_rx = coordinator.register_agent(
+                    strategy_agent_id.clone(),
+                    Domain::Crypto,
+                    crypto_cfg.risk_params.clone(),
+                );
+                let strategy_pm_client = pm_client.clone();
+                let strategy_ws_url = app_config.market.ws_url.clone();
+                let strategy_shutdown_rx = shutdown_tx.subscribe();
+                let strategy_dry_run = config.dry_run;
+                let jh = tokio::spawn(async move {
+                    if let Err(e) = run_managed_strategy_runtime(
+                        "split_arb",
+                        &strategy_agent_id,
+                        toml_cfg,
+                        strategy_dry_run,
+                        strategy_pm_client,
+                        strategy_ws_url,
+                        strategy_cmd_rx,
+                        strategy_shutdown_rx,
+                    )
+                    .await
+                    {
+                        error!(agent = "split_arb", error = %e, "managed strategy runtime exited with error");
+                    }
+                });
+                agent_handles.push(jh);
+                info!("split_arb strategy runtime spawned");
+            }
         }
 
         if lob_agent_enabled {

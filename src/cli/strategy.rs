@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
-use crate::safety::legacy_live::legacy_strategy_live_allowed;
+use crate::safety::direct_live::strategy_direct_live_allowed;
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};
@@ -558,8 +558,8 @@ async fn start_strategy(
 ) -> Result<()> {
     info!("Starting strategy: {}", name);
 
-    if !dry_run && !legacy_strategy_live_allowed() {
-        let msg = "legacy `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path) or set PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true for explicit override";
+    if !dry_run && !strategy_direct_live_allowed() {
+        let msg = "direct `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path) or set PLOY_ALLOW_DIRECT_STRATEGY_LIVE=true for explicit override";
         warn!("{msg}");
         println!("\x1b[31m✗ {}\x1b[0m", msg);
         return Err(anyhow::anyhow!(msg));
@@ -1276,7 +1276,7 @@ fn systemd_strategy_status(name: &str) -> Option<StrategyStatus> {
     let mut candidates = vec![
         format!("ploy-strategy-{}-dryrun.service", slug),
         format!("ploy-strategy-{}.service", slug),
-        // Back-compat (older units may have kept underscores).
+        // Compatibility fallback (older units may have kept underscores).
         format!("ploy-strategy-{}-dryrun.service", name),
         format!("ploy-strategy-{}.service", name),
     ];

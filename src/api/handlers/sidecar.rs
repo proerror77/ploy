@@ -364,6 +364,43 @@ fn deployment_gate_required() -> bool {
     }
 }
 
+fn ensure_domain_allowed(
+    state: &AppState,
+    domain: Domain,
+    reason: &str,
+) -> std::result::Result<(), (StatusCode, String)> {
+    if state.is_domain_allowed(domain) {
+        return Ok(());
+    }
+    let allowed = state.allowed_domains_labels().join(", ");
+    Err((
+        StatusCode::CONFLICT,
+        format!(
+            "{} is not enabled for runtime scope (requested={}, allowed=[{}])",
+            reason, domain, allowed
+        ),
+    ))
+}
+
+fn ensure_agent_authorized(
+    state: &AppState,
+    agent_id: &str,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let coordinator = state.coordinator.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Coordinator not running (platform not started)".to_string(),
+        )
+    })?;
+    if coordinator.is_agent_authorized(agent_id) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        format!("agent_id '{}' is not registered/authorized", agent_id),
+    ))
+}
+
 async fn resolve_intent_deployment(
     state: &AppState,
     deployment_id: &str,
@@ -417,6 +454,11 @@ async fn resolve_intent_deployment(
             ),
         ));
     }
+    ensure_domain_allowed(
+        state,
+        dep.domain,
+        &format!("deployment {}", dep.id.as_str()),
+    )?;
     Ok(Some(dep.clone()))
 }
 
@@ -972,6 +1014,7 @@ pub async fn sidecar_submit_order(
         .map(|d| d.domain)
         .unwrap_or(Domain::Sports);
     let domain = parse_sidecar_domain(req.domain.as_deref(), domain_default)?;
+    ensure_domain_allowed(&state, domain, "sidecar order domain")?;
     let side = parse_binary_side(req.side.as_deref())?;
     let is_buy = parse_is_buy(None, req.is_buy)?;
 
@@ -1026,6 +1069,7 @@ pub async fn sidecar_submit_order(
 
     let intent_id = intent.intent_id.to_string();
 
+    ensure_agent_authorized(&state, "sidecar")?;
     coordinator
         .submit_order(intent)
         .await
@@ -1179,6 +1223,7 @@ pub async fn sidecar_submit_intent(
         .map(|d| d.domain)
         .unwrap_or(Domain::Crypto);
     let domain = parse_sidecar_domain(req.domain.as_deref(), domain_default)?;
+    ensure_domain_allowed(&state, domain, "sidecar intent domain")?;
     let side = parse_binary_side(req.side.as_deref())?;
     let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy)?;
     let priority = if req.priority.as_deref().is_some() {
@@ -1270,6 +1315,8 @@ pub async fn sidecar_submit_intent(
             dry_run: true,
         }));
     }
+
+    ensure_agent_authorized(&state, &agent_id)?;
 
     let coordinator = state.coordinator.as_ref().ok_or_else(|| {
         (
@@ -1631,7 +1678,7 @@ pub async fn sidecar_get_risk(
                 )
             };
 
-            // Best-effort exposure table from persistent positions (legacy bot).
+            // Best-effort exposure table from persistent positions.
             let rows = sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
                 r#"
                 SELECT

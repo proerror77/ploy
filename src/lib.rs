@@ -1,7 +1,6 @@
 pub mod adapters;
 pub mod agent;
 pub mod agents;
-pub mod ai_agents;
 pub mod analysis;
 #[cfg(feature = "api")]
 pub mod api;
@@ -20,7 +19,6 @@ pub mod services;
 pub mod signing;
 pub mod strategy;
 pub mod supervisor;
-pub mod trading_agents;
 pub mod tui;
 pub mod validation;
 

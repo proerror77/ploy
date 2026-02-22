@@ -55,7 +55,7 @@ pub struct PolymarketClient {
     gamma_client: GammaClient,
     /// Private key signer for authenticated operations
     signer: Option<PrivateKeySigner>,
-    /// Legacy wallet for backward compatibility
+    /// Optional wallet handle for authenticated signing flows
     wallet: Option<Arc<Wallet>>,
     /// Funder address (proxy wallet that holds funds)
     funder: Option<alloy::primitives::Address>,
@@ -590,11 +590,8 @@ impl PolymarketClient {
         explicit_gate || (openclaw_mode && openclaw_hard_disable)
     }
 
-    fn allow_legacy_direct_submit() -> bool {
-        Self::env_bool(&[
-            "PLOY_ALLOW_LEGACY_DIRECT_SUBMIT",
-            "PLOY_ALLOW_DIRECT_SUBMIT",
-        ])
+    fn allow_direct_submit() -> bool {
+        Self::env_bool(&["PLOY_ALLOW_DIRECT_SUBMIT"])
     }
 
     fn gateway_execution_context_active() -> bool {
@@ -602,7 +599,7 @@ impl PolymarketClient {
     }
 
     fn validate_gateway_execution_context(dry_run: bool) -> Result<()> {
-        if dry_run || Self::allow_legacy_direct_submit() {
+        if dry_run || Self::allow_direct_submit() {
             return Ok(());
         }
 
@@ -938,7 +935,7 @@ impl PolymarketClient {
         self.dry_run
     }
 
-    /// Check if HMAC authentication is configured (for backward compatibility)
+    /// Check whether HMAC authentication is configured
     pub fn has_hmac_auth(&self) -> bool {
         self.signer.is_some()
     }
@@ -2241,8 +2238,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gateway_execution_context_rejects_legacy_direct_live_submit() {
-        if PolymarketClient::allow_legacy_direct_submit() {
+    async fn test_gateway_execution_context_rejects_direct_live_submit_without_gateway_context() {
+        if PolymarketClient::allow_direct_submit() {
             return;
         }
 

@@ -159,6 +159,8 @@ pub enum BlockReason {
     MarketNotAllowed { market: String, agent: String },
     /// Agent 狀態不允許交易
     AgentNotActive { agent: String, status: String },
+    /// Agent 未註冊風控參數
+    UnregisteredAgent { agent: String },
     /// 訂單已過期
     OrderExpired,
     /// 未對沖倉位過多
@@ -219,6 +221,9 @@ impl std::fmt::Display for BlockReason {
             }
             BlockReason::AgentNotActive { agent, status } => {
                 write!(f, "Agent {} is {} (not active)", agent, status)
+            }
+            BlockReason::UnregisteredAgent { agent } => {
+                write!(f, "Agent {} is not registered for risk controls", agent)
             }
             BlockReason::OrderExpired => write!(f, "Order has expired"),
             BlockReason::TooManyUnhedgedPositions { limit, current } => {
@@ -451,10 +456,12 @@ impl RiskGate {
                 Some(p) => p.clone(),
                 None => {
                     warn!(
-                        "No risk params for agent {}, using defaults",
+                        "No risk params for agent {}, blocking order",
                         intent.agent_id
                     );
-                    AgentRiskParams::default()
+                    return RiskCheckResult::Blocked(BlockReason::UnregisteredAgent {
+                        agent: intent.agent_id.clone(),
+                    });
                 }
             }
         };
@@ -1034,6 +1041,23 @@ mod tests {
         let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
         let result = gate.check_order(&intent).await;
         assert!(result.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_agent_is_blocked() {
+        let gate = RiskGate::new(RiskConfig::default());
+        let intent = make_intent(
+            "unknown-agent",
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        let result = gate.check_order(&intent).await;
+        match result {
+            RiskCheckResult::Blocked(BlockReason::UnregisteredAgent { agent }) => {
+                assert_eq!(agent, "unknown-agent");
+            }
+            _ => panic!("Expected UnregisteredAgent block"),
+        }
     }
 
     #[tokio::test]

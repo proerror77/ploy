@@ -496,7 +496,7 @@ impl DumpHedgeEngine {
         tracker.update(token_id, price, bid_depth, ask_depth);
     }
 
-    /// Simplified price update (backward compatible)
+    /// Simplified price update
     pub async fn on_simple_price_update(&self, token_id: &str, price: Decimal) {
         self.on_price_update(token_id, price, None, None).await;
     }

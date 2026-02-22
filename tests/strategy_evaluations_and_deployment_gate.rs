@@ -212,7 +212,10 @@ impl TestContext {
             .await
             .expect("failed to connect postgres test database");
 
-        ensure_strategy_evaluations_table(&pool).await;
+        PostgresStore::from_pool(pool.clone())
+            .migrate()
+            .await
+            .expect("failed to run sqlx migrations for integration test");
 
         let store = Arc::new(PostgresStore::from_pool(pool.clone()));
         let config = StrategyConfigState {
@@ -236,50 +239,6 @@ impl TestContext {
             _env: env_override,
         })
     }
-}
-
-async fn ensure_strategy_evaluations_table(pool: &PgPool) {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS strategy_evaluations (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            strategy_id TEXT NOT NULL,
-            deployment_id TEXT,
-            domain TEXT NOT NULL,
-            stage TEXT NOT NULL CHECK (stage IN ('BACKTEST','PAPER','LIVE')),
-            status TEXT NOT NULL CHECK (status IN ('PASS','FAIL','WARN','UNKNOWN')),
-            score NUMERIC(12,6),
-            timeframe TEXT,
-            sample_size BIGINT,
-            pnl_usd NUMERIC(20,10),
-            win_rate NUMERIC(12,6),
-            sharpe NUMERIC(20,10),
-            max_drawdown_pct NUMERIC(12,6),
-            max_drawdown_usd NUMERIC(20,10),
-            evidence_kind TEXT NOT NULL DEFAULT 'report',
-            evidence_ref TEXT,
-            evidence_hash TEXT,
-            evidence_payload JSONB,
-            metadata JSONB
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("failed to create strategy_evaluations table");
-
-    sqlx::query(
-        r#"
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_evaluations_evidence_hash
-            ON strategy_evaluations(account_id, strategy_id, stage, evidence_hash)
-            WHERE evidence_hash IS NOT NULL
-        "#,
-    )
-    .execute(pool)
-    .await
-    .expect("failed to create strategy_evaluations unique index");
 }
 
 async fn insert_evaluation(
@@ -310,19 +269,21 @@ async fn insert_evaluation(
             strategy_id,
             deployment_id,
             domain,
+            timeframe,
             stage,
             status,
             evidence_kind,
             evidence_ref,
             evidence_hash
         )
-        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind("default")
     .bind(evaluated_at)
     .bind(strategy_id)
     .bind("CRYPTO")
+    .bind("5m")
     .bind(stage)
     .bind(status)
     .bind("report")
@@ -348,17 +309,19 @@ async fn insert_evaluation_without_traceable_artifacts(
             strategy_id,
             deployment_id,
             domain,
+            timeframe,
             stage,
             status,
             evidence_kind
         )
-        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8)
         "#,
     )
     .bind("default")
     .bind(evaluated_at)
     .bind(strategy_id)
     .bind("CRYPTO")
+    .bind("5m")
     .bind(stage)
     .bind(status)
     .bind("report")

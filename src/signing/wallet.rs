@@ -91,7 +91,7 @@ impl Wallet {
     )]
     pub fn private_key_hex(&self) -> &str {
         warn!("SECURITY WARNING: private_key_hex() called - this is deprecated and insecure");
-        // Return empty string to maintain API compatibility
+        // Return empty string to preserve method contract
         // The actual key is not stored anymore
         ""
     }

@@ -2,7 +2,7 @@ use crate::adapters::PostgresStore;
 use crate::agent::grok::GrokClient;
 use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
 use crate::coordinator::CoordinatorHandle;
-use crate::platform::StrategyDeployment;
+use crate::platform::{Domain, StrategyDeployment};
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -51,6 +51,8 @@ pub struct AppState {
     pub deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
     /// Persistence path for deployment matrix state.
     pub deployments_path: Arc<PathBuf>,
+    /// Runtime-allowed domains for this process.
+    pub allowed_domains: Arc<std::collections::HashSet<Domain>>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +98,15 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
+    fn default_allowed_domains() -> std::collections::HashSet<Domain> {
+        let mut domains = std::collections::HashSet::new();
+        domains.insert(Domain::Crypto);
+        domains.insert(Domain::Sports);
+        domains.insert(Domain::Politics);
+        domains.insert(Domain::Economics);
+        domains
+    }
+
     fn normalize_account_id(raw: Option<&str>) -> String {
         raw.map(str::trim)
             .filter(|v| !v.is_empty())
@@ -217,6 +228,7 @@ impl AppState {
         let deployments = Arc::new(RwLock::new(Self::load_deployments(
             deployments_path.as_ref(),
         )));
+        let allowed_domains = Arc::new(Self::default_allowed_domains());
         let account_id = Self::default_account_id_from_env();
 
         Self {
@@ -237,6 +249,7 @@ impl AppState {
             grok_client: None,
             deployments,
             deployments_path,
+            allowed_domains,
         }
     }
 
@@ -251,9 +264,19 @@ impl AppState {
     ) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
         let deployments_path = Arc::new(Self::deployments_state_path());
-        let deployments = Arc::new(RwLock::new(Self::load_deployments(
-            deployments_path.as_ref(),
-        )));
+        let (deployments, allowed_domains) = if let Some(coordinator_ref) = coordinator.as_ref() {
+            (
+                coordinator_ref.shared_deployments(),
+                coordinator_ref.allowed_domains(),
+            )
+        } else {
+            (
+                Arc::new(RwLock::new(Self::load_deployments(
+                    deployments_path.as_ref(),
+                ))),
+                Arc::new(Self::default_allowed_domains()),
+            )
+        };
         let account_id = Self::normalize_account_id(Some(account_id.as_str()));
 
         Self {
@@ -274,7 +297,22 @@ impl AppState {
             grok_client,
             deployments,
             deployments_path,
+            allowed_domains,
         }
+    }
+
+    pub fn is_domain_allowed(&self, domain: Domain) -> bool {
+        self.allowed_domains.contains(&domain)
+    }
+
+    pub fn allowed_domains_labels(&self) -> Vec<String> {
+        let mut labels = self
+            .allowed_domains
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        labels.sort();
+        labels
     }
 
     /// Broadcast a WebSocket message to all connected clients

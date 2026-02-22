@@ -55,11 +55,20 @@ pub struct CoordinatorHandle {
     global_state: Arc<RwLock<GlobalState>>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
+    deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
+    allowed_domains: Arc<HashSet<Domain>>,
+    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
+        if !self.allowed_domains.contains(&intent.domain) {
+            return Err(crate::error::PloyError::Validation(format!(
+                "domain {} is not enabled for this runtime",
+                intent.domain
+            )));
+        }
         let global_mode = *self.ingress_mode.read().await;
         let domain_mode = self
             .domain_ingress_mode
@@ -206,12 +215,37 @@ impl CoordinatorHandle {
     pub async fn read_state(&self) -> GlobalState {
         self.global_state.read().await.clone()
     }
+
+    /// Shared deployment registry (single source of truth for API + coordinator).
+    pub fn shared_deployments(&self) -> Arc<RwLock<HashMap<String, StrategyDeployment>>> {
+        self.deployments.clone()
+    }
+
+    /// Runtime-enabled domains for this coordinator process.
+    pub fn allowed_domains(&self) -> Arc<HashSet<Domain>> {
+        self.allowed_domains.clone()
+    }
+
+    /// Whether a domain is enabled in this runtime.
+    pub fn is_domain_allowed(&self, domain: Domain) -> bool {
+        self.allowed_domains.contains(&domain)
+    }
+
+    /// Whether an agent_id is registered/authorized for order ingress.
+    pub fn is_agent_authorized(&self, agent_id: &str) -> bool {
+        self.authorized_agents
+            .read()
+            .map(|agents| agents.contains(agent_id))
+            .unwrap_or(false)
+    }
 }
 
 /// The Coordinator — owns shared infrastructure and runs the main event loop
 pub struct Coordinator {
     config: CoordinatorConfig,
     account_id: String,
+    allowed_domains: Arc<HashSet<Domain>>,
+    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
     deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
@@ -288,7 +322,7 @@ impl IntentDuplicateGuard {
         // are also blocked within the duplicate window.
         // Scope is configurable:
         // - Market: block across all strategies/deployments (safer, avoids double-entries).
-        // - Deployment: legacy behavior; allow different deployments to each enter.
+        // - Deployment: deployment-scoped behavior; allow different deployments to each enter.
         if !intent.is_buy || intent.priority == OrderPriority::Critical {
             return None;
         }
@@ -1247,11 +1281,14 @@ impl Coordinator {
         config: CoordinatorConfig,
         executor: Arc<OrderExecutor>,
         account_id: String,
+        allowed_domains: HashSet<Domain>,
     ) -> Self {
         let (order_tx, order_rx) = mpsc::channel(256);
         let (state_tx, state_rx) = mpsc::channel(128);
         let (control_tx, control_rx) = mpsc::channel(32);
 
+        let allowed_domains = Arc::new(allowed_domains);
+        let authorized_agents = Arc::new(std::sync::RwLock::new(HashSet::new()));
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
         let duplicate_guard = Arc::new(RwLock::new(IntentDuplicateGuard::new(
@@ -1276,6 +1313,8 @@ impl Coordinator {
         Self {
             config,
             account_id,
+            allowed_domains,
+            authorized_agents,
             deployments,
             risk_gate,
             order_queue,
@@ -1373,6 +1412,9 @@ impl Coordinator {
             global_state: self.global_state.clone(),
             ingress_mode: self.ingress_mode.clone(),
             domain_ingress_mode: self.domain_ingress_mode.clone(),
+            deployments: self.deployments.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            authorized_agents: self.authorized_agents.clone(),
         }
     }
 
@@ -1396,6 +1438,9 @@ impl Coordinator {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.agent_commands
             .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
+        if let Ok(mut authorized) = self.authorized_agents.write() {
+            authorized.insert(agent_id.clone());
+        }
 
         // Register with risk gate (fire-and-forget via spawn since we're not async here)
         let risk_gate = self.risk_gate.clone();
@@ -1408,6 +1453,18 @@ impl Coordinator {
 
         info!(agent_id, "agent registered with coordinator");
         cmd_rx
+    }
+
+    pub async fn authorize_external_agent(&self, agent_id: &str, params: AgentRiskParams) {
+        let id = agent_id.trim();
+        if id.is_empty() {
+            return;
+        }
+        if let Ok(mut authorized) = self.authorized_agents.write() {
+            authorized.insert(id.to_string());
+        }
+        self.risk_gate.register_agent(id, params).await;
+        info!(agent_id = %id, "external ingress agent authorized");
     }
 
     /// Send a command to a specific agent
@@ -1433,6 +1490,10 @@ impl Coordinator {
 
     fn should_apply_domain_cmd(&self, entry: &AgentCommandChannel, target: Domain) -> bool {
         entry.domain == target
+    }
+
+    fn is_domain_allowed(&self, domain: Domain) -> bool {
+        self.allowed_domains.contains(&domain)
     }
 
     async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
@@ -1631,6 +1692,17 @@ impl Coordinator {
         let intent_id = intent.intent_id;
         let strategy_max_shares = intent.shares;
 
+        if !self.is_domain_allowed(intent.domain) {
+            let reason = format!("domain {} is not enabled for this runtime", intent.domain);
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by runtime domain allowlist"
+            );
+            return;
+        }
+
         let ingress_mode = *self.ingress_mode.read().await;
         if ingress_mode != IngressMode::Running {
             let reason = format!(
@@ -1820,6 +1892,11 @@ impl Coordinator {
             return container_data_root.join("state/deployments.json");
         }
 
+        let repo_state_deployment = Path::new("data/state/deployments.json");
+        if repo_state_deployment.exists() {
+            return repo_state_deployment.to_path_buf();
+        }
+
         let repo_root_deployment = Path::new("deployment/deployments.json");
         if repo_root_deployment.exists() {
             return repo_root_deployment.to_path_buf();
@@ -1857,8 +1934,12 @@ impl Coordinator {
             return Self::parse_strategy_deployments(&raw);
         }
 
+        let repo_state_path = Path::new("data/state/deployments.json");
+        let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
         let candidates = [
             Self::deployments_state_path(),
+            repo_state_path.to_path_buf(),
+            container_data_path.to_path_buf(),
             Path::new("deployment/deployments.json").to_path_buf(),
             Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
         ];
@@ -2151,6 +2232,12 @@ impl Coordinator {
     ) -> std::result::Result<(), String> {
         if !intent.is_buy || self.executor.is_dry_run() || !Self::deployment_gate_required() {
             return Ok(());
+        }
+        if !self.is_domain_allowed(intent.domain) {
+            return Err(format!(
+                "domain {} is not enabled for this runtime",
+                intent.domain
+            ));
         }
 
         let explicit_id =
@@ -3446,7 +3533,7 @@ impl Coordinator {
         // Align idempotency with duplicate-guard semantics.
         // - When the guard is market-scoped, avoid including deployment_id in the key so
         //   cross-deployment duplicate intents resolve to the same idempotency key.
-        // - When deployment-scoped, keep legacy behavior (key includes deployment_id).
+        // - When deployment-scoped, key includes deployment_id.
         let scope = match intent
             .metadata
             .get("duplicate_guard_scope")
