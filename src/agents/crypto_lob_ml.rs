@@ -72,9 +72,8 @@ pub enum CryptoLobMlExitMode {
 }
 
 fn default_exit_mode() -> CryptoLobMlExitMode {
-    // Preserve current behavior: signal-flip exits are enabled by default,
-    // while mark-to-market exits are opt-in.
-    CryptoLobMlExitMode::SignalFlip
+    // Binary option architecture default: hold to settlement.
+    CryptoLobMlExitMode::SettleOnly
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,9 +129,6 @@ pub struct CryptoLobMlConfig {
     pub exit_edge_floor: Decimal,
     #[serde(default = "default_exit_price_band")]
     pub exit_price_band: Decimal,
-    /// Legacy mark-to-market toggle (kept for backward compatibility).
-    /// New deployments should use `exit_mode`.
-    pub enable_price_exits: bool,
     /// Exit policy:
     /// - settle_only: hold until settlement
     /// - signal_flip: exit on side flip
@@ -250,7 +246,6 @@ impl Default for CryptoLobMlConfig {
             default_shares: 50,
             exit_edge_floor: default_exit_edge_floor(),
             exit_price_band: default_exit_price_band(),
-            enable_price_exits: false,
             exit_mode: default_exit_mode(),
             min_hold_secs: 20,
             min_edge: dec!(0.02),
@@ -1793,8 +1788,7 @@ mod tests {
         assert_eq!(cfg.agent_id, "crypto_lob_ml");
         assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
         assert_eq!(cfg.max_time_remaining_secs, 900);
-        assert!(!cfg.enable_price_exits);
-        assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::SignalFlip);
+        assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::SettleOnly);
         assert_eq!(cfg.min_hold_secs, 20);
         assert!(cfg.prefer_close_to_end);
     }

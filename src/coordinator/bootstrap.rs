@@ -3084,33 +3084,29 @@ impl PlatformBootstrapConfig {
             "PLOY_CRYPTO_LOB_ML__EXIT_PRICE_BAND",
             cfg.crypto_lob_ml.exit_price_band,
         );
-        let mut exit_mode_set_by_env = false;
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__EXIT_MODE") {
-            let mode = match raw.trim().to_ascii_lowercase().as_str() {
-                "settle_only" | "settle" => Some(CryptoLobMlExitMode::SettleOnly),
-                "signal_flip" | "flip" => Some(CryptoLobMlExitMode::SignalFlip),
-                "price_exit" | "price" | "mtm" => Some(CryptoLobMlExitMode::PriceExit),
-                _ => None,
-            };
-            if let Some(mode) = mode {
-                cfg.crypto_lob_ml.exit_mode = mode;
-                exit_mode_set_by_env = true;
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS") {
             match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.enable_price_exits = true,
-                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.enable_price_exits = false,
-                _ => {}
+                "settle_only" | "settle" => {
+                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SettleOnly
+                }
+                "signal_flip" | "flip" => {
+                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SignalFlip
+                }
+                "price_exit" | "price" | "mtm" => {
+                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::PriceExit
+                }
+                _ => {
+                    warn!(
+                        value = %raw,
+                        "invalid PLOY_CRYPTO_LOB_ML__EXIT_MODE; keeping configured/default value"
+                    );
+                }
             }
         }
-        // Legacy compatibility: map old bool toggle to exit_mode when a new mode
-        // is not explicitly configured.
-        if !exit_mode_set_by_env
-            && cfg.crypto_lob_ml.enable_price_exits
-            && matches!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::SignalFlip)
-        {
-            cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::PriceExit;
+        if std::env::var_os("PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS").is_some() {
+            warn!(
+                "PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS is deprecated and ignored; use PLOY_CRYPTO_LOB_ML__EXIT_MODE"
+            );
         }
         cfg.crypto_lob_ml.min_hold_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__MIN_HOLD_SECS",
@@ -4364,7 +4360,6 @@ mod tests {
         let require_threshold_key = "PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT";
         let threshold_weight_key = "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT";
         let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
-        let legacy_price_exits_key = "PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS";
 
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
@@ -4377,7 +4372,6 @@ mod tests {
         let prev_require_threshold = std::env::var(require_threshold_key).ok();
         let prev_threshold_weight = std::env::var(threshold_weight_key).ok();
         let prev_exit_mode = std::env::var(exit_mode_key).ok();
-        let prev_legacy_price_exits = std::env::var(legacy_price_exits_key).ok();
 
         set_env(model_type_key, Some("onnx"));
         set_env(model_path_key, Some("/tmp/models/lob_mlp_v2.onnx"));
@@ -4390,7 +4384,6 @@ mod tests {
         set_env(require_threshold_key, Some("false"));
         set_env(threshold_weight_key, Some("0.40"));
         set_env(exit_mode_key, Some("settle_only"));
-        set_env(legacy_price_exits_key, Some("true"));
 
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
@@ -4424,7 +4417,6 @@ mod tests {
             rust_decimal::Decimal::new(40, 2)
         );
         assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::SettleOnly);
-        assert!(cfg.crypto_lob_ml.enable_price_exits);
 
         match prev_model_type.as_deref() {
             Some(v) => set_env(model_type_key, Some(v)),
@@ -4470,14 +4462,10 @@ mod tests {
             Some(v) => set_env(exit_mode_key, Some(v)),
             None => set_env(exit_mode_key, None),
         }
-        match prev_legacy_price_exits.as_deref() {
-            Some(v) => set_env(legacy_price_exits_key, Some(v)),
-            None => set_env(legacy_price_exits_key, None),
-        }
     }
 
     #[test]
-    fn from_app_config_maps_legacy_enable_price_exits_to_exit_mode() {
+    fn from_app_config_ignores_legacy_enable_price_exits_env() {
         let _guard = ENV_LOCK.lock().unwrap();
 
         let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
@@ -4492,8 +4480,7 @@ mod tests {
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
 
-        assert!(cfg.crypto_lob_ml.enable_price_exits);
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::PriceExit);
+        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::SettleOnly);
 
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),
