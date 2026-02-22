@@ -5,11 +5,9 @@ Train a Temporal Convolutional Network (TCN) to predict y_up
 and export the model to ONNX.
 
 This script reads directly from Postgres (no dataset file required).
-Default source is `sync_records + pm_token_settlements`, with optional
-`--horizon 5m|15m` to train per-window models.
-
-Legacy source (`agent_order_executions`) is still available via:
-  --source order_executions
+Training source is fixed to:
+  `sync_records + pm_market_metadata + pm_token_settlements`
+with required `--horizon 5m|15m` to train per-window models.
 
 Install deps on the training machine:
   python3 -m pip install torch psycopg2-binary
@@ -656,9 +654,9 @@ def main() -> None:
     ap.add_argument("--lookback-hours", type=int, default=168)
     ap.add_argument(
         "--source",
-        choices=["sync_records", "order_executions"],
+        choices=["sync_records"],
         default="sync_records",
-        help="training data source",
+        help="training data source (db-only)",
     )
     ap.add_argument(
         "--symbol",
@@ -671,9 +669,6 @@ def main() -> None:
         default=None,
         help="horizon for sync_records sequence training (required for sync_records)",
     )
-    ap.add_argument("--account-id", default=None)
-    ap.add_argument("--agent-id", default=None)
-    ap.add_argument("--live-only", action="store_true")
     ap.add_argument("--limit", type=int, default=50000)
     ap.add_argument("--test-ratio", type=float, default=0.2)
     ap.add_argument("--channels", type=int, default=32)
@@ -691,27 +686,16 @@ def main() -> None:
     args = ap.parse_args()
 
     print(f"Fetching from DB (source={args.source})...")
-    if args.source == "sync_records":
-        if args.horizon is None:
-            raise SystemExit("--horizon is required when --source=sync_records")
-        sequence_len = SEQ_LEN_BY_HORIZON[args.horizon]
-        ds = fetch_from_sync_records(
-            db_url=args.db_url,
-            lookback_hours=args.lookback_hours,
-            symbol=args.symbol,
-            horizon=args.horizon,
-            limit=args.limit,
-        )
-    else:
-        sequence_len = 1
-        ds = fetch_from_order_executions(
-            db_url=args.db_url,
-            lookback_hours=args.lookback_hours,
-            account_id=args.account_id,
-            agent_id=args.agent_id,
-            live_only=bool(args.live_only),
-            limit=args.limit,
-        )
+    if args.horizon is None:
+        raise SystemExit("--horizon is required when --source=sync_records")
+    sequence_len = SEQ_LEN_BY_HORIZON[args.horizon]
+    ds = fetch_from_sync_records(
+        db_url=args.db_url,
+        lookback_hours=args.lookback_hours,
+        symbol=args.symbol,
+        horizon=args.horizon,
+        limit=args.limit,
+    )
     print(f"Rows: {len(ds.y)}")
 
     if args.save_parquet:
@@ -753,7 +737,7 @@ def main() -> None:
     print(f"  PLOY_CRYPTO_LOB_ML__MODEL_PATH={args.output}")
     print("  PLOY_CRYPTO_LOB_ML__MODEL_VERSION=lob_tcn_v1")
     print(f"  PLOY_CRYPTO_LOB_ML__MODEL_INPUT_DIM={meta['input_dim']}")
-    print("  PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.10")
+    print("  PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT=0.00")
 
 
 if __name__ == "__main__":
