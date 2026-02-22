@@ -119,11 +119,32 @@ pub struct CryptoLobMlConfig {
     pub min_hold_secs: u64,
 
     /// Minimum expected-value edge required to enter.
-    /// UP edge = p_up - up_ask; DOWN edge = (1 - p_up) - down_ask.
+    /// This is measured on net EV after fee/slippage adjustments.
     pub min_edge: Decimal,
 
     /// Max ask price to pay for entry (YES/NO).
     pub max_entry_price: Decimal,
+
+    /// Taker fee rate used in net EV calculation (e.g. 0.02 = 2%).
+    #[serde(default = "default_taker_fee_rate")]
+    pub taker_fee_rate: Decimal,
+
+    /// Slippage buffer applied to entry ask in basis points (e.g. 10 = 0.10%).
+    #[serde(default = "default_entry_slippage_bps")]
+    pub entry_slippage_bps: Decimal,
+
+    /// If true, incorporate event price-to-beat into settlement probability.
+    #[serde(default = "default_use_price_to_beat")]
+    pub use_price_to_beat: bool,
+
+    /// If true, skip events that do not expose a parseable price-to-beat.
+    #[serde(default = "default_require_price_to_beat")]
+    pub require_price_to_beat: bool,
+
+    /// Blend weight for threshold-anchored settlement probability.
+    /// p_up = p_up_base * (1 - w_threshold) + p_up_threshold * w_threshold
+    #[serde(default = "default_threshold_prob_weight")]
+    pub threshold_prob_weight: Decimal,
 
     /// Minimum seconds between entries per symbol (avoid thrash).
     pub cooldown_secs: u64,
@@ -171,6 +192,26 @@ fn default_window_fallback_weight() -> Decimal {
     dec!(0.10)
 }
 
+fn default_taker_fee_rate() -> Decimal {
+    dec!(0.02)
+}
+
+fn default_entry_slippage_bps() -> Decimal {
+    dec!(10)
+}
+
+fn default_use_price_to_beat() -> bool {
+    true
+}
+
+fn default_require_price_to_beat() -> bool {
+    true
+}
+
+fn default_threshold_prob_weight() -> Decimal {
+    dec!(0.35)
+}
+
 impl Default for CryptoLobMlConfig {
     fn default() -> Self {
         Self {
@@ -189,6 +230,11 @@ impl Default for CryptoLobMlConfig {
             min_hold_secs: 20,
             min_edge: dec!(0.02),
             max_entry_price: dec!(0.70),
+            taker_fee_rate: default_taker_fee_rate(),
+            entry_slippage_bps: default_entry_slippage_bps(),
+            use_price_to_beat: default_use_price_to_beat(),
+            require_price_to_beat: default_require_price_to_beat(),
+            threshold_prob_weight: default_threshold_prob_weight(),
             cooldown_secs: 30,
             max_lob_snapshot_age_secs: 2,
             weights: LobMlWeights::default(),
@@ -232,12 +278,19 @@ struct EntrySignal {
     token_id: String,
     limit_price: Decimal,
     edge: Decimal,
+    gross_edge: Decimal,
     fair_value: Decimal,
     signal_confidence: Decimal,
     p_up_window: Decimal,
+    p_up_threshold: Option<Decimal>,
     p_up_blended: Decimal,
+    w_threshold: Decimal,
     w_model: Decimal,
     w_window: Decimal,
+    up_edge_gross: Decimal,
+    down_edge_gross: Decimal,
+    up_edge_net: Decimal,
+    down_edge_net: Decimal,
     up_ask: Decimal,
     down_ask: Decimal,
 }
@@ -708,6 +761,78 @@ impl CryptoLobMlAgent {
         (w_model, w_window)
     }
 
+    fn threshold_blend_weight(&self) -> Decimal {
+        self.config
+            .threshold_prob_weight
+            .max(Decimal::ZERO)
+            .min(dec!(0.90))
+    }
+
+    fn net_ev_for_binary_side(&self, prob_win: Decimal, ask: Decimal) -> Decimal {
+        if ask <= Decimal::ZERO || ask >= Decimal::ONE {
+            return Decimal::MIN;
+        }
+
+        let slippage_rate = (self.config.entry_slippage_bps / dec!(10000))
+            .max(Decimal::ZERO)
+            .min(dec!(0.25));
+        let effective_entry = (ask * (Decimal::ONE + slippage_rate))
+            .max(Decimal::ZERO)
+            .min(dec!(0.999));
+
+        let fee_rate = self
+            .config
+            .taker_fee_rate
+            .max(Decimal::ZERO)
+            .min(dec!(0.25));
+        let prob = prob_win.max(dec!(0.001)).min(dec!(0.999));
+        let net_profit_on_win = (Decimal::ONE - effective_entry) * (Decimal::ONE - fee_rate);
+        let loss_on_lose = effective_entry;
+
+        prob * net_profit_on_win - (Decimal::ONE - prob) * loss_on_lose
+    }
+
+    fn estimate_p_up_threshold_anchor(
+        &self,
+        spot_price: Decimal,
+        price_to_beat: Option<Decimal>,
+        sigma_1s: Option<Decimal>,
+        remaining_secs: i64,
+    ) -> Option<Decimal> {
+        if !self.config.use_price_to_beat {
+            return None;
+        }
+
+        let threshold = price_to_beat?;
+        if spot_price <= Decimal::ZERO || threshold <= Decimal::ZERO || remaining_secs <= 0 {
+            return None;
+        }
+
+        let sigma_1s = sigma_1s.and_then(|v| v.to_f64())?;
+        if !sigma_1s.is_finite() || sigma_1s <= 0.0 {
+            return None;
+        }
+
+        let sigma_rem = sigma_1s * (remaining_secs as f64).sqrt();
+        if !sigma_rem.is_finite() || sigma_rem <= 0.0 {
+            return None;
+        }
+
+        let spot = spot_price.to_f64()?;
+        let beat = threshold.to_f64()?;
+        if !spot.is_finite() || !beat.is_finite() || spot <= 0.0 || beat <= 0.0 {
+            return None;
+        }
+
+        let required_return = (beat - spot) / spot;
+        if !required_return.is_finite() {
+            return None;
+        }
+
+        let p = (1.0 - normal_cdf(required_return / sigma_rem)).clamp(0.001, 0.999);
+        Decimal::from_f64_retain(p)
+    }
+
     fn build_window_context(
         &self,
         spot: &SpotPrice,
@@ -756,10 +881,12 @@ impl CryptoLobMlAgent {
 
     fn evaluate_entry_signal(
         &self,
-        event: &EventInfo,
         model_type_used: &str,
         p_up_model_dec: Decimal,
         window: &WindowContext,
+        p_up_threshold: Option<Decimal>,
+        up_token_id: &str,
+        down_token_id: &str,
         up_ask: Decimal,
         down_ask: Decimal,
     ) -> Option<EntrySignal> {
@@ -768,29 +895,50 @@ impl CryptoLobMlAgent {
         }
 
         let (w_model, w_window) = self.model_window_blend_weights();
-        let p_up_blended = (window.p_up_window * w_window + p_up_model_dec * w_model)
+        let p_up_base = (window.p_up_window * w_window + p_up_model_dec * w_model)
             .max(dec!(0.001))
             .min(dec!(0.999));
-
-        let up_edge = p_up_blended - up_ask;
-        let down_edge = (Decimal::ONE - p_up_blended) - down_ask;
-        let (side, token_id, limit_price, edge, fair_value) = if up_edge >= down_edge {
-            (
-                Side::Up,
-                event.up_token_id.clone(),
-                up_ask,
-                up_edge,
-                p_up_blended,
-            )
+        let w_threshold = self.threshold_blend_weight();
+        let p_up_blended = if let Some(p_thr) = p_up_threshold {
+            if w_threshold > Decimal::ZERO {
+                (p_up_base * (Decimal::ONE - w_threshold) + p_thr * w_threshold)
+                    .max(dec!(0.001))
+                    .min(dec!(0.999))
+            } else {
+                p_up_base
+            }
         } else {
-            (
-                Side::Down,
-                event.down_token_id.clone(),
-                down_ask,
-                down_edge,
-                Decimal::ONE - p_up_blended,
-            )
+            if self.config.use_price_to_beat && self.config.require_price_to_beat {
+                return None;
+            }
+            p_up_base
         };
+
+        let up_edge_gross = p_up_blended - up_ask;
+        let down_edge_gross = (Decimal::ONE - p_up_blended) - down_ask;
+        let up_edge_net = self.net_ev_for_binary_side(p_up_blended, up_ask);
+        let down_edge_net = self.net_ev_for_binary_side(Decimal::ONE - p_up_blended, down_ask);
+
+        let (side, token_id, limit_price, edge, gross_edge, fair_value) =
+            if up_edge_net >= down_edge_net {
+                (
+                    Side::Up,
+                    up_token_id.to_string(),
+                    up_ask,
+                    up_edge_net,
+                    up_edge_gross,
+                    p_up_blended,
+                )
+            } else {
+                (
+                    Side::Down,
+                    down_token_id.to_string(),
+                    down_ask,
+                    down_edge_net,
+                    down_edge_gross,
+                    Decimal::ONE - p_up_blended,
+                )
+            };
 
         if edge < self.config.min_edge || limit_price > self.config.max_entry_price {
             return None;
@@ -806,12 +954,19 @@ impl CryptoLobMlAgent {
             token_id,
             limit_price,
             edge,
+            gross_edge,
             fair_value,
             signal_confidence,
             p_up_window: window.p_up_window,
+            p_up_threshold,
             p_up_blended,
+            w_threshold,
             w_model,
             w_window,
+            up_edge_gross,
+            down_edge_gross,
+            up_edge_net,
+            down_edge_net,
             up_ask,
             down_ask,
         })
@@ -1021,6 +1176,12 @@ impl TradingAgent for CryptoLobMlAgent {
                         else {
                             continue;
                         };
+                        let p_up_threshold = self.estimate_p_up_threshold_anchor(
+                            spot.price,
+                            event.price_to_beat,
+                            rolling_volatility_opt,
+                            window_ctx.remaining_secs,
+                        );
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
@@ -1034,10 +1195,12 @@ impl TradingAgent for CryptoLobMlAgent {
                             _ => continue,
                         };
                         let Some(signal) = self.evaluate_entry_signal(
-                            &event,
                             model_type_used,
                             p_up_model_dec,
                             &window_ctx,
+                            p_up_threshold,
+                            &event.up_token_id,
+                            &event.down_token_id,
                             up_ask,
                             down_ask,
                         ) else {
@@ -1088,13 +1251,49 @@ impl TradingAgent for CryptoLobMlAgent {
                                         .with_metadata("held_secs", &held_secs.to_string())
                                         .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
                                         .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                                        .with_metadata(
+                                            "p_up_threshold",
+                                            &signal
+                                                .p_up_threshold
+                                                .unwrap_or(dec!(0.5))
+                                                .to_string(),
+                                        )
                                         .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                                        .with_metadata(
+                                            "p_up_blend_w_threshold",
+                                            &signal.w_threshold.to_string(),
+                                        )
                                         .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
                                         .with_metadata(
                                             "p_up_blend_w_window",
                                             &signal.w_window.to_string(),
                                         )
                                         .with_metadata("signal_edge", &signal.edge.to_string())
+                                        .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
+                                        .with_metadata(
+                                            "signal_up_edge_gross",
+                                            &signal.up_edge_gross.to_string(),
+                                        )
+                                        .with_metadata(
+                                            "signal_down_edge_gross",
+                                            &signal.down_edge_gross.to_string(),
+                                        )
+                                        .with_metadata(
+                                            "signal_up_edge_net",
+                                            &signal.up_edge_net.to_string(),
+                                        )
+                                        .with_metadata(
+                                            "signal_down_edge_net",
+                                            &signal.down_edge_net.to_string(),
+                                        )
+                                        .with_metadata(
+                                            "cost_taker_fee_rate",
+                                            &self.config.taker_fee_rate.to_string(),
+                                        )
+                                        .with_metadata(
+                                            "cost_entry_slippage_bps",
+                                            &self.config.entry_slippage_bps.to_string(),
+                                        )
                                         .with_metadata("config_hash", &config_hash);
 
                                         match ctx.submit_order(exit_intent).await {
@@ -1168,17 +1367,42 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("horizon", &event.horizon)
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
                         .with_metadata("event_title", &event.title)
+                        .with_metadata(
+                            "price_to_beat",
+                            &event
+                                .price_to_beat
+                                .unwrap_or(Decimal::ZERO)
+                                .to_string(),
+                        )
                         .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
                         .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                        .with_metadata(
+                            "p_up_threshold",
+                            &signal
+                                .p_up_threshold
+                                .unwrap_or(dec!(0.5))
+                                .to_string(),
+                        )
                         .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                        .with_metadata("p_up_blend_w_threshold", &signal.w_threshold.to_string())
                         .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
                         .with_metadata("p_up_blend_w_window", &signal.w_window.to_string())
                         .with_metadata("model_type", model_type_used)
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
                         .with_metadata("signal_edge", &signal.edge.to_string())
+                        .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
+                        .with_metadata("signal_up_edge_gross", &signal.up_edge_gross.to_string())
+                        .with_metadata("signal_down_edge_gross", &signal.down_edge_gross.to_string())
+                        .with_metadata("signal_up_edge_net", &signal.up_edge_net.to_string())
+                        .with_metadata("signal_down_edge_net", &signal.down_edge_net.to_string())
                         .with_metadata("signal_confidence", &signal.signal_confidence.to_string())
                         .with_metadata("signal_fair_value", &signal.fair_value.to_string())
                         .with_metadata("signal_market_price", &signal.limit_price.to_string())
+                        .with_metadata("cost_taker_fee_rate", &self.config.taker_fee_rate.to_string())
+                        .with_metadata(
+                            "cost_entry_slippage_bps",
+                            &self.config.entry_slippage_bps.to_string(),
+                        )
                         .with_metadata("pm_up_ask", &signal.up_ask.to_string())
                         .with_metadata("pm_down_ask", &signal.down_ask.to_string())
                         .with_metadata("lob_best_bid", &lob.best_bid.to_string())
@@ -1209,7 +1433,8 @@ impl TradingAgent for CryptoLobMlAgent {
                             horizon = %event.horizon,
                             side = %signal.side,
                             limit_price = %signal.limit_price,
-                            edge = %signal.edge,
+                            net_edge = %signal.edge,
+                            gross_edge = %signal.gross_edge,
                             p_up = %signal.p_up_blended,
                             model = model_type_used,
                             "lob-ml signal detected, submitting order"
@@ -1498,22 +1723,6 @@ impl TradingAgent for CryptoLobMlAgent {
 mod tests {
     use super::*;
 
-    fn sample_event() -> EventInfo {
-        let now = Utc::now();
-        EventInfo {
-            slug: "btc-up-or-down-5m".to_string(),
-            title: "BTC up or down".to_string(),
-            up_token_id: "up-token".to_string(),
-            down_token_id: "down-token".to_string(),
-            start_time: now - chrono::Duration::seconds(30),
-            end_time: now + chrono::Duration::seconds(270),
-            condition_id: "condition-id".to_string(),
-            series_id: "10684".to_string(),
-            horizon: "5m".to_string(),
-            price_to_beat: None,
-        }
-    }
-
     fn sample_window_context() -> WindowContext {
         WindowContext {
             now: Utc::now(),
@@ -1665,10 +1874,12 @@ mod tests {
 
         let signal = agent
             .evaluate_entry_signal(
-                &sample_event(),
                 "mlp_json",
                 dec!(0.62),
                 &sample_window_context(),
+                Some(dec!(0.58)),
+                "up-token",
+                "down-token",
                 dec!(0.52),
                 dec!(0.49),
             )
@@ -1696,12 +1907,46 @@ mod tests {
         };
 
         let signal = agent.evaluate_entry_signal(
-            &sample_event(),
             "mlp_json",
             dec!(0.99),
             &sample_window_context(),
+            Some(dec!(0.50)),
+            "up-token",
+            "down-token",
             dec!(0.80),
             dec!(0.95),
+        );
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_requires_price_to_beat_when_enabled() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.use_price_to_beat = true;
+        cfg.require_price_to_beat = true;
+        let agent = CryptoLobMlAgent {
+            config: cfg,
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            nn_model: None,
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+            entry_trading_enabled: true,
+        };
+
+        let signal = agent.evaluate_entry_signal(
+            "mlp_json",
+            dec!(0.60),
+            &sample_window_context(),
+            None,
+            "up-token",
+            "down-token",
+            dec!(0.51),
+            dec!(0.49),
         );
         assert!(signal.is_none());
     }

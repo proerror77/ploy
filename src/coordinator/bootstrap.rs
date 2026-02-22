@@ -3101,6 +3101,38 @@ impl PlatformBootstrapConfig {
             "PLOY_CRYPTO_LOB_ML__MAX_ENTRY_PRICE",
             cfg.crypto_lob_ml.max_entry_price,
         );
+        cfg.crypto_lob_ml.taker_fee_rate = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE",
+            cfg.crypto_lob_ml.taker_fee_rate,
+        )
+        .max(rust_decimal::Decimal::ZERO)
+        .min(rust_decimal::Decimal::new(25, 2));
+        cfg.crypto_lob_ml.entry_slippage_bps = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS",
+            cfg.crypto_lob_ml.entry_slippage_bps,
+        )
+        .max(rust_decimal::Decimal::ZERO)
+        .min(rust_decimal::Decimal::new(2500, 0));
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.use_price_to_beat = true,
+                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.use_price_to_beat = false,
+                _ => {}
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.require_price_to_beat = true,
+                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.require_price_to_beat = false,
+                _ => {}
+            }
+        }
+        cfg.crypto_lob_ml.threshold_prob_weight = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT",
+            cfg.crypto_lob_ml.threshold_prob_weight,
+        )
+        .max(rust_decimal::Decimal::ZERO)
+        .min(rust_decimal::Decimal::new(90, 2));
         cfg.crypto_lob_ml.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__EVENT_REFRESH_SECS",
             cfg.crypto_lob_ml.event_refresh_secs,
@@ -4305,18 +4337,33 @@ mod tests {
         let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
         let collect_only_key = "PLOY_CRYPTO_LOB_ML__COLLECT_ONLY_ON_MODEL_ERROR";
         let window_weight_key = "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT";
+        let taker_fee_key = "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE";
+        let slippage_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS";
+        let use_threshold_key = "PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT";
+        let require_threshold_key = "PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT";
+        let threshold_weight_key = "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT";
 
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
         let prev_model_version = std::env::var(model_version_key).ok();
         let prev_collect_only = std::env::var(collect_only_key).ok();
         let prev_window_weight = std::env::var(window_weight_key).ok();
+        let prev_taker_fee = std::env::var(taker_fee_key).ok();
+        let prev_slippage = std::env::var(slippage_key).ok();
+        let prev_use_threshold = std::env::var(use_threshold_key).ok();
+        let prev_require_threshold = std::env::var(require_threshold_key).ok();
+        let prev_threshold_weight = std::env::var(threshold_weight_key).ok();
 
         set_env(model_type_key, Some("onnx"));
         set_env(model_path_key, Some("/tmp/models/lob_mlp_v2.onnx"));
         set_env(model_version_key, Some("lob_mlp_v2"));
         set_env(collect_only_key, Some("false"));
         set_env(window_weight_key, Some("0.15"));
+        set_env(taker_fee_key, Some("0.03"));
+        set_env(slippage_key, Some("12"));
+        set_env(use_threshold_key, Some("true"));
+        set_env(require_threshold_key, Some("false"));
+        set_env(threshold_weight_key, Some("0.40"));
 
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
@@ -4334,6 +4381,20 @@ mod tests {
         assert_eq!(
             cfg.crypto_lob_ml.window_fallback_weight,
             rust_decimal::Decimal::new(15, 2)
+        );
+        assert_eq!(
+            cfg.crypto_lob_ml.taker_fee_rate,
+            rust_decimal::Decimal::new(3, 2)
+        );
+        assert_eq!(
+            cfg.crypto_lob_ml.entry_slippage_bps,
+            rust_decimal::Decimal::new(12, 0)
+        );
+        assert!(cfg.crypto_lob_ml.use_price_to_beat);
+        assert!(!cfg.crypto_lob_ml.require_price_to_beat);
+        assert_eq!(
+            cfg.crypto_lob_ml.threshold_prob_weight,
+            rust_decimal::Decimal::new(40, 2)
         );
 
         match prev_model_type.as_deref() {
@@ -4355,6 +4416,26 @@ mod tests {
         match prev_window_weight.as_deref() {
             Some(v) => set_env(window_weight_key, Some(v)),
             None => set_env(window_weight_key, None),
+        }
+        match prev_taker_fee.as_deref() {
+            Some(v) => set_env(taker_fee_key, Some(v)),
+            None => set_env(taker_fee_key, None),
+        }
+        match prev_slippage.as_deref() {
+            Some(v) => set_env(slippage_key, Some(v)),
+            None => set_env(slippage_key, None),
+        }
+        match prev_use_threshold.as_deref() {
+            Some(v) => set_env(use_threshold_key, Some(v)),
+            None => set_env(use_threshold_key, None),
+        }
+        match prev_require_threshold.as_deref() {
+            Some(v) => set_env(require_threshold_key, Some(v)),
+            None => set_env(require_threshold_key, None),
+        }
+        match prev_threshold_weight.as_deref() {
+            Some(v) => set_env(threshold_weight_key, Some(v)),
+            None => set_env(threshold_weight_key, None),
         }
     }
 }
