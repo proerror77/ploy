@@ -2,6 +2,7 @@ use crate::adapters::{FeishuNotifier, PolymarketClient};
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::{OrderError, Result};
+use crate::exchange::ExchangeClient;
 use crate::strategy::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -12,7 +13,7 @@ use tracing::{debug, error, info, warn};
 
 /// Order executor for managing order lifecycle
 pub struct OrderExecutor {
-    client: PolymarketClient,
+    client: Arc<dyn ExchangeClient>,
     config: ExecutionConfig,
     feishu: Option<Arc<FeishuNotifier>>,
     idempotency: Option<Arc<IdempotencyManager>>,
@@ -31,6 +32,11 @@ pub struct ExecutionResult {
 impl OrderExecutor {
     /// Create a new order executor
     pub fn new(client: PolymarketClient, config: ExecutionConfig) -> Self {
+        Self::new_with_exchange(Arc::new(client), config)
+    }
+
+    /// Create a new order executor from any exchange implementation.
+    pub fn new_with_exchange(client: Arc<dyn ExchangeClient>, config: ExecutionConfig) -> Self {
         Self {
             client,
             config,
@@ -265,9 +271,7 @@ impl OrderExecutor {
         let start = Instant::now();
 
         // Submit order
-        let order_resp =
-            PolymarketClient::with_gateway_execution_context(self.client.submit_order(request))
-                .await?;
+        let order_resp = self.client.submit_order_gateway(request).await?;
         let order_id = order_resp.id.clone();
 
         debug!("Order submitted: {}", order_id);
@@ -321,15 +325,14 @@ impl OrderExecutor {
                 crate::domain::TimeInForce::IOC | crate::domain::TimeInForce::FOK => {
                     let _ = self.client.cancel_order(&order_id).await;
                     if let Ok(order) = self.client.get_order(&order_id).await {
-                        let status = PolymarketClient::infer_order_status(&order);
-                        let (filled, price) = PolymarketClient::calculate_fill(&order);
-                        let filled_u64 = filled.to_u64().unwrap_or(0);
+                        let status = self.client.infer_order_status(&order);
+                        let (filled_u64, price) = self.client.calculate_fill(&order);
 
                         return Ok(ExecutionResult {
                             order_id,
                             status,
                             filled_shares: filled_u64,
-                            avg_fill_price: Some(price),
+                            avg_fill_price: price,
                             elapsed_ms: start.elapsed().as_millis() as u64,
                         });
                     }
@@ -361,9 +364,8 @@ impl OrderExecutor {
     ) -> Result<ExecutionResult> {
         loop {
             let order = self.client.get_order(order_id).await?;
-            let status = PolymarketClient::infer_order_status(&order);
-            let (filled, price) = PolymarketClient::calculate_fill(&order);
-            let filled_u64 = filled.to_u64().unwrap_or(0);
+            let status = self.client.infer_order_status(&order);
+            let (filled_u64, price) = self.client.calculate_fill(&order);
 
             match status {
                 OrderStatus::Filled => {
@@ -371,7 +373,7 @@ impl OrderExecutor {
                         order_id: order_id.to_string(),
                         status,
                         filled_shares: filled_u64,
-                        avg_fill_price: Some(price),
+                        avg_fill_price: price,
                         elapsed_ms: 0, // Will be updated by caller
                     });
                 }
@@ -380,7 +382,7 @@ impl OrderExecutor {
                         order_id: order_id.to_string(),
                         status,
                         filled_shares: filled_u64,
-                        avg_fill_price: Some(price),
+                        avg_fill_price: price,
                         elapsed_ms: 0,
                     });
                 }

@@ -567,6 +567,17 @@ async fn run_platform_mode(
         platform_cfg.dry_run,
     );
 
+    if !app_config
+        .execution
+        .exchange
+        .eq_ignore_ascii_case("polymarket")
+    {
+        return Err(PloyError::Validation(format!(
+            "platform runtime currently requires execution.exchange=polymarket (got {})",
+            app_config.execution.exchange
+        )));
+    }
+
     let pm_client = create_pm_client(&app_config.market.rest_url, platform_cfg.dry_run).await?;
 
     let control = PlatformStartControl { pause, resume };
@@ -3785,8 +3796,8 @@ fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
 
 /// Handle crypto subcommands
 async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
-    use ploy::analysis::updown_backtest::{run_updown_backtest, UpDownBacktestConfig};
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+    use ploy::analysis::updown_backtest::{run_updown_backtest, UpDownBacktestConfig};
     use ploy::signing::Wallet;
     use ploy::strategy::{core::SplitArbConfig, run_crypto_split_arb, CryptoSplitArbConfig};
     use rust_decimal::Decimal;

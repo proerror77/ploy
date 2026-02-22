@@ -4637,7 +4637,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_guard_blocks_same_condition_with_different_slugs() {
-        let mut guard = IntentDuplicateGuard::new(1_000, true);
+        let mut guard = IntentDuplicateGuard::new(1_000, true, DuplicateGuardScope::Market);
         let now = Utc::now();
         let mut first = make_intent(true, OrderPriority::Normal);
         let mut second = make_intent(true, OrderPriority::Normal);
@@ -4819,8 +4819,10 @@ mod tests {
         let mut second = first.clone();
         second.market_slug = "nba-lakers-celtics-v2".to_string();
 
-        let first_key = Coordinator::stable_idempotency_key("acct-main", &first);
-        let second_key = Coordinator::stable_idempotency_key("acct-main", &second);
+        let first_key =
+            Coordinator::stable_idempotency_key("acct-main", &first, DuplicateGuardScope::Market);
+        let second_key =
+            Coordinator::stable_idempotency_key("acct-main", &second, DuplicateGuardScope::Market);
         assert_eq!(first_key, second_key);
     }
 
@@ -5002,20 +5004,16 @@ mod tests {
 
         let snapshot = handle.governance_status().await;
 
-        assert!(
-            snapshot
-                .domain_ingress_modes
-                .iter()
-                .any(|row| row.domain == "sports" && row.mode == "paused")
-        );
-        assert!(
-            snapshot
-                .agents
-                .iter()
-                .any(|agent| agent.agent_id == "sports_agent"
-                    && agent.domain == "sports"
-                    && agent.status == "running")
-        );
+        assert!(snapshot
+            .domain_ingress_modes
+            .iter()
+            .any(|row| row.domain == "sports" && row.mode == "paused"));
+        assert!(snapshot
+            .agents
+            .iter()
+            .any(|agent| agent.agent_id == "sports_agent"
+                && agent.domain == "sports"
+                && agent.status == "running"));
     }
 
     #[test]
