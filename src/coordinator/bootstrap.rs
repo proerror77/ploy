@@ -388,6 +388,43 @@ pub(crate) async fn ensure_pm_token_settlements_table(pool: &PgPool) -> Result<(
     Ok(())
 }
 
+pub(crate) async fn ensure_pm_market_metadata_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS pm_market_metadata (
+            market_slug TEXT PRIMARY KEY,
+            price_to_beat NUMERIC(20,8) NOT NULL,
+            start_time TIMESTAMPTZ,
+            end_time TIMESTAMPTZ,
+            horizon TEXT,
+            symbol TEXT,
+            raw_market JSONB,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pm_market_metadata_symbol_horizon ON pm_market_metadata(symbol, horizon)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pm_market_metadata_end_time ON pm_market_metadata(end_time DESC)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_pm_market_metadata_updated_at ON pm_market_metadata(updated_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub(crate) async fn ensure_strategy_observability_tables(pool: &PgPool) -> Result<()> {
     // Persist strategy signal calculations for audit/backtest attribution.
     sqlx::query(
@@ -3561,6 +3598,15 @@ pub async fn start_platform(
             }
             warn!(error = %e, "failed to ensure strategy observability tables");
         }
+        if let Err(e) = ensure_pm_market_metadata_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure pm_market_metadata table: {}",
+                    e
+                )));
+            }
+            warn!(error = %e, "failed to ensure pm_market_metadata table");
+        }
         if let Err(e) = ensure_pm_token_settlements_table(pool).await {
             if require_startup_schema {
                 return Err(crate::error::PloyError::Internal(format!(
@@ -4316,6 +4362,7 @@ pub fn print_platform_status(state: &GlobalState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::postgres::PgPoolOptions;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -4324,6 +4371,62 @@ mod tests {
         match value {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_pm_market_metadata_table_exists() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let db_url = std::env::var("PLOY_TEST_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok());
+        let Some(db_url) = db_url else {
+            return;
+        };
+
+        let pool = match PgPoolOptions::new().max_connections(1).connect(&db_url).await {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+
+        ensure_pm_market_metadata_table(&pool)
+            .await
+            .expect("ensure table");
+
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('public.pm_market_metadata') IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check relation exists");
+        assert!(exists);
+
+        let cols = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'pm_market_metadata'
+            "#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read table columns");
+
+        for col in [
+            "market_slug",
+            "price_to_beat",
+            "start_time",
+            "end_time",
+            "horizon",
+            "symbol",
+            "raw_market",
+            "updated_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == col),
+                "missing pm_market_metadata column: {col}"
+            );
         }
     }
 
@@ -4503,7 +4606,7 @@ mod tests {
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
 
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::SettleOnly);
+        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
 
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),
