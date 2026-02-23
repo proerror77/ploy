@@ -100,3 +100,72 @@ pub async fn build_exchange_client_for(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kalshi_exchange_is_blocked_without_experimental_gate() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvVarGuard::set("PLOY_ENABLE_KALSHI_EXPERIMENTAL", None);
+
+        let mut app_config = AppConfig::default_config(true, "test-market");
+        app_config.execution.exchange = "kalshi".to_string();
+
+        let result = build_exchange_client_for(ExchangeKind::Kalshi, &app_config, true).await;
+
+        match result {
+            Ok(_) => panic!("Kalshi should be blocked when experimental gate is disabled"),
+            Err(PloyError::Validation(msg)) => {
+                assert!(msg.contains("Kalshi exchange is temporarily disabled"));
+            }
+            Err(other) => panic!("expected validation error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn kalshi_exchange_builds_when_experimental_gate_is_enabled() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvVarGuard::set("PLOY_ENABLE_KALSHI_EXPERIMENTAL", Some("true"));
+
+        let mut app_config = AppConfig::default_config(true, "test-market");
+        app_config.execution.exchange = "kalshi".to_string();
+
+        let client = build_exchange_client_for(ExchangeKind::Kalshi, &app_config, true)
+            .await
+            .expect("Kalshi client should build when gate is enabled");
+
+        assert_eq!(client.kind(), ExchangeKind::Kalshi);
+        assert!(client.is_dry_run());
+    }
+}

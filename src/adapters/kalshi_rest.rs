@@ -132,18 +132,8 @@ impl KalshiClient {
         })?;
 
         let timestamp = Utc::now().timestamp_millis().to_string();
-        let sign_payload = format!(
-            "{}{}{}{}",
-            timestamp,
-            method.as_str().to_uppercase(),
-            path,
-            body
-        );
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| PloyError::Auth(format!("invalid Kalshi secret: {}", e)))?;
-        mac.update(sign_payload.as_bytes());
-        let signature = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+        let sign_payload = Self::build_sign_payload(&timestamp, method, path, body);
+        let signature = Self::hmac_signature(secret, &sign_payload)?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -253,6 +243,23 @@ impl KalshiClient {
         }
     }
 
+    fn build_sign_payload(timestamp: &str, method: &Method, path: &str, body: &str) -> String {
+        format!(
+            "{}{}{}{}",
+            timestamp,
+            method.as_str().to_uppercase(),
+            path,
+            body
+        )
+    }
+
+    fn hmac_signature(secret: &str, payload: &str) -> Result<String> {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| PloyError::Auth(format!("invalid Kalshi secret: {}", e)))?;
+        mac.update(payload.as_bytes());
+        Ok(BASE64_STANDARD.encode(mac.finalize().into_bytes()))
+    }
+
     fn format_price(value: Decimal) -> String {
         value.round_dp(6).normalize().to_string()
     }
@@ -263,6 +270,31 @@ impl KalshiClient {
         } else {
             value
         }
+    }
+
+    fn serialize_limit_price(limit_price: Decimal) -> (u64, String) {
+        let cents = (limit_price * Decimal::new(100, 0))
+            .round_dp(0)
+            .to_u64()
+            .unwrap_or(0);
+        (cents, limit_price.normalize().to_string())
+    }
+
+    fn build_submit_order_body(request: &OrderRequest) -> Value {
+        let (ticker, side) = OutcomeSide::from_token_id(&request.token_id);
+        let (price, dollars) = Self::serialize_limit_price(request.limit_price);
+
+        json!({
+            "ticker": ticker,
+            "client_order_id": request.client_order_id,
+            "action": if matches!(request.order_side, OrderSide::Buy) { "buy" } else { "sell" },
+            "side": side.as_str(),
+            "type": "limit",
+            "count": request.shares,
+            "price": price,
+            "dollars": dollars,
+            "time_in_force": format!("{:?}", request.time_in_force).to_lowercase(),
+        })
     }
 
     fn extract_book_levels(value: &Value) -> Vec<OrderBookLevel> {
@@ -562,17 +594,7 @@ impl KalshiClient {
             });
         }
 
-        let (ticker, side) = OutcomeSide::from_token_id(&request.token_id);
-        let body = json!({
-            "ticker": ticker,
-            "client_order_id": request.client_order_id,
-            "action": if matches!(request.order_side, OrderSide::Buy) { "buy" } else { "sell" },
-            "side": side.as_str(),
-            "type": "limit",
-            "count": request.shares,
-            "price": (request.limit_price * Decimal::new(100, 0)).round_dp(0).to_u64().unwrap_or(0),
-            "time_in_force": format!("{:?}", request.time_in_force).to_lowercase(),
-        });
+        let body = Self::build_submit_order_body(request);
 
         let value = self
             .request_json(Method::POST, "/portfolio/orders", None, Some(body), true)
@@ -870,6 +892,22 @@ impl ExchangeClient for KalshiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{OrderType, Side, TimeInForce};
+    use rust_decimal_macros::dec;
+
+    fn sample_order_request(limit_price: Decimal) -> OrderRequest {
+        OrderRequest {
+            client_order_id: "cid-123".to_string(),
+            idempotency_key: None,
+            token_id: "BTC-2026:YES".to_string(),
+            market_side: Side::Up,
+            order_side: OrderSide::Buy,
+            shares: 25,
+            limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
+        }
+    }
 
     #[test]
     fn parse_outcome_side_from_token_formats() {
@@ -892,5 +930,49 @@ mod tests {
 
         let decimal = Decimal::new(42, 2);
         assert_eq!(KalshiClient::from_cents_if_needed(decimal), decimal);
+    }
+
+    #[test]
+    fn submit_order_body_preserves_decimal_dollars_price() {
+        let request = sample_order_request(dec!(0.123456));
+        let body = KalshiClient::build_submit_order_body(&request);
+
+        assert_eq!(body.get("ticker").and_then(Value::as_str), Some("BTC-2026"));
+        assert_eq!(body.get("action").and_then(Value::as_str), Some("buy"));
+        assert_eq!(body.get("side").and_then(Value::as_str), Some("yes"));
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(25));
+        assert_eq!(body.get("price").and_then(Value::as_u64), Some(12));
+        assert_eq!(
+            body.get("dollars").and_then(Value::as_str),
+            Some("0.123456")
+        );
+    }
+
+    #[test]
+    fn serialize_limit_price_keeps_traceable_dollars_string() {
+        let (price_cents, dollars) = KalshiClient::serialize_limit_price(dec!(0.009));
+        assert_eq!(price_cents, 1);
+        assert_eq!(dollars, "0.009");
+    }
+
+    #[test]
+    fn build_sign_payload_is_stable() {
+        let payload = KalshiClient::build_sign_payload(
+            "1700000000123",
+            &Method::POST,
+            "/portfolio/orders",
+            "{\"a\":1}",
+        );
+
+        assert_eq!(payload, "1700000000123POST/portfolio/orders{\"a\":1}");
+    }
+
+    #[test]
+    fn hmac_signature_for_payload_is_stable() {
+        let payload = "1700000000123POST/portfolio/orders{\"a\":1}";
+        let signature = KalshiClient::hmac_signature("testsecret", payload)
+            .expect("signature should be generated");
+
+        assert_eq!(signature, "ckCxXMAnY9OGsFnZKIKUqm8P4iKMdZs/SinJqLZFIcM=");
     }
 }
