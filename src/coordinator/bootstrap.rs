@@ -5315,7 +5315,25 @@ pub async fn start_platform(
         }
 
         if lob_agent_enabled {
-            if let Some(lob_cache) = lob_cache_opt.clone() {
+            let model_type = lob_cfg.model_type.trim().to_ascii_lowercase();
+            let model_is_tcn = matches!(
+                model_type.as_str(),
+                "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
+            );
+            let needs_binance_lob = if model_is_tcn {
+                // If the binary isn't built with ONNX support, `onnx_tcn` will fall back,
+                // which requires Binance LOB features.
+                !cfg!(feature = "onnx")
+            } else {
+                true
+            };
+            if needs_binance_lob && lob_cache_opt.is_none() {
+                warn!(
+                    agent = lob_cfg.agent_id,
+                    model_type = %model_type,
+                    "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
+                );
+            } else {
                 let risk_params = lob_cfg.risk_params.clone();
                 let cmd_rx = coordinator.register_agent(
                     lob_cfg.agent_id.clone(),
@@ -5328,7 +5346,7 @@ pub async fn start_platform(
                     binance_ws.clone(),
                     pm_ws.clone(),
                     event_matcher.clone(),
-                    lob_cache,
+                    lob_cache_opt.clone(),
                 );
                 let ctx = AgentContext::new(
                     lob_cfg.agent_id.clone(),
@@ -5344,11 +5362,6 @@ pub async fn start_platform(
                 });
                 agent_handles.push(jh);
                 info!("crypto lob-ml agent spawned");
-            } else {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    "lob agent enabled but binance depth stream is disabled; skipping agent spawn"
-                );
             }
         }
 

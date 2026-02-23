@@ -14,12 +14,12 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate};
+use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteCache, QuoteUpdate};
 use crate::agents::{AgentContext, TradingAgent};
 use crate::collector::{LobCache, LobSnapshot};
 use crate::coordinator::CoordinatorCommand;
@@ -33,6 +33,7 @@ use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 const STRATEGY_ID: &str = "crypto_lob_ml";
+const TCN_FEATURE_DIM: usize = 25;
 
 /// Standard normal CDF approximation (Abramowitz-Stegun), ~4dp accuracy.
 fn normal_cdf(x: f64) -> f64 {
@@ -291,12 +292,306 @@ struct TrackedPosition {
     entry_time: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+struct TcnBuffers {
+    seq_len: usize,
+    sample_secs: u64,
+    trade_lookback_secs: u64,
+    vol_short_window_secs: u64,
+    vol_long_window_secs: u64,
+
+    mid_history_by_token: HashMap<String, VecDeque<(DateTime<Utc>, f64)>>,
+    seq_by_condition: HashMap<String, VecDeque<[f32; TCN_FEATURE_DIM]>>,
+    last_sample_by_condition: HashMap<String, DateTime<Utc>>,
+}
+
+impl TcnBuffers {
+    fn new(cfg: &CryptoLobMlConfig) -> Self {
+        let vol_short = cfg.tcn_vol_short_window_secs.max(1);
+        let vol_long = cfg.tcn_vol_long_window_secs.max(vol_short);
+
+        Self {
+            seq_len: cfg.onnx_seq_len.max(1),
+            sample_secs: cfg.tcn_sample_secs.max(1),
+            trade_lookback_secs: cfg.tcn_trade_lookback_secs.max(1),
+            vol_short_window_secs: vol_short,
+            vol_long_window_secs: vol_long,
+            mid_history_by_token: HashMap::new(),
+            seq_by_condition: HashMap::new(),
+            last_sample_by_condition: HashMap::new(),
+        }
+    }
+
+    fn prune_inactive(
+        &mut self,
+        keep_conditions: &HashSet<String>,
+        keep_tokens: &HashSet<String>,
+    ) {
+        self.seq_by_condition
+            .retain(|k, _| keep_conditions.contains(k));
+        self.last_sample_by_condition
+            .retain(|k, _| keep_conditions.contains(k));
+        self.mid_history_by_token.retain(|k, _| keep_tokens.contains(k));
+    }
+
+    fn on_quote_update(&mut self, update: &QuoteUpdate) {
+        let ts = update.quote.timestamp;
+        let bid = update.quote.best_bid.and_then(|v| v.to_f64());
+        let ask = update.quote.best_ask.and_then(|v| v.to_f64());
+
+        let mid = if let (Some(b), Some(a)) = (bid, ask) {
+            if b > 0.0 && a > 0.0 {
+                0.5 * (b + a)
+            } else if b > 0.0 {
+                b
+            } else if a > 0.0 {
+                a
+            } else {
+                return;
+            }
+        } else if let Some(b) = bid {
+            if b > 0.0 { b } else { return }
+        } else if let Some(a) = ask {
+            if a > 0.0 { a } else { return }
+        } else {
+            return;
+        };
+
+        self.record_mid(&update.token_id, ts, mid);
+    }
+
+    fn record_mid(&mut self, token_id: &str, ts: DateTime<Utc>, mid: f64) {
+        if !mid.is_finite() || mid <= 0.0 {
+            return;
+        }
+
+        let hist = self
+            .mid_history_by_token
+            .entry(token_id.to_string())
+            .or_default();
+        hist.push_back((ts, mid));
+
+        let cutoff = ts - chrono::Duration::seconds(self.vol_long_window_secs as i64);
+        while let Some((t0, _)) = hist.front().copied() {
+            if t0 < cutoff {
+                hist.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn sample_std(values: &[f64]) -> f64 {
+        let n = values.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mean = values.iter().sum::<f64>() / n as f64;
+        let mut var = 0.0;
+        for v in values {
+            let dv = v - mean;
+            var += dv * dv;
+        }
+        (var / (n as f64 - 1.0)).max(0.0).sqrt()
+    }
+
+    fn compute_vol_bps(&self, token_id: &str, now: DateTime<Utc>) -> (f64, f64) {
+        let Some(hist) = self.mid_history_by_token.get(token_id) else {
+            return (0.0, 0.0);
+        };
+
+        let long_start = now - chrono::Duration::seconds(self.vol_long_window_secs as i64);
+        let short_start = now - chrono::Duration::seconds(self.vol_short_window_secs as i64);
+
+        let mut long_vals: Vec<f64> = Vec::with_capacity(hist.len());
+        let mut short_vals: Vec<f64> = Vec::with_capacity(hist.len());
+
+        for (ts, mid) in hist {
+            if *ts <= long_start {
+                continue;
+            }
+            long_vals.push(*mid);
+            if *ts > short_start {
+                short_vals.push(*mid);
+            }
+        }
+
+        if long_vals.len() < 2 {
+            return (0.0, 0.0);
+        }
+        let avg_long = long_vals.iter().sum::<f64>() / long_vals.len() as f64;
+        if !avg_long.is_finite() || avg_long <= 0.0 {
+            return (0.0, 0.0);
+        }
+
+        let std_long = Self::sample_std(&long_vals);
+        let std_short = Self::sample_std(&short_vals);
+
+        let vol_short_bps = (std_short / avg_long) * 10_000.0;
+        let vol_long_bps = (std_long / avg_long) * 10_000.0;
+        (
+            vol_short_bps.max(0.0).min(1_000_000.0),
+            vol_long_bps.max(0.0).min(1_000_000.0),
+        )
+    }
+
+    fn spread_bps(best_bid: f64, best_ask: f64, mid: f64) -> f64 {
+        if !best_bid.is_finite()
+            || !best_ask.is_finite()
+            || !mid.is_finite()
+            || best_bid <= 0.0
+            || best_ask <= 0.0
+            || mid <= 0.0
+            || best_ask < best_bid
+        {
+            return 0.0;
+        }
+        ((best_ask - best_bid) / mid) * 10_000.0
+    }
+
+    fn build_point_features(
+        &self,
+        quote_cache: &QuoteCache,
+        yes_token_id: &str,
+        no_token_id: &str,
+        spot_now: Decimal,
+        spot_start: Decimal,
+        secs_to_anchor: i64,
+        now: DateTime<Utc>,
+    ) -> Option<[f32; TCN_FEATURE_DIM]> {
+        let yq = quote_cache.get(yes_token_id)?;
+        let nq = quote_cache.get(no_token_id)?;
+
+        let yes_bid = yq.best_bid.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
+        let yes_ask = yq.best_ask.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
+        let no_bid = nq.best_bid.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
+        let no_ask = nq.best_ask.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
+        if yes_ask <= 0.0 || no_ask <= 0.0 {
+            return None;
+        }
+
+        let yes_mid = if yes_bid > 0.0 && yes_ask > 0.0 {
+            0.5 * (yes_bid + yes_ask)
+        } else if yes_bid > 0.0 {
+            yes_bid
+        } else {
+            yes_ask
+        };
+        let no_mid = if no_bid > 0.0 && no_ask > 0.0 {
+            0.5 * (no_bid + no_ask)
+        } else if no_bid > 0.0 {
+            no_bid
+        } else {
+            no_ask
+        };
+
+        let yes_spread_bps = Self::spread_bps(yes_bid, yes_ask, yes_mid);
+        let no_spread_bps = Self::spread_bps(no_bid, no_ask, no_mid);
+        let yes_no_mid_gap = (yes_mid + no_mid) - 1.0;
+
+        // Trade tape may be unavailable at runtime; use training-compatible fallbacks.
+        let yes_last_trade = yes_mid;
+        let no_last_trade = no_mid;
+        let yes_trade_count = 0.0;
+        let no_trade_count = 0.0;
+        let yes_trade_volume = 0.0;
+        let no_trade_volume = 0.0;
+        let yes_trade_vwap = yes_mid;
+        let no_trade_vwap = no_mid;
+
+        let (yes_vol_short_bps, yes_vol_long_bps) = self.compute_vol_bps(yes_token_id, now);
+        let (no_vol_short_bps, no_vol_long_bps) = self.compute_vol_bps(no_token_id, now);
+
+        let spot_now_f = spot_now.to_f64().unwrap_or(0.0);
+        let spot_start_f = spot_start.to_f64().unwrap_or(0.0);
+        let spot_vs_start_ret_bps = if spot_start_f > 0.0 && spot_now_f.is_finite() {
+            ((spot_now_f - spot_start_f) / spot_start_f) * 10_000.0
+        } else {
+            0.0
+        };
+
+        let secs_to_anchor_f = secs_to_anchor.max(0) as f64;
+
+        let mut out = [0.0f32; TCN_FEATURE_DIM];
+        out[0] = yes_bid as f32;
+        out[1] = yes_ask as f32;
+        out[2] = yes_mid as f32;
+        out[3] = no_bid as f32;
+        out[4] = no_ask as f32;
+        out[5] = no_mid as f32;
+        out[6] = yes_spread_bps as f32;
+        out[7] = no_spread_bps as f32;
+        out[8] = yes_no_mid_gap as f32;
+        out[9] = yes_last_trade as f32;
+        out[10] = no_last_trade as f32;
+        out[11] = yes_trade_count as f32;
+        out[12] = no_trade_count as f32;
+        out[13] = yes_trade_volume as f32;
+        out[14] = no_trade_volume as f32;
+        out[15] = yes_trade_vwap as f32;
+        out[16] = no_trade_vwap as f32;
+        out[17] = yes_vol_short_bps as f32;
+        out[18] = yes_vol_long_bps as f32;
+        out[19] = no_vol_short_bps as f32;
+        out[20] = no_vol_long_bps as f32;
+        out[21] = spot_now_f as f32;
+        out[22] = spot_start_f as f32;
+        out[23] = spot_vs_start_ret_bps as f32;
+        out[24] = secs_to_anchor_f as f32;
+        Some(out)
+    }
+
+    fn ingest_point(&mut self, condition_id: &str, now: DateTime<Utc>, row: [f32; TCN_FEATURE_DIM]) {
+        let seq = self
+            .seq_by_condition
+            .entry(condition_id.to_string())
+            .or_default();
+        let last_ts_opt = self.last_sample_by_condition.get(condition_id).copied();
+
+        let should_roll = match last_ts_opt {
+            None => true,
+            Some(last_ts) => now.signed_duration_since(last_ts).num_seconds() >= self.sample_secs as i64,
+        };
+
+        if should_roll {
+            seq.push_back(row);
+            while seq.len() > self.seq_len {
+                seq.pop_front();
+            }
+            self.last_sample_by_condition
+                .insert(condition_id.to_string(), now);
+        } else if let Some(back) = seq.back_mut() {
+            // Keep the latest observation fresh without changing the sequence cadence.
+            *back = row;
+        } else {
+            seq.push_back(row);
+            self.last_sample_by_condition
+                .insert(condition_id.to_string(), now);
+        }
+    }
+
+    fn sequence_flat(&self, condition_id: &str) -> Option<Vec<f32>> {
+        let seq = self.seq_by_condition.get(condition_id)?;
+        let first = seq.front()?;
+
+        let mut out = Vec::with_capacity(self.seq_len * TCN_FEATURE_DIM);
+        let pad = self.seq_len.saturating_sub(seq.len());
+        for _ in 0..pad {
+            out.extend_from_slice(first);
+        }
+        for row in seq {
+            out.extend_from_slice(row);
+        }
+        Some(out)
+    }
+}
+
 pub struct CryptoLobMlAgent {
     config: CryptoLobMlConfig,
     binance_ws: Arc<BinanceWebSocket>,
     pm_ws: Arc<PolymarketWebSocket>,
     event_matcher: Arc<EventMatcher>,
-    lob_cache: LobCache,
+    lob_cache: Option<LobCache>,
     nn_model: Option<DenseNetwork>,
     #[cfg(feature = "onnx")]
     onnx_model: Option<OnnxModel>,
@@ -458,7 +753,7 @@ impl CryptoLobMlAgent {
         binance_ws: Arc<BinanceWebSocket>,
         pm_ws: Arc<PolymarketWebSocket>,
         event_matcher: Arc<EventMatcher>,
-        lob_cache: LobCache,
+        lob_cache: Option<LobCache>,
     ) -> Self {
         let model_type = config.model_type.trim().to_ascii_lowercase();
         let nn_model = if model_type == "mlp" || model_type == "mlp_json" {
@@ -500,16 +795,23 @@ impl CryptoLobMlAgent {
         };
 
         #[cfg(feature = "onnx")]
-        let onnx_model: Option<OnnxModel> = if model_type == "onnx" {
+        let onnx_model: Option<OnnxModel> = if model_type == "onnx" || model_type == "onnx_tcn" {
             match config.model_path.as_deref() {
                 Some(path) if !path.trim().is_empty() => {
-                    match OnnxModel::load_for_vec_input(path, 7) {
+                    let loaded = if model_type == "onnx_tcn" {
+                        let seq_len = config.onnx_seq_len.max(1);
+                        OnnxModel::load_for_tensor_input(path, &[1, seq_len, TCN_FEATURE_DIM])
+                    } else {
+                        OnnxModel::load_for_vec_input(path, 7)
+                    };
+
+                    match loaded {
                         Ok(m) => {
                             info!(
                                 agent = config.agent_id,
-                                model_type = "onnx",
+                                model_type = %model_type,
                                 model_path = %path,
-                                input_dim = m.input_dim(),
+                                input_shape = ?m.input_shape(),
                                 output_dim = m.output_dim(),
                                 "loaded lob-ml onnx model"
                             );
@@ -530,8 +832,8 @@ impl CryptoLobMlAgent {
                 _ => {
                     warn!(
                         agent = config.agent_id,
-                        model_type = "onnx",
-                        "model_type=onnx but model_path is not set; falling back to logistic"
+                        model_type = %model_type,
+                        "onnx model_type requested but model_path is not set; falling back to logistic"
                     );
                     None
                 }
@@ -541,10 +843,11 @@ impl CryptoLobMlAgent {
         };
 
         #[cfg(not(feature = "onnx"))]
-        if model_type == "onnx" {
+        if model_type == "onnx" || model_type == "onnx_tcn" {
             warn!(
                 agent = config.agent_id,
-                "model_type=onnx requested but binary is built without --features onnx; falling back to logistic"
+                model_type = %model_type,
+                "onnx model_type requested but binary is built without --features onnx; falling back to logistic"
             );
         }
 
@@ -713,6 +1016,62 @@ impl CryptoLobMlAgent {
             "logistic",
         )
     }
+
+    fn estimate_p_up_tcn(
+        &self,
+        tcn: &mut TcnBuffers,
+        quote_cache: &QuoteCache,
+        event: &EventInfo,
+        now: DateTime<Utc>,
+        spot_now: Decimal,
+        spot_start: Decimal,
+        remaining_secs: i64,
+    ) -> Option<f64> {
+        let row = tcn.build_point_features(
+            quote_cache,
+            &event.up_token_id,
+            &event.down_token_id,
+            spot_now,
+            spot_start,
+            remaining_secs,
+            now,
+        )?;
+        tcn.ingest_point(&event.condition_id, now, row);
+
+        let seq = tcn.sequence_flat(&event.condition_id)?;
+
+        #[cfg(feature = "onnx")]
+        {
+            let Some(m) = &self.onnx_model else {
+                return None;
+            };
+            match m.predict_scalar(&seq) {
+                Ok(raw) if raw.is_finite() => {
+                    let p = if raw < -0.001 || raw > 1.001 {
+                        Self::sigmoid(raw as f64)
+                    } else {
+                        raw as f64
+                    };
+                    Some(p.clamp(0.001, 0.999))
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    warn!(
+                        agent = self.config.agent_id,
+                        error = %e,
+                        "lob-ml onnx_tcn inference failed"
+                    );
+                    None
+                }
+            }
+        }
+
+        #[cfg(not(feature = "onnx"))]
+        {
+            let _ = seq;
+            None
+        }
+    }
 }
 
 #[async_trait]
@@ -736,6 +1095,19 @@ impl TradingAgent for CryptoLobMlAgent {
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "crypto lob-ml agent starting");
         let config_hash = self.config_hash();
+        let _model_type_cfg = self.config.model_type.trim().to_ascii_lowercase();
+        #[cfg(feature = "onnx")]
+        let use_tcn = matches!(
+            _model_type_cfg.as_str(),
+            "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
+        );
+        #[cfg(not(feature = "onnx"))]
+        let use_tcn = false;
+        let mut tcn_buffers: Option<TcnBuffers> = if use_tcn {
+            Some(TcnBuffers::new(&self.config))
+        } else {
+            None
+        };
 
         let mut status = AgentStatus::Running;
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
@@ -797,11 +1169,17 @@ impl TradingAgent for CryptoLobMlAgent {
 
                     // Ensure we are subscribed to the latest token set.
                     let mut desired_tokens: HashSet<String> = HashSet::new();
+                    let mut desired_conditions: HashSet<String> = HashSet::new();
                     for events in active_events.values() {
                         for event in events {
                             desired_tokens.insert(event.up_token_id.clone());
                             desired_tokens.insert(event.down_token_id.clone());
+                            desired_conditions.insert(event.condition_id.clone());
                         }
+                    }
+
+                    if let Some(buf) = tcn_buffers.as_mut() {
+                        buf.prune_inactive(&desired_conditions, &desired_tokens);
                     }
 
                     if desired_tokens != subscribed_tokens {
@@ -854,16 +1232,6 @@ impl TradingAgent for CryptoLobMlAgent {
                         _ => continue,
                     };
 
-                    // Pull LOB snapshot (feature vector).
-                    let lob = match self.lob_cache.get_snapshot(&update.symbol).await {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
-                    if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
-                        continue;
-                    }
-
                     // Momentum + volatility from trade-tick cache.
                     let spot_cache = self.binance_ws.price_cache();
                     let Some(spot) = spot_cache.get(&update.symbol).await else {
@@ -873,31 +1241,92 @@ impl TradingAgent for CryptoLobMlAgent {
                     let momentum_5s = spot.momentum(5).unwrap_or(Decimal::ZERO);
                     let rolling_volatility_opt = spot.volatility(60);
 
-                    let (p_up_model, model_type_used) =
-                        self.estimate_p_up(&lob, momentum_1s, momentum_5s);
-                    let p_up_model_dec =
-                        Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
+                    // Pull Binance LOB snapshot (feature vector) for non-TCN models only.
+                    let lob_opt: Option<LobSnapshot> = if use_tcn {
+                        None
+                    } else {
+                        let Some(lob_cache) = self.lob_cache.as_ref() else {
+                            continue;
+                        };
+                        let lob = match lob_cache.get_snapshot(&update.symbol).await {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
+                        if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
+                            continue;
+                        }
+                        Some(lob)
+                    };
 
-                    let (obi_1, obi_2, obi_3, obi_20) = (
-                        self.lob_cache
-                            .get_obi(&update.symbol, 1)
-                            .await
-                            .unwrap_or(Decimal::ZERO),
-                        self.lob_cache
-                            .get_obi(&update.symbol, 2)
-                            .await
-                            .unwrap_or(Decimal::ZERO),
-                        self.lob_cache
-                            .get_obi(&update.symbol, 3)
-                            .await
-                            .unwrap_or(Decimal::ZERO),
-                        self.lob_cache
-                            .get_obi(&update.symbol, 20)
-                            .await
-                            .unwrap_or(Decimal::ZERO),
-                    );
-                    let obi_micro = obi_1 - lob.obi_5;
-                    let obi_slope = lob.obi_5 - obi_20;
+                    let (lob_best_bid, lob_best_ask, lob_mid_price, lob_spread_bps, lob_obi_5, lob_obi_10, lob_bid_volume_5, lob_ask_volume_5) =
+                        if let Some(lob) = &lob_opt {
+                            (
+                                lob.best_bid,
+                                lob.best_ask,
+                                lob.mid_price,
+                                lob.spread_bps,
+                                lob.obi_5,
+                                lob.obi_10,
+                                lob.bid_volume_5,
+                                lob.ask_volume_5,
+                            )
+                        } else {
+                            (
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                            )
+                        };
+
+                    let (p_up_model_global, model_type_used_global, p_up_model_global_dec) =
+                        if let Some(lob) = lob_opt.as_ref() {
+                            let (p_up_model, model_type_used) =
+                                self.estimate_p_up(lob, momentum_1s, momentum_5s);
+                            let p_up_model_dec =
+                                Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
+                            (p_up_model, model_type_used, p_up_model_dec)
+                        } else {
+                            (0.5, "tcn", dec!(0.5))
+                        };
+
+                    let (obi_1, obi_2, obi_3, obi_20) = if let Some(lob_cache) = self.lob_cache.as_ref() {
+                        (
+                            lob_cache
+                                .get_obi(&update.symbol, 1)
+                                .await
+                                .unwrap_or(Decimal::ZERO),
+                            lob_cache
+                                .get_obi(&update.symbol, 2)
+                                .await
+                                .unwrap_or(Decimal::ZERO),
+                            lob_cache
+                                .get_obi(&update.symbol, 3)
+                                .await
+                                .unwrap_or(Decimal::ZERO),
+                            lob_cache
+                                .get_obi(&update.symbol, 20)
+                                .await
+                                .unwrap_or(Decimal::ZERO),
+                        )
+                    } else {
+                        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
+                    };
+                    let obi_micro = if let Some(lob) = &lob_opt {
+                        obi_1 - lob.obi_5
+                    } else {
+                        Decimal::ZERO
+                    };
+                    let obi_slope = if let Some(lob) = &lob_opt {
+                        lob.obi_5 - obi_20
+                    } else {
+                        Decimal::ZERO
+                    };
 
                     let quote_cache = self.pm_ws.quote_cache();
                     for event in events {
@@ -965,8 +1394,38 @@ impl TradingAgent for CryptoLobMlAgent {
                             rolling_volatility_opt,
                             remaining_secs,
                         );
+
+                        let (p_up_model, model_type_used, p_up_model_dec) = if use_tcn {
+                            let p_up_window_f = p_up_window_dec.to_f64().unwrap_or(0.5);
+                            match tcn_buffers.as_mut() {
+                                Some(buf) => match self.estimate_p_up_tcn(
+                                    buf,
+                                    quote_cache,
+                                    &event,
+                                    now,
+                                    spot.price,
+                                    start_price,
+                                    remaining_secs,
+                                ) {
+                                    Some(p) => (
+                                        p,
+                                        "onnx_tcn",
+                                        Decimal::from_f64_retain(p).unwrap_or(p_up_window_dec),
+                                    ),
+                                    None => (p_up_window_f, "window", p_up_window_dec),
+                                },
+                                None => (p_up_window_f, "window", p_up_window_dec),
+                            }
+                        } else {
+                            (
+                                p_up_model_global,
+                                model_type_used_global,
+                                p_up_model_global_dec,
+                            )
+                        };
+
                         let (w_model, w_window) = match model_type_used {
-                            "onnx" | "mlp_json" => (dec!(0.50), dec!(0.50)),
+                            "onnx" | "onnx_tcn" | "mlp_json" => (dec!(0.50), dec!(0.50)),
                             _ => (dec!(0.20), dec!(0.80)),
                         };
                         let p_up_dec = (p_up_window_dec * w_window + p_up_model_dec * w_model)
@@ -1199,20 +1658,20 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("pm_up_ask", &up_ask.to_string())
                         .with_metadata("pm_down_ask", &down_ask.to_string())
-                        .with_metadata("lob_best_bid", &lob.best_bid.to_string())
-                        .with_metadata("lob_best_ask", &lob.best_ask.to_string())
-                        .with_metadata("lob_mid_price", &lob.mid_price.to_string())
-                        .with_metadata("lob_spread_bps", &lob.spread_bps.to_string())
-                        .with_metadata("lob_obi_5", &lob.obi_5.to_string())
-                        .with_metadata("lob_obi_10", &lob.obi_10.to_string())
+                        .with_metadata("lob_best_bid", &lob_best_bid.to_string())
+                        .with_metadata("lob_best_ask", &lob_best_ask.to_string())
+                        .with_metadata("lob_mid_price", &lob_mid_price.to_string())
+                        .with_metadata("lob_spread_bps", &lob_spread_bps.to_string())
+                        .with_metadata("lob_obi_5", &lob_obi_5.to_string())
+                        .with_metadata("lob_obi_10", &lob_obi_10.to_string())
                         .with_metadata("lob_obi_1", &obi_1.to_string())
                         .with_metadata("lob_obi_2", &obi_2.to_string())
                         .with_metadata("lob_obi_3", &obi_3.to_string())
                         .with_metadata("lob_obi_20", &obi_20.to_string())
                         .with_metadata("lob_obi_micro", &obi_micro.to_string())
                         .with_metadata("lob_obi_slope", &obi_slope.to_string())
-                        .with_metadata("lob_bid_volume_5", &lob.bid_volume_5.to_string())
-                        .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
+                        .with_metadata("lob_bid_volume_5", &lob_bid_volume_5.to_string())
+                        .with_metadata("lob_ask_volume_5", &lob_ask_volume_5.to_string())
                         .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
                         .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
                         .with_metadata("window_start_price", &start_price.to_string())
@@ -1264,6 +1723,10 @@ impl TradingAgent for CryptoLobMlAgent {
 
                     if !matches!(status, AgentStatus::Running) {
                         continue;
+                    }
+
+                    if let Some(buf) = tcn_buffers.as_mut() {
+                        buf.on_quote_update(&update);
                     }
 
                     if !self.config.enable_price_exits {
@@ -1534,7 +1997,7 @@ mod tests {
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
-            lob_cache: LobCache::new(),
+            lob_cache: Some(LobCache::new()),
             nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,
