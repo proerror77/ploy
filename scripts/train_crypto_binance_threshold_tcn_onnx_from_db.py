@@ -301,6 +301,90 @@ def timeframe_bucket_from_market_slug(market_slug: str) -> str:
     return "other"
 
 
+def print_baseline_ev_tables(
+    ds: PointDataset,
+    condition_market_slug: Dict[str, str],
+    fee_buffer: float,
+    slippage_buffer: float,
+) -> None:
+    """
+    Sanity-check table: if you always buy YES or always buy NO at the observed asks
+    and hold to settlement, what's the realized ROI distribution?
+
+    This is NOT the strategy backtest (no model). It's a baseline to catch EV math
+    mistakes and to understand market pricing.
+    """
+    total_cost = fee_buffer + slippage_buffer
+
+    stats: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+    # (timeframe, asset, side) -> counters
+
+    def _bump(tf: str, asset: str, side: str, ask: float, win: bool) -> None:
+        key = (tf, asset, side)
+        s = stats.setdefault(
+            key,
+            {
+                "samples": 0.0,
+                "sum_ask": 0.0,
+                "wins": 0.0,
+                "sum_ev_net_per_share": 0.0,
+                "sum_roi": 0.0,
+            },
+        )
+        s["samples"] += 1.0
+        s["sum_ask"] += float(ask)
+        s["wins"] += 1.0 if win else 0.0
+
+        # Per-share PnL in $ terms (YES/NO both settle to 1.0 on win, 0.0 on loss).
+        s["sum_ev_net_per_share"] += (1.0 - ask) if win else (-ask)
+
+        cost = ask + total_cost
+        roi = ((1.0 / cost) - 1.0) if win else -1.0
+        s["sum_roi"] += float(roi)
+
+    for i in range(len(ds.y)):
+        g = ds.group[i]
+        tf = timeframe_bucket_from_market_slug(condition_market_slug.get(g, ""))
+        asset = ds.asset[i]
+        ya = float(ds.yes_ask[i])
+        na = float(ds.no_ask[i])
+        y = int(ds.y[i])
+
+        _bump(tf, asset, "YES", ya, win=(y == 1))
+        _bump(tf, asset, "NO", na, win=(y == 0))
+
+    def _print_bucket(tf: str) -> None:
+        rows = []
+        for (tfi, asset, side), s in stats.items():
+            if tfi != tf:
+                continue
+            n = int(s["samples"])
+            if n <= 0:
+                continue
+            avg_ask = s["sum_ask"] / s["samples"]
+            win_rate = s["wins"] / s["samples"]
+            ev_net = s["sum_ev_net_per_share"] / s["samples"]
+            roi_avg = s["sum_roi"] / s["samples"]
+            rows.append(
+                (asset, side, n, avg_ask, win_rate, ev_net, roi_avg),
+            )
+        if not rows:
+            return
+        rows.sort(key=lambda r: (r[0], r[1]))
+        print(f"\n[baseline] timeframe={tf} (always-buy side @ ask, hold to settlement)")
+        print(
+            "| Asset | Side | Samples | Avg Ask | Settle Success | EV Net/Share | ROI Avg (stake=1) |"
+        )
+        print("|---|---:|---:|---:|---:|---:|---:|")
+        for asset, side, n, avg_ask, win_rate, ev_net, roi_avg in rows:
+            print(
+                f"| {asset.upper()} | {side} | {n} | {avg_ask:.4f} | {win_rate:.4f} | {ev_net:.4f} | {roi_avg:.4f} |"
+            )
+
+    for tf in ("5m", "15m", "other"):
+        _print_bucket(tf)
+
+
 def _to_float(v: object) -> Optional[float]:
     if v is None:
         return None
@@ -1447,6 +1531,12 @@ def main() -> None:
         pm_book_source=args.pm_book_source,
     )
     print(f"Point rows: {len(point_ds.y)}")
+    print_baseline_ev_tables(
+        point_ds,
+        condition_market_slug,
+        fee_buffer=args.fee_buffer,
+        slippage_buffer=args.slippage_buffer,
+    )
 
     seq_ds = build_sequences(point_ds, seq_len=args.seq_len)
     print(
