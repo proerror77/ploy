@@ -3228,6 +3228,8 @@ fn spawn_clob_orderbook_persistence(
     pool: PgPool,
     agent_id: String,
     domain: Domain,
+    max_levels_default: usize,
+    min_interval_secs_default: i64,
 ) {
     tokio::spawn(async move {
         let agent_label = agent_id.clone();
@@ -3245,11 +3247,11 @@ fn spawn_clob_orderbook_persistence(
         }
 
         let mut rx = pm_ws.subscribe_books();
-        let max_levels = env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
-        let min_interval_secs = env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(1);
+        let max_levels = env_usize("PM_ORDERBOOK_LEVELS", max_levels_default).clamp(1, 200);
+        let min_interval_secs =
+            env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default).max(1);
 
-        let mut last_persisted: HashMap<String, (chrono::DateTime<Utc>, Option<String>)> =
-            HashMap::new();
+        let mut last_persisted: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
         let mut persisted_count: u64 = 0;
 
         loop {
@@ -3260,15 +3262,7 @@ fn spawn_clob_orderbook_persistence(
 
                     let should_persist = match last_persisted.get(&token_id) {
                         None => true,
-                        Some((ts, prev_hash)) => {
-                            let elapsed =
-                                now.signed_duration_since(*ts).num_seconds() >= min_interval_secs;
-                            let changed = match (prev_hash.as_deref(), book.hash.as_deref()) {
-                                (Some(a), Some(b)) => a != b,
-                                _ => true,
-                            };
-                            elapsed && changed
-                        }
+                        Some(ts) => now.signed_duration_since(*ts).num_seconds() >= min_interval_secs,
                     };
 
                     if !should_persist {
@@ -3309,7 +3303,7 @@ fn spawn_clob_orderbook_persistence(
                         continue;
                     }
 
-                    last_persisted.insert(token_id, (now, book.hash.clone()));
+                    last_persisted.insert(token_id, now);
                     persisted_count = persisted_count.saturating_add(1);
 
                     if persisted_count % 100 == 0 {
@@ -5060,6 +5054,22 @@ pub async fn start_platform(
         // Optional persistence pipeline for CLOB quotes (best-effort).
         // Do not block agent startup if DB is temporarily unavailable.
         if let Some(pool) = shared_pool.as_ref() {
+            let lob_model_type = lob_cfg.model_type.trim().to_ascii_lowercase();
+            let lob_model_is_tcn = lob_agent_enabled
+                && matches!(
+                    lob_model_type.as_str(),
+                    "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
+                );
+            let (orderbook_levels_default, orderbook_snapshot_secs_default) = if lob_model_is_tcn {
+                // Training/inference only uses top-of-book, sampled at `tcn_sample_secs`.
+                (
+                    1usize,
+                    lob_cfg.tcn_sample_secs.max(1).min(3600) as i64,
+                )
+            } else {
+                (20usize, 60i64)
+            };
+
             spawn_pm_token_settlement_persistence(
                 pm_client.clone(),
                 pool.clone(),
@@ -5072,6 +5082,8 @@ pub async fn start_platform(
                 pool.clone(),
                 crypto_cfg.agent_id.clone(),
                 Domain::Crypto,
+                orderbook_levels_default,
+                orderbook_snapshot_secs_default,
             );
             spawn_binance_price_persistence(
                 binance_ws.clone(),
