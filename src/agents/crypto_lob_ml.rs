@@ -860,9 +860,13 @@ impl TradingAgent for CryptoLobMlAgent {
                             continue;
                         }
 
-                        // Window-context baseline probability: ties the bet to event resolution
-                        // (end_price >= start_price). This avoids pathological "always buy cheap tail"
-                        // behavior when p_up_model is neutral (~0.5) or uncalibrated.
+                        // Window-context baseline probability: ties the bet to event resolution.
+                        //
+                        // For UP/DOWN markets, the threshold is the event start price.
+                        // For strike-style markets (when parsed), use `price_to_beat`.
+                        //
+                        // This avoids pathological "always buy cheap tail" behavior when
+                        // p_up_model is neutral (~0.5) or uncalibrated.
                         let elapsed_secs = now
                             .signed_duration_since(event.start_time)
                             .num_seconds()
@@ -900,7 +904,11 @@ impl TradingAgent for CryptoLobMlAgent {
                         if start_price <= Decimal::ZERO {
                             continue;
                         }
-                        let window_move = (spot.price - start_price) / start_price;
+                        let threshold_price = event
+                            .price_to_beat
+                            .filter(|v| *v > Decimal::ZERO)
+                            .unwrap_or(start_price);
+                        let window_move = (spot.price - threshold_price) / threshold_price;
                         let p_up_window_dec = Self::estimate_p_up_window(
                             window_move,
                             rolling_volatility_opt,
@@ -1157,6 +1165,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
                         .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
                         .with_metadata("window_start_price", &start_price.to_string())
+                        .with_metadata("window_threshold_price", &threshold_price.to_string())
                         .with_metadata("window_move_pct", &window_move.to_string())
                         .with_metadata("window_elapsed_secs", &elapsed_secs.to_string())
                         .with_metadata("window_remaining_secs", &remaining_secs.to_string())
