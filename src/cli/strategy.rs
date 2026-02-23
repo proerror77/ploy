@@ -549,6 +549,17 @@ async fn list_strategies() -> Result<()> {
 }
 
 /// Start a strategy
+fn enforce_legacy_strategy_live_gate(dry_run: bool) -> Result<()> {
+    if !dry_run && !legacy_strategy_live_allowed() {
+        let msg = "legacy `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path) or set PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true for explicit override";
+        warn!("{msg}");
+        println!("\x1b[31m✗ {}\x1b[0m", msg);
+        return Err(anyhow::anyhow!(msg));
+    }
+
+    Ok(())
+}
+
 async fn start_strategy(
     name: &str,
     config: Option<PathBuf>,
@@ -557,12 +568,7 @@ async fn start_strategy(
 ) -> Result<()> {
     info!("Starting strategy: {}", name);
 
-    if !dry_run {
-        let msg = "legacy `ploy strategy start` live runtime is disabled; use `ploy platform start` (Coordinator/Gateway execution path)";
-        warn!("{msg}");
-        println!("\x1b[31m✗ {}\x1b[0m", msg);
-        return Err(anyhow::anyhow!(msg));
-    }
+    enforce_legacy_strategy_live_gate(dry_run)?;
 
     // Check if already running.
     //
@@ -2626,4 +2632,67 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enforce_legacy_strategy_live_gate;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn strategy_live_gate_blocks_live_without_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let strategy_key = "PLOY_ALLOW_LEGACY_STRATEGY_LIVE";
+        let global_key = "PLOY_ALLOW_LEGACY_LIVE";
+        let prev_strategy = std::env::var(strategy_key).ok();
+        let prev_global = std::env::var(global_key).ok();
+
+        set_env(strategy_key, None);
+        set_env(global_key, None);
+
+        let err = enforce_legacy_strategy_live_gate(false)
+            .err()
+            .expect("live should be blocked without explicit override");
+        assert!(err.to_string().contains("PLOY_ALLOW_LEGACY_STRATEGY_LIVE"));
+
+        match prev_strategy.as_deref() {
+            Some(v) => set_env(strategy_key, Some(v)),
+            None => set_env(strategy_key, None),
+        }
+        match prev_global.as_deref() {
+            Some(v) => set_env(global_key, Some(v)),
+            None => set_env(global_key, None),
+        }
+    }
+
+    #[test]
+    fn strategy_live_gate_allows_live_with_strategy_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let strategy_key = "PLOY_ALLOW_LEGACY_STRATEGY_LIVE";
+        let global_key = "PLOY_ALLOW_LEGACY_LIVE";
+        let prev_strategy = std::env::var(strategy_key).ok();
+        let prev_global = std::env::var(global_key).ok();
+
+        set_env(global_key, None);
+        set_env(strategy_key, Some("true"));
+        assert!(enforce_legacy_strategy_live_gate(false).is_ok());
+
+        match prev_strategy.as_deref() {
+            Some(v) => set_env(strategy_key, Some(v)),
+            None => set_env(strategy_key, None),
+        }
+        match prev_global.as_deref() {
+            Some(v) => set_env(global_key, Some(v)),
+            None => set_env(global_key, None),
+        }
+    }
 }
