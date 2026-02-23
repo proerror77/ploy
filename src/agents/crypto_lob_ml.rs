@@ -14,12 +14,13 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteCache, QuoteUpdate};
+use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate};
 use crate::agents::{AgentContext, TradingAgent};
 use crate::collector::{LobCache, LobSnapshot};
 use crate::coordinator::CoordinatorCommand;
@@ -305,13 +306,13 @@ struct TrackedPosition {
 struct TcnBuffers {
     seq_len: usize,
     sample_secs: u64,
+    pair_window_secs: u64,
     trade_lookback_secs: u64,
     vol_short_window_secs: u64,
     vol_long_window_secs: u64,
 
-    mid_history_by_token: HashMap<String, VecDeque<(DateTime<Utc>, f64)>>,
     seq_by_condition: HashMap<String, VecDeque<[f32; TCN_FEATURE_DIM]>>,
-    last_sample_by_condition: HashMap<String, DateTime<Utc>>,
+    last_bucket_by_condition: HashMap<String, DateTime<Utc>>,
 }
 
 impl TcnBuffers {
@@ -322,261 +323,53 @@ impl TcnBuffers {
         Self {
             seq_len: cfg.onnx_seq_len.max(1),
             sample_secs: cfg.tcn_sample_secs.max(1),
+            pair_window_secs: cfg.tcn_pair_window_secs.max(1),
             trade_lookback_secs: cfg.tcn_trade_lookback_secs.max(1),
             vol_short_window_secs: vol_short,
             vol_long_window_secs: vol_long,
-            mid_history_by_token: HashMap::new(),
             seq_by_condition: HashMap::new(),
-            last_sample_by_condition: HashMap::new(),
+            last_bucket_by_condition: HashMap::new(),
         }
     }
 
-    fn prune_inactive(
-        &mut self,
-        keep_conditions: &HashSet<String>,
-        keep_tokens: &HashSet<String>,
-    ) {
+    fn prune_inactive(&mut self, keep_conditions: &HashSet<String>) {
         self.seq_by_condition
             .retain(|k, _| keep_conditions.contains(k));
-        self.last_sample_by_condition
+        self.last_bucket_by_condition
             .retain(|k, _| keep_conditions.contains(k));
-        self.mid_history_by_token.retain(|k, _| keep_tokens.contains(k));
     }
 
-    fn on_quote_update(&mut self, update: &QuoteUpdate) {
-        let ts = update.quote.timestamp;
-        let bid = update.quote.best_bid.and_then(|v| v.to_f64());
-        let ask = update.quote.best_ask.and_then(|v| v.to_f64());
-
-        let mid = if let (Some(b), Some(a)) = (bid, ask) {
-            if b > 0.0 && a > 0.0 {
-                0.5 * (b + a)
-            } else if b > 0.0 {
-                b
-            } else if a > 0.0 {
-                a
-            } else {
-                return;
-            }
-        } else if let Some(b) = bid {
-            if b > 0.0 { b } else { return }
-        } else if let Some(a) = ask {
-            if a > 0.0 { a } else { return }
-        } else {
-            return;
-        };
-
-        self.record_mid(&update.token_id, ts, mid);
+    fn bucket_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        let secs = now.timestamp();
+        let step = self.sample_secs as i64;
+        let bucket = if step > 0 { (secs / step) * step } else { secs };
+        chrono::DateTime::<Utc>::from_timestamp(bucket, 0).unwrap_or(now)
     }
 
-    fn record_mid(&mut self, token_id: &str, ts: DateTime<Utc>, mid: f64) {
-        if !mid.is_finite() || mid <= 0.0 {
-            return;
-        }
-
-        let hist = self
-            .mid_history_by_token
-            .entry(token_id.to_string())
-            .or_default();
-        hist.push_back((ts, mid));
-
-        let cutoff = ts - chrono::Duration::seconds(self.vol_long_window_secs as i64);
-        while let Some((t0, _)) = hist.front().copied() {
-            if t0 < cutoff {
-                hist.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn sample_std(values: &[f64]) -> f64 {
-        let n = values.len();
-        if n < 2 {
-            return 0.0;
-        }
-        let mean = values.iter().sum::<f64>() / n as f64;
-        let mut var = 0.0;
-        for v in values {
-            let dv = v - mean;
-            var += dv * dv;
-        }
-        (var / (n as f64 - 1.0)).max(0.0).sqrt()
-    }
-
-    fn compute_vol_bps(&self, token_id: &str, now: DateTime<Utc>) -> (f64, f64) {
-        let Some(hist) = self.mid_history_by_token.get(token_id) else {
-            return (0.0, 0.0);
-        };
-
-        let long_start = now - chrono::Duration::seconds(self.vol_long_window_secs as i64);
-        let short_start = now - chrono::Duration::seconds(self.vol_short_window_secs as i64);
-
-        let mut long_vals: Vec<f64> = Vec::with_capacity(hist.len());
-        let mut short_vals: Vec<f64> = Vec::with_capacity(hist.len());
-
-        for (ts, mid) in hist {
-            if *ts <= long_start {
-                continue;
-            }
-            long_vals.push(*mid);
-            if *ts > short_start {
-                short_vals.push(*mid);
-            }
-        }
-
-        if long_vals.len() < 2 {
-            return (0.0, 0.0);
-        }
-        let avg_long = long_vals.iter().sum::<f64>() / long_vals.len() as f64;
-        if !avg_long.is_finite() || avg_long <= 0.0 {
-            return (0.0, 0.0);
-        }
-
-        let std_long = Self::sample_std(&long_vals);
-        let std_short = Self::sample_std(&short_vals);
-
-        let vol_short_bps = (std_short / avg_long) * 10_000.0;
-        let vol_long_bps = (std_long / avg_long) * 10_000.0;
-        (
-            vol_short_bps.max(0.0).min(1_000_000.0),
-            vol_long_bps.max(0.0).min(1_000_000.0),
-        )
-    }
-
-    fn spread_bps(best_bid: f64, best_ask: f64, mid: f64) -> f64 {
-        if !best_bid.is_finite()
-            || !best_ask.is_finite()
-            || !mid.is_finite()
-            || best_bid <= 0.0
-            || best_ask <= 0.0
-            || mid <= 0.0
-            || best_ask < best_bid
+    fn ingest_point(
+        &mut self,
+        condition_id: &str,
+        bucket_start: DateTime<Utc>,
+        row: [f32; TCN_FEATURE_DIM],
+    ) {
+        if self
+            .last_bucket_by_condition
+            .get(condition_id)
+            .is_some_and(|v| *v == bucket_start)
         {
-            return 0.0;
-        }
-        ((best_ask - best_bid) / mid) * 10_000.0
-    }
-
-    fn build_point_features(
-        &self,
-        quote_cache: &QuoteCache,
-        yes_token_id: &str,
-        no_token_id: &str,
-        spot_now: Decimal,
-        spot_start: Decimal,
-        secs_to_anchor: i64,
-        now: DateTime<Utc>,
-    ) -> Option<[f32; TCN_FEATURE_DIM]> {
-        let yq = quote_cache.get(yes_token_id)?;
-        let nq = quote_cache.get(no_token_id)?;
-
-        let yes_bid = yq.best_bid.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
-        let yes_ask = yq.best_ask.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
-        let no_bid = nq.best_bid.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
-        let no_ask = nq.best_ask.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0);
-        if yes_ask <= 0.0 || no_ask <= 0.0 {
-            return None;
+            return;
         }
 
-        let yes_mid = if yes_bid > 0.0 && yes_ask > 0.0 {
-            0.5 * (yes_bid + yes_ask)
-        } else if yes_bid > 0.0 {
-            yes_bid
-        } else {
-            yes_ask
-        };
-        let no_mid = if no_bid > 0.0 && no_ask > 0.0 {
-            0.5 * (no_bid + no_ask)
-        } else if no_bid > 0.0 {
-            no_bid
-        } else {
-            no_ask
-        };
-
-        let yes_spread_bps = Self::spread_bps(yes_bid, yes_ask, yes_mid);
-        let no_spread_bps = Self::spread_bps(no_bid, no_ask, no_mid);
-        let yes_no_mid_gap = (yes_mid + no_mid) - 1.0;
-
-        // Trade tape may be unavailable at runtime; use training-compatible fallbacks.
-        let yes_last_trade = yes_mid;
-        let no_last_trade = no_mid;
-        let yes_trade_count = 0.0;
-        let no_trade_count = 0.0;
-        let yes_trade_volume = 0.0;
-        let no_trade_volume = 0.0;
-        let yes_trade_vwap = yes_mid;
-        let no_trade_vwap = no_mid;
-
-        let (yes_vol_short_bps, yes_vol_long_bps) = self.compute_vol_bps(yes_token_id, now);
-        let (no_vol_short_bps, no_vol_long_bps) = self.compute_vol_bps(no_token_id, now);
-
-        let spot_now_f = spot_now.to_f64().unwrap_or(0.0);
-        let spot_start_f = spot_start.to_f64().unwrap_or(0.0);
-        let spot_vs_start_ret_bps = if spot_start_f > 0.0 && spot_now_f.is_finite() {
-            ((spot_now_f - spot_start_f) / spot_start_f) * 10_000.0
-        } else {
-            0.0
-        };
-
-        let secs_to_anchor_f = secs_to_anchor.max(0) as f64;
-
-        let mut out = [0.0f32; TCN_FEATURE_DIM];
-        out[0] = yes_bid as f32;
-        out[1] = yes_ask as f32;
-        out[2] = yes_mid as f32;
-        out[3] = no_bid as f32;
-        out[4] = no_ask as f32;
-        out[5] = no_mid as f32;
-        out[6] = yes_spread_bps as f32;
-        out[7] = no_spread_bps as f32;
-        out[8] = yes_no_mid_gap as f32;
-        out[9] = yes_last_trade as f32;
-        out[10] = no_last_trade as f32;
-        out[11] = yes_trade_count as f32;
-        out[12] = no_trade_count as f32;
-        out[13] = yes_trade_volume as f32;
-        out[14] = no_trade_volume as f32;
-        out[15] = yes_trade_vwap as f32;
-        out[16] = no_trade_vwap as f32;
-        out[17] = yes_vol_short_bps as f32;
-        out[18] = yes_vol_long_bps as f32;
-        out[19] = no_vol_short_bps as f32;
-        out[20] = no_vol_long_bps as f32;
-        out[21] = spot_now_f as f32;
-        out[22] = spot_start_f as f32;
-        out[23] = spot_vs_start_ret_bps as f32;
-        out[24] = secs_to_anchor_f as f32;
-        Some(out)
-    }
-
-    fn ingest_point(&mut self, condition_id: &str, now: DateTime<Utc>, row: [f32; TCN_FEATURE_DIM]) {
         let seq = self
             .seq_by_condition
             .entry(condition_id.to_string())
             .or_default();
-        let last_ts_opt = self.last_sample_by_condition.get(condition_id).copied();
-
-        let should_roll = match last_ts_opt {
-            None => true,
-            Some(last_ts) => now.signed_duration_since(last_ts).num_seconds() >= self.sample_secs as i64,
-        };
-
-        if should_roll {
-            seq.push_back(row);
-            while seq.len() > self.seq_len {
-                seq.pop_front();
-            }
-            self.last_sample_by_condition
-                .insert(condition_id.to_string(), now);
-        } else if let Some(back) = seq.back_mut() {
-            // Keep the latest observation fresh without changing the sequence cadence.
-            *back = row;
-        } else {
-            seq.push_back(row);
-            self.last_sample_by_condition
-                .insert(condition_id.to_string(), now);
+        seq.push_back(row);
+        while seq.len() > self.seq_len {
+            seq.pop_front();
         }
+        self.last_bucket_by_condition
+            .insert(condition_id.to_string(), bucket_start);
     }
 
     fn sequence_flat(&self, condition_id: &str) -> Option<Vec<f32>> {
@@ -601,6 +394,7 @@ pub struct CryptoLobMlAgent {
     pm_ws: Arc<PolymarketWebSocket>,
     event_matcher: Arc<EventMatcher>,
     lob_cache: Option<LobCache>,
+    pool: Option<PgPool>,
     nn_model: Option<DenseNetwork>,
     #[cfg(feature = "onnx")]
     onnx_model: Option<OnnxModel>,
@@ -763,6 +557,7 @@ impl CryptoLobMlAgent {
         pm_ws: Arc<PolymarketWebSocket>,
         event_matcher: Arc<EventMatcher>,
         lob_cache: Option<LobCache>,
+        pool: Option<PgPool>,
     ) -> Self {
         let model_type = config.model_type.trim().to_ascii_lowercase();
         let nn_model = if model_type == "mlp" || model_type == "mlp_json" {
@@ -866,6 +661,7 @@ impl CryptoLobMlAgent {
             pm_ws,
             event_matcher,
             lob_cache,
+            pool,
             nn_model,
             #[cfg(feature = "onnx")]
             onnx_model,
@@ -881,6 +677,73 @@ impl CryptoLobMlAgent {
 
     fn sigmoid(x: f64) -> f64 {
         1.0 / (1.0 + (-x).exp())
+    }
+
+    // --- TCN feature helpers (must match training script semantics) ---
+
+    fn tcn_binance_symbol_from_market_slug(market_slug: &str) -> Option<&'static str> {
+        let slug = market_slug.trim().to_ascii_lowercase();
+        if slug.starts_with("btc-") {
+            return Some("BTCUSDT");
+        }
+        if slug.starts_with("eth-") {
+            return Some("ETHUSDT");
+        }
+        if slug.starts_with("sol-") {
+            return Some("SOLUSDT");
+        }
+        None
+    }
+
+    fn tcn_market_start_ts_from_slug(market_slug: &str) -> Option<DateTime<Utc>> {
+        // Mirror training SQL: TO_TIMESTAMP(SUBSTRING(market_slug FROM '([0-9]{9,})$')::double)
+        let digits_rev: String = market_slug
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits_rev.len() < 9 {
+            return None;
+        }
+        let digits: String = digits_rev.chars().rev().collect();
+        let secs: i64 = digits.parse().ok()?;
+        chrono::DateTime::<Utc>::from_timestamp(secs, 0)
+    }
+
+    fn tcn_mid_price(best_bid: Option<f64>, best_ask: Option<f64>) -> Option<f64> {
+        if let (Some(b), Some(a)) = (best_bid, best_ask) {
+            if b > 0.0 && a > 0.0 {
+                return Some(0.5 * (b + a));
+            }
+        }
+        if let Some(b) = best_bid {
+            if b > 0.0 {
+                return Some(b);
+            }
+        }
+        if let Some(a) = best_ask {
+            if a > 0.0 {
+                return Some(a);
+            }
+        }
+        None
+    }
+
+    fn tcn_spread_bps(best_bid: Option<f64>, best_ask: Option<f64>, mid: f64) -> f64 {
+        let (Some(b), Some(a)) = (best_bid, best_ask) else {
+            return 0.0;
+        };
+        if !b.is_finite()
+            || !a.is_finite()
+            || !mid.is_finite()
+            || b <= 0.0
+            || a <= 0.0
+            || mid <= 0.0
+            || a < b
+        {
+            return 0.0;
+        }
+        ((a - b) / mid) * 10_000.0
     }
 
     fn estimate_p_up_window(
@@ -1026,35 +889,289 @@ impl CryptoLobMlAgent {
         )
     }
 
-    fn estimate_p_up_tcn(
+    async fn estimate_p_up_tcn(
         &self,
         tcn: &mut TcnBuffers,
-        quote_cache: &QuoteCache,
         event: &EventInfo,
         now: DateTime<Utc>,
-        spot_now: Decimal,
-        spot_start: Decimal,
-        remaining_secs: i64,
     ) -> Option<f64> {
-        let row = tcn.build_point_features(
-            quote_cache,
-            &event.up_token_id,
-            &event.down_token_id,
-            spot_now,
-            spot_start,
-            remaining_secs,
-            now,
-        )?;
-        tcn.ingest_point(&event.condition_id, now, row);
+        let bucket_start = tcn.bucket_start(now);
+        if tcn
+            .last_bucket_by_condition
+            .get(&event.condition_id)
+            .is_some_and(|v| *v == bucket_start)
+            && tcn.seq_by_condition.contains_key(&event.condition_id)
+        {
+            let seq = tcn.sequence_flat(&event.condition_id)?;
+            return self.predict_tcn_sequence(&seq);
+        }
+
+        let Some(pool) = self.pool.as_ref() else {
+            warn!(
+                agent = self.config.agent_id,
+                "onnx_tcn requested but no PgPool was provided; skipping prediction"
+            );
+            return None;
+        };
+
+        let bucket_end =
+            bucket_start + chrono::Duration::seconds(tcn.sample_secs.max(1) as i64);
+        let binance_symbol = Self::tcn_binance_symbol_from_market_slug(&event.slug);
+        let market_start_ts = Self::tcn_market_start_ts_from_slug(&event.slug);
+
+        let row_opt = sqlx::query(
+            r#"
+            WITH y AS (
+              SELECT
+                received_at AS ts,
+                (bids->0->>'price')::double precision AS best_bid,
+                (asks->0->>'price')::double precision AS best_ask
+              FROM clob_orderbook_snapshots
+              WHERE LOWER(COALESCE(domain, '')) = 'crypto'
+                AND token_id = $1
+                AND received_at >= $2
+                AND received_at < $3
+              ORDER BY received_at ASC
+              LIMIT 1
+            ),
+            n AS (
+              SELECT
+                (s2.bids->0->>'price')::double precision AS best_bid,
+                (s2.asks->0->>'price')::double precision AS best_ask
+              FROM clob_orderbook_snapshots s2
+              JOIN y ON TRUE
+              WHERE LOWER(COALESCE(s2.domain, '')) = 'crypto'
+                AND s2.token_id = $4
+                AND s2.received_at BETWEEN y.ts - ($5::bigint * INTERVAL '1 second')
+                                      AND y.ts + ($5::bigint * INTERVAL '1 second')
+              ORDER BY ABS(EXTRACT(EPOCH FROM (s2.received_at - y.ts))) ASC
+              LIMIT 1
+            ),
+            t AS (
+              SELECT
+                token_id,
+                COUNT(*)::double precision AS cnt,
+                COALESCE(SUM(size), 0)::double precision AS vol,
+                COALESCE(SUM(price * size) / NULLIF(SUM(size), 0), NULL)::double precision AS vwap,
+                (ARRAY_AGG(price ORDER BY trade_ts DESC))[1]::double precision AS last_price
+              FROM clob_trade_ticks
+              JOIN y ON TRUE
+              WHERE token_id IN ($1, $4)
+                AND trade_ts <= y.ts
+                AND trade_ts > y.ts - ($6::bigint * INTERVAL '1 second')
+              GROUP BY token_id
+            ),
+            v AS (
+              SELECT
+                token_id,
+                received_at AS sample_ts,
+                COALESCE(
+                  0.5 * (
+                    (bids->0->>'price')::double precision +
+                    (asks->0->>'price')::double precision
+                  ),
+                  (bids->0->>'price')::double precision,
+                  (asks->0->>'price')::double precision
+                ) AS mid_price
+              FROM clob_orderbook_snapshots
+              JOIN y ON TRUE
+              WHERE LOWER(COALESCE(domain, '')) = 'crypto'
+                AND token_id IN ($1, $4)
+                AND received_at <= y.ts
+                AND received_at > y.ts - ($7::bigint * INTERVAL '1 second')
+            ),
+            vol AS (
+              SELECT
+                token_id,
+                COALESCE(
+                  (
+                    STDDEV_SAMP(mid_price) FILTER (
+                      WHERE sample_ts > (SELECT ts FROM y) - ($8::bigint * INTERVAL '1 second')
+                    ) / NULLIF(
+                      AVG(mid_price) FILTER (
+                        WHERE sample_ts > (SELECT ts FROM y) - ($8::bigint * INTERVAL '1 second')
+                      ),
+                      0
+                    )
+                  ) * 10000.0,
+                  0.0
+                )::double precision AS vol_short_bps,
+                COALESCE(
+                  (STDDEV_SAMP(mid_price) / NULLIF(AVG(mid_price), 0)) * 10000.0,
+                  0.0
+                )::double precision AS vol_long_bps
+              FROM v
+              WHERE mid_price IS NOT NULL
+                AND mid_price > 0.0
+              GROUP BY token_id
+            ),
+            bn AS (
+              SELECT b.price::double precision AS price
+              FROM binance_price_ticks b
+              JOIN y ON TRUE
+              WHERE $9::text IS NOT NULL
+                AND b.symbol = $9
+                AND b.trade_time <= y.ts
+              ORDER BY b.trade_time DESC
+              LIMIT 1
+            ),
+            bs AS (
+              SELECT b.price::double precision AS price
+              FROM binance_price_ticks b
+              WHERE $9::text IS NOT NULL
+                AND $10::timestamptz IS NOT NULL
+                AND b.symbol = $9
+                AND b.trade_time <= $10
+              ORDER BY b.trade_time DESC
+              LIMIT 1
+            )
+            SELECT
+              y.ts,
+              y.best_bid AS yes_best_bid,
+              y.best_ask AS yes_best_ask,
+              n.best_bid AS no_best_bid,
+              n.best_ask AS no_best_ask,
+              (SELECT last_price FROM t WHERE token_id = $1) AS yes_last_trade,
+              (SELECT cnt FROM t WHERE token_id = $1) AS yes_trade_count,
+              (SELECT vol FROM t WHERE token_id = $1) AS yes_trade_volume,
+              (SELECT vwap FROM t WHERE token_id = $1) AS yes_trade_vwap,
+              (SELECT last_price FROM t WHERE token_id = $4) AS no_last_trade,
+              (SELECT cnt FROM t WHERE token_id = $4) AS no_trade_count,
+              (SELECT vol FROM t WHERE token_id = $4) AS no_trade_volume,
+              (SELECT vwap FROM t WHERE token_id = $4) AS no_trade_vwap,
+              (SELECT vol_short_bps FROM vol WHERE token_id = $1) AS yes_mid_vol_short_bps,
+              (SELECT vol_long_bps FROM vol WHERE token_id = $1) AS yes_mid_vol_long_bps,
+              (SELECT vol_short_bps FROM vol WHERE token_id = $4) AS no_mid_vol_short_bps,
+              (SELECT vol_long_bps FROM vol WHERE token_id = $4) AS no_mid_vol_long_bps,
+              bn.price AS spot_now,
+              bs.price AS spot_start
+            FROM y
+            CROSS JOIN n
+            "#,
+        )
+        .bind(&event.up_token_id)
+        .bind(bucket_start)
+        .bind(bucket_end)
+        .bind(&event.down_token_id)
+        .bind(tcn.pair_window_secs as i64)
+        .bind(tcn.trade_lookback_secs as i64)
+        .bind(tcn.vol_long_window_secs as i64)
+        .bind(tcn.vol_short_window_secs as i64)
+        .bind(binance_symbol)
+        .bind(market_start_ts)
+        .fetch_optional(pool)
+        .await;
+
+        let row = match row_opt {
+            Ok(Some(r)) => r,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(
+                    agent = self.config.agent_id,
+                    error = %e,
+                    "failed to fetch onnx_tcn feature row from db"
+                );
+                return None;
+            }
+        };
+
+        let ts: DateTime<Utc> = row.try_get(0).ok()?;
+        let yes_best_bid: Option<f64> = row.try_get(1).ok()?;
+        let yes_best_ask: Option<f64> = row.try_get(2).ok()?;
+        let no_best_bid: Option<f64> = row.try_get(3).ok()?;
+        let no_best_ask: Option<f64> = row.try_get(4).ok()?;
+
+        let yes_last_trade: Option<f64> = row.try_get(5).ok()?;
+        let yes_trade_count: f64 = row.try_get::<Option<f64>, _>(6).ok()?.unwrap_or(0.0);
+        let yes_trade_volume: f64 = row.try_get::<Option<f64>, _>(7).ok()?.unwrap_or(0.0);
+        let yes_trade_vwap: Option<f64> = row.try_get(8).ok()?;
+
+        let no_last_trade: Option<f64> = row.try_get(9).ok()?;
+        let no_trade_count: f64 = row.try_get::<Option<f64>, _>(10).ok()?.unwrap_or(0.0);
+        let no_trade_volume: f64 = row.try_get::<Option<f64>, _>(11).ok()?.unwrap_or(0.0);
+        let no_trade_vwap: Option<f64> = row.try_get(12).ok()?;
+
+        let yes_vol_short_bps: f64 = row.try_get::<Option<f64>, _>(13).ok()?.unwrap_or(0.0);
+        let yes_vol_long_bps: f64 = row.try_get::<Option<f64>, _>(14).ok()?.unwrap_or(0.0);
+        let no_vol_short_bps: f64 = row.try_get::<Option<f64>, _>(15).ok()?.unwrap_or(0.0);
+        let no_vol_long_bps: f64 = row.try_get::<Option<f64>, _>(16).ok()?.unwrap_or(0.0);
+
+        let spot_now: Option<f64> = row.try_get(17).ok()?;
+        let spot_start: Option<f64> = row.try_get(18).ok()?;
+        let spot_now_f = spot_now.unwrap_or(0.0);
+        let spot_start_f = spot_start.unwrap_or(0.0);
+        let spot_vs_start_ret_bps = match (spot_now, spot_start) {
+            (Some(now), Some(start)) if start > 0.0 && now.is_finite() && start.is_finite() => {
+                ((now - start) / start) * 10_000.0
+            }
+            _ => 0.0,
+        };
+        let secs_to_anchor_f = event
+            .end_time
+            .signed_duration_since(ts)
+            .num_seconds()
+            .max(0) as f64;
+
+        let yes_mid = Self::tcn_mid_price(yes_best_bid, yes_best_ask)?;
+        let no_mid = Self::tcn_mid_price(no_best_bid, no_best_ask)?;
+        let yes_spread_bps = Self::tcn_spread_bps(yes_best_bid, yes_best_ask, yes_mid);
+        let no_spread_bps = Self::tcn_spread_bps(no_best_bid, no_best_ask, no_mid);
+        let yes_no_mid_gap = (yes_mid + no_mid) - 1.0;
+
+        let yes_last = yes_last_trade.unwrap_or(yes_mid);
+        let no_last = no_last_trade.unwrap_or(no_mid);
+        let yes_vwap = yes_trade_vwap.unwrap_or(yes_mid);
+        let no_vwap = no_trade_vwap.unwrap_or(no_mid);
+
+        let feats = [
+            yes_best_bid.unwrap_or(yes_mid),
+            yes_best_ask.unwrap_or(yes_mid),
+            yes_mid,
+            no_best_bid.unwrap_or(no_mid),
+            no_best_ask.unwrap_or(no_mid),
+            no_mid,
+            yes_spread_bps,
+            no_spread_bps,
+            yes_no_mid_gap,
+            yes_last,
+            no_last,
+            yes_trade_count,
+            no_trade_count,
+            yes_trade_volume,
+            no_trade_volume,
+            yes_vwap,
+            no_vwap,
+            yes_vol_short_bps,
+            yes_vol_long_bps,
+            no_vol_short_bps,
+            no_vol_long_bps,
+            spot_now_f,
+            spot_start_f,
+            spot_vs_start_ret_bps,
+            secs_to_anchor_f,
+        ];
+
+        if feats.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+
+        let mut row_f32 = [0.0f32; TCN_FEATURE_DIM];
+        for (i, v) in feats.iter().enumerate() {
+            row_f32[i] = *v as f32;
+        }
+        tcn.ingest_point(&event.condition_id, bucket_start, row_f32);
 
         let seq = tcn.sequence_flat(&event.condition_id)?;
+        self.predict_tcn_sequence(&seq)
+    }
 
+    fn predict_tcn_sequence(&self, seq: &[f32]) -> Option<f64> {
         #[cfg(feature = "onnx")]
         {
             let Some(m) = &self.onnx_model else {
                 return None;
             };
-            match m.predict_scalar(&seq) {
+            match m.predict_scalar(seq) {
                 Ok(raw) if raw.is_finite() => {
                     let p = if raw < -0.001 || raw > 1.001 {
                         Self::sigmoid(raw as f64)
@@ -1188,7 +1305,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     }
 
                     if let Some(buf) = tcn_buffers.as_mut() {
-                        buf.prune_inactive(&desired_conditions, &desired_tokens);
+                        buf.prune_inactive(&desired_conditions);
                     }
 
                     if desired_tokens != subscribed_tokens {
@@ -1405,25 +1522,20 @@ impl TradingAgent for CryptoLobMlAgent {
                         );
 
                         let (p_up_model, model_type_used, p_up_model_dec) = if use_tcn {
-                            let p_up_window_f = p_up_window_dec.to_f64().unwrap_or(0.5);
                             match tcn_buffers.as_mut() {
-                                Some(buf) => match self.estimate_p_up_tcn(
-                                    buf,
-                                    quote_cache,
-                                    &event,
-                                    now,
-                                    spot.price,
-                                    start_price,
-                                    remaining_secs,
-                                ) {
+                                Some(buf) => match self.estimate_p_up_tcn(buf, &event, now).await {
                                     Some(p) => (
                                         p,
                                         "onnx_tcn",
-                                        Decimal::from_f64_retain(p).unwrap_or(p_up_window_dec),
+                                        Decimal::from_f64_retain(p).unwrap_or(dec!(0.5)),
                                     ),
-                                    None => (p_up_window_f, "window", p_up_window_dec),
+                                    None => {
+                                        // In onnx_tcn mode we require DB-derived features for
+                                        // training parity; do not fall back to approximate models.
+                                        continue;
+                                    }
                                 },
-                                None => (p_up_window_f, "window", p_up_window_dec),
+                                None => continue,
                             }
                         } else {
                             (
@@ -1434,7 +1546,8 @@ impl TradingAgent for CryptoLobMlAgent {
                         };
 
                         let (w_model, w_window) = match model_type_used {
-                            "onnx" | "onnx_tcn" | "mlp_json" => (dec!(0.50), dec!(0.50)),
+                            "onnx_tcn" => (dec!(1.00), dec!(0.00)),
+                            "onnx" | "mlp_json" => (dec!(0.50), dec!(0.50)),
                             _ => (dec!(0.20), dec!(0.80)),
                         };
                         let p_up_dec = (p_up_window_dec * w_window + p_up_model_dec * w_model)
@@ -1734,10 +1847,6 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    if let Some(buf) = tcn_buffers.as_mut() {
-                        buf.on_quote_update(&update);
-                    }
-
                     if !self.config.enable_price_exits {
                         continue;
                     }
@@ -2007,6 +2116,7 @@ mod tests {
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
             lob_cache: Some(LobCache::new()),
+            pool: None,
             nn_model: None,
             #[cfg(feature = "onnx")]
             onnx_model: None,

@@ -5325,14 +5325,20 @@ pub async fn start_platform(
                 model_type.as_str(),
                 "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
             );
-            let needs_binance_lob = if model_is_tcn {
-                // If the binary isn't built with ONNX support, `onnx_tcn` will fall back,
-                // which requires Binance LOB features.
-                !cfg!(feature = "onnx")
-            } else {
-                true
-            };
-            if needs_binance_lob && lob_cache_opt.is_none() {
+
+            if model_is_tcn && !cfg!(feature = "onnx") {
+                warn!(
+                    agent = lob_cfg.agent_id,
+                    model_type = %model_type,
+                    "crypto lob-ml agent model_type=onnx_tcn requires --features onnx; skipping agent spawn"
+                );
+            } else if model_is_tcn && shared_pool.is_none() {
+                warn!(
+                    agent = lob_cfg.agent_id,
+                    model_type = %model_type,
+                    "crypto lob-ml agent model_type=onnx_tcn requires DB for feature parity with training; skipping agent spawn"
+                );
+            } else if !model_is_tcn && lob_cache_opt.is_none() {
                 warn!(
                     agent = lob_cfg.agent_id,
                     model_type = %model_type,
@@ -5352,6 +5358,7 @@ pub async fn start_platform(
                     pm_ws.clone(),
                     event_matcher.clone(),
                     lob_cache_opt.clone(),
+                    shared_pool.clone(),
                 );
                 let ctx = AgentContext::new(
                     lob_cfg.agent_id.clone(),
