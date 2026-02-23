@@ -119,7 +119,13 @@ pub struct CryptoLobMlConfig {
     pub min_hold_secs: u64,
 
     /// Minimum expected-value edge required to enter.
-    /// UP edge = p_up - up_ask; DOWN edge = (1 - p_up) - down_ask.
+    ///
+    /// Binary-options trading should be evaluated on *ROI* when sizing is by notional (USD),
+    /// not on per-share EV. We therefore gate entries by expected ROI on a normalized stake.
+    ///
+    /// Definitions (stake = 1.0, costs ignored):
+    /// - expected_roi_up = p_up / up_ask - 1 = (p_up - up_ask) / up_ask
+    /// - expected_roi_dn = (1 - p_up) / down_ask - 1 = ((1 - p_up) - down_ask) / down_ask
     pub min_edge: Decimal,
 
     /// Max ask price to pay for entry (YES/NO).
@@ -872,21 +878,32 @@ impl TradingAgent for CryptoLobMlAgent {
                             continue;
                         }
 
-                        let up_edge = p_up_dec - up_ask;
-                        let down_edge = (Decimal::ONE - p_up_dec) - down_ask;
-                        let (side, token_id, limit_price, edge, confidence) = if up_edge >= down_edge {
-                            (Side::Up, event.up_token_id.clone(), up_ask, up_edge, p_up_dec)
-                        } else {
-                            (
-                                Side::Down,
-                                event.down_token_id.clone(),
-                                down_ask,
-                                down_edge,
-                                Decimal::ONE - p_up_dec,
-                            )
-                        };
+                        let up_edge_per_share = p_up_dec - up_ask;
+                        let down_edge_per_share = (Decimal::ONE - p_up_dec) - down_ask;
+                        let up_expected_roi = up_edge_per_share / up_ask;
+                        let down_expected_roi = down_edge_per_share / down_ask;
+                        let (side, token_id, limit_price, edge_per_share, expected_roi, confidence) =
+                            if up_expected_roi >= down_expected_roi {
+                                (
+                                    Side::Up,
+                                    event.up_token_id.clone(),
+                                    up_ask,
+                                    up_edge_per_share,
+                                    up_expected_roi,
+                                    p_up_dec,
+                                )
+                            } else {
+                                (
+                                    Side::Down,
+                                    event.down_token_id.clone(),
+                                    down_ask,
+                                    down_edge_per_share,
+                                    down_expected_roi,
+                                    Decimal::ONE - p_up_dec,
+                                )
+                            };
 
-                        if edge < self.config.min_edge {
+                        if expected_roi < self.config.min_edge {
                             continue;
                         }
                         if limit_price > self.config.max_entry_price {
@@ -895,7 +912,7 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         let signal_confidence = {
                             // Scale confidence by edge size; keep within [0,1].
-                            let mut c = (edge / dec!(0.10))
+                            let mut c = (edge_per_share / dec!(0.10))
                                 .max(Decimal::ZERO)
                                 .min(Decimal::ONE);
                             // Heuristic logistic model is less trustworthy than a trained model.
@@ -955,7 +972,8 @@ impl TradingAgent for CryptoLobMlAgent {
                                             "p_up_blend_w_window",
                                             &w_window.to_string(),
                                         )
-                                        .with_metadata("signal_edge", &edge.to_string())
+                                        .with_metadata("signal_edge", &edge_per_share.to_string())
+                                        .with_metadata("signal_expected_roi", &expected_roi.to_string())
                                         .with_metadata("config_hash", &config_hash);
 
                                         match ctx.submit_order(exit_intent).await {
@@ -997,6 +1015,20 @@ impl TradingAgent for CryptoLobMlAgent {
                             continue;
                         }
 
+                        let max_order_value = self.config.risk_params.max_order_value;
+                        let shares = if max_order_value > Decimal::ZERO {
+                            // Size by USD notional: shares ~= max_order_value / limit_price.
+                            // Truncation ensures we don't exceed the configured budget.
+                            let raw = (max_order_value / limit_price).trunc();
+                            let shares = raw.to_u64().unwrap_or(0);
+                            if shares < 1 {
+                                continue;
+                            }
+                            shares
+                        } else {
+                            self.config.default_shares.max(1)
+                        };
+
                         let intent = OrderIntent::new(
                             &self.config.agent_id,
                             Domain::Crypto,
@@ -1004,7 +1036,7 @@ impl TradingAgent for CryptoLobMlAgent {
                             &token_id,
                             side,
                             true,
-                            self.config.default_shares.max(1),
+                            shares,
                             limit_price,
                         );
                         let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
@@ -1032,7 +1064,12 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata("p_up_blend_w_window", &w_window.to_string())
                         .with_metadata("model_type", model_type_used)
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
-                        .with_metadata("signal_edge", &edge.to_string())
+                        .with_metadata("signal_edge", &edge_per_share.to_string())
+                        .with_metadata("signal_expected_roi", &expected_roi.to_string())
+                        .with_metadata(
+                            "signal_expected_roi_pct",
+                            &(expected_roi * dec!(100)).to_string(),
+                        )
                         .with_metadata("signal_confidence", &signal_confidence.to_string())
                         .with_metadata("signal_fair_value", &confidence.to_string())
                         .with_metadata("signal_market_price", &limit_price.to_string())
@@ -1066,7 +1103,10 @@ impl TradingAgent for CryptoLobMlAgent {
                             horizon = %event.horizon,
                             %side,
                             %limit_price,
-                            %edge,
+                            edge_per_share = %edge_per_share,
+                            expected_roi = %expected_roi,
+                            shares,
+                            notional = %(limit_price * Decimal::from(shares)),
                             p_up = %p_up_dec,
                             model = model_type_used,
                             "lob-ml signal detected, submitting order"
