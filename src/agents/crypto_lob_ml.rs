@@ -691,20 +691,38 @@ impl CryptoLobMlAgent {
                 "onnx model input_dim must be > 0".to_string(),
             ));
         }
+        if model_input_dim % SEQ_FEATURE_DIM != 0 {
+            return Err(PloyError::Validation(format!(
+                "onnx model input_dim {} must be a multiple of sequence feature dim {}",
+                model_input_dim, SEQ_FEATURE_DIM
+            )));
+        }
+        if sequence.len() % SEQ_FEATURE_DIM != 0 {
+            return Err(PloyError::Validation(format!(
+                "sequence input dim {} must be a multiple of sequence feature dim {}",
+                sequence.len(),
+                SEQ_FEATURE_DIM
+            )));
+        }
 
-        if sequence.len() == model_input_dim {
+        let model_snapshots = model_input_dim / SEQ_FEATURE_DIM;
+        let sequence_snapshots = sequence.len() / SEQ_FEATURE_DIM;
+
+        if sequence_snapshots == model_snapshots {
             return Ok((sequence.to_vec(), SequenceAlignMode::Exact));
         }
 
-        if sequence.len() > model_input_dim {
-            let start = sequence.len() - model_input_dim;
+        if sequence_snapshots > model_snapshots {
+            let start_snapshot = sequence_snapshots - model_snapshots;
+            let start = start_snapshot * SEQ_FEATURE_DIM;
             return Ok((
                 sequence[start..].to_vec(),
                 SequenceAlignMode::TruncateOldest,
             ));
         }
 
-        let mut aligned = vec![0.0f32; model_input_dim - sequence.len()];
+        let pad_snapshots = model_snapshots - sequence_snapshots;
+        let mut aligned = vec![0.0f32; pad_snapshots * SEQ_FEATURE_DIM];
         aligned.extend_from_slice(sequence);
         Ok((aligned, SequenceAlignMode::LeftPadZero))
     }
@@ -2133,23 +2151,47 @@ mod tests {
 
     #[test]
     fn test_align_sequence_to_model_input_handles_boundary_cases() {
-        let exact = vec![1.0f32, 2.0, 3.0];
+        let exact = vec![1.0f32; SEQ_FEATURE_DIM * 2];
         let (exact_aligned, exact_mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&exact, 3).unwrap();
+            CryptoLobMlAgent::align_sequence_to_model_input(&exact, SEQ_FEATURE_DIM * 2).unwrap();
         assert_eq!(exact_mode, SequenceAlignMode::Exact);
         assert_eq!(exact_aligned, exact);
+    }
 
-        let too_long = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+    #[test]
+    fn test_align_sequence_to_model_input_rejects_non_snapshot_aligned_model_dim() {
+        let sequence = vec![1.0f32; SEQ_FEATURE_DIM * 2];
+        let err = CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM + 1)
+            .err()
+            .expect("non-snapshot input_dim must fail fast");
+        assert!(
+            err.to_string()
+                .contains("must be a multiple of sequence feature dim")
+        );
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_truncate_and_pad_keep_snapshot_boundaries() {
+        let mut sequence = Vec::new();
+        for snapshot_value in [1.0f32, 2.0, 3.0] {
+            sequence.extend(std::iter::repeat(snapshot_value).take(SEQ_FEATURE_DIM));
+        }
+
         let (truncated, truncate_mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&too_long, 3).unwrap();
+            CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM * 2)
+                .unwrap();
         assert_eq!(truncate_mode, SequenceAlignMode::TruncateOldest);
-        assert_eq!(truncated, vec![3.0f32, 4.0, 5.0]);
+        assert_eq!(truncated.len(), SEQ_FEATURE_DIM * 2);
+        assert!(truncated[..SEQ_FEATURE_DIM].iter().all(|v| *v == 2.0));
+        assert!(truncated[SEQ_FEATURE_DIM..].iter().all(|v| *v == 3.0));
 
-        let too_short = vec![9.0f32, 10.0];
         let (padded, pad_mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&too_short, 4).unwrap();
+            CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM * 4)
+                .unwrap();
         assert_eq!(pad_mode, SequenceAlignMode::LeftPadZero);
-        assert_eq!(padded, vec![0.0f32, 0.0, 9.0, 10.0]);
+        assert_eq!(padded.len(), SEQ_FEATURE_DIM * 4);
+        assert!(padded[..SEQ_FEATURE_DIM].iter().all(|v| *v == 0.0));
+        assert_eq!(&padded[SEQ_FEATURE_DIM..], sequence.as_slice());
     }
 
     #[test]
