@@ -357,6 +357,13 @@ struct SequenceSnapshot {
     distance_to_beat: Decimal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceAlignMode {
+    Exact,
+    TruncateOldest,
+    LeftPadZero,
+}
+
 fn sequence_len_for_horizon(horizon: &str) -> usize {
     match normalize_timeframe(horizon).as_str() {
         "15m" => SEQ_LEN_15M,
@@ -675,6 +682,33 @@ impl CryptoLobMlAgent {
         Decimal::from_f64_retain(p).unwrap_or(dec!(0.50))
     }
 
+    fn align_sequence_to_model_input(
+        sequence: &[f32],
+        model_input_dim: usize,
+    ) -> Result<(Vec<f32>, SequenceAlignMode)> {
+        if model_input_dim == 0 {
+            return Err(PloyError::Validation(
+                "onnx model input_dim must be > 0".to_string(),
+            ));
+        }
+
+        if sequence.len() == model_input_dim {
+            return Ok((sequence.to_vec(), SequenceAlignMode::Exact));
+        }
+
+        if sequence.len() > model_input_dim {
+            let start = sequence.len() - model_input_dim;
+            return Ok((
+                sequence[start..].to_vec(),
+                SequenceAlignMode::TruncateOldest,
+            ));
+        }
+
+        let mut aligned = vec![0.0f32; model_input_dim - sequence.len()];
+        aligned.extend_from_slice(sequence);
+        Ok((aligned, SequenceAlignMode::LeftPadZero))
+    }
+
     /// Estimate p(UP) using ONNX model from a flattened sequence input.
     fn estimate_p_up(&self, horizon: &str, sequence: &[f32]) -> Result<(f64, &'static str)> {
         #[cfg(feature = "onnx")]
@@ -693,15 +727,21 @@ impl CryptoLobMlAgent {
                 .onnx_model
                 .as_ref()
                 .ok_or_else(|| PloyError::InvalidState("onnx model not initialized".to_string()))?;
-            if m.input_dim() != sequence.len() {
-                return Err(PloyError::Validation(format!(
-                    "onnx input dim mismatch: got {}, model expects {}",
-                    sequence.len(),
-                    m.input_dim(),
-                )));
+
+            let (aligned, align_mode) =
+                Self::align_sequence_to_model_input(sequence, m.input_dim())?;
+            if align_mode != SequenceAlignMode::Exact {
+                debug!(
+                    agent = self.config.agent_id,
+                    horizon = normalize_timeframe(horizon),
+                    sequence_len = sequence.len(),
+                    model_input_dim = m.input_dim(),
+                    align_mode = ?align_mode,
+                    "aligned sequence input to onnx model input dim"
+                );
             }
 
-            let raw = m.predict_scalar(sequence)?;
+            let raw = m.predict_scalar(&aligned)?;
             if !raw.is_finite() {
                 return Err(PloyError::Internal(
                     "lob-ml onnx returned non-finite output".to_string(),
@@ -2089,6 +2129,41 @@ mod tests {
         }
 
         assert!(CryptoLobMlAgent::build_sequence(&cache, key, "5m").is_none());
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_handles_boundary_cases() {
+        let exact = vec![1.0f32, 2.0, 3.0];
+        let (exact_aligned, exact_mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&exact, 3).unwrap();
+        assert_eq!(exact_mode, SequenceAlignMode::Exact);
+        assert_eq!(exact_aligned, exact);
+
+        let too_long = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let (truncated, truncate_mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&too_long, 3).unwrap();
+        assert_eq!(truncate_mode, SequenceAlignMode::TruncateOldest);
+        assert_eq!(truncated, vec![3.0f32, 4.0, 5.0]);
+
+        let too_short = vec![9.0f32, 10.0];
+        let (padded, pad_mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&too_short, 4).unwrap();
+        assert_eq!(pad_mode, SequenceAlignMode::LeftPadZero);
+        assert_eq!(padded, vec![0.0f32, 0.0, 9.0, 10.0]);
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_allows_15m_sequence_with_5m_model_dim() {
+        let seq_15m_len = SEQ_LEN_15M * SEQ_FEATURE_DIM;
+        let seq_5m_len = SEQ_LEN_5M * SEQ_FEATURE_DIM;
+        let seq_15m: Vec<f32> = (0..seq_15m_len).map(|i| i as f32).collect();
+
+        let (aligned, mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&seq_15m, seq_5m_len).unwrap();
+
+        assert_eq!(mode, SequenceAlignMode::TruncateOldest);
+        assert_eq!(aligned.len(), seq_5m_len);
+        assert_eq!(aligned, seq_15m[(seq_15m_len - seq_5m_len)..].to_vec());
     }
 
     #[test]
