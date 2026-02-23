@@ -60,6 +60,22 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
+fn default_fee_buffer() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_slippage_buffer() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_max_time_remaining_secs_5m() -> u64 {
+    120
+}
+
+fn default_max_time_remaining_secs_15m() -> u64 {
+    240
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobMlWeights {
     pub bias: f64,
@@ -104,6 +120,14 @@ pub struct CryptoLobMlConfig {
     /// Maximum time remaining for selected event (seconds)
     pub max_time_remaining_secs: u64,
 
+    /// Optional override: maximum time remaining for 5m events (seconds).
+    #[serde(default = "default_max_time_remaining_secs_5m")]
+    pub max_time_remaining_secs_5m: u64,
+
+    /// Optional override: maximum time remaining for 15m events (seconds).
+    #[serde(default = "default_max_time_remaining_secs_15m")]
+    pub max_time_remaining_secs_15m: u64,
+
     /// If true, prefer events closest to end (confirmatory mode).
     /// If false, prefer events with more time remaining (predictive mode).
     pub prefer_close_to_end: bool,
@@ -130,6 +154,16 @@ pub struct CryptoLobMlConfig {
 
     /// Max ask price to pay for entry (YES/NO).
     pub max_entry_price: Decimal,
+
+    /// Optional fixed fee buffer (in price units) applied when computing expected ROI.
+    /// This is a modeling-only cost; it does not change the submitted limit price.
+    #[serde(default = "default_fee_buffer")]
+    pub fee_buffer: Decimal,
+
+    /// Optional fixed slippage buffer (in price units) applied when computing expected ROI.
+    /// This is a modeling-only cost; it does not change the submitted limit price.
+    #[serde(default = "default_slippage_buffer")]
+    pub slippage_buffer: Decimal,
 
     /// Minimum seconds between entries per symbol (avoid thrash).
     pub cooldown_secs: u64,
@@ -169,6 +203,8 @@ impl Default for CryptoLobMlConfig {
             // Cover both 5m + 15m windows by default.
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,
+            max_time_remaining_secs_5m: default_max_time_remaining_secs_5m(),
+            max_time_remaining_secs_15m: default_max_time_remaining_secs_15m(),
             prefer_close_to_end: true,
             default_shares: 50,
             exit_edge_floor: default_exit_edge_floor(),
@@ -177,6 +213,8 @@ impl Default for CryptoLobMlConfig {
             min_hold_secs: 20,
             min_edge: dec!(0.02),
             max_entry_price: dec!(0.70),
+            fee_buffer: default_fee_buffer(),
+            slippage_buffer: default_slippage_buffer(),
             cooldown_secs: 30,
             max_lob_snapshot_age_secs: 2,
             weights: LobMlWeights::default(),
@@ -833,6 +871,19 @@ impl TradingAgent for CryptoLobMlAgent {
                         if remaining_secs <= 0 {
                             continue;
                         }
+                        let remaining_secs_u64 = remaining_secs.max(0) as u64;
+                        if remaining_secs_u64 < self.config.min_time_remaining_secs {
+                            continue;
+                        }
+                        let max_time_remaining_secs = match timeframe.as_str() {
+                            "5m" => self.config.max_time_remaining_secs_5m,
+                            "15m" => self.config.max_time_remaining_secs_15m,
+                            _ => self.config.max_time_remaining_secs,
+                        }
+                        .min(self.config.max_time_remaining_secs);
+                        if remaining_secs_u64 > max_time_remaining_secs {
+                            continue;
+                        }
 
                         let target_time = now - chrono::Duration::seconds(elapsed_secs);
                         if let Some(oldest) = spot.oldest_timestamp() {
@@ -880,8 +931,17 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         let up_edge_per_share = p_up_dec - up_ask;
                         let down_edge_per_share = (Decimal::ONE - p_up_dec) - down_ask;
-                        let up_expected_roi = up_edge_per_share / up_ask;
-                        let down_expected_roi = down_edge_per_share / down_ask;
+                        let cost_buffer_total =
+                            (self.config.fee_buffer + self.config.slippage_buffer)
+                                .max(Decimal::ZERO);
+                        let up_cost = up_ask + cost_buffer_total;
+                        let down_cost = down_ask + cost_buffer_total;
+                        if up_cost <= Decimal::ZERO || down_cost <= Decimal::ZERO {
+                            continue;
+                        }
+
+                        let up_expected_roi = (p_up_dec / up_cost) - Decimal::ONE;
+                        let down_expected_roi = ((Decimal::ONE - p_up_dec) / down_cost) - Decimal::ONE;
                         let (side, token_id, limit_price, edge_per_share, expected_roi, confidence) =
                             if up_expected_roi >= down_expected_roi {
                                 (
@@ -1069,6 +1129,11 @@ impl TradingAgent for CryptoLobMlAgent {
                         .with_metadata(
                             "signal_expected_roi_pct",
                             &(expected_roi * dec!(100)).to_string(),
+                        )
+                        .with_metadata("signal_cost_buffer_total", &cost_buffer_total.to_string())
+                        .with_metadata(
+                            "signal_entry_cost",
+                            &(limit_price + cost_buffer_total).to_string(),
                         )
                         .with_metadata("signal_confidence", &signal_confidence.to_string())
                         .with_metadata("signal_fair_value", &confidence.to_string())

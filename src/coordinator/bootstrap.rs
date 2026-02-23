@@ -3799,6 +3799,12 @@ impl PlatformBootstrapConfig {
             "PLOY_CRYPTO_LOB_ML__MAX_ENTRY_PRICE",
             cfg.crypto_lob_ml.max_entry_price,
         );
+        cfg.crypto_lob_ml.fee_buffer =
+            env_decimal("PLOY_CRYPTO_LOB_ML__FEE_BUFFER", cfg.crypto_lob_ml.fee_buffer);
+        cfg.crypto_lob_ml.slippage_buffer = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__SLIPPAGE_BUFFER",
+            cfg.crypto_lob_ml.slippage_buffer,
+        );
         cfg.crypto_lob_ml.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__EVENT_REFRESH_SECS",
             cfg.crypto_lob_ml.event_refresh_secs,
@@ -3812,8 +3818,24 @@ impl PlatformBootstrapConfig {
             "PLOY_CRYPTO_LOB_ML__MAX_TIME_REMAINING_SECS",
             cfg.crypto_lob_ml.max_time_remaining_secs,
         );
+        cfg.crypto_lob_ml.max_time_remaining_secs_5m = env_u64(
+            "PLOY_CRYPTO_LOB_ML__MAX_TIME_REMAINING_SECS_5M",
+            cfg.crypto_lob_ml.max_time_remaining_secs_5m,
+        )
+        .max(1);
+        cfg.crypto_lob_ml.max_time_remaining_secs_15m = env_u64(
+            "PLOY_CRYPTO_LOB_ML__MAX_TIME_REMAINING_SECS_15M",
+            cfg.crypto_lob_ml.max_time_remaining_secs_15m,
+        )
+        .max(1);
         if cfg.crypto_lob_ml.max_time_remaining_secs < cfg.crypto_lob_ml.min_time_remaining_secs {
             cfg.crypto_lob_ml.max_time_remaining_secs = cfg.crypto_lob_ml.min_time_remaining_secs;
+        }
+        if cfg.crypto_lob_ml.max_time_remaining_secs_5m < cfg.crypto_lob_ml.min_time_remaining_secs {
+            cfg.crypto_lob_ml.max_time_remaining_secs_5m = cfg.crypto_lob_ml.min_time_remaining_secs;
+        }
+        if cfg.crypto_lob_ml.max_time_remaining_secs_15m < cfg.crypto_lob_ml.min_time_remaining_secs {
+            cfg.crypto_lob_ml.max_time_remaining_secs_15m = cfg.crypto_lob_ml.min_time_remaining_secs;
         }
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__PREFER_CLOSE_TO_END") {
             match raw.trim().to_ascii_lowercase().as_str() {
