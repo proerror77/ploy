@@ -271,7 +271,11 @@ impl OrderbookHistoryCollector {
                 .push_bind(&self.cfg.source);
         });
 
-        qb.push(" ON CONFLICT DO NOTHING");
+        // Keep the row identity stable by (token_id, ts, hash), but allow correcting
+        // condition_id when better metadata becomes available (e.g. collector targets).
+        qb.push(
+            " ON CONFLICT (token_id, book_ts_ms, hash) DO UPDATE SET condition_id = EXCLUDED.condition_id",
+        );
 
         let result = qb.build().execute(&self.pool).await?;
         Ok(result.rows_affected())
@@ -286,10 +290,31 @@ impl OrderbookHistoryCollector {
         start_ts_ms: i64,
         end_ts_ms: i64,
     ) -> Result<u64> {
+        self.backfill_asset_with_condition(asset_id, None, start_ts_ms, end_ts_ms)
+            .await
+    }
+
+    /// Backfill a single asset over a time range, optionally overriding the condition_id.
+    ///
+    /// The Polymarket endpoint returns a `market` field per entry, but that is not always
+    /// the CTF `condition_id` we want for research joins. When you already know the
+    /// condition_id (e.g., from `collector_token_targets.metadata.condition_id`), pass it
+    /// here so persisted rows are keyed correctly.
+    pub async fn backfill_asset_with_condition(
+        &self,
+        asset_id: &str,
+        condition_id: Option<&str>,
+        start_ts_ms: i64,
+        end_ts_ms: i64,
+    ) -> Result<u64> {
         let limit = self.cfg.page_limit.clamp(1, 5000);
         let max_pages = self.cfg.max_pages.max(1);
         let levels = self.cfg.levels.clamp(1, 2000);
         let sample_ms = self.cfg.sample_ms.max(0);
+        let condition_override = condition_id
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string);
 
         let mut inserted: u64 = 0;
         let mut offset: usize = 0;
@@ -336,10 +361,13 @@ impl OrderbookHistoryCollector {
 
                 let bids = parse_depth_levels(&entry.bids, true, levels);
                 let asks = parse_depth_levels(&entry.asks, false, levels);
+                let condition = condition_override
+                    .as_deref()
+                    .unwrap_or_else(|| entry.market.as_str());
 
                 batch.push((
                     entry.asset_id,
-                    entry.market,
+                    condition.to_string(),
                     ts_ms,
                     ts,
                     hash.clone(),

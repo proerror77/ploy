@@ -181,7 +181,29 @@ pub async fn run_orderbook_history_mode(
             "starting orderbook-history backfill"
         );
 
-        let inserted = collector.backfill_asset(asset_id, start_ms, end_ms).await?;
+        let condition_id_override = match sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT NULLIF(BTRIM(metadata->>'condition_id'), '')
+            FROM collector_token_targets
+            WHERE token_id = $1
+            "#,
+        )
+        .bind(asset_id)
+        .fetch_optional(store.pool())
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => None,
+        };
+
+        let inserted = collector
+            .backfill_asset_with_condition(
+                asset_id,
+                condition_id_override.as_deref(),
+                start_ms,
+                end_ms,
+            )
+            .await?;
         info!(
             asset_id = asset_id.as_str(),
             inserted, "orderbook-history backfill done"
