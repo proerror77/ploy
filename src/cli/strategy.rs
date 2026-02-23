@@ -551,7 +551,7 @@ async fn list_strategies() -> Result<()> {
 /// Start a strategy
 fn enforce_legacy_strategy_live_gate(dry_run: bool) -> Result<()> {
     if !dry_run && !legacy_strategy_live_allowed() {
-        let msg = "legacy `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path) or set PLOY_ALLOW_LEGACY_STRATEGY_LIVE=true for explicit override";
+        let msg = "legacy `ploy strategy start` live runtime is disabled by default; use `ploy platform start` (Coordinator/Gateway path)";
         warn!("{msg}");
         println!("\x1b[31m✗ {}\x1b[0m", msg);
         return Err(anyhow::anyhow!(msg));
@@ -2662,7 +2662,7 @@ mod tests {
         let err = enforce_legacy_strategy_live_gate(false)
             .err()
             .expect("live should be blocked without explicit override");
-        assert!(err.to_string().contains("PLOY_ALLOW_LEGACY_STRATEGY_LIVE"));
+        assert!(err.to_string().contains("disabled by default"));
 
         match prev_strategy.as_deref() {
             Some(v) => set_env(strategy_key, Some(v)),
@@ -2675,7 +2675,7 @@ mod tests {
     }
 
     #[test]
-    fn strategy_live_gate_allows_live_with_strategy_override() {
+    fn strategy_live_gate_blocks_even_with_strategy_override() {
         let _guard = ENV_LOCK.lock().unwrap();
         let strategy_key = "PLOY_ALLOW_LEGACY_STRATEGY_LIVE";
         let global_key = "PLOY_ALLOW_LEGACY_LIVE";
@@ -2684,7 +2684,10 @@ mod tests {
 
         set_env(global_key, None);
         set_env(strategy_key, Some("true"));
-        assert!(enforce_legacy_strategy_live_gate(false).is_ok());
+        let err = enforce_legacy_strategy_live_gate(false)
+            .err()
+            .expect("legacy live should still be blocked");
+        assert!(err.to_string().contains("disabled by default"));
 
         match prev_strategy.as_deref() {
             Some(v) => set_env(strategy_key, Some(v)),
