@@ -3,7 +3,15 @@
 Train a TCN to predict final YES settlement outcome from market-state snapshots:
   - Polymarket CLOB orderbook snapshots (YES + NO top-of-book prices)
   - Recent trade-tick context (counts/volume/vwap/last)
+  - Pre-entry realized volatility features (short + long windows)
   - Official settlement labels from pm_token_settlements
+
+Entry timing:
+  - uses snapshots inside a configurable [start, end] window (seconds before
+    each market's final observable orderbook timestamp).
+  - default by timeframe:
+      5m  -> [120s, 0s]   (last 2 minutes)
+      15m -> [240s, 0s]   (last 4 minutes; you can tighten to 180s if needed)
 
 Label:
   y_yes_win = 1 if YES settles to 1.0, else 0.
@@ -48,6 +56,14 @@ FEATURE_ORDER = [
     "no_trade_volume",
     "yes_trade_vwap",
     "no_trade_vwap",
+    "yes_mid_vol_short_bps",
+    "yes_mid_vol_long_bps",
+    "no_mid_vol_short_bps",
+    "no_mid_vol_long_bps",
+    "spot_now",
+    "spot_start",
+    "spot_vs_start_ret_bps",
+    "secs_to_anchor",
 ]
 
 
@@ -64,6 +80,7 @@ class SequenceDataset:
     x: List[List[List[float]]]  # [N, L, F]
     y: List[int]
     ts: List[str]
+    group: List[str]  # condition_id (sequence key)
     seq_len: int
     feature_dim: int
 
@@ -73,6 +90,7 @@ def _slice_sequence_dataset(ds: SequenceDataset, idxs: List[int]) -> SequenceDat
         x=[ds.x[i] for i in idxs],
         y=[ds.y[i] for i in idxs],
         ts=[ds.ts[i] for i in idxs],
+        group=[ds.group[i] for i in idxs],
         seq_len=ds.seq_len,
         feature_dim=ds.feature_dim,
     )
@@ -89,16 +107,36 @@ def split_train_val_sequences(
     if not (0.05 <= val_ratio <= 0.5):
         raise SystemExit("--val-ratio must be in [0.05, 0.5]")
 
-    idx = list(range(n))
-    idx.sort(key=lambda i: ds.ts[i])
+    # Group-aware split: keep each condition_id in only one side.
+    group_last_ts: Dict[str, str] = {}
+    group_count: Dict[str, int] = {}
+    for g, t in zip(ds.group, ds.ts):
+        group_count[g] = group_count.get(g, 0) + 1
+        if g not in group_last_ts or t > group_last_ts[g]:
+            group_last_ts[g] = t
 
-    val_n = max(int(n * val_ratio), min_val_samples)
-    # Keep at least 10 samples in training side.
-    val_n = min(val_n, n - 10)
-    val_n = max(1, val_n)
+    groups = sorted(group_last_ts.keys(), key=lambda g: group_last_ts[g])
+    if len(groups) < 2:
+        raise SystemExit("dataset has <2 groups; cannot split train/val safely")
 
-    train_idx = idx[:-val_n]
-    val_idx = idx[-val_n:]
+    target_val_rows = max(int(n * val_ratio), min_val_samples)
+    val_groups: List[str] = []
+    val_rows = 0
+    for g in reversed(groups):
+        if len(groups) - len(val_groups) <= 1:
+            break
+        val_groups.append(g)
+        val_rows += group_count.get(g, 0)
+        if val_rows >= target_val_rows:
+            break
+
+    val_set = set(val_groups)
+    train_idx = [i for i in range(n) if ds.group[i] not in val_set]
+    val_idx = [i for i in range(n) if ds.group[i] in val_set]
+    if len(train_idx) < 10 or len(val_idx) < 1:
+        raise SystemExit(
+            f"group split too small for train/val: train={len(train_idx)} val={len(val_idx)}"
+        )
     return _slice_sequence_dataset(ds, train_idx), _slice_sequence_dataset(ds, val_idx)
 
 
@@ -151,6 +189,15 @@ def log_loss(y_true: List[int], p: List[float]) -> float:
     return s / max(1, len(y_true))
 
 
+def timeframe_bucket_from_market_slug(market_slug: str) -> str:
+    slug = (market_slug or "").lower()
+    if "-5m-" in slug:
+        return "5m"
+    if "-15m-" in slug:
+        return "15m"
+    return "other"
+
+
 def evaluate_ev_policy(
     y_true: List[int],
     p_pred: List[float],
@@ -160,60 +207,81 @@ def evaluate_ev_policy(
     edge_threshold: float,
 ) -> Dict[str, float]:
     """
-    Evaluate a simple side-selection policy:
-      ev_yes = p_yes - yes_ask - costs
-      ev_no  = (1 - p_yes) - no_ask - costs
-    take side with higher EV if EV >= edge_threshold.
+    Binary-options EV on normalized stake (stake=1.0):
+      expected_roi_yes = p_yes / (yes_ask + costs) - 1
+      expected_roi_no  = p_no  / (no_ask  + costs) - 1
+
+    Choose side with higher expected ROI, and trade only if expected ROI
+    clears `edge_threshold` (minimum expected ROI gate).
+
+    Realized ROI per trade:
+      win  -> 1 / entry_cost - 1
+      lose -> -1
     """
     total_cost = fee_buffer + slippage_buffer
     trades = 0
     wins = 0
     skipped_bad_price = 0
-    sum_pred_ev = 0.0
-    total_pnl = 0.0
+    sum_pred_roi = 0.0
+    total_realized_roi = 0.0
+    win_roi_sum = 0.0
+    loss_roi_sum = 0.0
+    sum_entry_cost = 0.0
 
     for yt, pp, seq in zip(y_true, p_pred, x_seq):
         last = seq[-1]
         # FEATURE_ORDER indices
         yes_ask = float(last[1])
         no_ask = float(last[4])
+        yes_cost = yes_ask + total_cost
+        no_cost = no_ask + total_cost
 
         if (
             (not math.isfinite(yes_ask))
             or (not math.isfinite(no_ask))
-            or yes_ask <= 0.0
-            or no_ask <= 0.0
-            or yes_ask >= 1.0
-            or no_ask >= 1.0
+            or (not math.isfinite(yes_cost))
+            or (not math.isfinite(no_cost))
+            or yes_cost <= 0.0
+            or no_cost <= 0.0
         ):
             skipped_bad_price += 1
             continue
 
-        ev_yes = pp - yes_ask - total_cost
-        ev_no = (1.0 - pp) - no_ask - total_cost
+        p_yes = min(1.0, max(0.0, float(pp)))
+        p_no = 1.0 - p_yes
+        ev_roi_yes = (p_yes / yes_cost) - 1.0
+        ev_roi_no = (p_no / no_cost) - 1.0
 
-        if ev_yes >= ev_no:
+        if ev_roi_yes >= ev_roi_no:
             side = "YES"
-            best_ev = ev_yes
+            best_ev_roi = ev_roi_yes
+            entry_cost = yes_cost
         else:
             side = "NO"
-            best_ev = ev_no
+            best_ev_roi = ev_roi_no
+            entry_cost = no_cost
 
-        if best_ev < edge_threshold:
+        if best_ev_roi < edge_threshold:
             continue
 
         trades += 1
-        sum_pred_ev += best_ev
+        sum_pred_roi += best_ev_roi
+        sum_entry_cost += entry_cost
 
         if side == "YES":
-            pnl = (1.0 - yes_ask - total_cost) if yt == 1 else (-yes_ask - total_cost)
+            realized_roi = ((1.0 / yes_cost) - 1.0) if yt == 1 else -1.0
         else:
-            pnl = (1.0 - no_ask - total_cost) if yt == 0 else (-no_ask - total_cost)
+            realized_roi = ((1.0 / no_cost) - 1.0) if yt == 0 else -1.0
 
-        total_pnl += pnl
-        if pnl > 0.0:
+        total_realized_roi += realized_roi
+        if realized_roi > 0.0:
             wins += 1
+            win_roi_sum += realized_roi
+        else:
+            loss_roi_sum += realized_roi
 
+    avg_realized_roi = (total_realized_roi / max(1, trades))
+    avg_pred_ev_roi = (sum_pred_roi / max(1, trades))
     return {
         "edge_threshold": edge_threshold,
         "fee_buffer": fee_buffer,
@@ -223,10 +291,18 @@ def evaluate_ev_policy(
         "trades": float(trades),
         "trade_rate": (trades / max(1, len(y_true))),
         "hit_rate": (wins / max(1, trades)),
-        "predicted_ev_sum": sum_pred_ev,
-        "predicted_ev_avg_per_trade": (sum_pred_ev / max(1, trades)),
-        "realized_pnl_sum": total_pnl,
-        "realized_pnl_avg_per_trade": (total_pnl / max(1, trades)),
+        "predicted_ev_sum": sum_pred_roi,
+        "predicted_ev_avg_per_trade": avg_pred_ev_roi,
+        "predicted_ev_avg_per_trade_pct": avg_pred_ev_roi * 100.0,
+        "realized_pnl_sum": total_realized_roi,
+        "realized_pnl_sum_pct": total_realized_roi * 100.0,
+        "realized_pnl_avg_per_trade": avg_realized_roi,
+        "realized_pnl_avg_per_trade_pct": avg_realized_roi * 100.0,
+        "entry_notional_sum": float(trades),
+        "realized_roi_on_stake": avg_realized_roi,
+        "avg_win_pnl": (win_roi_sum / max(1, wins)),
+        "avg_loss_pnl": (loss_roi_sum / max(1, trades - wins)),
+        "avg_entry_cost": (sum_entry_cost / max(1, trades)),
         "skipped_bad_price": float(skipped_bad_price),
     }
 
@@ -241,11 +317,16 @@ def select_best_edge_threshold(
     threshold_max: float,
     threshold_step: float,
     min_val_trades: int,
+    min_val_trade_rate: float,
+    abstain_on_non_positive_val_pnl: bool,
 ) -> Tuple[float, Dict[str, float]]:
+    abstain_thr = 2.0  # larger than any feasible per-share EV in binary options
     if threshold_step <= 0.0:
         raise SystemExit("--edge-threshold-step must be > 0")
     if threshold_max < threshold_min:
         raise SystemExit("--edge-threshold-max must be >= --edge-threshold-min")
+    if min_val_trade_rate < 0.0 or min_val_trade_rate > 1.0:
+        raise SystemExit("--min-val-trade-rate must be in [0,1]")
 
     thresholds: List[float] = []
     t = threshold_min
@@ -257,6 +338,10 @@ def select_best_edge_threshold(
     best_eval: Optional[Dict[str, float]] = None
     best_sum = -1e18
     best_avg = -1e18
+    relaxed_eval: Optional[Dict[str, float]] = None
+    relaxed_thr = threshold_min
+    relaxed_sum = -1e18
+    relaxed_avg = -1e18
 
     for thr in thresholds:
         ev = evaluate_ev_policy(
@@ -268,20 +353,36 @@ def select_best_edge_threshold(
             edge_threshold=thr,
         )
         trades = int(ev["trades"])
+        trade_rate = float(ev["trade_rate"])
         pnl_sum = float(ev["realized_pnl_sum"])
         pnl_avg = float(ev["realized_pnl_avg_per_trade"])
 
-        if trades >= min_val_trades and (
-            (pnl_sum > best_sum) or (pnl_sum == best_sum and pnl_avg > best_avg)
+        if (
+            trades >= min_val_trades
+            and trade_rate >= min_val_trade_rate
+            and (
+                (pnl_sum > best_sum) or (pnl_sum == best_sum and pnl_avg > best_avg)
+            )
         ):
             best_sum = pnl_sum
             best_avg = pnl_avg
             best_eval = ev
             best_thr = thr
 
+        if trades > 0 and pnl_sum > 0.0 and (
+            (pnl_sum > relaxed_sum) or (pnl_sum == relaxed_sum and pnl_avg > relaxed_avg)
+        ):
+            relaxed_sum = pnl_sum
+            relaxed_avg = pnl_avg
+            relaxed_eval = ev
+            relaxed_thr = thr
+
     if best_eval is None:
+        if relaxed_eval is not None:
+            relaxed_eval["relaxed_threshold_selection"] = 1.0
+            relaxed_eval["relaxed_reason"] = "no_threshold_met_trade_rate_or_min_trades"
+            return relaxed_thr, relaxed_eval
         # No threshold produced enough validation trades; abstain.
-        abstain_thr = threshold_max + threshold_step
         best_eval = evaluate_ev_policy(
             y_true=y_val,
             p_pred=p_val,
@@ -295,23 +396,25 @@ def select_best_edge_threshold(
         best_thr = abstain_thr
         return best_thr, best_eval
 
-    # Safety gate: only deploy when validation realized PnL is clearly positive.
-    if (
-        float(best_eval.get("realized_pnl_sum", 0.0)) <= 0.0
-        or float(best_eval.get("realized_pnl_avg_per_trade", 0.0)) <= 0.0
-    ):
-        abstain_thr = threshold_max + threshold_step
-        best_eval = evaluate_ev_policy(
-            y_true=y_val,
-            p_pred=p_val,
-            x_seq=x_val,
-            fee_buffer=fee_buffer,
-            slippage_buffer=slippage_buffer,
-            edge_threshold=abstain_thr,
-        )
-        best_eval["abstain_recommended"] = 1.0
-        best_eval["abstain_reason"] = "non_positive_validation_pnl"
-        best_thr = abstain_thr
+    # Safety gate: by default only deploy when validation realized PnL is positive.
+    if abstain_on_non_positive_val_pnl:
+        if (
+            float(best_eval.get("realized_pnl_sum", 0.0)) <= 0.0
+            or float(best_eval.get("realized_pnl_avg_per_trade", 0.0)) <= 0.0
+        ):
+            best_eval = evaluate_ev_policy(
+                y_true=y_val,
+                p_pred=p_val,
+                x_seq=x_val,
+                fee_buffer=fee_buffer,
+                slippage_buffer=slippage_buffer,
+                edge_threshold=abstain_thr,
+            )
+            best_eval["abstain_recommended"] = 1.0
+            best_eval["abstain_reason"] = "non_positive_validation_pnl"
+            best_thr = abstain_thr
+    else:
+        best_eval["abstain_gate_disabled"] = 1.0
 
     return best_thr, best_eval
 
@@ -319,29 +422,48 @@ def select_best_edge_threshold(
 def chronological_split_sequences(
     ds: SequenceDataset,
     test_ratio: float,
+    min_total_samples: int,
 ) -> Tuple[SequenceDataset, SequenceDataset]:
     n = len(ds.y)
-    if n < 100:
-        raise SystemExit(f"dataset too small: n={n} (need >=100)")
+    if min_total_samples <= 0:
+        raise SystemExit("--min-total-samples must be > 0")
+    if n < min_total_samples:
+        raise SystemExit(f"dataset too small: n={n} (need >={min_total_samples})")
     if not (0.05 <= test_ratio <= 0.5):
         raise SystemExit("--test-ratio must be in [0.05, 0.5]")
 
-    idx = list(range(n))
-    idx.sort(key=lambda i: ds.ts[i])
+    # Group-aware chronological split by condition_id.
+    group_last_ts: Dict[str, str] = {}
+    group_count: Dict[str, int] = {}
+    for g, t in zip(ds.group, ds.ts):
+        group_count[g] = group_count.get(g, 0) + 1
+        if g not in group_last_ts or t > group_last_ts[g]:
+            group_last_ts[g] = t
 
-    cut = int((1.0 - test_ratio) * n)
-    cut = max(1, min(cut, n - 1))
+    groups = sorted(group_last_ts.keys(), key=lambda g: group_last_ts[g])
+    if len(groups) < 2:
+        raise SystemExit("dataset has <2 groups; cannot split train/test safely")
 
-    def take(idxs: List[int]) -> SequenceDataset:
-        return SequenceDataset(
-            x=[ds.x[i] for i in idxs],
-            y=[ds.y[i] for i in idxs],
-            ts=[ds.ts[i] for i in idxs],
-            seq_len=ds.seq_len,
-            feature_dim=ds.feature_dim,
+    target_test_rows = max(1, int(n * test_ratio))
+    test_groups: List[str] = []
+    test_rows = 0
+    for g in reversed(groups):
+        if len(groups) - len(test_groups) <= 1:
+            break
+        test_groups.append(g)
+        test_rows += group_count.get(g, 0)
+        if test_rows >= target_test_rows:
+            break
+
+    test_set = set(test_groups)
+    train_idx = [i for i in range(n) if ds.group[i] not in test_set]
+    test_idx = [i for i in range(n) if ds.group[i] in test_set]
+    if len(train_idx) < 10 or len(test_idx) < 1:
+        raise SystemExit(
+            f"group split too small for train/test: train={len(train_idx)} test={len(test_idx)}"
         )
 
-    return take(idx[:cut]), take(idx[cut:])
+    return _slice_sequence_dataset(ds, train_idx), _slice_sequence_dataset(ds, test_idx)
 
 
 def build_sequences(ds: Dataset, seq_len: int) -> SequenceDataset:
@@ -357,6 +479,7 @@ def build_sequences(ds: Dataset, seq_len: int) -> SequenceDataset:
     x_seq: List[List[List[float]]] = []
     y: List[int] = []
     ts: List[str] = []
+    group: List[str] = []
 
     for i in idx:
         g = ds.group[i]
@@ -372,11 +495,13 @@ def build_sequences(ds: Dataset, seq_len: int) -> SequenceDataset:
         x_seq.append([row[:] for row in seq])
         y.append(ds.y[i])
         ts.append(ds.ts[i])
+        group.append(g)
 
     return SequenceDataset(
         x=x_seq,
         y=y,
         ts=ts,
+        group=group,
         seq_len=seq_len,
         feature_dim=len(ds.x[0]),
     )
@@ -432,8 +557,14 @@ def fetch_from_db(
     sample_seconds: int,
     pair_window_seconds: int,
     trade_lookback_seconds: int,
+    entry_window_start_seconds: int,
+    entry_window_end_seconds: int,
+    vol_short_window_seconds: int,
+    vol_long_window_seconds: int,
+    market_timeframe: str,
+    market_asset: str,
     limit: int,
-) -> Tuple[Dataset, List[Dict[str, object]]]:
+) -> Tuple[Dataset, List[Dict[str, object]], Dict[str, str]]:
     try:
         import psycopg2  # type: ignore
     except Exception as e:
@@ -451,6 +582,22 @@ def fetch_from_db(
         raise SystemExit("--pair-window-seconds must be > 0")
     if trade_lookback_seconds <= 0:
         raise SystemExit("--trade-lookback-seconds must be > 0")
+    if entry_window_start_seconds <= 0:
+        raise SystemExit("--entry-window-start-seconds must be > 0")
+    if entry_window_end_seconds < 0:
+        raise SystemExit("--entry-window-end-seconds must be >= 0")
+    if entry_window_start_seconds <= entry_window_end_seconds:
+        raise SystemExit("--entry-window-start-seconds must be > --entry-window-end-seconds")
+    if vol_short_window_seconds <= 0:
+        raise SystemExit("--vol-short-window-seconds must be > 0")
+    if vol_long_window_seconds <= 0:
+        raise SystemExit("--vol-long-window-seconds must be > 0")
+    if vol_long_window_seconds < vol_short_window_seconds:
+        raise SystemExit("--vol-long-window-seconds must be >= --vol-short-window-seconds")
+    if market_timeframe not in ("all", "5m", "15m"):
+        raise SystemExit("--market-timeframe must be one of: all, 5m, 15m")
+    if market_asset not in ("all", "btc", "eth", "sol", "other"):
+        raise SystemExit("--market-asset must be one of: all, btc, eth, sol, other")
     if limit <= 0:
         raise SystemExit("--limit must be > 0")
 
@@ -458,6 +605,7 @@ def fetch_from_db(
     WITH settled AS (
       SELECT
         condition_id,
+        MAX(market_slug) AS market_slug,
         MAX(token_id) FILTER (
           WHERE LOWER(TRIM(COALESCE(outcome, ''))) IN ('yes', 'up', 'higher', 'above', 'true')
         ) AS yes_token_id,
@@ -469,11 +617,25 @@ def fetch_from_db(
         )::double precision AS yes_settled_price,
         MAX(settled_price) FILTER (
           WHERE LOWER(TRIM(COALESCE(outcome, ''))) IN ('no', 'down', 'lower', 'below', 'false')
-        )::double precision AS no_settled_price
+        )::double precision AS no_settled_price,
+        MAX(resolved_at) AS resolved_at
       FROM pm_token_settlements
       WHERE resolved = TRUE
         AND settled_price IS NOT NULL
         AND condition_id IS NOT NULL
+        AND (%s::text = 'all' OR LOWER(COALESCE(market_slug, '')) LIKE %s)
+        AND (
+          %s::text = 'all'
+          OR (%s::text = 'btc' AND LOWER(COALESCE(market_slug, '')) LIKE 'btc-%%')
+          OR (%s::text = 'eth' AND LOWER(COALESCE(market_slug, '')) LIKE 'eth-%%')
+          OR (%s::text = 'sol' AND LOWER(COALESCE(market_slug, '')) LIKE 'sol-%%')
+          OR (
+            %s::text = 'other'
+            AND LOWER(COALESCE(market_slug, '')) NOT LIKE 'btc-%%'
+            AND LOWER(COALESCE(market_slug, '')) NOT LIKE 'eth-%%'
+            AND LOWER(COALESCE(market_slug, '')) NOT LIKE 'sol-%%'
+          )
+        )
       GROUP BY condition_id
       HAVING
         MAX(token_id) FILTER (
@@ -486,13 +648,24 @@ def fetch_from_db(
     yes_raw AS (
       SELECT
         st.condition_id,
+        st.market_slug,
         st.yes_token_id,
         st.no_token_id,
         st.yes_settled_price,
         st.no_settled_price,
+        CASE
+          WHEN LOWER(COALESCE(st.market_slug, '')) LIKE 'btc-%%' THEN 'BTCUSDT'
+          WHEN LOWER(COALESCE(st.market_slug, '')) LIKE 'eth-%%' THEN 'ETHUSDT'
+          WHEN LOWER(COALESCE(st.market_slug, '')) LIKE 'sol-%%' THEN 'SOLUSDT'
+          ELSE NULL
+        END AS binance_symbol,
+        TO_TIMESTAMP(
+          NULLIF(SUBSTRING(COALESCE(st.market_slug, '') FROM '([0-9]{9,})$'), '')::double precision
+        ) AS market_start_ts,
         s.received_at AS ts,
         (s.bids->0->>'price')::double precision AS yes_best_bid,
         (s.asks->0->>'price')::double precision AS yes_best_ask,
+        MAX(s.received_at) OVER (PARTITION BY st.condition_id) AS anchor_ts,
         ROW_NUMBER() OVER (
           PARTITION BY st.condition_id, FLOOR(EXTRACT(EPOCH FROM s.received_at) / %s)
           ORDER BY s.received_at ASC
@@ -507,14 +680,20 @@ def fetch_from_db(
       SELECT *
       FROM yes_raw
       WHERE rn = 1
+        AND ts > anchor_ts - (%s::bigint * INTERVAL '1 second')
+        AND ts <= anchor_ts - (%s::bigint * INTERVAL '1 second')
       ORDER BY ts ASC
       LIMIT %s
     ),
     paired AS (
       SELECT
         y.condition_id,
+        y.market_slug,
         y.yes_token_id,
         y.no_token_id,
+        y.binance_symbol,
+        y.market_start_ts,
+        y.anchor_ts,
         y.ts,
         y.yes_best_bid,
         y.yes_best_ask,
@@ -536,6 +715,7 @@ def fetch_from_db(
     SELECT
       p.ts,
       p.condition_id,
+      p.market_slug,
       p.yes_token_id,
       p.no_token_id,
       p.yes_best_bid,
@@ -550,6 +730,17 @@ def fetch_from_db(
       nt.cnt AS no_trade_count,
       nt.vol AS no_trade_volume,
       nt.vwap AS no_trade_vwap,
+      yv.vol_short_bps AS yes_mid_vol_short_bps,
+      yv.vol_long_bps AS yes_mid_vol_long_bps,
+      nv.vol_short_bps AS no_mid_vol_short_bps,
+      nv.vol_long_bps AS no_mid_vol_long_bps,
+      bn.price AS spot_now,
+      bs.price AS spot_start,
+      COALESCE(
+        ((bn.price - bs.price) / NULLIF(bs.price, 0.0)) * 10000.0,
+        0.0
+      )::double precision AS spot_vs_start_ret_bps,
+      GREATEST(EXTRACT(EPOCH FROM (p.anchor_ts - p.ts)), 0.0)::double precision AS secs_to_anchor,
       p.yes_settled_price,
       p.no_settled_price
     FROM paired p
@@ -575,23 +766,134 @@ def fetch_from_db(
         AND t.trade_ts <= p.ts
         AND t.trade_ts > p.ts - (%s::bigint * INTERVAL '1 second')
     ) nt ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(
+          (
+            STDDEV_SAMP(mid_price) FILTER (
+              WHERE sample_ts > p.ts - (%s::bigint * INTERVAL '1 second')
+            ) / NULLIF(
+              AVG(mid_price) FILTER (
+                WHERE sample_ts > p.ts - (%s::bigint * INTERVAL '1 second')
+              ),
+              0
+            )
+          ) * 10000.0,
+          0.0
+        )::double precision AS vol_short_bps,
+        COALESCE(
+          (STDDEV_SAMP(mid_price) / NULLIF(AVG(mid_price), 0)) * 10000.0,
+          0.0
+        )::double precision AS vol_long_bps
+      FROM (
+        SELECT
+          s3.received_at AS sample_ts,
+          COALESCE(
+            0.5 * (
+              (s3.bids->0->>'price')::double precision +
+              (s3.asks->0->>'price')::double precision
+            ),
+            (s3.bids->0->>'price')::double precision,
+            (s3.asks->0->>'price')::double precision
+          ) AS mid_price
+        FROM clob_orderbook_snapshots s3
+        WHERE s3.token_id = p.yes_token_id
+          AND s3.received_at <= p.ts
+          AND s3.received_at > p.ts - (%s::bigint * INTERVAL '1 second')
+      ) v
+      WHERE mid_price IS NOT NULL
+        AND mid_price > 0.0
+    ) yv ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(
+          (
+            STDDEV_SAMP(mid_price) FILTER (
+              WHERE sample_ts > p.ts - (%s::bigint * INTERVAL '1 second')
+            ) / NULLIF(
+              AVG(mid_price) FILTER (
+                WHERE sample_ts > p.ts - (%s::bigint * INTERVAL '1 second')
+              ),
+              0
+            )
+          ) * 10000.0,
+          0.0
+        )::double precision AS vol_short_bps,
+        COALESCE(
+          (STDDEV_SAMP(mid_price) / NULLIF(AVG(mid_price), 0)) * 10000.0,
+          0.0
+        )::double precision AS vol_long_bps
+      FROM (
+        SELECT
+          s4.received_at AS sample_ts,
+          COALESCE(
+            0.5 * (
+              (s4.bids->0->>'price')::double precision +
+              (s4.asks->0->>'price')::double precision
+            ),
+            (s4.bids->0->>'price')::double precision,
+            (s4.asks->0->>'price')::double precision
+          ) AS mid_price
+        FROM clob_orderbook_snapshots s4
+        WHERE s4.token_id = p.no_token_id
+          AND s4.received_at <= p.ts
+          AND s4.received_at > p.ts - (%s::bigint * INTERVAL '1 second')
+      ) v
+      WHERE mid_price IS NOT NULL
+        AND mid_price > 0.0
+    ) nv ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT b.price::double precision AS price
+      FROM binance_price_ticks b
+      WHERE p.binance_symbol IS NOT NULL
+        AND b.symbol = p.binance_symbol
+        AND b.trade_time <= p.ts
+      ORDER BY b.trade_time DESC
+      LIMIT 1
+    ) bn ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT b.price::double precision AS price
+      FROM binance_price_ticks b
+      WHERE p.binance_symbol IS NOT NULL
+        AND p.market_start_ts IS NOT NULL
+        AND b.symbol = p.binance_symbol
+        AND b.trade_time <= p.market_start_ts
+      ORDER BY b.trade_time DESC
+      LIMIT 1
+    ) bs ON TRUE
     ORDER BY p.ts ASC
     """
 
     params = [
+        market_timeframe,
+        ("%-{}-%".format(market_timeframe) if market_timeframe in ("5m", "15m") else "%"),
+        market_asset,
+        market_asset,
+        market_asset,
+        market_asset,
+        market_asset,
         sample_seconds,
         lookback_hours,
+        entry_window_start_seconds,
+        entry_window_end_seconds,
         limit,
         pair_window_seconds,
         pair_window_seconds,
         trade_lookback_seconds,
         trade_lookback_seconds,
+        vol_short_window_seconds,
+        vol_short_window_seconds,
+        vol_long_window_seconds,
+        vol_short_window_seconds,
+        vol_short_window_seconds,
+        vol_long_window_seconds,
     ]
 
     x: List[List[float]] = []
     y: List[int] = []
     ts: List[str] = []
     group: List[str] = []
+    condition_market_slug: Dict[str, str] = {}
     exported_rows: List[Dict[str, object]] = []
 
     skipped_bad_book = 0
@@ -605,22 +907,31 @@ def fetch_from_db(
             for row in cur.fetchall():
                 ts_raw = row[0]
                 condition_id = row[1]
-                yes_token_id = row[2]
-                no_token_id = row[3]
-                yes_best_bid = _to_float(row[4])
-                yes_best_ask = _to_float(row[5])
-                no_best_bid = _to_float(row[6])
-                no_best_ask = _to_float(row[7])
-                yes_last_trade = _to_float(row[8])
-                yes_trade_count = _to_float(row[9]) or 0.0
-                yes_trade_volume = _to_float(row[10]) or 0.0
-                yes_trade_vwap = _to_float(row[11])
-                no_last_trade = _to_float(row[12])
-                no_trade_count = _to_float(row[13]) or 0.0
-                no_trade_volume = _to_float(row[14]) or 0.0
-                no_trade_vwap = _to_float(row[15])
-                yes_settled = _to_float(row[16])
-                no_settled = _to_float(row[17])
+                market_slug = str(row[2] or "")
+                yes_token_id = row[3]
+                no_token_id = row[4]
+                yes_best_bid = _to_float(row[5])
+                yes_best_ask = _to_float(row[6])
+                no_best_bid = _to_float(row[7])
+                no_best_ask = _to_float(row[8])
+                yes_last_trade = _to_float(row[9])
+                yes_trade_count = _to_float(row[10]) or 0.0
+                yes_trade_volume = _to_float(row[11]) or 0.0
+                yes_trade_vwap = _to_float(row[12])
+                no_last_trade = _to_float(row[13])
+                no_trade_count = _to_float(row[14]) or 0.0
+                no_trade_volume = _to_float(row[15]) or 0.0
+                no_trade_vwap = _to_float(row[16])
+                yes_vol_short_bps = _to_float(row[17]) or 0.0
+                yes_vol_long_bps = _to_float(row[18]) or 0.0
+                no_vol_short_bps = _to_float(row[19]) or 0.0
+                no_vol_long_bps = _to_float(row[20]) or 0.0
+                spot_now = _to_float(row[21])
+                spot_start = _to_float(row[22])
+                spot_vs_start_ret_bps = _to_float(row[23]) or 0.0
+                secs_to_anchor = _to_float(row[24]) or 0.0
+                yes_settled = _to_float(row[25])
+                no_settled = _to_float(row[26])
 
                 yes_mid = _mid_price(yes_best_bid, yes_best_ask)
                 no_mid = _mid_price(no_best_bid, no_best_ask)
@@ -642,6 +953,8 @@ def fetch_from_db(
                 no_last = no_last_trade if no_last_trade is not None else no_mid
                 yes_vwap = yes_trade_vwap if yes_trade_vwap is not None else yes_mid
                 no_vwap = no_trade_vwap if no_trade_vwap is not None else no_mid
+                spot_now_f = spot_now if spot_now is not None else 0.0
+                spot_start_f = spot_start if spot_start is not None else 0.0
 
                 feats = [
                     yes_best_bid if yes_best_bid is not None else yes_mid,
@@ -661,6 +974,14 @@ def fetch_from_db(
                     no_trade_volume,
                     yes_vwap,
                     no_vwap,
+                    yes_vol_short_bps,
+                    yes_vol_long_bps,
+                    no_vol_short_bps,
+                    no_vol_long_bps,
+                    spot_now_f,
+                    spot_start_f,
+                    spot_vs_start_ret_bps,
+                    secs_to_anchor,
                 ]
 
                 if any((v is None or (not math.isfinite(v))) for v in feats):
@@ -672,6 +993,8 @@ def fetch_from_db(
                 y.append(y_yes_win)
                 ts.append(ts_iso)
                 group.append(str(condition_id))
+                if condition_id is not None and market_slug:
+                    condition_market_slug[str(condition_id)] = market_slug
 
                 exported_rows.append(
                     {
@@ -679,6 +1002,7 @@ def fetch_from_db(
                         "condition_id": condition_id,
                         "yes_token_id": yes_token_id,
                         "no_token_id": no_token_id,
+                        "market_slug": market_slug,
                         "yes_best_bid": float(feats[0]),
                         "yes_best_ask": float(feats[1]),
                         "no_best_bid": float(feats[3]),
@@ -687,6 +1011,14 @@ def fetch_from_db(
                         "no_settled_price": no_settled,
                         "yes_settlement_success": y_yes_win,
                         "no_settlement_success": 1 - y_yes_win,
+                        "yes_mid_vol_short_bps": yes_vol_short_bps,
+                        "yes_mid_vol_long_bps": yes_vol_long_bps,
+                        "no_mid_vol_short_bps": no_vol_short_bps,
+                        "no_mid_vol_long_bps": no_vol_long_bps,
+                        "spot_now": spot_now_f,
+                        "spot_start": spot_start_f,
+                        "spot_vs_start_ret_bps": spot_vs_start_ret_bps,
+                        "secs_to_anchor": secs_to_anchor,
                     }
                 )
     finally:
@@ -710,7 +1042,7 @@ def fetch_from_db(
         )
     )
 
-    return Dataset(x=x, y=y, ts=ts, group=group), exported_rows
+    return Dataset(x=x, y=y, ts=ts, group=group), exported_rows, condition_market_slug
 
 
 def maybe_save_parquet(rows: List[Dict[str, object]], path: str) -> None:
@@ -736,6 +1068,7 @@ def maybe_save_parquet(rows: List[Dict[str, object]], path: str) -> None:
 def train_and_export_onnx_tcn(
     train_ds: SequenceDataset,
     test_ds: SequenceDataset,
+    condition_market_slug: Optional[Dict[str, str]],
     channels: List[int],
     kernel_size: int,
     dropout: float,
@@ -747,6 +1080,8 @@ def train_and_export_onnx_tcn(
     edge_threshold_max: float,
     edge_threshold_step: float,
     min_val_trades: int,
+    min_val_trade_rate: float,
+    abstain_on_non_positive_val_pnl: bool,
     epochs: int,
     batch_size: int,
     lr: float,
@@ -905,6 +1240,8 @@ def train_and_export_onnx_tcn(
         threshold_max=edge_threshold_max,
         threshold_step=edge_threshold_step,
         min_val_trades=min_val_trades,
+        min_val_trade_rate=min_val_trade_rate,
+        abstain_on_non_positive_val_pnl=abstain_on_non_positive_val_pnl,
     )
 
     test_policy = evaluate_ev_policy(
@@ -923,6 +1260,31 @@ def train_and_export_onnx_tcn(
         slippage_buffer=slippage_buffer,
         edge_threshold=0.0,
     )
+
+    test_policy_by_timeframe: Dict[str, Dict[str, float]] = {}
+    if condition_market_slug:
+        timeframe_idxs: Dict[str, List[int]] = {"5m": [], "15m": [], "other": []}
+        for i, cond in enumerate(test_ds.group):
+            bucket = timeframe_bucket_from_market_slug(condition_market_slug.get(cond, ""))
+            timeframe_idxs[bucket].append(i)
+
+        for bucket, idxs in timeframe_idxs.items():
+            if not idxs:
+                continue
+            y_sub = [test_ds.y[i] for i in idxs]
+            p_sub = [p_test[i] for i in idxs]
+            x_sub = [test_ds.x[i] for i in idxs]
+            cond_count = len({test_ds.group[i] for i in idxs})
+            policy = evaluate_ev_policy(
+                y_true=y_sub,
+                p_pred=p_sub,
+                x_seq=x_sub,
+                fee_buffer=fee_buffer,
+                slippage_buffer=slippage_buffer,
+                edge_threshold=selected_edge_threshold,
+            )
+            policy["conditions"] = float(cond_count)
+            test_policy_by_timeframe[bucket] = policy
 
     metrics = {
         "n_train": len(train_ds.y),
@@ -957,11 +1319,14 @@ def train_and_export_onnx_tcn(
         "metrics": metrics,
         "edge_policy": {
             "selected_edge_threshold": selected_edge_threshold,
-            "selection_objective": "maximize realized_pnl_sum on validation (min trades gate)",
+            "selection_objective": "maximize realized_pnl_sum on validation (min trades + trade_rate gate)",
             "min_val_trades": min_val_trades,
+            "min_val_trade_rate": min_val_trade_rate,
+            "abstain_on_non_positive_val_pnl": 1.0 if abstain_on_non_positive_val_pnl else 0.0,
             "val_policy": val_policy,
             "test_policy": test_policy,
             "test_policy_edge0": test_policy_edge0,
+            "test_policy_by_timeframe": test_policy_by_timeframe,
         },
         "cost_model": {
             "fee_buffer": fee_buffer,
@@ -981,12 +1346,79 @@ def main() -> None:
         help="Postgres URL (or env DATABASE_URL)",
     )
     ap.add_argument("--lookback-hours", type=int, default=336)
-    ap.add_argument("--sample-seconds", type=int, default=30)
+    ap.add_argument("--sample-seconds", type=int, default=5)
     ap.add_argument("--pair-window-seconds", type=int, default=2)
     ap.add_argument("--trade-lookback-seconds", type=int, default=60)
-    ap.add_argument("--seq-len", type=int, default=32)
+    ap.add_argument(
+        "--market-timeframe",
+        choices=["all", "5m", "15m"],
+        default="all",
+        help="filter settled markets by slug timeframe bucket",
+    )
+    ap.add_argument(
+        "--market-asset",
+        choices=["all", "btc", "eth", "sol", "other"],
+        default="all",
+        help="filter settled markets by asset bucket parsed from market_slug prefix",
+    )
+    ap.add_argument(
+        "--entry-window-seconds",
+        type=int,
+        default=None,
+        help="legacy override: use [N, 0] seconds window for all timeframes",
+    )
+    ap.add_argument(
+        "--entry-window-start-seconds-5m",
+        type=int,
+        default=120,
+        help="entry window start (seconds before anchor) for 5m markets",
+    )
+    ap.add_argument(
+        "--entry-window-end-seconds-5m",
+        type=int,
+        default=0,
+        help="entry window end (seconds before anchor) for 5m markets",
+    )
+    ap.add_argument(
+        "--entry-window-start-seconds-15m",
+        type=int,
+        default=240,
+        help="entry window start (seconds before anchor) for 15m markets",
+    )
+    ap.add_argument(
+        "--entry-window-end-seconds-15m",
+        type=int,
+        default=0,
+        help="entry window end (seconds before anchor) for 15m markets",
+    )
+    ap.add_argument(
+        "--entry-window-start-seconds-default",
+        type=int,
+        default=120,
+        help="entry window start (seconds before anchor) when timeframe=all/other",
+    )
+    ap.add_argument(
+        "--entry-window-end-seconds-default",
+        type=int,
+        default=0,
+        help="entry window end (seconds before anchor) when timeframe=all/other",
+    )
+    ap.add_argument(
+        "--vol-short-window-seconds",
+        type=int,
+        default=240,
+        help="short pre-entry volatility window in seconds (default: 4m)",
+    )
+    ap.add_argument(
+        "--vol-long-window-seconds",
+        type=int,
+        default=840,
+        help="long pre-entry volatility window in seconds (default: 14m)",
+    )
+    ap.add_argument("--seq-len", type=int, default=12)
     ap.add_argument("--limit", type=int, default=50000)
     ap.add_argument("--test-ratio", type=float, default=0.2)
+    ap.add_argument("--min-total-samples", type=int, default=100)
     ap.add_argument("--tcn-channels", default="64,64,64")
     ap.add_argument("--tcn-kernel-size", type=int, default=3)
     ap.add_argument("--tcn-dropout", type=float, default=0.1)
@@ -998,6 +1430,17 @@ def main() -> None:
     ap.add_argument("--edge-threshold-max", type=float, default=0.08)
     ap.add_argument("--edge-threshold-step", type=float, default=0.002)
     ap.add_argument("--min-val-trades", type=int, default=100)
+    ap.add_argument(
+        "--min-val-trade-rate",
+        type=float,
+        default=0.02,
+        help="minimum validation trade rate target for threshold selection",
+    )
+    ap.add_argument(
+        "--allow-negative-val-pnl",
+        action="store_true",
+        help="disable abstain gate on non-positive validation pnl (for data collection / high-volume mode)",
+    )
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch-size", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -1022,13 +1465,48 @@ def main() -> None:
     if not channels:
         raise SystemExit("--tcn-channels must not be empty")
 
-    print("Fetching from DB (LOB/tick + settlement)...")
-    point_ds, export_rows = fetch_from_db(
+    if args.entry_window_seconds is not None:
+        entry_window_start_seconds = args.entry_window_seconds
+        entry_window_end_seconds = 0
+    elif args.market_timeframe == "5m":
+        entry_window_start_seconds = args.entry_window_start_seconds_5m
+        entry_window_end_seconds = args.entry_window_end_seconds_5m
+    elif args.market_timeframe == "15m":
+        entry_window_start_seconds = args.entry_window_start_seconds_15m
+        entry_window_end_seconds = args.entry_window_end_seconds_15m
+    else:
+        entry_window_start_seconds = args.entry_window_start_seconds_default
+        entry_window_end_seconds = args.entry_window_end_seconds_default
+
+    if entry_window_start_seconds <= 0:
+        raise SystemExit("entry window start must be > 0")
+    if entry_window_end_seconds < 0:
+        raise SystemExit("entry window end must be >= 0")
+    if entry_window_start_seconds <= entry_window_end_seconds:
+        raise SystemExit("entry window start must be > entry window end")
+
+    print(
+        "Fetching from DB (asset={}, timeframe={}, LOB/tick + settlement, entry window [{}s, {}s], vol windows {}s/{}s)...".format(
+            args.market_asset,
+            args.market_timeframe,
+            entry_window_start_seconds,
+            entry_window_end_seconds,
+            args.vol_short_window_seconds,
+            args.vol_long_window_seconds,
+        )
+    )
+    point_ds, export_rows, condition_market_slug = fetch_from_db(
         db_url=args.db_url,
         lookback_hours=args.lookback_hours,
         sample_seconds=args.sample_seconds,
         pair_window_seconds=args.pair_window_seconds,
         trade_lookback_seconds=args.trade_lookback_seconds,
+        entry_window_start_seconds=entry_window_start_seconds,
+        entry_window_end_seconds=entry_window_end_seconds,
+        vol_short_window_seconds=args.vol_short_window_seconds,
+        vol_long_window_seconds=args.vol_long_window_seconds,
+        market_timeframe=args.market_timeframe,
+        market_asset=args.market_asset,
         limit=args.limit,
     )
     print(f"Point rows: {len(point_ds.y)}")
@@ -1047,12 +1525,17 @@ def main() -> None:
         print("Fetch-only mode complete.")
         return
 
-    train_ds, test_ds = chronological_split_sequences(seq_ds, args.test_ratio)
+    train_ds, test_ds = chronological_split_sequences(
+        seq_ds,
+        args.test_ratio,
+        args.min_total_samples,
+    )
     print(f"Split: train={len(train_ds.y)} test={len(test_ds.y)}")
 
     meta = train_and_export_onnx_tcn(
         train_ds=train_ds,
         test_ds=test_ds,
+        condition_market_slug=condition_market_slug,
         channels=channels,
         kernel_size=args.tcn_kernel_size,
         dropout=args.tcn_dropout,
@@ -1064,6 +1547,8 @@ def main() -> None:
         edge_threshold_max=args.edge_threshold_max,
         edge_threshold_step=args.edge_threshold_step,
         min_val_trades=max(0, args.min_val_trades),
+        min_val_trade_rate=args.min_val_trade_rate,
+        abstain_on_non_positive_val_pnl=not args.allow_negative_val_pnl,
         epochs=args.epochs,
         batch_size=max(1, args.batch_size),
         lr=args.lr,
@@ -1071,6 +1556,21 @@ def main() -> None:
         onnx_path=args.output,
         opset=args.opset,
     )
+    meta["dataset_config"] = {
+        "lookback_hours": args.lookback_hours,
+        "sample_seconds": args.sample_seconds,
+        "pair_window_seconds": args.pair_window_seconds,
+        "trade_lookback_seconds": args.trade_lookback_seconds,
+        "entry_window_start_seconds": entry_window_start_seconds,
+        "entry_window_end_seconds": entry_window_end_seconds,
+        "vol_short_window_seconds": args.vol_short_window_seconds,
+        "vol_long_window_seconds": args.vol_long_window_seconds,
+        "market_timeframe": args.market_timeframe,
+        "market_asset": args.market_asset,
+        "min_total_samples": args.min_total_samples,
+        "min_val_trade_rate": args.min_val_trade_rate,
+        "allow_negative_val_pnl": bool(args.allow_negative_val_pnl),
+    }
 
     os.makedirs(os.path.dirname(args.meta) or ".", exist_ok=True)
     with open(args.meta, "w", encoding="utf-8") as f:
@@ -1087,12 +1587,13 @@ def main() -> None:
     tpol = ep.get("test_policy", {})
     vpol = ep.get("val_policy", {})
     print(
-        "  edge_policy: threshold={:.4f} trades={} hit={:.2f}% avg_pnl={:.5f} pnl_sum={:.3f}".format(
+        "  edge_policy: threshold={:.4f} trades={} hit={:.2f}% avg_roi={:.2f}% roi_on_stake={:.2f}% roi_sum={:.2f}%".format(
             float(ep.get("selected_edge_threshold", 0.0)),
             int(float(tpol.get("trades", 0.0))),
             100.0 * float(tpol.get("hit_rate", 0.0)),
-            float(tpol.get("realized_pnl_avg_per_trade", 0.0)),
-            float(tpol.get("realized_pnl_sum", 0.0)),
+            float(tpol.get("realized_pnl_avg_per_trade_pct", 0.0)),
+            100.0 * float(tpol.get("realized_roi_on_stake", 0.0)),
+            float(tpol.get("realized_pnl_sum_pct", 0.0)),
         )
     )
     if int(float(vpol.get("abstain_recommended", 0.0))) == 1:
