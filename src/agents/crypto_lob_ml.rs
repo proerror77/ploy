@@ -89,6 +89,10 @@ fn default_tcn_trade_lookback_secs() -> u64 {
     60
 }
 
+fn default_tcn_pair_window_secs() -> u64 {
+    2
+}
+
 fn default_tcn_vol_short_window_secs() -> u64 {
     240
 }
@@ -224,6 +228,10 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_tcn_trade_lookback_secs")]
     pub tcn_trade_lookback_secs: u64,
 
+    /// Pair window for YES/NO orderbook snapshots (seconds), matching training `--pair-window-seconds`.
+    #[serde(default = "default_tcn_pair_window_secs")]
+    pub tcn_pair_window_secs: u64,
+
     /// Short pre-entry volatility window (seconds) for `*_vol_short_bps` (default 240).
     #[serde(default = "default_tcn_vol_short_window_secs")]
     pub tcn_vol_short_window_secs: u64,
@@ -271,6 +279,7 @@ impl Default for CryptoLobMlConfig {
             onnx_seq_len: default_onnx_seq_len(),
             tcn_sample_secs: default_tcn_sample_secs(),
             tcn_trade_lookback_secs: default_tcn_trade_lookback_secs(),
+            tcn_pair_window_secs: default_tcn_pair_window_secs(),
             tcn_vol_short_window_secs: default_tcn_vol_short_window_secs(),
             tcn_vol_long_window_secs: default_tcn_vol_long_window_secs(),
             risk_params: AgentRiskParams::conservative(),

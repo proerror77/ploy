@@ -3897,6 +3897,11 @@ impl PlatformBootstrapConfig {
             cfg.crypto_lob_ml.tcn_trade_lookback_secs,
         )
         .max(1);
+        cfg.crypto_lob_ml.tcn_pair_window_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__TCN_PAIR_WINDOW_SECS",
+            cfg.crypto_lob_ml.tcn_pair_window_secs,
+        )
+        .max(1);
         cfg.crypto_lob_ml.tcn_vol_short_window_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__TCN_VOL_SHORT_WINDOW_SECS",
             cfg.crypto_lob_ml.tcn_vol_short_window_secs,
