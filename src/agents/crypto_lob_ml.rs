@@ -76,6 +76,26 @@ fn default_max_time_remaining_secs_15m() -> u64 {
     240
 }
 
+fn default_onnx_seq_len() -> usize {
+    12
+}
+
+fn default_tcn_sample_secs() -> u64 {
+    5
+}
+
+fn default_tcn_trade_lookback_secs() -> u64 {
+    60
+}
+
+fn default_tcn_vol_short_window_secs() -> u64 {
+    240
+}
+
+fn default_tcn_vol_long_window_secs() -> u64 {
+    840
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LobMlWeights {
     pub bias: f64,
@@ -173,7 +193,11 @@ pub struct CryptoLobMlConfig {
 
     pub weights: LobMlWeights,
 
-    /// Prediction model type: "logistic" (default) or "mlp".
+    /// Prediction model type:
+    /// - "logistic" (default): in-config weights + Binance LOB features
+    /// - "mlp_json": JSON `DenseNetwork` + Binance LOB features
+    /// - "onnx": ONNX (vector) + Binance LOB features (requires --features onnx)
+    /// - "onnx_tcn": ONNX (TCN) + Polymarket LOB/tick features (requires --features onnx)
     #[serde(default = "default_lob_ml_model_type")]
     pub model_type: String,
 
@@ -184,6 +208,28 @@ pub struct CryptoLobMlConfig {
     /// Optional model version label recorded in order metadata (helps audit).
     #[serde(default)]
     pub model_version: Option<String>,
+
+    /// ONNX sequence length for `model_type = "onnx_tcn"`.
+    #[serde(default = "default_onnx_seq_len")]
+    pub onnx_seq_len: usize,
+
+    /// TCN sampling interval (seconds). Must match training `--sample-seconds` (default 5).
+    #[serde(default = "default_tcn_sample_secs")]
+    pub tcn_sample_secs: u64,
+
+    /// Trade lookback window (seconds) for tick features (default 60).
+    ///
+    /// Note: runtime may fall back to mid-price when trade tape is unavailable.
+    #[serde(default = "default_tcn_trade_lookback_secs")]
+    pub tcn_trade_lookback_secs: u64,
+
+    /// Short pre-entry volatility window (seconds) for `*_vol_short_bps` (default 240).
+    #[serde(default = "default_tcn_vol_short_window_secs")]
+    pub tcn_vol_short_window_secs: u64,
+
+    /// Long pre-entry volatility window (seconds) for `*_vol_long_bps` (default 840).
+    #[serde(default = "default_tcn_vol_long_window_secs")]
+    pub tcn_vol_long_window_secs: u64,
 
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
@@ -221,6 +267,11 @@ impl Default for CryptoLobMlConfig {
             model_type: default_lob_ml_model_type(),
             model_path: None,
             model_version: None,
+            onnx_seq_len: default_onnx_seq_len(),
+            tcn_sample_secs: default_tcn_sample_secs(),
+            tcn_trade_lookback_secs: default_tcn_trade_lookback_secs(),
+            tcn_vol_short_window_secs: default_tcn_vol_short_window_secs(),
+            tcn_vol_long_window_secs: default_tcn_vol_long_window_secs(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }

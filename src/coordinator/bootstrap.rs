@@ -3859,6 +3859,55 @@ impl PlatformBootstrapConfig {
         )
         .max(1);
 
+        // Model selection overrides.
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_TYPE") {
+            let v = raw.trim();
+            if !v.is_empty() {
+                cfg.crypto_lob_ml.model_type = v.to_string();
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_PATH") {
+            let v = raw.trim();
+            if v.is_empty() {
+                cfg.crypto_lob_ml.model_path = None;
+            } else {
+                cfg.crypto_lob_ml.model_path = Some(v.to_string());
+            }
+        }
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_VERSION") {
+            let v = raw.trim();
+            if v.is_empty() {
+                cfg.crypto_lob_ml.model_version = None;
+            } else {
+                cfg.crypto_lob_ml.model_version = Some(v.to_string());
+            }
+        }
+
+        // ONNX/TCN feature-model parameters.
+        cfg.crypto_lob_ml.onnx_seq_len =
+            env_u64("PLOY_CRYPTO_LOB_ML__ONNX_SEQ_LEN", cfg.crypto_lob_ml.onnx_seq_len as u64)
+                .max(1) as usize;
+        cfg.crypto_lob_ml.tcn_sample_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__TCN_SAMPLE_SECS",
+            cfg.crypto_lob_ml.tcn_sample_secs,
+        )
+        .max(1);
+        cfg.crypto_lob_ml.tcn_trade_lookback_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__TCN_TRADE_LOOKBACK_SECS",
+            cfg.crypto_lob_ml.tcn_trade_lookback_secs,
+        )
+        .max(1);
+        cfg.crypto_lob_ml.tcn_vol_short_window_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__TCN_VOL_SHORT_WINDOW_SECS",
+            cfg.crypto_lob_ml.tcn_vol_short_window_secs,
+        )
+        .max(1);
+        cfg.crypto_lob_ml.tcn_vol_long_window_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__TCN_VOL_LONG_WINDOW_SECS",
+            cfg.crypto_lob_ml.tcn_vol_long_window_secs,
+        )
+        .max(cfg.crypto_lob_ml.tcn_vol_short_window_secs);
+
         // Weight overrides (baseline logistic model).
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__W_BIAS") {
             if let Ok(v) = raw.parse::<f64>() {
