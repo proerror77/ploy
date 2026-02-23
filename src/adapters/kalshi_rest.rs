@@ -10,11 +10,11 @@ use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, Method};
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{
     polymarket_clob::{OrderBookLevel, OrderBookResponse, TokenInfo},
@@ -272,29 +272,46 @@ impl KalshiClient {
         }
     }
 
-    fn serialize_limit_price(limit_price: Decimal) -> (u64, String) {
-        let cents = (limit_price * Decimal::new(100, 0))
-            .round_dp(0)
-            .to_u64()
-            .unwrap_or(0);
-        (cents, limit_price.normalize().to_string())
+    fn serialize_limit_price(limit_price: Decimal) -> Result<(u64, String)> {
+        if limit_price <= Decimal::ZERO {
+            return Err(PloyError::Validation(format!(
+                "limit_price must be > 0 for Kalshi orders, got {}",
+                limit_price
+            )));
+        }
+
+        let scaled = limit_price * Decimal::new(100, 0);
+        let rounded = scaled.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero);
+        let cents = rounded.to_u64().ok_or_else(|| {
+            PloyError::Validation(format!(
+                "failed to serialize Kalshi limit_price={} to cents (rounded={})",
+                limit_price, rounded
+            ))
+        })?;
+
+        // Never send a 0-cent order for positive prices; guard tiny values to minimum 1 cent.
+        let protected_cents = if cents == 0 { 1 } else { cents };
+        Ok((protected_cents, limit_price.normalize().to_string()))
     }
 
-    fn build_submit_order_body(request: &OrderRequest) -> Value {
+    fn build_submit_order_body(request: &OrderRequest) -> Result<(Value, String, u64)> {
         let (ticker, side) = OutcomeSide::from_token_id(&request.token_id);
-        let (price, dollars) = Self::serialize_limit_price(request.limit_price);
+        let (price_cents, trace_dollars) = Self::serialize_limit_price(request.limit_price)?;
 
-        json!({
-            "ticker": ticker,
-            "client_order_id": request.client_order_id,
-            "action": if matches!(request.order_side, OrderSide::Buy) { "buy" } else { "sell" },
-            "side": side.as_str(),
-            "type": "limit",
-            "count": request.shares,
-            "price": price,
-            "dollars": dollars,
-            "time_in_force": format!("{:?}", request.time_in_force).to_lowercase(),
-        })
+        Ok((
+            json!({
+                "ticker": ticker,
+                "client_order_id": request.client_order_id,
+                "action": if matches!(request.order_side, OrderSide::Buy) { "buy" } else { "sell" },
+                "side": side.as_str(),
+                "type": "limit",
+                "count": request.shares,
+                "price": price_cents,
+                "time_in_force": format!("{:?}", request.time_in_force).to_lowercase(),
+            }),
+            trace_dollars,
+            price_cents,
+        ))
     }
 
     fn extract_book_levels(value: &Value) -> Vec<OrderBookLevel> {
@@ -594,7 +611,14 @@ impl KalshiClient {
             });
         }
 
-        let body = Self::build_submit_order_body(request);
+        let (body, trace_dollars, price_cents) = Self::build_submit_order_body(request)?;
+        debug!(
+            client_order_id = %request.client_order_id,
+            token_id = %request.token_id,
+            limit_price_dollars = %trace_dollars,
+            limit_price_cents = price_cents,
+            "Submitting Kalshi order with serialized limit price"
+        );
 
         let value = self
             .request_json(Method::POST, "/portfolio/orders", None, Some(body), true)
@@ -933,26 +957,58 @@ mod tests {
     }
 
     #[test]
-    fn submit_order_body_preserves_decimal_dollars_price() {
+    fn submit_order_body_keeps_compat_fields_and_internal_trace_price() {
         let request = sample_order_request(dec!(0.123456));
-        let body = KalshiClient::build_submit_order_body(&request);
+        let (body, serialized_price, serialized_cents) =
+            KalshiClient::build_submit_order_body(&request).expect("body should serialize");
 
         assert_eq!(body.get("ticker").and_then(Value::as_str), Some("BTC-2026"));
         assert_eq!(body.get("action").and_then(Value::as_str), Some("buy"));
         assert_eq!(body.get("side").and_then(Value::as_str), Some("yes"));
         assert_eq!(body.get("count").and_then(Value::as_u64), Some(25));
         assert_eq!(body.get("price").and_then(Value::as_u64), Some(12));
-        assert_eq!(
-            body.get("dollars").and_then(Value::as_str),
-            Some("0.123456")
+        assert!(
+            body.get("dollars").is_none(),
+            "must not send unknown fields"
         );
+        assert_eq!(serialized_price, "0.123456");
+        assert_eq!(serialized_cents, 12);
     }
 
     #[test]
     fn serialize_limit_price_keeps_traceable_dollars_string() {
-        let (price_cents, dollars) = KalshiClient::serialize_limit_price(dec!(0.009));
+        let (price_cents, dollars) =
+            KalshiClient::serialize_limit_price(dec!(0.009)).expect("price should serialize");
         assert_eq!(price_cents, 1);
         assert_eq!(dollars, "0.009");
+    }
+
+    #[test]
+    fn serialize_limit_price_uses_midpoint_away_from_zero() {
+        let (price_cents, dollars) =
+            KalshiClient::serialize_limit_price(dec!(0.005)).expect("price should serialize");
+        assert_eq!(price_cents, 1);
+        assert_eq!(dollars, "0.005");
+    }
+
+    #[test]
+    fn serialize_limit_price_applies_minimum_one_cent_for_tiny_positive_values() {
+        let (price_cents, dollars) =
+            KalshiClient::serialize_limit_price(dec!(0.001)).expect("price should serialize");
+        assert_eq!(price_cents, 1);
+        assert_eq!(dollars, "0.001");
+    }
+
+    #[test]
+    fn serialize_limit_price_rejects_non_positive_price() {
+        let err = KalshiClient::serialize_limit_price(Decimal::ZERO)
+            .expect_err("zero price should be rejected");
+        match err {
+            PloyError::Validation(msg) => {
+                assert!(msg.contains("limit_price must be > 0"));
+            }
+            other => panic!("expected validation error, got: {:?}", other),
+        }
     }
 
     #[test]
