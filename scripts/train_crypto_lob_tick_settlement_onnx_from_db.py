@@ -1472,6 +1472,7 @@ def main() -> None:
         help="only fetch/validate dataset and optionally save parquet; skip training",
     )
     ap.add_argument("--stride", type=int, default=1, help="emit every N-th sequence per group to reduce overlap (default: 1)")
+    ap.add_argument("--export-scaler", default=None, help="export feature scaler (offsets/scales) as JSON for config-based normalization")
 
     args = ap.parse_args()
 
@@ -1589,6 +1590,20 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.meta) or ".", exist_ok=True)
     with open(args.meta, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+
+    # Export scaler for config-based normalization (offset=mean, scale=1/std)
+    if args.export_scaler:
+        flat_train_rows = [row for seq in train_ds.x for row in seq]
+        mean_vals, std_vals = mean_std(flat_train_rows)
+        scaler = {
+            "feature_names": FEATURE_ORDER,
+            "feature_offsets": mean_vals,
+            "feature_scales": [1.0 / s if s > 0 else 1.0 for s in std_vals],
+        }
+        os.makedirs(os.path.dirname(args.export_scaler) or ".", exist_ok=True)
+        with open(args.export_scaler, "w") as f:
+            json.dump(scaler, f, indent=2)
+        print(f"  scaler: {args.export_scaler}")
 
     m = meta["metrics"]
     print("\nExported:")

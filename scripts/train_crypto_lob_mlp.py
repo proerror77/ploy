@@ -351,6 +351,7 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--export-scaler", default=None, help="export feature scaler (offsets/scales) as JSON for config-based normalization")
 
     args = ap.parse_args()
 
@@ -384,6 +385,19 @@ def main() -> None:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(export, f, indent=2, sort_keys=False)
+
+    # Export scaler for config-based normalization (offset=mean, scale=1/std)
+    if args.export_scaler:
+        mean_vals, std_vals = mean_std(train_ds.x)
+        scaler = {
+            "feature_names": FEATURES,
+            "feature_offsets": mean_vals,
+            "feature_scales": [1.0 / s if s > 0 else 1.0 for s in std_vals],
+        }
+        os.makedirs(os.path.dirname(args.export_scaler) or ".", exist_ok=True)
+        with open(args.export_scaler, "w") as f:
+            json.dump(scaler, f, indent=2)
+        print(f"  scaler: {args.export_scaler}")
 
     print("\nExported model:")
     print(f"  path: {out_path}")
