@@ -380,7 +380,11 @@ impl PostgresStore {
         Ok(row.map(|r| Cycle {
             id: Some(r.get("id")),
             round_id: r.get("round_id"),
-            state: r.get("state"),
+            state: r
+                .get::<String, _>("state")
+                .as_str()
+                .try_into()
+                .unwrap_or(StrategyState::Idle),
             leg1_side: r
                 .get::<Option<String>, _>("leg1_side")
                 .and_then(|s| Side::try_from(s.as_str()).ok()),
@@ -704,7 +708,11 @@ impl PostgresStore {
             .map(|r| IncompleteCycle {
                 cycle_id: r.get("id"),
                 round_id: r.get("round_id"),
-                state: r.get("state"),
+                state: r
+                    .get::<String, _>("state")
+                    .as_str()
+                    .try_into()
+                    .unwrap_or(StrategyState::Idle),
                 leg1_side: r
                     .get::<Option<String>, _>("leg1_side")
                     .and_then(|s| Side::try_from(s.as_str()).ok()),
@@ -863,7 +871,7 @@ pub struct PersistedState {
 pub struct IncompleteCycle {
     pub cycle_id: i32,
     pub round_id: i32,
-    pub state: String,
+    pub state: StrategyState,
     pub leg1_side: Option<Side>,
     pub leg1_entry_price: Option<Decimal>,
     pub leg1_shares: Option<u64>,
