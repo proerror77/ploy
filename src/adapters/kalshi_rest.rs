@@ -10,11 +10,11 @@ use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::{Client, Method};
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{
     polymarket_clob::{OrderBookLevel, OrderBookResponse, TokenInfo},
@@ -132,18 +132,8 @@ impl KalshiClient {
         })?;
 
         let timestamp = Utc::now().timestamp_millis().to_string();
-        let sign_payload = format!(
-            "{}{}{}{}",
-            timestamp,
-            method.as_str().to_uppercase(),
-            path,
-            body
-        );
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| PloyError::Auth(format!("invalid Kalshi secret: {}", e)))?;
-        mac.update(sign_payload.as_bytes());
-        let signature = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+        let sign_payload = Self::build_sign_payload(&timestamp, method, path, body);
+        let signature = Self::hmac_signature(secret, &sign_payload)?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -253,6 +243,23 @@ impl KalshiClient {
         }
     }
 
+    fn build_sign_payload(timestamp: &str, method: &Method, path: &str, body: &str) -> String {
+        format!(
+            "{}{}{}{}",
+            timestamp,
+            method.as_str().to_uppercase(),
+            path,
+            body
+        )
+    }
+
+    fn hmac_signature(secret: &str, payload: &str) -> Result<String> {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| PloyError::Auth(format!("invalid Kalshi secret: {}", e)))?;
+        mac.update(payload.as_bytes());
+        Ok(BASE64_STANDARD.encode(mac.finalize().into_bytes()))
+    }
+
     fn format_price(value: Decimal) -> String {
         value.round_dp(6).normalize().to_string()
     }
@@ -263,6 +270,48 @@ impl KalshiClient {
         } else {
             value
         }
+    }
+
+    fn serialize_limit_price(limit_price: Decimal) -> Result<(u64, String)> {
+        if limit_price <= Decimal::ZERO {
+            return Err(PloyError::Validation(format!(
+                "limit_price must be > 0 for Kalshi orders, got {}",
+                limit_price
+            )));
+        }
+
+        let scaled = limit_price * Decimal::new(100, 0);
+        let rounded = scaled.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero);
+        let cents = rounded.to_u64().ok_or_else(|| {
+            PloyError::Validation(format!(
+                "failed to serialize Kalshi limit_price={} to cents (rounded={})",
+                limit_price, rounded
+            ))
+        })?;
+
+        // Never send a 0-cent order for positive prices; guard tiny values to minimum 1 cent.
+        let protected_cents = if cents == 0 { 1 } else { cents };
+        Ok((protected_cents, limit_price.normalize().to_string()))
+    }
+
+    fn build_submit_order_body(request: &OrderRequest) -> Result<(Value, String, u64)> {
+        let (ticker, side) = OutcomeSide::from_token_id(&request.token_id);
+        let (price_cents, trace_dollars) = Self::serialize_limit_price(request.limit_price)?;
+
+        Ok((
+            json!({
+                "ticker": ticker,
+                "client_order_id": request.client_order_id,
+                "action": if matches!(request.order_side, OrderSide::Buy) { "buy" } else { "sell" },
+                "side": side.as_str(),
+                "type": "limit",
+                "count": request.shares,
+                "price": price_cents,
+                "time_in_force": format!("{:?}", request.time_in_force).to_lowercase(),
+            }),
+            trace_dollars,
+            price_cents,
+        ))
     }
 
     fn extract_book_levels(value: &Value) -> Vec<OrderBookLevel> {
@@ -562,17 +611,14 @@ impl KalshiClient {
             });
         }
 
-        let (ticker, side) = OutcomeSide::from_token_id(&request.token_id);
-        let body = json!({
-            "ticker": ticker,
-            "client_order_id": request.client_order_id,
-            "action": if matches!(request.order_side, OrderSide::Buy) { "buy" } else { "sell" },
-            "side": side.as_str(),
-            "type": "limit",
-            "count": request.shares,
-            "price": (request.limit_price * Decimal::new(100, 0)).round_dp(0).to_u64().unwrap_or(0),
-            "time_in_force": format!("{:?}", request.time_in_force).to_lowercase(),
-        });
+        let (body, trace_dollars, price_cents) = Self::build_submit_order_body(request)?;
+        debug!(
+            client_order_id = %request.client_order_id,
+            token_id = %request.token_id,
+            limit_price_dollars = %trace_dollars,
+            limit_price_cents = price_cents,
+            "Submitting Kalshi order with serialized limit price"
+        );
 
         let value = self
             .request_json(Method::POST, "/portfolio/orders", None, Some(body), true)
@@ -870,6 +916,22 @@ impl ExchangeClient for KalshiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{OrderType, Side, TimeInForce};
+    use rust_decimal_macros::dec;
+
+    fn sample_order_request(limit_price: Decimal) -> OrderRequest {
+        OrderRequest {
+            client_order_id: "cid-123".to_string(),
+            idempotency_key: None,
+            token_id: "BTC-2026:YES".to_string(),
+            market_side: Side::Up,
+            order_side: OrderSide::Buy,
+            shares: 25,
+            limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
+        }
+    }
 
     #[test]
     fn parse_outcome_side_from_token_formats() {
@@ -892,5 +954,81 @@ mod tests {
 
         let decimal = Decimal::new(42, 2);
         assert_eq!(KalshiClient::from_cents_if_needed(decimal), decimal);
+    }
+
+    #[test]
+    fn submit_order_body_keeps_compat_fields_and_internal_trace_price() {
+        let request = sample_order_request(dec!(0.123456));
+        let (body, serialized_price, serialized_cents) =
+            KalshiClient::build_submit_order_body(&request).expect("body should serialize");
+
+        assert_eq!(body.get("ticker").and_then(Value::as_str), Some("BTC-2026"));
+        assert_eq!(body.get("action").and_then(Value::as_str), Some("buy"));
+        assert_eq!(body.get("side").and_then(Value::as_str), Some("yes"));
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(25));
+        assert_eq!(body.get("price").and_then(Value::as_u64), Some(12));
+        assert!(
+            body.get("dollars").is_none(),
+            "must not send unknown fields"
+        );
+        assert_eq!(serialized_price, "0.123456");
+        assert_eq!(serialized_cents, 12);
+    }
+
+    #[test]
+    fn serialize_limit_price_keeps_traceable_dollars_string() {
+        let (price_cents, dollars) =
+            KalshiClient::serialize_limit_price(dec!(0.009)).expect("price should serialize");
+        assert_eq!(price_cents, 1);
+        assert_eq!(dollars, "0.009");
+    }
+
+    #[test]
+    fn serialize_limit_price_uses_midpoint_away_from_zero() {
+        let (price_cents, dollars) =
+            KalshiClient::serialize_limit_price(dec!(0.005)).expect("price should serialize");
+        assert_eq!(price_cents, 1);
+        assert_eq!(dollars, "0.005");
+    }
+
+    #[test]
+    fn serialize_limit_price_applies_minimum_one_cent_for_tiny_positive_values() {
+        let (price_cents, dollars) =
+            KalshiClient::serialize_limit_price(dec!(0.001)).expect("price should serialize");
+        assert_eq!(price_cents, 1);
+        assert_eq!(dollars, "0.001");
+    }
+
+    #[test]
+    fn serialize_limit_price_rejects_non_positive_price() {
+        let err = KalshiClient::serialize_limit_price(Decimal::ZERO)
+            .expect_err("zero price should be rejected");
+        match err {
+            PloyError::Validation(msg) => {
+                assert!(msg.contains("limit_price must be > 0"));
+            }
+            other => panic!("expected validation error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_sign_payload_is_stable() {
+        let payload = KalshiClient::build_sign_payload(
+            "1700000000123",
+            &Method::POST,
+            "/portfolio/orders",
+            "{\"a\":1}",
+        );
+
+        assert_eq!(payload, "1700000000123POST/portfolio/orders{\"a\":1}");
+    }
+
+    #[test]
+    fn hmac_signature_for_payload_is_stable() {
+        let payload = "1700000000123POST/portfolio/orders{\"a\":1}";
+        let signature = KalshiClient::hmac_signature("testsecret", payload)
+            .expect("signature should be generated");
+
+        assert_eq!(signature, "ckCxXMAnY9OGsFnZKIKUqm8P4iKMdZs/SinJqLZFIcM=");
     }
 }
