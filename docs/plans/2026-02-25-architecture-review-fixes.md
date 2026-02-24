@@ -128,3 +128,42 @@ Four-phase pipeline. Each phase ends with atomic commits. Later phases depend on
 
 ### 4.7 GlobalState bounded collections
 - `circuit_breaker_events` → cap at 1000, FIFO eviction
+
+---
+
+## Completion Status (2026-02-25)
+
+### Commit 06912a8 — Phase 1+2 (14 fixes)
+- ✅ 1.2 Forced Leg2 price ceiling
+- ✅ 1.3 Order default expiration (→ 30min, configurable)
+- ✅ 1.4 Production unwrap replacement (system.rs)
+- ✅ 1.5 Engine unwind error logging (14 locations)
+- ✅ 2.1 Constant-time token comparison
+- ✅ 2.2 WebSocket authentication
+- ✅ 2.3 Circuit breaker method unification
+- ✅ 2.5 Event Edge EV sorting
+- ✅ 2.6 ApiKeyResponse custom Debug
+- ✅ 2.8 Force-Leg2 double-submission guard
+- ✅ 3.4 Dead code cleanup (sports_analyst_enhanced.rs)
+- ✅ 3.5 Sidecar security defaults
+- ✅ 4.7 GlobalState bounded collections (500 cap)
+- ⬜ 1.1 FALSE POSITIVE — Leg2 shares already from ctx.leg1_shares
+- ⬜ 2.4 FALSE POSITIVE — NBA per-game limit already exists
+- ⬜ 3.3 FALSE POSITIVE — claimer .ok() are std::env::var().ok()
+
+### Commit ce21655 — Order expiry refinement
+- ✅ 1.3 Increased order expiry to 30min, added PLOY_ORDER_EXPIRY_SECS env var
+
+### Commit 6806141 — Dead code removal + type safety (-1558 lines)
+- ✅ 4.5 Nonce manager dedup (removed adapters/nonce_manager.rs)
+- ✅ 2.7 Cycle.state String → StrategyState enum
+- ✅ 4.6 EventEdge runner consolidation (removed simple interval runner)
+- ✅ 4.3 Risk types — removed orphaned strategy/core/risk.rs + executor.rs
+- ✅ 3.2 f64 → Decimal: fixed Kelly position sizing truncation (.round())
+
+### Deferred to separate PRs
+- 🔲 3.1 Engine tests — needs Store trait abstraction first
+- 🔲 4.1 Agent module rename (agent/ → ai_clients/) — 37+ imports, mechanical
+- 🔲 4.2 Strategy module split — 70+ files, mechanical
+- 🔲 4.3 Risk unification — 3 RiskConfig types serve different layers (config/strategy/platform)
+- 🔲 4.4 Circular dependency resolution — architectural concern, not compilation issue
