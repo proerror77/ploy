@@ -9,6 +9,24 @@
 use crate::rl::config::PPOConfig;
 use rand::Rng;
 
+// ---------------------------------------------------------------------------
+// 42-dim state vector indices (must match `src/rl/core/state.rs` TOTAL_FEATURES)
+// ---------------------------------------------------------------------------
+// Price features (20): [0] spot_price, [1..=15] price_history,
+//   [16] momentum_1s, [17] momentum_5s, [18] momentum_15s, [19] momentum_60s
+// Quote features (8): [20] up_bid, [21] up_ask, [22] down_bid, [23] down_ask,
+//   [24] spread_up, [25] spread_down, [26] sum_of_asks, [27] liquidity
+// Position features (6): [28] has_position, [29] position_side, [30] position_shares,
+//   [31] entry_price, [32] unrealized_pnl, [33] position_duration
+// Risk features (4): [34] risk_level, [35] exposure_pct, [36] daily_pnl,
+//   [37] consecutive_failures
+// Time features (4): [38] hour_sin, [39] hour_cos, [40] day_sin, [41] day_cos
+const IDX_MOMENTUM_1S: usize = 16;
+const IDX_SUM_OF_ASKS: usize = 26;
+const IDX_HAS_POSITION: usize = 28;
+const IDX_UNREALIZED_PNL: usize = 32;
+const IDX_DAILY_PNL: usize = 36;
+
 /// PPO Trainer configuration
 #[derive(Debug, Clone)]
 pub struct PPOTrainerConfig {
@@ -150,15 +168,15 @@ impl PPOTrainer {
         } else {
             // "Greedy" action based on simple heuristics from state
             // Use momentum and sum_of_asks to make basic decisions
-            let sum_of_asks = if state.len() > 26 { state[26] } else { 1.0 };
-            let momentum_1 = if state.len() > 16 { state[16] } else { 0.0 };
-            let has_position = if state.len() > 20 { state[20] } else { 0.0 };
+            let sum_of_asks = if state.len() > IDX_SUM_OF_ASKS { state[IDX_SUM_OF_ASKS] } else { 1.0 };
+            let momentum_1 = if state.len() > IDX_MOMENTUM_1S { state[IDX_MOMENTUM_1S] } else { 0.0 };
+            let has_position = if state.len() > IDX_HAS_POSITION { state[IDX_HAS_POSITION] } else { 0.0 };
 
             let mut action = vec![0.0f32; action_dim];
 
             if has_position > 0.5 {
                 // Have position - consider selling on profit or momentum reversal
-                let unrealized_pnl = if state.len() > 24 { state[24] } else { 0.0 };
+                let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL { state[IDX_UNREALIZED_PNL] } else { 0.0 };
                 if unrealized_pnl > 0.02 || unrealized_pnl < -0.01 {
                     action[3] = 1.0; // Sell
                 } else {
@@ -183,14 +201,14 @@ impl PPOTrainer {
     /// Get deterministic action (for evaluation)
     pub fn get_deterministic_action(&self, state: &[f32]) -> Vec<f32> {
         let action_dim = 4;
-        let sum_of_asks = if state.len() > 26 { state[26] } else { 1.0 };
-        let momentum_1 = if state.len() > 16 { state[16] } else { 0.0 };
-        let has_position = if state.len() > 20 { state[20] } else { 0.0 };
+        let sum_of_asks = if state.len() > IDX_SUM_OF_ASKS { state[IDX_SUM_OF_ASKS] } else { 1.0 };
+        let momentum_1 = if state.len() > IDX_MOMENTUM_1S { state[IDX_MOMENTUM_1S] } else { 0.0 };
+        let has_position = if state.len() > IDX_HAS_POSITION { state[IDX_HAS_POSITION] } else { 0.0 };
 
         let mut action = vec![0.0f32; action_dim];
 
         if has_position > 0.5 {
-            let unrealized_pnl = if state.len() > 24 { state[24] } else { 0.0 };
+            let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL { state[IDX_UNREALIZED_PNL] } else { 0.0 };
             if unrealized_pnl > 0.02 || unrealized_pnl < -0.01 {
                 action[3] = 1.0;
             } else {
@@ -212,11 +230,11 @@ impl PPOTrainer {
     /// Get state value estimate (simple heuristic)
     pub fn get_value(&self, state: &[f32]) -> f32 {
         // Simple value estimate based on position and PnL
-        let unrealized_pnl = if state.len() > 24 { state[24] } else { 0.0 };
-        let episode_pnl = if state.len() > 32 { state[32] } else { 0.0 };
+        let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL { state[IDX_UNREALIZED_PNL] } else { 0.0 };
+        let daily_pnl = if state.len() > IDX_DAILY_PNL { state[IDX_DAILY_PNL] } else { 0.0 };
 
         // Value = current PnL state
-        unrealized_pnl + episode_pnl * 0.1
+        unrealized_pnl + daily_pnl * 0.1
     }
 
     /// Decay exploration rate (call after each episode)
@@ -280,8 +298,11 @@ impl PPOTrainer {
 
     /// Train on a batch of experiences
     ///
-    /// Note: This is a placeholder that updates diagnostics.
-    /// Full implementation requires burn tensor operations.
+    /// **WARNING: STUB** — This method increments the step counter but does NOT
+    /// perform actual gradient updates.  A full implementation requires burn
+    /// tensor operations (forward pass → policy ratio → clipped surrogate
+    /// objective → critic value loss → entropy bonus → backward + optimizer).
+    /// Do not rely on the returned `PPOOutput` losses for real training.
     pub fn train_step(&mut self, _batch: PPOBatch) -> PPOOutput {
         self.step_count += 1;
 
