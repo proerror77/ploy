@@ -1340,7 +1340,7 @@ fn create_default_config(name: &str, path: &PathBuf) -> Result<()> {
 /// Seed NBA team comeback stats into the database
 async fn seed_nba_stats(season: &str, database_url: Option<String>) -> Result<()> {
     use crate::adapters::PostgresStore;
-    use crate::strategy::nba_data_collector::TeamStats;
+    use crate::strategy::nba_comeback::nba_data_collector::TeamStats;
 
     let db_url = database_url.unwrap_or_else(|| {
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
