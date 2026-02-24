@@ -8,7 +8,9 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/ploy</string>
-        <string>run</string>
+        <string>platform</string>
+        <string>start</string>
+        <string>--politics</string>
     </array>
 
     <key>WorkingDirectory</key>

@@ -14,19 +14,17 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate};
+use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate, SpotPrice};
 use crate::agents::{AgentContext, TradingAgent};
-use crate::collector::{LobCache, LobSnapshot};
+use crate::collector::LobCache;
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
-use crate::error::Result;
-use crate::ml::DenseNetwork;
+use crate::error::{PloyError, Result};
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
@@ -34,7 +32,9 @@ use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 const STRATEGY_ID: &str = "crypto_lob_ml";
-const TCN_FEATURE_DIM: usize = 25;
+const SEQ_LEN_5M: usize = 60;
+const SEQ_LEN_15M: usize = 180;
+const SEQ_FEATURE_DIM: usize = 11;
 
 /// Standard normal CDF approximation (Abramowitz-Stegun), ~4dp accuracy.
 fn normal_cdf(x: f64) -> f64 {
@@ -62,14 +62,6 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
-fn default_fee_buffer() -> Decimal {
-    Decimal::ZERO
-}
-
-fn default_slippage_buffer() -> Decimal {
-    Decimal::ZERO
-}
-
 fn default_max_time_remaining_secs_5m() -> u64 {
     120
 }
@@ -78,56 +70,35 @@ fn default_max_time_remaining_secs_15m() -> u64 {
     240
 }
 
-fn default_onnx_seq_len() -> usize {
-    12
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoLobMlExitMode {
+    /// Hold position until market settlement.
+    SettleOnly,
+    /// Exit when model says current market is overpriced (EV turns negative).
+    EvExit,
+    /// Exit when model side flips (after min hold time).
+    SignalFlip,
+    /// Exit on mark-to-market price thresholds.
+    PriceExit,
 }
 
-fn default_tcn_sample_secs() -> u64 {
-    5
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoLobMlEntrySidePolicy {
+    /// Choose the side with the highest net EV.
+    BestEv,
+    /// Only consider the cheaper side (lagging price) for entry.
+    LaggingOnly,
 }
 
-fn default_tcn_trade_lookback_secs() -> u64 {
-    60
+fn default_exit_mode() -> CryptoLobMlExitMode {
+    // Model-driven exit by default (pure ML policy).
+    CryptoLobMlExitMode::EvExit
 }
 
-fn default_tcn_pair_window_secs() -> u64 {
-    2
-}
-
-fn default_tcn_vol_short_window_secs() -> u64 {
-    240
-}
-
-fn default_tcn_vol_long_window_secs() -> u64 {
-    840
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LobMlWeights {
-    pub bias: f64,
-    pub w_obi_5: f64,
-    pub w_obi_10: f64,
-    pub w_momentum_1s: f64,
-    pub w_momentum_5s: f64,
-    pub w_spread_bps: f64,
-}
-
-impl Default for LobMlWeights {
-    fn default() -> Self {
-        // Reasonable starting point; tune via env-config + backtests.
-        // Typical ranges:
-        // - OBI: [-1, 1]
-        // - momentum_1s: ~[-0.002, 0.002] in calm markets
-        // - spread_bps: single digits
-        Self {
-            bias: 0.0,
-            w_obi_5: 1.5,
-            w_obi_10: 0.5,
-            w_momentum_1s: 150.0,
-            w_momentum_5s: 50.0,
-            w_spread_bps: -0.01,
-        }
-    }
+fn default_entry_side_policy() -> CryptoLobMlEntrySidePolicy {
+    CryptoLobMlEntrySidePolicy::LaggingOnly
 }
 
 /// Configuration for the CryptoLobMlAgent
@@ -163,33 +134,55 @@ pub struct CryptoLobMlConfig {
     pub exit_edge_floor: Decimal,
     #[serde(default = "default_exit_price_band")]
     pub exit_price_band: Decimal,
-    /// Optional mark-to-market binary exit thresholds (disabled by default)
-    pub enable_price_exits: bool,
+    /// Exit policy:
+    /// - settle_only: hold until settlement
+    /// - ev_exit: exit when model EV turns negative
+    /// - signal_flip: exit on side flip
+    /// - price_exit: exit on mark-to-market thresholds
+    #[serde(default = "default_exit_mode")]
+    pub exit_mode: CryptoLobMlExitMode,
     /// Minimum hold time before edge/price-band exits are allowed (seconds)
     pub min_hold_secs: u64,
 
     /// Minimum expected-value edge required to enter.
-    ///
-    /// Binary-options trading should be evaluated on *ROI* when sizing is by notional (USD),
-    /// not on per-share EV. We therefore gate entries by expected ROI on a normalized stake.
-    ///
-    /// Definitions (stake = 1.0, costs ignored):
-    /// - expected_roi_up = p_up / up_ask - 1 = (p_up - up_ask) / up_ask
-    /// - expected_roi_dn = (1 - p_up) / down_ask - 1 = ((1 - p_up) - down_ask) / down_ask
+    /// This is measured on net EV after fee/slippage adjustments.
     pub min_edge: Decimal,
 
     /// Max ask price to pay for entry (YES/NO).
     pub max_entry_price: Decimal,
 
-    /// Optional fixed fee buffer (in price units) applied when computing expected ROI.
-    /// This is a modeling-only cost; it does not change the submitted limit price.
-    #[serde(default = "default_fee_buffer")]
-    pub fee_buffer: Decimal,
+    /// Entry-side selection policy (best_ev or lagging_only).
+    #[serde(default = "default_entry_side_policy")]
+    pub entry_side_policy: CryptoLobMlEntrySidePolicy,
 
-    /// Optional fixed slippage buffer (in price units) applied when computing expected ROI.
-    /// This is a modeling-only cost; it does not change the submitted limit price.
-    #[serde(default = "default_slippage_buffer")]
-    pub slippage_buffer: Decimal,
+    /// For 5m markets, only allow entries in the last N seconds of the window.
+    #[serde(default = "default_entry_late_window_secs_5m")]
+    pub entry_late_window_secs_5m: u64,
+
+    /// For 15m markets, only allow entries in the last N seconds of the window.
+    #[serde(default = "default_entry_late_window_secs_15m")]
+    pub entry_late_window_secs_15m: u64,
+
+    /// Taker fee rate used in net EV calculation (e.g. 0.02 = 2%).
+    #[serde(default = "default_taker_fee_rate")]
+    pub taker_fee_rate: Decimal,
+
+    /// Slippage buffer applied to entry ask in basis points (e.g. 10 = 0.10%).
+    #[serde(default = "default_entry_slippage_bps")]
+    pub entry_slippage_bps: Decimal,
+
+    /// If true, incorporate event price-to-beat into settlement probability.
+    #[serde(default = "default_use_price_to_beat")]
+    pub use_price_to_beat: bool,
+
+    /// If true, skip events that do not expose a parseable price-to-beat.
+    #[serde(default = "default_require_price_to_beat")]
+    pub require_price_to_beat: bool,
+
+    /// Blend weight for threshold-anchored settlement probability.
+    /// p_up = p_up_base * (1 - w_threshold) + p_up_threshold * w_threshold
+    #[serde(default = "default_threshold_prob_weight")]
+    pub threshold_prob_weight: Decimal,
 
     /// Minimum seconds between entries per symbol (avoid thrash).
     pub cooldown_secs: u64,
@@ -197,17 +190,11 @@ pub struct CryptoLobMlConfig {
     /// Reject LOB snapshots older than this age (seconds).
     pub max_lob_snapshot_age_secs: u64,
 
-    pub weights: LobMlWeights,
-
-    /// Prediction model type:
-    /// - "logistic" (default): in-config weights + Binance LOB features
-    /// - "mlp_json": JSON `DenseNetwork` + Binance LOB features
-    /// - "onnx": ONNX (vector) + Binance LOB features (requires --features onnx)
-    /// - "onnx_tcn": ONNX (TCN) + Polymarket LOB/tick features (requires --features onnx)
+    /// Prediction model type. Must be "onnx".
     #[serde(default = "default_lob_ml_model_type")]
     pub model_type: String,
 
-    /// Optional JSON model path used when `model_type = "mlp"`.
+    /// ONNX model path used for online inference.
     #[serde(default)]
     pub model_path: Option<String>,
 
@@ -215,38 +202,65 @@ pub struct CryptoLobMlConfig {
     #[serde(default)]
     pub model_version: Option<String>,
 
-    /// ONNX sequence length for `model_type = "onnx_tcn"`.
-    #[serde(default = "default_onnx_seq_len")]
-    pub onnx_seq_len: usize,
+    /// Safety fallback blend weight for window baseline probability.
+    /// p_up = p_up_model * (1 - w_window) + p_up_window * w_window
+    #[serde(default = "default_window_fallback_weight")]
+    pub window_fallback_weight: Decimal,
 
-    /// TCN sampling interval (seconds). Must match training `--sample-seconds` (default 5).
-    #[serde(default = "default_tcn_sample_secs")]
-    pub tcn_sample_secs: u64,
+    /// Minimum positive EV gap required to trigger EV exit.
+    #[serde(default = "default_ev_exit_buffer")]
+    pub ev_exit_buffer: Decimal,
 
-    /// Trade lookback window (seconds) for tick features (default 60).
-    ///
-    /// Note: runtime may fall back to mid-price when trade tape is unavailable.
-    #[serde(default = "default_tcn_trade_lookback_secs")]
-    pub tcn_trade_lookback_secs: u64,
-
-    /// Pair window for YES/NO orderbook snapshots (seconds), matching training `--pair-window-seconds`.
-    #[serde(default = "default_tcn_pair_window_secs")]
-    pub tcn_pair_window_secs: u64,
-
-    /// Short pre-entry volatility window (seconds) for `*_vol_short_bps` (default 240).
-    #[serde(default = "default_tcn_vol_short_window_secs")]
-    pub tcn_vol_short_window_secs: u64,
-
-    /// Long pre-entry volatility window (seconds) for `*_vol_long_bps` (default 840).
-    #[serde(default = "default_tcn_vol_long_window_secs")]
-    pub tcn_vol_long_window_secs: u64,
+    /// Volatility-scaled EV exit buffer component (uses window uncertainty).
+    #[serde(default = "default_ev_exit_vol_scale")]
+    pub ev_exit_vol_scale: Decimal,
 
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
 }
 
 fn default_lob_ml_model_type() -> String {
-    "logistic".to_string()
+    "onnx".to_string()
+}
+
+fn default_window_fallback_weight() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_ev_exit_buffer() -> Decimal {
+    dec!(0.005)
+}
+
+fn default_ev_exit_vol_scale() -> Decimal {
+    dec!(0.02)
+}
+
+fn default_taker_fee_rate() -> Decimal {
+    dec!(0.02)
+}
+
+fn default_entry_slippage_bps() -> Decimal {
+    dec!(10)
+}
+
+fn default_use_price_to_beat() -> bool {
+    true
+}
+
+fn default_require_price_to_beat() -> bool {
+    true
+}
+
+fn default_threshold_prob_weight() -> Decimal {
+    dec!(0.35)
+}
+
+fn default_entry_late_window_secs_5m() -> u64 {
+    180
+}
+
+fn default_entry_late_window_secs_15m() -> u64 {
+    180
 }
 
 impl Default for CryptoLobMlConfig {
@@ -265,24 +279,26 @@ impl Default for CryptoLobMlConfig {
             default_shares: 50,
             exit_edge_floor: default_exit_edge_floor(),
             exit_price_band: default_exit_price_band(),
-            enable_price_exits: false,
+            exit_mode: default_exit_mode(),
             min_hold_secs: 20,
             min_edge: dec!(0.02),
             max_entry_price: dec!(0.70),
-            fee_buffer: default_fee_buffer(),
-            slippage_buffer: default_slippage_buffer(),
+            entry_side_policy: default_entry_side_policy(),
+            entry_late_window_secs_5m: default_entry_late_window_secs_5m(),
+            entry_late_window_secs_15m: default_entry_late_window_secs_15m(),
+            taker_fee_rate: default_taker_fee_rate(),
+            entry_slippage_bps: default_entry_slippage_bps(),
+            use_price_to_beat: default_use_price_to_beat(),
+            require_price_to_beat: default_require_price_to_beat(),
+            threshold_prob_weight: default_threshold_prob_weight(),
             cooldown_secs: 30,
             max_lob_snapshot_age_secs: 2,
-            weights: LobMlWeights::default(),
             model_type: default_lob_ml_model_type(),
             model_path: None,
             model_version: None,
-            onnx_seq_len: default_onnx_seq_len(),
-            tcn_sample_secs: default_tcn_sample_secs(),
-            tcn_trade_lookback_secs: default_tcn_trade_lookback_secs(),
-            tcn_pair_window_secs: default_tcn_pair_window_secs(),
-            tcn_vol_short_window_secs: default_tcn_vol_short_window_secs(),
-            tcn_vol_long_window_secs: default_tcn_vol_long_window_secs(),
+            window_fallback_weight: default_window_fallback_weight(),
+            ev_exit_buffer: default_ev_exit_buffer(),
+            ev_exit_vol_scale: default_ev_exit_vol_scale(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
         }
@@ -302,89 +318,67 @@ struct TrackedPosition {
     entry_time: DateTime<Utc>,
 }
 
-#[derive(Debug)]
-struct TcnBuffers {
-    seq_len: usize,
-    sample_secs: u64,
-    pair_window_secs: u64,
-    trade_lookback_secs: u64,
-    vol_short_window_secs: u64,
-    vol_long_window_secs: u64,
-
-    seq_by_condition: HashMap<String, VecDeque<[f32; TCN_FEATURE_DIM]>>,
-    last_bucket_by_condition: HashMap<String, DateTime<Utc>>,
+#[derive(Debug, Clone)]
+struct WindowContext {
+    now: DateTime<Utc>,
+    start_price: Decimal,
+    window_move: Decimal,
+    elapsed_secs: i64,
+    remaining_secs: i64,
+    p_up_window: Decimal,
 }
 
-impl TcnBuffers {
-    fn new(cfg: &CryptoLobMlConfig) -> Self {
-        let vol_short = cfg.tcn_vol_short_window_secs.max(1);
-        let vol_long = cfg.tcn_vol_long_window_secs.max(vol_short);
+#[derive(Debug, Clone)]
+struct BlendedProb {
+    p_up_blended: Decimal,
+    w_threshold: Decimal,
+    w_model: Decimal,
+    w_window: Decimal,
+}
 
-        Self {
-            seq_len: cfg.onnx_seq_len.max(1),
-            sample_secs: cfg.tcn_sample_secs.max(1),
-            pair_window_secs: cfg.tcn_pair_window_secs.max(1),
-            trade_lookback_secs: cfg.tcn_trade_lookback_secs.max(1),
-            vol_short_window_secs: vol_short,
-            vol_long_window_secs: vol_long,
-            seq_by_condition: HashMap::new(),
-            last_bucket_by_condition: HashMap::new(),
-        }
-    }
+#[derive(Debug, Clone)]
+struct EntrySignal {
+    side: Side,
+    token_id: String,
+    limit_price: Decimal,
+    edge: Decimal,
+    gross_edge: Decimal,
+    fair_value: Decimal,
+    signal_confidence: Decimal,
+    p_up_window: Decimal,
+    p_up_threshold: Option<Decimal>,
+    p_up_blended: Decimal,
+    w_threshold: Decimal,
+    w_model: Decimal,
+    w_window: Decimal,
+    up_edge_gross: Decimal,
+    down_edge_gross: Decimal,
+    up_edge_net: Decimal,
+    down_edge_net: Decimal,
+    up_ask: Decimal,
+    down_ask: Decimal,
+}
 
-    fn prune_inactive(&mut self, keep_conditions: &HashSet<String>) {
-        self.seq_by_condition
-            .retain(|k, _| keep_conditions.contains(k));
-        self.last_bucket_by_condition
-            .retain(|k, _| keep_conditions.contains(k));
-    }
+#[derive(Debug, Clone)]
+struct SequenceSnapshot {
+    ts: DateTime<Utc>,
+    obi_5: Decimal,
+    obi_10: Decimal,
+    spread_bps: Decimal,
+    bid_volume_5: Decimal,
+    ask_volume_5: Decimal,
+    momentum_1s: Decimal,
+    momentum_5s: Decimal,
+    spot_price: Decimal,
+    remaining_secs: Decimal,
+    price_to_beat: Decimal,
+    distance_to_beat: Decimal,
+}
 
-    fn bucket_start(&self, now: DateTime<Utc>) -> DateTime<Utc> {
-        let secs = now.timestamp();
-        let step = self.sample_secs as i64;
-        let bucket = if step > 0 { (secs / step) * step } else { secs };
-        chrono::DateTime::<Utc>::from_timestamp(bucket, 0).unwrap_or(now)
-    }
-
-    fn ingest_point(
-        &mut self,
-        condition_id: &str,
-        bucket_start: DateTime<Utc>,
-        row: [f32; TCN_FEATURE_DIM],
-    ) {
-        if self
-            .last_bucket_by_condition
-            .get(condition_id)
-            .is_some_and(|v| *v == bucket_start)
-        {
-            return;
-        }
-
-        let seq = self
-            .seq_by_condition
-            .entry(condition_id.to_string())
-            .or_default();
-        seq.push_back(row);
-        while seq.len() > self.seq_len {
-            seq.pop_front();
-        }
-        self.last_bucket_by_condition
-            .insert(condition_id.to_string(), bucket_start);
-    }
-
-    fn sequence_flat(&self, condition_id: &str) -> Option<Vec<f32>> {
-        let seq = self.seq_by_condition.get(condition_id)?;
-        let first = seq.front()?;
-
-        let mut out = Vec::with_capacity(self.seq_len * TCN_FEATURE_DIM);
-        let pad = self.seq_len.saturating_sub(seq.len());
-        for _ in 0..pad {
-            out.extend_from_slice(first);
-        }
-        for row in seq {
-            out.extend_from_slice(row);
-        }
-        Some(out)
+fn sequence_len_for_horizon(horizon: &str) -> usize {
+    match normalize_timeframe(horizon).as_str() {
+        "15m" => SEQ_LEN_15M,
+        _ => SEQ_LEN_5M,
     }
 }
 
@@ -393,9 +387,7 @@ pub struct CryptoLobMlAgent {
     binance_ws: Arc<BinanceWebSocket>,
     pm_ws: Arc<PolymarketWebSocket>,
     event_matcher: Arc<EventMatcher>,
-    lob_cache: Option<LobCache>,
-    pool: Option<PgPool>,
-    nn_model: Option<DenseNetwork>,
+    lob_cache: LobCache,
     #[cfg(feature = "onnx")]
     onnx_model: Option<OnnxModel>,
 }
@@ -556,115 +548,59 @@ impl CryptoLobMlAgent {
         binance_ws: Arc<BinanceWebSocket>,
         pm_ws: Arc<PolymarketWebSocket>,
         event_matcher: Arc<EventMatcher>,
-        lob_cache: Option<LobCache>,
-        pool: Option<PgPool>,
-    ) -> Self {
+        lob_cache: LobCache,
+    ) -> Result<Self> {
         let model_type = config.model_type.trim().to_ascii_lowercase();
-        let nn_model = if model_type == "mlp" || model_type == "mlp_json" {
-            match config.model_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => match DenseNetwork::from_file(path) {
-                    Ok(m) => {
-                        info!(
-                            agent = config.agent_id,
-                            model_type = "mlp_json",
-                            model_path = %path,
-                            input_dim = m.input_dim,
-                            output_dim = m.output_dim(),
-                            "loaded lob-ml neural model"
-                        );
-                        Some(m)
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = config.agent_id,
-                            model_type = "mlp_json",
-                            model_path = %path,
-                            error = %e,
-                            "failed to load lob-ml neural model; falling back to logistic"
-                        );
-                        None
-                    }
-                },
-                _ => {
-                    warn!(
-                        agent = config.agent_id,
-                        model_type = "mlp_json",
-                        "model_type=mlp but model_path is not set; falling back to logistic"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        #[cfg(feature = "onnx")]
-        let onnx_model: Option<OnnxModel> = if model_type == "onnx" || model_type == "onnx_tcn" {
-            match config.model_path.as_deref() {
-                Some(path) if !path.trim().is_empty() => {
-                    let loaded = if model_type == "onnx_tcn" {
-                        let seq_len = config.onnx_seq_len.max(1);
-                        OnnxModel::load_for_tensor_input(path, &[1, seq_len, TCN_FEATURE_DIM])
-                    } else {
-                        OnnxModel::load_for_vec_input(path, 7)
-                    };
-
-                    match loaded {
-                        Ok(m) => {
-                            info!(
-                                agent = config.agent_id,
-                                model_type = %model_type,
-                                model_path = %path,
-                                input_shape = ?m.input_shape(),
-                                output_dim = m.output_dim(),
-                                "loaded lob-ml onnx model"
-                            );
-                            Some(m)
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent = config.agent_id,
-                                model_type = "onnx",
-                                model_path = %path,
-                                error = %e,
-                                "failed to load lob-ml onnx model; falling back to logistic"
-                            );
-                            None
-                        }
-                    }
-                }
-                _ => {
-                    warn!(
-                        agent = config.agent_id,
-                        model_type = %model_type,
-                        "onnx model_type requested but model_path is not set; falling back to logistic"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "onnx"))]
-        if model_type == "onnx" || model_type == "onnx_tcn" {
-            warn!(
-                agent = config.agent_id,
-                model_type = %model_type,
-                "onnx model_type requested but binary is built without --features onnx; falling back to logistic"
-            );
+        if model_type != "onnx" {
+            return Err(PloyError::Validation(format!(
+                "crypto_lob_ml only accepts model_type=onnx, got '{model_type}'"
+            )));
         }
 
-        Self {
-            config,
-            binance_ws,
-            pm_ws,
-            event_matcher,
-            lob_cache,
-            pool,
-            nn_model,
-            #[cfg(feature = "onnx")]
-            onnx_model,
+        #[cfg(feature = "onnx")]
+        {
+            let model_path = config
+                .model_path
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| {
+                    PloyError::Validation(
+                        "crypto_lob_ml requires PLOY_CRYPTO_LOB_ML__MODEL_PATH for ONNX inference"
+                            .to_string(),
+                    )
+                })?;
+
+            let configured_input_dim = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_INPUT_DIM")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(SEQ_LEN_5M * SEQ_FEATURE_DIM);
+
+            let m = OnnxModel::load_for_vec_input(model_path, configured_input_dim)?;
+            info!(
+                agent = config.agent_id,
+                model_type = "onnx",
+                model_path = %model_path,
+                input_dim = m.input_dim(),
+                output_dim = m.output_dim(),
+                "loaded lob-ml onnx model"
+            );
+
+            return Ok(Self {
+                config,
+                binance_ws,
+                pm_ws,
+                event_matcher,
+                lob_cache,
+                onnx_model: Some(m),
+            });
+        }
+
+        #[cfg(not(feature = "onnx"))]
+        {
+            let _ = (binance_ws, pm_ws, event_matcher, lob_cache);
+            Err(PloyError::Validation(
+                "crypto_lob_ml requires building with --features onnx".to_string(),
+            ))
         }
     }
 
@@ -675,75 +611,59 @@ impl CryptoLobMlAgent {
         format!("{:x}", hasher.finalize())
     }
 
-    fn sigmoid(x: f64) -> f64 {
-        1.0 / (1.0 + (-x).exp())
+    fn push_sequence_snapshot(
+        sequence_cache: &mut HashMap<String, VecDeque<SequenceSnapshot>>,
+        key: &str,
+        snapshot: SequenceSnapshot,
+    ) {
+        let window = sequence_cache.entry(key.to_string()).or_default();
+        if let Some(last) = window.back_mut() {
+            // Keep one row per second key to avoid dense duplicate ticks.
+            if last.ts == snapshot.ts {
+                *last = snapshot;
+                return;
+            }
+        }
+
+        window.push_back(snapshot);
+        while window.len() > SEQ_LEN_15M {
+            let _ = window.pop_front();
+        }
     }
 
-    // --- TCN feature helpers (must match training script semantics) ---
-
-    fn tcn_binance_symbol_from_market_slug(market_slug: &str) -> Option<&'static str> {
-        let slug = market_slug.trim().to_ascii_lowercase();
-        if slug.starts_with("btc-") {
-            return Some("BTCUSDT");
-        }
-        if slug.starts_with("eth-") {
-            return Some("ETHUSDT");
-        }
-        if slug.starts_with("sol-") {
-            return Some("SOLUSDT");
-        }
-        None
-    }
-
-    fn tcn_market_start_ts_from_slug(market_slug: &str) -> Option<DateTime<Utc>> {
-        // Mirror training SQL: TO_TIMESTAMP(SUBSTRING(market_slug FROM '([0-9]{9,})$')::double)
-        let digits_rev: String = market_slug
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if digits_rev.len() < 9 {
+    fn build_sequence(
+        sequence_cache: &HashMap<String, VecDeque<SequenceSnapshot>>,
+        key: &str,
+        horizon: &str,
+    ) -> Option<Vec<f32>> {
+        let seq_len = sequence_len_for_horizon(horizon);
+        let window = sequence_cache.get(key)?;
+        if window.len() < seq_len {
             return None;
         }
-        let digits: String = digits_rev.chars().rev().collect();
-        let secs: i64 = digits.parse().ok()?;
-        chrono::DateTime::<Utc>::from_timestamp(secs, 0)
+
+        let mut flat: Vec<f32> = Vec::with_capacity(seq_len * SEQ_FEATURE_DIM);
+        let start_idx = window.len().saturating_sub(seq_len);
+        for snap in window.iter().skip(start_idx) {
+            flat.push(snap.obi_5.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.obi_10.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.spread_bps.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.bid_volume_5.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.ask_volume_5.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.momentum_1s.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.momentum_5s.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.spot_price.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.remaining_secs.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.price_to_beat.to_f64().unwrap_or(0.0) as f32);
+            flat.push(snap.distance_to_beat.to_f64().unwrap_or(0.0) as f32);
+        }
+
+        Some(flat)
     }
 
-    fn tcn_mid_price(best_bid: Option<f64>, best_ask: Option<f64>) -> Option<f64> {
-        if let (Some(b), Some(a)) = (best_bid, best_ask) {
-            if b > 0.0 && a > 0.0 {
-                return Some(0.5 * (b + a));
-            }
-        }
-        if let Some(b) = best_bid {
-            if b > 0.0 {
-                return Some(b);
-            }
-        }
-        if let Some(a) = best_ask {
-            if a > 0.0 {
-                return Some(a);
-            }
-        }
-        None
-    }
-
-    fn tcn_spread_bps(best_bid: Option<f64>, best_ask: Option<f64>, mid: f64) -> f64 {
-        let (Some(b), Some(a)) = (best_bid, best_ask) else {
-            return 0.0;
-        };
-        if !b.is_finite()
-            || !a.is_finite()
-            || !mid.is_finite()
-            || b <= 0.0
-            || a <= 0.0
-            || mid <= 0.0
-            || a < b
-        {
-            return 0.0;
-        }
-        ((a - b) / mid) * 10_000.0
+    #[cfg(feature = "onnx")]
+    fn sigmoid(x: f64) -> f64 {
+        1.0 / (1.0 + (-x).exp())
     }
 
     fn estimate_p_up_window(
@@ -773,122 +693,370 @@ impl CryptoLobMlAgent {
         Decimal::from_f64_retain(p).unwrap_or(dec!(0.50))
     }
 
-    /// Estimate p(UP) from LOB snapshot + short-horizon momentum.
-    fn estimate_p_up_logistic(
-        &self,
-        lob: &LobSnapshot,
-        momentum_1s: Decimal,
-        momentum_5s: Decimal,
-    ) -> f64 {
-        let w = &self.config.weights;
-
-        let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
-        let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
-        let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
-        let m1 = momentum_1s.to_f64().unwrap_or(0.0);
-        let m5 = momentum_5s.to_f64().unwrap_or(0.0);
-
-        let z = w.bias
-            + w.w_obi_5 * obi5
-            + w.w_obi_10 * obi10
-            + w.w_momentum_1s * m1
-            + w.w_momentum_5s * m5
-            + w.w_spread_bps * spread;
-
-        // Avoid exact 0/1 probabilities.
-        Self::sigmoid(z).clamp(0.001, 0.999)
-    }
-
-    /// Estimate p(UP) using configured model. Returns (p_up, model_type_used).
-    fn estimate_p_up(
-        &self,
-        lob: &LobSnapshot,
-        momentum_1s: Decimal,
-        momentum_5s: Decimal,
-    ) -> (f64, &'static str) {
-        let model_type = self.config.model_type.trim().to_ascii_lowercase();
-
-        // Shared feature order (must match training/export):
-        // [obi5, obi10, spread_bps, bid_volume_5, ask_volume_5, momentum_1s, momentum_5s]
-        let obi5 = lob.obi_5.to_f64().unwrap_or(0.0);
-        let obi10 = lob.obi_10.to_f64().unwrap_or(0.0);
-        let spread = lob.spread_bps.to_f64().unwrap_or(0.0);
-        let bidv5 = lob.bid_volume_5.to_f64().unwrap_or(0.0);
-        let askv5 = lob.ask_volume_5.to_f64().unwrap_or(0.0);
-        let m1 = momentum_1s.to_f64().unwrap_or(0.0);
-        let m5 = momentum_5s.to_f64().unwrap_or(0.0);
-
-        if model_type == "onnx" {
-            #[cfg(feature = "onnx")]
-            {
-                if let Some(m) = &self.onnx_model {
-                    let features = [
-                        obi5 as f32,
-                        obi10 as f32,
-                        spread as f32,
-                        bidv5 as f32,
-                        askv5 as f32,
-                        m1 as f32,
-                        m5 as f32,
-                    ];
-                    match m.predict_scalar(&features) {
-                        Ok(raw) if raw.is_finite() => {
-                            // Prefer probability output, but tolerate logits.
-                            let p = if raw < -0.001 || raw > 1.001 {
-                                Self::sigmoid(raw as f64)
-                            } else {
-                                raw as f64
-                            };
-                            return (p.clamp(0.001, 0.999), "onnx");
-                        }
-                        Ok(_) => {
-                            warn!(
-                                agent = self.config.agent_id,
-                                "lob-ml onnx returned non-finite output; falling back to logistic"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent = self.config.agent_id,
-                                error = %e,
-                                "lob-ml onnx inference failed; falling back to logistic"
-                            );
-                        }
-                    }
-                }
+    /// Estimate p(UP) using ONNX model from a flattened sequence input.
+    fn estimate_p_up(&self, horizon: &str, sequence: &[f32]) -> Result<(f64, &'static str)> {
+        #[cfg(feature = "onnx")]
+        {
+            let expected_len = sequence_len_for_horizon(horizon) * SEQ_FEATURE_DIM;
+            if sequence.len() != expected_len {
+                return Err(PloyError::Validation(format!(
+                    "sequence input dim mismatch: got {}, expected {} for horizon {}",
+                    sequence.len(),
+                    expected_len,
+                    normalize_timeframe(horizon),
+                )));
             }
+
+            let m = self
+                .onnx_model
+                .as_ref()
+                .ok_or_else(|| PloyError::InvalidState("onnx model not initialized".to_string()))?;
+            if m.input_dim() != sequence.len() {
+                return Err(PloyError::Validation(format!(
+                    "onnx input dim mismatch: got {}, model expects {}",
+                    sequence.len(),
+                    m.input_dim(),
+                )));
+            }
+
+            let raw = m.predict_scalar(sequence)?;
+            if !raw.is_finite() {
+                return Err(PloyError::Internal(
+                    "lob-ml onnx returned non-finite output".to_string(),
+                ));
+            }
+            // Prefer probability output, but tolerate logits.
+            let p = if raw < -0.001 || raw > 1.001 {
+                Self::sigmoid(raw as f64)
+            } else {
+                raw as f64
+            };
+            return Ok((p.clamp(0.001, 0.999), "onnx"));
         }
 
-        if model_type == "mlp" || model_type == "mlp_json" {
-            if let Some(nn) = &self.nn_model {
-                // Feature order must match training/export.
-                let features = [obi5, obi10, spread, bidv5, askv5, m1, m5];
-
-                match nn.forward_scalar(&features) {
-                    Ok(p) if p.is_finite() => return (p.clamp(0.001, 0.999), "mlp_json"),
-                    Ok(_) => {
-                        warn!(
-                            agent = self.config.agent_id,
-                            "lob-ml nn returned non-finite p_up; falling back to logistic"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = self.config.agent_id,
-                            error = %e,
-                            "lob-ml nn inference failed; falling back to logistic"
-                        );
-                    }
-                }
-            }
+        #[cfg(not(feature = "onnx"))]
+        {
+            let _ = (horizon, sequence);
+            Err(PloyError::Validation(
+                "crypto_lob_ml requires --features onnx".to_string(),
+            ))
         }
-
-        (
-            self.estimate_p_up_logistic(lob, momentum_1s, momentum_5s),
-            "logistic",
-        )
     }
 
+    fn model_window_blend_weights(&self) -> (Decimal, Decimal) {
+        // Keep window baseline as a small fallback, never dominant.
+        let w_window = self
+            .config
+            .window_fallback_weight
+            .max(Decimal::ZERO)
+            .min(dec!(0.49));
+        let w_model = (Decimal::ONE - w_window).max(Decimal::ZERO);
+        (w_model, w_window)
+    }
+
+    fn threshold_blend_weight(&self) -> Decimal {
+        self.config
+            .threshold_prob_weight
+            .max(Decimal::ZERO)
+            .min(dec!(0.90))
+    }
+
+    fn entry_late_window_secs(&self, horizon: &str) -> u64 {
+        match normalize_timeframe(horizon).as_str() {
+            "15m" => self.config.entry_late_window_secs_15m,
+            _ => self.config.entry_late_window_secs_5m,
+        }
+    }
+
+    fn is_within_entry_late_window(&self, horizon: &str, remaining_secs: i64) -> bool {
+        if remaining_secs <= 0 {
+            return false;
+        }
+
+        let window_secs = self.entry_late_window_secs(horizon);
+        window_secs == 0 || remaining_secs as u64 <= window_secs
+    }
+
+    fn allows_signal_flip_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::SignalFlip)
+    }
+
+    fn allows_ev_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::EvExit)
+    }
+
+    fn allows_price_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::PriceExit)
+    }
+
+    fn exit_mode_label(&self) -> &'static str {
+        match self.config.exit_mode {
+            CryptoLobMlExitMode::SettleOnly => "settle_only",
+            CryptoLobMlExitMode::EvExit => "ev_exit",
+            CryptoLobMlExitMode::SignalFlip => "signal_flip",
+            CryptoLobMlExitMode::PriceExit => "price_exit",
+        }
+    }
+
+    fn ev_exit_buffer(&self, window: &WindowContext) -> Decimal {
+        let base = self
+            .config
+            .ev_exit_buffer
+            .max(Decimal::ZERO)
+            .min(dec!(0.50));
+        let scale = self
+            .config
+            .ev_exit_vol_scale
+            .max(Decimal::ZERO)
+            .min(dec!(0.50));
+        let uncertainty = (dec!(0.5) - (window.p_up_window - dec!(0.5)).abs()).max(Decimal::ZERO);
+        (base + scale * uncertainty).min(dec!(0.50))
+    }
+
+    fn net_ev_for_binary_side(&self, prob_win: Decimal, ask: Decimal) -> Decimal {
+        if ask <= Decimal::ZERO || ask >= Decimal::ONE {
+            return Decimal::MIN;
+        }
+
+        let slippage_rate = (self.config.entry_slippage_bps / dec!(10000))
+            .max(Decimal::ZERO)
+            .min(dec!(0.25));
+        let effective_entry = (ask * (Decimal::ONE + slippage_rate))
+            .max(Decimal::ZERO)
+            .min(dec!(0.999));
+
+        let fee_rate = self
+            .config
+            .taker_fee_rate
+            .max(Decimal::ZERO)
+            .min(dec!(0.25));
+        let prob = prob_win.max(dec!(0.001)).min(dec!(0.999));
+        let net_profit_on_win = (Decimal::ONE - effective_entry) * (Decimal::ONE - fee_rate);
+        let loss_on_lose = effective_entry;
+
+        prob * net_profit_on_win - (Decimal::ONE - prob) * loss_on_lose
+    }
+
+    fn estimate_p_up_threshold_anchor(
+        &self,
+        spot_price: Decimal,
+        price_to_beat: Option<Decimal>,
+        sigma_1s: Option<Decimal>,
+        remaining_secs: i64,
+    ) -> Option<Decimal> {
+        if !self.config.use_price_to_beat {
+            return None;
+        }
+
+        let threshold = price_to_beat?;
+        if spot_price <= Decimal::ZERO || threshold <= Decimal::ZERO || remaining_secs <= 0 {
+            return None;
+        }
+
+        let sigma_1s = sigma_1s.and_then(|v| v.to_f64())?;
+        if !sigma_1s.is_finite() || sigma_1s <= 0.0 {
+            return None;
+        }
+
+        let sigma_rem = sigma_1s * (remaining_secs as f64).sqrt();
+        if !sigma_rem.is_finite() || sigma_rem <= 0.0 {
+            return None;
+        }
+
+        let spot = spot_price.to_f64()?;
+        let beat = threshold.to_f64()?;
+        if !spot.is_finite() || !beat.is_finite() || spot <= 0.0 || beat <= 0.0 {
+            return None;
+        }
+
+        let required_return = (beat - spot) / spot;
+        if !required_return.is_finite() {
+            return None;
+        }
+
+        let p = (1.0 - normal_cdf(required_return / sigma_rem)).clamp(0.001, 0.999);
+        Decimal::from_f64_retain(p)
+    }
+
+    fn build_window_context(
+        &self,
+        spot: &SpotPrice,
+        event: &EventInfo,
+        rolling_volatility_opt: Option<Decimal>,
+    ) -> Option<WindowContext> {
+        let now = spot.timestamp;
+        if now < event.start_time || now >= event.end_time {
+            return None;
+        }
+
+        let elapsed_secs = now
+            .signed_duration_since(event.start_time)
+            .num_seconds()
+            .max(0);
+        let remaining_secs = event.end_time.signed_duration_since(now).num_seconds();
+        if remaining_secs <= 0 {
+            return None;
+        }
+
+        let target_time = now - chrono::Duration::seconds(elapsed_secs);
+        match spot.oldest_timestamp() {
+            Some(oldest) if oldest > target_time => return None,
+            Some(_) => {}
+            None => return None,
+        }
+
+        let start_price = spot.price_secs_ago(elapsed_secs as u64)?;
+        if start_price <= Decimal::ZERO {
+            return None;
+        }
+
+        let window_move = (spot.price - start_price) / start_price;
+        let p_up_window =
+            Self::estimate_p_up_window(window_move, rolling_volatility_opt, remaining_secs);
+
+        Some(WindowContext {
+            now,
+            start_price,
+            window_move,
+            elapsed_secs,
+            remaining_secs,
+            p_up_window,
+        })
+    }
+
+    fn compute_blended_probability(
+        &self,
+        p_up_model_dec: Decimal,
+        window: &WindowContext,
+        p_up_threshold: Option<Decimal>,
+    ) -> Option<BlendedProb> {
+        let (w_model, w_window) = self.model_window_blend_weights();
+        let p_up_base = (window.p_up_window * w_window + p_up_model_dec * w_model)
+            .max(dec!(0.001))
+            .min(dec!(0.999));
+        let w_threshold = self.threshold_blend_weight();
+        let p_up_blended = if let Some(p_thr) = p_up_threshold {
+            if w_threshold > Decimal::ZERO {
+                (p_up_base * (Decimal::ONE - w_threshold) + p_thr * w_threshold)
+                    .max(dec!(0.001))
+                    .min(dec!(0.999))
+            } else {
+                p_up_base
+            }
+        } else {
+            if self.config.use_price_to_beat && self.config.require_price_to_beat {
+                return None;
+            }
+            p_up_base
+        };
+
+        Some(BlendedProb {
+            p_up_blended,
+            w_threshold,
+            w_model,
+            w_window,
+        })
+    }
+
+    fn evaluate_entry_signal(
+        &self,
+        blended: &BlendedProb,
+        window: &WindowContext,
+        p_up_threshold: Option<Decimal>,
+        up_token_id: &str,
+        down_token_id: &str,
+        up_ask: Decimal,
+        down_ask: Decimal,
+    ) -> Option<EntrySignal> {
+        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+            return None;
+        }
+
+        let p_up_blended = blended.p_up_blended;
+        let up_edge_gross = p_up_blended - up_ask;
+        let down_edge_gross = (Decimal::ONE - p_up_blended) - down_ask;
+        let up_edge_net = self.net_ev_for_binary_side(p_up_blended, up_ask);
+        let down_edge_net = self.net_ev_for_binary_side(Decimal::ONE - p_up_blended, down_ask);
+
+        let (side, token_id, limit_price, edge, gross_edge, fair_value) =
+            match self.config.entry_side_policy {
+                CryptoLobMlEntrySidePolicy::BestEv => {
+                    if up_edge_net >= down_edge_net {
+                        (
+                            Side::Up,
+                            up_token_id.to_string(),
+                            up_ask,
+                            up_edge_net,
+                            up_edge_gross,
+                            p_up_blended,
+                        )
+                    } else {
+                        (
+                            Side::Down,
+                            down_token_id.to_string(),
+                            down_ask,
+                            down_edge_net,
+                            down_edge_gross,
+                            Decimal::ONE - p_up_blended,
+                        )
+                    }
+                }
+                CryptoLobMlEntrySidePolicy::LaggingOnly => {
+                    if up_ask <= down_ask {
+                        (
+                            Side::Up,
+                            up_token_id.to_string(),
+                            up_ask,
+                            up_edge_net,
+                            up_edge_gross,
+                            p_up_blended,
+                        )
+                    } else {
+                        (
+                            Side::Down,
+                            down_token_id.to_string(),
+                            down_ask,
+                            down_edge_net,
+                            down_edge_gross,
+                            Decimal::ONE - p_up_blended,
+                        )
+                    }
+                }
+            };
+
+        if limit_price > self.config.max_entry_price {
+            return None;
+        }
+        if edge < self.config.min_edge {
+            return None;
+        }
+
+        let signal_confidence = (edge / dec!(0.10)).max(Decimal::ZERO).min(Decimal::ONE);
+
+        Some(EntrySignal {
+            side,
+            token_id,
+            limit_price,
+            edge,
+            gross_edge,
+            fair_value,
+            signal_confidence,
+            p_up_window: window.p_up_window,
+            p_up_threshold,
+            p_up_blended,
+            w_threshold: blended.w_threshold,
+            w_model: blended.w_model,
+            w_window: blended.w_window,
+            up_edge_gross,
+            down_edge_gross,
+            up_edge_net,
+            down_edge_net,
+            up_ask,
+            down_ask,
+        })
+    }
+
+    #[cfg(feature = "tcn_db")]
     async fn estimate_p_up_tcn(
         &self,
         tcn: &mut TcnBuffers,
@@ -1165,6 +1333,7 @@ impl CryptoLobMlAgent {
         self.predict_tcn_sequence(&seq)
     }
 
+    #[cfg(feature = "tcn_db")]
     fn predict_tcn_sequence(&self, seq: &[f32]) -> Option<f64> {
         #[cfg(feature = "onnx")]
         {
@@ -1221,19 +1390,6 @@ impl TradingAgent for CryptoLobMlAgent {
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "crypto lob-ml agent starting");
         let config_hash = self.config_hash();
-        let _model_type_cfg = self.config.model_type.trim().to_ascii_lowercase();
-        #[cfg(feature = "onnx")]
-        let use_tcn = matches!(
-            _model_type_cfg.as_str(),
-            "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
-        );
-        #[cfg(not(feature = "onnx"))]
-        let use_tcn = false;
-        let mut tcn_buffers: Option<TcnBuffers> = if use_tcn {
-            Some(TcnBuffers::new(&self.config))
-        } else {
-            None
-        };
 
         let mut status = AgentStatus::Running;
         let mut positions: HashMap<String, TrackedPosition> = HashMap::new(); // slug -> pos
@@ -1241,6 +1397,7 @@ impl TradingAgent for CryptoLobMlAgent {
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut last_trade_by_key: HashMap<String, DateTime<Utc>> = HashMap::new(); // symbol|timeframe -> ts
         let mut traded_events: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut sequence_cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
 
         let daily_pnl = Decimal::ZERO;
         sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
@@ -1295,17 +1452,11 @@ impl TradingAgent for CryptoLobMlAgent {
 
                     // Ensure we are subscribed to the latest token set.
                     let mut desired_tokens: HashSet<String> = HashSet::new();
-                    let mut desired_conditions: HashSet<String> = HashSet::new();
                     for events in active_events.values() {
                         for event in events {
                             desired_tokens.insert(event.up_token_id.clone());
                             desired_tokens.insert(event.down_token_id.clone());
-                            desired_conditions.insert(event.condition_id.clone());
                         }
-                    }
-
-                    if let Some(buf) = tcn_buffers.as_mut() {
-                        buf.prune_inactive(&desired_conditions);
                     }
 
                     if desired_tokens != subscribed_tokens {
@@ -1367,196 +1518,109 @@ impl TradingAgent for CryptoLobMlAgent {
                     let momentum_5s = spot.momentum(5).unwrap_or(Decimal::ZERO);
                     let rolling_volatility_opt = spot.volatility(60);
 
-                    // Pull Binance LOB snapshot (feature vector) for non-TCN models only.
-                    let lob_opt: Option<LobSnapshot> = if use_tcn {
-                        None
-                    } else {
-                        let Some(lob_cache) = self.lob_cache.as_ref() else {
-                            continue;
-                        };
-                        let lob = match lob_cache.get_snapshot(&update.symbol).await {
-                            Some(s) => s,
-                            None => continue,
-                        };
-                        let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
-                        if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
-                            continue;
-                        }
-                        Some(lob)
+                    let Some(lob) = self.lob_cache.get_snapshot(&update.symbol).await else {
+                        continue;
                     };
+                    let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
+                    if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
+                        continue;
+                    }
 
-                    let (lob_best_bid, lob_best_ask, lob_mid_price, lob_spread_bps, lob_obi_5, lob_obi_10, lob_bid_volume_5, lob_ask_volume_5) =
-                        if let Some(lob) = &lob_opt {
-                            (
-                                lob.best_bid,
-                                lob.best_ask,
-                                lob.mid_price,
-                                lob.spread_bps,
-                                lob.obi_5,
-                                lob.obi_10,
-                                lob.bid_volume_5,
-                                lob.ask_volume_5,
-                            )
-                        } else {
-                            (
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                                Decimal::ZERO,
-                            )
-                        };
-
-                    let (p_up_model_global, model_type_used_global, p_up_model_global_dec) =
-                        if let Some(lob) = lob_opt.as_ref() {
-                            let (p_up_model, model_type_used) =
-                                self.estimate_p_up(lob, momentum_1s, momentum_5s);
-                            let p_up_model_dec =
-                                Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
-                            (p_up_model, model_type_used, p_up_model_dec)
-                        } else {
-                            (0.5, "tcn", dec!(0.5))
-                        };
-
-                    let (obi_1, obi_2, obi_3, obi_20) = if let Some(lob_cache) = self.lob_cache.as_ref() {
-                        (
-                            lob_cache
-                                .get_obi(&update.symbol, 1)
-                                .await
-                                .unwrap_or(Decimal::ZERO),
-                            lob_cache
-                                .get_obi(&update.symbol, 2)
-                                .await
-                                .unwrap_or(Decimal::ZERO),
-                            lob_cache
-                                .get_obi(&update.symbol, 3)
-                                .await
-                                .unwrap_or(Decimal::ZERO),
-                            lob_cache
-                                .get_obi(&update.symbol, 20)
-                                .await
-                                .unwrap_or(Decimal::ZERO),
-                        )
-                    } else {
-                        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
-                    };
-                    let obi_micro = if let Some(lob) = &lob_opt {
-                        obi_1 - lob.obi_5
-                    } else {
-                        Decimal::ZERO
-                    };
-                    let obi_slope = if let Some(lob) = &lob_opt {
-                        lob.obi_5 - obi_20
-                    } else {
-                        Decimal::ZERO
-                    };
+                    let (obi_1, obi_2, obi_3, obi_20) = (
+                        self.lob_cache
+                            .get_obi(&update.symbol, 1)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                        self.lob_cache
+                            .get_obi(&update.symbol, 2)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                        self.lob_cache
+                            .get_obi(&update.symbol, 3)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                        self.lob_cache
+                            .get_obi(&update.symbol, 20)
+                            .await
+                            .unwrap_or(Decimal::ZERO),
+                    );
+                    let obi_micro = obi_1 - lob.obi_5;
+                    let obi_slope = lob.obi_5 - obi_20;
 
                     let quote_cache = self.pm_ws.quote_cache();
                     for event in events {
                         let timeframe = normalize_timeframe(&event.horizon);
                         let entry_key = format!("{}|{}", update.symbol, &timeframe);
-
-                        // Only trade events that have actually started.
-                        // Gamma can surface future windows early; avoid "pre-trading" them.
-                        let now = spot.timestamp;
-                        if now < event.start_time || now >= event.end_time {
-                            continue;
-                        }
-
-                        // Window-context baseline probability: ties the bet to event resolution.
-                        //
-                        // For UP/DOWN markets, the threshold is the event start price.
-                        // For strike-style markets (when parsed), use `price_to_beat`.
-                        //
-                        // This avoids pathological "always buy cheap tail" behavior when
-                        // p_up_model is neutral (~0.5) or uncalibrated.
-                        let elapsed_secs = now
-                            .signed_duration_since(event.start_time)
-                            .num_seconds()
-                            .max(0);
-                        let remaining_secs = event.end_time.signed_duration_since(now).num_seconds();
-                        if remaining_secs <= 0 {
-                            continue;
-                        }
-                        let remaining_secs_u64 = remaining_secs.max(0) as u64;
-                        if remaining_secs_u64 < self.config.min_time_remaining_secs {
-                            continue;
-                        }
-                        let max_time_remaining_secs = match timeframe.as_str() {
-                            "5m" => self.config.max_time_remaining_secs_5m,
-                            "15m" => self.config.max_time_remaining_secs_15m,
-                            _ => self.config.max_time_remaining_secs,
-                        }
-                        .min(self.config.max_time_remaining_secs);
-                        if remaining_secs_u64 > max_time_remaining_secs {
-                            continue;
-                        }
-
-                        let target_time = now - chrono::Duration::seconds(elapsed_secs);
-                        if let Some(oldest) = spot.oldest_timestamp() {
-                            if oldest > target_time {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-
-                        let Some(start_price) = spot.price_secs_ago(elapsed_secs as u64) else {
+                        let Some(window_ctx) =
+                            self.build_window_context(&spot, &event, rolling_volatility_opt)
+                        else {
                             continue;
                         };
-                        if start_price <= Decimal::ZERO {
+                        if !self
+                            .is_within_entry_late_window(&timeframe, window_ctx.remaining_secs)
+                        {
                             continue;
                         }
-                        let threshold_price = event
-                            .price_to_beat
-                            .filter(|v| *v > Decimal::ZERO)
-                            .unwrap_or(start_price);
-                        let window_move = (spot.price - threshold_price) / threshold_price;
-                        let p_up_window_dec = Self::estimate_p_up_window(
-                            window_move,
+                        let p_up_threshold = self.estimate_p_up_threshold_anchor(
+                            spot.price,
+                            event.price_to_beat,
                             rolling_volatility_opt,
-                            remaining_secs,
+                            window_ctx.remaining_secs,
                         );
 
-                        let (p_up_model, model_type_used, p_up_model_dec) = if use_tcn {
-                            match tcn_buffers.as_mut() {
-                                Some(buf) => match self.estimate_p_up_tcn(buf, &event, now).await {
-                                    Some(p) => (
-                                        p,
-                                        "onnx_tcn",
-                                        Decimal::from_f64_retain(p).unwrap_or(dec!(0.5)),
-                                    ),
-                                    None => {
-                                        // In onnx_tcn mode we require DB-derived features for
-                                        // training parity; do not fall back to approximate models.
-                                        continue;
-                                    }
-                                },
-                                None => continue,
-                            }
+                        let price_to_beat = event.price_to_beat.unwrap_or(spot.price);
+                        let distance_to_beat = if spot.price > Decimal::ZERO {
+                            (price_to_beat - spot.price) / spot.price
                         } else {
-                            (
-                                p_up_model_global,
-                                model_type_used_global,
-                                p_up_model_global_dec,
-                            )
+                            Decimal::ZERO
                         };
+                        let second_bucket =
+                            chrono::DateTime::<Utc>::from_timestamp(spot.timestamp.timestamp(), 0)
+                                .unwrap_or(spot.timestamp);
+                        Self::push_sequence_snapshot(
+                            &mut sequence_cache,
+                            entry_key.as_str(),
+                            SequenceSnapshot {
+                                ts: second_bucket,
+                                obi_5: lob.obi_5,
+                                obi_10: lob.obi_10,
+                                spread_bps: lob.spread_bps,
+                                bid_volume_5: lob.bid_volume_5,
+                                ask_volume_5: lob.ask_volume_5,
+                                momentum_1s,
+                                momentum_5s,
+                                spot_price: spot.price,
+                                remaining_secs: Decimal::from(window_ctx.remaining_secs.max(0)),
+                                price_to_beat,
+                                distance_to_beat,
+                            },
+                        );
 
-                        let (w_model, w_window) = match model_type_used {
-                            "onnx_tcn" => (dec!(1.00), dec!(0.00)),
-                            "onnx" | "mlp_json" => (dec!(0.50), dec!(0.50)),
-                            _ => (dec!(0.20), dec!(0.80)),
+                        let Some(sequence_input) =
+                            Self::build_sequence(&sequence_cache, entry_key.as_str(), &timeframe)
+                        else {
+                            continue;
                         };
-                        let p_up_dec = (p_up_window_dec * w_window + p_up_model_dec * w_model)
-                            .max(dec!(0.001))
-                            .min(dec!(0.999));
+                        let (p_up_model, model_type_used) =
+                            match self.estimate_p_up(&timeframe, &sequence_input) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        agent = self.config.agent_id,
+                                        symbol = %update.symbol,
+                                        timeframe = %timeframe,
+                                        error = %e,
+                                        "onnx inference failed for sequence input"
+                                    );
+                                    continue;
+                                }
+                            };
+                        let p_up_model_dec =
+                            Decimal::from_f64_retain(p_up_model).unwrap_or(dec!(0.5));
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
-                        let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
+                        let (up_bid, up_ask, down_bid, down_ask) = match (up, down) {
                             (Some(uq), Some(dq)) => (
                                 uq.best_bid.unwrap_or(Decimal::ZERO),
                                 uq.best_ask.unwrap_or(Decimal::ZERO),
@@ -1565,136 +1629,300 @@ impl TradingAgent for CryptoLobMlAgent {
                             ),
                             _ => continue,
                         };
-                        if up_ask <= Decimal::ZERO || down_ask <= Decimal::ZERO {
+                        let Some(blended) = self.compute_blended_probability(
+                            p_up_model_dec,
+                            &window_ctx,
+                            p_up_threshold,
+                        ) else {
                             continue;
-                        }
-
-                        let up_edge_per_share = p_up_dec - up_ask;
-                        let down_edge_per_share = (Decimal::ONE - p_up_dec) - down_ask;
-                        let cost_buffer_total =
-                            (self.config.fee_buffer + self.config.slippage_buffer)
-                                .max(Decimal::ZERO);
-                        let up_cost = up_ask + cost_buffer_total;
-                        let down_cost = down_ask + cost_buffer_total;
-                        if up_cost <= Decimal::ZERO || down_cost <= Decimal::ZERO {
-                            continue;
-                        }
-
-                        let up_expected_roi = (p_up_dec / up_cost) - Decimal::ONE;
-                        let down_expected_roi = ((Decimal::ONE - p_up_dec) / down_cost) - Decimal::ONE;
-                        let (side, token_id, limit_price, edge_per_share, expected_roi, confidence) =
-                            if up_expected_roi >= down_expected_roi {
-                                (
-                                    Side::Up,
-                                    event.up_token_id.clone(),
-                                    up_ask,
-                                    up_edge_per_share,
-                                    up_expected_roi,
-                                    p_up_dec,
-                                )
-                            } else {
-                                (
-                                    Side::Down,
-                                    event.down_token_id.clone(),
-                                    down_ask,
-                                    down_edge_per_share,
-                                    down_expected_roi,
-                                    Decimal::ONE - p_up_dec,
-                                )
-                            };
-
-                        if expected_roi < self.config.min_edge {
-                            continue;
-                        }
-                        if limit_price > self.config.max_entry_price {
-                            continue;
-                        }
-
-                        let signal_confidence = {
-                            // Scale confidence by edge size; keep within [0,1].
-                            let mut c = (edge_per_share / dec!(0.10))
-                                .max(Decimal::ZERO)
-                                .min(Decimal::ONE);
-                            // Heuristic logistic model is less trustworthy than a trained model.
-                            if model_type_used == "logistic" {
-                                c *= dec!(0.70);
-                            }
-                            c
                         };
 
                         if let Some(pos) = positions.get(&event.slug).cloned() {
-                            if pos.side != side {
-                                let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                            if self.allows_ev_exit() {
+                                let held_secs = Utc::now()
+                                    .signed_duration_since(pos.entry_time)
+                                    .num_seconds();
                                 if held_secs >= self.config.min_hold_secs as i64 {
-                                    let exit_price = quote_cache
-                                        .get(&pos.token_id)
-                                        .and_then(|q| q.best_bid)
-                                        .unwrap_or(Decimal::ZERO);
-
-                                    if exit_price > Decimal::ZERO {
-                                        let exit_intent = OrderIntent::new(
-                                            &self.config.agent_id,
-                                            Domain::Crypto,
-                                            &pos.market_slug,
-                                            &pos.token_id,
-                                            pos.side,
-                                            false,
-                                            pos.shares,
-                                            exit_price,
-                                        );
-                                        let position_coin = pos.symbol.replace("USDT", "");
-                                        let deployment_id =
-                                            deployment_id_for(STRATEGY_ID, &position_coin, &pos.horizon);
-                                        let timeframe = normalize_timeframe(&pos.horizon);
-                                        let event_window_secs =
-                                            event_window_secs_for_horizon(&timeframe).to_string();
-                                        let exit_intent = exit_intent
-                                        .with_priority(OrderPriority::High)
-                                        .with_metadata("strategy", STRATEGY_ID)
-                                        .with_metadata("deployment_id", &deployment_id)
-                                        .with_metadata("timeframe", &timeframe)
-                                        .with_metadata("event_window_secs", &event_window_secs)
-                                        .with_metadata("signal_type", "crypto_lob_ml_exit")
-                                        .with_metadata("coin", &position_coin)
-                                        .with_metadata("symbol", &pos.symbol)
-                                        .with_metadata("series_id", &pos.series_id)
-                                        .with_metadata("event_series_id", &pos.series_id)
-                                        .with_metadata("horizon", &pos.horizon)
-                                        .with_metadata("exit_reason", "signal_flip")
-                                        .with_metadata("entry_price", &pos.entry_price.to_string())
-                                        .with_metadata("exit_price", &exit_price.to_string())
-                                        .with_metadata("held_secs", &held_secs.to_string())
-                                        .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                                        .with_metadata("p_up_window", &p_up_window_dec.to_string())
-                                        .with_metadata("p_up_blended", &p_up_dec.to_string())
-                                        .with_metadata("p_up_blend_w_model", &w_model.to_string())
-                                        .with_metadata(
-                                            "p_up_blend_w_window",
-                                            &w_window.to_string(),
-                                        )
-                                        .with_metadata("signal_edge", &edge_per_share.to_string())
-                                        .with_metadata("signal_expected_roi", &expected_roi.to_string())
-                                        .with_metadata("config_hash", &config_hash);
-
-                                        match ctx.submit_order(exit_intent).await {
-                                            Ok(()) => {
-                                                info!(
-                                                    agent = self.config.agent_id,
-                                                    slug = %event.slug,
-                                                    old_side = %pos.side,
-                                                    new_side = %side,
-                                                    held_secs,
-                                                    p_up = %p_up_dec,
-                                                    "signal flip detected, submitting sell order"
+                                   
+                                    let held_bid = match pos.side {
+                                        Side::Up => up_bid,
+                                        Side::Down => down_bid,
+                                    };
+                                    if held_bid > Decimal::ZERO {
+                                        let fee_rate = self
+                                            .config
+                                            .taker_fee_rate
+                                            .max(Decimal::ZERO)
+                                            .min(dec!(0.25));
+                                        let bid_net =
+                                            (held_bid * (Decimal::ONE - fee_rate))
+                                                .max(Decimal::ZERO)
+                                                .min(dec!(0.999));
+                                        let fair_value = match pos.side {
+                                            Side::Up => blended.p_up_blended,
+                                            Side::Down => Decimal::ONE - blended.p_up_blended,
+                                        };
+                                        let ev_buffer = self.ev_exit_buffer(&window_ctx);
+                                        let ev_edge = bid_net - fair_value;
+                                        if ev_edge >= ev_buffer {
+                                            let exit_intent = OrderIntent::new(
+                                                &self.config.agent_id,
+                                                Domain::Crypto,
+                                                &pos.market_slug,
+                                                &pos.token_id,
+                                                pos.side,
+                                                false,
+                                                pos.shares,
+                                                held_bid,
+                                            );
+                                            let position_coin = pos.symbol.replace("USDT", "");
+                                            let deployment_id = deployment_id_for(
+                                                STRATEGY_ID,
+                                                &position_coin,
+                                                &pos.horizon,
+                                            );
+                                            let timeframe = normalize_timeframe(&pos.horizon);
+                                            let event_window_secs =
+                                                event_window_secs_for_horizon(&timeframe)
+                                                    .to_string();
+                                            let exit_intent = exit_intent
+                                                .with_priority(OrderPriority::High)
+                                                .with_metadata("strategy", STRATEGY_ID)
+                                                .with_metadata("deployment_id", &deployment_id)
+                                                .with_metadata("timeframe", &timeframe)
+                                                .with_metadata(
+                                                    "event_window_secs",
+                                                    &event_window_secs,
+                                                )
+                                                .with_metadata(
+                                                    "signal_type",
+                                                    "crypto_lob_ml_exit",
+                                                )
+                                                .with_metadata("coin", &position_coin)
+                                                .with_metadata("symbol", &pos.symbol)
+                                                .with_metadata("series_id", &pos.series_id)
+                                                .with_metadata("event_series_id", &pos.series_id)
+                                                .with_metadata("horizon", &pos.horizon)
+                                                .with_metadata("exit_mode", self.exit_mode_label())
+                                                .with_metadata("exit_reason", "model_ev")
+                                                .with_metadata(
+                                                    "entry_price",
+                                                    &pos.entry_price.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_price",
+                                                    &held_bid.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_bid_net",
+                                                    &bid_net.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_fair_value",
+                                                    &fair_value.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_ev_edge",
+                                                    &ev_edge.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "exit_ev_buffer",
+                                                    &ev_buffer.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "held_secs",
+                                                    &held_secs.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_model",
+                                                    &format!("{p_up_model:.6}"),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_window",
+                                                    &window_ctx.p_up_window.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_threshold",
+                                                    &p_up_threshold
+                                                        .unwrap_or(dec!(0.5))
+                                                        .to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blended",
+                                                    &blended.p_up_blended.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blend_w_threshold",
+                                                    &blended.w_threshold.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blend_w_model",
+                                                    &blended.w_model.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "p_up_blend_w_window",
+                                                    &blended.w_window.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "cost_taker_fee_rate",
+                                                    &self.config.taker_fee_rate.to_string(),
+                                                )
+                                                .with_metadata(
+                                                    "config_hash",
+                                                    &config_hash,
                                                 );
+
+                                            match ctx.submit_order(exit_intent).await {
+                                                Ok(()) => {
+                                                    info!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        side = %pos.side,
+                                                        held_secs,
+                                                        fair_value = %fair_value,
+                                                        bid_net = %bid_net,
+                                                        "model EV exit triggered, submitting sell order"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        error = %e,
+                                                        "failed to submit model-EV exit order"
+                                                    );
+                                                }
                                             }
-                                            Err(e) => {
-                                                warn!(
-                                                    agent = self.config.agent_id,
-                                                    slug = %event.slug,
-                                                    error = %e,
-                                                    "failed to submit signal-flip exit order"
-                                                );
+                                        }
+                                    }
+                                }
+                            }
+
+                            if self.allows_signal_flip_exit() {
+                                let Some(signal) = self.evaluate_entry_signal(
+                                    &blended,
+                                    &window_ctx,
+                                    p_up_threshold,
+                                    &event.up_token_id,
+                                    &event.down_token_id,
+                                    up_ask,
+                                    down_ask,
+                                ) else {
+                                    continue;
+                                };
+                                if pos.side != signal.side {
+                                    let held_secs =
+                                        Utc::now().signed_duration_since(pos.entry_time).num_seconds();
+                                    if held_secs >= self.config.min_hold_secs as i64 {
+                                        let exit_price = quote_cache
+                                            .get(&pos.token_id)
+                                            .and_then(|q| q.best_bid)
+                                            .unwrap_or(Decimal::ZERO);
+
+                                        if exit_price > Decimal::ZERO {
+                                            let exit_intent = OrderIntent::new(
+                                                &self.config.agent_id,
+                                                Domain::Crypto,
+                                                &pos.market_slug,
+                                                &pos.token_id,
+                                                pos.side,
+                                                false,
+                                                pos.shares,
+                                                exit_price,
+                                            );
+                                            let position_coin = pos.symbol.replace("USDT", "");
+                                            let deployment_id = deployment_id_for(
+                                                STRATEGY_ID,
+                                                &position_coin,
+                                                &pos.horizon,
+                                            );
+                                            let timeframe = normalize_timeframe(&pos.horizon);
+                                            let event_window_secs =
+                                                event_window_secs_for_horizon(&timeframe).to_string();
+                                            let exit_intent = exit_intent
+                                            .with_priority(OrderPriority::High)
+                                            .with_metadata("strategy", STRATEGY_ID)
+                                            .with_metadata("deployment_id", &deployment_id)
+                                            .with_metadata("timeframe", &timeframe)
+                                            .with_metadata("event_window_secs", &event_window_secs)
+                                            .with_metadata("signal_type", "crypto_lob_ml_exit")
+                                            .with_metadata("coin", &position_coin)
+                                            .with_metadata("symbol", &pos.symbol)
+                                            .with_metadata("series_id", &pos.series_id)
+                                            .with_metadata("event_series_id", &pos.series_id)
+                                            .with_metadata("horizon", &pos.horizon)
+                                            .with_metadata("exit_mode", self.exit_mode_label())
+                                            .with_metadata("exit_reason", "signal_flip")
+                                            .with_metadata("entry_price", &pos.entry_price.to_string())
+                                            .with_metadata("exit_price", &exit_price.to_string())
+                                            .with_metadata("held_secs", &held_secs.to_string())
+                                            .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
+                                            .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                                            .with_metadata(
+                                                "p_up_threshold",
+                                                &signal
+                                                    .p_up_threshold
+                                                    .unwrap_or(dec!(0.5))
+                                                    .to_string(),
+                                            )
+                                            .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                                            .with_metadata(
+                                                "p_up_blend_w_threshold",
+                                                &signal.w_threshold.to_string(),
+                                            )
+                                            .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
+                                            .with_metadata(
+                                                "p_up_blend_w_window",
+                                                &signal.w_window.to_string(),
+                                            )
+                                            .with_metadata("signal_edge", &signal.edge.to_string())
+                                            .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
+                                            .with_metadata(
+                                                "signal_up_edge_gross",
+                                                &signal.up_edge_gross.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "signal_down_edge_gross",
+                                                &signal.down_edge_gross.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "signal_up_edge_net",
+                                                &signal.up_edge_net.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "signal_down_edge_net",
+                                                &signal.down_edge_net.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "cost_taker_fee_rate",
+                                                &self.config.taker_fee_rate.to_string(),
+                                            )
+                                            .with_metadata(
+                                                "cost_entry_slippage_bps",
+                                                &self.config.entry_slippage_bps.to_string(),
+                                            )
+                                            .with_metadata("config_hash", &config_hash);
+
+                                            match ctx.submit_order(exit_intent).await {
+                                                Ok(()) => {
+                                                    info!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        old_side = %pos.side,
+                                                        new_side = %signal.side,
+                                                        held_secs,
+                                                        p_up = %signal.p_up_blended,
+                                                        "signal flip detected, submitting sell order"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        agent = self.config.agent_id,
+                                                        slug = %event.slug,
+                                                        error = %e,
+                                                        "failed to submit signal-flip exit order"
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1703,10 +1931,22 @@ impl TradingAgent for CryptoLobMlAgent {
                             continue;
                         }
 
+                        let Some(signal) = self.evaluate_entry_signal(
+                            &blended,
+                            &window_ctx,
+                            p_up_threshold,
+                            &event.up_token_id,
+                            &event.down_token_id,
+                            up_ask,
+                            down_ask,
+                        ) else {
+                            continue;
+                        };
+
                         if should_skip_entry(
                             &event.slug,
                             entry_key.as_str(),
-                            now,
+                            window_ctx.now,
                             &positions,
                             &traded_events,
                             &last_trade_by_key,
@@ -1717,9 +1957,9 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         let max_order_value = self.config.risk_params.max_order_value;
                         let shares = if max_order_value > Decimal::ZERO {
-                            // Size by USD notional: shares ~= max_order_value / limit_price.
+                            // Size by USD notional: shares ~= max_order_value / signal.limit_price.
                             // Truncation ensures we don't exceed the configured budget.
-                            let raw = (max_order_value / limit_price).trunc();
+                            let raw = (max_order_value / signal.limit_price).trunc();
                             let shares = raw.to_u64().unwrap_or(0);
                             if shares < 1 {
                                 continue;
@@ -1733,11 +1973,11 @@ impl TradingAgent for CryptoLobMlAgent {
                             &self.config.agent_id,
                             Domain::Crypto,
                             event.slug.as_str(),
-                            &token_id,
-                            side,
+                            &signal.token_id,
+                            signal.side,
                             true,
                             shares,
-                            limit_price,
+                            signal.limit_price,
                         );
                         let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
                         let event_window_secs =
@@ -1745,75 +1985,95 @@ impl TradingAgent for CryptoLobMlAgent {
                         let intent = intent
                         .with_priority(OrderPriority::Normal)
                         .with_metadata("strategy", STRATEGY_ID)
-                        .with_metadata("deployment_id", &deployment_id)
+                        .with_deployment_id(&deployment_id)
                         .with_metadata("timeframe", &timeframe)
                         .with_metadata("event_window_secs", &event_window_secs)
                         .with_metadata("signal_type", "crypto_lob_ml_entry")
+                        .with_metadata(
+                            "entry_side_policy",
+                            match self.config.entry_side_policy {
+                                CryptoLobMlEntrySidePolicy::BestEv => "best_ev",
+                                CryptoLobMlEntrySidePolicy::LaggingOnly => "lagging_only",
+                            },
+                        )
                         .with_metadata("coin", &coin)
                         .with_metadata("symbol", &update.symbol)
-                        .with_metadata("condition_id", &event.condition_id)
+                        .with_condition_id(&event.condition_id)
                         .with_metadata("series_id", &event.series_id)
                         .with_metadata("event_series_id", &event.series_id)
                         .with_metadata("horizon", &event.horizon)
+                        .with_metadata("exit_mode", self.exit_mode_label())
                         .with_metadata("event_end_time", &event.end_time.to_rfc3339())
                         .with_metadata("event_title", &event.title)
+                        .with_metadata(
+                            "price_to_beat",
+                            &event
+                                .price_to_beat
+                                .unwrap_or(Decimal::ZERO)
+                                .to_string(),
+                        )
                         .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                        .with_metadata("p_up_window", &p_up_window_dec.to_string())
-                        .with_metadata("p_up_blended", &p_up_dec.to_string())
-                        .with_metadata("p_up_blend_w_model", &w_model.to_string())
-                        .with_metadata("p_up_blend_w_window", &w_window.to_string())
+                        .with_metadata("p_up_window", &signal.p_up_window.to_string())
+                        .with_metadata(
+                            "p_up_threshold",
+                            &signal
+                                .p_up_threshold
+                                .unwrap_or(dec!(0.5))
+                                .to_string(),
+                        )
+                        .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
+                        .with_metadata("p_up_blend_w_threshold", &signal.w_threshold.to_string())
+                        .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
+                        .with_metadata("p_up_blend_w_window", &signal.w_window.to_string())
                         .with_metadata("model_type", model_type_used)
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
-                        .with_metadata("signal_edge", &edge_per_share.to_string())
-                        .with_metadata("signal_expected_roi", &expected_roi.to_string())
+                        .with_metadata("signal_edge", &signal.edge.to_string())
+                        .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
+                        .with_metadata("signal_up_edge_gross", &signal.up_edge_gross.to_string())
+                        .with_metadata("signal_down_edge_gross", &signal.down_edge_gross.to_string())
+                        .with_metadata("signal_up_edge_net", &signal.up_edge_net.to_string())
+                        .with_metadata("signal_down_edge_net", &signal.down_edge_net.to_string())
+                        .with_metadata("signal_confidence", &signal.signal_confidence.to_string())
+                        .with_metadata("signal_fair_value", &signal.fair_value.to_string())
+                        .with_metadata("signal_market_price", &signal.limit_price.to_string())
+                        .with_metadata("cost_taker_fee_rate", &self.config.taker_fee_rate.to_string())
                         .with_metadata(
-                            "signal_expected_roi_pct",
-                            &(expected_roi * dec!(100)).to_string(),
+                            "cost_entry_slippage_bps",
+                            &self.config.entry_slippage_bps.to_string(),
                         )
-                        .with_metadata("signal_cost_buffer_total", &cost_buffer_total.to_string())
-                        .with_metadata(
-                            "signal_entry_cost",
-                            &(limit_price + cost_buffer_total).to_string(),
-                        )
-                        .with_metadata("signal_confidence", &signal_confidence.to_string())
-                        .with_metadata("signal_fair_value", &confidence.to_string())
-                        .with_metadata("signal_market_price", &limit_price.to_string())
-                        .with_metadata("pm_up_ask", &up_ask.to_string())
-                        .with_metadata("pm_down_ask", &down_ask.to_string())
-                        .with_metadata("lob_best_bid", &lob_best_bid.to_string())
-                        .with_metadata("lob_best_ask", &lob_best_ask.to_string())
-                        .with_metadata("lob_mid_price", &lob_mid_price.to_string())
-                        .with_metadata("lob_spread_bps", &lob_spread_bps.to_string())
-                        .with_metadata("lob_obi_5", &lob_obi_5.to_string())
-                        .with_metadata("lob_obi_10", &lob_obi_10.to_string())
+                        .with_metadata("pm_up_ask", &signal.up_ask.to_string())
+                        .with_metadata("pm_down_ask", &signal.down_ask.to_string())
+                        .with_metadata("lob_best_bid", &lob.best_bid.to_string())
+                        .with_metadata("lob_best_ask", &lob.best_ask.to_string())
+                        .with_metadata("lob_mid_price", &lob.mid_price.to_string())
+                        .with_metadata("lob_spread_bps", &lob.spread_bps.to_string())
+                        .with_metadata("lob_obi_5", &lob.obi_5.to_string())
+                        .with_metadata("lob_obi_10", &lob.obi_10.to_string())
                         .with_metadata("lob_obi_1", &obi_1.to_string())
                         .with_metadata("lob_obi_2", &obi_2.to_string())
                         .with_metadata("lob_obi_3", &obi_3.to_string())
                         .with_metadata("lob_obi_20", &obi_20.to_string())
                         .with_metadata("lob_obi_micro", &obi_micro.to_string())
                         .with_metadata("lob_obi_slope", &obi_slope.to_string())
-                        .with_metadata("lob_bid_volume_5", &lob_bid_volume_5.to_string())
-                        .with_metadata("lob_ask_volume_5", &lob_ask_volume_5.to_string())
+                        .with_metadata("lob_bid_volume_5", &lob.bid_volume_5.to_string())
+                        .with_metadata("lob_ask_volume_5", &lob.ask_volume_5.to_string())
                         .with_metadata("signal_momentum_1s", &momentum_1s.to_string())
                         .with_metadata("signal_momentum_5s", &momentum_5s.to_string())
-                        .with_metadata("window_start_price", &start_price.to_string())
-                        .with_metadata("window_threshold_price", &threshold_price.to_string())
-                        .with_metadata("window_move_pct", &window_move.to_string())
-                        .with_metadata("window_elapsed_secs", &elapsed_secs.to_string())
-                        .with_metadata("window_remaining_secs", &remaining_secs.to_string())
+                        .with_metadata("window_start_price", &window_ctx.start_price.to_string())
+                        .with_metadata("window_move_pct", &window_ctx.window_move.to_string())
+                        .with_metadata("window_elapsed_secs", &window_ctx.elapsed_secs.to_string())
+                        .with_metadata("window_remaining_secs", &window_ctx.remaining_secs.to_string())
                         .with_metadata("config_hash", &config_hash);
 
                         info!(
                             agent = self.config.agent_id,
                             slug = %event.slug,
                             horizon = %event.horizon,
-                            %side,
-                            %limit_price,
-                            edge_per_share = %edge_per_share,
-                            expected_roi = %expected_roi,
-                            shares,
-                            notional = %(limit_price * Decimal::from(shares)),
-                            p_up = %p_up_dec,
+                            side = %signal.side,
+                            limit_price = %signal.limit_price,
+                            net_edge = %signal.edge,
+                            gross_edge = %signal.gross_edge,
+                            p_up = %signal.p_up_blended,
                             model = model_type_used,
                             "lob-ml signal detected, submitting order"
                         );
@@ -1847,7 +2107,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    if !self.config.enable_price_exits {
+                    if !self.allows_price_exit() {
                         continue;
                     }
 
@@ -1906,7 +2166,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     let intent = intent
                     .with_priority(priority)
                     .with_metadata("strategy", STRATEGY_ID)
-                    .with_metadata("deployment_id", &deployment_id)
+                    .with_deployment_id(&deployment_id)
                     .with_metadata("timeframe", &timeframe)
                     .with_metadata("event_window_secs", &event_window_secs)
                     .with_metadata("signal_type", "crypto_lob_ml_exit")
@@ -1915,6 +2175,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     .with_metadata("series_id", &pos.series_id)
                     .with_metadata("event_series_id", &pos.series_id)
                     .with_metadata("horizon", &pos.horizon)
+                    .with_metadata("exit_mode", self.exit_mode_label())
                     .with_metadata("exit_reason", exit_reason)
                     .with_metadata("entry_price", &pos.entry_price.to_string())
                     .with_metadata("exit_price", &best_bid.to_string())
@@ -1991,7 +2252,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 let intent = intent
                                 .with_priority(OrderPriority::Critical)
                                 .with_metadata("strategy", STRATEGY_ID)
-                                .with_metadata("deployment_id", &deployment_id)
+                                .with_deployment_id(&deployment_id)
                                 .with_metadata("timeframe", &timeframe)
                                 .with_metadata("event_window_secs", &event_window_secs)
                                 .with_metadata("signal_type", "crypto_lob_ml_exit")
@@ -2000,6 +2261,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 .with_metadata("series_id", &pos.series_id)
                                 .with_metadata("event_series_id", &pos.series_id)
                                 .with_metadata("horizon", &pos.horizon)
+                                .with_metadata("exit_mode", self.exit_mode_label())
                                 .with_metadata("exit_reason", "force_close")
                                 .with_metadata("entry_price", &pos.entry_price.to_string())
                                 .with_metadata("config_hash", &config_hash);
@@ -2023,6 +2285,15 @@ impl TradingAgent for CryptoLobMlAgent {
                                 &mut positions,
                             )
                             .await;
+                            let mut metrics = HashMap::new();
+                            metrics.insert(
+                                "model_type_configured".to_string(),
+                                self.config.model_type.clone(),
+                            );
+                            metrics.insert(
+                                "exit_mode".to_string(),
+                                self.exit_mode_label().to_string(),
+                            );
                             let snapshot = crate::coordinator::AgentSnapshot {
                                 agent_id: self.config.agent_id.clone(),
                                 name: self.config.name.clone(),
@@ -2032,7 +2303,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 exposure: total_exposure,
                                 daily_pnl,
                                 unrealized_pnl: Decimal::ZERO,
-                                metrics: HashMap::new(),
+                                metrics,
                                 last_heartbeat: Utc::now(),
                                 error_message: None,
                             };
@@ -2059,13 +2330,23 @@ impl TradingAgent for CryptoLobMlAgent {
                         &mut positions,
                     )
                     .await;
-                    let _ = ctx.report_state(
+                    let mut metrics = HashMap::new();
+                    metrics.insert(
+                        "model_type_configured".to_string(),
+                        self.config.model_type.clone(),
+                    );
+                    metrics.insert(
+                        "exit_mode".to_string(),
+                        self.exit_mode_label().to_string(),
+                    );
+                    let _ = ctx.report_state_with_metrics(
                         &self.config.name,
                         status,
                         positions.len(),
                         total_exposure,
                         daily_pnl,
                         Decimal::ZERO,
+                        metrics,
                         None,
                     ).await;
                 }
@@ -2081,33 +2362,80 @@ impl TradingAgent for CryptoLobMlAgent {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_config_defaults() {
-        let cfg = CryptoLobMlConfig::default();
-        assert_eq!(cfg.agent_id, "crypto_lob_ml");
-        assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
-        assert_eq!(cfg.max_time_remaining_secs, 900);
-        assert!(!cfg.enable_price_exits);
-        assert_eq!(cfg.min_hold_secs, 20);
-        assert!(cfg.prefer_close_to_end);
+    fn sample_window_context() -> WindowContext {
+        WindowContext {
+            now: Utc::now(),
+            start_price: dec!(100),
+            window_move: dec!(0.01),
+            elapsed_secs: 30,
+            remaining_secs: 270,
+            p_up_window: dec!(0.60),
+        }
+    }
+
+    fn sample_blended_prob(agent: &CryptoLobMlAgent) -> BlendedProb {
+        agent
+            .compute_blended_probability(dec!(0.62), &sample_window_context(), Some(dec!(0.58)))
+            .expect("blended probability should be available")
+    }
+
+    fn sample_sequence_snapshot(ts: DateTime<Utc>) -> SequenceSnapshot {
+        SequenceSnapshot {
+            ts,
+            obi_5: dec!(0.10),
+            obi_10: dec!(0.12),
+            spread_bps: dec!(2.0),
+            bid_volume_5: dec!(1000),
+            ask_volume_5: dec!(980),
+            momentum_1s: dec!(0.001),
+            momentum_5s: dec!(0.003),
+            spot_price: dec!(102000),
+            remaining_secs: dec!(90),
+            price_to_beat: dec!(102500),
+            distance_to_beat: dec!(0.0049),
+        }
     }
 
     #[test]
-    fn test_probability_clamps() {
-        // Minimal snapshot just for the estimator.
-        let snap = LobSnapshot {
-            timestamp: Utc::now(),
-            symbol: "BTCUSDT".into(),
-            best_bid: dec!(1),
-            best_ask: dec!(1),
-            mid_price: dec!(1),
-            spread_bps: dec!(1),
-            obi_5: dec!(0),
-            obi_10: dec!(0),
-            bid_volume_5: dec!(1),
-            ask_volume_5: dec!(1),
-            update_id: 1,
-        };
+    fn test_build_sequence_lengths_for_5m_and_15m() {
+        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
+        let key = "BTCUSDT|15m";
+        let now = Utc::now();
+        for i in 0..SEQ_LEN_15M {
+            CryptoLobMlAgent::push_sequence_snapshot(
+                &mut cache,
+                key,
+                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
+            );
+        }
+
+        let seq_5m = CryptoLobMlAgent::build_sequence(&cache, key, "5m")
+            .expect("5m sequence should be available");
+        assert_eq!(seq_5m.len(), SEQ_LEN_5M * SEQ_FEATURE_DIM);
+
+        let seq_15m = CryptoLobMlAgent::build_sequence(&cache, key, "15m")
+            .expect("15m sequence should be available");
+        assert_eq!(seq_15m.len(), SEQ_LEN_15M * SEQ_FEATURE_DIM);
+    }
+
+    #[test]
+    fn test_build_sequence_returns_none_when_insufficient_history() {
+        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
+        let key = "BTCUSDT|5m";
+        let now = Utc::now();
+        for i in 0..(SEQ_LEN_5M - 1) {
+            CryptoLobMlAgent::push_sequence_snapshot(
+                &mut cache,
+                key,
+                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
+            );
+        }
+
+        assert!(CryptoLobMlAgent::build_sequence(&cache, key, "5m").is_none());
+    }
+
+    #[test]
+    fn test_estimate_p_up_validates_sequence_input_dim() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
             binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
@@ -2115,14 +2443,272 @@ mod tests {
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
-            lob_cache: Some(LobCache::new()),
-            pool: None,
-            nn_model: None,
+            lob_cache: LobCache::new(),
             #[cfg(feature = "onnx")]
             onnx_model: None,
         };
-        let (p, _model) = agent.estimate_p_up(&snap, Decimal::ZERO, Decimal::ZERO);
-        assert!(p > 0.0 && p < 1.0);
+        let bad = vec![0.0f32; (SEQ_LEN_5M * SEQ_FEATURE_DIM).saturating_sub(1)];
+        let err = agent
+            .estimate_p_up("5m", &bad)
+            .err()
+            .expect("bad input dim should fail");
+        #[cfg(feature = "onnx")]
+        assert!(err.to_string().contains("sequence input dim mismatch"));
+        #[cfg(not(feature = "onnx"))]
+        assert!(err.to_string().contains("--features onnx"));
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let cfg = CryptoLobMlConfig::default();
+        assert_eq!(cfg.agent_id, "crypto_lob_ml");
+        assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
+        assert_eq!(cfg.max_time_remaining_secs, 900);
+        assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(cfg.max_entry_price, dec!(0.70));
+        assert_eq!(cfg.window_fallback_weight, Decimal::ZERO);
+        assert_eq!(
+            cfg.entry_side_policy,
+            CryptoLobMlEntrySidePolicy::LaggingOnly
+        );
+        assert_eq!(cfg.entry_late_window_secs_5m, 180);
+        assert_eq!(cfg.ev_exit_buffer, dec!(0.005));
+        assert_eq!(cfg.entry_late_window_secs_15m, 180);
+        assert_eq!(cfg.ev_exit_vol_scale, dec!(0.02));
+        assert_eq!(cfg.min_hold_secs, 20);
+        assert!(cfg.prefer_close_to_end);
+    }
+
+    #[test]
+    fn test_exit_mode_gate_helpers() {
+        let mk_agent = |exit_mode: CryptoLobMlExitMode| CryptoLobMlAgent {
+            config: CryptoLobMlConfig {
+                exit_mode,
+                ..CryptoLobMlConfig::default()
+            },
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let settle = mk_agent(CryptoLobMlExitMode::SettleOnly);
+        assert!(!settle.allows_signal_flip_exit());
+        assert!(!settle.allows_ev_exit());
+        assert!(!settle.allows_price_exit());
+
+        let ev_exit = mk_agent(CryptoLobMlExitMode::EvExit);
+        assert!(!ev_exit.allows_signal_flip_exit());
+        assert!(ev_exit.allows_ev_exit());
+        assert!(!ev_exit.allows_price_exit());
+
+        let flip = mk_agent(CryptoLobMlExitMode::SignalFlip);
+        assert!(flip.allows_signal_flip_exit());
+        assert!(!flip.allows_ev_exit());
+        assert!(!flip.allows_price_exit());
+
+        let price = mk_agent(CryptoLobMlExitMode::PriceExit);
+        assert!(!price.allows_signal_flip_exit());
+        assert!(!price.allows_ev_exit());
+        assert!(price.allows_price_exit());
+    }
+
+    #[test]
+    fn test_new_requires_onnx_model_type() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.model_type = "mlp_json".to_string();
+        cfg.model_path = Some("/tmp/does-not-matter.onnx".to_string());
+
+        let result = CryptoLobMlAgent::new(
+            cfg,
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            LobCache::new(),
+        );
+        assert!(result.is_err(), "non-onnx model_type must be rejected");
+        let err = result.err().expect("result should be err");
+
+        assert!(err.to_string().contains("model_type=onnx"));
+    }
+
+    #[test]
+    fn test_new_requires_model_path() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.model_type = "onnx".to_string();
+        cfg.model_path = None;
+
+        let result = CryptoLobMlAgent::new(
+            cfg,
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            LobCache::new(),
+        );
+        assert!(result.is_err(), "missing model_path must be rejected");
+        let err = result.err().expect("result should be err");
+        #[cfg(feature = "onnx")]
+        assert!(err.to_string().contains("MODEL_PATH"));
+        #[cfg(not(feature = "onnx"))]
+        assert!(err.to_string().contains("--features onnx"));
+    }
+
+    #[test]
+    fn test_model_first_blend_weights_default() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let (w_model, w_window) = agent.model_window_blend_weights();
+        assert_eq!(w_model, Decimal::ONE);
+        assert_eq!(w_window, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_entry_window_enforces_late_windows_for_5m_and_15m() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        assert!(agent.is_within_entry_late_window("5m", 180));
+        assert!(!agent.is_within_entry_late_window("5m", 181));
+        assert!(agent.is_within_entry_late_window("15m", 180));
+        assert!(!agent.is_within_entry_late_window("15m", 181));
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_uses_lagging_side_default() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let blended = agent
+            .compute_blended_probability(dec!(0.40), &sample_window_context(), Some(dec!(0.42)))
+            .expect("blended probability should be available");
+        let signal = agent
+            .evaluate_entry_signal(
+                &blended,
+                &sample_window_context(),
+                Some(dec!(0.42)),
+                "up-token",
+                "down-token",
+                dec!(0.28),
+                dec!(0.25),
+            )
+            .expect("signal should pass filters");
+
+        assert_eq!(signal.side, Side::Down);
+        assert_eq!(signal.token_id, "down-token");
+        assert!(signal.edge >= dec!(0.02));
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_rejects_expensive_entry() {
+        let agent = CryptoLobMlAgent {
+            config: CryptoLobMlConfig::default(),
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let blended = sample_blended_prob(&agent);
+        let signal = agent.evaluate_entry_signal(
+            &blended,
+            &sample_window_context(),
+            Some(dec!(0.50)),
+            "up-token",
+            "down-token",
+            dec!(0.80),
+            dec!(0.95),
+        );
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_rejects_price_above_strict_cap() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.max_entry_price = dec!(0.30);
+        let agent = CryptoLobMlAgent {
+            config: cfg,
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let blended = sample_blended_prob(&agent);
+        let signal = agent.evaluate_entry_signal(
+            &blended,
+            &sample_window_context(),
+            Some(dec!(0.50)),
+            "up-token",
+            "down-token",
+            dec!(0.31),
+            dec!(0.32),
+        );
+        assert!(signal.is_none(), "ask > 0.30 must be rejected");
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_requires_price_to_beat_when_enabled() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.use_price_to_beat = true;
+        cfg.require_price_to_beat = true;
+        let agent = CryptoLobMlAgent {
+            config: cfg,
+            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
+            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let blended = agent.compute_blended_probability(dec!(0.60), &sample_window_context(), None);
+        assert!(blended.is_none());
     }
 
     #[test]

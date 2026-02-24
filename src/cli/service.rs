@@ -57,83 +57,46 @@ impl ServiceCommands {
 }
 
 async fn start_services(service: Option<&str>) -> Result<()> {
-    let services = match service {
-        Some(s) => vec![s.to_string()],
-        None => vec!["market_data".into(), "executor".into()],
-    };
-
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Starting Core Services                                       ║\x1b[0m");
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-
-    for svc in services {
-        println!("  Starting {}...", svc);
-        // TODO: Actually start services
-        println!("  \x1b[32m✓ {} started\x1b[0m", svc);
-    }
-
-    println!("\n\x1b[32m✓ All services started\x1b[0m");
-    println!("  Use 'ploy service status' to check status");
-
-    Ok(())
+    disabled_service_command("start", service)
 }
 
 async fn stop_services(service: Option<&str>) -> Result<()> {
-    let services = match service {
-        Some(s) => vec![s.to_string()],
-        None => vec!["market_data".into(), "executor".into()],
-    };
-
-    println!("Stopping services...");
-
-    for svc in services {
-        println!("  Stopping {}...", svc);
-        // TODO: Actually stop services
-        println!("  \x1b[32m✓ {} stopped\x1b[0m", svc);
-    }
-
-    Ok(())
+    disabled_service_command("stop", service)
 }
 
 async fn show_status() -> Result<()> {
-    println!("\n{}", "=".repeat(60));
-    println!("  CORE SERVICES STATUS");
-    println!("{}\n", "=".repeat(60));
-
-    let services = vec![
-        (
-            "market_data",
-            "Market Data Service",
-            "Binance + Polymarket WebSocket",
-        ),
-        (
-            "executor",
-            "Order Executor",
-            "Order execution and risk management",
-        ),
-    ];
-
-    println!("  {:<15} {:<12} {}", "SERVICE", "STATUS", "DESCRIPTION");
-    println!("  {}", "-".repeat(55));
-
-    for (id, _name, desc) in services {
-        // TODO: Check actual status
-        let status = "\x1b[32m● running\x1b[0m";
-        println!("  {:<15} {:<20} {}", id, status, desc);
-    }
-
-    println!("\n  Connections:");
-    println!("  {}", "-".repeat(55));
-    println!("  Binance WS:     \x1b[32m● connected\x1b[0m");
-    println!("  Polymarket WS:  \x1b[32m● connected\x1b[0m");
-    println!("  PostgreSQL:     \x1b[32m● connected\x1b[0m");
-
-    println!("\n{}", "=".repeat(60));
-
-    Ok(())
+    disabled_service_command("status", None)
 }
 
-async fn show_logs(_service: &str, _tail: usize, _follow: bool) -> Result<()> {
-    println!("Service logs not yet implemented");
-    Ok(())
+async fn show_logs(service: &str, _tail: usize, _follow: bool) -> Result<()> {
+    disabled_service_command("logs", Some(service))
+}
+
+fn disabled_service_command(cmd: &str, service: Option<&str>) -> Result<()> {
+    let target = service
+        .map(|s| format!(" `{}`", s))
+        .unwrap_or_else(|| "".to_string());
+    let msg = format!(
+        "legacy `ploy service {cmd}{target}` is disabled because it used non-functional stubs; use `ploy platform start` for coordinator runtime and system tooling/scripts for process control"
+    );
+    Err(anyhow::anyhow!(msg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_service_command_returns_error_with_hint() {
+        let err = disabled_service_command("status", None)
+            .expect_err("legacy service command should be disabled");
+        assert!(err.to_string().contains("ploy platform start"));
+    }
+
+    #[test]
+    fn disabled_service_command_includes_target_service_when_provided() {
+        let err = disabled_service_command("logs", Some("executor"))
+            .expect_err("legacy service command should be disabled");
+        assert!(err.to_string().contains("logs `executor`"));
+    }
 }

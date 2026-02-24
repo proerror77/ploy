@@ -126,6 +126,72 @@ impl PriceHistory {
     }
 }
 
+fn symbol_aliases(symbol: &str) -> &'static [&'static str] {
+    match symbol {
+        "BTCUSDT" => &["btc", "bitcoin"],
+        "ETHUSDT" => &["eth", "ethereum"],
+        "SOLUSDT" => &["sol", "solana"],
+        "XRPUSDT" => &["xrp", "ripple"],
+        _ => &[],
+    }
+}
+
+fn slug_has_alias_token(slug: &str, aliases: &[&str]) -> bool {
+    slug.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|tok| !tok.is_empty())
+        .any(|tok| aliases.iter().any(|a| tok == *a))
+}
+
+fn select_polymarket_price_for_symbol(
+    symbol: &str,
+    prices: &std::collections::HashMap<String, PolymarketPrice>,
+) -> (Option<Decimal>, Option<Decimal>, Option<String>) {
+    let aliases = symbol_aliases(symbol);
+    if aliases.is_empty() {
+        return (None, None, None);
+    }
+
+    let mut best: Option<(bool, DateTime<Utc>, Decimal, Decimal, String)> = None;
+    for (slug, price) in prices.iter() {
+        let slug_lower = slug.to_ascii_lowercase();
+        if !slug_has_alias_token(&slug_lower, aliases) {
+            continue;
+        }
+
+        let has_updown = slug_lower.contains("up") && slug_lower.contains("down");
+        match &best {
+            None => {
+                best = Some((
+                    has_updown,
+                    price.timestamp,
+                    price.yes_price,
+                    price.no_price,
+                    slug.clone(),
+                ));
+            }
+            Some((best_updown, best_ts, _, _, _)) => {
+                if (has_updown && !*best_updown)
+                    || (has_updown == *best_updown && price.timestamp > *best_ts)
+                {
+                    best = Some((
+                        has_updown,
+                        price.timestamp,
+                        price.yes_price,
+                        price.no_price,
+                        slug.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some((_, _, yes, no, slug)) = best {
+        (Some(yes), Some(no), Some(slug))
+    } else {
+        (None, None, None)
+    }
+}
+
 /// Synchronized data collector
 pub struct SyncCollector {
     config: SyncCollectorConfig,
@@ -240,29 +306,10 @@ impl SyncCollector {
             }
         };
 
-        // Get Polymarket prices (match by symbol -> slug mapping)
+        // Get Polymarket prices (symbol -> slug mapping, deterministic and safe for unknown symbols).
         let (pm_yes, pm_no, pm_slug) = {
             let prices = self.polymarket_prices.read().await;
-            // Simple mapping: BTCUSDT -> btc market
-            let slug_prefix = match update.symbol.as_str() {
-                "BTCUSDT" => "btc",
-                "ETHUSDT" => "eth",
-                "SOLUSDT" => "sol",
-                _ => "",
-            };
-
-            let mut result = (None, None, None);
-            for (slug, price) in prices.iter() {
-                if slug.to_lowercase().contains(slug_prefix) {
-                    result = (
-                        Some(price.yes_price),
-                        Some(price.no_price),
-                        Some(slug.clone()),
-                    );
-                    break;
-                }
-            }
-            result
+            select_polymarket_price_for_symbol(&update.symbol, &prices)
         };
 
         // Create sync record
@@ -483,4 +530,53 @@ pub struct LagAnalysisResult {
     pub up_moves_bn_lead: usize,
     pub down_moves_bn_lead: usize,
     pub bn_lead_rate: f64, // How often Binance leads Polymarket
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn pm_price(ts: DateTime<Utc>, slug: &str, yes: i64, no: i64) -> PolymarketPrice {
+        PolymarketPrice {
+            timestamp: ts,
+            market_slug: slug.to_string(),
+            yes_price: Decimal::new(yes, 2),
+            no_price: Decimal::new(no, 2),
+        }
+    }
+
+    #[test]
+    fn select_pm_price_handles_xrp_and_avoids_empty_prefix_bug() {
+        let now = Utc::now();
+        let mut prices = std::collections::HashMap::new();
+        prices.insert(
+            "bitcoin-up-or-down-5m".to_string(),
+            pm_price(now, "bitcoin-up-or-down-5m", 55, 45),
+        );
+        prices.insert(
+            "xrp-up-or-down-5m".to_string(),
+            pm_price(now + Duration::seconds(1), "xrp-up-or-down-5m", 52, 48),
+        );
+
+        let (yes, no, slug) = select_polymarket_price_for_symbol("XRPUSDT", &prices);
+        assert_eq!(slug.as_deref(), Some("xrp-up-or-down-5m"));
+        assert_eq!(yes, Some(Decimal::new(52, 2)));
+        assert_eq!(no, Some(Decimal::new(48, 2)));
+    }
+
+    #[test]
+    fn select_pm_price_returns_none_for_unknown_symbol() {
+        let now = Utc::now();
+        let mut prices = std::collections::HashMap::new();
+        prices.insert(
+            "bitcoin-up-or-down-5m".to_string(),
+            pm_price(now, "bitcoin-up-or-down-5m", 55, 45),
+        );
+
+        let (yes, no, slug) = select_polymarket_price_for_symbol("DOGEUSDT", &prices);
+        assert!(yes.is_none());
+        assert!(no.is_none());
+        assert!(slug.is_none());
+    }
 }

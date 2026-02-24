@@ -18,6 +18,8 @@ use crate::platform::{
     OrderPriority,
 };
 
+const DEPLOYMENT_ID_CRYPTO_SPLIT_ARB: &str = "crypto.pm.split_arb";
+
 /// Crypto Agent 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoAgentConfig {
@@ -195,6 +197,7 @@ impl CryptoAgent {
                 )
                 .with_priority(OrderPriority::Normal)
                 .with_metadata("strategy", "crypto_split_arb")
+                .with_deployment_id(DEPLOYMENT_ID_CRYPTO_SPLIT_ARB)
                 .with_metadata("coin", &coin)
                 .with_metadata("sum_of_asks", &sum_of_asks.to_string());
 
@@ -267,6 +270,7 @@ impl CryptoAgent {
                     current_price,
                 )
                 .with_priority(OrderPriority::High)
+                .with_deployment_id(DEPLOYMENT_ID_CRYPTO_SPLIT_ARB)
                 .with_metadata("exit_reason", "take_profit");
 
                 info!(
@@ -291,6 +295,7 @@ impl CryptoAgent {
                     current_price,
                 )
                 .with_priority(OrderPriority::Critical) // 緊急止損
+                .with_deployment_id(DEPLOYMENT_ID_CRYPTO_SPLIT_ARB)
                 .with_metadata("exit_reason", "stop_loss");
 
                 warn!(
@@ -330,6 +335,7 @@ impl CryptoAgent {
                         other_ask,
                     )
                     .with_priority(OrderPriority::High)
+                    .with_deployment_id(DEPLOYMENT_ID_CRYPTO_SPLIT_ARB)
                     .with_metadata("hedge_for", &position.token_id)
                     .with_metadata("locked_profit", &locked_profit.to_string());
 

@@ -47,8 +47,10 @@ async fn main() -> anyhow::Result<()> {
         max_entry: 45.0,
         shares: 100,
         predictive: false,
-        take_profit: Some(20.0),
-        stop_loss: Some(12.0),
+        exit_edge_floor: Some(0.20),
+        exit_price_band: Some(0.12),
+        time_decay_exit_secs: None,
+        liquidity_exit_spread_bps: None,
     };
 
     println!("🚀 Starting API server on http://0.0.0.0:8080");

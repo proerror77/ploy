@@ -5,9 +5,11 @@
 
 use crate::domain::{OrderRequest, OrderSide, OrderStatus, TimeInForce};
 use crate::error::{PloyError, Result};
+use crate::exchange::{ExchangeClient, ExchangeKind};
 use crate::signing::Wallet;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use polymarket_client_sdk::auth::{state::Authenticated, Normal};
 use polymarket_client_sdk::clob::types::{
@@ -25,6 +27,7 @@ use polymarket_client_sdk::gamma::types::request::{
 };
 use polymarket_client_sdk::gamma::types::response::Event as SdkEvent;
 use polymarket_client_sdk::gamma::Client as GammaClient;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -590,16 +593,12 @@ impl PolymarketClient {
         explicit_gate || (openclaw_mode && openclaw_hard_disable)
     }
 
-    fn allow_direct_submit() -> bool {
-        Self::env_bool(&["PLOY_ALLOW_DIRECT_SUBMIT"])
-    }
-
     fn gateway_execution_context_active() -> bool {
         GATEWAY_EXECUTION_CONTEXT.try_with(|v| *v).unwrap_or(false)
     }
 
     fn validate_gateway_execution_context(dry_run: bool) -> Result<()> {
-        if dry_run || Self::allow_direct_submit() {
+        if dry_run {
             return Ok(());
         }
 
@@ -2014,6 +2013,66 @@ impl PolymarketClient {
     }
 }
 
+#[async_trait]
+impl ExchangeClient for PolymarketClient {
+    fn kind(&self) -> ExchangeKind {
+        ExchangeKind::Polymarket
+    }
+
+    fn is_dry_run(&self) -> bool {
+        PolymarketClient::is_dry_run(self)
+    }
+
+    async fn submit_order_gateway(&self, request: &OrderRequest) -> Result<OrderResponse> {
+        PolymarketClient::with_gateway_execution_context(self.submit_order(request)).await
+    }
+
+    async fn get_order(&self, order_id: &str) -> Result<OrderResponse> {
+        PolymarketClient::get_order(self, order_id).await
+    }
+
+    async fn cancel_order(&self, order_id: &str) -> Result<bool> {
+        PolymarketClient::cancel_order(self, order_id).await
+    }
+
+    async fn get_best_prices(&self, token_id: &str) -> Result<(Option<Decimal>, Option<Decimal>)> {
+        PolymarketClient::get_best_prices(self, token_id).await
+    }
+
+    fn infer_order_status(&self, order: &OrderResponse) -> OrderStatus {
+        PolymarketClient::infer_order_status(order)
+    }
+
+    fn calculate_fill(&self, order: &OrderResponse) -> (u64, Option<Decimal>) {
+        let (filled, avg) = PolymarketClient::calculate_fill(order);
+        (filled.to_u64().unwrap_or(0), Some(avg))
+    }
+
+    async fn get_market(&self, market_id: &str) -> Result<MarketResponse> {
+        PolymarketClient::get_market(self, market_id).await
+    }
+
+    async fn search_markets(&self, query: &str) -> Result<Vec<MarketSummary>> {
+        PolymarketClient::search_markets(self, query).await
+    }
+
+    async fn get_balance(&self) -> Result<BalanceResponse> {
+        PolymarketClient::get_balance(self).await
+    }
+
+    async fn get_positions(&self) -> Result<Vec<PositionResponse>> {
+        PolymarketClient::get_positions(self).await
+    }
+
+    async fn get_order_history(&self, limit: Option<u32>) -> Result<Vec<OrderResponse>> {
+        PolymarketClient::get_order_history(self, limit).await
+    }
+
+    async fn get_trades(&self, limit: Option<u32>) -> Result<Vec<TradeResponse>> {
+        PolymarketClient::get_trades(self, limit).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2238,11 +2297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gateway_execution_context_rejects_direct_live_submit_without_gateway_context() {
-        if PolymarketClient::allow_direct_submit() {
-            return;
-        }
-
+    async fn test_gateway_execution_context_rejects_direct_live_submit() {
         let result = PolymarketClient::validate_gateway_execution_context(false);
         assert!(result.is_err());
 

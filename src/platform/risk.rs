@@ -427,17 +427,23 @@ impl RiskGate {
         // Try automatic recovery before evaluating trading eligibility.
         self.try_auto_recover_circuit_breaker().await;
 
-        // 1. 檢查平台狀態
+        // 1. 檢查訂單是否過期
+        if intent.is_expired() {
+            return RiskCheckResult::Blocked(BlockReason::OrderExpired);
+        }
+
+        // Binary-options semantics (Polymarket): SELL intents are reduce-only exits.
+        // They must stay allowed during circuit-breaker, daily-loss, and exposure limits.
+        if !intent.is_buy {
+            return RiskCheckResult::Passed;
+        }
+
+        // 2. 檢查平台狀態 (BUY only)
         let platform_state = *self.state.read().await;
         if !platform_state.can_trade() {
             return RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped {
                 reason: "Platform trading halted".to_string(),
             });
-        }
-
-        // 2. 檢查訂單是否過期
-        if intent.is_expired() {
-            return RiskCheckResult::Blocked(BlockReason::OrderExpired);
         }
 
         // 3. Critical 訂單不再繞過風控檢查
@@ -844,6 +850,84 @@ impl RiskGate {
         (daily.total_pnl, daily.success_count, daily.failure_count)
     }
 
+    /// Restore runtime counters after coordinator cold-start replay.
+    pub async fn restore_runtime_counters(
+        &self,
+        date: NaiveDate,
+        total_pnl: Decimal,
+        domain_pnl: HashMap<Domain, Decimal>,
+        order_count: u32,
+        success_count: u32,
+        failure_count: u32,
+        consecutive_failures: u32,
+        agent_realized_pnl: HashMap<String, Decimal>,
+        agent_consecutive_failures: HashMap<String, u32>,
+        last_risk_event_at: Option<DateTime<Utc>>,
+    ) {
+        {
+            let mut daily = self.daily_stats.write().await;
+            *daily = DailyStats {
+                date: Some(date),
+                total_pnl,
+                domain_pnl,
+                order_count,
+                success_count,
+                failure_count,
+            };
+        }
+
+        self.consecutive_failures
+            .store(consecutive_failures, Ordering::SeqCst);
+
+        {
+            let mut stats_map = self.agent_stats.write().await;
+            for (agent_id, realized_pnl) in agent_realized_pnl {
+                let stats = stats_map.entry(agent_id).or_default();
+                stats.realized_pnl = realized_pnl;
+            }
+            for (agent_id, failures) in agent_consecutive_failures {
+                let stats = stats_map.entry(agent_id).or_default();
+                stats.consecutive_failures = failures;
+            }
+        }
+
+        let failure_limit = self.config.max_consecutive_failures.max(1);
+        let daily_loss_exceeded =
+            total_pnl < Decimal::ZERO && total_pnl.abs() >= self.config.daily_loss_limit;
+        let next_state = if daily_loss_exceeded || consecutive_failures >= failure_limit {
+            PlatformRiskState::Halted
+        } else if consecutive_failures >= (failure_limit / 2).max(1) {
+            PlatformRiskState::Elevated
+        } else {
+            PlatformRiskState::Normal
+        };
+
+        {
+            let mut state = self.state.write().await;
+            *state = next_state;
+        }
+
+        {
+            let mut halted_at = self.halted_at.write().await;
+            *halted_at = if next_state == PlatformRiskState::Halted {
+                Some(last_risk_event_at.unwrap_or_else(Utc::now))
+            } else {
+                None
+            };
+        }
+
+        debug!(
+            date = %date,
+            total_pnl = %total_pnl,
+            order_count,
+            success_count,
+            failure_count,
+            consecutive_failures,
+            state = ?next_state,
+            "restored risk gate runtime counters"
+        );
+    }
+
     /// Daily loss limit (USD)
     pub fn daily_loss_limit(&self) -> Decimal {
         self.config.daily_loss_limit
@@ -1029,6 +1113,19 @@ mod tests {
         )
     }
 
+    fn make_sell_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {
+        OrderIntent::new(
+            agent,
+            Domain::Crypto,
+            "btc-15m",
+            "token-123",
+            Side::Up,
+            false,
+            shares,
+            price,
+        )
+    }
+
     #[tokio::test]
     async fn test_basic_check() {
         let gate = RiskGate::new(RiskConfig::default());
@@ -1100,6 +1197,48 @@ mod tests {
         // 重置
         gate.reset_circuit_breaker().await;
         assert!(gate.can_trade().await);
+    }
+
+    #[tokio::test]
+    async fn test_sell_allowed_when_halted() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 1;
+        config.circuit_breaker_auto_recover = false;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+
+        gate.record_failure("agent1", "forced failure").await;
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+
+        let buy_intent = make_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&buy_intent).await.is_blocked());
+
+        let sell_intent = make_sell_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&sell_intent).await.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_sell_allowed_when_daily_loss_exceeded() {
+        let mut config = RiskConfig::default();
+        config.daily_loss_limit = Decimal::from(5);
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+
+        {
+            let mut daily = gate.daily_stats.write().await;
+            daily.date = Some(Utc::now().date_naive());
+            daily.total_pnl = Decimal::from(-6);
+        }
+
+        let buy_intent = make_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&buy_intent).await.is_blocked());
+
+        let sell_intent = make_sell_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&sell_intent).await.is_passed());
     }
 
     #[tokio::test]
@@ -1202,5 +1341,79 @@ mod tests {
         let (current_drawdown, max_drawdown) = gate.drawdown_stats().await;
         assert_eq!(current_drawdown, Decimal::from(6));
         assert_eq!(max_drawdown, Decimal::from(6));
+    }
+
+    #[tokio::test]
+    async fn test_restore_runtime_counters_restores_agent_and_failure_streaks() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 4;
+        config.daily_loss_limit = Decimal::from(1000);
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+
+        let today = Utc::now().date_naive();
+        let mut agent_realized_pnl = HashMap::new();
+        agent_realized_pnl.insert("agent1".to_string(), Decimal::from(12));
+        let mut agent_consecutive_failures = HashMap::new();
+        agent_consecutive_failures.insert("agent1".to_string(), 2);
+
+        gate.restore_runtime_counters(
+            today,
+            Decimal::from(12),
+            HashMap::new(),
+            5,
+            3,
+            2,
+            2,
+            agent_realized_pnl,
+            agent_consecutive_failures,
+            Some(Utc::now()),
+        )
+        .await;
+
+        assert_eq!(gate.state().await, PlatformRiskState::Elevated);
+        assert_eq!(gate.consecutive_failures(), 2);
+        let stats = gate
+            .agent_stats("agent1")
+            .await
+            .expect("agent stats restored");
+        assert_eq!(stats.1, Decimal::from(12));
+        assert_eq!(stats.3, 2);
+    }
+
+    #[tokio::test]
+    async fn test_restore_runtime_counters_halts_when_daily_loss_exceeded() {
+        let mut config = RiskConfig::default();
+        config.daily_loss_limit = Decimal::from(50);
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+
+        let today = Utc::now().date_naive();
+        let mut domain_pnl = HashMap::new();
+        domain_pnl.insert(Domain::Crypto, Decimal::from(-60));
+
+        gate.restore_runtime_counters(
+            today,
+            Decimal::from(-60),
+            domain_pnl,
+            4,
+            1,
+            3,
+            1,
+            HashMap::new(),
+            HashMap::new(),
+            Some(Utc::now()),
+        )
+        .await;
+
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+        let (total_pnl, success, failure) = gate.daily_stats().await;
+        assert_eq!(total_pnl, Decimal::from(-60));
+        assert_eq!(success, 1);
+        assert_eq!(failure, 3);
     }
 }

@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -17,6 +18,8 @@ use crate::error::Result;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
+
+const DEPLOYMENT_ID_EVENT_EDGE: &str = "politics.pm.event_edge";
 
 /// Configuration for the PoliticsTradingAgent
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +63,70 @@ impl PoliticsTradingAgent {
         self.data_source = ds;
         self
     }
+
+    async fn submit_force_close_exits(&self, ctx: &AgentContext) {
+        let global = ctx.read_global_state().await;
+        let positions = global
+            .positions
+            .into_iter()
+            .filter(|p| p.agent_id == self.config.agent_id && p.shares > 0)
+            .collect::<Vec<_>>();
+
+        if positions.is_empty() {
+            info!(
+                agent = self.config.agent_id,
+                "force close: no open positions"
+            );
+            return;
+        }
+
+        info!(
+            agent = self.config.agent_id,
+            positions = positions.len(),
+            "force close: submitting reduce-only exits"
+        );
+
+        for pos in positions {
+            let mut intent = OrderIntent::new(
+                &self.config.agent_id,
+                pos.domain,
+                &pos.market_slug,
+                &pos.token_id,
+                pos.side,
+                false,
+                pos.shares,
+                dec!(0.01),
+            )
+            .with_priority(OrderPriority::Critical)
+            .with_metadata("intent_reason", "force_close")
+            .with_metadata("position_id", &pos.position_id)
+            .with_metadata("force_close_price_floor", "0.01");
+            if let Some(deployment_id) = pos
+                .metadata
+                .get("deployment_id")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_deployment_id(deployment_id);
+            } else if let Some(strategy) = pos
+                .metadata
+                .get("strategy")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                intent = intent.with_metadata("strategy", strategy);
+            }
+
+            if let Err(e) = ctx.submit_order(intent).await {
+                warn!(
+                    agent = self.config.agent_id,
+                    position_id = %pos.position_id,
+                    error = %e,
+                    "force close exit submit failed"
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -98,6 +165,7 @@ impl TradingAgent for PoliticsTradingAgent {
         }
 
         let mut status = AgentStatus::Running;
+        let mut force_close_requested = false;
         let mut position_count: usize = 0;
         let mut total_exposure = Decimal::ZERO;
         let daily_pnl = Decimal::ZERO;
@@ -147,7 +215,7 @@ impl TradingAgent for PoliticsTradingAgent {
                     for event_id in &event_ids {
                         match self.core.scan_and_decide(event_id, arena.clone()).await {
                             Ok(Some(decision)) => {
-                                let intent = OrderIntent::new(
+                                let mut intent = OrderIntent::new(
                                     &self.config.agent_id,
                                     Domain::Politics,
                                     &decision.market_slug,
@@ -159,6 +227,7 @@ impl TradingAgent for PoliticsTradingAgent {
                                 )
                                 .with_priority(OrderPriority::Normal)
                                 .with_metadata("strategy", "event_edge")
+                                .with_deployment_id(DEPLOYMENT_ID_EVENT_EDGE)
                                 .with_metadata("event_id", &decision.event_id)
                                 .with_metadata("outcome", &decision.outcome)
                                 .with_metadata("edge", &decision.edge.to_string())
@@ -169,6 +238,14 @@ impl TradingAgent for PoliticsTradingAgent {
                                 .with_metadata("signal_market_price", &decision.limit_price.to_string())
                                 .with_metadata("signal_edge", &decision.edge.to_string())
                                 .with_metadata("config_hash", &config_hash);
+                                if let Some(condition_id) = decision
+                                    .condition_id
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty())
+                                {
+                                    intent = intent.with_condition_id(condition_id);
+                                }
 
                                 info!(
                                     agent = self.config.agent_id,
@@ -213,6 +290,7 @@ impl TradingAgent for PoliticsTradingAgent {
                         }
                         Some(CoordinatorCommand::ForceClose) => {
                             warn!(agent = self.config.agent_id, "force close");
+                            force_close_requested = true;
                             break;
                         }
                         Some(CoordinatorCommand::HealthCheck(tx)) => {
@@ -253,6 +331,10 @@ impl TradingAgent for PoliticsTradingAgent {
                     ).await;
                 }
             }
+        }
+
+        if force_close_requested {
+            self.submit_force_close_exits(&ctx).await;
         }
 
         info!(agent = self.config.agent_id, "politics agent stopped");

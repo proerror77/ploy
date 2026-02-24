@@ -60,7 +60,7 @@ ssh ploy@TRADING_HOST "svc-logs crypto 200"
 4. 在 OpenClaw 裡建立一個自訂 skill，內容用 bash 直接跑：
 
 - 掃描一次（不下單）：`ploy event-edge --title "Which company has the best AI model end of February?"`
-- 常駐自動循環：`ploy run`（由 `config/default.toml` 的 `[event_edge_agent]` 控制）
+- 常駐自動循環：`ploy platform start --politics`（由 `config/default.toml` 的 `[event_edge_agent]` 控制）
 - 或改用 wrapper：`scripts/event_edge_daemon.sh start false true`
 
 這樣 OpenClaw 可以用自己的 always-on daemon + channel inbox 來觸發、監控、或切換策略；而交易邏輯仍由 `ploy` 控制（含 `dry_run` / risk guard）。
@@ -92,7 +92,7 @@ JSON
   在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（Coordinator 已自動帶入）。
 - 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
 - sidecar `/api/sidecar/intents` 的 deployment gate 預設為啟用（可用 `PLOY_DEPLOYMENT_GATE_REQUIRED=false` 暫時關掉，不建議 production）。
-- `/api/sidecar/orders` live 提交預設關閉（避免繞過 deployment 治理）；僅在 `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=true` 才允許 live。
+- `/api/sidecar/orders` live 提交預設不掛載路由（避免繞過 deployment 治理）；僅在 `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=true` 才會暴露。
 
 ### Deployment Matrix API
 
@@ -106,7 +106,58 @@ JSON
 - `DELETE /api/deployments/:id`
 - deployment matrix 會落地到 `data/state/deployments.json`（可用 `PLOY_DEPLOYMENTS_FILE` 覆寫）。
 
+### Governance Policy API
+
+OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
+
+- `GET /api/governance/status`
+- `GET /api/governance/policy`
+- `PUT /api/governance/policy`
+- `GET /api/governance/policy/history?limit=100`（最新在前，預設 100，最大 500）
+
+`GET /api/governance/status` 現在包含 AI 調度層需要的完整快照：
+- `ingress_mode`（全局）
+- `domain_ingress_modes[]`（domain 級 pause/halt 狀態）
+- `agents[]`（agent_id/name/domain/status/exposure/daily_pnl/last_heartbeat/error_message）
+- `allocators[]` + `deployments[]`（資金佔用與 deployment 維度帳本）
+
+Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將該 domain 設為 `halted`，避免命令傳遞期間仍接收新 BUY intents。
+
+### Strategy Control API
+
+新增聚合控制面視圖（需 admin token）：
+
+- `GET /api/strategies/control`
+  - 回傳 deployment matrix + domain ingress mode + running agents 的單一視圖
+  - 供 OpenClaw/AI scheduler 做策略調度與運行態比對
+- `PUT /api/strategies/control/:id`
+  - 單 deployment patch（`enabled`/`priority`/`cooldown_secs`/`allocator_profile`/`risk_profile`）
+  - 已支援策略治理欄位：`strategy_version`、`lifecycle_stage`（`backtest|paper|shadow|live`）、`product_type`（預設 `binary_option`）、`last_evaluation_score`
+
+Ingress lifecycle contract:
+- sidecar live ingress 預設只接受 `lifecycle_stage=live` 的 deployment（避免未審核策略直接進 live queue）
+- 遷移期可暫時設 `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true` 放寬，但不建議 production
+
+### Strategy Evaluation Evidence API
+
+新增可追溯證據層（需 admin token）：
+
+- `GET /api/strategy-evaluations`
+  - filter: `deployment_id` / `strategy` / `strategy_version` / `stage` / `lifecycle_stage` / `limit`
+- `POST /api/strategy-evaluations`
+  - 寫入 backtest/paper/live 證據（包含 `dataset_hash` / `model_hash` / `config_hash` / metrics）
+- `GET /api/strategy-evaluations/:deployment_id/latest`
+  - 讀取最新證據（可帶 `stage` / `strategy_version`）
+
+`GET /api/strategies/control` 現在會回傳每個 deployment 的 latest evidence 摘要：
+- `latest_evaluation_id`
+- `latest_evaluation_stage`
+- `latest_evaluation_dataset_hash`
+- `latest_evaluation_model_hash`
+- `latest_evaluation_sample_size`
+
 已支援的 method（起步集合）：
+- `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）
 - `pm.get_balance`
 - `pm.get_positions`
 - `pm.get_open_orders`
@@ -116,12 +167,18 @@ JSON
 - `pm.get_event_details`（params: `event_id`）
 - `pm.get_market`（params: `condition_id`）
 - `pm.get_order_book`（params: `token_id`）
-- `pm.submit_limit`（params: `token_id`, `order_side`=`BUY|SELL`, `shares`, `limit_price`, `market_side`=`UP|DOWN`(optional), `idempotency_key`）
+- `pm.submit_limit`（params: `deployment_id`(required), `token_id`, `order_side`=`BUY|SELL`, `shares`, `limit_price`, `market_side`=`UP|DOWN`(optional), `market_slug`(optional), `idempotency_key`）
 - `gateway.submit_intent`（params: `deployment_id`, `domain`, `market_slug`, `token_id`, `side`, `order_side`, `size`, `price_limit`, `idempotency_key`）
 - `event_edge.scan`（params: `event_id` 或 `title`）
 - `multi_outcome.analyze`（params: `event_id`；回傳 outcome summary + 偵測到的套利訊號）
 - `events.upsert`（params: upsert 欄位 + `idempotency_key`）
 - `events.update_status`（params: `id`, `status`, `idempotency_key`）
+
+`pm.submit_limit` 的 SELL 在 Coordinator 入口採用 **reduce-only** 驗證：
+- 必須命中同 `agent_id/domain/token_id/side` 的已追蹤持倉，否則會被拒絕
+- SELL 張數不得超過已追蹤持倉張數
+- 佇列內同 bucket 的待執行 SELL 會先占用可減倉位（避免並發超賣）
+- 若是全局熔斷/降風險，請優先使用 deployment/governance 控制與 force-close 流程，而不是跨 agent 手動 SELL
 
 #### OpenClaw skill（bash）建議寫法
 

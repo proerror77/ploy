@@ -15,6 +15,7 @@ use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
+use crate::exchange::ExchangeClient;
 use crate::strategy::executor::OrderExecutor;
 
 use super::position::PositionAggregator;
@@ -99,9 +100,26 @@ pub struct OrderPlatform {
 }
 
 impl OrderPlatform {
+    fn enforce_coordinator_only_live(&self) -> Result<()> {
+        if self.executor.is_dry_run() {
+            return Ok(());
+        }
+        Err(PloyError::Validation(
+            "legacy OrderPlatform live runtime is disabled; use coordinator runtime (`ploy platform start`)".to_string(),
+        ))
+    }
+
     /// 創建新的下單平台
     pub fn new(client: PolymarketClient, config: PlatformConfig) -> Self {
-        let executor = Arc::new(OrderExecutor::new(client, config.execution_config.clone()));
+        Self::new_with_exchange(Arc::new(client), config)
+    }
+
+    /// 使用通用交易所客戶端建立平台
+    pub fn new_with_exchange(client: Arc<dyn ExchangeClient>, config: PlatformConfig) -> Self {
+        let executor = Arc::new(OrderExecutor::new_with_exchange(
+            client,
+            config.execution_config.clone(),
+        ));
 
         Self {
             router: Arc::new(EventRouter::new()),
@@ -255,6 +273,8 @@ impl OrderPlatform {
     ///
     /// 從優先隊列取出訂單，進行風控檢查，然後執行。
     pub async fn process_queue(&self) -> Result<usize> {
+        self.enforce_coordinator_only_live()?;
+
         let mut processed = 0;
 
         // 批量取出訂單
@@ -459,6 +479,7 @@ impl OrderPlatform {
 
     /// 啟動平台
     pub async fn start(&self) -> Result<()> {
+        self.enforce_coordinator_only_live()?;
         *self.running.write().await = true;
 
         // 啟動所有 Agent
@@ -597,6 +618,7 @@ impl OrderPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::PolymarketClient;
 
     // 需要 mock PolymarketClient 進行測試
     // 這裡只測試基本的結構和配置
@@ -614,5 +636,29 @@ mod tests {
         let stats = PlatformStats::default();
         assert_eq!(stats.intents_processed, 0);
         assert_eq!(stats.executions_success, 0);
+    }
+
+    fn build_platform(dry_run: bool) -> OrderPlatform {
+        let client = PolymarketClient::new("https://clob.polymarket.com", dry_run)
+            .expect("build polymarket client");
+        OrderPlatform::new(client, PlatformConfig::default())
+    }
+
+    #[tokio::test]
+    async fn test_order_platform_start_allows_dry_run() {
+        let platform = build_platform(true);
+        assert!(platform.start().await.is_ok());
+        assert!(platform.is_running().await);
+        assert!(platform.stop().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_order_platform_start_blocks_live_runtime() {
+        let platform = build_platform(false);
+        let err = platform.start().await.expect_err("live start must fail");
+        assert!(err
+            .to_string()
+            .contains("legacy OrderPlatform live runtime is disabled"));
+        assert!(!platform.is_running().await);
     }
 }

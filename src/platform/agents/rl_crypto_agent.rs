@@ -530,12 +530,22 @@ impl RLCryptoAgent {
         ContinuousAction::default()
     }
 
+    fn deployment_id(&self) -> String {
+        let market_slug = self.config.market_slug.trim().to_ascii_lowercase();
+        if market_slug.is_empty() {
+            "crypto.pm.rl_crypto".to_string()
+        } else {
+            format!("crypto.pm.rl_crypto.{}", market_slug)
+        }
+    }
+
     /// Convert RL action to order intents
     fn action_to_intents(&self, action: ContinuousAction) -> Vec<OrderIntent> {
         let discrete = action.to_discrete();
         let mut intents = Vec::new();
         let policy_source = self.last_action_source.as_deref().unwrap_or("unknown");
         let policy_version = self.config.policy_model_version.as_deref().unwrap_or("");
+        let deployment_id = self.deployment_id();
 
         match discrete {
             DiscreteAction::Hold => {
@@ -560,6 +570,7 @@ impl RLCryptoAgent {
                         OrderPriority::Normal
                     })
                     .with_metadata("strategy", "rl_crypto")
+                    .with_deployment_id(deployment_id.as_str())
                     .with_metadata("action", "buy_up")
                     .with_metadata("step", &self.step_count.to_string())
                     .with_metadata("policy_source", policy_source)
@@ -587,6 +598,7 @@ impl RLCryptoAgent {
                         OrderPriority::Normal
                     })
                     .with_metadata("strategy", "rl_crypto")
+                    .with_deployment_id(deployment_id.as_str())
                     .with_metadata("action", "buy_down")
                     .with_metadata("step", &self.step_count.to_string())
                     .with_metadata("policy_source", policy_source)
@@ -615,6 +627,7 @@ impl RLCryptoAgent {
                         )
                         .with_priority(OrderPriority::High)
                         .with_metadata("strategy", "rl_crypto")
+                        .with_deployment_id(deployment_id.as_str())
                         .with_metadata("action", "sell")
                         .with_metadata("exit_reason", "rl_signal")
                         .with_metadata("policy_source", policy_source)
@@ -652,6 +665,7 @@ impl RLCryptoAgent {
                             )
                             .with_priority(OrderPriority::High)
                             .with_metadata("strategy", "rl_crypto")
+                            .with_deployment_id(deployment_id.as_str())
                             .with_metadata("action", "hedge")
                             .with_metadata("locked_profit", &(dec!(1.0) - total_cost).to_string())
                             .with_metadata("policy_source", policy_source)

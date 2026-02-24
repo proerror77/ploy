@@ -89,12 +89,8 @@ pub async fn run_platform_mode(
         platform_cfg.enable_crypto, platform_cfg.enable_sports, platform_cfg.dry_run,
     );
 
-    let pm_client =
-        crate::main_runtime::create_pm_client(&app_config.market.rest_url, platform_cfg.dry_run)
-            .await?;
-
     let control = PlatformStartControl { pause, resume };
-    start_platform(platform_cfg, pm_client, &app_config, control).await
+    start_platform(platform_cfg, &app_config, control).await
 }
 
 #[cfg(test)]

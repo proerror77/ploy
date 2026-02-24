@@ -63,7 +63,7 @@ start() {
   # Start detached, log to file, store pid.
   (
     umask 077
-    exec env "${envs[@]}" ./target/release/ploy run >>"$log_file" 2>&1
+    exec env "${envs[@]}" ./target/release/ploy platform start --politics >>"$log_file" 2>&1
   ) &
 
   echo $! >"$pid_file"

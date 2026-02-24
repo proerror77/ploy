@@ -3,6 +3,7 @@ pub mod api_server;
 pub mod binance_kline_ws;
 pub mod binance_ws;
 pub mod feishu;
+pub mod kalshi_rest;
 pub mod nonce_manager;
 pub mod onchain_indexer;
 pub mod polymarket_clob;
@@ -18,9 +19,10 @@ pub use api_server::{
 pub use binance_kline_ws::{BinanceKlineBar, BinanceKlineWebSocket, KlineUpdate};
 pub use binance_ws::{BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice};
 pub use feishu::FeishuNotifier;
+pub use kalshi_rest::KalshiClient;
 pub use nonce_manager::{NonceManager, NonceStats};
 pub use polymarket_clob::{
-    AccountSummary, BalanceResponse, GammaEventInfo, MarketResponse, OrderResponse,
+    AccountSummary, BalanceResponse, GammaEventInfo, MarketResponse, MarketSummary, OrderResponse,
     PolymarketClient, PositionResponse, TradeResponse,
 };
 pub use polymarket_ws::{

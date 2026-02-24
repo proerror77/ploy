@@ -15,7 +15,8 @@ mod types;
 
 pub use contracts::{
     DeploymentExecutionMode, MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision,
-    RiskDecisionStatus, StrategyDeployment, Timeframe, TradeIntent,
+    RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
+    StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
 };
 pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};

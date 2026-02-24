@@ -80,12 +80,14 @@ impl Default for EventEdgeConfig {
 struct OutcomeMarket {
     name: String,
     yes_token_id: String,
+    condition_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeRow {
     pub outcome: String,
     pub yes_token_id: String,
+    pub condition_id: Option<String>,
     pub market_ask: Option<Decimal>,
     pub market_mid: Option<Decimal>,
     pub p_true: Decimal,
@@ -186,6 +188,7 @@ async fn load_event_outcomes(
         outcomes.push(OutcomeMarket {
             name: outcome_name,
             yes_token_id: yes_token_id.clone(),
+            condition_id: market.condition_id.clone(),
         });
     }
 
@@ -250,6 +253,7 @@ pub async fn scan_event_edge_once(
         rows.push(EdgeRow {
             outcome: o.name.clone(),
             yes_token_id: o.yes_token_id.clone(),
+            condition_id: o.condition_id.clone(),
             market_ask: ask,
             market_mid: mid,
             p_true: p,
