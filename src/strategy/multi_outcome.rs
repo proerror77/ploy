@@ -1021,7 +1021,7 @@ impl std::fmt::Display for ExpectedValue {
 
 /// EV calculation table for different price/probability scenarios
 pub fn generate_ev_table() -> Vec<(Decimal, Vec<(Decimal, ExpectedValue)>)> {
-    let prices = vec![
+    let prices = [
         dec!(0.90),
         dec!(0.92),
         dec!(0.94),
@@ -1031,7 +1031,7 @@ pub fn generate_ev_table() -> Vec<(Decimal, Vec<(Decimal, ExpectedValue)>)> {
         dec!(0.98),
         dec!(0.99),
     ];
-    let true_probs = vec![
+    let true_probs = [
         dec!(0.92),
         dec!(0.94),
         dec!(0.95),

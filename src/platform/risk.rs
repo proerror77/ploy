@@ -27,6 +27,8 @@ pub struct RiskConfig {
     pub max_consecutive_failures: u32,
     /// 每日最大損失 (USD)
     pub daily_loss_limit: Decimal,
+    /// Optional hard drawdown stop (USD, absolute).
+    pub max_drawdown_limit: Option<Decimal>,
     /// 最大點差 (basis points)
     pub max_spread_bps: u32,
     /// 緊急訂單是否跳過部分檢查
@@ -63,6 +65,7 @@ impl Default for RiskConfig {
             max_platform_exposure: Decimal::from(5000),
             max_consecutive_failures: 5,
             daily_loss_limit: Decimal::from(1000),
+            max_drawdown_limit: None,
             max_spread_bps: 500, // 5%
             critical_bypass_exposure: false,
             circuit_breaker_auto_recover: default_circuit_breaker_auto_recover(),
@@ -150,10 +153,14 @@ pub enum BlockReason {
         limit: Decimal,
         current: Decimal,
     },
+    /// Drawdown cap exceeded
+    DrawdownExceeded { limit: Decimal, current: Decimal },
     /// 市場不允許
     MarketNotAllowed { market: String, agent: String },
     /// Agent 狀態不允許交易
     AgentNotActive { agent: String, status: String },
+    /// Agent 未註冊風控參數
+    UnregisteredAgent { agent: String },
     /// 訂單已過期
     OrderExpired,
     /// 未對沖倉位過多
@@ -206,11 +213,17 @@ impl std::fmt::Display for BlockReason {
                     domain, current, limit
                 )
             }
+            BlockReason::DrawdownExceeded { limit, current } => {
+                write!(f, "Drawdown ${} exceeds limit ${}", current, limit)
+            }
             BlockReason::MarketNotAllowed { market, agent } => {
                 write!(f, "Agent {} not allowed in market {}", agent, market)
             }
             BlockReason::AgentNotActive { agent, status } => {
                 write!(f, "Agent {} is {} (not active)", agent, status)
+            }
+            BlockReason::UnregisteredAgent { agent } => {
+                write!(f, "Agent {} is not registered for risk controls", agent)
             }
             BlockReason::OrderExpired => write!(f, "Order has expired"),
             BlockReason::TooManyUnhedgedPositions { limit, current } => {
@@ -264,6 +277,22 @@ pub struct CircuitBreakerEvent {
     pub state: PlatformRiskState,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct DrawdownSnapshot {
+    pub current_equity: Decimal,
+    pub equity_peak: Decimal,
+    pub current_drawdown: Decimal,
+    pub max_drawdown_observed: Decimal,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DrawdownStats {
+    current_equity: Decimal,
+    equity_peak: Decimal,
+    current_drawdown: Decimal,
+    max_drawdown_observed: Decimal,
+}
+
 /// Agent 風控統計
 #[derive(Debug, Clone, Default)]
 struct AgentRiskStats {
@@ -315,6 +344,8 @@ pub struct RiskGate {
     consecutive_failures: AtomicU32,
     /// 每日統計
     daily_stats: Arc<RwLock<DailyStats>>,
+    /// Drawdown stats (runtime cumulative realized curve).
+    drawdown_stats: Arc<RwLock<DrawdownStats>>,
     /// Circuit breaker event history (bounded)
     circuit_events: Arc<RwLock<Vec<CircuitBreakerEvent>>>,
     /// Last HALTED timestamp (for auto-recovery cooldown checks)
@@ -334,6 +365,7 @@ impl RiskGate {
             domain_exposure: Arc::new(RwLock::new(HashMap::new())),
             consecutive_failures: AtomicU32::new(0),
             daily_stats: Arc::new(RwLock::new(DailyStats::default())),
+            drawdown_stats: Arc::new(RwLock::new(DrawdownStats::default())),
             circuit_events: Arc::new(RwLock::new(Vec::new())),
             halted_at: Arc::new(RwLock::new(None)),
         }
@@ -430,10 +462,12 @@ impl RiskGate {
                 Some(p) => p.clone(),
                 None => {
                     warn!(
-                        "No risk params for agent {}, using defaults",
+                        "No risk params for agent {}, blocking order",
                         intent.agent_id
                     );
-                    AgentRiskParams::default()
+                    return RiskCheckResult::Blocked(BlockReason::UnregisteredAgent {
+                        agent: intent.agent_id.clone(),
+                    });
                 }
             }
         };
@@ -551,6 +585,17 @@ impl RiskGate {
             }
         }
 
+        // 12. 檢查回撤上限 (runtime cumulative realized curve)
+        if let Some(limit) = self.config.max_drawdown_limit {
+            let current_drawdown = self.drawdown_stats.read().await.current_drawdown;
+            if limit > Decimal::ZERO && current_drawdown >= limit {
+                return RiskCheckResult::Blocked(BlockReason::DrawdownExceeded {
+                    limit,
+                    current: current_drawdown,
+                });
+            }
+        }
+
         RiskCheckResult::Passed
     }
 
@@ -610,15 +655,48 @@ impl RiskGate {
         }
 
         // 更新每日統計
+        let mut halt_reason: Option<String> = None;
         {
             let mut daily = self.daily_stats.write().await;
             self.ensure_daily_reset(&mut daily);
             daily.total_pnl += pnl;
             if let Some(domain) = domain {
                 *daily.domain_pnl.entry(domain).or_insert(Decimal::ZERO) += pnl;
+                if let Some(domain_limit) = self.config.domain_daily_loss_limit(domain) {
+                    let domain_pnl = daily
+                        .domain_pnl
+                        .get(&domain)
+                        .copied()
+                        .unwrap_or(Decimal::ZERO);
+                    if domain_pnl < Decimal::ZERO && domain_pnl.abs() >= domain_limit {
+                        halt_reason = Some(format!(
+                            "{} daily loss limit exceeded (pnl={}, limit={})",
+                            domain, domain_pnl, domain_limit
+                        ));
+                    }
+                }
             }
             daily.order_count += 1;
             daily.success_count += 1;
+
+            if halt_reason.is_none()
+                && daily.total_pnl < Decimal::ZERO
+                && daily.total_pnl.abs() >= self.config.daily_loss_limit
+            {
+                halt_reason = Some(format!(
+                    "Daily loss limit exceeded (pnl={}, limit={})",
+                    daily.total_pnl, self.config.daily_loss_limit
+                ));
+            }
+        }
+
+        if let Some(reason) = self.apply_realized_pnl_to_drawdown(pnl).await {
+            halt_reason.get_or_insert(reason);
+        }
+
+        if let Some(reason) = halt_reason {
+            self.trigger_circuit_breaker(&reason).await;
+            return;
         }
 
         // 如果處於警戒狀態，考慮恢復正常
@@ -675,19 +753,26 @@ impl RiskGate {
         }
 
         // 更新每日損益
-        let should_halt = {
+        let mut halt_reason = {
             let mut daily = self.daily_stats.write().await;
             self.ensure_daily_reset(&mut daily);
             daily.total_pnl -= loss.abs();
             if let Some(domain) = domain {
                 *daily.domain_pnl.entry(domain).or_insert(Decimal::ZERO) -= loss.abs();
             }
-            daily.total_pnl.abs() >= self.config.daily_loss_limit
+            if daily.total_pnl.abs() >= self.config.daily_loss_limit {
+                Some("Daily loss limit exceeded".to_string())
+            } else {
+                None
+            }
         };
 
-        if should_halt {
-            self.trigger_circuit_breaker("Daily loss limit exceeded")
-                .await;
+        if let Some(reason) = self.apply_realized_pnl_to_drawdown(-loss.abs()).await {
+            halt_reason.get_or_insert(reason);
+        }
+
+        if let Some(reason) = halt_reason {
+            self.trigger_circuit_breaker(&reason).await;
         }
     }
 
@@ -848,6 +933,53 @@ impl RiskGate {
         self.config.daily_loss_limit
     }
 
+    /// Optional max drawdown limit (USD)
+    pub fn max_drawdown_limit(&self) -> Option<Decimal> {
+        self.config.max_drawdown_limit
+    }
+
+    /// Current drawdown + max observed drawdown (USD)
+    pub async fn drawdown_stats(&self) -> (Decimal, Decimal) {
+        let drawdown = self.drawdown_stats.read().await;
+        (drawdown.current_drawdown, drawdown.max_drawdown_observed)
+    }
+
+    /// Full drawdown snapshot for persistence/recovery.
+    pub async fn drawdown_snapshot(&self) -> DrawdownSnapshot {
+        let drawdown = self.drawdown_stats.read().await;
+        DrawdownSnapshot {
+            current_equity: drawdown.current_equity,
+            equity_peak: drawdown.equity_peak,
+            current_drawdown: drawdown.current_drawdown,
+            max_drawdown_observed: drawdown.max_drawdown_observed,
+        }
+    }
+
+    /// Restore drawdown state from persisted snapshot.
+    pub async fn restore_drawdown_snapshot(&self, snapshot: DrawdownSnapshot) {
+        let mut drawdown = self.drawdown_stats.write().await;
+
+        let current_equity = snapshot.current_equity;
+        let equity_peak = snapshot.equity_peak.max(current_equity);
+        let current_drawdown = (equity_peak - current_equity).max(Decimal::ZERO);
+        let max_drawdown_observed = snapshot.max_drawdown_observed.max(current_drawdown);
+
+        drawdown.current_equity = current_equity;
+        drawdown.equity_peak = equity_peak;
+        drawdown.current_drawdown = current_drawdown;
+        drawdown.max_drawdown_observed = max_drawdown_observed;
+    }
+
+    /// Restore today's realized PnL (for daily loss-limit continuity after restart).
+    pub async fn restore_daily_pnl_for_today(&self, total_pnl: Decimal) {
+        let mut daily = self.daily_stats.write().await;
+        *daily = DailyStats {
+            date: Some(Utc::now().date_naive()),
+            total_pnl,
+            ..Default::default()
+        };
+    }
+
     /// Circuit breaker event history
     pub async fn circuit_breaker_events(&self) -> Vec<CircuitBreakerEvent> {
         self.circuit_events.read().await.clone()
@@ -870,6 +1002,31 @@ impl RiskGate {
         }
     }
 
+    async fn apply_realized_pnl_to_drawdown(&self, pnl_delta: Decimal) -> Option<String> {
+        let mut drawdown = self.drawdown_stats.write().await;
+        drawdown.current_equity += pnl_delta;
+
+        if drawdown.current_equity > drawdown.equity_peak {
+            drawdown.equity_peak = drawdown.current_equity;
+        }
+
+        drawdown.current_drawdown =
+            (drawdown.equity_peak - drawdown.current_equity).max(Decimal::ZERO);
+        if drawdown.current_drawdown > drawdown.max_drawdown_observed {
+            drawdown.max_drawdown_observed = drawdown.current_drawdown;
+        }
+
+        match self.config.max_drawdown_limit {
+            Some(limit) if limit > Decimal::ZERO && drawdown.current_drawdown >= limit => {
+                Some(format!(
+                    "Drawdown limit exceeded (drawdown={}, limit={})",
+                    drawdown.current_drawdown, limit
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// 清理 (測試用)
     pub async fn clear(&self) {
         *self.state.write().await = PlatformRiskState::Normal;
@@ -880,6 +1037,7 @@ impl RiskGate {
         *self.total_exposure.write().await = Decimal::ZERO;
         self.domain_exposure.write().await.clear();
         *self.daily_stats.write().await = DailyStats::default();
+        *self.drawdown_stats.write().await = DrawdownStats::default();
         self.circuit_events.write().await.clear();
         *self.halted_at.write().await = None;
     }
@@ -980,6 +1138,23 @@ mod tests {
         let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
         let result = gate.check_order(&intent).await;
         assert!(result.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_agent_is_blocked() {
+        let gate = RiskGate::new(RiskConfig::default());
+        let intent = make_intent(
+            "unknown-agent",
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        let result = gate.check_order(&intent).await;
+        match result {
+            RiskCheckResult::Blocked(BlockReason::UnregisteredAgent { agent }) => {
+                assert_eq!(agent, "unknown-agent");
+            }
+            _ => panic!("Expected UnregisteredAgent block"),
+        }
     }
 
     #[tokio::test]
@@ -1145,6 +1320,27 @@ mod tests {
             }
             _ => panic!("Expected domain daily loss block"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_drawdown_limit_triggers_circuit_breaker() {
+        let mut config = RiskConfig::default();
+        config.max_drawdown_limit = Some(Decimal::from(5));
+        let gate = RiskGate::new(config);
+
+        gate.register_agent_with_domain("agent1", Domain::Crypto, AgentRiskParams::default())
+            .await;
+
+        gate.record_success("agent1", Decimal::from(10)).await; // equity peak
+        gate.record_success("agent1", Decimal::from(-3)).await; // drawdown = 3
+        assert_eq!(gate.state().await, PlatformRiskState::Normal);
+
+        gate.record_success("agent1", Decimal::from(-3)).await; // drawdown = 6
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+
+        let (current_drawdown, max_drawdown) = gate.drawdown_stats().await;
+        assert_eq!(current_drawdown, Decimal::from(6));
+        assert_eq!(max_drawdown, Decimal::from(6));
     }
 
     #[tokio::test]

@@ -165,8 +165,8 @@ impl SportsAnalyst {
         }
     }
 
-    /// Create with legacy single-source mode
-    pub fn new_legacy(grok: GrokClient, claude: ClaudeAgentClient) -> Self {
+    /// Create with single-source fallback mode (aggregator disabled)
+    pub fn new_single_source(grok: GrokClient, claude: ClaudeAgentClient) -> Self {
         let aggregator = SportsDataAggregator::new(grok);
         Self {
             aggregator,
@@ -205,7 +205,7 @@ impl SportsAnalyst {
         let (event_slug, league, team1, team2) = self.parse_event_url(event_url)?;
         info!("Analyzing {} event: {} vs {}", league.to_uppercase(), team1, team2);
 
-        // 2. Fetch structured data using aggregator or legacy fetcher
+        // 2. Fetch structured data using aggregator or single-source fallback
         info!("Fetching game data...");
         let (structured_data, data_quality) = if self.use_aggregator {
             // Use multi-source aggregator
@@ -232,7 +232,7 @@ impl SportsAnalyst {
                 }
             }
         } else {
-            // Legacy single-source mode
+            // Single-source fallback mode
             let fetcher = SportsDataFetcher::new(
                 self.aggregator.grok.clone()
             );
@@ -479,9 +479,3 @@ impl SportsAnalyst {
     // ... (keep existing methods: parse_event_url, get_claude_prediction, generate_recommendation, etc.)
     // These methods remain unchanged from the original implementation
 }
-
-// Re-export for compatibility
-pub use crate::agent::sports_analyst_legacy::{
-    SportsAnalysisWithDK,
-    // ... other exports
-};

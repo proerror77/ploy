@@ -13,7 +13,7 @@
 
 use axum::{
     extract::State,
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use chrono::Utc;
@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::{
-    auth::ensure_admin_authorized,
+    auth::{ensure_sidecar_authorized, ensure_sidecar_or_admin_authorized},
     state::AppState,
     types::{MarketData, PositionResponse, TradeResponse, WsMessage},
 };
@@ -151,6 +151,7 @@ pub struct GrokDecisionResponse {
 #[derive(Debug, Deserialize)]
 pub struct SidecarOrderRequest {
     pub strategy: String,
+    pub account_id: Option<String>,
     pub deployment_id: Option<String>,
     pub domain: Option<String>, // "crypto" | "sports" | "politics" | "economics"
     pub market_slug: String,
@@ -183,6 +184,7 @@ pub struct SidecarOrderResponse {
 #[derive(Debug, Deserialize)]
 pub struct SidecarIntentRequest {
     pub intent_id: Option<String>,
+    pub account_id: Option<String>,
     pub deployment_id: String,
     pub agent_id: Option<String>,
     pub domain: Option<String>,
@@ -233,6 +235,9 @@ pub struct SidecarRiskState {
     pub risk_state: String,
     pub daily_pnl_usd: f64,
     pub daily_loss_limit_usd: f64,
+    pub current_drawdown_usd: f64,
+    pub max_drawdown_observed_usd: f64,
+    pub drawdown_limit_usd: Option<f64>,
     pub queue_depth: usize,
     pub positions: Vec<SidecarRiskPosition>,
     pub circuit_breaker_events: Vec<SidecarCircuitBreakerEvent>,
@@ -253,14 +258,6 @@ pub struct SidecarCircuitBreakerEvent {
     pub state: String,
 }
 
-fn sidecar_expected_auth_token() -> Option<String> {
-    std::env::var("PLOY_SIDECAR_AUTH_TOKEN")
-        .or_else(|_| std::env::var("PLOY_API_SIDECAR_AUTH_TOKEN"))
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
 fn parse_boolish(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -268,67 +265,91 @@ fn parse_boolish(value: &str) -> bool {
     )
 }
 
+fn normalize_account(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+fn request_metadata_account(metadata: &HashMap<String, String>) -> Option<String> {
+    metadata
+        .get("account_id")
+        .or_else(|| metadata.get("account"))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn table_has_account_scope(pool: &sqlx::PgPool, table_name: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = $1
+          AND column_name = 'account_id'
+        LIMIT 1
+        "#,
+    )
+    .bind(table_name)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+fn resolve_request_account_scope(
+    explicit: Option<&str>,
+    metadata: Option<&HashMap<String, String>>,
+) -> std::result::Result<Option<String>, (StatusCode, String)> {
+    let explicit = normalize_account(explicit);
+    let metadata = metadata.and_then(request_metadata_account);
+
+    if let (Some(e), Some(m)) = (explicit.as_ref(), metadata.as_ref()) {
+        if !e.eq_ignore_ascii_case(m) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "account_id mismatch between request field ({}) and metadata ({})",
+                    e, m
+                ),
+            ));
+        }
+    }
+
+    Ok(explicit.or(metadata))
+}
+
+fn validate_account_scope(
+    state: &AppState,
+    requested_account: Option<&str>,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let runtime_account = state.account_id.trim();
+    if let Some(account) = requested_account
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+    {
+        if !account.eq_ignore_ascii_case(runtime_account) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "account scope mismatch: runtime account is {}, request account is {}",
+                    runtime_account, account
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn env_bool(keys: &[&str]) -> bool {
     keys.iter()
         .find_map(|k| std::env::var(k).ok())
         .map(|v| parse_boolish(&v))
         .unwrap_or(false)
-}
-
-fn sidecar_auth_required() -> bool {
-    env_bool(&[
-        "PLOY_SIDECAR_AUTH_REQUIRED",
-        "PLOY_GATEWAY_ONLY",
-        "PLOY_ENFORCE_GATEWAY_ONLY",
-        "PLOY_ENFORCE_COORDINATOR_GATEWAY_ONLY",
-    ])
-}
-
-fn extract_bearer_token(raw: &str) -> Option<&str> {
-    raw.strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))
-        .map(str::trim)
-}
-
-fn ensure_sidecar_authorized(headers: &HeaderMap) -> std::result::Result<(), (StatusCode, String)> {
-    let expected = sidecar_expected_auth_token();
-    let required = sidecar_auth_required();
-    let Some(expected) = expected else {
-        let msg = if required {
-            "sidecar auth is required but token is not configured"
-        } else {
-            "sidecar auth token is not configured (write endpoints are fail-closed)"
-        };
-        return Err((StatusCode::SERVICE_UNAVAILABLE, msg.to_string()));
-    };
-
-    let token = headers
-        .get("x-ploy-sidecar-token")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .or_else(|| {
-            headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(extract_bearer_token)
-        });
-
-    match token {
-        Some(provided) if provided == expected => Ok(()),
-        _ => Err((
-            StatusCode::UNAUTHORIZED,
-            "sidecar auth failed (missing/invalid token)".to_string(),
-        )),
-    }
-}
-
-fn ensure_sidecar_or_admin_authorized(
-    headers: &HeaderMap,
-) -> std::result::Result<(), (StatusCode, String)> {
-    if ensure_sidecar_authorized(headers).is_ok() {
-        return Ok(());
-    }
-    ensure_admin_authorized(headers)
 }
 
 fn deployment_gate_required() -> bool {
@@ -341,6 +362,24 @@ fn deployment_gate_required() -> bool {
         Some(v) => !matches!(v.as_str(), "0" | "false" | "no" | "off"),
         None => true,
     }
+}
+
+fn ensure_domain_allowed(
+    state: &AppState,
+    domain: Domain,
+    reason: &str,
+) -> std::result::Result<(), (StatusCode, String)> {
+    if state.is_domain_allowed(domain) {
+        return Ok(());
+    }
+    let allowed = state.allowed_domains_labels().join(", ");
+    Err((
+        StatusCode::CONFLICT,
+        format!(
+            "{} is not enabled for runtime scope (requested={}, allowed=[{}])",
+            reason, domain, allowed
+        ),
+    ))
 }
 
 fn allow_non_live_deployment_ingress() -> bool {
@@ -367,6 +406,24 @@ fn ensure_deployment_accepts_live_ingress(
     ))
 }
 
+fn ensure_agent_authorized(
+    state: &AppState,
+    agent_id: &str,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let coordinator = state.coordinator.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Coordinator not running (platform not started)".to_string(),
+        )
+    })?;
+    if coordinator.is_agent_authorized(agent_id) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        format!("agent_id '{}' is not registered/authorized", agent_id),
+    ))
+}
 async fn resolve_intent_deployment(
     state: &AppState,
     deployment_id: &str,
@@ -402,7 +459,29 @@ async fn resolve_intent_deployment(
             format!("deployment {} is disabled", key),
         ));
     }
-    ensure_deployment_accepts_live_ingress(dep)?;
+    if !dep.matches_account(state.account_id.as_str()) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "deployment {} is not scoped to runtime account {}",
+                key, state.account_id
+            ),
+        ));
+    }
+    if !dep.matches_execution_mode(state.dry_run) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "deployment {} does not match runtime mode (dry_run={})",
+                key, state.dry_run
+            ),
+        ));
+    }
+    ensure_domain_allowed(
+        state,
+        dep.domain,
+        &format!("deployment {}", dep.id.as_str()),
+    )?;
     Ok(Some(dep.clone()))
 }
 
@@ -877,6 +956,7 @@ pub async fn sidecar_submit_order(
     Json(req): Json<SidecarOrderRequest>,
 ) -> std::result::Result<Json<SidecarOrderResponse>, (StatusCode, String)> {
     ensure_sidecar_authorized(&headers)?;
+    validate_account_scope(&state, req.account_id.as_deref())?;
 
     let dry_run = req.dry_run.unwrap_or(true);
 
@@ -976,6 +1056,7 @@ pub async fn sidecar_submit_order(
         .map(|d| d.domain)
         .unwrap_or(Domain::Sports);
     let domain = parse_sidecar_domain(req.domain.as_deref(), domain_default)?;
+    ensure_domain_allowed(&state, domain, "sidecar order domain")?;
     let side = parse_binary_side(req.side.as_deref())?;
     let is_buy = parse_is_buy(None, req.is_buy)?;
 
@@ -1004,6 +1085,7 @@ pub async fn sidecar_submit_order(
         metadata.insert("idempotency_key".to_string(), idem.to_string());
     }
     metadata.insert("domain".to_string(), domain.to_string());
+    metadata.insert("account_id".to_string(), state.account_id.clone());
     if let Some(dep) = deployment.as_ref() {
         validate_deployment_binding(dep, domain, &req.market_slug, &metadata)?;
         apply_deployment_metadata(&mut metadata, dep);
@@ -1029,6 +1111,7 @@ pub async fn sidecar_submit_order(
 
     let intent_id = intent.intent_id.to_string();
 
+    ensure_agent_authorized(&state, "sidecar")?;
     coordinator
         .submit_order(intent)
         .await
@@ -1153,6 +1236,9 @@ pub async fn sidecar_submit_intent(
     Json(req): Json<SidecarIntentRequest>,
 ) -> std::result::Result<Json<SidecarIntentResponse>, (StatusCode, String)> {
     ensure_sidecar_authorized(&headers)?;
+    let requested_account =
+        resolve_request_account_scope(req.account_id.as_deref(), Some(&req.metadata))?;
+    validate_account_scope(&state, requested_account.as_deref())?;
 
     let dry_run = req.dry_run.unwrap_or(false);
     let price = Decimal::from_str(&format!("{:.6}", req.price_limit)).map_err(|_| {
@@ -1190,6 +1276,7 @@ pub async fn sidecar_submit_intent(
         .map(|d| d.domain)
         .unwrap_or(Domain::Crypto);
     let domain = parse_sidecar_domain(req.domain.as_deref(), domain_default)?;
+    ensure_domain_allowed(&state, domain, "sidecar intent domain")?;
     let side = parse_binary_side(req.side.as_deref())?;
     let is_buy = parse_is_buy(req.order_side.as_deref(), req.is_buy)?;
     let priority = if req.priority.as_deref().is_some() {
@@ -1217,6 +1304,7 @@ pub async fn sidecar_submit_intent(
     metadata
         .entry("domain".to_string())
         .or_insert_with(|| domain.to_string());
+    metadata.insert("account_id".to_string(), state.account_id.clone());
     if let Some(idem) = req
         .idempotency_key
         .as_deref()
@@ -1281,6 +1369,8 @@ pub async fn sidecar_submit_intent(
         }));
     }
 
+    ensure_agent_authorized(&state, &agent_id)?;
+
     let coordinator = state.coordinator.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1318,6 +1408,46 @@ pub async fn sidecar_get_positions(
     headers: HeaderMap,
 ) -> std::result::Result<Json<Vec<SidecarPosition>>, (StatusCode, String)> {
     ensure_sidecar_authorized(&headers)?;
+
+    if let Some(coordinator) = state.coordinator.as_ref() {
+        let global = coordinator.read_state().await;
+        let mut runtime_positions = global.positions.clone();
+        runtime_positions.sort_by(|a, b| b.entry_time.cmp(&a.entry_time));
+
+        let positions: Vec<SidecarPosition> = runtime_positions
+            .into_iter()
+            .enumerate()
+            .map(|(idx, p)| {
+                let pnl = p.unrealized_pnl().to_f64().unwrap_or(0.0);
+                SidecarPosition {
+                    id: idx as i64 + 1,
+                    market_slug: p.market_slug,
+                    token_id: p.token_id,
+                    side: match p.side {
+                        Side::Up => "Yes".to_string(),
+                        Side::Down => "No".to_string(),
+                    },
+                    shares: p.shares as i64,
+                    avg_price: p.entry_price.to_f64().unwrap_or(0.0),
+                    current_value: p
+                        .current_price
+                        .map(|px| (px * Decimal::from(p.shares)).to_f64().unwrap_or(0.0)),
+                    pnl: Some(pnl),
+                    status: "OPEN".to_string(),
+                    opened_at: p.entry_time.to_rfc3339(),
+                }
+            })
+            .collect();
+        return Ok(Json(positions));
+    }
+
+    if !table_has_account_scope(state.store.pool(), "positions").await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sidecar fallback requires positions.account_id scope".to_string(),
+        ));
+    }
+
     let rows = sqlx::query_as::<
         _,
         (
@@ -1347,10 +1477,12 @@ pub async fn sidecar_get_positions(
             opened_at
         FROM positions
         WHERE status = 'OPEN'
+          AND account_id = $1
         ORDER BY opened_at DESC
         LIMIT 100
         "#,
     )
+    .bind(state.account_id.as_str())
     .fetch_all(state.store.pool())
     .await
     .map_err(|e| {
@@ -1456,95 +1588,220 @@ pub async fn sidecar_get_risk(
                 risk_state: format!("{:?}", global.risk_state),
                 daily_pnl_usd: global.daily_pnl.to_f64().unwrap_or(0.0),
                 daily_loss_limit_usd: global.daily_loss_limit.to_f64().unwrap_or(0.0),
+                current_drawdown_usd: global.current_drawdown.to_f64().unwrap_or(0.0),
+                max_drawdown_observed_usd: global.max_drawdown_observed.to_f64().unwrap_or(0.0),
+                drawdown_limit_usd: global.max_drawdown_limit.and_then(|v| v.to_f64()),
                 queue_depth: global.queue_stats.current_size,
                 positions,
                 circuit_breaker_events,
             }))
         }
-        None => Ok(Json(SidecarRiskState {
-            risk_state: {
-                // Fallback to DB strategy_state / daily_metrics if the platform coordinator isn't running.
-                let halted = sqlx::query_scalar::<_, bool>(
-                    "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE",
+        None => {
+            let runtime_state_scoped =
+                table_has_account_scope(state.store.pool(), "risk_runtime_state").await;
+            let daily_metrics_scoped =
+                table_has_account_scope(state.store.pool(), "daily_metrics").await;
+            let positions_scoped = table_has_account_scope(state.store.pool(), "positions").await;
+
+            if !runtime_state_scoped || !daily_metrics_scoped || !positions_scoped {
+                let mut missing = Vec::new();
+                if !runtime_state_scoped {
+                    missing.push("risk_runtime_state.account_id");
+                }
+                if !daily_metrics_scoped {
+                    missing.push("daily_metrics.account_id");
+                }
+                if !positions_scoped {
+                    missing.push("positions.account_id");
+                }
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "sidecar risk fallback requires account scope on: {}",
+                        missing.join(", ")
+                    ),
+                ));
+            }
+
+            let runtime_row = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<chrono::NaiveDate>,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    Decimal,
+                    chrono::DateTime<Utc>,
+                ),
+            >(
+                r#"
+                SELECT
+                    risk_state,
+                    daily_date,
+                    daily_pnl,
+                    daily_loss_limit,
+                    current_drawdown,
+                    max_drawdown_observed,
+                    updated_at
+                FROM risk_runtime_state
+                WHERE account_id = $1
+                "#,
+            )
+            .bind(state.account_id.as_str())
+            .fetch_optional(state.store.pool())
+            .await
+            .ok()
+            .flatten();
+
+            // Fallback to daily_metrics when runtime snapshot is unavailable.
+            let (
+                risk_state,
+                daily_pnl,
+                daily_loss_limit,
+                current_drawdown,
+                max_drawdown_observed,
+                runtime_event,
+            ) = if let Some((
+                risk_state,
+                daily_date,
+                daily_pnl,
+                daily_loss_limit,
+                current_drawdown,
+                max_drawdown_observed,
+                updated_at,
+            )) = runtime_row
+            {
+                let daily_pnl = if daily_date == Some(Utc::now().date_naive()) {
+                    daily_pnl
+                } else {
+                    Decimal::ZERO
+                };
+                let runtime_event = if risk_state.eq_ignore_ascii_case("halted") {
+                    Some(SidecarCircuitBreakerEvent {
+                        timestamp: updated_at.to_rfc3339(),
+                        reason: "restored runtime risk state".to_string(),
+                        state: "Halted".to_string(),
+                    })
+                } else {
+                    None
+                };
+                (
+                    risk_state,
+                    daily_pnl,
+                    daily_loss_limit,
+                    current_drawdown,
+                    max_drawdown_observed,
+                    runtime_event,
                 )
+            } else {
+                let halted = sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+                )
+                .bind(state.account_id.as_str())
                 .fetch_optional(state.store.pool())
                 .await
                 .ok()
                 .flatten()
                 .unwrap_or(false);
 
-                if halted {
-                    "Halted".to_string()
-                } else {
-                    "Normal".to_string()
-                }
-            },
-            daily_pnl_usd: sqlx::query_scalar::<_, Decimal>(
-                "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE",
-            )
-            .fetch_optional(state.store.pool())
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(Decimal::ZERO)
-            .to_f64()
-            .unwrap_or(0.0),
-            daily_loss_limit_usd: AppConfig::load()
-                .ok()
-                .map(|c| c.risk.daily_loss_limit_usd.to_f64().unwrap_or(0.0))
-                .unwrap_or(0.0),
-            queue_depth: 0,
-            positions: {
-                // Best-effort exposure table from persistent positions (legacy bot).
-                let rows = sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
-                    r#"
-                    SELECT
-                        event_id as market,
-                        market_side as side,
-                        SUM(amount_usd)::double precision as size,
-                        SUM(pnl)::double precision as pnl_usd
-                    FROM positions
-                    WHERE status = 'OPEN'
-                    GROUP BY event_id, market_side
-                    ORDER BY market, side
-                    "#,
+                let daily_pnl = sqlx::query_scalar::<_, Decimal>(
+                    "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
                 )
-                .fetch_all(state.store.pool())
-                .await
-                .unwrap_or_default();
-
-                rows.into_iter()
-                    .map(|(market, side, size, pnl_usd)| SidecarRiskPosition {
-                        market,
-                        side: if side == "UP" { "Yes" } else { "No" }.to_string(),
-                        size,
-                        pnl_usd: pnl_usd.unwrap_or(0.0),
-                    })
-                    .collect()
-            },
-            circuit_breaker_events: {
-                let row = sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
-                    r#"
-                    SELECT halted, halt_reason, updated_at
-                    FROM daily_metrics
-                    WHERE date = CURRENT_DATE
-                    "#,
-                )
+                .bind(state.account_id.as_str())
                 .fetch_optional(state.store.pool())
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .unwrap_or(Decimal::ZERO);
+                (
+                    if halted {
+                        "Halted".to_string()
+                    } else {
+                        "Normal".to_string()
+                    },
+                    daily_pnl,
+                    AppConfig::load()
+                        .ok()
+                        .map(|c| c.risk.daily_loss_limit_usd)
+                        .unwrap_or(Decimal::ZERO),
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    None,
+                )
+            };
 
-                match row {
-                    Some((true, reason, updated_at)) => vec![SidecarCircuitBreakerEvent {
-                        timestamp: updated_at.to_rfc3339(),
-                        reason: reason.unwrap_or_else(|| "halted".to_string()),
-                        state: "Halted".to_string(),
-                    }],
-                    _ => Vec::new(),
-                }
-            },
-        })),
+            // Best-effort exposure table from persistent positions.
+            let rows = sqlx::query_as::<_, (String, String, f64, Option<f64>)>(
+                r#"
+                SELECT
+                    event_id as market,
+                    market_side as side,
+                    SUM(amount_usd)::double precision as size,
+                    SUM(pnl)::double precision as pnl_usd
+                FROM positions
+                WHERE status = 'OPEN'
+                  AND account_id = $1
+                GROUP BY event_id, market_side
+                ORDER BY market, side
+                "#,
+            )
+            .bind(state.account_id.as_str())
+            .fetch_all(state.store.pool())
+            .await
+            .unwrap_or_default();
+
+            let positions = rows
+                .into_iter()
+                .map(|(market, side, size, pnl_usd)| SidecarRiskPosition {
+                    market,
+                    side: if side == "UP" { "Yes" } else { "No" }.to_string(),
+                    size,
+                    pnl_usd: pnl_usd.unwrap_or(0.0),
+                })
+                .collect();
+
+            let row = sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
+                r#"
+                SELECT halted, halt_reason, updated_at
+                FROM daily_metrics
+                WHERE date = CURRENT_DATE
+                  AND account_id = $1
+                "#,
+            )
+            .bind(state.account_id.as_str())
+            .fetch_optional(state.store.pool())
+            .await
+            .ok()
+            .flatten();
+
+            let mut circuit_breaker_events = match row {
+                Some((true, reason, updated_at)) => vec![SidecarCircuitBreakerEvent {
+                    timestamp: updated_at.to_rfc3339(),
+                    reason: reason.unwrap_or_else(|| "halted".to_string()),
+                    state: "Halted".to_string(),
+                }],
+                _ => Vec::new(),
+            };
+            if let Some(runtime_event) = runtime_event {
+                circuit_breaker_events.push(runtime_event);
+            }
+
+            Ok(Json(SidecarRiskState {
+                risk_state,
+                daily_pnl_usd: daily_pnl.to_f64().unwrap_or(0.0),
+                daily_loss_limit_usd: daily_loss_limit.to_f64().unwrap_or(0.0),
+                current_drawdown_usd: current_drawdown.to_f64().unwrap_or(0.0),
+                max_drawdown_observed_usd: max_drawdown_observed.to_f64().unwrap_or(0.0),
+                drawdown_limit_usd: std::env::var("PLOY_RISK__MAX_DRAWDOWN_USD")
+                    .ok()
+                    .and_then(|v| Decimal::from_str(v.trim()).ok())
+                    .and_then(|v| v.to_f64()),
+                queue_depth: 0,
+                positions,
+                circuit_breaker_events,
+            }))
+        }
     }
 }
 

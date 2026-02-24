@@ -405,7 +405,7 @@ impl VolatilityDetector {
     ///
     /// # Arguments
     /// * `price_to_beat` - The threshold price from Polymarket (e.g., $94,000 for "Will BTC be above $94,000?")
-    ///                     If None, falls back to using start_price (legacy behavior)
+    ///                     If None, falls back to using start_price
     pub fn check_signal(
         &self,
         symbol: &str,

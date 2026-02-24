@@ -626,8 +626,6 @@ impl PositionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Note: These tests require a running PostgreSQL database with migrations applied
     // Run with: cargo test --features test-db
 

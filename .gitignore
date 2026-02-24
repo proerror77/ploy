@@ -29,6 +29,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+runtime_logs/
 
 # Runtime artifacts (RPC idempotency/audit files)
 data/rpc/

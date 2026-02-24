@@ -10,7 +10,7 @@ use crate::platform::RiskConfig;
 /// - `market`: block repeated BUY intents for the same (domain, market_slug) within the guard window,
 ///   regardless of which strategy deployment produced them. This is safer when multiple strategies
 ///   can overlap and would otherwise double-enter the same event.
-/// - `deployment`: legacy behavior; scope duplicates by deployment_id (or agent+strategy fallback).
+/// - `deployment`: deployment-scoped behavior; scope duplicates by deployment_id (or agent+strategy fallback).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DuplicateGuardScope {
@@ -164,7 +164,7 @@ impl Default for CoordinatorConfig {
             governance_max_total_notional_usd: None,
             governance_blocked_domains: Vec::new(),
 
-            // Kelly sizing is opt-in by env to preserve legacy behavior.
+            // Kelly sizing is opt-in by env to preserve conservative default behavior.
             kelly_sizing_enabled: false,
             kelly_fraction_multiplier: Decimal::new(25, 2), // 0.25 (quarter-Kelly)
             kelly_min_edge: Decimal::ZERO,

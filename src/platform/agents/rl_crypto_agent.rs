@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -22,9 +21,11 @@ use crate::platform::{
     OrderPriority,
 };
 use crate::rl::config::RLConfig;
+#[cfg(feature = "onnx")]
+use crate::rl::core::TOTAL_FEATURES;
 use crate::rl::core::{
     ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
-    RewardFunction, StateEncoder, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS, TOTAL_FEATURES,
+    RewardFunction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
 };
 use crate::rl::memory::ReplayBuffer;
 
@@ -304,65 +305,52 @@ impl RLCryptoAgent {
 
     /// Select action using RL policy
     fn select_action(&mut self) -> ContinuousAction {
-        // Encode current state
-        let state_vec = self.encoder.encode(&self.current_obs);
-
-        let mut action: Option<ContinuousAction> = None;
-        let mut source: Option<&str> = None;
+        // Start with the baseline policy, then override with ONNX when available.
+        let mut action = self.rule_based_policy();
+        let mut source = "rule_based";
 
         #[cfg(feature = "onnx")]
-        if action.is_none() {
-            if let Some(model) = &self.policy_model {
-                match model.predict(&state_vec) {
-                    Ok(out) => match self.action_from_policy_output(&out) {
-                        Some(a) => {
-                            action = Some(a);
-                            source = Some("onnx");
-                        }
-                        None => {
-                            warn!(
-                                agent = %self.config.id,
-                                output_dim = out.len(),
-                                policy_output = %self.config.policy_output,
-                                "RL ONNX policy output could not be interpreted; falling back"
-                            );
-                        }
-                    },
-                    Err(e) => {
+        if let Some(model) = &self.policy_model {
+            let state_vec = self.encoder.encode(&self.current_obs);
+            match model.predict(&state_vec) {
+                Ok(out) => match self.action_from_policy_output(&out) {
+                    Some(a) => {
+                        action = a;
+                        source = "onnx";
+                    }
+                    None => {
                         warn!(
                             agent = %self.config.id,
-                            error = %e,
-                            "RL ONNX policy inference failed; falling back"
+                            output_dim = out.len(),
+                            policy_output = %self.config.policy_output,
+                            "RL ONNX policy output could not be interpreted; keeping rule-based policy"
                         );
                     }
+                },
+                Err(e) => {
+                    warn!(
+                        agent = %self.config.id,
+                        error = %e,
+                        "RL ONNX policy inference failed; keeping rule-based policy"
+                    );
                 }
             }
         }
 
-        // Use rule-based policy as baseline.
-        let action = action.unwrap_or_else(|| {
-            source = Some("rule_based");
-            self.rule_based_policy()
-        });
-
         // Apply exploration noise (override the action).
-        let (action, source) = if rand::random::<f32>() < self.exploration_rate {
-            (
-                ContinuousAction::new(
-                    rand::random::<f32>() * 2.0 - 1.0,
-                    rand::random::<f32>() * 2.0 - 1.0,
-                    rand::random::<f32>(),
-                    0.0,
-                    0.0,
-                ),
-                Some("explore"),
-            )
-        } else {
-            (action, source)
-        };
+        if rand::random::<f32>() < self.exploration_rate {
+            action = ContinuousAction::new(
+                rand::random::<f32>() * 2.0 - 1.0,
+                rand::random::<f32>() * 2.0 - 1.0,
+                rand::random::<f32>(),
+                0.0,
+                0.0,
+            );
+            source = "explore";
+        }
 
         self.last_action = Some(action);
-        self.last_action_source = source.map(|s| s.to_string());
+        self.last_action_source = Some(source.to_string());
         action
     }
 

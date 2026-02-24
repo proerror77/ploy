@@ -6,8 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use burn::prelude::*;
-use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder};
-use tracing::{error, info, warn};
+use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+use tracing::{info, warn};
 
 /// Checkpointer for saving and loading models
 pub struct Checkpointer {
@@ -63,7 +63,7 @@ impl Checkpointer {
     }
 
     /// Load a model
-    pub fn load<B, M>(&self, name: &str, device: &B::Device) -> Result<M, String>
+    pub fn load<B, M>(&self, name: &str, _device: &B::Device) -> Result<M, String>
     where
         B: Backend,
         M: Module<B>,
@@ -73,8 +73,6 @@ impl Checkpointer {
         if !path.exists() {
             return Err(format!("Checkpoint not found: {:?}", path));
         }
-
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
 
         // Note: Module::load_file requires the record type to match
         // This is a simplified version - actual implementation may need adjustment

@@ -315,7 +315,7 @@ mod tests {
             away_quarter_scores: vec![],
         };
 
-        let (name, abbrev, deficit) = game.trailing_team().unwrap();
+        let (_name, abbrev, deficit) = game.trailing_team().unwrap();
         assert_eq!(abbrev, "LAL");
         assert_eq!(deficit, 7);
     }

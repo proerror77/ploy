@@ -7,13 +7,10 @@
 //!
 //! Based on data schemas from Jon Becker's prediction-market-analysis.
 
-use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::sol;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
 
 // ============================================================================
 // Contract addresses & constants

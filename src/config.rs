@@ -729,7 +729,7 @@ impl AppConfig {
             .set_default("api_port", 8081)?;
 
         // Accept either a config directory (`config/`) or a single TOML file
-        // (`config/default.toml`) for CLI compatibility.
+        // (`config/default.toml`) for CLI loading.
         if config_path.is_file() {
             builder = builder.add_source(File::from(config_path).required(true));
         } else {

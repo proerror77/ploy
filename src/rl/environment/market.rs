@@ -241,8 +241,6 @@ mod tests {
         let config = MarketConfig::default();
         let mut market = SimulatedMarket::new(config);
 
-        let initial_price = market.state().spot_price;
-
         // Step multiple times
         for _ in 0..100 {
             market.step();

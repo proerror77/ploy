@@ -13,7 +13,7 @@ if [[ -z "$EC2_HOST" ]]; then
     exit 1
 fi
 
-PLOY_CARGO_FEATURES="${PLOY_CARGO_FEATURES:-onnx}"
+PLOY_CARGO_FEATURES="${PLOY_CARGO_FEATURES:-onnx,api}"
 echo "==> Building release binary (features: ${PLOY_CARGO_FEATURES:-none})..."
 if [[ -n "${PLOY_CARGO_FEATURES}" ]]; then
     cargo build --release --features "$PLOY_CARGO_FEATURES"

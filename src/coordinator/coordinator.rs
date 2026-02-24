@@ -12,19 +12,20 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, Domain, OrderIntent, OrderPriority, OrderQueue, PositionAggregator,
-    RiskCheckResult, RiskGate,
+    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue,
+    PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
 };
 use crate::strategy::executor::OrderExecutor;
 
@@ -880,6 +881,9 @@ pub struct CoordinatorHandle {
     positions: Arc<PositionAggregator>,
     ingress_mode: Arc<RwLock<IngressMode>>,
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
+    deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
+    allowed_domains: Arc<HashSet<Domain>>,
+    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
     governance_store_pool: Option<PgPool>,
 }
@@ -887,6 +891,12 @@ pub struct CoordinatorHandle {
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
+        if !self.allowed_domains.contains(&intent.domain) {
+            return Err(crate::error::PloyError::Validation(format!(
+                "domain {} is not enabled for this runtime",
+                intent.domain
+            )));
+        }
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
             return Err(crate::error::PloyError::Validation(reason));
         }
@@ -1073,6 +1083,29 @@ impl CoordinatorHandle {
         self.global_state.read().await.clone()
     }
 
+    /// Shared deployment registry (single source of truth for API + coordinator).
+    pub fn shared_deployments(&self) -> Arc<RwLock<HashMap<String, StrategyDeployment>>> {
+        self.deployments.clone()
+    }
+
+    /// Runtime-enabled domains for this coordinator process.
+    pub fn allowed_domains(&self) -> Arc<HashSet<Domain>> {
+        self.allowed_domains.clone()
+    }
+
+    /// Whether a domain is enabled in this runtime.
+    pub fn is_domain_allowed(&self, domain: Domain) -> bool {
+        self.allowed_domains.contains(&domain)
+    }
+
+    /// Whether an agent_id is registered/authorized for order ingress.
+    pub fn is_agent_authorized(&self, agent_id: &str) -> bool {
+        self.authorized_agents
+            .read()
+            .map(|agents| agents.contains(agent_id))
+            .unwrap_or(false)
+    }
+
     /// Read current account-level governance policy.
     pub async fn governance_policy(&self) -> GovernancePolicySnapshot {
         self.governance_policy.read().await.to_snapshot()
@@ -1230,6 +1263,9 @@ impl CoordinatorHandle {
 pub struct Coordinator {
     config: CoordinatorConfig,
     account_id: String,
+    allowed_domains: Arc<HashSet<Domain>>,
+    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
+    deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
     duplicate_guard: Arc<RwLock<IntentDuplicateGuard>>,
@@ -1289,7 +1325,7 @@ impl IntentDuplicateGuard {
         // on the same contract are blocked within the duplicate window.
         // Scope is configurable:
         // - Market: block across all strategies/deployments (safer, avoids double-entries).
-        // - Deployment: legacy behavior; allow different deployments to each enter.
+        // - Deployment: deployment-scoped behavior; allow different deployments to each enter.
         if !intent.is_buy || intent.priority == OrderPriority::Critical {
             return None;
         }
@@ -2438,11 +2474,14 @@ impl Coordinator {
         config: CoordinatorConfig,
         executor: Arc<OrderExecutor>,
         account_id: String,
+        allowed_domains: HashSet<Domain>,
     ) -> Self {
         let (order_tx, order_rx) = mpsc::channel(256);
         let (state_tx, state_rx) = mpsc::channel(128);
         let (control_tx, control_rx) = mpsc::channel(32);
 
+        let allowed_domains = Arc::new(allowed_domains);
+        let authorized_agents = Arc::new(std::sync::RwLock::new(HashSet::new()));
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
         let duplicate_guard = Arc::new(RwLock::new(IntentDuplicateGuard::new(
@@ -2450,6 +2489,7 @@ impl Coordinator {
             config.duplicate_guard_enabled,
             config.duplicate_guard_scope,
         )));
+        let deployments = Arc::new(RwLock::new(Self::load_strategy_deployments()));
         let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
         let sports_allocator = Arc::new(RwLock::new(MarketCapitalAllocator::for_sports(&config)));
         let politics_allocator =
@@ -2471,6 +2511,9 @@ impl Coordinator {
         Self {
             config,
             account_id,
+            allowed_domains,
+            authorized_agents,
+            deployments,
             risk_gate,
             order_queue,
             duplicate_guard,
@@ -2500,6 +2543,66 @@ impl Coordinator {
     /// Enable DB logging for order execution outcomes (including dry-run).
     pub fn set_execution_log_pool(&mut self, pool: PgPool) {
         self.execution_log_pool = Some(pool);
+    }
+
+    /// Restore persisted risk runtime state (drawdown + daily pnl continuity).
+    pub async fn restore_risk_runtime_state(&self) -> Result<()> {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                current_equity,
+                equity_peak,
+                current_drawdown,
+                max_drawdown_observed,
+                daily_pnl,
+                daily_date,
+                risk_state
+            FROM risk_runtime_state
+            WHERE account_id = $1
+            "#,
+        )
+        .bind(&self.account_id)
+        .fetch_optional(pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(());
+        };
+
+        let snapshot = crate::platform::DrawdownSnapshot {
+            current_equity: row.try_get("current_equity").unwrap_or(Decimal::ZERO),
+            equity_peak: row.try_get("equity_peak").unwrap_or(Decimal::ZERO),
+            current_drawdown: row.try_get("current_drawdown").unwrap_or(Decimal::ZERO),
+            max_drawdown_observed: row
+                .try_get("max_drawdown_observed")
+                .unwrap_or(Decimal::ZERO),
+        };
+        self.risk_gate.restore_drawdown_snapshot(snapshot).await;
+
+        let daily_date: Option<chrono::NaiveDate> = row.try_get("daily_date").ok();
+        let daily_pnl: Decimal = row.try_get("daily_pnl").unwrap_or(Decimal::ZERO);
+        if daily_date == Some(Utc::now().date_naive()) {
+            self.risk_gate.restore_daily_pnl_for_today(daily_pnl).await;
+        }
+
+        let risk_state_raw: String = row.try_get("risk_state").unwrap_or_default();
+        if risk_state_raw.eq_ignore_ascii_case("halted") {
+            self.risk_gate
+                .trigger_circuit_breaker("restored persisted halted risk state")
+                .await;
+        }
+
+        info!(
+            account_id = %self.account_id,
+            daily_pnl = %daily_pnl,
+            risk_state = %risk_state_raw,
+            "restored persisted risk runtime state"
+        );
+        Ok(())
     }
 
     /// Enable DB persistence for coordinator governance policy.
@@ -2700,6 +2803,9 @@ impl Coordinator {
             positions: self.positions.clone(),
             ingress_mode: self.ingress_mode.clone(),
             domain_ingress_mode: self.domain_ingress_mode.clone(),
+            deployments: self.deployments.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            authorized_agents: self.authorized_agents.clone(),
             governance_policy: self.governance_policy.clone(),
             governance_store_pool: self.governance_store_pool.clone(),
         }
@@ -2725,6 +2831,9 @@ impl Coordinator {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.agent_commands
             .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
+        if let Ok(mut authorized) = self.authorized_agents.write() {
+            authorized.insert(agent_id.clone());
+        }
 
         // Register with risk gate (fire-and-forget via spawn since we're not async here)
         let risk_gate = self.risk_gate.clone();
@@ -2737,6 +2846,18 @@ impl Coordinator {
 
         info!(agent_id, "agent registered with coordinator");
         cmd_rx
+    }
+
+    pub async fn authorize_external_agent(&self, agent_id: &str, params: AgentRiskParams) {
+        let id = agent_id.trim();
+        if id.is_empty() {
+            return;
+        }
+        if let Ok(mut authorized) = self.authorized_agents.write() {
+            authorized.insert(id.to_string());
+        }
+        self.risk_gate.register_agent(id, params).await;
+        info!(agent_id = %id, "external ingress agent authorized");
     }
 
     /// Send a command to a specific agent
@@ -2762,6 +2883,10 @@ impl Coordinator {
 
     fn should_apply_domain_cmd(&self, entry: &AgentCommandChannel, target: Domain) -> bool {
         entry.domain == target
+    }
+
+    fn is_domain_allowed(&self, domain: Domain) -> bool {
+        self.allowed_domains.contains(&domain)
     }
 
     async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
@@ -2985,6 +3110,17 @@ impl Coordinator {
         let intent_id = intent.intent_id;
         let strategy_max_shares = intent.shares;
 
+        if !self.is_domain_allowed(intent.domain) {
+            let reason = format!("domain {} is not enabled for this runtime", intent.domain);
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by runtime domain allowlist"
+            );
+            return;
+        }
+
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
@@ -3024,7 +3160,6 @@ impl Coordinator {
                 return;
             }
         }
-
         let ingress_mode = *self.ingress_mode.read().await;
         if intent.is_buy && ingress_mode != IngressMode::Running {
             let reason = format!(
@@ -3068,6 +3203,16 @@ impl Coordinator {
             warn!(
                 %agent_id, %intent_id, reason = %reason,
                 "order blocked by global governance policy"
+            );
+            return;
+        }
+
+        if let Err(reason) = self.enforce_live_buy_deployment_gate(&mut intent).await {
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by deployment gate"
             );
             return;
         }
@@ -3192,6 +3337,398 @@ impl Coordinator {
         self.persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
             .await;
         warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
+    }
+
+    fn deployment_gate_required() -> bool {
+        match std::env::var("PLOY_DEPLOYMENT_GATE_REQUIRED")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+        {
+            Some(v) => !matches!(v.as_str(), "0" | "false" | "no" | "off"),
+            None => true,
+        }
+    }
+
+    fn deployments_state_path() -> PathBuf {
+        if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
+            return PathBuf::from(path);
+        }
+
+        let container_data_root = Path::new("/opt/ploy/data");
+        if container_data_root.exists() {
+            return container_data_root.join("state/deployments.json");
+        }
+
+        let repo_state_deployment = Path::new("data/state/deployments.json");
+        if repo_state_deployment.exists() {
+            return repo_state_deployment.to_path_buf();
+        }
+
+        let repo_root_deployment = Path::new("deployment/deployments.json");
+        if repo_root_deployment.exists() {
+            return repo_root_deployment.to_path_buf();
+        }
+
+        let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
+        if container_deployment.exists() {
+            return container_deployment.to_path_buf();
+        }
+
+        PathBuf::from("data/state/deployments.json")
+    }
+
+    fn parse_strategy_deployments(raw: &str) -> HashMap<String, StrategyDeployment> {
+        let mut out = HashMap::new();
+        if let Ok(items) = serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
+            for mut dep in items {
+                let id = dep.id.trim().to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                dep.id = id.clone();
+                dep.normalize_account_ids_in_place();
+                out.insert(id, dep);
+            }
+        }
+        out
+    }
+
+    fn load_strategy_deployments() -> HashMap<String, StrategyDeployment> {
+        let raw = std::env::var("PLOY_STRATEGY_DEPLOYMENTS_JSON")
+            .or_else(|_| std::env::var("PLOY_DEPLOYMENTS_JSON"))
+            .unwrap_or_default();
+        if !raw.trim().is_empty() {
+            return Self::parse_strategy_deployments(&raw);
+        }
+
+        let repo_state_path = Path::new("data/state/deployments.json");
+        let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
+        let candidates = [
+            Self::deployments_state_path(),
+            repo_state_path.to_path_buf(),
+            container_data_path.to_path_buf(),
+            Path::new("deployment/deployments.json").to_path_buf(),
+            Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
+        ];
+
+        for path in candidates {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                let parsed = Self::parse_strategy_deployments(&contents);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+            }
+        }
+
+        HashMap::new()
+    }
+
+    async fn refresh_strategy_deployments(&self) {
+        let loaded = Self::load_strategy_deployments();
+        let mut deployments = self.deployments.write().await;
+        *deployments = loaded;
+    }
+
+    fn metadata_value<'a>(metadata: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+        keys.iter()
+            .find_map(|k| metadata.get(*k))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }
+
+    fn normalized_token(raw: &str) -> String {
+        raw.trim()
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect()
+    }
+
+    fn strategy_matches(intent_strategy: &str, deployment_strategy: &str) -> bool {
+        let intent = Self::normalized_token(intent_strategy);
+        let dep = Self::normalized_token(deployment_strategy);
+        if intent.is_empty() || dep.is_empty() {
+            return false;
+        }
+        intent == dep || intent.contains(&dep) || dep.contains(&intent)
+    }
+
+    fn selector_matches_intent(
+        deployment: &StrategyDeployment,
+        market_slug: &str,
+        metadata: &HashMap<String, String>,
+    ) -> bool {
+        match &deployment.market_selector {
+            MarketSelector::Static {
+                symbol,
+                series_id,
+                market_slug: expected_market_slug,
+            } => {
+                if let Some(expected) = expected_market_slug
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    if !market_slug.eq_ignore_ascii_case(expected) {
+                        return false;
+                    }
+                }
+
+                if let Some(expected) = symbol.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    if let Some(actual) = Self::metadata_value(metadata, &["symbol"]) {
+                        if !actual.eq_ignore_ascii_case(expected) {
+                            return false;
+                        }
+                    }
+                }
+
+                if let Some(expected) = series_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    if let Some(actual) =
+                        Self::metadata_value(metadata, &["series_id", "event_series_id"])
+                    {
+                        if !actual.eq_ignore_ascii_case(expected) {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            }
+            MarketSelector::Dynamic { domain, .. } => *domain == deployment.domain,
+        }
+    }
+
+    fn timeframe_hint(intent: &OrderIntent) -> Option<String> {
+        if let Some(raw) = Self::metadata_value(&intent.metadata, &["timeframe", "horizon"]) {
+            if let Some(h) = CryptoHorizon::from_hint(raw) {
+                return Some(h.as_str().to_string());
+            }
+            return Some(raw.to_ascii_lowercase());
+        }
+
+        if let Some(raw) = Self::metadata_value(&intent.metadata, &["series_id", "event_series_id"])
+        {
+            if let Some(h) = CryptoHorizon::from_hint(raw) {
+                return Some(h.as_str().to_string());
+            }
+        }
+
+        CryptoHorizon::from_hint(&intent.market_slug).map(|h| h.as_str().to_string())
+    }
+
+    fn deployment_matches_timeframe(deployment: &StrategyDeployment, intent: &OrderIntent) -> bool {
+        let Some(timeframe) = Self::timeframe_hint(intent) else {
+            return true;
+        };
+        timeframe.eq_ignore_ascii_case(deployment.timeframe.as_str())
+    }
+
+    fn deployment_runtime_eligible(
+        deployment: &StrategyDeployment,
+        account_id: &str,
+        dry_run: bool,
+        intent: &OrderIntent,
+    ) -> bool {
+        deployment.is_enabled_for_runtime(account_id, dry_run)
+            && deployment.domain == intent.domain
+            && Self::deployment_matches_timeframe(deployment, intent)
+            && Self::selector_matches_intent(deployment, &intent.market_slug, &intent.metadata)
+    }
+
+    fn apply_deployment_metadata(intent: &mut OrderIntent, deployment: &StrategyDeployment) {
+        intent
+            .metadata
+            .insert("deployment_id".to_string(), deployment.id.clone());
+        intent
+            .metadata
+            .entry("timeframe".to_string())
+            .or_insert_with(|| deployment.timeframe.as_str().to_string());
+        intent
+            .metadata
+            .entry("allocator_profile".to_string())
+            .or_insert_with(|| deployment.allocator_profile.clone());
+        intent
+            .metadata
+            .entry("risk_profile".to_string())
+            .or_insert_with(|| deployment.risk_profile.clone());
+        intent
+            .metadata
+            .entry("deployment_strategy".to_string())
+            .or_insert_with(|| deployment.strategy.clone());
+        intent
+            .metadata
+            .entry("deployment_priority".to_string())
+            .or_insert_with(|| deployment.priority.to_string());
+        intent
+            .metadata
+            .entry("deployment_cooldown_secs".to_string())
+            .or_insert_with(|| deployment.cooldown_secs.to_string());
+
+        if let MarketSelector::Static {
+            symbol,
+            series_id,
+            market_slug,
+        } = &deployment.market_selector
+        {
+            if let Some(value) = symbol.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                intent
+                    .metadata
+                    .entry("symbol".to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+            if let Some(value) = series_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                intent
+                    .metadata
+                    .entry("series_id".to_string())
+                    .or_insert_with(|| value.to_string());
+                intent
+                    .metadata
+                    .entry("event_series_id".to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+            if let Some(value) = market_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                intent
+                    .metadata
+                    .entry("selector_market_slug".to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+        }
+    }
+
+    fn enforce_deployment_gate_with_snapshot(
+        account_id: &str,
+        dry_run: bool,
+        deployments: &HashMap<String, StrategyDeployment>,
+        intent: &mut OrderIntent,
+    ) -> std::result::Result<(), String> {
+        if !intent.is_buy || dry_run || !Self::deployment_gate_required() {
+            return Ok(());
+        }
+
+        if deployments.is_empty() {
+            return Err(
+                "deployment registry is empty while deployment gate is required".to_string(),
+            );
+        }
+
+        if let Some(deployment_id) = Self::metadata_value(&intent.metadata, &["deployment_id"]) {
+            let Some(deployment) = deployments.get(deployment_id) else {
+                return Err(format!("unknown deployment_id: {}", deployment_id));
+            };
+            if !Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent) {
+                return Err(format!(
+                    "deployment {} is not eligible for runtime/account/domain/timeframe/selector binding",
+                    deployment.id
+                ));
+            }
+            Self::apply_deployment_metadata(intent, deployment);
+            return Ok(());
+        }
+
+        let strategy = Self::metadata_value(&intent.metadata, &["strategy", "deployment_strategy"])
+            .ok_or_else(|| "strategy metadata is required for live BUY intents".to_string())?;
+
+        let mut candidates: Vec<&StrategyDeployment> = deployments
+            .values()
+            .filter(|deployment| {
+                Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent)
+                    && Self::strategy_matches(strategy, deployment.strategy.as_str())
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            let mut domain_candidates: Vec<&StrategyDeployment> = deployments
+                .values()
+                .filter(|deployment| {
+                    Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent)
+                })
+                .collect();
+            domain_candidates.sort_by(|a, b| a.id.cmp(&b.id));
+
+            if domain_candidates.len() == 1 {
+                let deployment = domain_candidates[0];
+                Self::apply_deployment_metadata(intent, deployment);
+                intent.metadata.insert(
+                    "deployment_resolution".to_string(),
+                    "domain_singleton_fallback".to_string(),
+                );
+                return Ok(());
+            }
+
+            return Err(format!(
+                "no eligible deployment found for strategy={} domain={} market={}",
+                strategy, intent.domain, intent.market_slug
+            ));
+        }
+
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
+
+        if candidates.len() > 1 {
+            let ids = candidates
+                .iter()
+                .map(|d| d.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "ambiguous deployment resolution for strategy={} market={}: {}",
+                strategy, intent.market_slug, ids
+            ));
+        }
+
+        let deployment = candidates[0];
+        Self::apply_deployment_metadata(intent, deployment);
+        Ok(())
+    }
+
+    async fn enforce_live_buy_deployment_gate(
+        &self,
+        intent: &mut OrderIntent,
+    ) -> std::result::Result<(), String> {
+        if !intent.is_buy || self.executor.is_dry_run() || !Self::deployment_gate_required() {
+            return Ok(());
+        }
+        if !self.is_domain_allowed(intent.domain) {
+            return Err(format!(
+                "domain {} is not enabled for this runtime",
+                intent.domain
+            ));
+        }
+
+        let explicit_id =
+            Self::metadata_value(&intent.metadata, &["deployment_id"]).map(ToString::to_string);
+        let should_refresh = {
+            let deployments = self.deployments.read().await;
+            deployments.is_empty()
+                || explicit_id
+                    .as_ref()
+                    .is_some_and(|id| !deployments.contains_key(id.as_str()))
+        };
+        if should_refresh {
+            self.refresh_strategy_deployments().await;
+        }
+
+        let deployments = self.deployments.read().await;
+        Self::enforce_deployment_gate_with_snapshot(
+            self.account_id.as_str(),
+            self.executor.is_dry_run(),
+            &deployments,
+            intent,
+        )
     }
 
     async fn apply_kelly_sizing(&self, intent: &mut OrderIntent) -> Option<String> {
@@ -3675,6 +4212,9 @@ impl Coordinator {
                     } else {
                         self.risk_gate.record_success(&agent_id, realized_pnl).await;
                     }
+
+                    // Record execution outcome with realized PnL attribution.
+                    self.risk_gate.record_success(&agent_id, realized_pnl).await;
                 }
                 Err(e) => {
                     error!(
@@ -3712,8 +4252,8 @@ impl Coordinator {
             return Decimal::ZERO;
         }
 
-        let mut realized_pnl = Decimal::ZERO;
         let mut remaining = filled_shares;
+        let mut realized_pnl = Decimal::ZERO;
         let mut matching_positions = self
             .positions
             .get_agent_positions(&intent.agent_id)
@@ -4160,7 +4700,7 @@ impl Coordinator {
         &self,
         intent: &OrderIntent,
         request: &OrderRequest,
-        result: Option<&crate::strategy::executor::ExecutionResult>,
+        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
         queue_delay_ms: Option<i64>,
         config_hash: Option<String>,
     ) {
@@ -4169,8 +4709,8 @@ impl Coordinator {
         };
 
         let expected_price = request.limit_price;
-        let executed_price = result.and_then(|r| r.avg_fill_price);
-        let execution_latency_ms = result.map(|r| r.elapsed_ms as i64);
+        let executed_price = execution_result.and_then(|r| r.avg_fill_price);
+        let execution_latency_ms = execution_result.map(|r| r.elapsed_ms as i64);
         let total_latency_ms = match (queue_delay_ms, execution_latency_ms) {
             (Some(q), Some(e)) => Some(q + e),
             (Some(q), None) => Some(q),
@@ -4194,11 +4734,11 @@ impl Coordinator {
             .or_else(|| Self::metadata_decimal(intent, "signal_expected_slippage_bps"));
         let metadata =
             serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-        let status = result
+        let status = execution_result
             .map(|r| format!("{:?}", r.status))
             .unwrap_or_else(|| "Failed".to_string());
 
-        let result = sqlx::query(
+        let persist_result = sqlx::query(
             r#"
             INSERT INTO execution_analysis (
                 account_id, intent_id, agent_id, domain, market_slug, token_id, is_buy,
@@ -4247,12 +4787,201 @@ impl Coordinator {
         .execute(pool)
         .await;
 
-        if let Err(e) = result {
+        if let Err(e) = persist_result {
             warn!(
                 agent_id = %intent.agent_id,
                 intent_id = %intent.intent_id,
                 error = %e,
                 "failed to persist execution analysis"
+            );
+        }
+
+        self.persist_live_strategy_evaluation(
+            intent,
+            request,
+            execution_result,
+            expected_slippage_bps,
+            actual_slippage_bps,
+            total_latency_ms,
+        )
+        .await;
+    }
+
+    async fn persist_live_strategy_evaluation(
+        &self,
+        intent: &OrderIntent,
+        request: &OrderRequest,
+        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
+        expected_slippage_bps: Option<Decimal>,
+        actual_slippage_bps: Option<Decimal>,
+        total_latency_ms: Option<i64>,
+    ) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let strategy_id = intent
+            .metadata
+            .get("strategy")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let deployment_id = intent
+            .metadata
+            .get("deployment_id")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string);
+        let timeframe = intent
+            .metadata
+            .get("timeframe")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string);
+        let score = Self::metadata_decimal(intent, "signal_confidence")
+            .or_else(|| Self::metadata_decimal(intent, "signal_edge"));
+
+        let status = match execution_result {
+            Some(result) => match result.status {
+                crate::domain::OrderStatus::Submitted
+                | crate::domain::OrderStatus::PartiallyFilled
+                | crate::domain::OrderStatus::Filled => "PASS",
+                crate::domain::OrderStatus::Cancelled => "WARN",
+                crate::domain::OrderStatus::Pending
+                | crate::domain::OrderStatus::Rejected
+                | crate::domain::OrderStatus::Expired
+                | crate::domain::OrderStatus::Failed => "FAIL",
+            },
+            None => "FAIL",
+        };
+
+        let evidence_hash = intent.intent_id.to_string();
+        let evidence_payload = serde_json::json!({
+            "intent_id": intent.intent_id.to_string(),
+            "agent_id": intent.agent_id.clone(),
+            "is_buy": intent.is_buy,
+            "shares": intent.shares,
+            "request_limit_price": request.limit_price.to_string(),
+            "order_side": request.order_side.to_string(),
+            "expected_slippage_bps": expected_slippage_bps.map(|v| v.to_string()),
+            "actual_slippage_bps": actual_slippage_bps.map(|v| v.to_string()),
+            "total_latency_ms": total_latency_ms,
+            "dry_run": self.executor.is_dry_run(),
+            "execution": execution_result.map(|r| serde_json::json!({
+                "order_id": r.order_id.clone(),
+                "status": format!("{:?}", r.status),
+                "filled_shares": r.filled_shares,
+                "avg_fill_price": r.avg_fill_price.map(|p| p.to_string()),
+                "elapsed_ms": r.elapsed_ms
+            })),
+        });
+        let metadata =
+            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+        let insert = sqlx::query(
+            r#"
+            INSERT INTO strategy_evaluations (
+                account_id,
+                strategy_id,
+                deployment_id,
+                domain,
+                stage,
+                status,
+                score,
+                timeframe,
+                sample_size,
+                evidence_kind,
+                evidence_ref,
+                evidence_hash,
+                evidence_payload,
+                metadata
+            )
+            VALUES (
+                $1,$2,$3,$4,'LIVE',$5,$6,$7,1,
+                'execution_analysis',$8,$9,$10,$11
+            )
+            ON CONFLICT (account_id, strategy_id, stage, evidence_hash) DO NOTHING
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(strategy_id)
+        .bind(deployment_id)
+        .bind(intent.domain.to_string())
+        .bind(status)
+        .bind(score)
+        .bind(timeframe)
+        .bind(intent.intent_id.to_string())
+        .bind(evidence_hash)
+        .bind(sqlx::types::Json(evidence_payload))
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
+
+        if let Err(e) = insert {
+            warn!(
+                account_id = %self.account_id,
+                intent_id = %intent.intent_id,
+                error = %e,
+                "failed to persist live strategy evaluation evidence"
+            );
+        }
+    }
+
+    async fn persist_risk_runtime_state(&self) {
+        let Some(pool) = self.execution_log_pool.as_ref() else {
+            return;
+        };
+
+        let risk_state = self.risk_gate.state().await;
+        let (daily_pnl, _, _) = self.risk_gate.daily_stats().await;
+        let daily_loss_limit = self.risk_gate.daily_loss_limit();
+        let drawdown = self.risk_gate.drawdown_snapshot().await;
+        let daily_date = Utc::now().date_naive();
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO risk_runtime_state (
+                account_id,
+                risk_state,
+                daily_date,
+                daily_pnl,
+                daily_loss_limit,
+                current_equity,
+                equity_peak,
+                current_drawdown,
+                max_drawdown_observed
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (account_id) DO UPDATE SET
+                risk_state = EXCLUDED.risk_state,
+                daily_date = EXCLUDED.daily_date,
+                daily_pnl = EXCLUDED.daily_pnl,
+                daily_loss_limit = EXCLUDED.daily_loss_limit,
+                current_equity = EXCLUDED.current_equity,
+                equity_peak = EXCLUDED.equity_peak,
+                current_drawdown = EXCLUDED.current_drawdown,
+                max_drawdown_observed = EXCLUDED.max_drawdown_observed,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&self.account_id)
+        .bind(format!("{:?}", risk_state))
+        .bind(daily_date)
+        .bind(daily_pnl)
+        .bind(daily_loss_limit)
+        .bind(drawdown.current_equity)
+        .bind(drawdown.equity_peak)
+        .bind(drawdown.current_drawdown)
+        .bind(drawdown.max_drawdown_observed)
+        .execute(pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(
+                account_id = %self.account_id,
+                error = %e,
+                "failed to persist risk runtime state"
             );
         }
     }
@@ -4264,6 +4993,8 @@ impl Coordinator {
         let risk_state = self.risk_gate.state().await;
         let (daily_pnl, _, _) = self.risk_gate.daily_stats().await;
         let daily_loss_limit = self.risk_gate.daily_loss_limit();
+        let (current_drawdown, max_drawdown_observed) = self.risk_gate.drawdown_stats().await;
+        let max_drawdown_limit = self.risk_gate.max_drawdown_limit();
         let circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
         let queue_stats = self.order_queue.read().await.stats();
         let total_realized = self.positions.total_realized_pnl().await;
@@ -4274,6 +5005,9 @@ impl Coordinator {
         state.risk_state = risk_state;
         state.daily_pnl = daily_pnl;
         state.daily_loss_limit = daily_loss_limit;
+        state.current_drawdown = current_drawdown;
+        state.max_drawdown_observed = max_drawdown_observed;
+        state.max_drawdown_limit = max_drawdown_limit;
         state.circuit_breaker_events = circuit_breaker_events;
         state.queue_stats = QueueStatsSnapshot::from(queue_stats);
         state.total_realized_pnl = total_realized;
@@ -4306,6 +5040,10 @@ impl Coordinator {
                 agent.error_message = Some("heartbeat timeout".into());
             }
         }
+        drop(stale_warn_at);
+        drop(state);
+
+        self.persist_risk_runtime_state().await;
     }
 
     fn infer_time_bucket_seconds(intent: &OrderIntent) -> i64 {
@@ -4370,7 +5108,7 @@ impl Coordinator {
         // Align idempotency with duplicate-guard semantics.
         // - When the guard is market-scoped, avoid including deployment_id in the key so
         //   cross-deployment duplicate intents resolve to the same idempotency key.
-        // - When deployment-scoped, keep legacy behavior (key includes deployment_id).
+        // - When deployment-scoped, key includes deployment_id.
         let scope = match intent
             .metadata
             .get("duplicate_guard_scope")
@@ -4449,10 +5187,13 @@ mod tests {
     use super::*;
     use crate::adapters::PolymarketClient;
     use crate::config::ExecutionConfig;
-    use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
+    use crate::platform::{
+        AgentStatus, DeploymentExecutionMode, Domain, MarketSelector, OrderPriority, QueueStats,
+        StrategyDeployment, StrategyLifecycleStage, StrategyProductType, Timeframe,
+    };
     use crate::strategy::executor::OrderExecutor;
     use rust_decimal_macros::dec;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
@@ -4475,10 +5216,12 @@ mod tests {
         let client = PolymarketClient::new("https://clob.polymarket.com", true)
             .expect("build dry-run polymarket client");
         let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+        let allowed_domains = HashSet::from([Domain::Crypto, Domain::Sports]);
         let coordinator = Coordinator::new(
             CoordinatorConfig::default(),
             executor,
             "acct-test".to_string(),
+            allowed_domains,
         );
         let handle = coordinator.handle();
         (handle, coordinator)
@@ -4535,6 +5278,41 @@ mod tests {
         );
         intent.priority = priority;
         intent
+    }
+
+    fn make_deployment(
+        id: &str,
+        strategy: &str,
+        domain: Domain,
+        timeframe: Timeframe,
+        execution_mode: DeploymentExecutionMode,
+    ) -> StrategyDeployment {
+        StrategyDeployment {
+            id: id.to_string(),
+            strategy: strategy.to_string(),
+            strategy_version: "test".to_string(),
+            domain,
+            market_selector: MarketSelector::Dynamic {
+                domain,
+                query: None,
+                min_liquidity_usd: None,
+                max_spread_bps: None,
+                min_time_remaining_secs: None,
+                max_time_remaining_secs: None,
+            },
+            timeframe,
+            enabled: true,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 50,
+            cooldown_secs: 60,
+            account_ids: Vec::new(),
+            execution_mode,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        }
     }
 
     #[test]
@@ -4724,6 +5502,185 @@ mod tests {
         assert!(guard
             .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
             .is_none());
+    }
+
+    #[test]
+    fn test_deployment_gate_blocks_live_buy_without_strategy_metadata() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-15m".to_string(),
+            make_deployment(
+                "crypto-momentum-15m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M15,
+                DeploymentExecutionMode::LiveOnly,
+            ),
+        );
+
+        let mut intent = make_intent(true, OrderPriority::Normal);
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("strategy metadata is required"));
+    }
+
+    #[test]
+    fn test_deployment_gate_accepts_explicit_deployment_and_applies_metadata() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-15m".to_string(),
+            make_deployment(
+                "crypto-momentum-15m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M15,
+                DeploymentExecutionMode::LiveOnly,
+            ),
+        );
+
+        let mut intent = make_intent(true, OrderPriority::Normal)
+            .with_metadata("strategy", "crypto_momentum")
+            .with_metadata("deployment_id", "crypto-momentum-15m");
+        intent.market_slug = "btc-updown-15m-xyz".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            intent.metadata.get("deployment_id").map(String::as_str),
+            Some("crypto-momentum-15m")
+        );
+        assert_eq!(
+            intent.metadata.get("timeframe").map(String::as_str),
+            Some("15m")
+        );
+    }
+
+    #[test]
+    fn test_deployment_gate_blocks_ambiguous_inferred_deployments() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-a".to_string(),
+            make_deployment(
+                "crypto-momentum-a",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::Other("other".to_string()),
+                DeploymentExecutionMode::Any,
+            ),
+        );
+        deployments.insert(
+            "crypto-momentum-b".to_string(),
+            make_deployment(
+                "crypto-momentum-b",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::Other("other".to_string()),
+                DeploymentExecutionMode::Any,
+            ),
+        );
+
+        let mut intent =
+            make_intent(true, OrderPriority::Normal).with_metadata("strategy", "momentum");
+        intent.market_slug = "btc-updown-unknown".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("ambiguous deployment resolution"));
+    }
+
+    #[test]
+    fn test_deployment_gate_blocks_runtime_scope_mismatch() {
+        let mut deployment = make_deployment(
+            "crypto-momentum-15m",
+            "momentum",
+            Domain::Crypto,
+            Timeframe::M15,
+            DeploymentExecutionMode::DryRunOnly,
+        );
+        deployment.account_ids = vec!["acct-b".to_string()];
+
+        let mut deployments = HashMap::new();
+        deployments.insert("crypto-momentum-15m".to_string(), deployment);
+
+        let mut intent = make_intent(true, OrderPriority::Normal)
+            .with_metadata("strategy", "momentum")
+            .with_metadata("deployment_id", "crypto-momentum-15m");
+        intent.market_slug = "btc-updown-15m-xyz".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not eligible"));
+    }
+
+    #[test]
+    fn test_deployment_gate_infers_unique_by_timeframe_hint() {
+        let mut deployments = HashMap::new();
+        deployments.insert(
+            "crypto-momentum-5m".to_string(),
+            make_deployment(
+                "crypto-momentum-5m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M5,
+                DeploymentExecutionMode::Any,
+            ),
+        );
+        deployments.insert(
+            "crypto-momentum-15m".to_string(),
+            make_deployment(
+                "crypto-momentum-15m",
+                "momentum",
+                Domain::Crypto,
+                Timeframe::M15,
+                DeploymentExecutionMode::Any,
+            ),
+        );
+
+        let mut intent = make_intent(true, OrderPriority::Normal)
+            .with_metadata("strategy", "crypto_momentum")
+            .with_metadata("horizon", "15m");
+        intent.market_slug = "btc-updown-15m-xyz".to_string();
+
+        let result = Coordinator::enforce_deployment_gate_with_snapshot(
+            "acct-a",
+            false,
+            &deployments,
+            &mut intent,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            intent.metadata.get("deployment_id").map(String::as_str),
+            Some("crypto-momentum-15m")
+        );
     }
 
     #[test]
@@ -4952,21 +5909,21 @@ mod tests {
     async fn test_handle_shutdown_domain_blocks_new_buy_immediately() {
         let (handle, _coordinator) = make_test_handle();
         handle
-            .shutdown_domain(Domain::Politics)
+            .shutdown_domain(Domain::Sports)
             .await
             .expect("shutdown domain command accepted");
 
         let intent = OrderIntent::new(
-            "politics",
-            Domain::Politics,
-            "election-market",
-            "politics-token-yes",
+            "sports",
+            Domain::Sports,
+            "nba-game-2",
+            "sports-token-yes",
             crate::domain::Side::Up,
             true,
             10,
             dec!(0.40),
         )
-        .with_deployment_id("deploy.politics.election.test");
+        .with_deployment_id("deploy.sports.nba.test");
 
         let err = handle
             .submit_order(intent)

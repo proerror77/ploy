@@ -78,6 +78,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/positions", get(handlers::get_positions))
         // System endpoints
         .route("/api/system/status", get(handlers::get_system_status))
+        .route(
+            "/api/system/capabilities",
+            get(handlers::get_platform_capabilities),
+        )
+        .route("/api/system/accounts", get(handlers::get_system_accounts))
         .route("/api/system/start", post(handlers::start_system))
         .route("/api/system/stop", post(handlers::stop_system))
         .route("/api/system/restart", post(handlers::restart_system))
@@ -154,6 +159,10 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::sidecar_get_positions),
         )
         .route("/api/sidecar/risk", get(handlers::sidecar_get_risk))
+        .route(
+            "/api/sidecar/strategy-evaluations",
+            post(handlers::upsert_strategy_evaluation).get(handlers::list_strategy_evaluations),
+        )
         // WebSocket endpoint
         .route("/ws", get(websocket_handler));
 

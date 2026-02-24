@@ -550,9 +550,11 @@ mod tests {
 
     #[test]
     fn test_position_exposure() {
-        let mut pos = Position::default();
-        pos.yes_usd = dec!(10);
-        pos.no_usd = dec!(15);
+        let pos = Position {
+            yes_usd: dec!(10),
+            no_usd: dec!(15),
+            ..Default::default()
+        };
         assert_eq!(pos.total_exposure(), dec!(25));
         assert!(pos.can_buy(dec!(1), dec!(50)));
         assert!(!pos.can_buy(dec!(30), dec!(50)));

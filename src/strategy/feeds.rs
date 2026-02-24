@@ -557,7 +557,7 @@ impl DataFeedManager {
 
         if let Some(ref client) = self.pm_client {
             match client.get_all_active_events(series_id).await {
-                Ok(mut events) => {
+                Ok(events) => {
                     let total_events = events.len();
 
                     // /series/{id} returns lightweight event summaries without markets/tokens.
@@ -850,7 +850,7 @@ impl DataFeedManager {
 
                 for series_id in &series_ids {
                     // Fetch active events and keep only the nearest ones.
-                    let Ok(mut events) = pm_client.get_all_active_events(series_id).await else {
+                    let Ok(events) = pm_client.get_all_active_events(series_id).await else {
                         continue;
                     };
 

@@ -62,6 +62,14 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
+fn default_max_time_remaining_secs_5m() -> u64 {
+    120
+}
+
+fn default_max_time_remaining_secs_15m() -> u64 {
+    240
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CryptoLobMlExitMode {
@@ -108,6 +116,14 @@ pub struct CryptoLobMlConfig {
 
     /// Maximum time remaining for selected event (seconds)
     pub max_time_remaining_secs: u64,
+
+    /// Optional override: maximum time remaining for 5m events (seconds).
+    #[serde(default = "default_max_time_remaining_secs_5m")]
+    pub max_time_remaining_secs_5m: u64,
+
+    /// Optional override: maximum time remaining for 15m events (seconds).
+    #[serde(default = "default_max_time_remaining_secs_15m")]
+    pub max_time_remaining_secs_15m: u64,
 
     /// If true, prefer events closest to end (confirmatory mode).
     /// If false, prefer events with more time remaining (predictive mode).
@@ -257,6 +273,8 @@ impl Default for CryptoLobMlConfig {
             // Cover both 5m + 15m windows by default.
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,
+            max_time_remaining_secs_5m: default_max_time_remaining_secs_5m(),
+            max_time_remaining_secs_15m: default_max_time_remaining_secs_15m(),
             prefer_close_to_end: true,
             default_shares: 50,
             exit_edge_floor: default_exit_edge_floor(),
@@ -264,7 +282,7 @@ impl Default for CryptoLobMlConfig {
             exit_mode: default_exit_mode(),
             min_hold_secs: 20,
             min_edge: dec!(0.02),
-            max_entry_price: dec!(0.30),
+            max_entry_price: dec!(0.70),
             entry_side_policy: default_entry_side_policy(),
             entry_late_window_secs_5m: default_entry_late_window_secs_5m(),
             entry_late_window_secs_15m: default_entry_late_window_secs_15m(),
@@ -1037,6 +1055,317 @@ impl CryptoLobMlAgent {
             down_ask,
         })
     }
+
+    #[cfg(feature = "tcn_db")]
+    async fn estimate_p_up_tcn(
+        &self,
+        tcn: &mut TcnBuffers,
+        event: &EventInfo,
+        now: DateTime<Utc>,
+    ) -> Option<f64> {
+        let bucket_start = tcn.bucket_start(now);
+        if tcn
+            .last_bucket_by_condition
+            .get(&event.condition_id)
+            .is_some_and(|v| *v == bucket_start)
+            && tcn.seq_by_condition.contains_key(&event.condition_id)
+        {
+            let seq = tcn.sequence_flat(&event.condition_id)?;
+            return self.predict_tcn_sequence(&seq);
+        }
+
+        let Some(pool) = self.pool.as_ref() else {
+            warn!(
+                agent = self.config.agent_id,
+                "onnx_tcn requested but no PgPool was provided; skipping prediction"
+            );
+            return None;
+        };
+
+        let bucket_end = bucket_start + chrono::Duration::seconds(tcn.sample_secs.max(1) as i64);
+        let binance_symbol = Self::tcn_binance_symbol_from_market_slug(&event.slug);
+        let market_start_ts = Self::tcn_market_start_ts_from_slug(&event.slug);
+
+        let row_opt = sqlx::query(
+            r#"
+            WITH y AS (
+              SELECT
+                received_at AS ts,
+                (bids->0->>'price')::double precision AS best_bid,
+                (asks->0->>'price')::double precision AS best_ask
+              FROM clob_orderbook_snapshots
+              WHERE LOWER(COALESCE(domain, '')) = 'crypto'
+                AND token_id = $1
+                AND received_at >= $2
+                AND received_at < $3
+              ORDER BY received_at ASC
+              LIMIT 1
+            ),
+            n AS (
+              SELECT
+                (s2.bids->0->>'price')::double precision AS best_bid,
+                (s2.asks->0->>'price')::double precision AS best_ask
+              FROM clob_orderbook_snapshots s2
+              JOIN y ON TRUE
+              WHERE LOWER(COALESCE(s2.domain, '')) = 'crypto'
+                AND s2.token_id = $4
+                AND s2.received_at BETWEEN y.ts - ($5::bigint * INTERVAL '1 second')
+                                      AND y.ts + ($5::bigint * INTERVAL '1 second')
+              ORDER BY ABS(EXTRACT(EPOCH FROM (s2.received_at - y.ts))) ASC
+              LIMIT 1
+            ),
+            t AS (
+              SELECT
+                token_id,
+                COUNT(*)::double precision AS cnt,
+                COALESCE(SUM(size), 0)::double precision AS vol,
+                COALESCE(SUM(price * size) / NULLIF(SUM(size), 0), NULL)::double precision AS vwap,
+                (ARRAY_AGG(price ORDER BY trade_ts DESC))[1]::double precision AS last_price
+              FROM clob_trade_ticks
+              JOIN y ON TRUE
+              WHERE token_id IN ($1, $4)
+                AND trade_ts <= y.ts
+                AND trade_ts > y.ts - ($6::bigint * INTERVAL '1 second')
+              GROUP BY token_id
+            ),
+            v AS (
+              SELECT
+                token_id,
+                received_at AS sample_ts,
+                COALESCE(
+                  0.5 * (
+                    (bids->0->>'price')::double precision +
+                    (asks->0->>'price')::double precision
+                  ),
+                  (bids->0->>'price')::double precision,
+                  (asks->0->>'price')::double precision
+                ) AS mid_price
+              FROM clob_orderbook_snapshots
+              JOIN y ON TRUE
+              WHERE LOWER(COALESCE(domain, '')) = 'crypto'
+                AND token_id IN ($1, $4)
+                AND received_at <= y.ts
+                AND received_at > y.ts - ($7::bigint * INTERVAL '1 second')
+            ),
+            vol AS (
+              SELECT
+                token_id,
+                COALESCE(
+                  (
+                    STDDEV_SAMP(mid_price) FILTER (
+                      WHERE sample_ts > (SELECT ts FROM y) - ($8::bigint * INTERVAL '1 second')
+                    ) / NULLIF(
+                      AVG(mid_price) FILTER (
+                        WHERE sample_ts > (SELECT ts FROM y) - ($8::bigint * INTERVAL '1 second')
+                      ),
+                      0
+                    )
+                  ) * 10000.0,
+                  0.0
+                )::double precision AS vol_short_bps,
+                COALESCE(
+                  (STDDEV_SAMP(mid_price) / NULLIF(AVG(mid_price), 0)) * 10000.0,
+                  0.0
+                )::double precision AS vol_long_bps
+              FROM v
+              WHERE mid_price IS NOT NULL
+                AND mid_price > 0.0
+              GROUP BY token_id
+            ),
+            bn AS (
+              SELECT b.price::double precision AS price
+              FROM binance_price_ticks b
+              JOIN y ON TRUE
+              WHERE $9::text IS NOT NULL
+                AND b.symbol = $9
+                AND b.trade_time <= y.ts
+              ORDER BY b.trade_time DESC
+              LIMIT 1
+            ),
+            bs AS (
+              SELECT b.price::double precision AS price
+              FROM binance_price_ticks b
+              WHERE $9::text IS NOT NULL
+                AND $10::timestamptz IS NOT NULL
+                AND b.symbol = $9
+                AND b.trade_time <= $10
+              ORDER BY b.trade_time DESC
+              LIMIT 1
+            )
+            SELECT
+              y.ts,
+              y.best_bid AS yes_best_bid,
+              y.best_ask AS yes_best_ask,
+              n.best_bid AS no_best_bid,
+              n.best_ask AS no_best_ask,
+              (SELECT last_price FROM t WHERE token_id = $1) AS yes_last_trade,
+              (SELECT cnt FROM t WHERE token_id = $1) AS yes_trade_count,
+              (SELECT vol FROM t WHERE token_id = $1) AS yes_trade_volume,
+              (SELECT vwap FROM t WHERE token_id = $1) AS yes_trade_vwap,
+              (SELECT last_price FROM t WHERE token_id = $4) AS no_last_trade,
+              (SELECT cnt FROM t WHERE token_id = $4) AS no_trade_count,
+              (SELECT vol FROM t WHERE token_id = $4) AS no_trade_volume,
+              (SELECT vwap FROM t WHERE token_id = $4) AS no_trade_vwap,
+              (SELECT vol_short_bps FROM vol WHERE token_id = $1) AS yes_mid_vol_short_bps,
+              (SELECT vol_long_bps FROM vol WHERE token_id = $1) AS yes_mid_vol_long_bps,
+              (SELECT vol_short_bps FROM vol WHERE token_id = $4) AS no_mid_vol_short_bps,
+              (SELECT vol_long_bps FROM vol WHERE token_id = $4) AS no_mid_vol_long_bps,
+              bn.price AS spot_now,
+              bs.price AS spot_start
+            FROM y
+            CROSS JOIN n
+            "#,
+        )
+        .bind(&event.up_token_id)
+        .bind(bucket_start)
+        .bind(bucket_end)
+        .bind(&event.down_token_id)
+        .bind(tcn.pair_window_secs as i64)
+        .bind(tcn.trade_lookback_secs as i64)
+        .bind(tcn.vol_long_window_secs as i64)
+        .bind(tcn.vol_short_window_secs as i64)
+        .bind(binance_symbol)
+        .bind(market_start_ts)
+        .fetch_optional(pool)
+        .await;
+
+        let row = match row_opt {
+            Ok(Some(r)) => r,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(
+                    agent = self.config.agent_id,
+                    error = %e,
+                    "failed to fetch onnx_tcn feature row from db"
+                );
+                return None;
+            }
+        };
+
+        let ts: DateTime<Utc> = row.try_get(0).ok()?;
+        let yes_best_bid: Option<f64> = row.try_get(1).ok()?;
+        let yes_best_ask: Option<f64> = row.try_get(2).ok()?;
+        let no_best_bid: Option<f64> = row.try_get(3).ok()?;
+        let no_best_ask: Option<f64> = row.try_get(4).ok()?;
+
+        let yes_last_trade: Option<f64> = row.try_get(5).ok()?;
+        let yes_trade_count: f64 = row.try_get::<Option<f64>, _>(6).ok()?.unwrap_or(0.0);
+        let yes_trade_volume: f64 = row.try_get::<Option<f64>, _>(7).ok()?.unwrap_or(0.0);
+        let yes_trade_vwap: Option<f64> = row.try_get(8).ok()?;
+
+        let no_last_trade: Option<f64> = row.try_get(9).ok()?;
+        let no_trade_count: f64 = row.try_get::<Option<f64>, _>(10).ok()?.unwrap_or(0.0);
+        let no_trade_volume: f64 = row.try_get::<Option<f64>, _>(11).ok()?.unwrap_or(0.0);
+        let no_trade_vwap: Option<f64> = row.try_get(12).ok()?;
+
+        let yes_vol_short_bps: f64 = row.try_get::<Option<f64>, _>(13).ok()?.unwrap_or(0.0);
+        let yes_vol_long_bps: f64 = row.try_get::<Option<f64>, _>(14).ok()?.unwrap_or(0.0);
+        let no_vol_short_bps: f64 = row.try_get::<Option<f64>, _>(15).ok()?.unwrap_or(0.0);
+        let no_vol_long_bps: f64 = row.try_get::<Option<f64>, _>(16).ok()?.unwrap_or(0.0);
+
+        let spot_now: Option<f64> = row.try_get(17).ok()?;
+        let spot_start: Option<f64> = row.try_get(18).ok()?;
+        let spot_now_f = spot_now.unwrap_or(0.0);
+        let spot_start_f = spot_start.unwrap_or(0.0);
+        let spot_vs_start_ret_bps = match (spot_now, spot_start) {
+            (Some(now), Some(start)) if start > 0.0 && now.is_finite() && start.is_finite() => {
+                ((now - start) / start) * 10_000.0
+            }
+            _ => 0.0,
+        };
+        let secs_to_anchor_f = event
+            .end_time
+            .signed_duration_since(ts)
+            .num_seconds()
+            .max(0) as f64;
+
+        let yes_mid = Self::tcn_mid_price(yes_best_bid, yes_best_ask)?;
+        let no_mid = Self::tcn_mid_price(no_best_bid, no_best_ask)?;
+        let yes_spread_bps = Self::tcn_spread_bps(yes_best_bid, yes_best_ask, yes_mid);
+        let no_spread_bps = Self::tcn_spread_bps(no_best_bid, no_best_ask, no_mid);
+        let yes_no_mid_gap = (yes_mid + no_mid) - 1.0;
+
+        let yes_last = yes_last_trade.unwrap_or(yes_mid);
+        let no_last = no_last_trade.unwrap_or(no_mid);
+        let yes_vwap = yes_trade_vwap.unwrap_or(yes_mid);
+        let no_vwap = no_trade_vwap.unwrap_or(no_mid);
+
+        let feats = [
+            yes_best_bid.unwrap_or(yes_mid),
+            yes_best_ask.unwrap_or(yes_mid),
+            yes_mid,
+            no_best_bid.unwrap_or(no_mid),
+            no_best_ask.unwrap_or(no_mid),
+            no_mid,
+            yes_spread_bps,
+            no_spread_bps,
+            yes_no_mid_gap,
+            yes_last,
+            no_last,
+            yes_trade_count,
+            no_trade_count,
+            yes_trade_volume,
+            no_trade_volume,
+            yes_vwap,
+            no_vwap,
+            yes_vol_short_bps,
+            yes_vol_long_bps,
+            no_vol_short_bps,
+            no_vol_long_bps,
+            spot_now_f,
+            spot_start_f,
+            spot_vs_start_ret_bps,
+            secs_to_anchor_f,
+        ];
+
+        if feats.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+
+        let mut row_f32 = [0.0f32; TCN_FEATURE_DIM];
+        for (i, v) in feats.iter().enumerate() {
+            row_f32[i] = *v as f32;
+        }
+        tcn.ingest_point(&event.condition_id, bucket_start, row_f32);
+
+        let seq = tcn.sequence_flat(&event.condition_id)?;
+        self.predict_tcn_sequence(&seq)
+    }
+
+    #[cfg(feature = "tcn_db")]
+    fn predict_tcn_sequence(&self, seq: &[f32]) -> Option<f64> {
+        #[cfg(feature = "onnx")]
+        {
+            let Some(m) = &self.onnx_model else {
+                return None;
+            };
+            match m.predict_scalar(seq) {
+                Ok(raw) if raw.is_finite() => {
+                    let p = if raw < -0.001 || raw > 1.001 {
+                        Self::sigmoid(raw as f64)
+                    } else {
+                        raw as f64
+                    };
+                    Some(p.clamp(0.001, 0.999))
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    warn!(
+                        agent = self.config.agent_id,
+                        error = %e,
+                        "lob-ml onnx_tcn inference failed"
+                    );
+                    None
+                }
+            }
+        }
+
+        #[cfg(not(feature = "onnx"))]
+        {
+            let _ = seq;
+            None
+        }
+    }
 }
 
 #[async_trait]
@@ -1179,16 +1508,6 @@ impl TradingAgent for CryptoLobMlAgent {
                         _ => continue,
                     };
 
-                    // Pull LOB snapshot (feature vector).
-                    let lob = match self.lob_cache.get_snapshot(&update.symbol).await {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
-                    if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
-                        continue;
-                    }
-
                     // Momentum + volatility from trade-tick cache.
                     let spot_cache = self.binance_ws.price_cache();
                     let Some(spot) = spot_cache.get(&update.symbol).await else {
@@ -1197,6 +1516,14 @@ impl TradingAgent for CryptoLobMlAgent {
                     let momentum_1s = spot.momentum(1).unwrap_or(Decimal::ZERO);
                     let momentum_5s = spot.momentum(5).unwrap_or(Decimal::ZERO);
                     let rolling_volatility_opt = spot.volatility(60);
+
+                    let Some(lob) = self.lob_cache.get_snapshot(&update.symbol).await else {
+                        continue;
+                    };
+                    let age_secs = Utc::now().signed_duration_since(lob.timestamp).num_seconds();
+                    if age_secs > self.config.max_lob_snapshot_age_secs as i64 {
+                        continue;
+                    }
 
                     let (obi_1, obi_2, obi_3, obi_20) = (
                         self.lob_cache
@@ -1315,6 +1642,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                     .signed_duration_since(pos.entry_time)
                                     .num_seconds();
                                 if held_secs >= self.config.min_hold_secs as i64 {
+
                                     let held_bid = match pos.side {
                                         Side::Up => up_bid,
                                         Side::Down => down_bid,
@@ -1626,6 +1954,20 @@ impl TradingAgent for CryptoLobMlAgent {
                             continue;
                         }
 
+                        let max_order_value = self.config.risk_params.max_order_value;
+                        let shares = if max_order_value > Decimal::ZERO {
+                            // Size by USD notional: shares ~= max_order_value / signal.limit_price.
+                            // Truncation ensures we don't exceed the configured budget.
+                            let raw = (max_order_value / signal.limit_price).trunc();
+                            let shares = raw.to_u64().unwrap_or(0);
+                            if shares < 1 {
+                                continue;
+                            }
+                            shares
+                        } else {
+                            self.config.default_shares.max(1)
+                        };
+
                         let intent = OrderIntent::new(
                             &self.config.agent_id,
                             Domain::Crypto,
@@ -1633,7 +1975,7 @@ impl TradingAgent for CryptoLobMlAgent {
                             &signal.token_id,
                             signal.side,
                             true,
-                            self.config.default_shares.max(1),
+                            shares,
                             signal.limit_price,
                         );
                         let deployment_id = deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
@@ -2122,7 +2464,7 @@ mod tests {
         assert_eq!(cfg.coins, vec!["BTC", "ETH", "SOL", "XRP"]);
         assert_eq!(cfg.max_time_remaining_secs, 900);
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
-        assert_eq!(cfg.max_entry_price, dec!(0.30));
+        assert_eq!(cfg.max_entry_price, dec!(0.70));
         assert_eq!(cfg.window_fallback_weight, Decimal::ZERO);
         assert_eq!(
             cfg.entry_side_policy,

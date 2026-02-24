@@ -274,7 +274,6 @@ impl DomainAgent for NbaComebackAgent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::NbaComebackConfig;
     use rust_decimal_macros::dec;
 

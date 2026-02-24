@@ -208,7 +208,9 @@ struct ContinuousAction {
     position_delta: f32,
     side_preference: f32,
     urgency: f32,
+    #[allow(dead_code)]
     tp_adjustment: f32,
+    #[allow(dead_code)]
     sl_adjustment: f32,
 }
 
@@ -272,6 +274,7 @@ struct PositionLeg {
     side: Side,
     shares: u64,
     entry_price: Decimal,
+    #[allow(dead_code)]
     entry_time: DateTime<Utc>,
 }
 

@@ -64,6 +64,12 @@ pub struct GlobalState {
     pub daily_pnl: Decimal,
     /// Daily loss limit (risk-gate configured)
     pub daily_loss_limit: Decimal,
+    /// Current equity drawdown (USD)
+    pub current_drawdown: Decimal,
+    /// Max drawdown observed since runtime start (USD)
+    pub max_drawdown_observed: Decimal,
+    /// Optional hard drawdown stop threshold (USD)
+    pub max_drawdown_limit: Option<Decimal>,
     /// Circuit breaker event history
     pub circuit_breaker_events: Vec<CircuitBreakerEvent>,
     /// Order queue statistics
@@ -86,6 +92,9 @@ impl GlobalState {
             risk_state: PlatformRiskState::Normal,
             daily_pnl: Decimal::ZERO,
             daily_loss_limit: Decimal::ZERO,
+            current_drawdown: Decimal::ZERO,
+            max_drawdown_observed: Decimal::ZERO,
+            max_drawdown_limit: None,
             circuit_breaker_events: Vec::new(),
             queue_stats: QueueStatsSnapshot::default(),
             total_realized_pnl: Decimal::ZERO,

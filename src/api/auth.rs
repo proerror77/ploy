@@ -25,6 +25,27 @@ pub fn expected_admin_token() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+pub fn expected_sidecar_token() -> Option<String> {
+    std::env::var("PLOY_SIDECAR_AUTH_TOKEN")
+        .or_else(|_| std::env::var("PLOY_API_SIDECAR_AUTH_TOKEN"))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub fn sidecar_auth_required() -> bool {
+    [
+        "PLOY_SIDECAR_AUTH_REQUIRED",
+        "PLOY_GATEWAY_ONLY",
+        "PLOY_ENFORCE_GATEWAY_ONLY",
+        "PLOY_ENFORCE_COORDINATOR_GATEWAY_ONLY",
+    ]
+    .iter()
+    .find_map(|key| std::env::var(key).ok())
+    .map(|raw| parse_boolish(&raw))
+    .unwrap_or(false)
+}
+
 fn auth_cookie_secure() -> bool {
     match std::env::var("PLOY_API_AUTH_COOKIE_SECURE") {
         Ok(raw) => parse_boolish(&raw),
@@ -133,4 +154,47 @@ pub fn ensure_admin_authorized(
         StatusCode::UNAUTHORIZED,
         "admin auth failed (missing/invalid token)".to_string(),
     ))
+}
+
+pub fn ensure_sidecar_authorized(
+    headers: &HeaderMap,
+) -> std::result::Result<(), (StatusCode, String)> {
+    let expected = expected_sidecar_token();
+    if expected.is_none() && !sidecar_auth_required() {
+        return Ok(());
+    }
+    let Some(expected) = expected else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sidecar auth is required but token is not configured".to_string(),
+        ));
+    };
+
+    let token = headers
+        .get("x-ploy-sidecar-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .or_else(|| {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(extract_bearer_token)
+        });
+
+    match token {
+        Some(provided) if provided == expected => Ok(()),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            "sidecar auth failed (missing/invalid token)".to_string(),
+        )),
+    }
+}
+
+pub fn ensure_sidecar_or_admin_authorized(
+    headers: &HeaderMap,
+) -> std::result::Result<(), (StatusCode, String)> {
+    if ensure_sidecar_authorized(headers).is_ok() {
+        return Ok(());
+    }
+    ensure_admin_authorized(headers)
 }

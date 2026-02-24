@@ -805,7 +805,6 @@ mod tests {
 
     #[test]
     fn test_record_position_entry() {
-        let cfg = scaling_cfg();
         let mut state = NbaComebackState::default();
         // Can't construct full NbaComebackCore without DB, so test state directly
         let game_id = "game1";
@@ -919,7 +918,7 @@ mod tests {
         // shares = floor(6.50 / 0.12) = 54
 
         let mut state = NbaComebackState::default();
-        let pos = state
+        state
             .game_positions
             .entry("game1".to_string())
             .or_insert_with(|| GamePosition {

@@ -34,6 +34,24 @@ impl Timeframe {
     }
 }
 
+/// Execution-mode scope for a deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentExecutionMode {
+    /// Deployment can run in both dry-run and live mode.
+    Any,
+    /// Deployment is only eligible when runtime is dry-run.
+    DryRunOnly,
+    /// Deployment is only eligible when runtime is live.
+    LiveOnly,
+}
+
+impl Default for DeploymentExecutionMode {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
 /// Market selection policy for a deployment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -124,6 +142,13 @@ pub struct StrategyDeployment {
     pub risk_profile: String,
     pub priority: i32,
     pub cooldown_secs: u64,
+    /// Optional account scope allow-list.
+    /// Empty list means "all accounts".
+    #[serde(default)]
+    pub account_ids: Vec<String>,
+    /// Optional runtime execution-mode scope.
+    #[serde(default)]
+    pub execution_mode: DeploymentExecutionMode,
     #[serde(default = "default_lifecycle_stage")]
     pub lifecycle_stage: StrategyLifecycleStage,
     #[serde(default = "default_strategy_product_type")]
@@ -132,6 +157,43 @@ pub struct StrategyDeployment {
     pub last_evaluated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_evaluation_score: Option<f64>,
+}
+
+impl StrategyDeployment {
+    pub fn normalize_account_ids_in_place(&mut self) {
+        let mut normalized: Vec<String> = self
+            .account_ids
+            .iter()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        normalized.sort_by_key(|v| v.to_ascii_lowercase());
+        normalized.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        self.account_ids = normalized;
+    }
+
+    pub fn matches_account(&self, account_id: &str) -> bool {
+        let runtime_account = account_id.trim();
+        if runtime_account.is_empty() || self.account_ids.is_empty() {
+            return true;
+        }
+        self.account_ids
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case(runtime_account))
+    }
+
+    pub fn matches_execution_mode(&self, dry_run: bool) -> bool {
+        match self.execution_mode {
+            DeploymentExecutionMode::Any => true,
+            DeploymentExecutionMode::DryRunOnly => dry_run,
+            DeploymentExecutionMode::LiveOnly => !dry_run,
+        }
+    }
+
+    pub fn is_enabled_for_runtime(&self, account_id: &str, dry_run: bool) -> bool {
+        self.enabled && self.matches_account(account_id) && self.matches_execution_mode(dry_run)
+    }
 }
 
 /// Evidence stage for strategy evaluation artifacts.
@@ -372,6 +434,45 @@ mod tests {
             mapped.metadata.get("intent_reason").map(String::as_str),
             Some("signal_edge")
         );
+    }
+
+    #[test]
+    fn deployment_runtime_scope_matching() {
+        let mut deployment = StrategyDeployment {
+            id: "dep.crypto.5m".to_string(),
+            strategy: "momentum".to_string(),
+            strategy_version: "v1".to_string(),
+            domain: Domain::Crypto,
+            market_selector: MarketSelector::Dynamic {
+                domain: Domain::Crypto,
+                query: Some("BTC 5m".to_string()),
+                min_liquidity_usd: None,
+                max_spread_bps: None,
+                min_time_remaining_secs: None,
+                max_time_remaining_secs: None,
+            },
+            timeframe: Timeframe::M5,
+            enabled: true,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 10,
+            cooldown_secs: 30,
+            account_ids: vec![" acct-a ".to_string(), "ACCT-A".to_string()],
+            execution_mode: DeploymentExecutionMode::LiveOnly,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        };
+
+        deployment.normalize_account_ids_in_place();
+        assert_eq!(deployment.account_ids.len(), 1);
+        assert!(deployment.matches_account("acct-a"));
+        assert!(!deployment.matches_account("acct-b"));
+        assert!(deployment.matches_execution_mode(false));
+        assert!(!deployment.matches_execution_mode(true));
+        assert!(deployment.is_enabled_for_runtime("acct-a", false));
+        assert!(!deployment.is_enabled_for_runtime("acct-a", true));
     }
 
     #[test]

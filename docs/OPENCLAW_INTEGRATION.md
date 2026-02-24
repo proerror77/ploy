@@ -84,8 +84,8 @@ JSON
 - 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
 - `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。
 - 若你有設定 sidecar token，可用 `PLOY_RPC_SIDECAR_AUTH_TOKEN` 讓 RPC 自動帶 `x-ploy-sidecar-token` 呼叫 ingress。
-- live 直連 `submit_order` 已永久禁用（防旁路風控）；所有 live 下單都必須走 Coordinator/Gateway intent ingress。
-- `ploy strategy start ...` 的 legacy live runtime 已永久封鎖（避免繞過 Coordinator）；live 請改走 `ploy platform start`。
+- live 直連 `submit_order` 預設禁用（防旁路風控）；如需暫時回退可設 `PLOY_ALLOW_DIRECT_LIVE=true`（不建議 production）。
+- `ploy strategy start ...` 的 direct live runtime 預設也會被擋下（避免繞過 Coordinator）。如需緊急回退才設 `PLOY_ALLOW_DIRECT_STRATEGY_LIVE=true`。
 - 若設定 `PLOY_SIDECAR_AUTH_TOKEN`，所有 sidecar `POST` 端點都需帶 `x-ploy-sidecar-token`（或 `Authorization: Bearer ...`）。
 - `PLOY_GATEWAY_ONLY=true` 時，sidecar auth 也會強制要求有 token 設定（沒設 token 會拒絕寫入請求）。
 - 若你要強制「只有 coordinator/gateway 能送單」，在交易機器加上 `PLOY_GATEWAY_ONLY=true`。

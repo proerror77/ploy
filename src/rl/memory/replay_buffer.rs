@@ -7,7 +7,24 @@ use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-use crate::rl::core::{ContinuousAction, DiscreteAction, RewardSignal};
+use crate::rl::core::{DiscreteAction, RewardSignal};
+
+pub type BatchTensors = (
+    Vec<Vec<f32>>,
+    Vec<Vec<f32>>,
+    Vec<f32>,
+    Vec<Vec<f32>>,
+    Vec<bool>,
+);
+
+pub type PpoTensors = (
+    Vec<Vec<f32>>,
+    Vec<Vec<f32>>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    Vec<bool>,
+);
 
 /// A single transition in the environment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,16 +168,7 @@ impl ReplayBuffer {
     /// Extract batch tensors for training
     ///
     /// Returns (states, actions, rewards, next_states, dones)
-    pub fn to_batch_tensors(
-        &self,
-        batch: &[Transition],
-    ) -> (
-        Vec<Vec<f32>>,
-        Vec<Vec<f32>>,
-        Vec<f32>,
-        Vec<Vec<f32>>,
-        Vec<bool>,
-    ) {
+    pub fn to_batch_tensors(&self, batch: &[Transition]) -> BatchTensors {
         let states: Vec<Vec<f32>> = batch.iter().map(|t| t.state.clone()).collect();
         let actions: Vec<Vec<f32>> = batch.iter().map(|t| t.action.clone()).collect();
         let rewards: Vec<f32> = batch.iter().map(|t| t.reward).collect();
@@ -173,17 +181,7 @@ impl ReplayBuffer {
     /// Extract PPO-specific tensors
     ///
     /// Returns (states, actions, log_probs, values, rewards, dones)
-    pub fn to_ppo_tensors(
-        &self,
-        transitions: &[Transition],
-    ) -> (
-        Vec<Vec<f32>>,
-        Vec<Vec<f32>>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<bool>,
-    ) {
+    pub fn to_ppo_tensors(&self, transitions: &[Transition]) -> PpoTensors {
         let states: Vec<Vec<f32>> = transitions.iter().map(|t| t.state.clone()).collect();
         let actions: Vec<Vec<f32>> = transitions.iter().map(|t| t.action.clone()).collect();
         let log_probs: Vec<f32> = transitions

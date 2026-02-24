@@ -1,10 +1,10 @@
 # Ploy
 
-A high-performance Polymarket trading bot covering crypto, sports, and political prediction markets. Ships with a terminal dashboard, multi-agent coordinator, AI-assisted analysis, and optional reinforcement learning.
+A high-performance Polymarket trading bot focused on crypto and sports prediction markets. Ships with a terminal dashboard, multi-agent coordinator, AI-assisted analysis, and optional reinforcement learning.
 
 ## Features
 
-- **Three trading domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds), Politics (elections, approval ratings)
+- **Two runtime domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds)
 - **Multiple strategies** -- Momentum, Split-Arb, Event-Edge mispricing scanner, NBA Q3-Q4 comeback, market making
 - **Multi-agent platform** -- Coordinator with central order queue, per-domain agents, risk gate, and position aggregation
 - **Event registry** -- Automated DISCOVER -> RESEARCH -> MONITOR -> TRADE pipeline for new markets
@@ -84,6 +84,14 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
 | `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
+| `PLOY_RISK__MAX_DRAWDOWN_USD` | No | Hard drawdown stop (runtime cumulative realized curve) |
+| `PLOY_ACCOUNT_ID` | No | Runtime account scope identifier (default `default`) |
+| `PLOY_DRY_RUN__ENABLED` | No | Force runtime dry-run mode (`true`/`false`) |
+| `PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE` | No | Require strategy evidence before enabling deployments (`true`/`false`) |
+| `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
+| `PLOY_DEPLOYMENTS_MAX_EVIDENCE_AGE_HOURS` | No | Max evidence staleness window in hours (default `168`) |
+| `PLOY_ALLOW_DIRECT_LIVE` | No | Allow direct (non-Coordinator) live order paths. Not recommended. |
+| `PLOY_ALLOW_DIRECT_STRATEGY_LIVE` | No | Allow direct `ploy strategy start` live runtime. Prefer `ploy platform start`. |
 
 ### Config File
 
@@ -111,12 +119,17 @@ See the inline comments in `config/default.toml` for a full explanation of every
 Ploy is migrating to a **Coordinator-only** live execution plane. For live orders, use the multi-agent platform entry point:
 
 ```bash
-ploy platform start --crypto --sports --politics   # Coordinator + Agents (live)
+ploy platform start --crypto --sports              # Coordinator + Agents (live)
 ploy platform start --crypto --dry-run             # Safe dry-run
 ```
 
 Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
-Legacy live overrides are now removed to enforce a single audited execution path.
+
+If you need an explicit override (not recommended), set:
+
+```bash
+export PLOY_ALLOW_DIRECT_LIVE=true
+```
 
 ### Global Flags
 
@@ -129,7 +142,7 @@ Legacy live overrides are now removed to enforce a single audited execution path
 ### Core Commands
 
 ```bash
-ploy run                                       # Legacy bot loop (dry-run only; live is blocked)
+ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_DIRECT_LIVE=true)
 ploy test                                      # Test Polymarket API connectivity
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
@@ -147,13 +160,13 @@ ploy ev --price 95 --probability 97            # Calculate expected value for ne
 
 ```bash
 ploy trade --series 10423 --shares 50 --dry-run          # Two-leg arbitrage on a price series
-ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # CEX momentum strategy
+ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # Binance BTCUSDT is the underlying signal feed; execution is PM YES/NO tokens
 ploy momentum --predictive --min-time 300 --dry-run      # Predictive mode: early entry with TP/SL
 ploy split-arb --max-entry 35 --shares 100 --dry-run     # Split arbitrage (time-separated hedge)
 ploy market-make --token <token_id>            # Market making opportunity analysis
 ploy scan --series 10423 --watch               # Continuous arbitrage scan
 ploy analyze --event <event_id>                # Analyze multi-outcome market
-ploy paper --symbols BTCUSDT,ETHUSDT           # Paper trading mode (signals only)
+ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underlyings (signals only, no PM orders)
 ```
 
 Live momentum mode now supports automatic post-settlement claims (redeem winning positions) when keys are configured:
@@ -221,23 +234,13 @@ ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
 ### Domain: Sports
 
 ```bash
-ploy sports split-arb --leagues NBA,NFL --dry-run          # Split-arb on sports markets
+ploy sports split-arb --leagues NBA --dry-run              # Split-arb on sports markets
 ploy sports monitor --leagues NBA                # Monitor sports markets
 ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
 ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup
 ploy sports polymarket --league nba --live       # Browse Polymarket sports markets
 ploy sports chain --team1 LAL --team2 BOS        # Full decision chain (Grok -> Claude -> DK -> PM)
 ploy sports live-scan --sport nba --min-edge 3   # Continuous live edge scanner
-```
-
-### Domain: Politics
-
-```bash
-ploy politics markets --category presidential   # Browse political markets
-ploy politics search "election"                 # Search political markets
-ploy politics analyze --candidate "Trump"       # Analyze a candidate's markets
-ploy politics trump --market-type favorability  # Trump-specific markets
-ploy politics elections --year 2026             # Election markets by year
 ```
 
 ### Strategy Management
@@ -257,10 +260,31 @@ ploy strategy accuracy --lookback-hours 12      # Report prediction accuracy
 ### Multi-Agent Platform
 
 ```bash
-ploy platform start --crypto --sports --politics   # Start all domain agents
+ploy platform start --crypto --sports              # Start all domain agents
 ploy platform start --crypto --dry-run             # Crypto agent only, dry-run
 ploy platform start --sports --pause sports        # Start paused
 ```
+
+Deployment matrix entries support runtime scope controls:
+
+```json
+{
+  "id": "crypto-momentum-5m",
+  "strategy": "momentum",
+  "domain": "Crypto",
+  "enabled": true,
+  "account_ids": ["acct-main", "acct-paper"],
+  "execution_mode": "any"
+}
+```
+
+- `account_ids`: optional allow-list. Empty means all accounts.
+- `execution_mode`: `any` | `dry_run_only` | `live_only`.
+
+Strategy evidence is stored in `strategy_evaluations` and supports `BACKTEST` / `PAPER` / `LIVE` stages with auditable payloads (`evidence_ref`, `evidence_hash`, `evidence_payload`).  
+Sidecar/API can write and query evidence via:
+- `POST /api/sidecar/strategy-evaluations`
+- `GET /api/sidecar/strategy-evaluations`
 
 ### RL Commands (requires `--features rl`)
 
@@ -286,14 +310,14 @@ ploy orderbook-history --asset-ids <ids>             # Backfill L2 orderbook his
 
 ## Architecture
 
-Ploy is organized around a multi-domain platform where each prediction market category (crypto, sports, politics) has a dedicated trading agent. The agents submit orders through a central coordinator that applies risk checks, queues orders, and dispatches them to the Polymarket CLOB via authenticated API calls.
+Ploy is organized around a multi-domain platform where each prediction market category (currently crypto and sports/NBA) has a dedicated trading agent. The agents submit orders through a central coordinator that applies risk checks, queues orders, and dispatches them to the Polymarket CLOB via authenticated API calls.
 
 Strategies run independently and can be managed as daemons (start/stop/status). The event registry continuously discovers new markets, scores them for edge, and promotes them through a funnel from discovery to active trading. Persistence is handled by PostgreSQL with an event store for auditability, a checkpoint system for crash recovery, and a dead-letter queue for failed operations.
 
 ```
 src/
   adapters/      Polymarket CLOB, WebSocket, Binance WS
-  agents/        Domain trading agents (crypto, sports, politics)
+  agents/        Domain trading agents (crypto, sports)
   agent/         Claude AI agent integration
   coordinator/   Multi-agent coordinator + order queue
   domain/        Core types (Market, Order, Quote)

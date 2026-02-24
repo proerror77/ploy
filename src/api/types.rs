@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ============================================================================
 // Stats Types
@@ -106,6 +107,40 @@ pub struct SystemStatus {
 pub struct SystemControlResponse {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformCapabilities {
+    pub account_id: String,
+    pub runtime_mode: String,
+    pub execution_plane: String,
+    pub dry_run: bool,
+    pub coordinator_running: bool,
+    pub supported_domains: Vec<String>,
+    pub active_domains: Vec<String>,
+    pub total_deployments: usize,
+    pub enabled_deployments: usize,
+    pub scoped_total_deployments: usize,
+    pub scoped_enabled_deployments: usize,
+    pub deployments_by_domain: HashMap<String, usize>,
+    pub system_controls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountRuntimeSummary {
+    pub account_id: String,
+    pub wallet_address: Option<String>,
+    pub label: Option<String>,
+    pub runtime_active: bool,
+    pub deployment_total: usize,
+    pub deployment_enabled: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountsOverview {
+    pub runtime_account_id: String,
+    pub dry_run: bool,
+    pub accounts: Vec<AccountRuntimeSummary>,
 }
 
 // ============================================================================
@@ -220,7 +255,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn strategy_config_rejects_legacy_take_profit_stop_loss_fields() {
+    fn strategy_config_rejects_deprecated_take_profit_stop_loss_fields() {
         let payload = json!({
             "symbols": ["BTCUSDT"],
             "min_move": 0.1,

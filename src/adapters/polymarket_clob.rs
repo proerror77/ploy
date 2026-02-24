@@ -58,7 +58,7 @@ pub struct PolymarketClient {
     gamma_client: GammaClient,
     /// Private key signer for authenticated operations
     signer: Option<PrivateKeySigner>,
-    /// Legacy wallet for backward compatibility
+    /// Optional wallet handle for authenticated signing flows
     wallet: Option<Arc<Wallet>>,
     /// Funder address (proxy wallet that holds funds)
     funder: Option<alloy::primitives::Address>,
@@ -708,6 +708,7 @@ impl PolymarketClient {
         Ok(out)
     }
 
+    #[allow(dead_code)]
     async fn clear_cached_auth(&self) {
         let mut guard = self.auth_client.lock().await;
         *guard = None;
@@ -934,7 +935,7 @@ impl PolymarketClient {
         self.dry_run
     }
 
-    /// Check if HMAC authentication is configured (for backward compatibility)
+    /// Check whether HMAC authentication is configured
     pub fn has_hmac_auth(&self) -> bool {
         self.signer.is_some()
     }

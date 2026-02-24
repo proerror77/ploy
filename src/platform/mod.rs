@@ -14,15 +14,16 @@ mod traits;
 mod types;
 
 pub use contracts::{
-    MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision, RiskDecisionStatus,
-    StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
+    DeploymentExecutionMode, MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision,
+    RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
     StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
 };
 pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
 pub use risk::{
-    BlockReason, CircuitBreakerEvent, PlatformRiskState, RiskCheckResult, RiskConfig, RiskGate,
+    BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
+    RiskConfig, RiskGate,
 };
 pub use router::{AgentSubscription, EventRouter, RouterStats};
 pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent, SimpleAgent};

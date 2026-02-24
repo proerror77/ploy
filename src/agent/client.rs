@@ -334,9 +334,16 @@ fn parse_flexible_response(json_str: &str) -> Result<AgentResponse> {
     let flexible: FlexibleAgentResponse = serde_json::from_str(json_str)
         .map_err(|e| PloyError::Internal(format!("Failed to parse agent response: {}", e)))?;
 
+    let FlexibleAgentResponse {
+        reasoning,
+        confidence,
+        recommended_actions,
+        risk_assessment,
+        summary,
+    } = flexible;
+
     // Convert recommended_actions to AgentAction
-    let actions: Vec<AgentAction> = flexible
-        .recommended_actions
+    let actions: Vec<AgentAction> = recommended_actions
         .iter()
         .filter_map(|v| convert_to_agent_action(v))
         .collect();
@@ -345,18 +352,21 @@ fn parse_flexible_response(json_str: &str) -> Result<AgentResponse> {
     let actions = if actions.is_empty() {
         vec![AgentAction::Alert {
             severity: "info".to_string(),
-            message: flexible.summary.clone(),
+            message: summary.clone(),
         }]
     } else {
         actions
     };
 
+    let risk_assessment = risk_assessment
+        .and_then(|v| serde_json::from_value::<crate::agent::protocol::RiskAssessment>(v).ok());
+
     Ok(AgentResponse {
-        reasoning: flexible.reasoning,
-        confidence: flexible.confidence,
+        reasoning,
+        confidence,
         recommended_actions: actions,
-        risk_assessment: None, // Could parse this more thoroughly if needed
-        summary: flexible.summary,
+        risk_assessment,
+        summary,
         raw_response: Some(json_str.to_string()),
     })
 }

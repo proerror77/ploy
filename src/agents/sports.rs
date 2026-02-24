@@ -2862,6 +2862,7 @@ impl TradingAgent for SportsTradingAgent {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use uuid::Uuid;
 
     #[test]
     fn test_config_defaults() {
@@ -2880,5 +2881,69 @@ mod tests {
 
         let hold = SportsTradingAgent::classify_early_exit(dec!(0.30), dec!(0.31), 15.0, 20.0);
         assert_eq!(hold, None);
+    }
+
+    #[test]
+    fn test_grok_decision_intent_uses_nba_deployment_binding() {
+        let req = UnifiedDecisionRequest {
+            request_id: Uuid::nil(),
+            trigger: DecisionTrigger::EspnComeback,
+            game: LiveGame {
+                espn_game_id: "401584701".to_string(),
+                home_team: "Boston Celtics".to_string(),
+                away_team: "Los Angeles Lakers".to_string(),
+                home_abbrev: "BOS".to_string(),
+                away_abbrev: "LAL".to_string(),
+                home_score: 90,
+                away_score: 80,
+                quarter: 3,
+                clock: "05:00".to_string(),
+                time_remaining_mins: 17.0,
+                status: GameStatus::InProgress,
+                home_quarter_scores: Vec::new(),
+                away_quarter_scores: Vec::new(),
+            },
+            trailing_team: "Los Angeles Lakers".to_string(),
+            trailing_abbrev: "LAL".to_string(),
+            deficit: 10,
+            comeback: Some(ComebackSnapshot {
+                comeback_rate: 0.2,
+                adjusted_win_prob: 0.35,
+                statistical_edge: 0.1,
+            }),
+            grok_intel: None,
+            market: MarketSnapshot {
+                market_slug: "nba-lal-vs-bos".to_string(),
+                token_id: "lal-win-yes".to_string(),
+                market_price: dec!(0.30),
+                yes_best_bid: Some(dec!(0.29)),
+                yes_best_ask: Some(dec!(0.31)),
+            },
+            risk_metrics: RiskMetrics::calculate(0.35, 0.30),
+        };
+
+        let decision = GrokDecision::Trade {
+            request_id: Uuid::nil(),
+            fair_value: 0.36,
+            own_fair_value: 0.34,
+            edge: 0.06,
+            confidence: 0.7,
+            reasoning: "edge positive".to_string(),
+            risk_factors: vec![],
+        };
+
+        let intent =
+            SportsTradingAgent::decision_to_intent("sports", &req, &decision, 25, "cfg-hash");
+
+        assert_eq!(intent.domain, Domain::Sports);
+        assert!(intent.is_buy);
+        assert_eq!(
+            intent.metadata.get("strategy").map(String::as_str),
+            Some("grok_unified_decision")
+        );
+        assert_eq!(
+            intent.metadata.get("deployment_id").map(String::as_str),
+            Some(DEPLOYMENT_ID_NBA_GROK_UNIFIED)
+        );
     }
 }
