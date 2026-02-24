@@ -55,11 +55,19 @@ fn normal_cdf(x: f64) -> f64 {
 }
 
 fn default_exit_edge_floor() -> Decimal {
-    dec!(0.02)
+    dec!(0.15)
 }
 
 fn default_exit_price_band() -> Decimal {
-    dec!(0.05)
+    dec!(0.25)
+}
+
+fn default_trailing_pullback_pct() -> Decimal {
+    dec!(0.15)
+}
+
+fn default_trailing_time_decay() -> Decimal {
+    dec!(0.50)
 }
 
 fn default_max_time_remaining_secs_5m() -> u64 {
@@ -79,8 +87,8 @@ pub enum CryptoLobMlExitMode {
     EvExit,
     /// Exit when model side flips (after min hold time).
     SignalFlip,
-    /// Exit on mark-to-market price thresholds.
-    PriceExit,
+    /// Trailing exit: track peak bid, exit on pullback. Tightens as settlement nears.
+    TrailingExit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,18 +138,30 @@ pub struct CryptoLobMlConfig {
     pub prefer_close_to_end: bool,
 
     pub default_shares: u64,
+    /// (Legacy, kept for config compat) Fixed take-profit PnL% threshold.
     #[serde(default = "default_exit_edge_floor")]
     pub exit_edge_floor: Decimal,
+    /// (Legacy, kept for config compat) Fixed stop-loss PnL% threshold.
     #[serde(default = "default_exit_price_band")]
     pub exit_price_band: Decimal,
+
+    /// Trailing exit: base pullback % from peak bid that triggers exit (e.g. 0.15 = 15%).
+    #[serde(default = "default_trailing_pullback_pct")]
+    pub trailing_pullback_pct: Decimal,
+    /// Trailing exit: time-decay factor. As remaining time → 0, pullback tolerance shrinks
+    /// by up to this fraction. 0.50 means at settlement the effective pullback threshold
+    /// is halved (e.g. 15% → 7.5%).
+    #[serde(default = "default_trailing_time_decay")]
+    pub trailing_time_decay: Decimal,
+
     /// Exit policy:
-    /// - settle_only: hold until settlement
+    /// - settle_only: hold until settlement (pure binary payoff)
     /// - ev_exit: exit when model EV turns negative
     /// - signal_flip: exit on side flip
-    /// - price_exit: exit on mark-to-market thresholds
+    /// - trailing_exit: track peak bid, exit on pullback (tightens near settlement)
     #[serde(default = "default_exit_mode")]
     pub exit_mode: CryptoLobMlExitMode,
-    /// Minimum hold time before edge/price-band exits are allowed (seconds)
+    /// Minimum hold time before exits are allowed (seconds)
     pub min_hold_secs: u64,
 
     /// Minimum expected-value edge required to enter.
@@ -224,7 +244,7 @@ fn default_lob_ml_model_type() -> String {
 }
 
 fn default_window_fallback_weight() -> Decimal {
-    Decimal::ZERO
+    dec!(0.10)
 }
 
 fn default_ev_exit_buffer() -> Decimal {
@@ -279,6 +299,8 @@ impl Default for CryptoLobMlConfig {
             default_shares: 50,
             exit_edge_floor: default_exit_edge_floor(),
             exit_price_band: default_exit_price_band(),
+            trailing_pullback_pct: default_trailing_pullback_pct(),
+            trailing_time_decay: default_trailing_time_decay(),
             exit_mode: default_exit_mode(),
             min_hold_secs: 20,
             min_edge: dec!(0.02),
@@ -316,6 +338,8 @@ struct TrackedPosition {
     shares: u64,
     entry_price: Decimal,
     entry_time: DateTime<Utc>,
+    /// Highest bid seen since entry (for trailing exit).
+    peak_bid: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -513,6 +537,7 @@ fn tracked_position_from_global(position: &crate::platform::Position) -> Tracked
         shares: position.shares,
         entry_price: position.entry_price,
         entry_time: position.entry_time,
+        peak_bid: position.entry_price,
     }
 }
 
@@ -522,6 +547,13 @@ async fn sync_positions_from_global(
     positions: &mut HashMap<String, TrackedPosition>,
 ) -> Decimal {
     let state = ctx.read_global_state().await;
+
+    // Snapshot existing peak_bid values so trailing exits survive sync.
+    let prev_peaks: HashMap<String, Decimal> = positions
+        .iter()
+        .map(|(slug, tp)| (slug.clone(), tp.peak_bid))
+        .collect();
+
     positions.clear();
     for position in state.positions {
         if position.agent_id != agent_id
@@ -530,10 +562,14 @@ async fn sync_positions_from_global(
         {
             continue;
         }
-        positions.insert(
-            position.market_slug.clone(),
-            tracked_position_from_global(&position),
-        );
+        let mut tp = tracked_position_from_global(&position);
+        // Restore the peak_bid we tracked locally (higher of old peak and entry).
+        if let Some(&prev_peak) = prev_peaks.get(&position.market_slug) {
+            if prev_peak > tp.peak_bid {
+                tp.peak_bid = prev_peak;
+            }
+        }
+        positions.insert(position.market_slug.clone(), tp);
     }
 
     positions
@@ -785,8 +821,8 @@ impl CryptoLobMlAgent {
         matches!(self.config.exit_mode, CryptoLobMlExitMode::EvExit)
     }
 
-    fn allows_price_exit(&self) -> bool {
-        matches!(self.config.exit_mode, CryptoLobMlExitMode::PriceExit)
+    fn allows_trailing_exit(&self) -> bool {
+        matches!(self.config.exit_mode, CryptoLobMlExitMode::TrailingExit)
     }
 
     fn exit_mode_label(&self) -> &'static str {
@@ -794,7 +830,7 @@ impl CryptoLobMlAgent {
             CryptoLobMlExitMode::SettleOnly => "settle_only",
             CryptoLobMlExitMode::EvExit => "ev_exit",
             CryptoLobMlExitMode::SignalFlip => "signal_flip",
-            CryptoLobMlExitMode::PriceExit => "price_exit",
+            CryptoLobMlExitMode::TrailingExit => "trailing_exit",
         }
     }
 
@@ -831,8 +867,17 @@ impl CryptoLobMlAgent {
             .max(Decimal::ZERO)
             .min(dec!(0.25));
         let prob = prob_win.max(dec!(0.001)).min(dec!(0.999));
-        let net_profit_on_win = (Decimal::ONE - effective_entry) * (Decimal::ONE - fee_rate);
-        let loss_on_lose = effective_entry;
+
+        // Binary option EV: fee is part of cost basis.
+        // Win  → receive $1.00, invested effective_cost is lost profit.
+        // Lose → receive $0.00, lose entire effective_cost.
+        // EV = prob × (1 - effective_cost) - (1-prob) × effective_cost
+        //    = prob - effective_cost
+        let effective_cost = (effective_entry * (Decimal::ONE + fee_rate))
+            .max(Decimal::ZERO)
+            .min(dec!(0.999));
+        let net_profit_on_win = Decimal::ONE - effective_cost;
+        let loss_on_lose = effective_cost;
 
         prob * net_profit_on_win - (Decimal::ONE - prob) * loss_on_lose
     }
@@ -2088,7 +2133,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     }
                 }
 
-                // --- Polymarket quote updates (exit decisions) ---
+                // --- Polymarket quote updates (trailing exit decisions) ---
                 result = pm_rx.recv() => {
                     let update = match result {
                         Ok(u) => u,
@@ -2106,7 +2151,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
-                    if !self.allows_price_exit() {
+                    if !self.allows_trailing_exit() {
                         continue;
                     }
 
@@ -2122,7 +2167,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     let Some(slug) = position_key else {
                         continue;
                     };
-                    let Some(pos) = positions.get(&slug).cloned() else {
+                    let Some(pos) = positions.get_mut(&slug) else {
                         continue;
                     };
 
@@ -2130,22 +2175,57 @@ impl TradingAgent for CryptoLobMlAgent {
                         continue;
                     }
 
+                    // Update peak bid (track high-water mark).
+                    if best_bid > pos.peak_bid {
+                        pos.peak_bid = best_bid;
+                    }
+
                     let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
                     if held_secs < self.config.min_hold_secs as i64 {
                         continue;
                     }
 
-                    let pnl_pct = (best_bid - pos.entry_price) / pos.entry_price;
-                    let maybe_reason = if pnl_pct >= self.config.exit_edge_floor {
-                        Some(("exit_edge_floor", OrderPriority::High))
-                    } else if pnl_pct <= -self.config.exit_price_band {
-                        Some(("exit_price_band", OrderPriority::Critical))
+                    // --- Time-aware trailing pullback ---
+                    // Base pullback threshold (e.g. 15%).
+                    let base_pullback = self.config.trailing_pullback_pct
+                        .max(dec!(0.01))
+                        .min(dec!(0.50));
+                    // Time decay: as remaining_secs → 0, shrink tolerance.
+                    // time_fraction = remaining / total (1.0 at start, 0.0 at settlement)
+                    let event_total_secs = event_window_secs_for_horizon(&pos.horizon);
+                    let remaining_secs = (event_total_secs as i64 - held_secs).max(0);
+                    let time_fraction = if event_total_secs > 0 {
+                        Decimal::from(remaining_secs) / Decimal::from(event_total_secs)
                     } else {
-                        None
+                        Decimal::ZERO
+                    };
+                    // effective_pullback = base × (1 - decay × (1 - time_fraction))
+                    // At start (tf=1.0): effective = base × 1.0 (full tolerance)
+                    // At settlement (tf=0): effective = base × (1 - decay) (tightened)
+                    let decay = self.config.trailing_time_decay
+                        .max(Decimal::ZERO)
+                        .min(dec!(0.90));
+                    let effective_pullback = base_pullback
+                        * (Decimal::ONE - decay * (Decimal::ONE - time_fraction));
+
+                    // Compute pullback from peak.
+                    let pullback_pct = if pos.peak_bid > Decimal::ZERO {
+                        (pos.peak_bid - best_bid) / pos.peak_bid
+                    } else {
+                        Decimal::ZERO
                     };
 
-                    let Some((exit_reason, priority)) = maybe_reason else {
+                    if pullback_pct < effective_pullback {
                         continue;
+                    }
+
+                    let pnl_pct = (best_bid - pos.entry_price) / pos.entry_price;
+                    let pos = pos.clone();
+                    let exit_reason = "trailing_pullback";
+                    let priority = if pnl_pct >= Decimal::ZERO {
+                        OrderPriority::High
+                    } else {
+                        OrderPriority::Critical
                     };
 
                     let intent = OrderIntent::new(
@@ -2465,7 +2545,7 @@ mod tests {
         assert_eq!(cfg.max_time_remaining_secs, 900);
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(cfg.max_entry_price, dec!(0.70));
-        assert_eq!(cfg.window_fallback_weight, Decimal::ZERO);
+        assert_eq!(cfg.window_fallback_weight, dec!(0.10));
         assert_eq!(
             cfg.entry_side_policy,
             CryptoLobMlEntrySidePolicy::LaggingOnly
@@ -2498,22 +2578,22 @@ mod tests {
         let settle = mk_agent(CryptoLobMlExitMode::SettleOnly);
         assert!(!settle.allows_signal_flip_exit());
         assert!(!settle.allows_ev_exit());
-        assert!(!settle.allows_price_exit());
+        assert!(!settle.allows_trailing_exit());
 
         let ev_exit = mk_agent(CryptoLobMlExitMode::EvExit);
         assert!(!ev_exit.allows_signal_flip_exit());
         assert!(ev_exit.allows_ev_exit());
-        assert!(!ev_exit.allows_price_exit());
+        assert!(!ev_exit.allows_trailing_exit());
 
         let flip = mk_agent(CryptoLobMlExitMode::SignalFlip);
         assert!(flip.allows_signal_flip_exit());
         assert!(!flip.allows_ev_exit());
-        assert!(!flip.allows_price_exit());
+        assert!(!flip.allows_trailing_exit());
 
-        let price = mk_agent(CryptoLobMlExitMode::PriceExit);
-        assert!(!price.allows_signal_flip_exit());
-        assert!(!price.allows_ev_exit());
-        assert!(price.allows_price_exit());
+        let trailing = mk_agent(CryptoLobMlExitMode::TrailingExit);
+        assert!(!trailing.allows_signal_flip_exit());
+        assert!(!trailing.allows_ev_exit());
+        assert!(trailing.allows_trailing_exit());
     }
 
     #[test]
@@ -2575,8 +2655,8 @@ mod tests {
         };
 
         let (w_model, w_window) = agent.model_window_blend_weights();
-        assert_eq!(w_model, Decimal::ONE);
-        assert_eq!(w_window, Decimal::ZERO);
+        assert_eq!(w_model, dec!(0.90));
+        assert_eq!(w_window, dec!(0.10));
     }
 
     #[test]
@@ -2742,6 +2822,7 @@ mod tests {
                 shares: 1,
                 entry_price: dec!(0.5),
                 entry_time: now,
+                peak_bid: dec!(0.5),
             },
         );
 
