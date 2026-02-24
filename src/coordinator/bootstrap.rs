@@ -4750,7 +4750,8 @@ pub async fn start_platform(
     // - settlement persistence (Gamma)
     // - politics agent
     // - sports settlement labeling (Gamma)
-    let needs_polymarket_client = config.enable_crypto || config.enable_sports || config.enable_politics;
+    let needs_polymarket_client =
+        config.enable_crypto || config.enable_sports || config.enable_politics;
     let pm_client = if needs_polymarket_client {
         let rest_url = app_config
             .market
