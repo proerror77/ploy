@@ -268,6 +268,7 @@ def train_with_torch(
             logits = model(xb)
             loss = loss_fn(logits, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
 
             total_loss += float(loss.detach().cpu().item()) * len(batch_idx)
@@ -295,6 +296,11 @@ def train_with_torch(
         "brier": brier(y_test, p_test),
         "log_loss": log_loss(y_test, p_test),
     }
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auc"] = roc_auc_score(y_test, p_test)
+    except Exception:
+        metrics["auc"] = float("nan")
 
     # Export weights/bias in DenseNetwork schema.
     exported_layers = []
@@ -381,7 +387,7 @@ def main() -> None:
 
     print("\nExported model:")
     print(f"  path: {out_path}")
-    print(f"  metrics: acc@0.5={metrics['acc_at_0.5']*100:.2f}%  brier={metrics['brier']:.6f}  ll={metrics['log_loss']:.6f}")
+    print(f"  metrics: acc@0.5={metrics['acc_at_0.5']*100:.2f}%  brier={metrics['brier']:.6f}  ll={metrics['log_loss']:.6f}  auc={metrics['auc']:.4f}")
     print("\nEnable on EC2 (example):")
     print("  PLOY_CRYPTO_LOB_ML__ENABLED=true")
     print("  PLOY_CRYPTO_LOB_ML__MODEL_TYPE=mlp")

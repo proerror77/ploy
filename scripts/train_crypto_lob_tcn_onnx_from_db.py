@@ -140,7 +140,7 @@ def chronological_split(ds: Dataset, test_ratio: float) -> Tuple[Dataset, Datase
     return take(idx[:cut]), take(idx[cut:])
 
 
-def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int) -> Dataset:
+def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int, stride: int = 1) -> Dataset:
     grouped: dict[str, List[SequenceRow]] = {}
     for row in rows:
         grouped.setdefault(row.market_slug, []).append(row)
@@ -171,7 +171,7 @@ def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int) -> Datase
         if len(one_sec) < sequence_len:
             continue
 
-        for i in range(sequence_len - 1, len(one_sec)):
+        for i in range(sequence_len - 1, len(one_sec), stride):
             window = one_sec[i - sequence_len + 1 : i + 1]
             flat: List[float] = []
             for snap in window:
@@ -298,6 +298,7 @@ def fetch_from_sync_records(
     symbol: Optional[str],
     horizon: Optional[str],
     limit: int,
+    stride: int = 1,
 ) -> Dataset:
     try:
         import psycopg2  # type: ignore
@@ -453,7 +454,7 @@ def fetch_from_sync_records(
     if not rows:
         raise SystemExit("no usable rows fetched from sync_records + pm_market_metadata")
 
-    return build_sequence_dataset(rows, sequence_len)
+    return build_sequence_dataset(rows, sequence_len, stride=stride)
 
 
 def maybe_save_parquet(ds: Dataset, path: str) -> None:
@@ -592,6 +593,7 @@ def train_and_export_onnx(
             p = model(xb)
             loss = loss_fn(p, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
 
             total_loss += float(loss.detach().cpu().item()) * len(bidx)
@@ -617,6 +619,11 @@ def train_and_export_onnx(
         "brier": brier(test_ds.y, p_test),
         "log_loss": log_loss(test_ds.y, p_test),
     }
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auc"] = roc_auc_score(test_ds.y, p_test)
+    except Exception:
+        metrics["auc"] = float("nan")
 
     os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
     dummy = torch.zeros((1, in_dim), dtype=torch.float32)
@@ -682,6 +689,7 @@ def main() -> None:
     ap.add_argument("--output", default="./models/crypto/lob_tcn_v1.onnx")
     ap.add_argument("--meta", default="./models/crypto/lob_tcn_v1.meta.json")
     ap.add_argument("--save-parquet", default=None)
+    ap.add_argument("--stride", type=int, default=1, help="step between sequence windows per market to reduce overlap (default: 1)")
 
     args = ap.parse_args()
 
@@ -695,6 +703,7 @@ def main() -> None:
         symbol=args.symbol,
         horizon=args.horizon,
         limit=args.limit,
+        stride=args.stride,
     )
     print(f"Rows: {len(ds.y)}")
 
@@ -728,7 +737,7 @@ def main() -> None:
     print(f"  onnx: {args.output}")
     print(f"  meta: {args.meta}")
     print(
-        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}"
+        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}  auc={m.get('auc', float('nan')):.4f}"
     )
 
     print("\nEnable on EC2 (example):")

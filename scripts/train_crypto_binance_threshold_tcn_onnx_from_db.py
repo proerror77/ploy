@@ -24,7 +24,7 @@ Policy / EV (binary options, fixed stake=1.0)
     with the highest expected ROI that clears edge_threshold.
 
 Data requirements
-  - pm_token_settlements (resolved labels, includes raw_market.end_date)
+  - pm_token_settlements (resolved labels, raw_market JSONB uses camelCase: endDate, groupItemThreshold, etc.)
   - binance_lob_ticks (Binance L2 snapshots)
   - clob_orderbook_history_ticks OR clob_orderbook_snapshots (Polymarket asks for EV only)
   - collector_token_targets (optional; helps map token_id -> binance symbol, threshold)
@@ -193,7 +193,7 @@ def chronological_split_sequences(
     return _slice_sequence_dataset(ds, train_idx), _slice_sequence_dataset(ds, test_idx)
 
 
-def build_sequences(ds: PointDataset, seq_len: int) -> SequenceDataset:
+def build_sequences(ds: PointDataset, seq_len: int, stride: int = 1) -> SequenceDataset:
     if seq_len <= 0:
         raise SystemExit("--seq-len must be > 0")
     if not ds.x:
@@ -203,6 +203,7 @@ def build_sequences(ds: PointDataset, seq_len: int) -> SequenceDataset:
     idx.sort(key=lambda i: ds.ts[i])
 
     history_by_group: Dict[str, List[List[float]]] = {}
+    emit_counter_by_group: Dict[str, int] = {}
     x_seq: List[List[List[float]]] = []
     y: List[int] = []
     ts: List[str] = []
@@ -215,6 +216,12 @@ def build_sequences(ds: PointDataset, seq_len: int) -> SequenceDataset:
         g = ds.group[i]
         hist = history_by_group.setdefault(g, [])
         hist.append(ds.x[i])
+
+        counter = emit_counter_by_group.get(g, 0)
+        emit_counter_by_group[g] = counter + 1
+
+        if counter % stride != 0:
+            continue
 
         if len(hist) >= seq_len:
             seq = hist[-seq_len:]
@@ -760,11 +767,11 @@ def fetch_from_db(
           WHERE LOWER(TRIM(COALESCE(outcome, ''))) IN ('no', 'down', 'lower', 'below', 'false')
         )::double precision AS no_settled_price,
         MAX(resolved_at) AS resolved_at,
-        MAX((raw_market->>'end_date')::timestamptz) AS end_date,
-        MAX((raw_market->>'start_date')::timestamptz) AS start_date,
-        MAX(raw_market->>'group_item_threshold') AS group_item_threshold,
-        MAX(raw_market->>'upper_bound') AS upper_bound,
-        MAX(raw_market->>'lower_bound') AS lower_bound
+        MAX(COALESCE((raw_market->>'endDate')::timestamptz, (raw_market->>'end_date')::timestamptz)) AS end_date,
+        MAX(COALESCE((raw_market->>'eventStartTime')::timestamptz, (raw_market->>'startDate')::timestamptz, (raw_market->>'start_date')::timestamptz)) AS start_date,
+        MAX(COALESCE(raw_market->>'groupItemThreshold', raw_market->>'group_item_threshold')) AS group_item_threshold,
+        MAX(COALESCE(raw_market->>'upperBound', raw_market->>'upper_bound')) AS upper_bound,
+        MAX(COALESCE(raw_market->>'lowerBound', raw_market->>'lower_bound')) AS lower_bound
       FROM pm_token_settlements
       WHERE resolved = TRUE
         AND settled_price IS NOT NULL
@@ -1021,11 +1028,6 @@ def fetch_from_db(
                     continue
                 y_yes_win = 1 if yes_settled > 0.5 else 0
 
-                thr = _parse_price_to_beat(price_to_beat_raw)
-                if thr is None:
-                    skipped_missing_threshold += 1
-                    continue
-
                 spot_now_f = spot_now if spot_now is not None else bn_mid
                 if spot_now_f is None or spot_now_f <= 0.0:
                     skipped_nonfinite += 1
@@ -1037,6 +1039,22 @@ def fetch_from_db(
                     if spot_start_f > 0.0
                     else 0.0
                 )
+
+                # For up/down markets the threshold IS the spot price at
+                # market start.  collector_token_targets stores a series
+                # number (22, 23 …) not a dollar price, and Gamma API
+                # returns groupItemThreshold=0 for relative markets.
+                # Fall back to spot_start which is the Binance price at
+                # eventStartTime – exactly what determines settlement.
+                thr = _parse_price_to_beat(price_to_beat_raw)
+                if thr is None or thr < 1.0:
+                    # price_to_beat is 0 or a small series number – use
+                    # spot at market start as the effective threshold.
+                    thr = spot_start_f if spot_start_f > 0.0 else None
+                if thr is None:
+                    skipped_missing_threshold += 1
+                    continue
+
                 spot_vs_thr_ret_bps = ((spot_now_f / thr) - 1.0) * 10000.0
 
                 # Asset bucket from slug (fallback to "other").
@@ -1284,6 +1302,7 @@ def train_and_export_onnx_tcn(
             p = model(x_b)
             loss = loss_fn(p, y_b)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
 
         model.eval()
@@ -1391,6 +1410,11 @@ def train_and_export_onnx_tcn(
         "brier": brier(test_ds.y, p_test),
         "log_loss": log_loss(test_ds.y, p_test),
     }
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auc"] = roc_auc_score(test_ds.y, p_test)
+    except Exception:
+        metrics["auc"] = float("nan")
 
     os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
     dummy = torch.zeros((1, seq_len, in_dim), dtype=torch.float32)
@@ -1447,7 +1471,7 @@ def main() -> None:
     ap.add_argument("--market-asset", default="all", choices=["all", "btc", "eth", "sol", "other"])
     ap.add_argument(
         "--pm-book-source",
-        default="obh",
+        default="ws",
         choices=["obh", "ws"],
         help="Polymarket price source for asks (EV only): obh=clob_orderbook_history_ticks, ws=clob_orderbook_snapshots",
     )
@@ -1456,8 +1480,8 @@ def main() -> None:
     ap.add_argument("--entry-window-end-seconds-5m", type=int, default=0)
     ap.add_argument("--entry-window-start-seconds-15m", type=int, default=240)
     ap.add_argument("--entry-window-end-seconds-15m", type=int, default=0)
-    ap.add_argument("--entry-window-start-seconds-default", type=int, default=60)
-    ap.add_argument("--entry-window-end-seconds-default", type=int, default=0)
+    ap.add_argument("--entry-window-start-seconds-default", type=int, default=240)
+    ap.add_argument("--entry-window-end-seconds-default", type=int, default=30)
     ap.add_argument("--vol-short-window-seconds", type=int, default=240)
     ap.add_argument("--vol-long-window-seconds", type=int, default=840)
     ap.add_argument("--seq-len", type=int, default=48)
@@ -1486,6 +1510,7 @@ def main() -> None:
     ap.add_argument("--meta", default="./models/crypto/binance_threshold_tcn_v1.meta.json")
     ap.add_argument("--save-parquet", default=None)
     ap.add_argument("--fetch-only", action="store_true")
+    ap.add_argument("--stride", type=int, default=1, help="emit every N-th sequence per group to reduce overlap (default: 1)")
 
     args = ap.parse_args()
 
@@ -1538,7 +1563,7 @@ def main() -> None:
         slippage_buffer=args.slippage_buffer,
     )
 
-    seq_ds = build_sequences(point_ds, seq_len=args.seq_len)
+    seq_ds = build_sequences(point_ds, seq_len=args.seq_len, stride=args.stride)
     print(
         "Sequence rows: {} (seq_len={}, feature_dim={})".format(
             len(seq_ds.y), seq_ds.seq_len, seq_ds.feature_dim
@@ -1607,7 +1632,7 @@ def main() -> None:
     print(f"  onnx: {args.output}")
     print(f"  meta: {args.meta}")
     print(
-        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}"
+        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}  auc={m.get('auc', float('nan')):.4f}"
     )
     ep = meta.get("edge_policy", {})
     tpol = ep.get("test_policy", {})

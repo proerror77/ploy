@@ -462,6 +462,7 @@ def train_and_export_onnx(
             p = model(xb)
             loss = loss_fn(p, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
 
             total_loss += float(loss.detach().cpu().item()) * len(bidx)
@@ -487,6 +488,11 @@ def train_and_export_onnx(
         "brier": brier(test_ds.y, p_test),
         "log_loss": log_loss(test_ds.y, p_test),
     }
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auc"] = roc_auc_score(test_ds.y, p_test)
+    except Exception:
+        metrics["auc"] = float("nan")
 
     os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
     dummy = torch.zeros((1, in_dim), dtype=torch.float32)
@@ -607,7 +613,7 @@ def main() -> None:
     print(f"  onnx: {args.output}")
     print(f"  meta: {args.meta}")
     print(
-        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}"
+        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}  auc={m.get('auc', float('nan')):.4f}"
     )
 
     print("\nEnable on EC2 (example):")

@@ -466,7 +466,7 @@ def chronological_split_sequences(
     return _slice_sequence_dataset(ds, train_idx), _slice_sequence_dataset(ds, test_idx)
 
 
-def build_sequences(ds: Dataset, seq_len: int) -> SequenceDataset:
+def build_sequences(ds: Dataset, seq_len: int, stride: int = 1) -> SequenceDataset:
     if seq_len <= 0:
         raise SystemExit("--seq-len must be > 0")
     if not ds.x:
@@ -476,6 +476,7 @@ def build_sequences(ds: Dataset, seq_len: int) -> SequenceDataset:
     idx.sort(key=lambda i: ds.ts[i])
 
     history_by_group: Dict[str, List[List[float]]] = {}
+    emit_counter_by_group: Dict[str, int] = {}
     x_seq: List[List[List[float]]] = []
     y: List[int] = []
     ts: List[str] = []
@@ -485,6 +486,12 @@ def build_sequences(ds: Dataset, seq_len: int) -> SequenceDataset:
         g = ds.group[i]
         hist = history_by_group.setdefault(g, [])
         hist.append(ds.x[i])
+
+        counter = emit_counter_by_group.get(g, 0)
+        emit_counter_by_group[g] = counter + 1
+
+        if counter % stride != 0:
+            continue
 
         if len(hist) >= seq_len:
             seq = hist[-seq_len:]
@@ -1211,6 +1218,7 @@ def train_and_export_onnx_tcn(
             p = model(xb)
             loss = loss_fn(p, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
 
             total_loss += float(loss.detach().cpu().item()) * len(bidx)
@@ -1295,6 +1303,11 @@ def train_and_export_onnx_tcn(
         "brier": brier(test_ds.y, p_test),
         "log_loss": log_loss(test_ds.y, p_test),
     }
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auc"] = roc_auc_score(test_ds.y, p_test)
+    except Exception:
+        metrics["auc"] = float("nan")
 
     os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
     dummy = torch.zeros((1, seq_len, in_dim), dtype=torch.float32)
@@ -1458,6 +1471,7 @@ def main() -> None:
         action="store_true",
         help="only fetch/validate dataset and optionally save parquet; skip training",
     )
+    ap.add_argument("--stride", type=int, default=1, help="emit every N-th sequence per group to reduce overlap (default: 1)")
 
     args = ap.parse_args()
 
@@ -1511,7 +1525,7 @@ def main() -> None:
     )
     print(f"Point rows: {len(point_ds.y)}")
 
-    seq_ds = build_sequences(point_ds, seq_len=args.seq_len)
+    seq_ds = build_sequences(point_ds, seq_len=args.seq_len, stride=args.stride)
     print(
         "Sequence rows: {} (seq_len={}, feature_dim={})".format(
             len(seq_ds.y), seq_ds.seq_len, seq_ds.feature_dim
@@ -1581,7 +1595,7 @@ def main() -> None:
     print(f"  onnx: {args.output}")
     print(f"  meta: {args.meta}")
     print(
-        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}"
+        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}  auc={m.get('auc', float('nan')):.4f}"
     )
     ep = meta.get("edge_policy", {})
     tpol = ep.get("test_policy", {})
