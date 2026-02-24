@@ -52,6 +52,8 @@ struct CycleContext {
     leg1_shares: u64,
     leg1_order_id: String,
     leg2_order_id: Option<String>,
+    /// Guard against duplicate forced Leg2 submissions from concurrent paths.
+    force_leg2_attempted: bool,
 }
 
 impl Default for EngineState {
@@ -530,6 +532,7 @@ impl StrategyEngine {
                 // Use client_order_id until we have an exchange order id.
                 leg1_order_id: request.client_order_id.clone(),
                 leg2_order_id: None,
+                force_leg2_attempted: false,
             });
             state.version += 1;
 
@@ -546,7 +549,9 @@ impl StrategyEngine {
 
         // Best-effort daily metrics update (avoid failing trading logic on telemetry).
         let today = Utc::now().date_naive();
-        let _ = self.store.increment_cycle_count(today).await;
+        if let Err(e) = self.store.increment_cycle_count(today).await {
+            error!("Failed to increment cycle count: {}", e);
+        }
 
         info!(
             "Entering Leg1: {} {} shares of {} @ {}",
@@ -659,6 +664,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id.clone(),
                     leg2_order_id: None,
+                force_leg2_attempted: false,
                 };
 
                 let unwind_summary = match self
@@ -672,7 +678,9 @@ impl StrategyEngine {
                 let today = Utc::now().date_naive();
                 let halt_reason = "DB update failed after Leg1 fill - exposure may exist";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                let _ = self.store.halt_trading(today, halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
                 self.persist_halt_if_needed().await;
                 let _ = self
                     .store
@@ -732,6 +740,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id,
                     leg2_order_id: None,
+                force_leg2_attempted: false,
                 });
 
                 state.strategy_state = StrategyState::Leg1Filled;
@@ -782,6 +791,25 @@ impl StrategyEngine {
 
     async fn enter_leg2_inner(&self, side: Side, price: Decimal, forced: bool) -> Result<()> {
         let _exec_guard = self.execution_mutex.lock().await;
+
+        // Guard against duplicate forced Leg2 submissions.
+        if forced {
+            let state = self.state.read().await;
+            if state
+                .current_cycle
+                .as_ref()
+                .is_some_and(|c| c.force_leg2_attempted)
+            {
+                warn!("Force Leg2 already attempted for this cycle; skipping duplicate");
+                return Ok(());
+            }
+            drop(state);
+            // Mark the flag under write lock before proceeding.
+            let mut state = self.state.write().await;
+            if let Some(ref mut ctx) = state.current_cycle {
+                ctx.force_leg2_attempted = true;
+            }
+        }
 
         let (ctx, round) = {
             let state = self.state.read().await;
@@ -893,7 +921,14 @@ impl StrategyEngine {
         };
 
         // Keep at least the requested price (forced paths may pass a higher limit).
-        order_price = order_price.max(price).min(Decimal::ONE);
+        // Prevent forced Leg2 from creating a guaranteed loss: in binary markets,
+        // combined leg cost > 1.0 means guaranteed loss regardless of outcome.
+        let max_leg2_price = if forced {
+            (Decimal::ONE - ctx.leg1_price).min(Decimal::ONE)
+        } else {
+            Decimal::ONE
+        };
+        order_price = order_price.max(price).min(max_leg2_price);
 
         // Execute order (FOK to avoid partial hedges).
         let mut request = crate::domain::OrderRequest::buy_limit(
@@ -974,11 +1009,15 @@ impl StrategyEngine {
             self.persist_halt_if_needed().await;
 
             let today = Utc::now().date_naive();
-            let _ = self.store.record_cycle_abort(today).await;
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
 
             let halt_reason = "Failed to persist Leg2 order - open exposure";
             self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-            let _ = self.store.halt_trading(today, halt_reason).await;
+            if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
             self.persist_halt_if_needed().await;
 
             {
@@ -1014,11 +1053,15 @@ impl StrategyEngine {
                     .await;
 
                 let today = Utc::now().date_naive();
-                let _ = self.store.record_cycle_abort(today).await;
+                if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
 
                 let halt_reason = "Leg2 execution failed - open exposure";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                let _ = self.store.halt_trading(today, halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
                 self.persist_halt_if_needed().await;
 
                 {
@@ -1121,12 +1164,16 @@ impl StrategyEngine {
 
             // Update daily metrics
             let today = Utc::now().date_naive();
-            let _ = self.store.record_cycle_completion(today, net_pnl).await;
+            if let Err(e) = self.store.record_cycle_completion(today, net_pnl).await {
+                error!("Failed to record cycle completion: {}", e);
+            }
 
             if cycle_update_error.is_some() {
                 let halt_reason = "DB update failed after Leg2 fill";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                let _ = self.store.halt_trading(today, halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
                 self.persist_halt_if_needed().await;
             }
 
@@ -1210,12 +1257,16 @@ impl StrategyEngine {
                 .record_failure("Leg2 not fully filled")
                 .await;
 
-            let _ = self.store.record_cycle_abort(today).await;
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
 
             // Halt trading for manual intervention (exposure may exist).
             let halt_reason = "Leg2 not fully filled - open exposure";
             self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-            let _ = self.store.halt_trading(today, halt_reason).await;
+            if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
             self.persist_halt_if_needed().await;
 
             {
@@ -1318,7 +1369,9 @@ impl StrategyEngine {
         // Persist the intent (best effort) before submitting to the exchange.
         let client_order_id = request.client_order_id.clone();
         let order = Order::from_request(&request, Some(ctx.cycle_id), 1);
-        let _ = self.store.insert_order(&order).await;
+        if let Err(e) = self.store.insert_order(&order).await {
+            error!("Failed to persist unwind order (cycle {}): {}", ctx.cycle_id, e);
+        }
 
         let result = self.executor.execute(&request).await?;
 
@@ -1430,11 +1483,17 @@ impl StrategyEngine {
             self.risk_manager.record_failure(reason).await;
 
             let today = Utc::now().date_naive();
-            let _ = self.store.record_cycle_abort(today).await;
-            let _ = self.store.halt_trading(today, reason).await;
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
+            if let Err(e) = self.store.halt_trading(today, reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
         } else {
             let today = Utc::now().date_naive();
-            let _ = self.store.halt_trading(today, reason).await;
+            if let Err(e) = self.store.halt_trading(today, reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
         }
 
         // Always halt trading on aborts that indicate potential exposure or operational risk.

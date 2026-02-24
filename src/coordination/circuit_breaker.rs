@@ -134,23 +134,13 @@ impl TradingCircuitBreaker {
         *self.state.read().await
     }
 
-    /// Check if trading is allowed
+    /// Check if trading is allowed (delegates to should_allow_trade with zero exposure).
+    ///
+    /// Prefer `should_allow_trade()` directly when you have exposure information,
+    /// as it properly enforces HalfOpen limits.
     pub async fn should_allow(&self) -> bool {
-        let state = self.state().await;
-
-        // Check for auto-recovery from Open to HalfOpen
-        if state == CircuitState::Open {
-            if let Some(opened_at) = *self.opened_at.read().await {
-                let elapsed = Utc::now().signed_duration_since(opened_at).num_seconds() as u64;
-                if elapsed >= self.config.recovery_timeout_secs {
-                    self.transition_to_half_open().await;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        state != CircuitState::Open
+        // Delegate to the stricter method with zero exposure to enforce HalfOpen limits.
+        self.should_allow_trade(Decimal::ZERO).await.unwrap_or(false)
     }
 
     /// Check if a trade should be allowed, enforcing HalfOpen limits.

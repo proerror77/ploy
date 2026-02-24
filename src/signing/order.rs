@@ -5,6 +5,11 @@ use ethers::utils::keccak256;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Default order expiration: 5 minutes from submission.
+/// Prevents ghost orders from filling at stale prices after a crash.
+const DEFAULT_ORDER_EXPIRY_SECS: u64 = 300;
 
 /// Exchange contract addresses for Polygon Mainnet
 pub mod contracts {
@@ -124,7 +129,7 @@ impl OrderData {
             token_id,
             maker_amount,
             taker_amount,
-            expiration: U256::zero(), // No expiration
+            expiration: Self::default_expiration(),
             nonce: U256::from(nonce),
             fee_rate_bps: U256::zero(), // No fee
             side: OrderSide::Buy as u8,
@@ -161,7 +166,7 @@ impl OrderData {
             token_id,
             maker_amount,
             taker_amount,
-            expiration: U256::zero(),
+            expiration: Self::default_expiration(),
             nonce: U256::from(nonce),
             fee_rate_bps: U256::zero(),
             side: OrderSide::Sell as u8,
@@ -175,6 +180,16 @@ impl OrderData {
         let mut rng = rand::thread_rng();
         let bytes: [u8; 32] = rng.gen();
         U256::from_big_endian(&bytes)
+    }
+
+    /// Compute default order expiration (current time + DEFAULT_ORDER_EXPIRY_SECS).
+    /// Prevents ghost orders from filling at stale prices after a crash.
+    fn default_expiration() -> U256 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        U256::from(now + DEFAULT_ORDER_EXPIRY_SECS)
     }
 
     /// Compute the EIP-712 struct hash

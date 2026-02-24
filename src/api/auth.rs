@@ -3,6 +3,21 @@ use sha2::{Digest, Sha256};
 
 pub const ADMIN_SESSION_COOKIE: &str = "ploy_admin_auth";
 
+/// Constant-time string comparison to prevent timing side-channel attacks.
+/// The length check leaks length information, but for fixed-format bearer tokens
+/// this is acceptable — the critical protection is against byte-by-byte guessing.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 fn parse_boolish(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -34,7 +49,7 @@ pub fn expected_sidecar_token() -> Option<String> {
 }
 
 pub fn sidecar_auth_required() -> bool {
-    [
+    let explicit = [
         "PLOY_SIDECAR_AUTH_REQUIRED",
         "PLOY_GATEWAY_ONLY",
         "PLOY_ENFORCE_GATEWAY_ONLY",
@@ -42,14 +57,22 @@ pub fn sidecar_auth_required() -> bool {
     ]
     .iter()
     .find_map(|key| std::env::var(key).ok())
-    .map(|raw| parse_boolish(&raw))
-    .unwrap_or(false)
+    .map(|raw| parse_boolish(&raw));
+
+    match explicit {
+        Some(v) => v,
+        None => {
+            // Default to true for safety; log once so operators notice.
+            tracing::warn!("No PLOY_SIDECAR_AUTH_REQUIRED env set — defaulting to required");
+            true
+        }
+    }
 }
 
 fn auth_cookie_secure() -> bool {
     match std::env::var("PLOY_API_AUTH_COOKIE_SECURE") {
         Ok(raw) => parse_boolish(&raw),
-        Err(_) => false,
+        Err(_) => true, // Secure by default; set to false explicitly for local dev
     }
 }
 
@@ -108,7 +131,7 @@ fn extract_bearer_token(raw: &str) -> Option<&str> {
 
 pub fn is_valid_admin_token(provided: &str) -> bool {
     expected_admin_token()
-        .map(|expected| provided.trim() == expected)
+        .map(|expected| ct_eq(provided.trim(), &expected))
         .unwrap_or(false)
 }
 
@@ -137,7 +160,7 @@ pub fn ensure_admin_authorized(
                 .and_then(extract_bearer_token)
         });
 
-    if token.is_some_and(|v| v == expected) {
+    if token.is_some_and(|v| ct_eq(v, &expected)) {
         return Ok(());
     }
 
@@ -145,7 +168,7 @@ pub fn ensure_admin_authorized(
     let cookie = extract_cookie(headers, ADMIN_SESSION_COOKIE);
     if cookie
         .as_deref()
-        .is_some_and(|v| v == expected_fp || v == expected)
+        .is_some_and(|v| ct_eq(v, &expected_fp) || ct_eq(v, &expected))
     {
         return Ok(());
     }
@@ -182,7 +205,7 @@ pub fn ensure_sidecar_authorized(
         });
 
     match token {
-        Some(provided) if provided == expected => Ok(()),
+        Some(provided) if ct_eq(provided, &expected) => Ok(()),
         _ => Err((
             StatusCode::UNAUTHORIZED,
             "sidecar auth failed (missing/invalid token)".to_string(),
