@@ -2650,6 +2650,16 @@ async fn refresh_pm_token_settlements_for_domain(
                         if resolved_market {
                             guard.resolved_markets += 1;
                         }
+                        drop(guard);
+
+                        // Backfill pm_market_metadata from settlement raw_market JSONB
+                        if let Err(e) = backfill_pm_market_metadata_from_settlement(pool, &market).await {
+                            debug!(
+                                market_id = %market.id,
+                                error = %e,
+                                "pm_market_metadata backfill skipped"
+                            );
+                        }
                     }
                     Err(e) => {
                         warn!(
@@ -2750,6 +2760,143 @@ async fn upsert_pm_token_settlement_rows(
     }
 
     Ok((upserted_rows, resolved_market))
+}
+
+/// Backfill `pm_market_metadata` from a Gamma market's raw fields.
+///
+/// Called after every settlement upsert so that training scripts (which JOIN
+/// sync_records → pm_market_metadata) can always find the metadata row.
+/// Uses ON CONFLICT DO UPDATE to keep the latest values.
+async fn backfill_pm_market_metadata_from_settlement(
+    pool: &PgPool,
+    market: &polymarket_client_sdk::gamma::types::response::Market,
+) -> Result<()> {
+    let slug = match market.slug.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()), // No slug — can't populate metadata
+    };
+
+    // Extract threshold from group_item_threshold or upper/lower bound midpoint
+    let raw_market = serde_json::to_value(market).unwrap_or_else(|_| serde_json::json!({}));
+
+    // Parse start/end times — prefer eventStartTime over startDate (market creation time)
+    let end_time: Option<chrono::DateTime<Utc>> = market
+        .end_date_iso
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+    let start_time: Option<chrono::DateTime<Utc>> = raw_market
+        .get("eventStartTime")
+        .or_else(|| raw_market.get("startDate"))
+        .or_else(|| raw_market.get("start_date"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
+
+    // Infer symbol from slug prefix
+    let symbol = if slug.starts_with("btc-") {
+        Some("BTCUSDT")
+    } else if slug.starts_with("eth-") {
+        Some("ETHUSDT")
+    } else if slug.starts_with("sol-") {
+        Some("SOLUSDT")
+    } else {
+        None
+    };
+
+    // Infer horizon from slug pattern (most reliable)
+    let horizon = if slug.contains("-5m-") {
+        Some("5m")
+    } else if slug.contains("-15m-") {
+        Some("15m")
+    } else if slug.contains("-60m-") {
+        Some("60m")
+    } else {
+        // Fallback to duration
+        match (start_time, end_time) {
+            (Some(s), Some(e)) => {
+                let secs = (e - s).num_seconds();
+                if secs <= 360 {
+                    Some("5m")
+                } else if secs <= 1080 {
+                    Some("15m")
+                } else {
+                    Some("60m")
+                }
+            }
+            _ => None,
+        }
+    };
+
+    let threshold: Option<rust_decimal::Decimal> = market
+        .group_item_threshold
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| {
+            let upper: Option<f64> = raw_market
+                .get("upperBound")
+                .or_else(|| raw_market.get("upper_bound"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok());
+            let lower: Option<f64> = raw_market
+                .get("lowerBound")
+                .or_else(|| raw_market.get("lower_bound"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok());
+            match (upper, lower) {
+                (Some(u), Some(l)) => {
+                    rust_decimal::Decimal::try_from((u + l) / 2.0).ok()
+                }
+                _ => None,
+            }
+        });
+
+    let price_to_beat = match threshold {
+        Some(p) if !p.is_zero() => p,
+        _ => {
+            // For up/down markets groupItemThreshold is "0" — the real
+            // threshold is the Binance spot price at eventStartTime.
+            // Try to look it up; fall back to Decimal::ZERO if unavailable.
+            match (symbol, start_time) {
+                (Some(sym), Some(st)) => {
+                    let row = sqlx::query_scalar::<_, rust_decimal::Decimal>(
+                        "SELECT price FROM binance_price_ticks WHERE symbol = $1 AND trade_time <= $2 ORDER BY trade_time DESC LIMIT 1"
+                    )
+                    .bind(sym)
+                    .bind(st)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap_or(None);
+                    row.unwrap_or(rust_decimal::Decimal::ZERO)
+                }
+                _ => rust_decimal::Decimal::ZERO,
+            }
+        }
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO pm_market_metadata (market_slug, price_to_beat, start_time, end_time, horizon, symbol, raw_market, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        ON CONFLICT (market_slug) DO UPDATE SET
+            price_to_beat = EXCLUDED.price_to_beat,
+            start_time    = COALESCE(EXCLUDED.start_time, pm_market_metadata.start_time),
+            end_time      = COALESCE(EXCLUDED.end_time, pm_market_metadata.end_time),
+            horizon       = COALESCE(EXCLUDED.horizon, pm_market_metadata.horizon),
+            symbol        = COALESCE(EXCLUDED.symbol, pm_market_metadata.symbol),
+            raw_market    = EXCLUDED.raw_market,
+            updated_at    = NOW()
+        "#,
+    )
+    .bind(slug)
+    .bind(price_to_beat)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(horizon)
+    .bind(symbol)
+    .bind(sqlx::types::Json(raw_market))
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 fn parse_json_array_strings_relaxed(
@@ -3361,10 +3508,16 @@ fn spawn_clob_orderbook_persistence(
 
         let mut rx = pm_ws.subscribe_books();
         let max_levels = env_usize("PM_ORDERBOOK_LEVELS", max_levels_default).clamp(1, 200);
-        let min_interval_secs =
-            env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default).max(1);
+        let min_interval_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
+            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
+            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default)
+                .max(0) as u64)
+                .saturating_mul(1000),
+        };
+        let require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
 
         let mut last_persisted: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
+        let mut last_hash: HashMap<String, String> = HashMap::new();
         let mut persisted_count: u64 = 0;
 
         loop {
@@ -3373,15 +3526,25 @@ fn spawn_clob_orderbook_persistence(
                     let now = Utc::now();
                     let token_id = book.asset_id.clone();
 
-                    let should_persist = match last_persisted.get(&token_id) {
-                        None => true,
-                        Some(ts) => {
-                            now.signed_duration_since(*ts).num_seconds() >= min_interval_secs
+                    if min_interval_ms > 0 {
+                        let should_persist_by_interval = match last_persisted.get(&token_id) {
+                            None => true,
+                            Some(ts) => {
+                                now.signed_duration_since(*ts).num_milliseconds()
+                                    >= min_interval_ms as i64
+                            }
+                        };
+                        if !should_persist_by_interval {
+                            continue;
                         }
-                    };
+                    }
 
-                    if !should_persist {
-                        continue;
+                    if require_hash_change {
+                        if let Some(hash) = book.hash.as_deref() {
+                            if last_hash.get(&token_id).map(|v| v.as_str()) == Some(hash) {
+                                continue;
+                            }
+                        }
                     }
 
                     let bids = parse_depth_levels(&book.bids, true, max_levels);
@@ -3419,6 +3582,9 @@ fn spawn_clob_orderbook_persistence(
                     }
 
                     last_persisted.insert(token_id, now);
+                    if let Some(hash) = book.hash.as_ref() {
+                        last_hash.insert(book.asset_id.clone(), hash.clone());
+                    }
                     persisted_count = persisted_count.saturating_add(1);
 
                     if persisted_count % 100 == 0 {
@@ -3426,7 +3592,8 @@ fn spawn_clob_orderbook_persistence(
                             agent = %agent_label,
                             persisted_count,
                             max_levels,
-                            min_interval_secs,
+                            min_interval_ms,
+                            require_hash_change,
                             "persisted clob orderbook snapshots"
                         );
                     }
@@ -3970,8 +4137,8 @@ impl PlatformBootstrapConfig {
                 "signal_flip" | "flip" => {
                     cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SignalFlip
                 }
-                "price_exit" | "price" | "mtm" => {
-                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::PriceExit
+                "trailing_exit" | "trailing" | "price_exit" | "price" | "mtm" => {
+                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::TrailingExit
                 }
                 _ => {
                     warn!(
