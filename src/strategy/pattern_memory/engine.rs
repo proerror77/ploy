@@ -1,5 +1,6 @@
 //! Core pattern-memory engine (no market IO).
 
+use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 
 /// Pearson correlation in [-1, 1]. Returns 0.0 on degenerate input.
@@ -67,6 +68,7 @@ pub fn classify_up(next_return: f64, required_return: f64) -> bool {
 pub struct PatternSample<const N: usize> {
     pub pattern: [f64; N],
     pub next_return: f64,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -82,16 +84,28 @@ pub struct Posterior {
 pub struct PatternMemory<const N: usize> {
     returns: VecDeque<f64>,
     pending_pattern: Option<[f64; N]>,
+    pending_timestamp: Option<DateTime<Utc>>,
     samples: Vec<PatternSample<N>>,
+    max_samples: usize,
 }
+
+/// Default max samples (~7 days of 5m bars).
+const DEFAULT_MAX_SAMPLES: usize = 2000;
 
 impl<const N: usize> PatternMemory<N> {
     pub fn new() -> Self {
         Self {
             returns: VecDeque::with_capacity(N),
             pending_pattern: None,
+            pending_timestamp: None,
             samples: Vec::new(),
+            max_samples: DEFAULT_MAX_SAMPLES,
         }
+    }
+
+    pub fn with_max_samples(mut self, max: usize) -> Self {
+        self.max_samples = max;
+        self
     }
 
     pub fn samples_len(&self) -> usize {
@@ -121,12 +135,18 @@ impl<const N: usize> PatternMemory<N> {
     /// Ingest a newly closed-bar return for this timeframe.
     ///
     /// The incoming return labels the previous pending pattern as its realized `next_return`.
-    pub fn ingest_return(&mut self, r: f64) {
+    pub fn ingest_return(&mut self, r: f64, now: DateTime<Utc>) {
         if let Some(p) = self.pending_pattern.take() {
+            let ts = self.pending_timestamp.unwrap_or(now);
             self.samples.push(PatternSample {
                 pattern: p,
                 next_return: r,
+                timestamp: ts,
             });
+            // Evict oldest if over capacity
+            if self.samples.len() > self.max_samples {
+                self.samples.remove(0);
+            }
         }
 
         self.returns.push_back(r);
@@ -135,6 +155,7 @@ impl<const N: usize> PatternMemory<N> {
         }
 
         self.pending_pattern = self.current_pattern();
+        self.pending_timestamp = Some(now);
     }
 
     pub fn posterior_for_required_return(
@@ -143,7 +164,9 @@ impl<const N: usize> PatternMemory<N> {
         corr_threshold: f64,
         alpha: f64,
         beta: f64,
+        age_decay_lambda: f64,
     ) -> Posterior {
+        let now = Utc::now();
         let Some(cur) = self.current_pattern() else {
             let p_up = beta_posterior(alpha, beta, 0.0, 0.0);
             return Posterior {
@@ -166,10 +189,21 @@ impl<const N: usize> PatternMemory<N> {
                 continue;
             }
             matches = matches.saturating_add(1);
-            let w = corr_weight(corr, corr_threshold);
-            if w <= 0.0 {
+            let cw = corr_weight(corr, corr_threshold);
+            if cw <= 0.0 {
                 continue;
             }
+            // Time decay: w = corr_weight * exp(-lambda * age_minutes)
+            let decay = if age_decay_lambda > 0.0 {
+                let age_min = now
+                    .signed_duration_since(s.timestamp)
+                    .num_minutes()
+                    .max(0) as f64;
+                (-age_decay_lambda * age_min).exp()
+            } else {
+                1.0
+            };
+            let w = cw * decay;
             if classify_up(s.next_return, required_return) {
                 up_w += w;
             } else {
@@ -244,18 +278,19 @@ mod tests {
 
     #[test]
     fn pattern_memory_labels_previous_pattern_with_next_return() {
+        let now = Utc::now();
         let mut mem = PatternMemory::<3>::new();
-        mem.ingest_return(0.1);
-        mem.ingest_return(0.2);
+        mem.ingest_return(0.1, now);
+        mem.ingest_return(0.2, now);
         assert_eq!(mem.samples_len(), 0);
 
         // First time we have a full pattern, it becomes pending (no label yet).
-        mem.ingest_return(0.3);
+        mem.ingest_return(0.3, now);
         assert_eq!(mem.samples_len(), 0);
         assert_eq!(mem.current_pattern().unwrap(), [0.1, 0.2, 0.3]);
 
         // Next return labels the previous pending pattern.
-        mem.ingest_return(0.4);
+        mem.ingest_return(0.4, now);
         assert_eq!(mem.samples_len(), 1);
         let s0 = mem.samples()[0];
         assert_eq!(s0.pattern, [0.1, 0.2, 0.3]);
@@ -265,30 +300,31 @@ mod tests {
 
     #[test]
     fn posterior_uses_required_return_threshold() {
+        let now = Utc::now();
         let mut mem = PatternMemory::<3>::new();
         // Build a single stored sample with pattern [0.1,0.2,0.3] and next_return 0.4
-        mem.ingest_return(0.1);
-        mem.ingest_return(0.2);
-        mem.ingest_return(0.3); // pending
-        mem.ingest_return(0.4); // labels pending, stores sample
+        mem.ingest_return(0.1, now);
+        mem.ingest_return(0.2, now);
+        mem.ingest_return(0.3, now); // pending
+        mem.ingest_return(0.4, now); // labels pending, stores sample
 
         // Current pattern is [0.2,0.3,0.4]. Add one more return so pending/current becomes [0.1,0.2,0.3].
         // We want current pattern to match the stored one for corr ~ 1.
         let mut mem2 = PatternMemory::<3>::new();
-        mem2.ingest_return(0.1);
-        mem2.ingest_return(0.2);
-        mem2.ingest_return(0.3);
+        mem2.ingest_return(0.1, now);
+        mem2.ingest_return(0.2, now);
+        mem2.ingest_return(0.3, now);
         // At this point current pattern == [0.1,0.2,0.3], but there is no stored sample yet.
         // Copy the stored sample from `mem`.
         mem2.push_sample(mem.samples()[0]);
 
-        let post = mem2.posterior_for_required_return(0.0, 0.7, 1.0, 1.0);
+        let post = mem2.posterior_for_required_return(0.0, 0.7, 1.0, 1.0, 0.0);
         // One matched sample, weight=1, next_return=0.4 > 0 => up_w=1.
         assert!((post.p_up - (2.0 / 3.0)).abs() < 1e-9, "p_up={}", post.p_up);
         assert!((post.n_eff - 1.0).abs() < 1e-12);
 
         // If required return is higher than next_return, it should count as DOWN.
-        let post2 = mem2.posterior_for_required_return(0.5, 0.7, 1.0, 1.0);
+        let post2 = mem2.posterior_for_required_return(0.5, 0.7, 1.0, 1.0, 0.0);
         assert!(
             (post2.p_up - (1.0 / 3.0)).abs() < 1e-9,
             "p_up={}",
