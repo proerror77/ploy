@@ -978,7 +978,7 @@ impl PostgresStore {
     pub async fn load_nba_team_stats(
         &self,
         season: &str,
-    ) -> Result<Vec<crate::strategy::nba_data_collector::TeamStats>> {
+    ) -> Result<Vec<crate::strategy::nba_comeback::nba_data_collector::TeamStats>> {
         let rows = sqlx::query(
             r#"
             SELECT team_name, team_abbrev, season,
@@ -997,7 +997,7 @@ impl PostgresStore {
 
         let stats = rows
             .iter()
-            .map(|r| crate::strategy::nba_data_collector::TeamStats {
+            .map(|r| crate::strategy::nba_comeback::nba_data_collector::TeamStats {
                 team_name: r.get("team_name"),
                 season: r.get("season"),
                 wins: r.get("wins"),
@@ -1026,7 +1026,7 @@ impl PostgresStore {
         team_name: &str,
         team_abbrev: &str,
         season: &str,
-        stats: &crate::strategy::nba_data_collector::TeamStats,
+        stats: &crate::strategy::nba_comeback::nba_data_collector::TeamStats,
     ) -> Result<()> {
         sqlx::query(
             r#"

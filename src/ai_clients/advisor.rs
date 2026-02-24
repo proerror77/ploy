@@ -3,8 +3,8 @@
 //! Provides non-autonomous advisory capabilities that help traders
 //! make informed decisions.
 
-use crate::agent::client::ClaudeAgentClient;
-use crate::agent::protocol::{
+use crate::ai_clients::client::ClaudeAgentClient;
+use crate::ai_clients::protocol::{
     AgentContext, AgentResponse, DailyStats, MarketSnapshot, RiskAssessment,
 };
 use crate::domain::{RiskState, StrategyState};

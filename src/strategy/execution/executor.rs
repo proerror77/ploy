@@ -3,7 +3,7 @@ use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::{OrderError, Result};
 use crate::exchange::ExchangeClient;
-use crate::strategy::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
+use super::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;

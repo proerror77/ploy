@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::agent::grok::GrokClient;
+use crate::ai_clients::grok::GrokClient;
 use crate::strategy::nba_comeback::espn::LiveGame;
 
 // ── Types ──────────────────────────────────────────────────────

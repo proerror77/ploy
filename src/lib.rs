@@ -1,6 +1,5 @@
 pub mod adapters;
-pub mod agent;
-pub mod agent_system;
+pub mod ai_clients;
 pub mod agents;
 pub mod analysis;
 #[cfg(feature = "api")]
@@ -28,7 +27,7 @@ pub mod validation;
 #[cfg(feature = "rl")]
 pub mod rl;
 
-pub use agent::{AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
+pub use ai_clients::{AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
 pub use collector::{
     BinanceDepthStream, LobCache, LobSnapshot, SyncCollector, SyncCollectorConfig,
 };

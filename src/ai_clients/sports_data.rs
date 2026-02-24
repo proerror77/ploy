@@ -3,7 +3,7 @@
 //! Uses Grok to fetch sports data in a fixed JSON format for reliable parsing.
 //! This ensures consistent data quality for Claude's analysis.
 
-use crate::agent::grok::GrokClient;
+use crate::ai_clients::grok::GrokClient;
 use crate::error::{PloyError, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -941,7 +941,7 @@ mod tests {
     use super::*;
 
     fn create_test_fetcher() -> SportsDataFetcher {
-        let grok = GrokClient::new(crate::agent::grok::GrokConfig::default()).unwrap();
+        let grok = GrokClient::new(crate::ai_clients::grok::GrokConfig::default()).unwrap();
         SportsDataFetcher::new(grok)
     }
 

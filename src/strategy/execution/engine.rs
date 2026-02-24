@@ -2,7 +2,7 @@ use crate::adapters::{QuoteCache, QuoteUpdate};
 use crate::config::AppConfig;
 use crate::domain::{Order, OrderStatus, Round, Side, StrategyState, TimeInForce};
 use crate::error::{PloyError, Result};
-use crate::strategy::engine_store::EngineStore;
+use super::engine_store::EngineStore;
 use crate::strategy::{
     MarketDepth, OrderExecutor, RiskManager, SignalDetector, SlippageCheck, SlippageConfig,
     SlippageProtection, TradingCalculator,
@@ -1686,7 +1686,7 @@ mod tests {
     use crate::config::AppConfig;
     use crate::domain::Round;
     use crate::exchange::{ExchangeClient, ExchangeKind};
-    use crate::strategy::engine_store::mock::MockStore;
+    use crate::strategy::execution::engine_store::mock::MockStore;
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;

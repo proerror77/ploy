@@ -10,6 +10,14 @@ pub mod espn;
 pub mod grok_decision;
 pub mod grok_intel;
 
+// Infrastructure modules (moved from strategy/ root)
+pub mod nba_data_collector;
+pub mod nba_entry;
+pub mod nba_exit;
+pub mod nba_filters;
+pub mod nba_state_machine;
+pub mod nba_winprob;
+
 pub use comeback_stats::{ComebackStatsProvider, TeamComebackProfile};
 pub use core::{
     ComebackOpportunity, GamePosition, NbaComebackCore, NbaComebackState, PositionEntry,

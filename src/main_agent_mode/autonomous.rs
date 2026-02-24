@@ -8,9 +8,9 @@ pub(super) async fn run_autonomous_mode(
     max_exposure: f64,
     enable_trading: bool,
 ) -> Result<()> {
-    use ploy::agent::autonomous::AutonomyLevel;
-    use ploy::agent::protocol::{AgentContext, DailyStats, MarketSnapshot};
-    use ploy::agent::{AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
+    use ploy::ai_clients::autonomous::AutonomyLevel;
+    use ploy::ai_clients::protocol::{AgentContext, DailyStats, MarketSnapshot};
+    use ploy::ai_clients::{AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
     use ploy::domain::{RiskState, StrategyState};
     use rust_decimal::Decimal;
 
@@ -45,7 +45,7 @@ pub(super) async fn run_autonomous_mode(
         );
     }
 
-    use ploy::agent::AgentClientConfig;
+    use ploy::ai_clients::AgentClientConfig;
     let client = ClaudeAgentClient::with_config(AgentClientConfig::for_autonomous());
     let mut agent = AutonomousAgent::new(client, config);
 
@@ -59,7 +59,7 @@ pub(super) async fn run_autonomous_mode(
         println!("  Trading backend: \x1b[33mdisabled\x1b[0m");
     }
 
-    use ploy::agent::{GrokClient, GrokConfig};
+    use ploy::ai_clients::{GrokClient, GrokConfig};
     if let Ok(grok) = GrokClient::new(GrokConfig::from_env()) {
         if grok.is_configured() {
             println!("  Grok: \x1b[32m✓ Enabled\x1b[0m (real-time market intelligence)");

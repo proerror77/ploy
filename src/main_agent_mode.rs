@@ -15,7 +15,7 @@ pub(crate) async fn run_agent_mode(
     enable_trading: bool,
     chat: bool,
 ) -> Result<()> {
-    use ploy::agent::ClaudeAgentClient;
+    use ploy::ai_clients::ClaudeAgentClient;
 
     println!("\x1b[36m");
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -48,10 +48,10 @@ pub(crate) async fn run_agent_mode(
 }
 
 /// Fetch market data from Polymarket and create a populated MarketSnapshot
-async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::agent::protocol::MarketSnapshot> {
+async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::ai_clients::protocol::MarketSnapshot> {
     use chrono::Utc;
     use ploy::adapters::polymarket_clob::GAMMA_API_URL;
-    use ploy::agent::protocol::MarketSnapshot;
+    use ploy::ai_clients::protocol::MarketSnapshot;
     use ploy::error::PloyError;
     use polymarket_client_sdk::gamma::types::request::SearchRequest;
     use polymarket_client_sdk::gamma::Client as GammaClient;

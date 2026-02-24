@@ -12,14 +12,14 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agent_system::ai::PolymarketSportsClient;
-use crate::agent_system::runtime::{
+use crate::ai_clients::PolymarketSportsClient;
+use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent,
     PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig, TradingAgent,
 };
 #[cfg(feature = "rl")]
-use crate::agent_system::runtime::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{
@@ -5046,7 +5046,7 @@ pub async fn start_platform(
     #[cfg(feature = "api")]
     let _api_handle = {
         use crate::adapters::{start_api_server_platform_background, PostgresStore};
-        use crate::agent::grok::GrokClient;
+        use crate::ai_clients::grok::GrokClient;
         use crate::api::state::StrategyConfigState;
 
         let api_port = std::env::var("API_PORT")
@@ -5810,7 +5810,7 @@ pub async fn start_platform(
                 }
             }
             if nba_cfg.grok_enabled {
-                match crate::agent::grok::GrokClient::from_env() {
+                match crate::ai_clients::grok::GrokClient::from_env() {
                     Ok(grok) if grok.is_configured() => {
                         info!(
                             agent = sports_cfg.agent_id,

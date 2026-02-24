@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::nba_filters::MarketContext;
-use super::nba_winprob::WinProbPrediction;
+use crate::strategy::nba_comeback::nba_winprob::WinProbPrediction;
 
 /// Exit logic configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,7 +370,7 @@ impl ExitDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::nba_winprob::GameFeatures;
+    use crate::strategy::nba_comeback::nba_winprob::GameFeatures;
 
     fn create_position(entry_price: f64, current_price: f64) -> PositionState {
         let mut position = PositionState::new(

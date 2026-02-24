@@ -162,10 +162,13 @@ Four-phase pipeline. Each phase ends with atomic commits. Later phases depend on
 - ✅ 3.2 f64 → Decimal: fixed Kelly position sizing truncation (.round())
 
 ### Deferred to separate PRs
-- 🔲 4.1 Agent module rename (agent/ → ai_clients/) — 37+ imports, mechanical
-- 🔲 4.2 Strategy module split — 70+ files, mechanical
-- 🔲 4.3 Risk unification — 3 RiskConfig types serve different layers (config/strategy/platform)
-- 🔲 4.4 Circular dependency resolution — architectural concern, not compilation issue
+- ✅ 4.1 Agent module rename (agent/ → ai_clients/) — DONE in module-cleanup PR
+- ✅ 4.2 Strategy module split (execution/, nba_comeback/, risk_mgmt/) — DONE
+- ✅ 4.3 Risk unification — 3rd type was dead code (deleted). Remaining 2 serve different
+  layers (per-strategy vs cross-platform) — intentional, no unification needed
+- ✅ 4.4 Circular dependency — HealthState references RiskManager+Metrics so can't move to
+  domain/. adapters→services dep is layering concern, not compilation issue; acceptable in
+  single-crate Rust. Extracting trait would be over-engineering
 
 ### Current commit — EngineStore trait + engine tests
 - ✅ 3.1 Engine tests — 12 tests covering state machine transitions, abort paths, version locking
