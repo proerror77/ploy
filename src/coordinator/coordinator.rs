@@ -4995,7 +4995,12 @@ impl Coordinator {
         let daily_loss_limit = self.risk_gate.daily_loss_limit();
         let (current_drawdown, max_drawdown_observed) = self.risk_gate.drawdown_stats().await;
         let max_drawdown_limit = self.risk_gate.max_drawdown_limit();
-        let circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
+        let mut circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
+        // Retain only the most recent events to prevent unbounded memory growth in long-running deployments.
+        const MAX_CB_EVENTS: usize = 500;
+        if circuit_breaker_events.len() > MAX_CB_EVENTS {
+            circuit_breaker_events.drain(..circuit_breaker_events.len() - MAX_CB_EVENTS);
+        }
         let queue_stats = self.order_queue.read().await.stats();
         let total_realized = self.positions.total_realized_pnl().await;
 

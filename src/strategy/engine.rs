@@ -1,7 +1,8 @@
-use crate::adapters::{PostgresStore, QuoteCache, QuoteUpdate};
+use crate::adapters::{QuoteCache, QuoteUpdate};
 use crate::config::AppConfig;
 use crate::domain::{Order, OrderStatus, Round, Side, StrategyState, TimeInForce};
 use crate::error::{PloyError, Result};
+use crate::strategy::engine_store::EngineStore;
 use crate::strategy::{
     MarketDepth, OrderExecutor, RiskManager, SignalDetector, SlippageCheck, SlippageConfig,
     SlippageProtection, TradingCalculator,
@@ -15,7 +16,7 @@ use tracing::{debug, error, info, warn};
 /// Main strategy engine orchestrating all components
 pub struct StrategyEngine {
     config: AppConfig,
-    store: PostgresStore,
+    store: Box<dyn EngineStore>,
     executor: OrderExecutor,
     risk_manager: Arc<RiskManager>,
     signal_detector: Arc<RwLock<SignalDetector>>,
@@ -52,6 +53,8 @@ struct CycleContext {
     leg1_shares: u64,
     leg1_order_id: String,
     leg2_order_id: Option<String>,
+    /// Guard against duplicate forced Leg2 submissions from concurrent paths.
+    force_leg2_attempted: bool,
 }
 
 impl Default for EngineState {
@@ -70,7 +73,7 @@ impl StrategyEngine {
     /// Create a new strategy engine
     pub async fn new(
         config: AppConfig,
-        store: PostgresStore,
+        store: impl EngineStore + 'static,
         executor: OrderExecutor,
         quote_cache: QuoteCache,
     ) -> Result<Self> {
@@ -100,7 +103,7 @@ impl StrategyEngine {
 
         Ok(Self {
             config,
-            store,
+            store: Box::new(store),
             executor,
             risk_manager,
             signal_detector: Arc::new(RwLock::new(signal_detector)),
@@ -530,6 +533,7 @@ impl StrategyEngine {
                 // Use client_order_id until we have an exchange order id.
                 leg1_order_id: request.client_order_id.clone(),
                 leg2_order_id: None,
+                force_leg2_attempted: false,
             });
             state.version += 1;
 
@@ -546,7 +550,9 @@ impl StrategyEngine {
 
         // Best-effort daily metrics update (avoid failing trading logic on telemetry).
         let today = Utc::now().date_naive();
-        let _ = self.store.increment_cycle_count(today).await;
+        if let Err(e) = self.store.increment_cycle_count(today).await {
+            error!("Failed to increment cycle count: {}", e);
+        }
 
         info!(
             "Entering Leg1: {} {} shares of {} @ {}",
@@ -659,6 +665,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id.clone(),
                     leg2_order_id: None,
+                force_leg2_attempted: false,
                 };
 
                 let unwind_summary = match self
@@ -672,7 +679,9 @@ impl StrategyEngine {
                 let today = Utc::now().date_naive();
                 let halt_reason = "DB update failed after Leg1 fill - exposure may exist";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                let _ = self.store.halt_trading(today, halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
                 self.persist_halt_if_needed().await;
                 let _ = self
                     .store
@@ -732,6 +741,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id,
                     leg2_order_id: None,
+                force_leg2_attempted: false,
                 });
 
                 state.strategy_state = StrategyState::Leg1Filled;
@@ -782,6 +792,25 @@ impl StrategyEngine {
 
     async fn enter_leg2_inner(&self, side: Side, price: Decimal, forced: bool) -> Result<()> {
         let _exec_guard = self.execution_mutex.lock().await;
+
+        // Guard against duplicate forced Leg2 submissions.
+        if forced {
+            let state = self.state.read().await;
+            if state
+                .current_cycle
+                .as_ref()
+                .is_some_and(|c| c.force_leg2_attempted)
+            {
+                warn!("Force Leg2 already attempted for this cycle; skipping duplicate");
+                return Ok(());
+            }
+            drop(state);
+            // Mark the flag under write lock before proceeding.
+            let mut state = self.state.write().await;
+            if let Some(ref mut ctx) = state.current_cycle {
+                ctx.force_leg2_attempted = true;
+            }
+        }
 
         let (ctx, round) = {
             let state = self.state.read().await;
@@ -893,7 +922,14 @@ impl StrategyEngine {
         };
 
         // Keep at least the requested price (forced paths may pass a higher limit).
-        order_price = order_price.max(price).min(Decimal::ONE);
+        // Prevent forced Leg2 from creating a guaranteed loss: in binary markets,
+        // combined leg cost > 1.0 means guaranteed loss regardless of outcome.
+        let max_leg2_price = if forced {
+            (Decimal::ONE - ctx.leg1_price).min(Decimal::ONE)
+        } else {
+            Decimal::ONE
+        };
+        order_price = order_price.max(price).min(max_leg2_price);
 
         // Execute order (FOK to avoid partial hedges).
         let mut request = crate::domain::OrderRequest::buy_limit(
@@ -974,11 +1010,15 @@ impl StrategyEngine {
             self.persist_halt_if_needed().await;
 
             let today = Utc::now().date_naive();
-            let _ = self.store.record_cycle_abort(today).await;
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
 
             let halt_reason = "Failed to persist Leg2 order - open exposure";
             self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-            let _ = self.store.halt_trading(today, halt_reason).await;
+            if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
             self.persist_halt_if_needed().await;
 
             {
@@ -1014,11 +1054,15 @@ impl StrategyEngine {
                     .await;
 
                 let today = Utc::now().date_naive();
-                let _ = self.store.record_cycle_abort(today).await;
+                if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
 
                 let halt_reason = "Leg2 execution failed - open exposure";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                let _ = self.store.halt_trading(today, halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
                 self.persist_halt_if_needed().await;
 
                 {
@@ -1121,12 +1165,16 @@ impl StrategyEngine {
 
             // Update daily metrics
             let today = Utc::now().date_naive();
-            let _ = self.store.record_cycle_completion(today, net_pnl).await;
+            if let Err(e) = self.store.record_cycle_completion(today, net_pnl).await {
+                error!("Failed to record cycle completion: {}", e);
+            }
 
             if cycle_update_error.is_some() {
                 let halt_reason = "DB update failed after Leg2 fill";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                let _ = self.store.halt_trading(today, halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
                 self.persist_halt_if_needed().await;
             }
 
@@ -1210,12 +1258,16 @@ impl StrategyEngine {
                 .record_failure("Leg2 not fully filled")
                 .await;
 
-            let _ = self.store.record_cycle_abort(today).await;
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
 
             // Halt trading for manual intervention (exposure may exist).
             let halt_reason = "Leg2 not fully filled - open exposure";
             self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-            let _ = self.store.halt_trading(today, halt_reason).await;
+            if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
             self.persist_halt_if_needed().await;
 
             {
@@ -1318,7 +1370,9 @@ impl StrategyEngine {
         // Persist the intent (best effort) before submitting to the exchange.
         let client_order_id = request.client_order_id.clone();
         let order = Order::from_request(&request, Some(ctx.cycle_id), 1);
-        let _ = self.store.insert_order(&order).await;
+        if let Err(e) = self.store.insert_order(&order).await {
+            error!("Failed to persist unwind order (cycle {}): {}", ctx.cycle_id, e);
+        }
 
         let result = self.executor.execute(&request).await?;
 
@@ -1430,11 +1484,17 @@ impl StrategyEngine {
             self.risk_manager.record_failure(reason).await;
 
             let today = Utc::now().date_naive();
-            let _ = self.store.record_cycle_abort(today).await;
-            let _ = self.store.halt_trading(today, reason).await;
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
+            if let Err(e) = self.store.halt_trading(today, reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
         } else {
             let today = Utc::now().date_naive();
-            let _ = self.store.halt_trading(today, reason).await;
+            if let Err(e) = self.store.halt_trading(today, reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
         }
 
         // Always halt trading on aborts that indicate potential exposure or operational risk.
@@ -1613,5 +1673,347 @@ impl StrategyEngine {
     /// Check if dry run mode is enabled
     pub fn is_dry_run(&self) -> bool {
         self.executor.is_dry_run()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::{
+        BalanceResponse, MarketResponse, MarketSummary, OrderResponse, PositionResponse,
+        TradeResponse,
+    };
+    use crate::config::AppConfig;
+    use crate::domain::Round;
+    use crate::exchange::{ExchangeClient, ExchangeKind};
+    use crate::strategy::engine_store::mock::MockStore;
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
+    use rust_decimal_macros::dec;
+
+    // ───────────────────── Mock Exchange Client ─────────────────────
+
+    struct MockExchangeClient;
+
+    #[async_trait]
+    impl ExchangeClient for MockExchangeClient {
+        fn kind(&self) -> ExchangeKind {
+            ExchangeKind::Polymarket
+        }
+
+        fn is_dry_run(&self) -> bool {
+            true
+        }
+
+        async fn submit_order_gateway(
+            &self,
+            _request: &crate::domain::OrderRequest,
+        ) -> Result<OrderResponse> {
+            Ok(OrderResponse {
+                id: "mock-order-1".to_string(),
+                status: "live".to_string(),
+                owner: None,
+                market: None,
+                asset_id: None,
+                side: None,
+                original_size: None,
+                size_matched: None,
+                price: None,
+                associate_trades: None,
+                created_at: None,
+                expiration: None,
+                order_type: None,
+            })
+        }
+
+        async fn get_order(&self, _order_id: &str) -> Result<OrderResponse> {
+            Ok(OrderResponse {
+                id: "mock-order-1".to_string(),
+                status: "matched".to_string(),
+                owner: None,
+                market: None,
+                asset_id: None,
+                side: None,
+                original_size: Some("100".to_string()),
+                size_matched: Some("100".to_string()),
+                price: Some("0.50".to_string()),
+                associate_trades: None,
+                created_at: None,
+                expiration: None,
+                order_type: None,
+            })
+        }
+
+        async fn cancel_order(&self, _order_id: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn get_best_prices(
+            &self,
+            _token_id: &str,
+        ) -> Result<(Option<Decimal>, Option<Decimal>)> {
+            Ok((Some(dec!(0.48)), Some(dec!(0.52))))
+        }
+
+        fn infer_order_status(&self, _order: &OrderResponse) -> OrderStatus {
+            OrderStatus::Filled
+        }
+
+        fn calculate_fill(&self, _order: &OrderResponse) -> (u64, Option<Decimal>) {
+            (100, Some(dec!(0.50)))
+        }
+    }
+
+    // ───────────────────── Test helpers ─────────────────────
+
+    /// Minimal config that passes the safety guard (dry_run=true).
+    fn test_config() -> AppConfig {
+        toml::from_str(
+            r#"
+            [market]
+            ws_url = "wss://test"
+            rest_url = "https://test"
+            market_slug = "test-market"
+
+            [strategy]
+            shares = 100
+            window_min = 5
+            move_pct = "0.15"
+            sum_target = "0.95"
+            fee_buffer = "0.005"
+            slippage_buffer = "0.02"
+            profit_buffer = "0.01"
+
+            [execution]
+            order_timeout_ms = 5000
+            max_retries = 3
+            max_spread_bps = 500
+            confirm_fills = false
+
+            [risk]
+            max_single_exposure_usd = "500"
+            min_remaining_seconds = 60
+            max_consecutive_failures = 3
+            daily_loss_limit_usd = "100"
+            leg2_force_close_seconds = 30
+
+            [database]
+            url = "postgres://test:test@localhost/test"
+
+            [dry_run]
+            enabled = true
+            "#,
+        )
+        .expect("test config should parse")
+    }
+
+    fn test_round(minutes_from_now: i64) -> Round {
+        let now = Utc::now();
+        Round {
+            id: None,
+            slug: "test-btc-15m".to_string(),
+            up_token_id: "up-token-123".to_string(),
+            down_token_id: "down-token-456".to_string(),
+            start_time: now - Duration::minutes(1),
+            end_time: now + Duration::minutes(minutes_from_now),
+            outcome: None,
+        }
+    }
+
+    fn expired_round() -> Round {
+        let now = Utc::now();
+        Round {
+            id: None,
+            slug: "test-btc-expired".to_string(),
+            up_token_id: "up-token-exp".to_string(),
+            down_token_id: "down-token-exp".to_string(),
+            start_time: now - Duration::minutes(20),
+            end_time: now - Duration::minutes(5),
+            outcome: None,
+        }
+    }
+
+    async fn test_engine() -> StrategyEngine {
+        let config = test_config();
+        let executor = OrderExecutor::new_with_exchange(
+            Arc::new(MockExchangeClient),
+            config.execution.clone(),
+        );
+        let quote_cache = QuoteCache::new();
+        StrategyEngine::new(config, MockStore::new(), executor, quote_cache)
+            .await
+            .expect("engine should construct")
+    }
+
+    // ───────────────────── Tests ─────────────────────
+
+    #[tokio::test]
+    async fn initial_state_is_idle() {
+        let engine = test_engine().await;
+        assert_eq!(engine.state().await, StrategyState::Idle);
+    }
+
+    #[tokio::test]
+    async fn set_round_transitions_to_watch_window() {
+        let engine = test_engine().await;
+        let round = test_round(15);
+        engine.set_round(round).await.unwrap();
+        assert_eq!(engine.state().await, StrategyState::WatchWindow);
+    }
+
+    #[tokio::test]
+    async fn set_round_dedup_same_slug() {
+        let engine = test_engine().await;
+        let round = test_round(15);
+        engine.set_round(round.clone()).await.unwrap();
+        let v1 = engine.state.read().await.version;
+
+        // Same slug → no-op, version unchanged
+        engine.set_round(round).await.unwrap();
+        let v2 = engine.state.read().await.version;
+        assert_eq!(v1, v2, "version should not change on duplicate round");
+    }
+
+    #[tokio::test]
+    async fn set_round_expired_stays_idle() {
+        let engine = test_engine().await;
+        let round = expired_round();
+        engine.set_round(round).await.unwrap();
+        // Round already past window → stays Idle (or becomes Idle via has_ended())
+        let state = engine.state().await;
+        assert!(
+            state == StrategyState::Idle,
+            "expired round should not enter WatchWindow, got {:?}",
+            state
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_sets_flag() {
+        let engine = test_engine().await;
+        assert!(!engine.state.read().await.shutdown);
+        engine.shutdown().await;
+        assert!(engine.state.read().await.shutdown);
+    }
+
+    #[tokio::test]
+    async fn transition_to_idle_clears_state() {
+        let engine = test_engine().await;
+        // Move to WatchWindow first
+        let round = test_round(15);
+        engine.set_round(round).await.unwrap();
+        assert_eq!(engine.state().await, StrategyState::WatchWindow);
+
+        // Transition to idle
+        engine.transition_to_idle().await.unwrap();
+        assert_eq!(engine.state().await, StrategyState::Idle);
+        let state = engine.state.read().await;
+        assert!(state.current_round.is_none(), "round should be cleared");
+        assert!(state.current_cycle.is_none(), "cycle should be cleared");
+    }
+
+    #[tokio::test]
+    async fn version_increments_on_state_change() {
+        let engine = test_engine().await;
+        let v0 = engine.state.read().await.version;
+        assert_eq!(v0, 0);
+
+        engine.set_round(test_round(15)).await.unwrap();
+        let v1 = engine.state.read().await.version;
+        assert!(v1 > v0, "version should increment after set_round");
+
+        engine.transition_to_idle().await.unwrap();
+        let v2 = engine.state.read().await.version;
+        assert!(v2 > v1, "version should increment after transition_to_idle");
+    }
+
+    #[tokio::test]
+    async fn abort_cycle_without_active_cycle() {
+        let engine = test_engine().await;
+        // Abort with no active cycle should still move to Abort state
+        engine.abort_cycle("test reason").await.unwrap();
+        assert_eq!(engine.state().await, StrategyState::Abort);
+    }
+
+    #[tokio::test]
+    async fn abort_cycle_neutral_without_active_cycle() {
+        let engine = test_engine().await;
+        engine.abort_cycle_neutral("neutral test").await.unwrap();
+        assert_eq!(engine.state().await, StrategyState::Abort);
+    }
+
+    #[tokio::test]
+    async fn set_round_blocked_mid_cycle() {
+        let engine = test_engine().await;
+        let round = test_round(15);
+        engine.set_round(round).await.unwrap();
+
+        // Simulate a mid-cycle state by writing directly
+        {
+            let mut state = engine.state.write().await;
+            state.strategy_state = StrategyState::Leg1Filled;
+            state.current_cycle = Some(CycleContext {
+                cycle_id: 42,
+                leg1_side: Side::Up,
+                leg1_price: dec!(0.45),
+                leg1_shares: 100,
+                leg1_order_id: "test-order".to_string(),
+                leg2_order_id: None,
+                force_leg2_attempted: false,
+            });
+        }
+
+        // Try to set a different round — should be rejected (mid-cycle)
+        let new_round = Round {
+            slug: "test-btc-different".to_string(),
+            ..test_round(15)
+        };
+        engine.set_round(new_round).await.unwrap();
+
+        // State should still be Leg1Filled (round change ignored)
+        assert_eq!(engine.state().await, StrategyState::Leg1Filled);
+    }
+
+    #[tokio::test]
+    async fn abort_cycle_with_active_cycle_clears_context() {
+        let engine = test_engine().await;
+        let round = test_round(15);
+        engine.set_round(round).await.unwrap();
+
+        // Simulate active cycle
+        {
+            let mut state = engine.state.write().await;
+            state.strategy_state = StrategyState::Leg1Filled;
+            state.current_cycle = Some(CycleContext {
+                cycle_id: 99,
+                leg1_side: Side::Down,
+                leg1_price: dec!(0.55),
+                leg1_shares: 50,
+                leg1_order_id: "leg1-order".to_string(),
+                leg2_order_id: None,
+                force_leg2_attempted: false,
+            });
+        }
+
+        engine.abort_cycle("test abort with cycle").await.unwrap();
+        assert_eq!(engine.state().await, StrategyState::Abort);
+        assert!(
+            engine.state.read().await.current_cycle.is_none(),
+            "cycle should be cleared after abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_safety_guard_rejects_live_mode_without_confirm_fills() {
+        let mut config = test_config();
+        config.dry_run.enabled = false;
+        config.execution.confirm_fills = false;
+
+        let executor = OrderExecutor::new_with_exchange(
+            Arc::new(MockExchangeClient),
+            config.execution.clone(),
+        );
+        let result = StrategyEngine::new(config, MockStore::new(), executor, QuoteCache::new()).await;
+        assert!(result.is_err(), "should reject live mode without confirm_fills");
     }
 }

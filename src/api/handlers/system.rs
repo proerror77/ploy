@@ -590,7 +590,7 @@ pub async fn update_config(
         VALUES ('CONFIG_UPDATE', 'MEDIUM', 'Strategy config updated via API', $1)
         "#,
     )
-    .bind(serde_json::to_value(&*config).unwrap())
+    .bind(serde_json::to_value(&*config).unwrap_or_default())
     .execute(state.store.pool())
     .await;
 

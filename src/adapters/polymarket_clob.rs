@@ -319,12 +319,22 @@ pub struct MarketSummary {
     pub outcome_prices: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ApiKeyResponse {
     #[serde(rename = "apiKey")]
     pub api_key: String,
     pub secret: String,
     pub passphrase: String,
+}
+
+impl std::fmt::Debug for ApiKeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyResponse")
+            .field("api_key", &format_args!("{}...", &self.api_key[..8.min(self.api_key.len())]))
+            .field("secret", &"[REDACTED]")
+            .field("passphrase", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // ==================== Account & Position Types ====================
