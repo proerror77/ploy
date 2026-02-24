@@ -1,7 +1,7 @@
 use ploy::error::Result;
 
 pub(super) async fn run_advisory_mode(market: Option<&str>, chat: bool) -> Result<()> {
-    use ploy::agent::{protocol::MarketSnapshot, AdvisoryAgent, ClaudeAgentClient};
+    use ploy::ai_clients::{protocol::MarketSnapshot, AdvisoryAgent, ClaudeAgentClient};
     use std::io::{self, BufRead, Write};
 
     let client = ClaudeAgentClient::new();

@@ -4,9 +4,9 @@
 //! from fully autonomous to requiring human confirmation for trades.
 
 use crate::adapters::PolymarketClient;
-use crate::agent::client::ClaudeAgentClient;
-use crate::agent::grok::{GrokClient, SearchResult};
-use crate::agent::protocol::{AgentAction, AgentContext, AgentResponse, PositionInfo};
+use crate::ai_clients::client::ClaudeAgentClient;
+use crate::ai_clients::grok::{GrokClient, SearchResult};
+use crate::ai_clients::protocol::{AgentAction, AgentContext, AgentResponse, PositionInfo};
 use crate::domain::{RiskState, Side};
 use crate::error::{PloyError, Result};
 use rust_decimal::prelude::ToPrimitive;

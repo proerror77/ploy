@@ -11,9 +11,9 @@
 
 use crate::adapters::polymarket_clob::{GammaMarketInfo, MarketSummary as GammaMarketSummary};
 use crate::adapters::{GammaEventInfo, PolymarketClient};
-use crate::agent::client::{AgentClientConfig, ClaudeAgentClient};
-use crate::agent::grok::GrokClient;
-use crate::agent::sports_data::{format_for_claude, SportsDataFetcher, StructuredGameData};
+use crate::ai_clients::client::{AgentClientConfig, ClaudeAgentClient};
+use crate::ai_clients::grok::GrokClient;
+use crate::ai_clients::sports_data::{format_for_claude, SportsDataFetcher, StructuredGameData};
 use crate::error::{PloyError, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,7 @@ impl SportsAnalyst {
 
     /// Create from environment with Opus model for decision making
     pub fn from_env() -> Result<Self> {
-        use crate::agent::grok::GrokConfig;
+        use crate::ai_clients::grok::GrokConfig;
 
         let grok = GrokClient::new(GrokConfig::from_env())?;
         if !grok.is_configured() {
@@ -801,7 +801,7 @@ IMPORTANT:
 
     /// Analyze with DraftKings odds comparison
     pub async fn analyze_with_draftkings(&self, event_url: &str) -> Result<SportsAnalysisWithDK> {
-        use crate::agent::odds_provider::{OddsProvider, Sport};
+        use crate::ai_clients::odds_provider::{OddsProvider, Sport};
 
         // Get base analysis first
         let analysis = self.analyze_event(event_url).await?;
@@ -862,7 +862,7 @@ IMPORTANT:
 #[derive(Debug, Clone)]
 pub struct SportsAnalysisWithDK {
     pub base: SportsAnalysis,
-    pub draftkings: Option<crate::agent::odds_provider::EdgeAnalysis>,
+    pub draftkings: Option<crate::ai_clients::odds_provider::EdgeAnalysis>,
 }
 
 impl SportsAnalysisWithDK {
@@ -905,7 +905,7 @@ mod tests {
     use super::*;
 
     fn create_test_analyst() -> SportsAnalyst {
-        let grok = GrokClient::new(crate::agent::grok::GrokConfig::default()).unwrap();
+        let grok = GrokClient::new(crate::ai_clients::grok::GrokConfig::default()).unwrap();
         let claude = ClaudeAgentClient::new();
         SportsAnalyst::new(grok, claude)
     }

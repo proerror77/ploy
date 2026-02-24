@@ -1,8 +1,8 @@
 use ploy::error::Result;
 
 pub(super) async fn run_sports_mode(sports_url: Option<&str>) -> Result<()> {
-    use ploy::agent::sports_analyst::TradeAction;
-    use ploy::agent::SportsAnalyst;
+    use ploy::ai_clients::sports_analyst::TradeAction;
+    use ploy::ai_clients::SportsAnalyst;
 
     let event_url = match sports_url {
         Some(url) => url.to_string(),

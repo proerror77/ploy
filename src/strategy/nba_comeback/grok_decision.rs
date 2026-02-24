@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::agent::grok::GrokClient;
+use crate::ai_clients::grok::GrokClient;
 use crate::strategy::nba_comeback::espn::LiveGame;
 use crate::strategy::nba_comeback::grok_intel::{
     self, GrokGameIntel, GrokSignalType, MomentumDirection,
