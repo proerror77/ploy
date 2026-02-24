@@ -162,8 +162,12 @@ Four-phase pipeline. Each phase ends with atomic commits. Later phases depend on
 - ✅ 3.2 f64 → Decimal: fixed Kelly position sizing truncation (.round())
 
 ### Deferred to separate PRs
-- 🔲 3.1 Engine tests — needs Store trait abstraction first
 - 🔲 4.1 Agent module rename (agent/ → ai_clients/) — 37+ imports, mechanical
 - 🔲 4.2 Strategy module split — 70+ files, mechanical
 - 🔲 4.3 Risk unification — 3 RiskConfig types serve different layers (config/strategy/platform)
 - 🔲 4.4 Circular dependency resolution — architectural concern, not compilation issue
+
+### Current commit — EngineStore trait + engine tests
+- ✅ 3.1 Engine tests — 12 tests covering state machine transitions, abort paths, version locking
+- ✅ EngineStore trait (15 methods) with MockStore for DI-based testing
+- ✅ MockExchangeClient for test isolation from HTTP/CLOB layer

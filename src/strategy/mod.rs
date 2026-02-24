@@ -59,6 +59,7 @@ pub mod calculations;
 pub mod claimer;
 pub mod dump_hedge;
 pub mod engine;
+pub mod engine_store;
 pub mod execution_sim;
 pub mod executor;
 pub mod fund_manager;
