@@ -52,6 +52,41 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
+/// Entry mode for the crypto momentum agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoEntryMode {
+    /// Original arbitrage-only mode: require sum_of_asks < threshold.
+    ArbOnly,
+    /// Directional mode: trade based on momentum edge alone, no sum constraint.
+    Directional,
+    /// Volatility straddle: buy both UP and DOWN when sum < straddle_threshold.
+    VolStraddle,
+}
+
+fn default_entry_mode() -> CryptoEntryMode {
+    CryptoEntryMode::Directional
+}
+
+fn default_oracle_lag_buffer_secs() -> u64 {
+    3
+}
+
+fn default_max_spread_pct() -> Decimal {
+    dec!(0.10)
+}
+
+fn default_straddle_threshold() -> Decimal {
+    dec!(0.99)
+}
+
+fn default_straddle_min_vol() -> Decimal {
+    Decimal::ZERO
+}
+
+/// Bias added to P(UP) for >= settlement rule (UP wins on ties).
+const GEQ_SETTLEMENT_BIAS: f64 = 0.002;
+
 /// Convert event threshold into required return from event start price.
 ///
 /// For UP/DOWN markets:
@@ -85,6 +120,7 @@ fn estimate_p_up_window(
     required_return: Decimal,
     rolling_volatility_opt: Option<Decimal>,
     window_remaining_secs: i64,
+    oracle_lag_buffer_secs: u64,
 ) -> Decimal {
     if window_remaining_secs <= 0 {
         return dec!(0.5);
@@ -92,10 +128,18 @@ fn estimate_p_up_window(
 
     let sigma_1s = rolling_volatility_opt.unwrap_or(Decimal::ZERO);
     let sigma_1s_f = sigma_1s.to_f64().unwrap_or(0.0);
-    let sigma_rem = sigma_1s_f * (window_remaining_secs as f64).sqrt();
+
+    // Oracle lag buffer: near settlement, inflate remaining-time uncertainty
+    // to account for Chainlink vs Binance price delay.
+    let effective_remaining = if window_remaining_secs < 30 {
+        (window_remaining_secs as f64) + (oracle_lag_buffer_secs as f64)
+    } else {
+        window_remaining_secs as f64
+    };
+    let sigma_rem = sigma_1s_f * effective_remaining.sqrt();
 
     let z_num = (window_move - required_return).to_f64().unwrap_or(0.0);
-    let p_up = if sigma_rem.is_finite() && sigma_rem > 0.0 && z_num.is_finite() {
+    let mut p_up = if sigma_rem.is_finite() && sigma_rem > 0.0 && z_num.is_finite() {
         normal_cdf(z_num / sigma_rem)
     } else if z_num > 0.0 {
         1.0
@@ -105,7 +149,13 @@ fn estimate_p_up_window(
         0.5
     };
 
-    Decimal::from_f64(p_up)
+    // >= settlement bias: UP wins on ties (close >= open).
+    // Only significant for pure UP/DOWN events where required_return ≈ 0.
+    if required_return.abs().to_f64().unwrap_or(1.0) < 0.001 {
+        p_up += GEQ_SETTLEMENT_BIAS;
+    }
+
+    Decimal::from_f64(p_up.clamp(0.01, 0.99))
         .unwrap_or(dec!(0.5))
         .max(dec!(0.01))
         .min(dec!(0.99))
@@ -161,6 +211,27 @@ pub struct CryptoTradingConfig {
     pub min_hold_secs: u64,
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
+
+    /// Entry mode: arb_only (legacy), directional (no sum gate), vol_straddle (buy both sides).
+    #[serde(default = "default_entry_mode")]
+    pub entry_mode: CryptoEntryMode,
+
+    /// Oracle lag buffer (seconds) added to remaining-time uncertainty near settlement.
+    /// Accounts for Chainlink-vs-Binance delay in the last 30s of the window.
+    #[serde(default = "default_oracle_lag_buffer_secs")]
+    pub oracle_lag_buffer_secs: u64,
+
+    /// Maximum bid-ask spread percentage per side to filter thin markets.
+    #[serde(default = "default_max_spread_pct")]
+    pub max_spread_pct: Decimal,
+
+    /// (VolStraddle mode) Maximum sum of asks to enter a straddle position.
+    #[serde(default = "default_straddle_threshold")]
+    pub straddle_threshold: Decimal,
+
+    /// (VolStraddle mode) Minimum 60s rolling volatility required to enter.
+    #[serde(default = "default_straddle_min_vol")]
+    pub straddle_min_vol: Decimal,
 }
 
 impl Default for CryptoTradingConfig {
@@ -186,6 +257,11 @@ impl Default for CryptoTradingConfig {
             min_hold_secs: 20,
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
+            entry_mode: default_entry_mode(),
+            oracle_lag_buffer_secs: default_oracle_lag_buffer_secs(),
+            max_spread_pct: default_max_spread_pct(),
+            straddle_threshold: default_straddle_threshold(),
+            straddle_min_vol: default_straddle_min_vol(),
         }
     }
 }
@@ -618,7 +694,13 @@ impl TradingAgent for CryptoTradingAgent {
                         }
 
                         let held_secs = Utc::now().signed_duration_since(pos.entry_time).num_seconds();
-                        if held_secs < self.config.min_hold_secs as i64 {
+                        // 5m events: force hold-to-settlement (no early signal-flip exit).
+                        let effective_min_hold = if normalize_timeframe(&pos.horizon) == "5m" {
+                            event_window_secs_for_horizon("5m") as i64
+                        } else {
+                            self.config.min_hold_secs as i64
+                        };
+                        if held_secs < effective_min_hold {
                             continue;
                         }
 
@@ -777,7 +859,7 @@ impl TradingAgent for CryptoTradingAgent {
 
                         let up = quote_cache.get(&event.up_token_id);
                         let down = quote_cache.get(&event.down_token_id);
-                        let (_up_bid, up_ask, _down_bid, down_ask) = match (up, down) {
+                        let (up_bid, up_ask, down_bid, down_ask) = match (up, down) {
                             (Some(uq), Some(dq)) => (
                                 uq.best_bid.unwrap_or(Decimal::ZERO),
                                 uq.best_ask.unwrap_or(Decimal::ZERO),
@@ -791,9 +873,108 @@ impl TradingAgent for CryptoTradingAgent {
                             continue;
                         }
 
+                        // Spread check: reject thin markets where bid-ask is too wide.
+                        {
+                            let up_spread = if up_bid > Decimal::ZERO {
+                                (up_ask - up_bid) / up_ask
+                            } else {
+                                Decimal::ONE
+                            };
+                            let down_spread = if down_bid > Decimal::ZERO {
+                                (down_ask - down_bid) / down_ask
+                            } else {
+                                Decimal::ONE
+                            };
+                            if up_spread > self.config.max_spread_pct
+                                || down_spread > self.config.max_spread_pct
+                            {
+                                continue;
+                            }
+                        }
+
                         let sum_of_asks = up_ask + down_ask;
-                        if sum_of_asks >= self.config.sum_threshold {
-                            continue;
+
+                        // Entry mode gate + straddle path
+                        match self.config.entry_mode {
+                            CryptoEntryMode::ArbOnly => {
+                                if sum_of_asks >= self.config.sum_threshold {
+                                    continue;
+                                }
+                            }
+                            CryptoEntryMode::Directional => {
+                                // No sum check — rely on momentum edge + min_edge
+                            }
+                            CryptoEntryMode::VolStraddle => {
+                                // Straddle: buy both sides when sum < threshold and vol is high
+                                if sum_of_asks >= self.config.straddle_threshold {
+                                    continue;
+                                }
+                                if rolling_volatility < self.config.straddle_min_vol {
+                                    continue;
+                                }
+                                let straddle_shares = self.config.default_shares;
+                                let straddle_profit_pct = Decimal::ONE - sum_of_asks;
+                                let deployment_id =
+                                    deployment_id_for(STRATEGY_ID, &coin, &event.horizon);
+                                let tf = normalize_timeframe(&event.horizon);
+                                let ew = event_window_secs_for_horizon(&tf).to_string();
+                                for (s_side, s_token, s_price) in [
+                                    (Side::Up, event.up_token_id.as_str(), up_ask),
+                                    (Side::Down, event.down_token_id.as_str(), down_ask),
+                                ] {
+                                    let intent = OrderIntent::new(
+                                        &self.config.agent_id,
+                                        Domain::Crypto,
+                                        event.slug.as_str(),
+                                        s_token,
+                                        s_side,
+                                        true,
+                                        straddle_shares,
+                                        s_price,
+                                    )
+                                    .with_priority(OrderPriority::Normal)
+                                    .with_metadata("strategy", STRATEGY_ID)
+                                    .with_deployment_id(&deployment_id)
+                                    .with_metadata("timeframe", &tf)
+                                    .with_metadata("event_window_secs", &ew)
+                                    .with_metadata("coin", &coin)
+                                    .with_condition_id(&event.condition_id)
+                                    .with_metadata("series_id", &event.series_id)
+                                    .with_metadata("event_series_id", &event.series_id)
+                                    .with_metadata("horizon", &event.horizon)
+                                    .with_metadata("entry_mode", "vol_straddle")
+                                    .with_metadata("sum_of_asks", &sum_of_asks.to_string())
+                                    .with_metadata(
+                                        "straddle_profit_pct",
+                                        &straddle_profit_pct.to_string(),
+                                    )
+                                    .with_metadata(
+                                        "rolling_volatility",
+                                        &rolling_volatility.to_string(),
+                                    )
+                                    .with_metadata("config_hash", &config_hash);
+
+                                    if let Err(e) = ctx.submit_order(intent).await {
+                                        warn!(
+                                            agent = self.config.agent_id,
+                                            side = %s_side,
+                                            error = %e,
+                                            "straddle order failed"
+                                        );
+                                    }
+                                }
+                                info!(
+                                    agent = self.config.agent_id,
+                                    slug = %event.slug,
+                                    %sum_of_asks,
+                                    profit_pct = %straddle_profit_pct,
+                                    vol = %rolling_volatility,
+                                    "straddle entry: bought both sides"
+                                );
+                                traded_events.insert(event.slug.clone(), now);
+                                entered_timeframes.insert(timeframe.clone());
+                                continue; // skip directional entry below
+                            }
                         }
 
                         let (token_id, limit_price) = match side {
@@ -813,6 +994,7 @@ impl TradingAgent for CryptoTradingAgent {
                             required_return,
                             rolling_volatility_opt,
                             window_remaining_secs,
+                            self.config.oracle_lag_buffer_secs,
                         );
                         let fair_value = match side {
                             Side::Up => p_up,
@@ -868,6 +1050,11 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("sum_of_asks", &sum_of_asks.to_string())
                         .with_metadata("event_title", &event.title)
                         .with_metadata("signal_type", "crypto_momentum_entry")
+                        .with_metadata("entry_mode", match self.config.entry_mode {
+                            CryptoEntryMode::ArbOnly => "arb_only",
+                            CryptoEntryMode::Directional => "directional",
+                            CryptoEntryMode::VolStraddle => "vol_straddle",
+                        })
                         .with_metadata("signal_confidence", &confidence.to_string())
                         .with_metadata("signal_momentum_value", &momentum_1s.to_string())
                         .with_metadata("signal_short_ma", &short_momentum.to_string())
@@ -1195,9 +1382,9 @@ mod tests {
         let vol = Some(dec!(0.002));
         let rem = 300;
 
-        let base = estimate_p_up_window(window_move, dec!(0), vol, rem);
-        let harder = estimate_p_up_window(window_move, dec!(0.01), vol, rem);
-        let easier = estimate_p_up_window(window_move, dec!(-0.01), vol, rem);
+        let base = estimate_p_up_window(window_move, dec!(0), vol, rem, 0);
+        let harder = estimate_p_up_window(window_move, dec!(0.01), vol, rem, 0);
+        let easier = estimate_p_up_window(window_move, dec!(-0.01), vol, rem, 0);
 
         assert!(harder < base, "higher threshold should reduce p_up");
         assert!(easier > base, "lower threshold should increase p_up");

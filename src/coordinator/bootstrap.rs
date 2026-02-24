@@ -4063,6 +4063,37 @@ impl PlatformBootstrapConfig {
         }
         cfg.crypto.min_hold_secs =
             env_u64("PLOY_CRYPTO_AGENT__MIN_HOLD_SECS", cfg.crypto.min_hold_secs);
+        // Entry mode: arb_only | directional | vol_straddle
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENTRY_MODE") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "arb_only" | "arb" => {
+                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::ArbOnly
+                }
+                "directional" | "dir" => {
+                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::Directional
+                }
+                "vol_straddle" | "straddle" => {
+                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::VolStraddle
+                }
+                _ => {}
+            }
+        }
+        cfg.crypto.oracle_lag_buffer_secs = env_u64(
+            "PLOY_CRYPTO_AGENT__ORACLE_LAG_BUFFER_SECS",
+            cfg.crypto.oracle_lag_buffer_secs,
+        );
+        cfg.crypto.max_spread_pct = env_decimal(
+            "PLOY_CRYPTO_AGENT__MAX_SPREAD_PCT",
+            cfg.crypto.max_spread_pct,
+        );
+        cfg.crypto.straddle_threshold = env_decimal(
+            "PLOY_CRYPTO_AGENT__STRADDLE_THRESHOLD",
+            cfg.crypto.straddle_threshold,
+        );
+        cfg.crypto.straddle_min_vol = env_decimal(
+            "PLOY_CRYPTO_AGENT__STRADDLE_MIN_VOL",
+            cfg.crypto.straddle_min_vol,
+        );
         cfg.crypto.heartbeat_interval_secs = env_u64(
             "PLOY_CRYPTO_AGENT__HEARTBEAT_INTERVAL_SECS",
             cfg.crypto.heartbeat_interval_secs,
@@ -4222,12 +4253,12 @@ impl PlatformBootstrapConfig {
                 _ => {}
             }
         }
-        cfg.crypto_lob_ml.threshold_prob_weight = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT",
-            cfg.crypto_lob_ml.threshold_prob_weight,
+        cfg.crypto_lob_ml.model_blend_weight = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__MODEL_BLEND_WEIGHT",
+            cfg.crypto_lob_ml.model_blend_weight,
         )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(90, 2));
+        .max(rust_decimal::Decimal::new(1, 2))
+        .min(rust_decimal::Decimal::new(99, 2));
         cfg.crypto_lob_ml.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__EVENT_REFRESH_SECS",
             cfg.crypto_lob_ml.event_refresh_secs,
@@ -4307,12 +4338,8 @@ impl PlatformBootstrapConfig {
                 Some(v.to_string())
             };
         }
-        cfg.crypto_lob_ml.window_fallback_weight = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT",
-            cfg.crypto_lob_ml.window_fallback_weight,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(49, 2));
+        // window_fallback_weight env var kept for backward compat but is unused
+        // in the 2-layer blend model. Ignore silently.
         cfg.crypto_lob_ml.ev_exit_buffer = env_decimal(
             "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER",
             cfg.crypto_lob_ml.ev_exit_buffer,
@@ -4325,6 +4352,21 @@ impl PlatformBootstrapConfig {
         )
         .max(rust_decimal::Decimal::ZERO)
         .min(rust_decimal::Decimal::new(50, 2));
+        cfg.crypto_lob_ml.oracle_lag_buffer_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__ORACLE_LAG_BUFFER_SECS",
+            cfg.crypto_lob_ml.oracle_lag_buffer_secs,
+        );
+        cfg.crypto_lob_ml.max_spread_pct = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__MAX_SPREAD_PCT",
+            cfg.crypto_lob_ml.max_spread_pct,
+        );
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__FORCE_SETTLE_ONLY_5M") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.force_settle_only_5m = true,
+                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.force_settle_only_5m = false,
+                _ => {}
+            }
+        }
 
         #[cfg(feature = "rl")]
         {
@@ -6273,14 +6315,13 @@ mod tests {
         let model_type_key = "PLOY_CRYPTO_LOB_ML__MODEL_TYPE";
         let model_path_key = "PLOY_CRYPTO_LOB_ML__MODEL_PATH";
         let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
-        let window_weight_key = "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT";
+        let blend_weight_key = "PLOY_CRYPTO_LOB_ML__MODEL_BLEND_WEIGHT";
         let ev_exit_buffer_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER";
         let ev_exit_vol_scale_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_VOL_SCALE";
         let taker_fee_key = "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE";
         let slippage_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS";
         let use_threshold_key = "PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT";
         let require_threshold_key = "PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT";
-        let threshold_weight_key = "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT";
         let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
         let entry_side_policy_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY";
         let entry_late_window_5m_key = "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M";
@@ -6289,14 +6330,13 @@ mod tests {
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
         let prev_model_version = std::env::var(model_version_key).ok();
-        let prev_window_weight = std::env::var(window_weight_key).ok();
+        let prev_blend_weight = std::env::var(blend_weight_key).ok();
         let prev_ev_exit_buffer = std::env::var(ev_exit_buffer_key).ok();
         let prev_ev_exit_vol_scale = std::env::var(ev_exit_vol_scale_key).ok();
         let prev_taker_fee = std::env::var(taker_fee_key).ok();
         let prev_slippage = std::env::var(slippage_key).ok();
         let prev_use_threshold = std::env::var(use_threshold_key).ok();
         let prev_require_threshold = std::env::var(require_threshold_key).ok();
-        let prev_threshold_weight = std::env::var(threshold_weight_key).ok();
         let prev_exit_mode = std::env::var(exit_mode_key).ok();
         let prev_entry_side_policy = std::env::var(entry_side_policy_key).ok();
         let prev_entry_late_window_5m = std::env::var(entry_late_window_5m_key).ok();
@@ -6305,14 +6345,13 @@ mod tests {
         set_env(model_type_key, Some("onnx"));
         set_env(model_path_key, Some("/tmp/models/lob_tcn_v2.onnx"));
         set_env(model_version_key, Some("lob_tcn_v2"));
-        set_env(window_weight_key, Some("0.15"));
+        set_env(blend_weight_key, Some("0.75"));
         set_env(ev_exit_buffer_key, Some("0.01"));
         set_env(ev_exit_vol_scale_key, Some("0.03"));
         set_env(taker_fee_key, Some("0.03"));
         set_env(slippage_key, Some("12"));
         set_env(use_threshold_key, Some("true"));
         set_env(require_threshold_key, Some("false"));
-        set_env(threshold_weight_key, Some("0.40"));
         set_env(exit_mode_key, Some("ev_exit"));
         set_env(entry_side_policy_key, Some("lagging_only"));
         set_env(entry_late_window_5m_key, Some("170"));
@@ -6331,8 +6370,8 @@ mod tests {
             Some("lob_tcn_v2")
         );
         assert_eq!(
-            cfg.crypto_lob_ml.window_fallback_weight,
-            rust_decimal::Decimal::new(15, 2)
+            cfg.crypto_lob_ml.model_blend_weight,
+            rust_decimal::Decimal::new(75, 2)
         );
         assert_eq!(
             cfg.crypto_lob_ml.ev_exit_buffer,
@@ -6352,10 +6391,6 @@ mod tests {
         );
         assert!(cfg.crypto_lob_ml.use_price_to_beat);
         assert!(!cfg.crypto_lob_ml.require_price_to_beat);
-        assert_eq!(
-            cfg.crypto_lob_ml.threshold_prob_weight,
-            rust_decimal::Decimal::new(40, 2)
-        );
         assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(
             cfg.crypto_lob_ml.entry_side_policy,
@@ -6376,9 +6411,9 @@ mod tests {
             Some(v) => set_env(model_version_key, Some(v)),
             None => set_env(model_version_key, None),
         }
-        match prev_window_weight.as_deref() {
-            Some(v) => set_env(window_weight_key, Some(v)),
-            None => set_env(window_weight_key, None),
+        match prev_blend_weight.as_deref() {
+            Some(v) => set_env(blend_weight_key, Some(v)),
+            None => set_env(blend_weight_key, None),
         }
         match prev_ev_exit_buffer.as_deref() {
             Some(v) => set_env(ev_exit_buffer_key, Some(v)),
@@ -6403,10 +6438,6 @@ mod tests {
         match prev_require_threshold.as_deref() {
             Some(v) => set_env(require_threshold_key, Some(v)),
             None => set_env(require_threshold_key, None),
-        }
-        match prev_threshold_weight.as_deref() {
-            Some(v) => set_env(threshold_weight_key, Some(v)),
-            None => set_env(threshold_weight_key, None),
         }
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),

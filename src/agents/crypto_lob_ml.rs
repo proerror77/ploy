@@ -78,6 +78,21 @@ fn default_max_time_remaining_secs_15m() -> u64 {
     240
 }
 
+fn default_oracle_lag_buffer_secs() -> u64 {
+    3
+}
+
+fn default_max_spread_pct() -> Decimal {
+    dec!(0.10)
+}
+
+fn default_force_settle_only_5m() -> bool {
+    true
+}
+
+/// Bias added to P(UP) for >= settlement rule (UP wins on ties).
+const GEQ_SETTLEMENT_BIAS: f64 = 0.002;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CryptoLobMlExitMode {
@@ -199,10 +214,13 @@ pub struct CryptoLobMlConfig {
     #[serde(default = "default_require_price_to_beat")]
     pub require_price_to_beat: bool,
 
-    /// Blend weight for threshold-anchored settlement probability.
-    /// p_up = p_up_base * (1 - w_threshold) + p_up_threshold * w_threshold
-    #[serde(default = "default_threshold_prob_weight")]
-    pub threshold_prob_weight: Decimal,
+    /// Blend weight for the ONNX model vs GBM anchor probability.
+    /// p_final = w_model × p_model + (1 - w_model) × p_gbm_anchor
+    #[serde(
+        default = "default_model_blend_weight",
+        alias = "threshold_prob_weight"
+    )]
+    pub model_blend_weight: Decimal,
 
     /// Minimum seconds between entries per symbol (avoid thrash).
     pub cooldown_secs: u64,
@@ -222,10 +240,33 @@ pub struct CryptoLobMlConfig {
     #[serde(default)]
     pub model_version: Option<String>,
 
-    /// Safety fallback blend weight for window baseline probability.
-    /// p_up = p_up_model * (1 - w_window) + p_up_window * w_window
+    /// Expected SHA256 hex digest of the model file. On startup, if the model file
+    /// exists and this is set, the actual hash is compared and a warning logged on mismatch.
+    #[serde(default)]
+    pub model_sha256: Option<String>,
+
+    /// ISO8601 timestamp of when the model was trained.
+    #[serde(default)]
+    pub model_trained_at: Option<String>,
+
+    /// Validation AUC of the model (recorded in order metadata for post-hoc analysis).
+    #[serde(default)]
+    pub model_auc: Option<f64>,
+
+    /// Per-feature offsets for normalization: normalized = (raw - offset) * scale.
+    /// Length must equal SEQ_FEATURE_DIM (11). Empty → identity (no normalization).
+    #[serde(default)]
+    pub feature_offsets: Vec<f32>,
+
+    /// Per-feature scales for normalization: normalized = (raw - offset) * scale.
+    /// Length must equal SEQ_FEATURE_DIM (11). Empty → identity (no normalization).
+    #[serde(default)]
+    pub feature_scales: Vec<f32>,
+
+    /// Safety fallback blend weight for window baseline probability (DEPRECATED).
+    /// Kept for config backward-compat deserialization but unused in 2-layer blend.
     #[serde(default = "default_window_fallback_weight")]
-    pub window_fallback_weight: Decimal,
+    pub _window_fallback_weight_compat: Decimal,
 
     /// Minimum positive EV gap required to trigger EV exit.
     #[serde(default = "default_ev_exit_buffer")]
@@ -237,6 +278,18 @@ pub struct CryptoLobMlConfig {
 
     pub risk_params: AgentRiskParams,
     pub heartbeat_interval_secs: u64,
+
+    /// Oracle lag buffer (seconds) added to remaining-time uncertainty near settlement.
+    #[serde(default = "default_oracle_lag_buffer_secs")]
+    pub oracle_lag_buffer_secs: u64,
+
+    /// Maximum bid-ask spread percentage per side to filter thin markets.
+    #[serde(default = "default_max_spread_pct")]
+    pub max_spread_pct: Decimal,
+
+    /// When true, force SettleOnly exit mode for 5m events regardless of configured exit_mode.
+    #[serde(default = "default_force_settle_only_5m")]
+    pub force_settle_only_5m: bool,
 }
 
 fn default_lob_ml_model_type() -> String {
@@ -271,8 +324,9 @@ fn default_require_price_to_beat() -> bool {
     true
 }
 
-fn default_threshold_prob_weight() -> Decimal {
-    dec!(0.35)
+
+fn default_model_blend_weight() -> Decimal {
+    dec!(0.80)
 }
 
 fn default_entry_late_window_secs_5m() -> u64 {
@@ -312,17 +366,25 @@ impl Default for CryptoLobMlConfig {
             entry_slippage_bps: default_entry_slippage_bps(),
             use_price_to_beat: default_use_price_to_beat(),
             require_price_to_beat: default_require_price_to_beat(),
-            threshold_prob_weight: default_threshold_prob_weight(),
+            model_blend_weight: default_model_blend_weight(),
             cooldown_secs: 30,
             max_lob_snapshot_age_secs: 2,
             model_type: default_lob_ml_model_type(),
             model_path: None,
             model_version: None,
-            window_fallback_weight: default_window_fallback_weight(),
+            model_sha256: None,
+            model_trained_at: None,
+            model_auc: None,
+            feature_offsets: vec![],
+            feature_scales: vec![],
+            _window_fallback_weight_compat: default_window_fallback_weight(),
             ev_exit_buffer: default_ev_exit_buffer(),
             ev_exit_vol_scale: default_ev_exit_vol_scale(),
             risk_params: AgentRiskParams::conservative(),
             heartbeat_interval_secs: 5,
+            oracle_lag_buffer_secs: default_oracle_lag_buffer_secs(),
+            max_spread_pct: default_max_spread_pct(),
+            force_settle_only_5m: default_force_settle_only_5m(),
         }
     }
 }
@@ -349,15 +411,13 @@ struct WindowContext {
     window_move: Decimal,
     elapsed_secs: i64,
     remaining_secs: i64,
-    p_up_window: Decimal,
 }
 
 #[derive(Debug, Clone)]
 struct BlendedProb {
     p_up_blended: Decimal,
-    w_threshold: Decimal,
+    p_gbm_anchor: Decimal,
     w_model: Decimal,
-    w_window: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -369,12 +429,9 @@ struct EntrySignal {
     gross_edge: Decimal,
     fair_value: Decimal,
     signal_confidence: Decimal,
-    p_up_window: Decimal,
-    p_up_threshold: Option<Decimal>,
+    p_gbm_anchor: Decimal,
     p_up_blended: Decimal,
-    w_threshold: Decimal,
     w_model: Decimal,
-    w_window: Decimal,
     up_edge_gross: Decimal,
     down_edge_gross: Decimal,
     up_edge_net: Decimal,
@@ -621,6 +678,29 @@ impl CryptoLobMlAgent {
                 "loaded lob-ml onnx model"
             );
 
+            // Model SHA256 integrity check (warn-only, non-blocking)
+            if let Some(ref expected_hash) = config.model_sha256 {
+                match std::fs::read(model_path) {
+                    Ok(bytes) => {
+                        use sha2::{Digest, Sha256};
+                        let actual = format!("{:x}", Sha256::digest(&bytes));
+                        if actual != expected_hash.to_lowercase() {
+                            warn!(
+                                agent = config.agent_id,
+                                expected = %expected_hash,
+                                actual = %actual,
+                                "model SHA256 mismatch — config may be stale"
+                            );
+                        } else {
+                            info!(agent = config.agent_id, "model SHA256 verified");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(agent = config.agent_id, error = %e, "could not read model for SHA256 check");
+                    }
+                }
+            }
+
             return Ok(Self {
                 config,
                 binance_ws,
@@ -671,6 +751,8 @@ impl CryptoLobMlAgent {
         sequence_cache: &HashMap<String, VecDeque<SequenceSnapshot>>,
         key: &str,
         horizon: &str,
+        feature_offsets: &[f32],
+        feature_scales: &[f32],
     ) -> Option<Vec<f32>> {
         let seq_len = sequence_len_for_horizon(horizon);
         let window = sequence_cache.get(key)?;
@@ -678,20 +760,32 @@ impl CryptoLobMlAgent {
             return None;
         }
 
+        let normalize = feature_offsets.len() == SEQ_FEATURE_DIM
+            && feature_scales.len() == SEQ_FEATURE_DIM;
+
         let mut flat: Vec<f32> = Vec::with_capacity(seq_len * SEQ_FEATURE_DIM);
         let start_idx = window.len().saturating_sub(seq_len);
         for snap in window.iter().skip(start_idx) {
-            flat.push(snap.obi_5.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.obi_10.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.spread_bps.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.bid_volume_5.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.ask_volume_5.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.momentum_1s.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.momentum_5s.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.spot_price.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.remaining_secs.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.price_to_beat.to_f64().unwrap_or(0.0) as f32);
-            flat.push(snap.distance_to_beat.to_f64().unwrap_or(0.0) as f32);
+            let raw = [
+                snap.obi_5.to_f64().unwrap_or(0.0) as f32,
+                snap.obi_10.to_f64().unwrap_or(0.0) as f32,
+                snap.spread_bps.to_f64().unwrap_or(0.0) as f32,
+                snap.bid_volume_5.to_f64().unwrap_or(0.0) as f32,
+                snap.ask_volume_5.to_f64().unwrap_or(0.0) as f32,
+                snap.momentum_1s.to_f64().unwrap_or(0.0) as f32,
+                snap.momentum_5s.to_f64().unwrap_or(0.0) as f32,
+                snap.spot_price.to_f64().unwrap_or(0.0) as f32,
+                snap.remaining_secs.to_f64().unwrap_or(0.0) as f32,
+                snap.price_to_beat.to_f64().unwrap_or(0.0) as f32,
+                snap.distance_to_beat.to_f64().unwrap_or(0.0) as f32,
+            ];
+            if normalize {
+                for (i, v) in raw.iter().enumerate() {
+                    flat.push((v - feature_offsets[i]) * feature_scales[i]);
+                }
+            } else {
+                flat.extend_from_slice(&raw);
+            }
         }
 
         Some(flat)
@@ -702,10 +796,13 @@ impl CryptoLobMlAgent {
         1.0 / (1.0 + (-x).exp())
     }
 
-    fn estimate_p_up_window(
-        window_move: Decimal,
+    fn estimate_p_up_gbm_anchor(
+        spot_price: Decimal,
+        start_price: Decimal,
+        price_to_beat: Option<Decimal>,
         sigma_1s: Option<Decimal>,
         remaining_secs: i64,
+        oracle_lag_buffer_secs: u64,
     ) -> Decimal {
         let remaining_secs = remaining_secs.max(0) as f64;
         let Some(sig_1s) = sigma_1s.and_then(|v| v.to_f64()) else {
@@ -715,18 +812,53 @@ impl CryptoLobMlAgent {
             return dec!(0.50);
         }
 
-        let sigma_rem = sig_1s * remaining_secs.sqrt();
+        // Oracle lag buffer: near settlement, inflate remaining-time uncertainty
+        // to account for Chainlink vs Binance price delay.
+        let effective_remaining = if remaining_secs < 30.0 {
+            remaining_secs + (oracle_lag_buffer_secs as f64)
+        } else {
+            remaining_secs
+        };
+        let sigma_rem = sig_1s * effective_remaining.sqrt();
         if !sigma_rem.is_finite() || sigma_rem <= 0.0 {
             return dec!(0.50);
         }
 
-        let w = window_move.to_f64().unwrap_or(0.0);
-        if !w.is_finite() {
+        let spot = spot_price.to_f64().unwrap_or(0.0);
+        if !spot.is_finite() || spot <= 0.0 {
             return dec!(0.50);
         }
 
-        let p = normal_cdf(w / sigma_rem).clamp(0.001, 0.999);
-        Decimal::from_f64_retain(p).unwrap_or(dec!(0.50))
+        // With price_to_beat: P(spot_at_end > price_to_beat) = 1 - Φ(required_return / σ)
+        // Fallback (no price_to_beat): P(UP) = Φ(window_move / σ)
+        if let Some(beat) = price_to_beat {
+            let beat_f = beat.to_f64().unwrap_or(0.0);
+            if beat_f.is_finite() && beat_f > 0.0 {
+                let required_return = (beat_f - spot) / spot;
+                if required_return.is_finite() {
+                    let p = (1.0 - normal_cdf(required_return / sigma_rem)).clamp(0.001, 0.999);
+                    return Decimal::from_f64_retain(p).unwrap_or(dec!(0.50));
+                }
+            }
+        }
+
+        // Fallback: use window_move = (spot - start) / start
+        let start_f = start_price.to_f64().unwrap_or(0.0);
+        if !start_f.is_finite() || start_f <= 0.0 {
+            return dec!(0.50);
+        }
+        let window_move = (spot - start_f) / start_f;
+        if !window_move.is_finite() {
+            return dec!(0.50);
+        }
+
+        let mut p = normal_cdf(window_move / sigma_rem).clamp(0.001, 0.999);
+
+        // >= settlement bias: UP wins on ties (close >= open).
+        // Only significant for pure UP/DOWN events (no price_to_beat).
+        p += GEQ_SETTLEMENT_BIAS;
+
+        Decimal::from_f64_retain(p.clamp(0.001, 0.999)).unwrap_or(dec!(0.50))
     }
 
     /// Estimate p(UP) using ONNX model from a flattened sequence input.
@@ -779,22 +911,11 @@ impl CryptoLobMlAgent {
         }
     }
 
-    fn model_window_blend_weights(&self) -> (Decimal, Decimal) {
-        // Keep window baseline as a small fallback, never dominant.
-        let w_window = self
-            .config
-            .window_fallback_weight
-            .max(Decimal::ZERO)
-            .min(dec!(0.49));
-        let w_model = (Decimal::ONE - w_window).max(Decimal::ZERO);
-        (w_model, w_window)
-    }
-
-    fn threshold_blend_weight(&self) -> Decimal {
+    fn model_blend_weight_clamped(&self) -> Decimal {
         self.config
-            .threshold_prob_weight
-            .max(Decimal::ZERO)
-            .min(dec!(0.90))
+            .model_blend_weight
+            .max(dec!(0.01))
+            .min(dec!(0.99))
     }
 
     fn entry_late_window_secs(&self, horizon: &str) -> u64 {
@@ -834,7 +955,7 @@ impl CryptoLobMlAgent {
         }
     }
 
-    fn ev_exit_buffer(&self, window: &WindowContext) -> Decimal {
+    fn ev_exit_buffer(&self, blended: &BlendedProb) -> Decimal {
         let base = self
             .config
             .ev_exit_buffer
@@ -845,7 +966,7 @@ impl CryptoLobMlAgent {
             .ev_exit_vol_scale
             .max(Decimal::ZERO)
             .min(dec!(0.50));
-        let uncertainty = (dec!(0.5) - (window.p_up_window - dec!(0.5)).abs()).max(Decimal::ZERO);
+        let uncertainty = (dec!(0.5) - (blended.p_gbm_anchor - dec!(0.5)).abs()).max(Decimal::ZERO);
         (base + scale * uncertainty).min(dec!(0.50))
     }
 
@@ -882,52 +1003,28 @@ impl CryptoLobMlAgent {
         prob * net_profit_on_win - (Decimal::ONE - prob) * loss_on_lose
     }
 
-    fn estimate_p_up_threshold_anchor(
+    fn compute_blended_probability(
         &self,
-        spot_price: Decimal,
-        price_to_beat: Option<Decimal>,
-        sigma_1s: Option<Decimal>,
-        remaining_secs: i64,
-    ) -> Option<Decimal> {
-        if !self.config.use_price_to_beat {
-            return None;
-        }
+        p_up_model_dec: Decimal,
+        p_gbm_anchor: Decimal,
+    ) -> BlendedProb {
+        let w_model = self.model_blend_weight_clamped();
+        let w_anchor = Decimal::ONE - w_model;
+        let p_up_blended = (p_up_model_dec * w_model + p_gbm_anchor * w_anchor)
+            .max(dec!(0.001))
+            .min(dec!(0.999));
 
-        let threshold = price_to_beat?;
-        if spot_price <= Decimal::ZERO || threshold <= Decimal::ZERO || remaining_secs <= 0 {
-            return None;
+        BlendedProb {
+            p_up_blended,
+            p_gbm_anchor,
+            w_model,
         }
-
-        let sigma_1s = sigma_1s.and_then(|v| v.to_f64())?;
-        if !sigma_1s.is_finite() || sigma_1s <= 0.0 {
-            return None;
-        }
-
-        let sigma_rem = sigma_1s * (remaining_secs as f64).sqrt();
-        if !sigma_rem.is_finite() || sigma_rem <= 0.0 {
-            return None;
-        }
-
-        let spot = spot_price.to_f64()?;
-        let beat = threshold.to_f64()?;
-        if !spot.is_finite() || !beat.is_finite() || spot <= 0.0 || beat <= 0.0 {
-            return None;
-        }
-
-        let required_return = (beat - spot) / spot;
-        if !required_return.is_finite() {
-            return None;
-        }
-
-        let p = (1.0 - normal_cdf(required_return / sigma_rem)).clamp(0.001, 0.999);
-        Decimal::from_f64_retain(p)
     }
 
     fn build_window_context(
         &self,
         spot: &SpotPrice,
         event: &EventInfo,
-        rolling_volatility_opt: Option<Decimal>,
     ) -> Option<WindowContext> {
         let now = spot.timestamp;
         if now < event.start_time || now >= event.end_time {
@@ -956,8 +1053,6 @@ impl CryptoLobMlAgent {
         }
 
         let window_move = (spot.price - start_price) / start_price;
-        let p_up_window =
-            Self::estimate_p_up_window(window_move, rolling_volatility_opt, remaining_secs);
 
         Some(WindowContext {
             now,
@@ -965,49 +1060,12 @@ impl CryptoLobMlAgent {
             window_move,
             elapsed_secs,
             remaining_secs,
-            p_up_window,
-        })
-    }
-
-    fn compute_blended_probability(
-        &self,
-        p_up_model_dec: Decimal,
-        window: &WindowContext,
-        p_up_threshold: Option<Decimal>,
-    ) -> Option<BlendedProb> {
-        let (w_model, w_window) = self.model_window_blend_weights();
-        let p_up_base = (window.p_up_window * w_window + p_up_model_dec * w_model)
-            .max(dec!(0.001))
-            .min(dec!(0.999));
-        let w_threshold = self.threshold_blend_weight();
-        let p_up_blended = if let Some(p_thr) = p_up_threshold {
-            if w_threshold > Decimal::ZERO {
-                (p_up_base * (Decimal::ONE - w_threshold) + p_thr * w_threshold)
-                    .max(dec!(0.001))
-                    .min(dec!(0.999))
-            } else {
-                p_up_base
-            }
-        } else {
-            if self.config.use_price_to_beat && self.config.require_price_to_beat {
-                return None;
-            }
-            p_up_base
-        };
-
-        Some(BlendedProb {
-            p_up_blended,
-            w_threshold,
-            w_model,
-            w_window,
         })
     }
 
     fn evaluate_entry_signal(
         &self,
         blended: &BlendedProb,
-        window: &WindowContext,
-        p_up_threshold: Option<Decimal>,
         up_token_id: &str,
         down_token_id: &str,
         up_ask: Decimal,
@@ -1047,25 +1105,17 @@ impl CryptoLobMlAgent {
                     }
                 }
                 CryptoLobMlEntrySidePolicy::LaggingOnly => {
-                    if up_ask <= down_ask {
-                        (
-                            Side::Up,
-                            up_token_id.to_string(),
-                            up_ask,
-                            up_edge_net,
-                            up_edge_gross,
-                            p_up_blended,
-                        )
-                    } else {
-                        (
-                            Side::Down,
-                            down_token_id.to_string(),
-                            down_ask,
-                            down_edge_net,
-                            down_edge_gross,
-                            Decimal::ONE - p_up_blended,
-                        )
+                    // Follow model direction, only enter when that side's ask is cheap (<= 0.50)
+                    let model_dir = if p_up_blended >= dec!(0.50) { Side::Up } else { Side::Down };
+                    let (dir_token, dir_ask, dir_edge, dir_gross, dir_fair) = match model_dir {
+                        Side::Up => (up_token_id, up_ask, up_edge_net, up_edge_gross, p_up_blended),
+                        Side::Down => (down_token_id, down_ask, down_edge_net, down_edge_gross,
+                                       Decimal::ONE - p_up_blended),
+                    };
+                    if dir_ask > dec!(0.50) {
+                        return None;
                     }
+                    (model_dir, dir_token.to_string(), dir_ask, dir_edge, dir_gross, dir_fair)
                 }
             };
 
@@ -1086,12 +1136,9 @@ impl CryptoLobMlAgent {
             gross_edge,
             fair_value,
             signal_confidence,
-            p_up_window: window.p_up_window,
-            p_up_threshold,
+            p_gbm_anchor: blended.p_gbm_anchor,
             p_up_blended,
-            w_threshold: blended.w_threshold,
             w_model: blended.w_model,
-            w_window: blended.w_window,
             up_edge_gross,
             down_edge_gross,
             up_edge_net,
@@ -1596,7 +1643,7 @@ impl TradingAgent for CryptoLobMlAgent {
                         let timeframe = normalize_timeframe(&event.horizon);
                         let entry_key = format!("{}|{}", update.symbol, &timeframe);
                         let Some(window_ctx) =
-                            self.build_window_context(&spot, &event, rolling_volatility_opt)
+                            self.build_window_context(&spot, &event)
                         else {
                             continue;
                         };
@@ -1605,11 +1652,20 @@ impl TradingAgent for CryptoLobMlAgent {
                         {
                             continue;
                         }
-                        let p_up_threshold = self.estimate_p_up_threshold_anchor(
+                        // Skip events without price_to_beat when required.
+                        if self.config.use_price_to_beat
+                            && self.config.require_price_to_beat
+                            && event.price_to_beat.is_none()
+                        {
+                            continue;
+                        }
+                        let p_gbm_anchor = Self::estimate_p_up_gbm_anchor(
                             spot.price,
+                            window_ctx.start_price,
                             event.price_to_beat,
                             rolling_volatility_opt,
                             window_ctx.remaining_secs,
+                            self.config.oracle_lag_buffer_secs,
                         );
 
                         let price_to_beat = event.price_to_beat.unwrap_or(spot.price);
@@ -1641,7 +1697,8 @@ impl TradingAgent for CryptoLobMlAgent {
                         );
 
                         let Some(sequence_input) =
-                            Self::build_sequence(&sequence_cache, entry_key.as_str(), &timeframe)
+                            Self::build_sequence(&sequence_cache, entry_key.as_str(), &timeframe,
+                                &self.config.feature_offsets, &self.config.feature_scales)
                         else {
                             continue;
                         };
@@ -1673,15 +1730,48 @@ impl TradingAgent for CryptoLobMlAgent {
                             ),
                             _ => continue,
                         };
-                        let Some(blended) = self.compute_blended_probability(
+
+                        // Spread check: reject thin markets where bid-ask is too wide.
+                        {
+                            let up_spread = if up_bid > Decimal::ZERO {
+                                (up_ask - up_bid) / up_ask
+                            } else {
+                                Decimal::ONE
+                            };
+                            let down_spread = if down_bid > Decimal::ZERO {
+                                (down_ask - down_bid) / down_ask
+                            } else {
+                                Decimal::ONE
+                            };
+                            if up_spread > self.config.max_spread_pct
+                                || down_spread > self.config.max_spread_pct
+                            {
+                                continue;
+                            }
+                        }
+
+                        let blended = self.compute_blended_probability(
                             p_up_model_dec,
-                            &window_ctx,
-                            p_up_threshold,
-                        ) else {
-                            continue;
-                        };
+                            p_gbm_anchor,
+                        );
 
                         if let Some(pos) = positions.get(&event.slug).cloned() {
+                            // 5m events: force hold-to-settlement (skip all exit logic).
+                            if self.config.force_settle_only_5m
+                                && normalize_timeframe(&pos.horizon) == "5m"
+                            {
+                                // Only update peak_bid for tracking.
+                                if let Some(tracked) = positions.get_mut(&event.slug) {
+                                    let held_bid = match pos.side {
+                                        Side::Up => up_bid,
+                                        Side::Down => down_bid,
+                                    };
+                                    if held_bid > tracked.peak_bid {
+                                        tracked.peak_bid = held_bid;
+                                    }
+                                }
+                                continue;
+                            }
                             if self.allows_ev_exit() {
                                 let held_secs = Utc::now()
                                     .signed_duration_since(pos.entry_time)
@@ -1706,7 +1796,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                             Side::Up => blended.p_up_blended,
                                             Side::Down => Decimal::ONE - blended.p_up_blended,
                                         };
-                                        let ev_buffer = self.ev_exit_buffer(&window_ctx);
+                                        let ev_buffer = self.ev_exit_buffer(&blended);
                                         let ev_edge = bid_net - fair_value;
                                         if ev_edge >= ev_buffer {
                                             let exit_intent = OrderIntent::new(
@@ -1782,30 +1872,16 @@ impl TradingAgent for CryptoLobMlAgent {
                                                     &format!("{p_up_model:.6}"),
                                                 )
                                                 .with_metadata(
-                                                    "p_up_window",
-                                                    &window_ctx.p_up_window.to_string(),
-                                                )
-                                                .with_metadata(
-                                                    "p_up_threshold",
-                                                    &p_up_threshold
-                                                        .unwrap_or(dec!(0.5))
-                                                        .to_string(),
+                                                    "p_gbm_anchor",
+                                                    &p_gbm_anchor.to_string(),
                                                 )
                                                 .with_metadata(
                                                     "p_up_blended",
                                                     &blended.p_up_blended.to_string(),
                                                 )
                                                 .with_metadata(
-                                                    "p_up_blend_w_threshold",
-                                                    &blended.w_threshold.to_string(),
-                                                )
-                                                .with_metadata(
                                                     "p_up_blend_w_model",
                                                     &blended.w_model.to_string(),
-                                                )
-                                                .with_metadata(
-                                                    "p_up_blend_w_window",
-                                                    &blended.w_window.to_string(),
                                                 )
                                                 .with_metadata(
                                                     "cost_taker_fee_rate",
@@ -1845,8 +1921,6 @@ impl TradingAgent for CryptoLobMlAgent {
                             if self.allows_signal_flip_exit() {
                                 let Some(signal) = self.evaluate_entry_signal(
                                     &blended,
-                                    &window_ctx,
-                                    p_up_threshold,
                                     &event.up_token_id,
                                     &event.down_token_id,
                                     up_ask,
@@ -1901,24 +1975,9 @@ impl TradingAgent for CryptoLobMlAgent {
                                             .with_metadata("exit_price", &exit_price.to_string())
                                             .with_metadata("held_secs", &held_secs.to_string())
                                             .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                                            .with_metadata("p_up_window", &signal.p_up_window.to_string())
-                                            .with_metadata(
-                                                "p_up_threshold",
-                                                &signal
-                                                    .p_up_threshold
-                                                    .unwrap_or(dec!(0.5))
-                                                    .to_string(),
-                                            )
+                                            .with_metadata("p_gbm_anchor", &signal.p_gbm_anchor.to_string())
                                             .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
-                                            .with_metadata(
-                                                "p_up_blend_w_threshold",
-                                                &signal.w_threshold.to_string(),
-                                            )
                                             .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
-                                            .with_metadata(
-                                                "p_up_blend_w_window",
-                                                &signal.w_window.to_string(),
-                                            )
                                             .with_metadata("signal_edge", &signal.edge.to_string())
                                             .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
                                             .with_metadata(
@@ -1977,8 +2036,6 @@ impl TradingAgent for CryptoLobMlAgent {
 
                         let Some(signal) = self.evaluate_entry_signal(
                             &blended,
-                            &window_ctx,
-                            p_up_threshold,
                             &event.up_token_id,
                             &event.down_token_id,
                             up_ask,
@@ -2057,20 +2114,13 @@ impl TradingAgent for CryptoLobMlAgent {
                                 .to_string(),
                         )
                         .with_metadata("p_up_model", &format!("{p_up_model:.6}"))
-                        .with_metadata("p_up_window", &signal.p_up_window.to_string())
-                        .with_metadata(
-                            "p_up_threshold",
-                            &signal
-                                .p_up_threshold
-                                .unwrap_or(dec!(0.5))
-                                .to_string(),
-                        )
+                        .with_metadata("p_gbm_anchor", &signal.p_gbm_anchor.to_string())
                         .with_metadata("p_up_blended", &signal.p_up_blended.to_string())
-                        .with_metadata("p_up_blend_w_threshold", &signal.w_threshold.to_string())
                         .with_metadata("p_up_blend_w_model", &signal.w_model.to_string())
-                        .with_metadata("p_up_blend_w_window", &signal.w_window.to_string())
                         .with_metadata("model_type", model_type_used)
                         .with_metadata("model_version", self.config.model_version.as_deref().unwrap_or(""))
+                        .with_metadata("model_trained_at", self.config.model_trained_at.as_deref().unwrap_or(""))
+                        .with_metadata("model_auc", &self.config.model_auc.map(|v| format!("{v:.4}")).unwrap_or_default())
                         .with_metadata("signal_edge", &signal.edge.to_string())
                         .with_metadata("signal_edge_gross", &signal.gross_edge.to_string())
                         .with_metadata("signal_up_edge_gross", &signal.up_edge_gross.to_string())
@@ -2448,14 +2498,12 @@ mod tests {
             window_move: dec!(0.01),
             elapsed_secs: 30,
             remaining_secs: 270,
-            p_up_window: dec!(0.60),
         }
     }
 
     fn sample_blended_prob(agent: &CryptoLobMlAgent) -> BlendedProb {
         agent
-            .compute_blended_probability(dec!(0.62), &sample_window_context(), Some(dec!(0.58)))
-            .expect("blended probability should be available")
+            .compute_blended_probability(dec!(0.62), dec!(0.58))
     }
 
     fn sample_sequence_snapshot(ts: DateTime<Utc>) -> SequenceSnapshot {
@@ -2488,11 +2536,11 @@ mod tests {
             );
         }
 
-        let seq_5m = CryptoLobMlAgent::build_sequence(&cache, key, "5m")
+        let seq_5m = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[])
             .expect("5m sequence should be available");
         assert_eq!(seq_5m.len(), SEQ_LEN_5M * SEQ_FEATURE_DIM);
 
-        let seq_15m = CryptoLobMlAgent::build_sequence(&cache, key, "15m")
+        let seq_15m = CryptoLobMlAgent::build_sequence(&cache, key, "15m", &[], &[])
             .expect("15m sequence should be available");
         assert_eq!(seq_15m.len(), SEQ_LEN_15M * SEQ_FEATURE_DIM);
     }
@@ -2510,7 +2558,56 @@ mod tests {
             );
         }
 
-        assert!(CryptoLobMlAgent::build_sequence(&cache, key, "5m").is_none());
+        assert!(CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_build_sequence_applies_normalization() {
+        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
+        let key = "BTCUSDT|5m";
+        let now = Utc::now();
+        // Push exactly SEQ_LEN_5M snapshots (one per second)
+        for i in 0..SEQ_LEN_5M {
+            CryptoLobMlAgent::push_sequence_snapshot(
+                &mut cache,
+                key,
+                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
+            );
+        }
+
+        // Without normalization
+        let raw = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[])
+            .expect("raw sequence");
+
+        // With identity normalization (offset=0, scale=1)
+        let offsets = vec![0.0f32; SEQ_FEATURE_DIM];
+        let scales = vec![1.0f32; SEQ_FEATURE_DIM];
+        let identity = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &offsets, &scales)
+            .expect("identity normalized");
+        assert_eq!(raw.len(), identity.len());
+        for (a, b) in raw.iter().zip(identity.iter()) {
+            assert!((a - b).abs() < 1e-6, "identity transform should match raw");
+        }
+
+        // With real normalization: offset=1, scale=2 for first feature
+        let mut offsets2 = vec![0.0f32; SEQ_FEATURE_DIM];
+        let mut scales2 = vec![1.0f32; SEQ_FEATURE_DIM];
+        offsets2[0] = 1.0;
+        scales2[0] = 2.0;
+        let normed = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &offsets2, &scales2)
+            .expect("normalized");
+        // First feature of first timestep: (raw[0] - 1.0) * 2.0
+        let expected_first = (raw[0] - 1.0) * 2.0;
+        assert!(
+            (normed[0] - expected_first).abs() < 1e-6,
+            "expected {expected_first}, got {}",
+            normed[0]
+        );
+        // Second feature should be unchanged (offset=0, scale=1)
+        assert!(
+            (normed[1] - raw[1]).abs() < 1e-6,
+            "second feature should be unchanged"
+        );
     }
 
     #[test]
@@ -2545,7 +2642,7 @@ mod tests {
         assert_eq!(cfg.max_time_remaining_secs, 900);
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(cfg.max_entry_price, dec!(0.70));
-        assert_eq!(cfg.window_fallback_weight, dec!(0.10));
+        assert_eq!(cfg.model_blend_weight, dec!(0.80));
         assert_eq!(
             cfg.entry_side_policy,
             CryptoLobMlEntrySidePolicy::LaggingOnly
@@ -2641,7 +2738,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_first_blend_weights_default() {
+    fn test_model_blend_weight_default() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
             binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
@@ -2654,9 +2751,8 @@ mod tests {
             onnx_model: None,
         };
 
-        let (w_model, w_window) = agent.model_window_blend_weights();
-        assert_eq!(w_model, dec!(0.90));
-        assert_eq!(w_window, dec!(0.10));
+        let w_model = agent.model_blend_weight_clamped();
+        assert_eq!(w_model, dec!(0.80));
     }
 
     #[test]
@@ -2694,13 +2790,10 @@ mod tests {
         };
 
         let blended = agent
-            .compute_blended_probability(dec!(0.40), &sample_window_context(), Some(dec!(0.42)))
-            .expect("blended probability should be available");
+            .compute_blended_probability(dec!(0.40), dec!(0.42));
         let signal = agent
             .evaluate_entry_signal(
                 &blended,
-                &sample_window_context(),
-                Some(dec!(0.42)),
                 "up-token",
                 "down-token",
                 dec!(0.28),
@@ -2730,8 +2823,6 @@ mod tests {
         let blended = sample_blended_prob(&agent);
         let signal = agent.evaluate_entry_signal(
             &blended,
-            &sample_window_context(),
-            Some(dec!(0.50)),
             "up-token",
             "down-token",
             dec!(0.80),
@@ -2759,8 +2850,6 @@ mod tests {
         let blended = sample_blended_prob(&agent);
         let signal = agent.evaluate_entry_signal(
             &blended,
-            &sample_window_context(),
-            Some(dec!(0.50)),
             "up-token",
             "down-token",
             dec!(0.31),
@@ -2770,24 +2859,18 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_entry_signal_requires_price_to_beat_when_enabled() {
-        let mut cfg = CryptoLobMlConfig::default();
-        cfg.use_price_to_beat = true;
-        cfg.require_price_to_beat = true;
-        let agent = CryptoLobMlAgent {
-            config: cfg,
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
-            event_matcher: Arc::new(EventMatcher::new(
-                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
-            )),
-            lob_cache: LobCache::new(),
-            #[cfg(feature = "onnx")]
-            onnx_model: None,
-        };
-
-        let blended = agent.compute_blended_probability(dec!(0.60), &sample_window_context(), None);
-        assert!(blended.is_none());
+    fn test_gbm_anchor_falls_back_to_window_move_when_no_price_to_beat() {
+        // Without price_to_beat, GBM anchor uses window_move fallback
+        let p = CryptoLobMlAgent::estimate_p_up_gbm_anchor(
+            dec!(101),      // spot_price
+            dec!(100),      // start_price
+            None,           // no price_to_beat
+            Some(dec!(0.001)), // sigma_1s
+            270,            // remaining_secs
+            0,              // oracle_lag_buffer_secs
+        );
+        // window_move = +1%, with small volatility over 270s → P(UP) > 0.50
+        assert!(p > dec!(0.50), "p_up with positive momentum should be > 0.50, got {p}");
     }
 
     #[test]
