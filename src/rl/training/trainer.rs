@@ -7,10 +7,9 @@
 //! operations need refinement based on the specific burn backend.
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::rl::algorithms::ppo::{PPOBatch, PPOTrainer, PPOTrainerConfig};
+use crate::rl::algorithms::ppo::{PPOBatch, PPOTrainer};
 use crate::rl::config::TrainingConfig;
 use crate::rl::core::{
     ContinuousAction, DefaultStateEncoder, PnLRewardFunction, RawObservation, RewardFunction,

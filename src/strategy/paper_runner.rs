@@ -152,7 +152,7 @@ impl PaperTradingRunner {
         // Initialize K-line client for volatility
         let kline_client = BinanceKlineClient::new();
         info!("Initializing K-line volatility data...");
-        kline_client.initialize_symbols(&self.config.symbols).await;
+        let _ = kline_client.initialize_symbols(&self.config.symbols).await;
 
         // Update paper trader with initial volatility
         {

@@ -202,7 +202,6 @@ struct TrackedPosition {
     shares: u64,
     entry_price: Decimal,
     entry_time: DateTime<Utc>,
-    is_hedged: bool,
 }
 
 /// Pull-based crypto trading agent
@@ -318,7 +317,6 @@ fn tracked_position_from_global(position: &crate::platform::Position) -> Tracked
         shares: position.shares,
         entry_price: position.entry_price,
         entry_time: position.entry_time,
-        is_hedged: position.is_hedged,
     }
 }
 
@@ -372,12 +370,6 @@ impl CryptoTradingAgent {
 
     fn entry_cooldown_secs(&self) -> u64 {
         self.config.entry_cooldown_secs
-    }
-
-    fn estimate_fair_value(momentum: Decimal) -> Decimal {
-        (dec!(0.50) + momentum.abs() * dec!(10))
-            .max(dec!(0.05))
-            .min(dec!(0.95))
     }
 
     fn signal_confidence(

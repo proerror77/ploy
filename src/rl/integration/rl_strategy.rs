@@ -2,27 +2,25 @@
 //!
 //! Implements the Strategy trait using an RL agent for decision making.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::domain::{OrderRequest, OrderSide, OrderType, Quote, Side, TimeInForce};
+use crate::domain::{OrderRequest, OrderSide, OrderType, Side, TimeInForce};
 use crate::error::Result;
 use crate::rl::config::RLConfig;
 use crate::rl::core::{
     ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
-    RewardFunction, RewardTransition, StateEncoder,
+    RewardFunction, RewardTransition,
 };
 use crate::rl::memory::ReplayBuffer;
 use crate::strategy::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy, StrategyAction,
-    StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyStateInfo,
 };
 
 /// RL-based trading strategy
@@ -161,9 +159,6 @@ impl RLStrategy {
     /// For now, this uses a simple rule-based policy as placeholder.
     /// In production, this would query the neural network.
     fn select_action(&mut self) -> ContinuousAction {
-        // Get encoded state
-        let state_vec = self.encoder.encode(&self.current_obs);
-
         // Placeholder: rule-based action selection
         // In production, this queries the PPO actor network
         let action = self.rule_based_action();
@@ -607,7 +602,7 @@ mod tests {
     #[test]
     fn test_rule_based_action() {
         let config = RLConfig::default();
-        let mut strategy = RLStrategy::new(
+        let strategy = RLStrategy::new(
             "test_rl".to_string(),
             config,
             "up_token".to_string(),

@@ -520,7 +520,6 @@ pub fn generate_sample_data(duration_mins: u64, volatility: f64) -> HistoricalDa
     let start_ts = chrono::Utc::now().timestamp_millis() - (duration_mins as i64 * 60 * 1000);
 
     let mut up_price = 0.50;
-    let mut down_price = 0.50;
 
     for i in 0..num_ticks {
         let ts = start_ts + (i as i64 * 1000);
@@ -530,7 +529,7 @@ pub fn generate_sample_data(duration_mins: u64, volatility: f64) -> HistoricalDa
         up_price = (up_price + up_change).clamp(0.10, 0.90);
 
         // DOWN should roughly mirror UP
-        down_price = (1.0 - up_price + rng.gen_range(-0.02..0.02)).clamp(0.10, 0.90);
+        let down_price = (1.0 - up_price + rng.gen_range(-0.02..0.02)).clamp(0.10, 0.90);
 
         let spread = 0.01 + rng.gen_range(0.0..0.02);
 
@@ -605,7 +604,7 @@ mod tests {
         }
 
         // Sell
-        let result = env.step(EnvAction::Sell);
+        env.step(EnvAction::Sell);
         assert_eq!(env.final_stats().num_trades, 1);
     }
 }

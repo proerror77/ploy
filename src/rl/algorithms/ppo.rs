@@ -212,7 +212,6 @@ impl PPOTrainer {
     /// Get state value estimate (simple heuristic)
     pub fn get_value(&self, state: &[f32]) -> f32 {
         // Simple value estimate based on position and PnL
-        let has_position = if state.len() > 20 { state[20] } else { 0.0 };
         let unrealized_pnl = if state.len() > 24 { state[24] } else { 0.0 };
         let episode_pnl = if state.len() > 32 { state[32] } else { 0.0 };
 
@@ -283,7 +282,7 @@ impl PPOTrainer {
     ///
     /// Note: This is a placeholder that updates diagnostics.
     /// Full implementation requires burn tensor operations.
-    pub fn train_step(&mut self, batch: PPOBatch) -> PPOOutput {
+    pub fn train_step(&mut self, _batch: PPOBatch) -> PPOOutput {
         self.step_count += 1;
 
         // In a full implementation, this would:

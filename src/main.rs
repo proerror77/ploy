@@ -13,4 +13,3 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     main_dispatch::run(&cli).await
 }
-

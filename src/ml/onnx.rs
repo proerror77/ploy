@@ -58,8 +58,8 @@ impl OnnxModel {
             .map_err(|e| PloyError::Internal(format!("onnx runnable failed: {e}")))?;
 
         // Infer output_dim by running a dummy forward pass.
-        let dummy = tract_ndarray::ArrayD::<f32>::zeros(tract_ndarray::IxDyn(input_shape))
-            .into_tvalue();
+        let dummy =
+            tract_ndarray::ArrayD::<f32>::zeros(tract_ndarray::IxDyn(input_shape)).into_tvalue();
         let outputs = plan
             .run(tvec!(dummy))
             .map_err(|e| PloyError::Internal(format!("onnx run failed: {e}")))?;

@@ -28,8 +28,8 @@ use crate::coordinator::{
 };
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, MarketSelector, StrategyDeployment};
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
+use crate::platform::{AgentRiskParams, AgentStatus, Domain, MarketSelector, StrategyDeployment};
 use crate::signing::Wallet;
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
@@ -3375,7 +3375,9 @@ fn spawn_clob_orderbook_persistence(
 
                     let should_persist = match last_persisted.get(&token_id) {
                         None => true,
-                        Some(ts) => now.signed_duration_since(*ts).num_seconds() >= min_interval_secs,
+                        Some(ts) => {
+                            now.signed_duration_since(*ts).num_seconds() >= min_interval_secs
+                        }
                     };
 
                     if !should_persist {
@@ -4085,11 +4087,15 @@ impl PlatformBootstrapConfig {
         if cfg.crypto_lob_ml.max_time_remaining_secs < cfg.crypto_lob_ml.min_time_remaining_secs {
             cfg.crypto_lob_ml.max_time_remaining_secs = cfg.crypto_lob_ml.min_time_remaining_secs;
         }
-        if cfg.crypto_lob_ml.max_time_remaining_secs_5m < cfg.crypto_lob_ml.min_time_remaining_secs {
-            cfg.crypto_lob_ml.max_time_remaining_secs_5m = cfg.crypto_lob_ml.min_time_remaining_secs;
+        if cfg.crypto_lob_ml.max_time_remaining_secs_5m < cfg.crypto_lob_ml.min_time_remaining_secs
+        {
+            cfg.crypto_lob_ml.max_time_remaining_secs_5m =
+                cfg.crypto_lob_ml.min_time_remaining_secs;
         }
-        if cfg.crypto_lob_ml.max_time_remaining_secs_15m < cfg.crypto_lob_ml.min_time_remaining_secs {
-            cfg.crypto_lob_ml.max_time_remaining_secs_15m = cfg.crypto_lob_ml.min_time_remaining_secs;
+        if cfg.crypto_lob_ml.max_time_remaining_secs_15m < cfg.crypto_lob_ml.min_time_remaining_secs
+        {
+            cfg.crypto_lob_ml.max_time_remaining_secs_15m =
+                cfg.crypto_lob_ml.min_time_remaining_secs;
         }
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__PREFER_CLOSE_TO_END") {
             match raw.trim().to_ascii_lowercase().as_str() {

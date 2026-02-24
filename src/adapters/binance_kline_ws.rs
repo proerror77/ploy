@@ -189,6 +189,8 @@ pub struct KlineUpdate {
 
 #[derive(Debug, Deserialize)]
 struct CombinedStream<T> {
+    // Present in Binance combined stream payloads; retained for debugging.
+    #[allow(dead_code)]
     stream: String,
     data: T,
 }

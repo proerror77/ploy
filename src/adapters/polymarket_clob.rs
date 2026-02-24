@@ -708,6 +708,7 @@ impl PolymarketClient {
         Ok(out)
     }
 
+    #[allow(dead_code)]
     async fn clear_cached_auth(&self) {
         let mut guard = self.auth_client.lock().await;
         *guard = None;

@@ -1082,8 +1082,7 @@ impl CryptoLobMlAgent {
             return None;
         };
 
-        let bucket_end =
-            bucket_start + chrono::Duration::seconds(tcn.sample_secs.max(1) as i64);
+        let bucket_end = bucket_start + chrono::Duration::seconds(tcn.sample_secs.max(1) as i64);
         let binance_symbol = Self::tcn_binance_symbol_from_market_slug(&event.slug);
         let market_start_ts = Self::tcn_market_start_ts_from_slug(&event.slug);
 
@@ -1643,7 +1642,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                     .signed_duration_since(pos.entry_time)
                                     .num_seconds();
                                 if held_secs >= self.config.min_hold_secs as i64 {
-                                   
+
                                     let held_bid = match pos.side {
                                         Side::Up => up_bid,
                                         Side::Down => down_bid,

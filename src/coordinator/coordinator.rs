@@ -4252,7 +4252,6 @@ impl Coordinator {
             return Decimal::ZERO;
         }
 
-        let mut realized_pnl = Decimal::ZERO;
         let mut remaining = filled_shares;
         let mut realized_pnl = Decimal::ZERO;
         let mut matching_positions = self

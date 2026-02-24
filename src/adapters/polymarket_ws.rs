@@ -409,6 +409,7 @@ struct SubscribeRequest {
 
 /// Dynamic subscription/unsubscription request
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 struct DynamicSubscribeRequest {
     assets_ids: Vec<String>,
     operation: String,

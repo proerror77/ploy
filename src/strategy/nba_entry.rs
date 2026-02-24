@@ -425,8 +425,10 @@ mod tests {
 
     #[test]
     fn test_low_confidence_rejected() {
-        let mut config = EntryConfig::default();
-        config.min_confidence = 0.95; // Very high confidence required
+        let config = EntryConfig {
+            min_confidence: 0.95, // Very high confidence required
+            ..Default::default()
+        };
 
         let entry_logic = EntryLogic::new(config);
         let prediction = create_good_prediction();

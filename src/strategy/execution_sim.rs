@@ -309,8 +309,10 @@ mod tests {
 
     #[test]
     fn test_buy_with_spread() {
-        let mut config = ExecutionSimConfig::default();
-        config.enable_market_impact = false;
+        let config = ExecutionSimConfig {
+            enable_market_impact: false,
+            ..Default::default()
+        };
         let sim = ExecutionSimulator::with_config(config);
         let signal_price = dec!(0.50);
         let signal_time = Utc::now();
@@ -329,8 +331,10 @@ mod tests {
 
     #[test]
     fn test_sell_with_spread() {
-        let mut config = ExecutionSimConfig::default();
-        config.enable_market_impact = false;
+        let config = ExecutionSimConfig {
+            enable_market_impact: false,
+            ..Default::default()
+        };
         let sim = ExecutionSimulator::with_config(config);
         let signal_price = dec!(0.50);
         let signal_time = Utc::now();

@@ -34,4 +34,3 @@ mod tests {
         std::env::remove_var("PLOY_ALLOW_DIRECT_STRATEGY_LIVE");
     }
 }
-

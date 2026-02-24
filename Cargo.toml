@@ -120,6 +120,7 @@ api = []  # Enable API module with SQLx compile-time checks (requires DATABASE_U
 rl = ["burn", "burn-ndarray", "bincode"]
 analysis = ["duckdb"]
 onnx = ["tract-onnx"]
+tcn_db = [] # Legacy db-backed TCN path (currently unused)
 builder_relayer_sdk = ["dep:builder-relayer-client-rust", "dep:builder_signing_sdk_rs"]
 
 [dev-dependencies]

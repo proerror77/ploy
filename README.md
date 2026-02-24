@@ -160,13 +160,13 @@ ploy ev --price 95 --probability 97            # Calculate expected value for ne
 
 ```bash
 ploy trade --series 10423 --shares 50 --dry-run          # Two-leg arbitrage on a price series
-ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # CEX momentum strategy
+ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # Binance BTCUSDT is the underlying signal feed; execution is PM YES/NO tokens
 ploy momentum --predictive --min-time 300 --dry-run      # Predictive mode: early entry with TP/SL
 ploy split-arb --max-entry 35 --shares 100 --dry-run     # Split arbitrage (time-separated hedge)
 ploy market-make --token <token_id>            # Market making opportunity analysis
 ploy scan --series 10423 --watch               # Continuous arbitrage scan
 ploy analyze --event <event_id>                # Analyze multi-outcome market
-ploy paper --symbols BTCUSDT,ETHUSDT           # Paper trading mode (signals only)
+ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underlyings (signals only, no PM orders)
 ```
 
 Live momentum mode now supports automatic post-settlement claims (redeem winning positions) when keys are configured:
