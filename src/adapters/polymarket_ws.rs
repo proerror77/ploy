@@ -656,6 +656,9 @@ pub struct PolymarketWebSocket {
     ws_url: String,
     quote_cache: QuoteCache,
     token_to_side: Arc<RwLock<HashMap<String, Side>>>,
+    /// Token IDs that should be subscribed for full book snapshots, but do not have an `Up/Down`
+    /// `Side` mapping (ex: YES/NO sports markets).
+    extra_tokens: Arc<RwLock<HashSet<String>>>,
     update_tx: broadcast::Sender<QuoteUpdate>,
     book_tx: broadcast::Sender<Arc<BookMessage>>,
     reconnect_delay: Duration,
@@ -690,6 +693,7 @@ impl PolymarketWebSocket {
             ws_url: ws_url.to_string(),
             quote_cache: QuoteCache::new(),
             token_to_side: Arc::new(RwLock::new(HashMap::new())),
+            extra_tokens: Arc::new(RwLock::new(HashSet::new())),
             update_tx,
             book_tx,
             reconnect_delay: Duration::from_secs(1),
@@ -793,6 +797,35 @@ impl PolymarketWebSocket {
         (added, removed, updated, total)
     }
 
+    /// Reconcile extra token subscriptions to exactly match `desired`.
+    ///
+    /// These tokens are included in the WS subscription set, but won't emit `QuoteUpdate`s (no
+    /// `Side` mapping exists). They *will* emit full `BookMessage`s via `subscribe_books()`.
+    ///
+    /// Returns `(added, removed, total)`.
+    pub async fn reconcile_extra_tokens(&self, desired: &HashSet<String>) -> (usize, usize, usize) {
+        let mut extra = self.extra_tokens.write().await;
+
+        let mut added: usize = 0;
+        for token_id in desired {
+            if extra.insert(token_id.clone()) {
+                added = added.saturating_add(1);
+            }
+        }
+
+        let mut removed: usize = 0;
+        extra.retain(|token_id| {
+            let keep = desired.contains(token_id);
+            if !keep {
+                removed = removed.saturating_add(1);
+            }
+            keep
+        });
+
+        let total = extra.len();
+        (added, removed, total)
+    }
+
     /// Get side for a token ID
     async fn get_side(&self, token_id: &str) -> Option<Side> {
         let mapping = self.token_to_side.read().await;
@@ -809,9 +842,18 @@ impl PolymarketWebSocket {
             }
         }
 
-        let mapping = self.token_to_side.read().await;
-        for token in mapping.keys() {
-            set.insert(token.clone());
+        {
+            let mapping = self.token_to_side.read().await;
+            for token in mapping.keys() {
+                set.insert(token.clone());
+            }
+        }
+
+        {
+            let extra = self.extra_tokens.read().await;
+            for token in extra.iter() {
+                set.insert(token.clone());
+            }
         }
 
         set.into_iter().collect()
@@ -1064,13 +1106,20 @@ impl PolymarketWebSocket {
                 side, best_bid, best_ask
             );
         } else {
-            // Token not registered - this is a critical issue for debugging
-            let registered_count = self.token_to_side.read().await.len();
-            debug!(
-                "Unregistered token in book update: {} (registered tokens: {})",
-                &asset_id[..16.min(asset_id.len())],
-                registered_count
-            );
+            // Token not registered: expected for `extra_tokens` subscriptions, and a signal for
+            // misconfiguration otherwise.
+            let is_extra = {
+                let extra = self.extra_tokens.read().await;
+                extra.contains(&asset_id)
+            };
+            if !is_extra {
+                let registered_count = self.token_to_side.read().await.len();
+                debug!(
+                    "Unregistered token in book update: {} (registered tokens: {})",
+                    &asset_id[..16.min(asset_id.len())],
+                    registered_count
+                );
+            }
         }
 
         // Broadcast the full book snapshot for downstream persistence/analytics.
@@ -1086,24 +1135,30 @@ impl PolymarketWebSocket {
                 change.price.parse::<Decimal>(),
             ) {
                 debug!("Price change {}: {}", side, price);
-                // Price change messages are typically top-of-book deltas without side depth.
-                // Keep cache warm by updating both bid/ask to the latest quoted price.
+                // Price change messages carry a last-trade price, NOT a book quote.
+                // Passing it as both bid and ask would set spread=0 and corrupt
+                // downstream spread/arb calculations.  Pass None/None so the
+                // existing best_bid / best_ask from the last book snapshot are
+                // preserved while the entry timestamp is still refreshed.
                 self.quote_cache.update(
                     &change.asset_id,
                     side,
-                    Some(price),
-                    Some(price),
+                    None,
+                    None,
                     None,
                     None,
                 );
 
                 if let Some(quote) = self.quote_cache.get(&change.asset_id) {
-                    let update = QuoteUpdate {
-                        token_id: change.asset_id.clone(),
-                        side,
-                        quote,
-                    };
-                    let _ = self.update_tx.send(update);
+                    // Only broadcast if we have at least one side from a prior book snapshot
+                    if quote.best_bid.is_some() || quote.best_ask.is_some() {
+                        let update = QuoteUpdate {
+                            token_id: change.asset_id.clone(),
+                            side,
+                            quote,
+                        };
+                        let _ = self.update_tx.send(update);
+                    }
                 }
             }
         }
@@ -1255,6 +1310,25 @@ mod tests {
         cb.record_success().await;
         assert_eq!(cb.consecutive_failures(), 0);
         assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_build_subscription_list_includes_extra_tokens() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("token_up", Side::Up).await;
+
+        let mut extra = std::collections::HashSet::new();
+        extra.insert("token_yes".to_string());
+        let (_added, _removed, total) = ws.reconcile_extra_tokens(&extra).await;
+        assert_eq!(total, 1);
+
+        let seed = vec!["seed".to_string()];
+        let got = ws.build_subscription_list(&seed).await;
+        let set: std::collections::HashSet<String> = got.into_iter().collect();
+
+        assert!(set.contains("seed"));
+        assert!(set.contains("token_up"));
+        assert!(set.contains("token_yes"));
     }
 
     #[tokio::test]

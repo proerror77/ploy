@@ -6,6 +6,7 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
+use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -15,8 +16,9 @@ use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, P
 use crate::ai_clients::PolymarketSportsClient;
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent,
-    PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig, TradingAgent,
+    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
+    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
+    TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -2654,6 +2656,16 @@ async fn refresh_pm_token_settlements_for_domains(
                         if resolved_market {
                             guard.resolved_markets += 1;
                         }
+                        drop(guard);
+
+                        // Backfill pm_market_metadata from settlement raw_market JSONB
+                        if let Err(e) = backfill_pm_market_metadata_from_settlement(pool, &market).await {
+                            debug!(
+                                market_id = %market.id,
+                                error = %e,
+                                "pm_market_metadata backfill skipped"
+                            );
+                        }
                     }
                     Err(e) => {
                         warn!(
@@ -2754,6 +2766,143 @@ async fn upsert_pm_token_settlement_rows(
     }
 
     Ok((upserted_rows, resolved_market))
+}
+
+/// Backfill `pm_market_metadata` from a Gamma market's raw fields.
+///
+/// Called after every settlement upsert so that training scripts (which JOIN
+/// sync_records → pm_market_metadata) can always find the metadata row.
+/// Uses ON CONFLICT DO UPDATE to keep the latest values.
+async fn backfill_pm_market_metadata_from_settlement(
+    pool: &PgPool,
+    market: &polymarket_client_sdk::gamma::types::response::Market,
+) -> Result<()> {
+    let slug = match market.slug.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()), // No slug — can't populate metadata
+    };
+
+    // Extract threshold from group_item_threshold or upper/lower bound midpoint
+    let raw_market = serde_json::to_value(market).unwrap_or_else(|_| serde_json::json!({}));
+
+    // Parse start/end times — prefer eventStartTime over startDate (market creation time)
+    let end_time: Option<chrono::DateTime<Utc>> = market
+        .end_date_iso
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+    let start_time: Option<chrono::DateTime<Utc>> = raw_market
+        .get("eventStartTime")
+        .or_else(|| raw_market.get("startDate"))
+        .or_else(|| raw_market.get("start_date"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
+
+    // Infer symbol from slug prefix
+    let symbol = if slug.starts_with("btc-") {
+        Some("BTCUSDT")
+    } else if slug.starts_with("eth-") {
+        Some("ETHUSDT")
+    } else if slug.starts_with("sol-") {
+        Some("SOLUSDT")
+    } else {
+        None
+    };
+
+    // Infer horizon from slug pattern (most reliable)
+    let horizon = if slug.contains("-5m-") {
+        Some("5m")
+    } else if slug.contains("-15m-") {
+        Some("15m")
+    } else if slug.contains("-60m-") {
+        Some("60m")
+    } else {
+        // Fallback to duration
+        match (start_time, end_time) {
+            (Some(s), Some(e)) => {
+                let secs = (e - s).num_seconds();
+                if secs <= 360 {
+                    Some("5m")
+                } else if secs <= 1080 {
+                    Some("15m")
+                } else {
+                    Some("60m")
+                }
+            }
+            _ => None,
+        }
+    };
+
+    let threshold: Option<rust_decimal::Decimal> = market
+        .group_item_threshold
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| {
+            let upper: Option<f64> = raw_market
+                .get("upperBound")
+                .or_else(|| raw_market.get("upper_bound"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok());
+            let lower: Option<f64> = raw_market
+                .get("lowerBound")
+                .or_else(|| raw_market.get("lower_bound"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok());
+            match (upper, lower) {
+                (Some(u), Some(l)) => {
+                    rust_decimal::Decimal::try_from((u + l) / 2.0).ok()
+                }
+                _ => None,
+            }
+        });
+
+    let price_to_beat = match threshold {
+        Some(p) if !p.is_zero() => p,
+        _ => {
+            // For up/down markets groupItemThreshold is "0" — the real
+            // threshold is the Binance spot price at eventStartTime.
+            // Try to look it up; fall back to Decimal::ZERO if unavailable.
+            match (symbol, start_time) {
+                (Some(sym), Some(st)) => {
+                    let row = sqlx::query_scalar::<_, rust_decimal::Decimal>(
+                        "SELECT price FROM binance_price_ticks WHERE symbol = $1 AND trade_time <= $2 ORDER BY trade_time DESC LIMIT 1"
+                    )
+                    .bind(sym)
+                    .bind(st)
+                    .fetch_optional(pool)
+                    .await
+                    .unwrap_or(None);
+                    row.unwrap_or(rust_decimal::Decimal::ZERO)
+                }
+                _ => rust_decimal::Decimal::ZERO,
+            }
+        }
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO pm_market_metadata (market_slug, price_to_beat, start_time, end_time, horizon, symbol, raw_market, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        ON CONFLICT (market_slug) DO UPDATE SET
+            price_to_beat = EXCLUDED.price_to_beat,
+            start_time    = COALESCE(EXCLUDED.start_time, pm_market_metadata.start_time),
+            end_time      = COALESCE(EXCLUDED.end_time, pm_market_metadata.end_time),
+            horizon       = COALESCE(EXCLUDED.horizon, pm_market_metadata.horizon),
+            symbol        = COALESCE(EXCLUDED.symbol, pm_market_metadata.symbol),
+            raw_market    = EXCLUDED.raw_market,
+            updated_at    = NOW()
+        "#,
+    )
+    .bind(slug)
+    .bind(price_to_beat)
+    .bind(start_time)
+    .bind(end_time)
+    .bind(horizon)
+    .bind(symbol)
+    .bind(sqlx::types::Json(raw_market))
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 fn parse_json_array_strings_relaxed(
@@ -3365,10 +3514,16 @@ fn spawn_clob_orderbook_persistence(
 
         let mut rx = pm_ws.subscribe_books();
         let max_levels = env_usize("PM_ORDERBOOK_LEVELS", max_levels_default).clamp(1, 200);
-        let min_interval_secs =
-            env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default).max(1);
+        let min_interval_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
+            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
+            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default)
+                .max(0) as u64)
+                .saturating_mul(1000),
+        };
+        let require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
 
         let mut last_persisted: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
+        let mut last_hash: HashMap<String, String> = HashMap::new();
         let mut persisted_count: u64 = 0;
 
         loop {
@@ -3377,15 +3532,25 @@ fn spawn_clob_orderbook_persistence(
                     let now = Utc::now();
                     let token_id = book.asset_id.clone();
 
-                    let should_persist = match last_persisted.get(&token_id) {
-                        None => true,
-                        Some(ts) => {
-                            now.signed_duration_since(*ts).num_seconds() >= min_interval_secs
+                    if min_interval_ms > 0 {
+                        let should_persist_by_interval = match last_persisted.get(&token_id) {
+                            None => true,
+                            Some(ts) => {
+                                now.signed_duration_since(*ts).num_milliseconds()
+                                    >= min_interval_ms as i64
+                            }
+                        };
+                        if !should_persist_by_interval {
+                            continue;
                         }
-                    };
+                    }
 
-                    if !should_persist {
-                        continue;
+                    if require_hash_change {
+                        if let Some(hash) = book.hash.as_deref() {
+                            if last_hash.get(&token_id).map(|v| v.as_str()) == Some(hash) {
+                                continue;
+                            }
+                        }
                     }
 
                     let bids = parse_depth_levels(&book.bids, true, max_levels);
@@ -3423,6 +3588,9 @@ fn spawn_clob_orderbook_persistence(
                     }
 
                     last_persisted.insert(token_id, now);
+                    if let Some(hash) = book.hash.as_ref() {
+                        last_hash.insert(book.asset_id.clone(), hash.clone());
+                    }
                     persisted_count = persisted_count.saturating_add(1);
 
                     if persisted_count % 100 == 0 {
@@ -3430,7 +3598,8 @@ fn spawn_clob_orderbook_persistence(
                             agent = %agent_label,
                             persisted_count,
                             max_levels,
-                            min_interval_secs,
+                            min_interval_ms,
+                            require_hash_change,
                             "persisted clob orderbook snapshots"
                         );
                     }
@@ -3467,6 +3636,9 @@ pub struct PlatformBootstrapConfig {
     pub enable_politics: bool,
     #[serde(default)]
     pub enable_economics: bool,
+    /// Enable OpenClaw meta-agent (Layer 3 orchestrator)
+    #[serde(default)]
+    pub enable_openclaw: bool,
     pub dry_run: bool,
     pub crypto: CryptoTradingConfig,
     pub crypto_lob_ml: CryptoLobMlConfig,
@@ -3475,6 +3647,9 @@ pub struct PlatformBootstrapConfig {
     pub crypto_rl_policy: CryptoRlPolicyConfig,
     pub sports: SportsTradingConfig,
     pub politics: PoliticsTradingConfig,
+    /// OpenClaw meta-agent configuration
+    #[serde(default)]
+    pub openclaw: OpenClawConfig,
 }
 
 impl Default for PlatformBootstrapConfig {
@@ -3491,6 +3666,7 @@ impl Default for PlatformBootstrapConfig {
             enable_sports: false,
             enable_politics: false,
             enable_economics: false,
+            enable_openclaw: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
             crypto_lob_ml: CryptoLobMlConfig::default(),
@@ -3498,6 +3674,7 @@ impl Default for PlatformBootstrapConfig {
             crypto_rl_policy: CryptoRlPolicyConfig::default(),
             sports: SportsTradingConfig::default(),
             politics: PoliticsTradingConfig::default(),
+            openclaw: OpenClawConfig::default(),
         }
     }
 }
@@ -3900,6 +4077,37 @@ impl PlatformBootstrapConfig {
         }
         cfg.crypto.min_hold_secs =
             env_u64("PLOY_CRYPTO_AGENT__MIN_HOLD_SECS", cfg.crypto.min_hold_secs);
+        // Entry mode: arb_only | directional | vol_straddle
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENTRY_MODE") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "arb_only" | "arb" => {
+                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::ArbOnly
+                }
+                "directional" | "dir" => {
+                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::Directional
+                }
+                "vol_straddle" | "straddle" => {
+                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::VolStraddle
+                }
+                _ => {}
+            }
+        }
+        cfg.crypto.oracle_lag_buffer_secs = env_u64(
+            "PLOY_CRYPTO_AGENT__ORACLE_LAG_BUFFER_SECS",
+            cfg.crypto.oracle_lag_buffer_secs,
+        );
+        cfg.crypto.max_spread_pct = env_decimal(
+            "PLOY_CRYPTO_AGENT__MAX_SPREAD_PCT",
+            cfg.crypto.max_spread_pct,
+        );
+        cfg.crypto.straddle_threshold = env_decimal(
+            "PLOY_CRYPTO_AGENT__STRADDLE_THRESHOLD",
+            cfg.crypto.straddle_threshold,
+        );
+        cfg.crypto.straddle_min_vol = env_decimal(
+            "PLOY_CRYPTO_AGENT__STRADDLE_MIN_VOL",
+            cfg.crypto.straddle_min_vol,
+        );
         cfg.crypto.heartbeat_interval_secs = env_u64(
             "PLOY_CRYPTO_AGENT__HEARTBEAT_INTERVAL_SECS",
             cfg.crypto.heartbeat_interval_secs,
@@ -3974,8 +4182,8 @@ impl PlatformBootstrapConfig {
                 "signal_flip" | "flip" => {
                     cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SignalFlip
                 }
-                "price_exit" | "price" | "mtm" => {
-                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::PriceExit
+                "trailing_exit" | "trailing" | "price_exit" | "price" | "mtm" => {
+                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::TrailingExit
                 }
                 _ => {
                     warn!(
@@ -4059,12 +4267,12 @@ impl PlatformBootstrapConfig {
                 _ => {}
             }
         }
-        cfg.crypto_lob_ml.threshold_prob_weight = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT",
-            cfg.crypto_lob_ml.threshold_prob_weight,
+        cfg.crypto_lob_ml.model_blend_weight = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__MODEL_BLEND_WEIGHT",
+            cfg.crypto_lob_ml.model_blend_weight,
         )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(90, 2));
+        .max(rust_decimal::Decimal::new(1, 2))
+        .min(rust_decimal::Decimal::new(99, 2));
         cfg.crypto_lob_ml.event_refresh_secs = env_u64(
             "PLOY_CRYPTO_LOB_ML__EVENT_REFRESH_SECS",
             cfg.crypto_lob_ml.event_refresh_secs,
@@ -4144,12 +4352,8 @@ impl PlatformBootstrapConfig {
                 Some(v.to_string())
             };
         }
-        cfg.crypto_lob_ml.window_fallback_weight = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT",
-            cfg.crypto_lob_ml.window_fallback_weight,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(49, 2));
+        // window_fallback_weight env var kept for backward compat but is unused
+        // in the 2-layer blend model. Ignore silently.
         cfg.crypto_lob_ml.ev_exit_buffer = env_decimal(
             "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER",
             cfg.crypto_lob_ml.ev_exit_buffer,
@@ -4162,6 +4366,21 @@ impl PlatformBootstrapConfig {
         )
         .max(rust_decimal::Decimal::ZERO)
         .min(rust_decimal::Decimal::new(50, 2));
+        cfg.crypto_lob_ml.oracle_lag_buffer_secs = env_u64(
+            "PLOY_CRYPTO_LOB_ML__ORACLE_LAG_BUFFER_SECS",
+            cfg.crypto_lob_ml.oracle_lag_buffer_secs,
+        );
+        cfg.crypto_lob_ml.max_spread_pct = env_decimal(
+            "PLOY_CRYPTO_LOB_ML__MAX_SPREAD_PCT",
+            cfg.crypto_lob_ml.max_spread_pct,
+        );
+        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__FORCE_SETTLE_ONLY_5M") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.force_settle_only_5m = true,
+                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.force_settle_only_5m = false,
+                _ => {}
+            }
+        }
 
         #[cfg(feature = "rl")]
         {
@@ -4800,6 +5019,7 @@ pub async fn start_platform(
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
+        openclaw = config.enable_openclaw || config.openclaw.enabled,
         exchange = %exchange_kind,
         dry_run = config.dry_run,
         "starting multi-agent platform"
@@ -5540,6 +5760,13 @@ pub async fn start_platform(
         }
 
         if pattern_memory_enabled {
+            // Ensure persistence table exists
+            if let Some(ref pool) = shared_pool {
+                if let Err(e) = crate::strategy::pattern_memory::persistence::ensure_table(pool).await {
+                    warn!(error = %e, "failed to create pattern_memory_samples table");
+                }
+            }
+
             let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
                 crypto_cfg.coins.clone()
             } else {
@@ -5910,6 +6137,62 @@ pub async fn start_platform(
         }
     }
 
+    // --- OpenClaw meta-agent (Layer 3 orchestrator) ---
+    let openclaw_enabled = env_bool(
+        "PLOY_OPENCLAW__ENABLED",
+        config.enable_openclaw || config.openclaw.enabled,
+    );
+    if openclaw_enabled {
+        // OpenClaw needs a BinanceWebSocket for regime detection.
+        // If crypto is enabled, a binance_ws was already created above and lives in a local scope.
+        // We create a dedicated one for OpenClaw using the configured BTC symbol.
+        let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
+        let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
+
+        // Spawn Binance WS feed for OpenClaw
+        let oc_ws = oc_binance_ws.clone();
+        tokio::spawn(async move {
+            if let Err(e) = oc_ws.run().await {
+                tracing::error!(error = %e, "openclaw binance ws exited");
+            }
+        });
+
+        let oc_risk_params = AgentRiskParams {
+            max_order_value: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
+            max_unhedged_positions: 0,
+            max_daily_loss: Decimal::ZERO,
+            allow_overnight: false,
+            allowed_markets: vec![],
+        };
+        let oc_agent_id = config.openclaw.agent_id.clone();
+        let cmd_rx = coordinator.register_agent(
+            oc_agent_id.clone(),
+            Domain::Custom(0),
+            oc_risk_params,
+        );
+
+        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_binance_ws);
+        let ctx = AgentContext::new(
+            oc_agent_id.clone(),
+            Domain::Custom(0),
+            handle.clone(),
+            cmd_rx,
+        );
+
+        let jh = tokio::spawn(async move {
+            if let Err(e) = agent.run(ctx).await {
+                tracing::error!(agent = "openclaw", error = %e, "openclaw meta-agent exited with error");
+            }
+        });
+        agent_handles.push(jh);
+        info!(
+            agent_id = %oc_agent_id,
+            regime_tick = config.openclaw.regime_tick_secs,
+            "openclaw meta-agent spawned"
+        );
+    }
+
     info!(
         agents = agent_handles.len(),
         "all agents spawned, starting coordinator"
@@ -6131,14 +6414,13 @@ mod tests {
         let model_type_key = "PLOY_CRYPTO_LOB_ML__MODEL_TYPE";
         let model_path_key = "PLOY_CRYPTO_LOB_ML__MODEL_PATH";
         let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
-        let window_weight_key = "PLOY_CRYPTO_LOB_ML__WINDOW_FALLBACK_WEIGHT";
+        let blend_weight_key = "PLOY_CRYPTO_LOB_ML__MODEL_BLEND_WEIGHT";
         let ev_exit_buffer_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER";
         let ev_exit_vol_scale_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_VOL_SCALE";
         let taker_fee_key = "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE";
         let slippage_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS";
         let use_threshold_key = "PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT";
         let require_threshold_key = "PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT";
-        let threshold_weight_key = "PLOY_CRYPTO_LOB_ML__THRESHOLD_PROB_WEIGHT";
         let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
         let entry_side_policy_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY";
         let entry_late_window_5m_key = "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M";
@@ -6147,14 +6429,13 @@ mod tests {
         let prev_model_type = std::env::var(model_type_key).ok();
         let prev_model_path = std::env::var(model_path_key).ok();
         let prev_model_version = std::env::var(model_version_key).ok();
-        let prev_window_weight = std::env::var(window_weight_key).ok();
+        let prev_blend_weight = std::env::var(blend_weight_key).ok();
         let prev_ev_exit_buffer = std::env::var(ev_exit_buffer_key).ok();
         let prev_ev_exit_vol_scale = std::env::var(ev_exit_vol_scale_key).ok();
         let prev_taker_fee = std::env::var(taker_fee_key).ok();
         let prev_slippage = std::env::var(slippage_key).ok();
         let prev_use_threshold = std::env::var(use_threshold_key).ok();
         let prev_require_threshold = std::env::var(require_threshold_key).ok();
-        let prev_threshold_weight = std::env::var(threshold_weight_key).ok();
         let prev_exit_mode = std::env::var(exit_mode_key).ok();
         let prev_entry_side_policy = std::env::var(entry_side_policy_key).ok();
         let prev_entry_late_window_5m = std::env::var(entry_late_window_5m_key).ok();
@@ -6163,14 +6444,13 @@ mod tests {
         set_env(model_type_key, Some("onnx"));
         set_env(model_path_key, Some("/tmp/models/lob_tcn_v2.onnx"));
         set_env(model_version_key, Some("lob_tcn_v2"));
-        set_env(window_weight_key, Some("0.15"));
+        set_env(blend_weight_key, Some("0.75"));
         set_env(ev_exit_buffer_key, Some("0.01"));
         set_env(ev_exit_vol_scale_key, Some("0.03"));
         set_env(taker_fee_key, Some("0.03"));
         set_env(slippage_key, Some("12"));
         set_env(use_threshold_key, Some("true"));
         set_env(require_threshold_key, Some("false"));
-        set_env(threshold_weight_key, Some("0.40"));
         set_env(exit_mode_key, Some("ev_exit"));
         set_env(entry_side_policy_key, Some("lagging_only"));
         set_env(entry_late_window_5m_key, Some("170"));
@@ -6189,8 +6469,8 @@ mod tests {
             Some("lob_tcn_v2")
         );
         assert_eq!(
-            cfg.crypto_lob_ml.window_fallback_weight,
-            rust_decimal::Decimal::new(15, 2)
+            cfg.crypto_lob_ml.model_blend_weight,
+            rust_decimal::Decimal::new(75, 2)
         );
         assert_eq!(
             cfg.crypto_lob_ml.ev_exit_buffer,
@@ -6210,10 +6490,6 @@ mod tests {
         );
         assert!(cfg.crypto_lob_ml.use_price_to_beat);
         assert!(!cfg.crypto_lob_ml.require_price_to_beat);
-        assert_eq!(
-            cfg.crypto_lob_ml.threshold_prob_weight,
-            rust_decimal::Decimal::new(40, 2)
-        );
         assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(
             cfg.crypto_lob_ml.entry_side_policy,
@@ -6234,9 +6510,9 @@ mod tests {
             Some(v) => set_env(model_version_key, Some(v)),
             None => set_env(model_version_key, None),
         }
-        match prev_window_weight.as_deref() {
-            Some(v) => set_env(window_weight_key, Some(v)),
-            None => set_env(window_weight_key, None),
+        match prev_blend_weight.as_deref() {
+            Some(v) => set_env(blend_weight_key, Some(v)),
+            None => set_env(blend_weight_key, None),
         }
         match prev_ev_exit_buffer.as_deref() {
             Some(v) => set_env(ev_exit_buffer_key, Some(v)),
@@ -6261,10 +6537,6 @@ mod tests {
         match prev_require_threshold.as_deref() {
             Some(v) => set_env(require_threshold_key, Some(v)),
             None => set_env(require_threshold_key, None),
-        }
-        match prev_threshold_weight.as_deref() {
-            Some(v) => set_env(threshold_weight_key, Some(v)),
-            None => set_env(threshold_weight_key, None),
         }
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),

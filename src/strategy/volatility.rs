@@ -24,10 +24,10 @@ fn normal_cdf(x: f64) -> f64 {
     let p = 0.3275911;
 
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
+    let z = x.abs() / std::f64::consts::SQRT_2;
 
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
+    let t = 1.0 / (1.0 + p * z);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
 
     0.5 * (1.0 + sign * y)
 }

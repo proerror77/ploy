@@ -1270,29 +1270,56 @@ impl PolymarketClient {
         Ok(active_events)
     }
 
-    /// Get all events from a series (includes closed events).
+    /// Get all events from a series (includes closed events with full market data).
+    ///
+    /// Uses the Gamma events API directly (not SDK series_by_id) because the
+    /// series endpoint omits nested market data (outcomes, prices, token IDs).
     #[instrument(skip(self))]
     pub async fn get_all_events_in_series(&self, series_id: &str) -> Result<Vec<GammaEventInfo>> {
-        let req = SeriesByIdRequest::builder().id(series_id).build();
-        let series = self
-            .gamma_client
-            .series_by_id(&req)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to fetch series: {}", e)))?;
+        let client = reqwest::Client::new();
+        let mut all_events: Vec<GammaEventInfo> = Vec::new();
+        let page_size = 200;
+        let mut offset = 0;
 
-        let events: Vec<GammaEventInfo> = series
-            .events
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| self.convert_sdk_event(&e))
-            .collect();
+        loop {
+            let url = format!(
+                "{}/events?series_id={}&closed=true&limit={}&offset={}&order=endDate&ascending=false",
+                GAMMA_API_URL, series_id, page_size, offset
+            );
+
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| PloyError::Internal(format!("Gamma events API error: {e}")))?;
+
+            if !resp.status().is_success() {
+                return Err(PloyError::Internal(format!(
+                    "Gamma events API returned {}",
+                    resp.status()
+                )));
+            }
+
+            let page: Vec<GammaEventInfo> = resp
+                .json()
+                .await
+                .map_err(|e| PloyError::Internal(format!("Gamma events parse error: {e}")))?;
+
+            let page_len = page.len();
+            all_events.extend(page);
+
+            if page_len < page_size {
+                break; // last page
+            }
+            offset += page_size;
+        }
 
         debug!(
-            "Found {} total events in series {}",
-            events.len(),
+            "Found {} closed events in series {}",
+            all_events.len(),
             series_id
         );
-        Ok(events)
+        Ok(all_events)
     }
 
     /// Get active sports events matching a keyword
@@ -1886,7 +1913,12 @@ impl PolymarketClient {
             id: event.id.clone(),
             slug: event.slug.clone(),
             title: event.title.clone(),
-            start_time: event.start_time.map(|d| d.to_rfc3339()),
+            // Prefer start_time (sports events) but fall back to start_date
+            // (crypto events set startDate but not startTime).
+            start_time: event
+                .start_time
+                .or(event.start_date)
+                .map(|d| d.to_rfc3339()),
             end_date: event.end_date.map(|d| d.to_rfc3339()),
             closed: event.closed.unwrap_or(false),
             markets: event
