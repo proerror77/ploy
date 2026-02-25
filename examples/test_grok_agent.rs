@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example test_grok_agent
 
-use ploy::agent::{AutonomousAgent, AutonomousConfig, ClaudeAgentClient, GrokClient, GrokConfig};
+use ploy::ai_clients::{AutonomousAgent, AutonomousConfig, ClaudeAgentClient, GrokClient, GrokConfig};
 
 #[tokio::main]
 async fn main() {
