@@ -316,7 +316,7 @@ async fn run_redeem(
 async fn build_signer_provider(
     rpc_url: &str,
     signer: &alloy::signers::local::PrivateKeySigner,
-    _chain_id: u64,
+    chain_id: u64,
 ) -> anyhow::Result<impl alloy::providers::Provider + Clone> {
     use alloy::network::EthereumWallet;
     use alloy::providers::ProviderBuilder;
@@ -328,6 +328,19 @@ async fn build_signer_provider(
         .connect(rpc_url)
         .await
         .map_err(|e| anyhow::anyhow!("failed to connect to RPC: {e}"))?;
+
+    // Verify that the RPC chain ID matches expected chain_id
+    use alloy::providers::Provider as _;
+    let rpc_chain_id = provider
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to query chain ID from RPC: {e}"))?;
+    if rpc_chain_id != chain_id {
+        anyhow::bail!(
+            "chain ID mismatch: config expects {chain_id} but RPC returned {rpc_chain_id}. \
+             Check your rpc_url and chain_id settings."
+        );
+    }
 
     Ok(provider)
 }
@@ -342,17 +355,29 @@ fn parse_usdc_amount(amount: &str) -> anyhow::Result<alloy::primitives::U256> {
             let whole: u64 = parts[0]
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid amount: {e}"))?;
-            whole * 1_000_000
+            whole
+                .checked_mul(1_000_000)
+                .ok_or_else(|| anyhow::anyhow!("amount too large: overflow"))?
         }
         2 => {
             let whole: u64 = parts[0]
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid amount: {e}"))?;
-            let frac_str = format!("{:0<6}", parts[1]); // Pad to 6 decimals
-            let frac: u64 = frac_str[..6]
+            let frac_raw = parts[1];
+            if frac_raw.len() > 6 {
+                anyhow::bail!(
+                    "amount has {} decimal places, USDC only supports 6 (input: {amount})",
+                    frac_raw.len()
+                );
+            }
+            let frac_str = format!("{:0<6}", frac_raw); // Pad to 6 decimals
+            let frac: u64 = frac_str
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid fractional amount: {e}"))?;
-            whole * 1_000_000 + frac
+            whole
+                .checked_mul(1_000_000)
+                .and_then(|w| w.checked_add(frac))
+                .ok_or_else(|| anyhow::anyhow!("amount too large: overflow"))?
         }
         _ => anyhow::bail!("invalid amount format: expected 'X' or 'X.Y'"),
     };

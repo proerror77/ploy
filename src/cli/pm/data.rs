@@ -55,8 +55,7 @@ pub async fn run(cmd: DataCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::
     use polymarket_client_sdk::data::types::request::*;
     use polymarket_client_sdk::data::Client as DataClient;
 
-    let config = super::config_file::PmConfig::load().unwrap_or_default();
-    let data = DataClient::new(config.clob_base_url())?;
+    let data = DataClient::default();
 
     let resolve_addr = |explicit: Option<String>| -> anyhow::Result<alloy::primitives::Address> {
         if let Some(addr) = explicit {

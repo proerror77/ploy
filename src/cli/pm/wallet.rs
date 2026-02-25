@@ -69,7 +69,13 @@ pub async fn run(cmd: WalletCommands, auth: &PmAuth, mode: OutputMode) -> anyhow
             )?;
 
             let creds = unauth_client.create_or_derive_api_key(signer, None).await?;
-            output::print_debug(&creds, mode)?;
+            output::print_success("API key created successfully");
+            output::print_kv("api_key", &creds.key().to_string());
+            output::print_kv("api_secret", "[REDACTED — see SDK docs for access]");
+            output::print_kv("api_passphrase", "[REDACTED — see SDK docs for access]");
+            output::print_warn(
+                "Save the full credentials securely. Use `ploy pm setup` to configure.",
+            );
         }
         WalletCommands::Notifications => {
             let client = ClobClient::new(

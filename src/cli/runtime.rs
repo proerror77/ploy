@@ -231,8 +231,7 @@ pub enum Commands {
     },
 
     /// Polymarket CLI (markets, orders, wallet, CTF, bridge, shell)
-    #[command(subcommand)]
-    Pm(super::pm::PmCommands),
+    Pm(super::pm::PmCli),
 }
 
 /// Crypto market subcommands

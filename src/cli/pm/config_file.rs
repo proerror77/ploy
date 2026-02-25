@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Configuration stored in `~/.config/polymarket/config.json`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PmConfig {
     /// Private key (hex, with or without 0x prefix).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,6 +32,23 @@ pub struct PmConfig {
     /// Polygon RPC URL (required for CTF on-chain operations).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
+}
+
+// Custom Debug to never leak private_key into logs or error messages.
+impl std::fmt::Debug for PmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PmConfig")
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("funder_address", &self.funder_address)
+            .field("clob_url", &self.clob_url)
+            .field("gamma_url", &self.gamma_url)
+            .field("chain_id", &self.chain_id)
+            .field("rpc_url", &self.rpc_url)
+            .finish()
+    }
 }
 
 impl PmConfig {
@@ -62,8 +79,22 @@ impl PmConfig {
     /// Save config to disk with restrictive permissions (0o600).
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir()?;
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create {}", dir.display()))?;
+
+        // Create config directory with restrictive permissions (owner-only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder
+                .create(&dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
 
         let path = Self::config_path()?;
         let contents = serde_json::to_string_pretty(self)?;

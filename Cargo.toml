@@ -84,11 +84,12 @@ url = "2"
 urlencoding = "2"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 dashmap = "6.1.0"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 tabled = "0.18"
+rpassword = "7"
 rustyline = "14"
 dirs = "6"
 

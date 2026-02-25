@@ -75,8 +75,9 @@ pub async fn run(cmd: ClobCommands, _auth: &PmAuth, mode: OutputMode) -> anyhow:
             let tid =
                 U256::from_str(&token_id).map_err(|e| anyhow::anyhow!("invalid token_id: {e}"))?;
             let sdk_side = match side.to_uppercase().as_str() {
-                "SELL" => Side::Sell,
-                _ => Side::Buy,
+                "BUY" | "B" => Side::Buy,
+                "SELL" | "S" => Side::Sell,
+                other => anyhow::bail!("invalid side '{other}': expected BUY or SELL"),
             };
             let req = PriceRequest::builder().token_id(tid).side(sdk_side).build();
             let price = clob.price(&req).await?;

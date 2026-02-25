@@ -165,15 +165,12 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             )
             .await?;
         }
-        Some(Commands::Pm(pm_cmd)) => {
+        Some(Commands::Pm(pm_cli)) => {
             crate::main_runtime::init_logging_simple();
-            let pm_args = ploy::cli::pm::GlobalPmArgs {
-                json: false,
-                private_key: None,
-                dry_run: cli.dry_run.unwrap_or(false),
-                yes: false,
-            };
-            ploy::cli::pm::run(pm_cmd.clone(), &pm_args)
+            let mut pm_args = pm_cli.args.clone();
+            // Merge top-level --dry-run if set
+            pm_args.dry_run = pm_args.dry_run || cli.dry_run.unwrap_or(false);
+            ploy::cli::pm::run(pm_cli.command.clone(), &pm_args)
                 .await
                 .map_err(|e| PloyError::Validation(format!("pm command failed: {e}")))?;
         }

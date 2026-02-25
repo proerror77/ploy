@@ -93,12 +93,8 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 fn prompt_private_key(config: &mut PmConfig) -> anyhow::Result<()> {
-    print!("  Private key (hex): ");
-    std::io::Write::flush(&mut std::io::stdout())?;
-
-    // Read without echo if possible
-    let mut key = String::new();
-    std::io::stdin().read_line(&mut key)?;
+    // Use rpassword to hide input from terminal echo and shoulder surfing
+    let key = rpassword::prompt_password("  Private key (hex): ")?;
     let key = key.trim().to_string();
 
     if key.is_empty() {

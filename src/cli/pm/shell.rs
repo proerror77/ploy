@@ -35,7 +35,10 @@ async fn run_inner(args: &GlobalPmArgs) -> anyhow::Result<()> {
                     continue;
                 }
 
-                let _ = rl.add_history_entry(line);
+                // Skip history entries that contain sensitive data
+                if !line.contains("--private-key") {
+                    let _ = rl.add_history_entry(line);
+                }
 
                 match line {
                     "exit" | "quit" | "q" => break,
@@ -79,9 +82,25 @@ async fn run_inner(args: &GlobalPmArgs) -> anyhow::Result<()> {
 
     if let Some(ref path) = history_path {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = std::fs::DirBuilder::new();
+                builder.recursive(true).mode(0o700);
+                let _ = builder.create(parent);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::fs::create_dir_all(parent);
+            }
         }
         let _ = rl.save_history(path);
+        // Restrict history file permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 
     Ok(())

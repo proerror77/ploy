@@ -93,8 +93,9 @@ pub async fn run(
         } => {
             let tid = U256::from_str(&token_id)?;
             let sdk_side = match side.to_uppercase().as_str() {
-                "SELL" => Side::Sell,
-                _ => Side::Buy,
+                "BUY" | "B" => Side::Buy,
+                "SELL" | "S" => Side::Sell,
+                other => anyhow::bail!("invalid side '{other}': expected BUY or SELL"),
             };
             let price_dec = Decimal::from_str(&price)?;
             let size_dec = Decimal::from_str(&size)?;
@@ -199,6 +200,10 @@ pub async fn run(
                 output::print_warn(&format!("[DRY RUN] Would cancel order: {order_id}"));
                 return Ok(());
             }
+            if !args.yes && !output::confirm(&format!("Cancel order {order_id}?")) {
+                output::print_warn("cancelled");
+                return Ok(());
+            }
             let resp = client.cancel_order(&order_id).await?;
             output::print_debug(&resp, mode)?;
             output::print_success(&format!("order {order_id} cancelled"));
@@ -206,6 +211,10 @@ pub async fn run(
         OrdersCommands::CancelAll { market } => {
             if args.dry_run {
                 output::print_warn("[DRY RUN] Would cancel all orders");
+                return Ok(());
+            }
+            if !args.yes && !output::confirm("Cancel ALL orders? This cannot be undone.") {
+                output::print_warn("cancelled");
                 return Ok(());
             }
             if let Some(m) = market {

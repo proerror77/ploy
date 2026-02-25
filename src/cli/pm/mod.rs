@@ -35,7 +35,9 @@ pub struct GlobalPmArgs {
     pub json: bool,
 
     /// Private key for authenticated operations (overrides env/config).
-    #[arg(long, global = true)]
+    /// WARNING: Prefer POLYMARKET_PRIVATE_KEY env var or `ploy pm setup` instead.
+    /// CLI args are visible in `ps` output and shell history.
+    #[arg(long, global = true, env = "POLYMARKET_PRIVATE_KEY")]
     pub private_key: Option<String>,
 
     /// Dry-run mode: print what would happen without executing.
@@ -45,6 +47,16 @@ pub struct GlobalPmArgs {
     /// Skip confirmation prompts.
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
+}
+
+/// Top-level container for `ploy pm` — wraps GlobalPmArgs + PmCommands so
+/// clap can parse both global flags and the subcommand together.
+#[derive(Args, Debug, Clone)]
+pub struct PmCli {
+    #[command(flatten)]
+    pub args: GlobalPmArgs,
+    #[command(subcommand)]
+    pub command: PmCommands,
 }
 
 /// Polymarket CLI commands.
