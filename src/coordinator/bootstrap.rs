@@ -2470,7 +2470,7 @@ fn spawn_pm_token_settlement_persistence(
     pm_client: PolymarketClient,
     pool: PgPool,
     agent_id: String,
-    collector_domain: &'static str,
+    collector_domains: Vec<&'static str>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = ensure_pm_token_settlements_table(&pool).await {
@@ -2482,13 +2482,15 @@ fn spawn_pm_token_settlement_persistence(
             return;
         }
 
-        let poll_secs = env_u64("PM_SETTLEMENT_POLL_SECS", 60).max(10);
+        let poll_secs = env_u64("PM_SETTLEMENT_POLL_SECS", 120).max(10);
         let targets_limit = env_usize("PM_SETTLEMENT_TARGETS_LIMIT", 1000).clamp(1, 10000);
         let unresolved_limit = env_usize("PM_SETTLEMENT_UNRESOLVED_LIMIT", 1000).clamp(1, 10000);
         let lookback_secs = env_i64("PM_SETTLEMENT_TARGET_LOOKBACK_SECS", 86400).max(0);
         let max_tokens_per_cycle =
-            env_usize("PM_SETTLEMENT_MAX_TOKENS_PER_CYCLE", 500).clamp(1, 5000);
-        let max_concurrency = env_usize("PM_SETTLEMENT_CONCURRENCY", 4).clamp(1, 32);
+            env_usize("PM_SETTLEMENT_MAX_TOKENS_PER_CYCLE", 200).clamp(1, 5000);
+        let max_concurrency = env_usize("PM_SETTLEMENT_CONCURRENCY", 2).clamp(1, 32);
+
+        let collector_domains_label = collector_domains.join(",");
 
         let mut tick = tokio::time::interval(Duration::from_secs(poll_secs));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2496,10 +2498,10 @@ fn spawn_pm_token_settlement_persistence(
         loop {
             tick.tick().await;
 
-            match refresh_pm_token_settlements_for_domain(
+            match refresh_pm_token_settlements_for_domains(
                 &pm_client,
                 &pool,
-                collector_domain,
+                &collector_domains,
                 targets_limit,
                 unresolved_limit,
                 lookback_secs,
@@ -2514,7 +2516,7 @@ fn spawn_pm_token_settlement_persistence(
                     {
                         info!(
                             agent = %agent_id,
-                            collector_domain,
+                            collector_domains = %collector_domains_label,
                             targeted_tokens = stats.targeted_tokens,
                             refreshed_markets = stats.refreshed_markets,
                             upserted_rows = stats.upserted_rows,
@@ -2526,7 +2528,7 @@ fn spawn_pm_token_settlement_persistence(
                 Err(e) => {
                     warn!(
                         agent = %agent_id,
-                        collector_domain,
+                        collector_domains = %collector_domains_label,
                         error = %e,
                         "pm settlement persistence cycle failed"
                     );
@@ -2536,10 +2538,10 @@ fn spawn_pm_token_settlement_persistence(
     });
 }
 
-async fn refresh_pm_token_settlements_for_domain(
+async fn refresh_pm_token_settlements_for_domains(
     pm_client: &PolymarketClient,
     pool: &PgPool,
-    collector_domain: &str,
+    collector_domains: &[&str],
     targets_limit: usize,
     unresolved_limit: usize,
     lookback_secs: i64,
@@ -2551,27 +2553,29 @@ async fn refresh_pm_token_settlements_for_domain(
     let mut token_ids: BTreeSet<String> = BTreeSet::new();
 
     // 1) Active/recent collector targets (seed for upcoming or just-ended markets).
-    let scoped_targets = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT token_id
-        FROM collector_token_targets
-        WHERE domain = $1
-          AND (
-                expires_at IS NULL
-             OR expires_at > NOW() - ($2::bigint * INTERVAL '1 second')
-          )
-        ORDER BY updated_at DESC
-        LIMIT $3
-        "#,
-    )
-    .bind(collector_domain)
-    .bind(lookback_secs)
-    .bind(targets_limit as i64)
-    .fetch_all(pool)
-    .await?;
-    for token_id in scoped_targets {
-        if !token_id.trim().is_empty() {
-            token_ids.insert(token_id);
+    for domain in collector_domains {
+        let scoped_targets = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT token_id
+            FROM collector_token_targets
+            WHERE domain = $1
+              AND (
+                    expires_at IS NULL
+                 OR expires_at > NOW() - ($2::bigint * INTERVAL '1 second')
+              )
+            ORDER BY updated_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(*domain)
+        .bind(lookback_secs)
+        .bind(targets_limit as i64)
+        .fetch_all(pool)
+        .await?;
+        for token_id in scoped_targets {
+            if !token_id.trim().is_empty() {
+                token_ids.insert(token_id);
+            }
         }
     }
 
@@ -4741,7 +4745,13 @@ pub async fn start_platform(
         )));
     }
 
-    let needs_polymarket_client = config.enable_crypto || config.enable_politics;
+    // Polymarket client is required for:
+    // - crypto event discovery (Gamma)
+    // - settlement persistence (Gamma)
+    // - politics agent
+    // - sports settlement labeling (Gamma)
+    let needs_polymarket_client =
+        config.enable_crypto || config.enable_sports || config.enable_politics;
     let pm_client = if needs_polymarket_client {
         let rest_url = app_config
             .market
@@ -5117,6 +5127,34 @@ pub async fn start_platform(
     // 3. Shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
+    // 3b. Optional Polymarket settlement persistence (Gamma) for training labels.
+    // Keep it read-only and enabled even in dry-run (no order placement).
+    if let Some(pool) = shared_pool.as_ref() {
+        let mut collector_domains: Vec<&'static str> = Vec::new();
+        if config.enable_crypto {
+            collector_domains.push("CRYPTO");
+        }
+        if config.enable_sports {
+            collector_domains.push("SPORTS_NBA");
+        }
+
+        if !collector_domains.is_empty() {
+            if let Some(client) = pm_client.clone() {
+                spawn_pm_token_settlement_persistence(
+                    client,
+                    pool.clone(),
+                    format!("settlements:{}", account_id),
+                    collector_domains,
+                );
+            } else {
+                warn!(
+                    account_id = %account_id,
+                    "pm client not configured; skipping token settlement persistence task"
+                );
+            }
+        }
+    }
+
     // 4. Spawn agents
     let mut agent_handles = Vec::new();
 
@@ -5376,19 +5414,6 @@ pub async fn start_platform(
         if let Some(pool) = shared_pool.as_ref() {
             let (orderbook_levels_default, orderbook_snapshot_secs_default) = (20usize, 60i64);
 
-            if let Some(client) = pm_client.clone() {
-                spawn_pm_token_settlement_persistence(
-                    client,
-                    pool.clone(),
-                    crypto_cfg.agent_id.clone(),
-                    "CRYPTO",
-                );
-            } else {
-                warn!(
-                    agent = crypto_cfg.agent_id,
-                    "pm client not configured; skipping token settlement persistence task"
-                );
-            }
             spawn_clob_quote_persistence(pm_ws.clone(), pool.clone(), crypto_cfg.agent_id.clone());
             spawn_clob_orderbook_persistence(
                 pm_ws.clone(),
