@@ -1566,6 +1566,25 @@ impl CryptoIntentDimensions {
             other => other.to_string(),
         })
     }
+
+    /// Parse coin from a market slug without needing a full OrderIntent.
+    fn parse_coin_from_slug(slug: &str) -> Option<String> {
+        let slug_lower = slug.to_ascii_lowercase();
+        for (needle, coin) in [
+            ("bitcoin", "BTC"),
+            ("btc", "BTC"),
+            ("ethereum", "ETH"),
+            ("eth", "ETH"),
+            ("solana", "SOL"),
+            ("sol", "SOL"),
+            ("xrp", "XRP"),
+        ] {
+            if slug_lower.contains(needle) {
+                return Some(coin.to_string());
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1957,6 +1976,90 @@ impl CryptoCapitalAllocator {
                 &dims.deployment_scope,
                 &dims.coin,
                 dims.horizon,
+                remaining,
+            );
+        }
+    }
+
+    /// Release exposure for a position that settled on-chain without generating a sell fill.
+    /// Binary option tokens (especially 5m events) settle at $0/$1 on-chain but the trading
+    /// system never sees a sell fill, so the allocator's `open` book retains phantom exposure.
+    /// This method drains that exposure using the position's entry_price as the reference.
+    fn release_settled_position(
+        &mut self,
+        market_slug: &str,
+        token_id: &str,
+        side: Side,
+        shares: u64,
+        entry_price: Decimal,
+        metadata: &HashMap<String, String>,
+    ) {
+        if !self.enabled || shares == 0 || entry_price <= Decimal::ZERO {
+            return;
+        }
+
+        // Reconstruct the same position_key that was used during settle_buy_execution.
+        // Position key = "{deployment_scope}|{market_identity}|{token_id}|{side}"
+        let deployment_scope = metadata
+            .get("deployment_id")
+            .and_then(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                if t.is_empty() { None } else { Some(t) }
+            })
+            .unwrap_or_else(|| {
+                let agent_id = metadata
+                    .get("agent_id")
+                    .map(|a| a.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let strategy = metadata
+                    .get("strategy")
+                    .and_then(|v| {
+                        let t = v.trim().to_ascii_lowercase();
+                        if t.is_empty() { None } else { Some(t) }
+                    })
+                    .unwrap_or_else(|| "default".to_string());
+                format!("agent:{}|strategy:{}", agent_id, strategy)
+            });
+
+        let market_identity = metadata
+            .get("condition_id")
+            .and_then(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                if t.is_empty() { None } else { Some(format!("condition:{}", t)) }
+            })
+            .unwrap_or_else(|| {
+                let slug = market_slug.trim().to_ascii_lowercase();
+                if slug.is_empty() {
+                    let tok = token_id.trim().to_ascii_lowercase();
+                    if tok.is_empty() { "unknown".to_string() } else { format!("token:{}", tok) }
+                } else {
+                    format!("slug:{}", slug)
+                }
+            });
+
+        let position_key = format!(
+            "{}|{}|{}|{}",
+            deployment_scope,
+            market_identity,
+            token_id,
+            side.as_str()
+        );
+
+        let release_notional = entry_price * Decimal::from(shares);
+        let removed = self.open.subtract_from_position_key(&position_key, release_notional);
+
+        // If exact key match didn't find the full amount, fall back to bucket-level drain.
+        // This handles cases where the position key reconstruction differs slightly.
+        if removed < release_notional {
+            let coin = CryptoIntentDimensions::parse_coin_from_slug(market_slug)
+                .unwrap_or_else(|| "OTHER".to_string());
+            let horizon = CryptoHorizon::from_hint(market_slug)
+                .unwrap_or(CryptoHorizon::Other);
+            let remaining = release_notional - removed;
+            self.open.subtract_matching_bucket(
+                &deployment_scope,
+                &coin,
+                horizon,
                 remaining,
             );
         }
@@ -2833,12 +2936,39 @@ impl Coordinator {
                 if !settled.is_empty() {
                     let settled_map: HashMap<String, Decimal> = settled.into_iter().collect();
                     let mut closed_count = 0u32;
+                    let mut settled_crypto: Vec<(String, String, Side, u64, Decimal, HashMap<String, String>)> = Vec::new();
                     for pos in &open_positions {
                         if let Some(&exit_price) = settled_map.get(&pos.token_id) {
                             self.positions
                                 .close_position(&pos.position_id, exit_price)
                                 .await;
+                            if pos.domain == Domain::Crypto {
+                                let mut meta = pos.metadata.clone();
+                                meta.entry("agent_id".to_string()).or_insert_with(|| pos.agent_id.clone());
+                                settled_crypto.push((
+                                    pos.market_slug.clone(),
+                                    pos.token_id.clone(),
+                                    pos.side,
+                                    pos.shares,
+                                    pos.entry_price,
+                                    meta,
+                                ));
+                            }
                             closed_count += 1;
+                        }
+                    }
+                    // Release allocator exposure for settled crypto positions
+                    if !settled_crypto.is_empty() {
+                        let mut allocator = self.crypto_allocator.write().await;
+                        for (market_slug, token_id, side, shares, entry_price, metadata) in &settled_crypto {
+                            allocator.release_settled_position(
+                                market_slug,
+                                token_id,
+                                *side,
+                                *shares,
+                                *entry_price,
+                                metadata,
+                            );
                         }
                     }
                     if closed_count > 0 {
@@ -2888,6 +3018,8 @@ impl Coordinator {
 
         let mut closed_count = 0u32;
         let mut affected_agents = std::collections::HashSet::new();
+        // Collect positions that need allocator exposure release
+        let mut settled_positions: Vec<(String, String, Side, u64, Decimal, HashMap<String, String>)> = Vec::new();
         let now = Utc::now();
 
         // Strategy 1: Settlement-based cleanup via pm_token_settlements
@@ -2920,6 +3052,18 @@ impl Coordinator {
                             .close_position(&pos.position_id, exit_price)
                             .await;
                         affected_agents.insert(pos.agent_id.clone());
+                        if pos.domain == Domain::Crypto {
+                            let mut meta = pos.metadata.clone();
+                            meta.entry("agent_id".to_string()).or_insert_with(|| pos.agent_id.clone());
+                            settled_positions.push((
+                                pos.market_slug.clone(),
+                                pos.token_id.clone(),
+                                pos.side,
+                                pos.shares,
+                                pos.entry_price,
+                                meta,
+                            ));
+                        }
                         closed_count += 1;
                     }
                 }
@@ -2964,9 +3108,42 @@ impl Coordinator {
                         .close_position(&pos.position_id, pos.entry_price)
                         .await;
                     affected_agents.insert(pos.agent_id.clone());
+                    if pos.domain == Domain::Crypto {
+                        let mut meta = pos.metadata.clone();
+                        meta.entry("agent_id".to_string()).or_insert_with(|| pos.agent_id.clone());
+                        settled_positions.push((
+                            pos.market_slug.clone(),
+                            pos.token_id.clone(),
+                            pos.side,
+                            pos.shares,
+                            pos.entry_price,
+                            meta,
+                        ));
+                    }
                     closed_count += 1;
                 }
             }
+        }
+
+        // Release allocator exposure for all settled crypto positions.
+        // Without this, the CryptoCapitalAllocator's `open` ExposureBook retains
+        // phantom exposure for positions that settled on-chain without sell fills.
+        if !settled_positions.is_empty() {
+            let mut allocator = self.crypto_allocator.write().await;
+            for (market_slug, token_id, side, shares, entry_price, metadata) in &settled_positions {
+                allocator.release_settled_position(
+                    market_slug,
+                    token_id,
+                    *side,
+                    *shares,
+                    *entry_price,
+                    metadata,
+                );
+            }
+            info!(
+                released_count = settled_positions.len(),
+                "settlement check: released allocator exposure for settled positions"
+            );
         }
 
         if closed_count > 0 {
