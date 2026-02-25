@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::sync::oneshot;
 
 use super::state::{AgentSnapshot, QueueStatsSnapshot};
@@ -30,10 +31,14 @@ pub enum CoordinatorControlCommand {
     PauseAll,
     /// Pause agents for specific domain
     PauseDomain(Domain),
+    /// Pause a single agent by ID
+    PauseAgent(String),
     /// Resume all agents after pause
     ResumeAll,
     /// Resume agents for specific domain
     ResumeDomain(Domain),
+    /// Resume a single agent by ID
+    ResumeAgent(String),
     /// Force-close all positions and stop agents
     ForceCloseAll,
     /// Force-close only positions for specific domain
@@ -64,6 +69,9 @@ pub struct GovernancePolicySnapshot {
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
     pub reason: Option<String>,
+    /// Extensible key-value metadata for cross-agent signaling (e.g., OpenClaw regime)
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 /// Full replacement payload for runtime governance policy.
@@ -77,6 +85,9 @@ pub struct GovernancePolicyUpdate {
     pub updated_by: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Extensible key-value metadata for cross-agent signaling
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 /// Append-only governance policy change event (audit ledger).
@@ -90,6 +101,9 @@ pub struct GovernancePolicyHistoryEntry {
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
     pub reason: Option<String>,
+    /// Extensible key-value metadata snapshot at the time of this change
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 /// Per-domain allocator ledger snapshot (account-level capital tracking).

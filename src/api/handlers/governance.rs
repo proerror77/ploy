@@ -111,6 +111,7 @@ pub async fn put_governance_policy(
             .trim()
             .to_string(),
         reason: req.reason,
+        metadata: Default::default(),
     };
 
     let snapshot = coordinator
