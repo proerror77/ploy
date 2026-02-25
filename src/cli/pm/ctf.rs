@@ -52,20 +52,27 @@ pub async fn run(
     args: &GlobalPmArgs,
 ) -> anyhow::Result<()> {
     match cmd {
-        CtfCommands::ConditionId { oracle, question_id, outcome_count } => {
+        CtfCommands::ConditionId {
+            oracle,
+            question_id,
+            outcome_count,
+        } => {
             // Pure computation — no RPC needed. Use SDK's contract call if RPC
             // available, otherwise compute locally with keccak256.
             run_condition_id(&oracle, &question_id, outcome_count, auth, mode).await
         }
-        CtfCommands::Split { condition_id, amount } => {
-            run_split(&condition_id, &amount, auth, args).await
-        }
-        CtfCommands::Merge { condition_id, amount } => {
-            run_merge(&condition_id, &amount, auth, args).await
-        }
-        CtfCommands::Redeem { condition_id, neg_risk } => {
-            run_redeem(&condition_id, neg_risk, auth, args).await
-        }
+        CtfCommands::Split {
+            condition_id,
+            amount,
+        } => run_split(&condition_id, &amount, auth, args).await,
+        CtfCommands::Merge {
+            condition_id,
+            amount,
+        } => run_merge(&condition_id, &amount, auth, args).await,
+        CtfCommands::Redeem {
+            condition_id,
+            neg_risk,
+        } => run_redeem(&condition_id, neg_risk, auth, args).await,
     }
 }
 
@@ -81,10 +88,11 @@ async fn run_condition_id(
     use alloy::primitives::{B256, U256};
     use std::str::FromStr;
 
-    let oracle_addr: alloy::primitives::Address = oracle.parse()
+    let oracle_addr: alloy::primitives::Address = oracle
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid oracle address: {e}"))?;
-    let q_id = B256::from_str(question_id)
-        .map_err(|e| anyhow::anyhow!("invalid question_id: {e}"))?;
+    let q_id =
+        B256::from_str(question_id).map_err(|e| anyhow::anyhow!("invalid question_id: {e}"))?;
 
     // Try on-chain computation via CTF contract
     let config = super::config_file::PmConfig::load().unwrap_or_default();
@@ -120,8 +128,8 @@ async fn try_onchain_condition_id(
 ) -> anyhow::Result<alloy::primitives::B256> {
     use alloy::primitives::U256;
     use alloy::providers::ProviderBuilder;
-    use polymarket_client_sdk::ctf::Client as CtfClient;
     use polymarket_client_sdk::ctf::types::ConditionIdRequest;
+    use polymarket_client_sdk::ctf::Client as CtfClient;
 
     let provider = ProviderBuilder::new()
         .connect(rpc_url)
@@ -150,8 +158,8 @@ async fn run_split(
     use alloy::primitives::B256;
     use std::str::FromStr;
 
-    let cond_id = B256::from_str(condition_id)
-        .map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
+    let cond_id =
+        B256::from_str(condition_id).map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
 
     // Parse amount as USDC (6 decimals)
     let usdc_amount = parse_usdc_amount(amount)?;
@@ -201,8 +209,8 @@ async fn run_merge(
     use alloy::primitives::B256;
     use std::str::FromStr;
 
-    let cond_id = B256::from_str(condition_id)
-        .map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
+    let cond_id =
+        B256::from_str(condition_id).map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
     let usdc_amount = parse_usdc_amount(amount)?;
 
     if args.dry_run {
@@ -249,8 +257,8 @@ async fn run_redeem(
     use alloy::primitives::{B256, U256};
     use std::str::FromStr;
 
-    let cond_id = B256::from_str(condition_id)
-        .map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
+    let cond_id =
+        B256::from_str(condition_id).map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
 
     if args.dry_run {
         let mode = if neg_risk { "NegRisk" } else { "standard" };
@@ -290,8 +298,7 @@ async fn run_redeem(
 
         let collateral = polymarket_usdc_address(auth.chain_id);
         let req = polymarket_client_sdk::ctf::types::RedeemPositionsRequest::for_binary_market(
-            collateral,
-            cond_id,
+            collateral, cond_id,
         );
 
         output::print_warn("Submitting redeem transaction...");
@@ -332,15 +339,18 @@ fn parse_usdc_amount(amount: &str) -> anyhow::Result<alloy::primitives::U256> {
     let parts: Vec<&str> = amount.split('.').collect();
     let raw = match parts.len() {
         1 => {
-            let whole: u64 = parts[0].parse()
+            let whole: u64 = parts[0]
+                .parse()
                 .map_err(|e| anyhow::anyhow!("invalid amount: {e}"))?;
             whole * 1_000_000
         }
         2 => {
-            let whole: u64 = parts[0].parse()
+            let whole: u64 = parts[0]
+                .parse()
                 .map_err(|e| anyhow::anyhow!("invalid amount: {e}"))?;
             let frac_str = format!("{:0<6}", parts[1]); // Pad to 6 decimals
-            let frac: u64 = frac_str[..6].parse()
+            let frac: u64 = frac_str[..6]
+                .parse()
                 .map_err(|e| anyhow::anyhow!("invalid fractional amount: {e}"))?;
             whole * 1_000_000 + frac
         }

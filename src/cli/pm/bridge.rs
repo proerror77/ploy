@@ -87,7 +87,10 @@ pub async fn run(cmd: BridgeCommands, auth: &PmAuth, _mode: OutputMode) -> anyho
                         tx.to_chain_id,
                         tx.from_amount_base_unit,
                         tx.status,
-                        tx.tx_hash.as_deref().map(|h| format!(" | tx: {h}")).unwrap_or_default(),
+                        tx.tx_hash
+                            .as_deref()
+                            .map(|h| format!(" | tx: {h}"))
+                            .unwrap_or_default(),
                     );
                 }
             }

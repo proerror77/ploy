@@ -52,15 +52,16 @@ pub enum DataCommands {
 }
 
 pub async fn run(cmd: DataCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::Result<()> {
-    use polymarket_client_sdk::data::Client as DataClient;
     use polymarket_client_sdk::data::types::request::*;
+    use polymarket_client_sdk::data::Client as DataClient;
 
     let config = super::config_file::PmConfig::load().unwrap_or_default();
     let data = DataClient::new(config.clob_base_url())?;
 
     let resolve_addr = |explicit: Option<String>| -> anyhow::Result<alloy::primitives::Address> {
         if let Some(addr) = explicit {
-            addr.parse().map_err(|e| anyhow::anyhow!("invalid address: {e}"))
+            addr.parse()
+                .map_err(|e| anyhow::anyhow!("invalid address: {e}"))
         } else {
             auth.address()
         }
@@ -69,10 +70,7 @@ pub async fn run(cmd: DataCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::
     match cmd {
         DataCommands::Positions { address, limit } => {
             let addr = resolve_addr(address)?;
-            let req = PositionsRequest::builder()
-                .user(addr)
-                .limit(limit)?
-                .build();
+            let req = PositionsRequest::builder().user(addr).limit(limit)?.build();
             let positions = data.positions(&req).await?;
             output::print_debug_items(&positions, mode)?;
         }
@@ -87,24 +85,19 @@ pub async fn run(cmd: DataCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::
         }
         DataCommands::Trades { address, limit } => {
             let addr = resolve_addr(address)?;
-            let req = TradesRequest::builder()
-                .user(addr)
-                .limit(limit)?
-                .build();
+            let req = TradesRequest::builder().user(addr).limit(limit)?.build();
             let trades = data.trades(&req).await?;
             output::print_debug_items(&trades, mode)?;
         }
         DataCommands::Activity { address, limit } => {
             let addr = resolve_addr(address)?;
-            let req = ActivityRequest::builder()
-                .user(addr)
-                .limit(limit)?
-                .build();
+            let req = ActivityRequest::builder().user(addr).limit(limit)?.build();
             let activity = data.activity(&req).await?;
             output::print_debug_items(&activity, mode)?;
         }
         DataCommands::Holders { condition_id } => {
-            let cid: alloy::primitives::B256 = condition_id.parse()
+            let cid: alloy::primitives::B256 = condition_id
+                .parse()
                 .map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
             let req = HoldersRequest::builder().markets(vec![cid]).build();
             let holders = data.holders(&req).await?;
@@ -117,11 +110,10 @@ pub async fn run(cmd: DataCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::
             output::print_debug_items(&value, mode)?;
         }
         DataCommands::OpenInterest { condition_id } => {
-            let cid: alloy::primitives::B256 = condition_id.parse()
+            let cid: alloy::primitives::B256 = condition_id
+                .parse()
                 .map_err(|e| anyhow::anyhow!("invalid condition_id: {e}"))?;
-            let req = OpenInterestRequest::builder()
-                .markets(vec![cid])
-                .build();
+            let req = OpenInterestRequest::builder().markets(vec![cid]).build();
             let oi = data.open_interest(&req).await?;
             output::print_debug_items(&oi, mode)?;
         }

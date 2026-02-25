@@ -173,9 +173,9 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
                 dry_run: cli.dry_run.unwrap_or(false),
                 yes: false,
             };
-            ploy::cli::pm::run(pm_cmd.clone(), &pm_args).await.map_err(|e| {
-                PloyError::Validation(format!("pm command failed: {e}"))
-            })?;
+            ploy::cli::pm::run(pm_cmd.clone(), &pm_args)
+                .await
+                .map_err(|e| PloyError::Validation(format!("pm command failed: {e}")))?;
         }
         None => {
             return Err(PloyError::Validation(

@@ -111,8 +111,6 @@ impl PmConfig {
 
     /// Returns the Polygon RPC URL (default: public Polygon RPC).
     pub fn rpc_url(&self) -> &str {
-        self.rpc_url
-            .as_deref()
-            .unwrap_or("https://polygon-rpc.com")
+        self.rpc_url.as_deref().unwrap_or("https://polygon-rpc.com")
     }
 }

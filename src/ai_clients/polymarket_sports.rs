@@ -560,25 +560,18 @@ impl PolymarketSportsClient {
             .or_else(|| market.volume_num.and_then(Self::decimal_to_f64));
 
         let outcome_prices = market.outcome_prices.map(|prices| {
-            serde_json::to_string(
-                &prices
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_default()
+            serde_json::to_string(&prices.iter().map(|p| p.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default()
         });
 
         let clob_token_ids = market.clob_token_ids.map(|ids| {
-            serde_json::to_string(
-                &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
-            )
-            .unwrap_or_default()
+            serde_json::to_string(&ids.iter().map(|id| id.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default()
         });
 
-        let outcomes = market.outcomes.map(|o| {
-            serde_json::to_string(&o).unwrap_or_default()
-        });
+        let outcomes = market
+            .outcomes
+            .map(|o| serde_json::to_string(&o).unwrap_or_default());
 
         LiveGameMarket {
             question: market.question.unwrap_or_default(),
@@ -673,24 +666,20 @@ impl PolymarketSportsClient {
             .or_else(|| market.liquidity_num.and_then(Self::decimal_to_f64));
 
         let outcome_prices = market.outcome_prices.map(|prices| {
-            serde_json::to_string(
-                &prices
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_default()
+            serde_json::to_string(&prices.iter().map(|p| p.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default()
         });
 
         let clob_token_ids = market.clob_token_ids.map(|ids| {
-            serde_json::to_string(
-                &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
-            )
-            .unwrap_or_default()
+            serde_json::to_string(&ids.iter().map(|id| id.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default()
         });
 
         PolymarketSportsMarket {
-            condition_id: market.condition_id.map(|c| c.to_string()).unwrap_or_default(),
+            condition_id: market
+                .condition_id
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
             question: market.question,
             slug: market.slug,
             active: market.active.unwrap_or(true),

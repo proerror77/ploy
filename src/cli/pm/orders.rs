@@ -61,9 +61,9 @@ pub async fn run(
     args: &GlobalPmArgs,
 ) -> anyhow::Result<()> {
     use alloy::primitives::{B256, U256};
-    use polymarket_client_sdk::clob::Client as ClobClient;
     use polymarket_client_sdk::clob::types::request::*;
     use polymarket_client_sdk::clob::types::{Amount, Side, SignatureType};
+    use polymarket_client_sdk::clob::Client as ClobClient;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -85,7 +85,12 @@ pub async fn run(
     let client = auth_builder.authenticate().await?;
 
     match cmd {
-        OrdersCommands::Create { token_id, side, price, size } => {
+        OrdersCommands::Create {
+            token_id,
+            side,
+            price,
+            size,
+        } => {
             let tid = U256::from_str(&token_id)?;
             let sdk_side = match side.to_uppercase().as_str() {
                 "SELL" => Side::Sell,
@@ -100,9 +105,11 @@ pub async fn run(
                 ));
                 return Ok(());
             }
-            if !args.yes && !output::confirm(&format!(
-                "Create {side} order: token={token_id} price={price} size={size}?"
-            )) {
+            if !args.yes
+                && !output::confirm(&format!(
+                    "Create {side} order: token={token_id} price={price} size={size}?"
+                ))
+            {
                 output::print_warn("cancelled");
                 return Ok(());
             }
@@ -129,9 +136,11 @@ pub async fn run(
                 ));
                 return Ok(());
             }
-            if !args.yes && !output::confirm(&format!(
-                "Market buy: token={token_id} amount={amount} USDC?"
-            )) {
+            if !args.yes
+                && !output::confirm(&format!(
+                    "Market buy: token={token_id} amount={amount} USDC?"
+                ))
+            {
                 output::print_warn("cancelled");
                 return Ok(());
             }
@@ -157,9 +166,8 @@ pub async fn run(
                 ));
                 return Ok(());
             }
-            if !args.yes && !output::confirm(&format!(
-                "Market sell: token={token_id} size={size}?"
-            )) {
+            if !args.yes && !output::confirm(&format!("Market sell: token={token_id} size={size}?"))
+            {
                 output::print_warn("cancelled");
                 return Ok(());
             }
@@ -177,9 +185,7 @@ pub async fn run(
         }
         OrdersCommands::List { market } => {
             let market_b256 = market.as_deref().map(B256::from_str).transpose()?;
-            let req = OrdersRequest::builder()
-                .maybe_market(market_b256)
-                .build();
+            let req = OrdersRequest::builder().maybe_market(market_b256).build();
             let page = client.orders(&req, None).await?;
             output::print_debug_items(&page.data, mode)?;
         }
@@ -204,9 +210,7 @@ pub async fn run(
             }
             if let Some(m) = market {
                 let b256 = B256::from_str(&m)?;
-                let req = CancelMarketOrderRequest::builder()
-                    .market(b256)
-                    .build();
+                let req = CancelMarketOrderRequest::builder().market(b256).build();
                 let resp = client.cancel_market_orders(&req).await?;
                 output::print_debug(&resp, mode)?;
             } else {
@@ -216,9 +220,7 @@ pub async fn run(
         }
         OrdersCommands::Trades { market } => {
             let market_b256 = market.as_deref().map(B256::from_str).transpose()?;
-            let req = TradesRequest::builder()
-                .maybe_market(market_b256)
-                .build();
+            let req = TradesRequest::builder().maybe_market(market_b256).build();
             let page = client.trades(&req, None).await?;
             output::print_debug_items(&page.data, mode)?;
         }

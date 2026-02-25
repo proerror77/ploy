@@ -14,10 +14,12 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::ai_clients::grok::GrokClient;
-use crate::ai_clients::polymarket_sports::{OrderBookLevel as SportsOrderBookLevel, SportsOrderBook};
-use crate::ai_clients::{EventDetails, LiveGameMarket, PolymarketSportsClient, NBA_SERIES_ID};
 use crate::agents::{AgentContext, TradingAgent};
+use crate::ai_clients::grok::GrokClient;
+use crate::ai_clients::polymarket_sports::{
+    OrderBookLevel as SportsOrderBookLevel, SportsOrderBook,
+};
+use crate::ai_clients::{EventDetails, LiveGameMarket, PolymarketSportsClient, NBA_SERIES_ID};
 use crate::collector::{
     ensure_collector_token_targets_table, upsert_collector_token_targets, CollectorTokenTarget,
 };

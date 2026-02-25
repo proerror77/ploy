@@ -21,14 +21,18 @@ pub enum SeriesCommands {
 }
 
 pub async fn run(cmd: SeriesCommands, _auth: &PmAuth, mode: OutputMode) -> anyhow::Result<()> {
-    use polymarket_client_sdk::gamma::Client as GammaClient;
     use polymarket_client_sdk::gamma::types::request::*;
+    use polymarket_client_sdk::gamma::Client as GammaClient;
 
     let config = super::config_file::PmConfig::load().unwrap_or_default();
     let gamma = GammaClient::new(config.gamma_base_url())?;
 
     match cmd {
-        SeriesCommands::List { limit, offset, closed } => {
+        SeriesCommands::List {
+            limit,
+            offset,
+            closed,
+        } => {
             let req = SeriesListRequest::builder()
                 .limit(limit)
                 .offset(offset)

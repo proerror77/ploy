@@ -26,9 +26,9 @@ pub async fn run(
     mode: OutputMode,
     args: &GlobalPmArgs,
 ) -> anyhow::Result<()> {
-    use polymarket_client_sdk::clob::Client as ClobClient;
     use polymarket_client_sdk::clob::types::request::*;
     use polymarket_client_sdk::clob::types::AssetType;
+    use polymarket_client_sdk::clob::Client as ClobClient;
 
     let signer = auth.require_signer()?;
     let config = super::config_file::PmConfig::load().unwrap_or_default();

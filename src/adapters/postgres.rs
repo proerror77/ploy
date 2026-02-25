@@ -997,24 +997,26 @@ impl PostgresStore {
 
         let stats = rows
             .iter()
-            .map(|r| crate::strategy::nba_comeback::nba_data_collector::TeamStats {
-                team_name: r.get("team_name"),
-                season: r.get("season"),
-                wins: r.get("wins"),
-                losses: r.get("losses"),
-                win_rate: r.get("win_rate"),
-                avg_points: r.get("avg_points"),
-                q1_avg_points: r.get("q1_avg_points"),
-                q2_avg_points: r.get("q2_avg_points"),
-                q3_avg_points: r.get("q3_avg_points"),
-                q4_avg_points: r.get("q4_avg_points"),
-                comeback_rate_5pt: r.get("comeback_rate_5pt"),
-                comeback_rate_10pt: r.get("comeback_rate_10pt"),
-                comeback_rate_15pt: r.get("comeback_rate_15pt"),
-                elo_rating: r.get("elo_rating"),
-                offensive_rating: r.get("offensive_rating"),
-                defensive_rating: r.get("defensive_rating"),
-            })
+            .map(
+                |r| crate::strategy::nba_comeback::nba_data_collector::TeamStats {
+                    team_name: r.get("team_name"),
+                    season: r.get("season"),
+                    wins: r.get("wins"),
+                    losses: r.get("losses"),
+                    win_rate: r.get("win_rate"),
+                    avg_points: r.get("avg_points"),
+                    q1_avg_points: r.get("q1_avg_points"),
+                    q2_avg_points: r.get("q2_avg_points"),
+                    q3_avg_points: r.get("q3_avg_points"),
+                    q4_avg_points: r.get("q4_avg_points"),
+                    comeback_rate_5pt: r.get("comeback_rate_5pt"),
+                    comeback_rate_10pt: r.get("comeback_rate_10pt"),
+                    comeback_rate_15pt: r.get("comeback_rate_15pt"),
+                    elo_rating: r.get("elo_rating"),
+                    offensive_rating: r.get("offensive_rating"),
+                    defensive_rating: r.get("defensive_rating"),
+                },
+            )
             .collect();
 
         Ok(stats)

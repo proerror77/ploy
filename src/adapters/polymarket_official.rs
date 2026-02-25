@@ -8,7 +8,6 @@ use crate::error::{PloyError, Result};
 use alloy::primitives::U256;
 use alloy::signers::local::PrivateKeySigner;
 use chrono::Utc;
-use std::str::FromStr;
 use polymarket_client_sdk::clob::types::{
     request::{
         BalanceAllowanceRequest, LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest,
@@ -19,6 +18,7 @@ use polymarket_client_sdk::clob::types::{
 use polymarket_client_sdk::clob::{Client, Config};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use tracing::{info, instrument};
 
 /// Chain IDs
@@ -238,7 +238,9 @@ impl SdkPolymarketClient {
     pub async fn get_last_trade_price(&self, token_id: &str) -> Result<Decimal> {
         let token_id_u256 = U256::from_str(token_id)
             .map_err(|e| PloyError::Validation(format!("invalid token_id: {e}")))?;
-        let req = LastTradePriceRequest::builder().token_id(token_id_u256).build();
+        let req = LastTradePriceRequest::builder()
+            .token_id(token_id_u256)
+            .build();
 
         let resp =
             self.read_client.last_trade_price(&req).await.map_err(|e| {

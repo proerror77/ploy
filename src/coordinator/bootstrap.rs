@@ -12,7 +12,6 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::ai_clients::PolymarketSportsClient;
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent,
@@ -20,6 +19,7 @@ use crate::agents::{
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{
@@ -1786,8 +1786,8 @@ async fn collect_trades_for_market(
         };
 
         let cid_b256: alloy::primitives::B256 = condition_id.parse().unwrap_or_default();
-        let req_builder = DataTradesRequest::builder()
-            .filter(DataMarketFilter::markets([cid_b256]));
+        let req_builder =
+            DataTradesRequest::builder().filter(DataMarketFilter::markets([cid_b256]));
         let req_builder = match req_builder.limit(page_limit_i32) {
             Ok(builder) => builder,
             Err(e) => {
@@ -2683,10 +2683,7 @@ async fn upsert_pm_token_settlement_rows(
         .as_ref()
         .map(|ids| ids.iter().map(|id| id.to_string()).collect())
         .unwrap_or_default();
-    let outcomes: Vec<String> = market
-        .outcomes
-        .clone()
-        .unwrap_or_default();
+    let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
     let outcome_prices: Vec<String> = market
         .outcome_prices
         .as_ref()

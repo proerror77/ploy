@@ -8,22 +8,22 @@ pub mod config_file;
 pub mod output;
 
 // Command modules (Phase 2-5)
-pub mod markets;
-pub mod events;
-pub mod tags;
-pub mod series;
-pub mod comments;
-pub mod profiles;
-pub mod sports;
-pub mod clob;
-pub mod data;
-pub mod orders;
-pub mod wallet;
-pub mod ctf;
 pub mod approve;
 pub mod bridge;
+pub mod clob;
+pub mod comments;
+pub mod ctf;
+pub mod data;
+pub mod events;
+pub mod markets;
+pub mod orders;
+pub mod profiles;
+pub mod series;
 pub mod setup;
 pub mod shell;
+pub mod sports;
+pub mod tags;
+pub mod wallet;
 
 use clap::{Args, Subcommand};
 

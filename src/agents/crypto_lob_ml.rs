@@ -2506,10 +2506,9 @@ mod tests {
         let err = CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM + 1)
             .err()
             .expect("non-snapshot input_dim must fail fast");
-        assert!(
-            err.to_string()
-                .contains("must be a multiple of sequence feature dim")
-        );
+        assert!(err
+            .to_string()
+            .contains("must be a multiple of sequence feature dim"));
     }
 
     #[test]

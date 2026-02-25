@@ -48,7 +48,9 @@ pub(crate) async fn run_agent_mode(
 }
 
 /// Fetch market data from Polymarket and create a populated MarketSnapshot
-async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::ai_clients::protocol::MarketSnapshot> {
+async fn fetch_market_snapshot(
+    market_slug: &str,
+) -> Result<ploy::ai_clients::protocol::MarketSnapshot> {
     use chrono::Utc;
     use ploy::adapters::polymarket_clob::GAMMA_API_URL;
     use ploy::ai_clients::protocol::MarketSnapshot;
@@ -116,10 +118,14 @@ async fn fetch_market_snapshot(market_slug: &str) -> Result<ploy::ai_clients::pr
         let mut first_market = true;
 
         for market in markets {
-            let clob_token_ids: Vec<String> = market.clob_token_ids.as_ref()
+            let clob_token_ids: Vec<String> = market
+                .clob_token_ids
+                .as_ref()
                 .map(|ids| ids.iter().map(|id| id.to_string()).collect())
                 .unwrap_or_default();
-            let outcome_prices: Vec<String> = market.outcome_prices.as_ref()
+            let outcome_prices: Vec<String> = market
+                .outcome_prices
+                .as_ref()
                 .map(|ps| ps.iter().map(|d| d.to_string()).collect())
                 .unwrap_or_default();
 

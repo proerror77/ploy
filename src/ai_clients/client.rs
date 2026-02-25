@@ -358,8 +358,9 @@ fn parse_flexible_response(json_str: &str) -> Result<AgentResponse> {
         actions
     };
 
-    let risk_assessment = risk_assessment
-        .and_then(|v| serde_json::from_value::<crate::ai_clients::protocol::RiskAssessment>(v).ok());
+    let risk_assessment = risk_assessment.and_then(|v| {
+        serde_json::from_value::<crate::ai_clients::protocol::RiskAssessment>(v).ok()
+    });
 
     Ok(AgentResponse {
         reasoning,

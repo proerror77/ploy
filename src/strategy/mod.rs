@@ -140,7 +140,9 @@ pub use nba_comeback::nba_data_collector::{
     CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,
     GameState as NbaGameState, MarketSnapshot as NbaMarketSnapshot, OrderbookData, TeamStats,
 };
-pub use nba_comeback::nba_entry::{EntryConfig, EntryDecision, EntryLogic, EntrySignal, PartialSignal};
+pub use nba_comeback::nba_entry::{
+    EntryConfig, EntryDecision, EntryLogic, EntrySignal, PartialSignal,
+};
 pub use nba_comeback::nba_exit::{
     ExitConfig as NbaExitConfig, ExitDecision, ExitLogic, ExitUrgency, PositionState,
 };
@@ -162,8 +164,8 @@ pub use reconciliation::{
 };
 pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
 pub use risk_mgmt::risk::RiskManager;
-pub use signal::SignalDetector;
 pub use risk_mgmt::slippage::{MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection};
+pub use signal::SignalDetector;
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
     SplitArbConfig, SplitArbEngine,

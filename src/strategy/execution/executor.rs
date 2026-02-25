@@ -1,9 +1,9 @@
+use super::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
 use crate::adapters::{FeishuNotifier, PolymarketClient};
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::{OrderError, Result};
 use crate::exchange::ExchangeClient;
-use super::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;

@@ -20,9 +20,9 @@ pub enum WalletCommands {
 }
 
 pub async fn run(cmd: WalletCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::Result<()> {
-    use polymarket_client_sdk::clob::Client as ClobClient;
     use polymarket_client_sdk::clob::types::request::*;
     use polymarket_client_sdk::clob::types::AssetType;
+    use polymarket_client_sdk::clob::Client as ClobClient;
 
     let signer = auth.require_signer()?;
     let config = super::config_file::PmConfig::load().unwrap_or_default();

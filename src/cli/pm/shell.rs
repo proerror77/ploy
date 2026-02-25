@@ -2,7 +2,9 @@
 
 use super::GlobalPmArgs;
 
-pub fn run(args: &GlobalPmArgs) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + '_>> {
+pub fn run(
+    args: &GlobalPmArgs,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + '_>> {
     Box::pin(run_inner(args))
 }
 

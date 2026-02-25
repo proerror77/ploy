@@ -10,7 +10,6 @@ use crate::signing::Wallet;
 use alloy::primitives::{B256, U256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
-use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use polymarket_client_sdk::auth::{state::Authenticated, Normal};
@@ -34,6 +33,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
@@ -332,7 +332,10 @@ pub struct ApiKeyResponse {
 impl std::fmt::Debug for ApiKeyResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiKeyResponse")
-            .field("api_key", &format_args!("{}...", &self.api_key[..8.min(self.api_key.len())]))
+            .field(
+                "api_key",
+                &format_args!("{}...", &self.api_key[..8.min(self.api_key.len())]),
+            )
             .field("secret", &"[REDACTED]")
             .field("passphrase", &"[REDACTED]")
             .finish()
@@ -992,8 +995,9 @@ impl PolymarketClient {
     pub async fn get_market(&self, condition_id: &str) -> Result<MarketResponse> {
         // Gamma's `market_by_id` is keyed by Gamma market id, not `condition_id`.
         // Use `markets?condition_ids=...` to fetch by condition id.
-        let cond_b256 = condition_id.parse::<B256>()
-            .map_err(|e| PloyError::Internal(format!("Invalid condition_id '{}': {}", condition_id, e)))?;
+        let cond_b256 = condition_id.parse::<B256>().map_err(|e| {
+            PloyError::Internal(format!("Invalid condition_id '{}': {}", condition_id, e))
+        })?;
 
         let req = MarketsRequest::builder()
             .condition_ids(vec![cond_b256])
@@ -1149,10 +1153,16 @@ impl PolymarketClient {
                         slug: m.slug,
                         active: m.active.unwrap_or(true),
                         clob_token_ids: m.clob_token_ids.map(|ids| {
-                            serde_json::to_string(&ids.iter().map(|id| id.to_string()).collect::<Vec<_>>()).unwrap_or_default()
+                            serde_json::to_string(
+                                &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                            )
+                            .unwrap_or_default()
                         }),
                         outcome_prices: m.outcome_prices.map(|ps| {
-                            serde_json::to_string(&ps.iter().map(|d| d.to_string()).collect::<Vec<_>>()).unwrap_or_default()
+                            serde_json::to_string(
+                                &ps.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                            )
+                            .unwrap_or_default()
                         }),
                     });
                 }
@@ -1422,8 +1432,9 @@ impl PolymarketClient {
             TimeInForce::IOC => SdkOrderType::FAK,
         };
 
-        let token_u256 = U256::from_str(&request.token_id)
-            .map_err(|e| PloyError::OrderSubmission(format!("Invalid token_id '{}': {}", request.token_id, e)))?;
+        let token_u256 = U256::from_str(&request.token_id).map_err(|e| {
+            PloyError::OrderSubmission(format!("Invalid token_id '{}': {}", request.token_id, e))
+        })?;
 
         let order = auth_client
             .limit_order()
@@ -1924,14 +1935,21 @@ impl PolymarketClient {
                             question: m.question.clone(),
                             tokens: None,
                             group_item_title: m.group_item_title.clone(),
-                            outcomes: m.outcomes.as_ref().map(|o| {
-                                serde_json::to_string(o).unwrap_or_default()
-                            }),
+                            outcomes: m
+                                .outcomes
+                                .as_ref()
+                                .map(|o| serde_json::to_string(o).unwrap_or_default()),
                             clob_token_ids: m.clob_token_ids.as_ref().map(|ids| {
-                                serde_json::to_string(&ids.iter().map(|id| id.to_string()).collect::<Vec<_>>()).unwrap_or_default()
+                                serde_json::to_string(
+                                    &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                                )
+                                .unwrap_or_default()
                             }),
                             outcome_prices: m.outcome_prices.as_ref().map(|ps| {
-                                serde_json::to_string(&ps.iter().map(|d| d.to_string()).collect::<Vec<_>>()).unwrap_or_default()
+                                serde_json::to_string(
+                                    &ps.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                                )
+                                .unwrap_or_default()
                             }),
                         })
                         .collect()

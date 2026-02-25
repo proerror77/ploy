@@ -551,8 +551,7 @@ async fn list_strategies() -> Result<()> {
 /// Check if the legacy `ploy strategy start` live path is explicitly allowed
 /// via the global `PLOY_ALLOW_LEGACY_LIVE` env var.
 fn legacy_strategy_live_allowed() -> bool {
-    std::env::var("PLOY_ALLOW_LEGACY_LIVE")
-        .map_or(false, |v| v == "true" || v == "1")
+    std::env::var("PLOY_ALLOW_LEGACY_LIVE").map_or(false, |v| v == "true" || v == "1")
 }
 
 /// Start a strategy
@@ -1672,10 +1671,7 @@ async fn report_accuracy_pm_settlement(
                 .as_ref()
                 .map(|ids| ids.iter().map(|id| id.to_string()).collect())
                 .unwrap_or_default();
-            let outcomes: Vec<String> = market
-                .outcomes
-                .clone()
-                .unwrap_or_default();
+            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
             let price_strs: Vec<String> = market
                 .outcome_prices
                 .as_ref()
@@ -2190,10 +2186,7 @@ async fn export_crypto_lob_dataset(
                 .as_ref()
                 .map(|ids| ids.iter().map(|id| id.to_string()).collect())
                 .unwrap_or_default();
-            let outcomes: Vec<String> = market
-                .outcomes
-                .clone()
-                .unwrap_or_default();
+            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
             let price_strs: Vec<String> = market
                 .outcome_prices
                 .as_ref()
