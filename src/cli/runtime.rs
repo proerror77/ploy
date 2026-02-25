@@ -229,6 +229,10 @@ pub enum Commands {
         #[arg(long)]
         resume: Option<String>,
     },
+
+    /// Polymarket CLI (markets, orders, wallet, CTF, bridge, shell)
+    #[command(subcommand)]
+    Pm(super::pm::PmCommands),
 }
 
 /// Crypto market subcommands
