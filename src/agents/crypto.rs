@@ -847,6 +847,7 @@ impl TradingAgent for CryptoTradingAgent {
                     let quote_cache = self.pm_ws.quote_cache();
 
                     // Binary options default: exit on signal flip instead of TP/SL.
+                    let mut sold_slugs: Vec<String> = Vec::new();
                     for (slug, pos) in &positions {
                         if pos.symbol != update.symbol {
                             continue;
@@ -923,6 +924,7 @@ impl TradingAgent for CryptoTradingAgent {
 
                         match ctx.submit_order(intent).await {
                             Ok(()) => {
+                                sold_slugs.push(slug.clone());
                                 info!(
                                     agent = self.config.agent_id,
                                     slug = %slug,
@@ -941,6 +943,11 @@ impl TradingAgent for CryptoTradingAgent {
                                 );
                             }
                         }
+                    }
+                    // Remove positions that had sell orders submitted to prevent
+                    // re-selling on the next tick (sell-loop prevention).
+                    for slug in &sold_slugs {
+                        positions.remove(slug);
                     }
 
                     let mut entered_timeframes: HashSet<String> = HashSet::new();
@@ -1418,6 +1425,7 @@ impl TradingAgent for CryptoTradingAgent {
 
                     match ctx.submit_order(intent).await {
                         Ok(()) => {
+                            positions.remove(&slug);
                             info!(
                                 agent = self.config.agent_id,
                                 slug = %slug,
