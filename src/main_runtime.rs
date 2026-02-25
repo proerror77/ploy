@@ -1,6 +1,6 @@
 use ploy::adapters::PolymarketClient;
-use ploy::error::{PloyError, Result};
-use ploy::safety::direct_live::direct_live_allowed;
+use ploy::error::Result;
+use ploy::safety::direct_live;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
@@ -22,17 +22,12 @@ pub async fn create_pm_client(rest_url: &str, dry_run: bool) -> Result<Polymarke
 }
 
 pub fn enforce_coordinator_only_live(cmd: &str) -> Result<()> {
-    if direct_live_allowed() {
-        return Ok(());
+    let result = direct_live::enforce_live_gate(cmd);
+    if let Err(ref e) = result {
+        warn!("{e}");
+        println!("\x1b[31m✗ {e}\x1b[0m");
     }
-
-    let msg = format!(
-        "direct `{}` live runtime is disabled by default; use `ploy platform start` (Coordinator-only live). Override only for controlled ops with PLOY_ALLOW_DIRECT_LIVE=true",
-        cmd
-    );
-    warn!("{msg}");
-    println!("\x1b[31m✗ {}\x1b[0m", msg);
-    Err(PloyError::Validation(msg))
+    result
 }
 
 pub fn init_logging() {

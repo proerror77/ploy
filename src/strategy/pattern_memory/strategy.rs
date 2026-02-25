@@ -18,7 +18,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 
-const PATTERN_LEN: usize = 10;
+const PATTERN_LEN: usize = 20;
 const TF_5M: &str = "5m";
 const TF_15M: &str = "15m";
 
@@ -50,6 +50,8 @@ struct PatternConfig {
     min_matches: usize,
     min_n_eff: f64,
     min_confidence: f64,
+    age_decay_lambda: f64,
+    max_samples: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -181,23 +183,31 @@ impl PatternMemoryStrategy {
                 alpha: pattern
                     .get("alpha")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(1.0),
+                    .unwrap_or(5.0),
                 beta: pattern
                     .get("beta")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(1.0),
+                    .unwrap_or(5.0),
                 min_matches: pattern
                     .get("min_matches")
                     .and_then(|v| v.as_integer())
-                    .unwrap_or(3) as usize,
+                    .unwrap_or(10) as usize,
                 min_n_eff: pattern
                     .get("min_n_eff")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(2.0),
+                    .unwrap_or(5.0),
                 min_confidence: pattern
                     .get("min_confidence")
                     .and_then(|v| v.as_float())
                     .unwrap_or(0.60),
+                age_decay_lambda: pattern
+                    .get("age_decay_lambda")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.001),
+                max_samples: pattern
+                    .get("max_samples")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(2000) as usize,
             },
             filter_15m: Filter15mConfig {
                 enabled: filter_15m
@@ -353,7 +363,7 @@ impl PatternMemoryStrategy {
             && conf >= self.cfg.pattern.min_confidence
     }
 
-    fn filter_15m_ok(&self, symbol: &str) -> (bool, f64, Posterior) {
+    fn filter_15m_ok(&self, symbol: &str, required_return: f64) -> (bool, f64, Posterior) {
         if !self.cfg.filter_15m.enabled {
             return (
                 true,
@@ -383,10 +393,11 @@ impl PatternMemoryStrategy {
         };
 
         let post = mem.posterior_for_required_return(
-            0.0,
+            required_return,
             self.cfg.pattern.corr_threshold,
             self.cfg.pattern.alpha,
             self.cfg.pattern.beta,
+            self.cfg.pattern.age_decay_lambda,
         );
         let conf = Self::confidence_from_p_up(post.p_up);
         let ok = post.n_eff >= self.cfg.filter_15m.min_n_eff
@@ -467,6 +478,7 @@ impl PatternMemoryStrategy {
             self.cfg.pattern.corr_threshold,
             self.cfg.pattern.alpha,
             self.cfg.pattern.beta,
+            self.cfg.pattern.age_decay_lambda,
         );
 
         let dir5 = Self::direction_from_p_up(post5.p_up);
@@ -476,7 +488,7 @@ impl PatternMemoryStrategy {
             Side::Down => 1.0 - post5.p_up,
         };
 
-        let (filter_ok, conf15, post15) = self.filter_15m_ok(symbol);
+        let (filter_ok, conf15, post15) = self.filter_15m_ok(symbol, required_return);
         let dir15 = Self::direction_from_p_up(post15.p_up);
         let dir_ok = if self.cfg.filter_15m.enabled {
             dir15 == dir5
@@ -844,11 +856,11 @@ impl Strategy for PatternMemoryStrategy {
 
                 match interval.as_str() {
                     TF_5M => {
-                        let mem = self
-                            .mem_5m
-                            .entry(symbol.clone())
-                            .or_insert_with(PatternMemory::<PATTERN_LEN>::new);
-                        mem.ingest_return(r);
+                        let max_s = self.cfg.pattern.max_samples;
+                        let mem = self.mem_5m.entry(symbol.clone()).or_insert_with(|| {
+                            PatternMemory::<PATTERN_LEN>::new().with_max_samples(max_s)
+                        });
+                        mem.ingest_return(r, *timestamp);
 
                         if let Some(mut a) = self
                             .maybe_trade_on_5m_close(symbol, kline.close, *timestamp)
@@ -858,11 +870,11 @@ impl Strategy for PatternMemoryStrategy {
                         }
                     }
                     TF_15M => {
-                        let mem = self
-                            .mem_15m
-                            .entry(symbol.clone())
-                            .or_insert_with(PatternMemory::<PATTERN_LEN>::new);
-                        mem.ingest_return(r);
+                        let max_s = self.cfg.pattern.max_samples;
+                        let mem = self.mem_15m.entry(symbol.clone()).or_insert_with(|| {
+                            PatternMemory::<PATTERN_LEN>::new().with_max_samples(max_s)
+                        });
+                        mem.ingest_return(r, *timestamp);
                     }
                     _ => {}
                 }

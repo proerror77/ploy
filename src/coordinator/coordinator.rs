@@ -70,6 +70,8 @@ struct GovernancePolicy {
     updated_at: chrono::DateTime<Utc>,
     updated_by: String,
     reason: Option<String>,
+    /// Extensible key-value metadata for cross-agent signaling (e.g., OpenClaw regime)
+    metadata: HashMap<String, String>,
 }
 
 impl GovernancePolicy {
@@ -88,6 +90,7 @@ impl GovernancePolicy {
             updated_at: Utc::now(),
             updated_by: "boot".to_string(),
             reason: Some("loaded from coordinator config".to_string()),
+            metadata: HashMap::new(),
         }
     }
 
@@ -126,6 +129,7 @@ impl GovernancePolicy {
                 let trimmed = v.trim();
                 (!trimmed.is_empty()).then(|| trimmed.to_string())
             }),
+            metadata: update.metadata,
         })
     }
 
@@ -144,6 +148,7 @@ impl GovernancePolicy {
             updated_at: self.updated_at,
             updated_by: self.updated_by.clone(),
             reason: self.reason.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 }
@@ -769,6 +774,7 @@ async fn load_governance_policy_history(
                     let trimmed = v.trim();
                     (!trimmed.is_empty()).then(|| trimmed.to_string())
                 }),
+                metadata: HashMap::new(),
             },
         )
         .collect())
@@ -861,6 +867,7 @@ async fn load_governance_policy(
         updated_at,
         updated_by,
         reason,
+        metadata: HashMap::new(),
     }))
 }
 
@@ -1078,6 +1085,26 @@ impl CoordinatorHandle {
             })
     }
 
+    /// Pause a single agent by ID (used by OpenClaw meta-agent)
+    pub async fn pause_agent(&self, agent_id: &str) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::PauseAgent(agent_id.to_string()))
+            .await
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
+    }
+
+    /// Resume a single agent by ID (used by OpenClaw meta-agent)
+    pub async fn resume_agent(&self, agent_id: &str) -> Result<()> {
+        self.control_tx
+            .send(CoordinatorControlCommand::ResumeAgent(agent_id.to_string()))
+            .await
+            .map_err(|_| {
+                crate::error::PloyError::Internal("coordinator control channel closed".into())
+            })
+    }
+
     /// Read the current global state (non-blocking snapshot)
     pub async fn read_state(&self) -> GlobalState {
         self.global_state.read().await.clone()
@@ -1282,6 +1309,7 @@ pub struct Coordinator {
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
+    paused_agent_ids: Arc<RwLock<HashSet<String>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -2530,6 +2558,7 @@ impl Coordinator {
             domain_ingress_mode,
             governance_policy,
             stale_heartbeat_warn_at,
+            paused_agent_ids: Arc::new(RwLock::new(HashSet::new())),
             order_tx,
             order_rx,
             state_tx,
@@ -3068,6 +3097,15 @@ impl Coordinator {
                         CoordinatorControlCommand::ShutdownDomain(domain) => {
                             self.shutdown_domain(domain).await
                         }
+                        CoordinatorControlCommand::PauseAgent(id) => {
+                            // Track per-agent pause so handle_order_intent blocks BUY intents
+                            self.paused_agent_ids.write().await.insert(id.clone());
+                            self.send_command(&id, CoordinatorCommand::Pause).await.ok();
+                        }
+                        CoordinatorControlCommand::ResumeAgent(id) => {
+                            self.paused_agent_ids.write().await.remove(&id);
+                            self.send_command(&id, CoordinatorCommand::Resume).await.ok();
+                        }
                     }
                 }
 
@@ -3195,6 +3233,23 @@ impl Coordinator {
                 );
                 return;
             }
+        }
+        // Per-agent pause check
+        if intent.is_buy
+            && self
+                .paused_agent_ids
+                .read()
+                .await
+                .contains(&intent.agent_id)
+        {
+            let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by per-agent pause"
+            );
+            return;
         }
 
         if let Some(reason) = self.check_governance_policy(&intent).await {
@@ -5797,6 +5852,7 @@ mod tests {
             max_total_notional_usd: None,
             updated_by: "openclaw".to_string(),
             reason: None,
+            metadata: HashMap::new(),
         };
 
         let parsed = GovernancePolicy::try_from_update(update);
@@ -5812,6 +5868,7 @@ mod tests {
             max_total_notional_usd: None,
             updated_by: "openclaw".to_string(),
             reason: Some("maintenance".to_string()),
+            metadata: HashMap::new(),
         })
         .expect("valid policy");
 
@@ -5838,6 +5895,7 @@ mod tests {
             max_total_notional_usd: Some(dec!(100)),
             updated_by: "openclaw".to_string(),
             reason: None,
+            metadata: HashMap::new(),
         })
         .expect("valid policy");
 
@@ -5866,6 +5924,7 @@ mod tests {
             max_total_notional_usd: Some(dec!(1)),
             updated_by: "openclaw".to_string(),
             reason: Some("circuit".to_string()),
+            metadata: HashMap::new(),
         })
         .expect("valid policy");
 

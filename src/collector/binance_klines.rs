@@ -347,6 +347,52 @@ impl BinanceKlineClient {
 
         Ok(())
     }
+
+    /// Persist a batch of klines to the `binance_klines` database table.
+    ///
+    /// Uses ON CONFLICT DO NOTHING for idempotent inserts (dedup on symbol+interval+open_time).
+    pub async fn save_klines_to_db(
+        pool: &sqlx::PgPool,
+        symbol: &str,
+        interval: &str,
+        klines: &[Kline],
+    ) -> Result<usize> {
+        let mut saved = 0usize;
+        for k in klines {
+            let result = sqlx::query(
+                r#"
+                INSERT INTO binance_klines (symbol, interval, open_time, close_time, open, high, low, close, volume, quote_volume, trades)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT (symbol, interval, open_time) DO NOTHING
+                "#,
+            )
+            .bind(symbol)
+            .bind(interval)
+            .bind(k.open_time)
+            .bind(k.close_time)
+            .bind(k.open)
+            .bind(k.high)
+            .bind(k.low)
+            .bind(k.close)
+            .bind(k.volume)
+            .bind(k.quote_volume)
+            .bind(k.trades as i64)
+            .execute(pool)
+            .await;
+
+            match result {
+                Ok(r) => {
+                    if r.rows_affected() > 0 {
+                        saved += 1;
+                    }
+                }
+                Err(e) => {
+                    debug!("kline insert error for {} {}: {}", symbol, interval, e);
+                }
+            }
+        }
+        Ok(saved)
+    }
 }
 
 impl Default for BinanceKlineClient {

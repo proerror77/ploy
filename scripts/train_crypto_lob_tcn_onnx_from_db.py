@@ -140,7 +140,7 @@ def chronological_split(ds: Dataset, test_ratio: float) -> Tuple[Dataset, Datase
     return take(idx[:cut]), take(idx[cut:])
 
 
-def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int) -> Dataset:
+def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int, stride: int = 1) -> Dataset:
     grouped: dict[str, List[SequenceRow]] = {}
     for row in rows:
         grouped.setdefault(row.market_slug, []).append(row)
@@ -171,7 +171,7 @@ def build_sequence_dataset(rows: List[SequenceRow], sequence_len: int) -> Datase
         if len(one_sec) < sequence_len:
             continue
 
-        for i in range(sequence_len - 1, len(one_sec)):
+        for i in range(sequence_len - 1, len(one_sec), stride):
             window = one_sec[i - sequence_len + 1 : i + 1]
             flat: List[float] = []
             for snap in window:
@@ -298,6 +298,7 @@ def fetch_from_sync_records(
     symbol: Optional[str],
     horizon: Optional[str],
     limit: int,
+    stride: int = 1,
 ) -> Dataset:
     try:
         import psycopg2  # type: ignore
@@ -453,7 +454,7 @@ def fetch_from_sync_records(
     if not rows:
         raise SystemExit("no usable rows fetched from sync_records + pm_market_metadata")
 
-    return build_sequence_dataset(rows, sequence_len)
+    return build_sequence_dataset(rows, sequence_len, stride=stride)
 
 
 def maybe_save_parquet(ds: Dataset, path: str) -> None:
@@ -592,6 +593,7 @@ def train_and_export_onnx(
             p = model(xb)
             loss = loss_fn(p, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
 
             total_loss += float(loss.detach().cpu().item()) * len(bidx)
@@ -617,6 +619,11 @@ def train_and_export_onnx(
         "brier": brier(test_ds.y, p_test),
         "log_loss": log_loss(test_ds.y, p_test),
     }
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auc"] = roc_auc_score(test_ds.y, p_test)
+    except Exception:
+        metrics["auc"] = float("nan")
 
     os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
     dummy = torch.zeros((1, in_dim), dtype=torch.float32)
@@ -682,6 +689,8 @@ def main() -> None:
     ap.add_argument("--output", default="./models/crypto/lob_tcn_v1.onnx")
     ap.add_argument("--meta", default="./models/crypto/lob_tcn_v1.meta.json")
     ap.add_argument("--save-parquet", default=None)
+    ap.add_argument("--stride", type=int, default=1, help="step between sequence windows per market to reduce overlap (default: 1)")
+    ap.add_argument("--export-scaler", default=None, help="export feature scaler (offsets/scales) as JSON for config-based normalization")
 
     args = ap.parse_args()
 
@@ -695,6 +704,7 @@ def main() -> None:
         symbol=args.symbol,
         horizon=args.horizon,
         limit=args.limit,
+        stride=args.stride,
     )
     print(f"Rows: {len(ds.y)}")
 
@@ -723,12 +733,25 @@ def main() -> None:
     with open(args.meta, "w") as f:
         json.dump(meta, f, indent=2)
 
+    # Export scaler for config-based normalization (offset=mean, scale=1/std)
+    if args.export_scaler:
+        mean, std = mean_std(train_ds.x)
+        scaler = {
+            "feature_names": FEATURE_ORDER,
+            "feature_offsets": mean,
+            "feature_scales": [1.0 / s if s > 0 else 1.0 for s in std],
+        }
+        os.makedirs(os.path.dirname(args.export_scaler) or ".", exist_ok=True)
+        with open(args.export_scaler, "w") as f:
+            json.dump(scaler, f, indent=2)
+        print(f"  scaler: {args.export_scaler}")
+
     m = meta["metrics"]
     print("\nExported:")
     print(f"  onnx: {args.output}")
     print(f"  meta: {args.meta}")
     print(
-        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}"
+        f"  metrics: acc@0.5={m['acc_at_0.5']*100:.2f}%  brier={m['brier']:.6f}  ll={m['log_loss']:.6f}  auc={m.get('auc', float('nan')):.4f}"
     )
 
     print("\nEnable on EC2 (example):")

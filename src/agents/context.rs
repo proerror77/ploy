@@ -8,7 +8,10 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-use crate::coordinator::{AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState};
+use crate::coordinator::{
+    AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState, GovernancePolicySnapshot,
+    GovernancePolicyUpdate,
+};
 use crate::error::Result;
 use crate::platform::{AgentStatus, Domain, OrderIntent};
 
@@ -110,5 +113,30 @@ impl AgentContext {
     /// Mutable access to the command receiver (for use in select! macros)
     pub fn command_rx(&mut self) -> &mut mpsc::Receiver<CoordinatorCommand> {
         &mut self.commands
+    }
+
+    // --- OpenClaw meta-agent governance methods ---
+
+    /// Pause a single agent by ID (proxies to CoordinatorHandle)
+    pub async fn submit_pause_agent(&self, agent_id: &str) -> Result<()> {
+        self.handle.pause_agent(agent_id).await
+    }
+
+    /// Resume a single agent by ID (proxies to CoordinatorHandle)
+    pub async fn submit_resume_agent(&self, agent_id: &str) -> Result<()> {
+        self.handle.resume_agent(agent_id).await
+    }
+
+    /// Read the current governance policy snapshot
+    pub async fn read_governance_policy(&self) -> GovernancePolicySnapshot {
+        self.handle.governance_policy().await
+    }
+
+    /// Update the governance policy (full replacement)
+    pub async fn update_governance_policy(
+        &self,
+        update: GovernancePolicyUpdate,
+    ) -> Result<GovernancePolicySnapshot> {
+        self.handle.update_governance_policy(update).await
     }
 }
