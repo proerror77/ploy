@@ -279,6 +279,10 @@ async fn load_execution_log_fills(
     account_id: &str,
     dry_run: bool,
 ) -> Result<Vec<PersistedExecutionFill>> {
+    // Only replay fills from the last 24 hours. Binary option positions (especially
+    // 5m events) settle on-chain but don't generate sell fills, so replaying all-time
+    // fills accumulates phantom positions that inflate the risk gate exposure.
+    let cutoff = Utc::now() - chrono::Duration::hours(24);
     let rows = sqlx::query_as::<
         _,
         (
@@ -314,11 +318,13 @@ async fn load_execution_log_fills(
         WHERE account_id = $1
           AND dry_run = $2
           AND filled_shares > 0
+          AND executed_at > $3
         ORDER BY executed_at ASC, id ASC
         "#,
     )
     .bind(account_id)
     .bind(dry_run)
+    .bind(cutoff)
     .fetch_all(pool)
     .await
     .map_err(|e| crate::error::PloyError::Internal(format!("load execution log fills: {}", e)))?;
@@ -2800,6 +2806,56 @@ impl Coordinator {
         for agent_id in &restored_agents {
             self.refresh_risk_exposure_for_agent(agent_id).await;
         }
+
+        // Close positions whose tokens have already settled on-chain.
+        // Binary option tokens settle at $0 or $1 but don't generate sell fills,
+        // so without this cleanup, 5m positions accumulate indefinitely.
+        if let Some(pool) = self.execution_log_pool.as_ref() {
+            let open_positions = self.positions.all_positions().await;
+            if !open_positions.is_empty() {
+                let token_ids: Vec<String> =
+                    open_positions.iter().map(|p| p.token_id.clone()).collect();
+
+                let settled = match sqlx::query_as::<_, (String, rust_decimal::Decimal)>(
+                    "SELECT token_id, settled_price FROM pm_token_settlements WHERE token_id = ANY($1) AND resolved = true",
+                )
+                .bind(&token_ids)
+                .fetch_all(pool)
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        warn!(error = %e, "failed to query settled tokens for position cleanup");
+                        vec![]
+                    }
+                };
+
+                if !settled.is_empty() {
+                    let settled_map: HashMap<String, Decimal> = settled.into_iter().collect();
+                    let mut closed_count = 0u32;
+                    for pos in &open_positions {
+                        if let Some(&exit_price) = settled_map.get(&pos.token_id) {
+                            self.positions
+                                .close_position(&pos.position_id, exit_price)
+                                .await;
+                            closed_count += 1;
+                        }
+                    }
+                    if closed_count > 0 {
+                        info!(
+                            closed_count,
+                            remaining = open_positions.len() as u32 - closed_count,
+                            "closed settled positions during crash recovery"
+                        );
+                        // Refresh exposure after settlement cleanup
+                        for agent_id in &restored_agents {
+                            self.refresh_risk_exposure_for_agent(agent_id).await;
+                        }
+                    }
+                }
+            }
+        }
+
         self.refresh_global_state().await;
 
         info!(
@@ -2813,6 +2869,116 @@ impl Coordinator {
             "restored coordinator runtime state from execution log"
         );
         Ok(())
+    }
+
+    /// Periodically check for on-chain settled tokens and close matching positions.
+    ///
+    /// Two cleanup strategies:
+    /// 1. Settlement-based: query `pm_token_settlements` for resolved tokens
+    /// 2. Age-based: close positions whose event window has expired (using metadata)
+    ///
+    /// Binary option tokens (especially 5m events) settle at $0 or $1 but don't
+    /// generate sell fills. Without this cleanup, positions accumulate and inflate
+    /// the risk gate's exposure counter indefinitely.
+    async fn close_settled_positions(&self) {
+        let open_positions = self.positions.all_positions().await;
+        if open_positions.is_empty() {
+            return;
+        }
+
+        let mut closed_count = 0u32;
+        let mut affected_agents = std::collections::HashSet::new();
+        let now = Utc::now();
+
+        // Strategy 1: Settlement-based cleanup via pm_token_settlements
+        if let Some(pool) = self.execution_log_pool.as_ref() {
+            let token_ids: Vec<String> =
+                open_positions.iter().map(|p| p.token_id.clone()).collect();
+
+            let settled = match sqlx::query_as::<_, (String, rust_decimal::Decimal)>(
+                "SELECT token_id, settled_price \
+                 FROM pm_token_settlements \
+                 WHERE token_id = ANY($1) AND resolved = true",
+            )
+            .bind(&token_ids)
+            .fetch_all(pool)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    warn!(error = %e, "settlement check: failed to query pm_token_settlements");
+                    vec![]
+                }
+            };
+
+            if !settled.is_empty() {
+                let settled_map: std::collections::HashMap<String, Decimal> =
+                    settled.into_iter().collect();
+                for pos in &open_positions {
+                    if let Some(&exit_price) = settled_map.get(&pos.token_id) {
+                        self.positions
+                            .close_position(&pos.position_id, exit_price)
+                            .await;
+                        affected_agents.insert(pos.agent_id.clone());
+                        closed_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Strategy 2: Age-based expiry using event_end_time metadata or slug epoch.
+        // If a position's event window has expired (plus 2-min buffer for settlement
+        // propagation), close it at entry_price (neutral PnL) since we can't know the
+        // actual settlement price. This catches positions not in pm_token_settlements.
+        let expiry_buffer = chrono::Duration::minutes(2);
+        for pos in &open_positions {
+            // Skip if already closed by strategy 1
+            if self
+                .positions
+                .get_position(&pos.position_id)
+                .await
+                .is_none()
+            {
+                continue;
+            }
+
+            // Try metadata first, then parse epoch from slug (e.g. "btc-updown-5m-1771946400")
+            let event_end_utc: Option<DateTime<Utc>> = pos
+                .metadata
+                .get("event_end_time")
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.into())
+                .or_else(|| {
+                    pos.market_slug
+                        .rsplit('-')
+                        .next()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .and_then(|epoch| {
+                            DateTime::from_timestamp(epoch, 0)
+                        })
+                });
+
+            if let Some(event_end) = event_end_utc {
+                if now > event_end + expiry_buffer {
+                    self.positions
+                        .close_position(&pos.position_id, pos.entry_price)
+                        .await;
+                    affected_agents.insert(pos.agent_id.clone());
+                    closed_count += 1;
+                }
+            }
+        }
+
+        if closed_count > 0 {
+            info!(
+                closed_count,
+                remaining = open_positions.len() as u32 - closed_count,
+                "settlement check: closed expired/settled positions"
+            );
+            for agent_id in &affected_agents {
+                self.refresh_risk_exposure_for_agent(agent_id).await;
+            }
+        }
     }
 
     /// Create a clonable handle for agents
@@ -3070,13 +3236,16 @@ impl Coordinator {
 
         let drain_interval = tokio::time::Duration::from_millis(self.config.queue_drain_ms);
         let refresh_interval = tokio::time::Duration::from_millis(self.config.state_refresh_ms);
+        let settlement_interval = tokio::time::Duration::from_secs(60);
 
         let mut drain_tick = tokio::time::interval(drain_interval);
         let mut refresh_tick = tokio::time::interval(refresh_interval);
+        let mut settlement_tick = tokio::time::interval(settlement_interval);
 
         // Don't burst-fire missed ticks
         drain_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        settlement_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -3127,6 +3296,11 @@ impl Coordinator {
                 // --- Periodic: refresh global state ---
                 _ = refresh_tick.tick() => {
                     self.refresh_global_state().await;
+                }
+
+                // --- Periodic: close positions whose tokens settled on-chain ---
+                _ = settlement_tick.tick() => {
+                    self.close_settled_positions().await;
                 }
 
                 // --- Shutdown signal ---
