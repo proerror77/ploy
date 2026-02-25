@@ -48,6 +48,158 @@ fn default_exit_edge_floor() -> Decimal {
     dec!(0.02)
 }
 
+/// Dynamic min_edge thresholds based on window move magnitude.
+///
+/// Data-driven from 7-day production analysis:
+/// - flat   (|move| < 0.05%): 77.8% win rate → conservative 2% edge
+/// - mild   (0.05% - 0.15%): 46.2% win rate → aggressive 6% edge filter
+/// - strong (> 0.15%):        63.4% avg      → standard 3% edge
+fn dynamic_min_edge(window_move_abs: Decimal, base_min_edge: Decimal) -> Decimal {
+    if window_move_abs < dec!(0.0005) {
+        // Flat: highest win rate, use base edge
+        base_min_edge
+    } else if window_move_abs < dec!(0.0015) {
+        // Mild: worst win rate zone, require much higher edge
+        dec!(0.06).max(base_min_edge)
+    } else {
+        // Strong: moderate signal, require slightly more edge than base
+        dec!(0.03).max(base_min_edge)
+    }
+}
+
+/// Classify window move category for metadata logging.
+fn classify_window_move(window_move: Decimal) -> &'static str {
+    let abs_move = window_move.abs();
+    if abs_move < dec!(0.0005) {
+        "flat"
+    } else if abs_move < dec!(0.0015) {
+        "mild"
+    } else {
+        "strong"
+    }
+}
+
+/// Cross-asset direction confirmation score.
+///
+/// Checks whether correlated assets agree with the proposed trade direction.
+/// Returns a score in [0.0, 1.0] where:
+/// - 1.0 = all correlated assets agree
+/// - 0.5 = mixed signals
+/// - 0.0 = all correlated assets disagree
+///
+/// Crypto assets (BTC, ETH, SOL, XRP) are highly correlated (ρ ≈ 0.7–0.9).
+/// When the market moves in one direction uniformly, the signal is more reliable.
+async fn cross_asset_score(
+    spot_cache: &crate::adapters::PriceCache,
+    current_symbol: &str,
+    side: Side,
+    coins: &[String],
+) -> (Decimal, usize, usize) {
+    let direction_positive = matches!(side, Side::Up);
+    let mut agree = 0usize;
+    let mut disagree = 0usize;
+
+    for coin in coins {
+        let sym = format!("{coin}USDT");
+        if sym == current_symbol {
+            continue;
+        }
+        // Use 5s momentum as the cross-asset direction indicator.
+        // 1s is too noisy; 30s may be stale for 5m windows.
+        if let Some(mom) = spot_cache.momentum(&sym, 5).await {
+            if (mom > Decimal::ZERO) == direction_positive {
+                agree += 1;
+            } else if mom != Decimal::ZERO {
+                disagree += 1;
+            }
+        }
+    }
+
+    let total = agree + disagree;
+    let score = if total > 0 {
+        Decimal::from(agree) / Decimal::from(total)
+    } else {
+        dec!(0.5) // No data → neutral
+    };
+
+    (score, agree, disagree)
+}
+
+/// Compute weighted signal score for entry decision.
+///
+/// Weights:
+/// - 0.40: window_trend (is window move aligned with proposed side?)
+/// - 0.30: momentum_agreement (are 1s/5s/30s momenta aligned?)
+/// - 0.20: volatility_signal (does rolling vol indicate a trending market?)
+/// - 0.10: cross_asset (do correlated assets agree?)
+///
+/// Each component returns 0.0 or 1.0 (binary) then weighted.
+fn weighted_signal_score(
+    side: Side,
+    window_move: Decimal,
+    momentum_1s: Decimal,
+    short_momentum: Option<Decimal>,
+    long_momentum: Option<Decimal>,
+    rolling_volatility: Option<Decimal>,
+    cross_asset_score: Decimal,
+) -> Decimal {
+    let dir_positive = matches!(side, Side::Up);
+
+    // Component 1: Window trend alignment (0 or 1)
+    let window_aligned = if dir_positive {
+        window_move > Decimal::ZERO
+    } else {
+        window_move < Decimal::ZERO
+    };
+    let w_trend: Decimal = if window_aligned { dec!(1.0) } else { dec!(0.0) };
+
+    // Component 2: Momentum agreement (fractional: how many timeframes agree?)
+    let sign_matches = |mom: Decimal| -> bool {
+        if mom == Decimal::ZERO { return true; } // neutral = don't penalize
+        (mom > Decimal::ZERO) == dir_positive
+    };
+
+    let mut mom_agree = 0u32;
+    let mut mom_total = 0u32;
+
+    if momentum_1s != Decimal::ZERO {
+        mom_total += 1;
+        if sign_matches(momentum_1s) { mom_agree += 1; }
+    }
+    if let Some(sm) = short_momentum {
+        if sm != Decimal::ZERO {
+            mom_total += 1;
+            if sign_matches(sm) { mom_agree += 1; }
+        }
+    }
+    if let Some(lm) = long_momentum {
+        if lm != Decimal::ZERO {
+            mom_total += 1;
+            if sign_matches(lm) { mom_agree += 1; }
+        }
+    }
+
+    let w_momentum = if mom_total > 0 {
+        Decimal::from(mom_agree) / Decimal::from(mom_total)
+    } else {
+        dec!(0.5) // No data → neutral
+    };
+
+    // Component 3: Volatility signal (is vol high enough to indicate a real move?)
+    // Use 60s vol > 0.0001 as "trending" indicator
+    let w_vol = match rolling_volatility {
+        Some(v) if v > dec!(0.0001) => dec!(1.0),
+        Some(v) if v > dec!(0.00005) => dec!(0.5),
+        _ => dec!(0.0),
+    };
+
+    // Component 4: Cross-asset score (already in [0, 1])
+    let w_xa = cross_asset_score;
+
+    // Weighted sum
+    dec!(0.40) * w_trend + dec!(0.30) * w_momentum + dec!(0.20) * w_vol + dec!(0.10) * w_xa
+}
+
 fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
@@ -82,6 +234,11 @@ fn default_straddle_threshold() -> Decimal {
 
 fn default_straddle_min_vol() -> Decimal {
     Decimal::ZERO
+}
+
+/// Minimum weighted signal score to allow entry (0.0 = allow all, 1.0 = require perfect agreement).
+fn default_min_signal_score() -> Decimal {
+    dec!(0.40)
 }
 
 /// Bias added to P(UP) for >= settlement rule (UP wins on ties).
@@ -232,6 +389,18 @@ pub struct CryptoTradingConfig {
     /// (VolStraddle mode) Minimum 60s rolling volatility required to enter.
     #[serde(default = "default_straddle_min_vol")]
     pub straddle_min_vol: Decimal,
+
+    /// Minimum weighted signal score for entry (replaces binary MTF agreement).
+    ///
+    /// Score is computed as weighted sum of:
+    /// - 0.40 × window_trend (window move direction aligned with trade side)
+    /// - 0.30 × momentum_agreement (1s/5s/30s momentum aligned)
+    /// - 0.20 × volatility_signal (rolling vol above baseline)
+    /// - 0.10 × cross_asset_score (correlated assets agree)
+    ///
+    /// Range: [0.0, 1.0]. Default 0.40 allows entry if trend + partial momentum agree.
+    #[serde(default = "default_min_signal_score")]
+    pub min_signal_score: Decimal,
 }
 
 impl Default for CryptoTradingConfig {
@@ -246,7 +415,7 @@ impl Default for CryptoTradingConfig {
             min_edge: dec!(0.02),
             event_refresh_secs: 30,
             min_time_remaining_secs: 60,
-            max_time_remaining_secs: 900,
+            max_time_remaining_secs: 300,
             prefer_close_to_end: true,
             entry_cooldown_secs: 0,
             require_mtf_agreement: true,
@@ -262,6 +431,7 @@ impl Default for CryptoTradingConfig {
             max_spread_pct: default_max_spread_pct(),
             straddle_threshold: default_straddle_threshold(),
             straddle_min_vol: default_straddle_min_vol(),
+            min_signal_score: default_min_signal_score(),
         }
     }
 }
@@ -818,6 +988,9 @@ impl TradingAgent for CryptoTradingAgent {
                         }
 
                         if self.config.require_mtf_agreement {
+                            // Legacy binary MTF check — kept for backward compat.
+                            // When min_signal_score > 0, the weighted check below
+                            // also applies. Both must pass.
                             let dir_sign = match side {
                                 Side::Up => 1,
                                 Side::Down => -1,
@@ -1001,9 +1174,56 @@ impl TradingAgent for CryptoTradingAgent {
                             Side::Down => Decimal::ONE - p_up,
                         };
                         let signal_edge = fair_value - limit_price;
-                        if signal_edge < self.config.min_edge {
+                        let effective_min_edge = dynamic_min_edge(window_move.abs(), self.config.min_edge);
+                        if signal_edge < effective_min_edge {
                             continue;
                         }
+                        let move_category = classify_window_move(window_move);
+
+                        // Cross-asset direction confirmation
+                        let (xa_score, xa_agree, xa_disagree) = cross_asset_score(
+                            &spot_cache,
+                            &update.symbol,
+                            side,
+                            &self.config.coins,
+                        ).await;
+
+                        // Skip if majority of correlated assets disagree (score < 0.3)
+                        if xa_disagree > 0 && xa_score < dec!(0.3) {
+                            debug!(
+                                agent = self.config.agent_id,
+                                symbol = %update.symbol,
+                                %side,
+                                %xa_score,
+                                xa_agree,
+                                xa_disagree,
+                                "cross-asset disagreement, skipping entry"
+                            );
+                            continue;
+                        }
+
+                        // Weighted signal score (P2 optimization)
+                        let signal_score = weighted_signal_score(
+                            side,
+                            window_move,
+                            momentum_1s,
+                            short_momentum_opt,
+                            long_momentum_opt,
+                            rolling_volatility_opt,
+                            xa_score,
+                        );
+                        if signal_score < self.config.min_signal_score {
+                            debug!(
+                                agent = self.config.agent_id,
+                                symbol = %update.symbol,
+                                %side,
+                                %signal_score,
+                                min = %self.config.min_signal_score,
+                                "signal score below threshold, skipping"
+                            );
+                            continue;
+                        }
+
                         let confidence = Self::signal_confidence(
                             sum_of_asks,
                             self.config.sum_threshold,
@@ -1056,6 +1276,7 @@ impl TradingAgent for CryptoTradingAgent {
                             CryptoEntryMode::VolStraddle => "vol_straddle",
                         })
                         .with_metadata("signal_confidence", &confidence.to_string())
+                        .with_metadata("signal_score", &signal_score.to_string())
                         .with_metadata("signal_momentum_value", &momentum_1s.to_string())
                         .with_metadata("signal_short_ma", &short_momentum.to_string())
                         .with_metadata("signal_long_ma", &long_momentum.to_string())
@@ -1064,7 +1285,11 @@ impl TradingAgent for CryptoTradingAgent {
                         .with_metadata("signal_fair_value", &fair_value.to_string())
                         .with_metadata("signal_market_price", &limit_price.to_string())
                         .with_metadata("signal_edge", &signal_edge.to_string())
-                        .with_metadata("signal_min_edge", &self.config.min_edge.to_string())
+                        .with_metadata("signal_min_edge", &effective_min_edge.to_string())
+                        .with_metadata("move_category", move_category)
+                        .with_metadata("cross_asset_score", &xa_score.to_string())
+                        .with_metadata("cross_asset_agree", &xa_agree.to_string())
+                        .with_metadata("cross_asset_disagree", &xa_disagree.to_string())
                         .with_metadata("window_start_price", &window_start_price.to_string())
                         .with_metadata("window_move_pct", &window_move.to_string())
                         .with_metadata("window_elapsed_secs", &window_elapsed_secs.to_string())

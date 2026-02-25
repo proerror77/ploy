@@ -6,6 +6,7 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
+use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -15,8 +16,9 @@ use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, P
 use crate::agent_system::ai::PolymarketSportsClient;
 use crate::agent_system::runtime::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, PoliticsTradingAgent,
-    PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig, TradingAgent,
+    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
+    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
+    TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agent_system::runtime::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -3630,6 +3632,9 @@ pub struct PlatformBootstrapConfig {
     pub enable_politics: bool,
     #[serde(default)]
     pub enable_economics: bool,
+    /// Enable OpenClaw meta-agent (Layer 3 orchestrator)
+    #[serde(default)]
+    pub enable_openclaw: bool,
     pub dry_run: bool,
     pub crypto: CryptoTradingConfig,
     pub crypto_lob_ml: CryptoLobMlConfig,
@@ -3638,6 +3643,9 @@ pub struct PlatformBootstrapConfig {
     pub crypto_rl_policy: CryptoRlPolicyConfig,
     pub sports: SportsTradingConfig,
     pub politics: PoliticsTradingConfig,
+    /// OpenClaw meta-agent configuration
+    #[serde(default)]
+    pub openclaw: OpenClawConfig,
 }
 
 impl Default for PlatformBootstrapConfig {
@@ -3654,6 +3662,7 @@ impl Default for PlatformBootstrapConfig {
             enable_sports: false,
             enable_politics: false,
             enable_economics: false,
+            enable_openclaw: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
             crypto_lob_ml: CryptoLobMlConfig::default(),
@@ -3661,6 +3670,7 @@ impl Default for PlatformBootstrapConfig {
             crypto_rl_policy: CryptoRlPolicyConfig::default(),
             sports: SportsTradingConfig::default(),
             politics: PoliticsTradingConfig::default(),
+            openclaw: OpenClawConfig::default(),
         }
     }
 }
@@ -4999,6 +5009,7 @@ pub async fn start_platform(
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
+        openclaw = config.enable_openclaw || config.openclaw.enabled,
         exchange = %exchange_kind,
         dry_run = config.dry_run,
         "starting multi-agent platform"
@@ -5724,6 +5735,13 @@ pub async fn start_platform(
         }
 
         if pattern_memory_enabled {
+            // Ensure persistence table exists
+            if let Some(ref pool) = shared_pool {
+                if let Err(e) = crate::strategy::pattern_memory::persistence::ensure_table(pool).await {
+                    warn!(error = %e, "failed to create pattern_memory_samples table");
+                }
+            }
+
             let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
                 crypto_cfg.coins.clone()
             } else {
@@ -6092,6 +6110,62 @@ pub async fn start_platform(
             agent_handles.push(jh);
             info!("politics agent spawned");
         }
+    }
+
+    // --- OpenClaw meta-agent (Layer 3 orchestrator) ---
+    let openclaw_enabled = env_bool(
+        "PLOY_OPENCLAW__ENABLED",
+        config.enable_openclaw || config.openclaw.enabled,
+    );
+    if openclaw_enabled {
+        // OpenClaw needs a BinanceWebSocket for regime detection.
+        // If crypto is enabled, a binance_ws was already created above and lives in a local scope.
+        // We create a dedicated one for OpenClaw using the configured BTC symbol.
+        let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
+        let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
+
+        // Spawn Binance WS feed for OpenClaw
+        let oc_ws = oc_binance_ws.clone();
+        tokio::spawn(async move {
+            if let Err(e) = oc_ws.run().await {
+                tracing::error!(error = %e, "openclaw binance ws exited");
+            }
+        });
+
+        let oc_risk_params = AgentRiskParams {
+            max_order_value: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
+            max_unhedged_positions: 0,
+            max_daily_loss: Decimal::ZERO,
+            allow_overnight: false,
+            allowed_markets: vec![],
+        };
+        let oc_agent_id = config.openclaw.agent_id.clone();
+        let cmd_rx = coordinator.register_agent(
+            oc_agent_id.clone(),
+            Domain::Custom(0),
+            oc_risk_params,
+        );
+
+        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_binance_ws);
+        let ctx = AgentContext::new(
+            oc_agent_id.clone(),
+            Domain::Custom(0),
+            handle.clone(),
+            cmd_rx,
+        );
+
+        let jh = tokio::spawn(async move {
+            if let Err(e) = agent.run(ctx).await {
+                tracing::error!(agent = "openclaw", error = %e, "openclaw meta-agent exited with error");
+            }
+        });
+        agent_handles.push(jh);
+        info!(
+            agent_id = %oc_agent_id,
+            regime_tick = config.openclaw.regime_tick_secs,
+            "openclaw meta-agent spawned"
+        );
     }
 
     info!(
