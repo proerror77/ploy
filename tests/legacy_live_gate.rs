@@ -1,4 +1,6 @@
-use ploy::safety::direct_live::{direct_live_allowed, enforce_live_gate, strategy_direct_live_allowed};
+use ploy::safety::direct_live::{
+    direct_live_allowed, enforce_live_gate, strategy_direct_live_allowed,
+};
 
 /// Every legacy live entry point must be blocked by `enforce_live_gate`.
 #[test]
@@ -11,8 +13,8 @@ fn enforce_live_gate_blocks_all_known_commands() {
     ];
 
     for cmd in commands {
-        let err = enforce_live_gate(cmd)
-            .expect_err(&format!("enforce_live_gate should block `{cmd}`"));
+        let err =
+            enforce_live_gate(cmd).expect_err(&format!("enforce_live_gate should block `{cmd}`"));
         let msg = err.to_string();
         assert!(
             msg.contains(cmd),

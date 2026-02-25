@@ -1,8 +1,8 @@
+use super::engine_store::EngineStore;
 use crate::adapters::{QuoteCache, QuoteUpdate};
 use crate::config::AppConfig;
 use crate::domain::{Order, OrderStatus, Round, Side, StrategyState, TimeInForce};
 use crate::error::{PloyError, Result};
-use super::engine_store::EngineStore;
 use crate::strategy::{
     MarketDepth, OrderExecutor, RiskManager, SignalDetector, SlippageCheck, SlippageConfig,
     SlippageProtection, TradingCalculator,
@@ -665,7 +665,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id.clone(),
                     leg2_order_id: None,
-                force_leg2_attempted: false,
+                    force_leg2_attempted: false,
                 };
 
                 let unwind_summary = match self
@@ -741,7 +741,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id,
                     leg2_order_id: None,
-                force_leg2_attempted: false,
+                    force_leg2_attempted: false,
                 });
 
                 state.strategy_state = StrategyState::Leg1Filled;
@@ -1055,8 +1055,8 @@ impl StrategyEngine {
 
                 let today = Utc::now().date_naive();
                 if let Err(e) = self.store.record_cycle_abort(today).await {
-                error!("Failed to record cycle abort: {}", e);
-            }
+                    error!("Failed to record cycle abort: {}", e);
+                }
 
                 let halt_reason = "Leg2 execution failed - open exposure";
                 self.risk_manager.trigger_circuit_breaker(halt_reason).await;
@@ -1371,7 +1371,10 @@ impl StrategyEngine {
         let client_order_id = request.client_order_id.clone();
         let order = Order::from_request(&request, Some(ctx.cycle_id), 1);
         if let Err(e) = self.store.insert_order(&order).await {
-            error!("Failed to persist unwind order (cycle {}): {}", ctx.cycle_id, e);
+            error!(
+                "Failed to persist unwind order (cycle {}): {}",
+                ctx.cycle_id, e
+            );
         }
 
         let result = self.executor.execute(&request).await?;
@@ -2013,7 +2016,11 @@ mod tests {
             Arc::new(MockExchangeClient),
             config.execution.clone(),
         );
-        let result = StrategyEngine::new(config, MockStore::new(), executor, QuoteCache::new()).await;
-        assert!(result.is_err(), "should reject live mode without confirm_fills");
+        let result =
+            StrategyEngine::new(config, MockStore::new(), executor, QuoteCache::new()).await;
+        assert!(
+            result.is_err(),
+            "should reject live mode without confirm_fills"
+        );
     }
 }

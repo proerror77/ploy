@@ -3,17 +3,16 @@
 //! Entry point for `ploy platform start`. Creates shared infrastructure,
 //! registers agents based on config flags, and runs the coordinator loop.
 
+use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
-use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::ai_clients::PolymarketSportsClient;
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
@@ -22,6 +21,7 @@ use crate::agents::{
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{
@@ -1787,8 +1787,9 @@ async fn collect_trades_for_market(
             }
         };
 
-        let req_builder = DataTradesRequest::builder()
-            .filter(DataMarketFilter::markets([condition_id.to_string()]));
+        let cid_b256: alloy::primitives::B256 = condition_id.parse().unwrap_or_default();
+        let req_builder =
+            DataTradesRequest::builder().filter(DataMarketFilter::markets([cid_b256]));
         let req_builder = match req_builder.limit(page_limit_i32) {
             Ok(builder) => builder,
             Err(e) => {
@@ -1883,16 +1884,19 @@ async fn collect_trades_for_market(
                 let trade_ts = Utc.timestamp_opt(t.timestamp, 0).single();
                 let side = t.side.to_string();
                 let proxy_wallet = format!("{:#x}", t.proxy_wallet);
+                let cond_id_str = t.condition_id.to_string();
+                let asset_str = t.asset.to_string();
+                let tx_hash_str = t.transaction_hash.to_string();
 
                 b.push_bind(domain)
-                    .push_bind(&t.condition_id)
-                    .push_bind(&t.asset)
+                    .push_bind(cond_id_str)
+                    .push_bind(asset_str)
                     .push_bind(side)
                     .push_bind(t.size)
                     .push_bind(t.price)
                     .push_bind(trade_ts.unwrap_or_else(Utc::now))
                     .push_bind(t.timestamp)
-                    .push_bind(&t.transaction_hash)
+                    .push_bind(tx_hash_str)
                     .push_bind(proxy_wallet)
                     .push_bind(&t.title)
                     .push_bind(&t.slug)
@@ -2635,10 +2639,8 @@ async fn refresh_pm_token_settlements_for_domains(
 
                 let condition_key = market
                     .condition_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(ToString::to_string)
+                    .map(|b| b.to_string())
+                    .filter(|v| !v.trim().is_empty())
                     .unwrap_or_else(|| format!("market:{}", market.id));
 
                 {
@@ -2659,7 +2661,9 @@ async fn refresh_pm_token_settlements_for_domains(
                         drop(guard);
 
                         // Backfill pm_market_metadata from settlement raw_market JSONB
-                        if let Err(e) = backfill_pm_market_metadata_from_settlement(pool, &market).await {
+                        if let Err(e) =
+                            backfill_pm_market_metadata_from_settlement(pool, &market).await
+                        {
                             debug!(
                                 market_id = %market.id,
                                 error = %e,
@@ -2688,20 +2692,16 @@ async fn upsert_pm_token_settlement_rows(
     pool: &PgPool,
     market: &polymarket_client_sdk::gamma::types::response::Market,
 ) -> Result<(usize, bool)> {
-    let clob_token_ids = market
+    let clob_token_ids: Vec<String> = market
         .clob_token_ids
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .as_ref()
+        .map(|ids| ids.iter().map(|id| id.to_string()).collect())
         .unwrap_or_default();
-    let outcomes = market
-        .outcomes
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
-        .unwrap_or_default();
-    let outcome_prices = market
+    let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+    let outcome_prices: Vec<String> = market
         .outcome_prices
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .as_ref()
+        .map(|ps| ps.iter().map(|d| d.to_string()).collect())
         .unwrap_or_default();
 
     if clob_token_ids.is_empty() || outcome_prices.is_empty() {
@@ -2751,7 +2751,7 @@ async fn upsert_pm_token_settlement_rows(
             "#,
         )
         .bind(token_id)
-        .bind(market.condition_id.as_deref())
+        .bind(market.condition_id.map(|b| b.to_string()))
         .bind(&market.id)
         .bind(market.slug.as_deref())
         .bind(outcome.as_deref())
@@ -2788,8 +2788,8 @@ async fn backfill_pm_market_metadata_from_settlement(
     // Parse start/end times — prefer eventStartTime over startDate (market creation time)
     let end_time: Option<chrono::DateTime<Utc>> = market
         .end_date_iso
-        .as_deref()
-        .and_then(|s| s.parse().ok());
+        .map(|d| d.and_hms_opt(23, 59, 59).unwrap_or_default())
+        .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
     let start_time: Option<chrono::DateTime<Utc>> = raw_market
         .get("eventStartTime")
         .or_else(|| raw_market.get("startDate"))
@@ -2848,9 +2848,7 @@ async fn backfill_pm_market_metadata_from_settlement(
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok());
             match (upper, lower) {
-                (Some(u), Some(l)) => {
-                    rust_decimal::Decimal::try_from((u + l) / 2.0).ok()
-                }
+                (Some(u), Some(l)) => rust_decimal::Decimal::try_from((u + l) / 2.0).ok(),
                 _ => None,
             }
         });
@@ -3516,8 +3514,8 @@ fn spawn_clob_orderbook_persistence(
         let max_levels = env_usize("PM_ORDERBOOK_LEVELS", max_levels_default).clamp(1, 200);
         let min_interval_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
             Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default)
-                .max(0) as u64)
+            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default).max(0)
+                as u64)
                 .saturating_mul(1000),
         };
         let require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
@@ -5762,7 +5760,9 @@ pub async fn start_platform(
         if pattern_memory_enabled {
             // Ensure persistence table exists
             if let Some(ref pool) = shared_pool {
-                if let Err(e) = crate::strategy::pattern_memory::persistence::ensure_table(pool).await {
+                if let Err(e) =
+                    crate::strategy::pattern_memory::persistence::ensure_table(pool).await
+                {
                     warn!(error = %e, "failed to create pattern_memory_samples table");
                 }
             }
@@ -6166,11 +6166,8 @@ pub async fn start_platform(
             allowed_markets: vec![],
         };
         let oc_agent_id = config.openclaw.agent_id.clone();
-        let cmd_rx = coordinator.register_agent(
-            oc_agent_id.clone(),
-            Domain::Custom(0),
-            oc_risk_params,
-        );
+        let cmd_rx =
+            coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
 
         let agent = OpenClawAgent::new(config.openclaw.clone(), oc_binance_ws);
         let ctx = AgentContext::new(

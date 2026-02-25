@@ -140,7 +140,9 @@ impl TradingCircuitBreaker {
     /// as it properly enforces HalfOpen limits.
     pub async fn should_allow(&self) -> bool {
         // Delegate to the stricter method with zero exposure to enforce HalfOpen limits.
-        self.should_allow_trade(Decimal::ZERO).await.unwrap_or(false)
+        self.should_allow_trade(Decimal::ZERO)
+            .await
+            .unwrap_or(false)
     }
 
     /// Check if a trade should be allowed, enforcing HalfOpen limits.

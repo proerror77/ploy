@@ -155,7 +155,9 @@ fn weighted_signal_score(
 
     // Component 2: Momentum agreement (fractional: how many timeframes agree?)
     let sign_matches = |mom: Decimal| -> bool {
-        if mom == Decimal::ZERO { return true; } // neutral = don't penalize
+        if mom == Decimal::ZERO {
+            return true;
+        } // neutral = don't penalize
         (mom > Decimal::ZERO) == dir_positive
     };
 
@@ -164,18 +166,24 @@ fn weighted_signal_score(
 
     if momentum_1s != Decimal::ZERO {
         mom_total += 1;
-        if sign_matches(momentum_1s) { mom_agree += 1; }
+        if sign_matches(momentum_1s) {
+            mom_agree += 1;
+        }
     }
     if let Some(sm) = short_momentum {
         if sm != Decimal::ZERO {
             mom_total += 1;
-            if sign_matches(sm) { mom_agree += 1; }
+            if sign_matches(sm) {
+                mom_agree += 1;
+            }
         }
     }
     if let Some(lm) = long_momentum {
         if lm != Decimal::ZERO {
             mom_total += 1;
-            if sign_matches(lm) { mom_agree += 1; }
+            if sign_matches(lm) {
+                mom_agree += 1;
+            }
         }
     }
 

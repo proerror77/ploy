@@ -3235,11 +3235,14 @@ impl Coordinator {
             }
         }
         // Per-agent pause check
-        if intent.is_buy && self.paused_agent_ids.read().await.contains(&intent.agent_id) {
-            let reason = format!(
-                "Agent {} is paused; blocking BUY intent",
-                intent.agent_id
-            );
+        if intent.is_buy
+            && self
+                .paused_agent_ids
+                .read()
+                .await
+                .contains(&intent.agent_id)
+        {
+            let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(

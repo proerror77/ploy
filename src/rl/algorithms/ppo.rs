@@ -168,15 +168,31 @@ impl PPOTrainer {
         } else {
             // "Greedy" action based on simple heuristics from state
             // Use momentum and sum_of_asks to make basic decisions
-            let sum_of_asks = if state.len() > IDX_SUM_OF_ASKS { state[IDX_SUM_OF_ASKS] } else { 1.0 };
-            let momentum_1 = if state.len() > IDX_MOMENTUM_1S { state[IDX_MOMENTUM_1S] } else { 0.0 };
-            let has_position = if state.len() > IDX_HAS_POSITION { state[IDX_HAS_POSITION] } else { 0.0 };
+            let sum_of_asks = if state.len() > IDX_SUM_OF_ASKS {
+                state[IDX_SUM_OF_ASKS]
+            } else {
+                1.0
+            };
+            let momentum_1 = if state.len() > IDX_MOMENTUM_1S {
+                state[IDX_MOMENTUM_1S]
+            } else {
+                0.0
+            };
+            let has_position = if state.len() > IDX_HAS_POSITION {
+                state[IDX_HAS_POSITION]
+            } else {
+                0.0
+            };
 
             let mut action = vec![0.0f32; action_dim];
 
             if has_position > 0.5 {
                 // Have position - consider selling on profit or momentum reversal
-                let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL { state[IDX_UNREALIZED_PNL] } else { 0.0 };
+                let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL {
+                    state[IDX_UNREALIZED_PNL]
+                } else {
+                    0.0
+                };
                 if unrealized_pnl > 0.02 || unrealized_pnl < -0.01 {
                     action[3] = 1.0; // Sell
                 } else {
@@ -201,14 +217,30 @@ impl PPOTrainer {
     /// Get deterministic action (for evaluation)
     pub fn get_deterministic_action(&self, state: &[f32]) -> Vec<f32> {
         let action_dim = 4;
-        let sum_of_asks = if state.len() > IDX_SUM_OF_ASKS { state[IDX_SUM_OF_ASKS] } else { 1.0 };
-        let momentum_1 = if state.len() > IDX_MOMENTUM_1S { state[IDX_MOMENTUM_1S] } else { 0.0 };
-        let has_position = if state.len() > IDX_HAS_POSITION { state[IDX_HAS_POSITION] } else { 0.0 };
+        let sum_of_asks = if state.len() > IDX_SUM_OF_ASKS {
+            state[IDX_SUM_OF_ASKS]
+        } else {
+            1.0
+        };
+        let momentum_1 = if state.len() > IDX_MOMENTUM_1S {
+            state[IDX_MOMENTUM_1S]
+        } else {
+            0.0
+        };
+        let has_position = if state.len() > IDX_HAS_POSITION {
+            state[IDX_HAS_POSITION]
+        } else {
+            0.0
+        };
 
         let mut action = vec![0.0f32; action_dim];
 
         if has_position > 0.5 {
-            let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL { state[IDX_UNREALIZED_PNL] } else { 0.0 };
+            let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL {
+                state[IDX_UNREALIZED_PNL]
+            } else {
+                0.0
+            };
             if unrealized_pnl > 0.02 || unrealized_pnl < -0.01 {
                 action[3] = 1.0;
             } else {
@@ -230,8 +262,16 @@ impl PPOTrainer {
     /// Get state value estimate (simple heuristic)
     pub fn get_value(&self, state: &[f32]) -> f32 {
         // Simple value estimate based on position and PnL
-        let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL { state[IDX_UNREALIZED_PNL] } else { 0.0 };
-        let daily_pnl = if state.len() > IDX_DAILY_PNL { state[IDX_DAILY_PNL] } else { 0.0 };
+        let unrealized_pnl = if state.len() > IDX_UNREALIZED_PNL {
+            state[IDX_UNREALIZED_PNL]
+        } else {
+            0.0
+        };
+        let daily_pnl = if state.len() > IDX_DAILY_PNL {
+            state[IDX_DAILY_PNL]
+        } else {
+            0.0
+        };
 
         // Value = current PnL state
         unrealized_pnl + daily_pnl * 0.1

@@ -92,10 +92,8 @@ impl TradingAgent for OpenClawAgent {
             self.config.btc_symbol.clone(),
             self.binance_ws.clone(),
         );
-        let mut perf_tracker = PerformanceTracker::new(
-            self.config.allocator.clone(),
-            self.config.perf_window_secs,
-        );
+        let mut perf_tracker =
+            PerformanceTracker::new(self.config.allocator.clone(), self.config.perf_window_secs);
         let mut allocator = DynamicAllocator::new(self.config.allocator.clone());
         let mut straddle_mgr = StraddleManager::new(self.config.straddle.clone());
 
@@ -107,14 +105,12 @@ impl TradingAgent for OpenClawAgent {
         let mut regime_tick = tokio::time::interval(tokio::time::Duration::from_secs(
             self.config.regime_tick_secs,
         ));
-        let mut perf_tick = tokio::time::interval(tokio::time::Duration::from_secs(
-            self.config.perf_tick_secs,
-        ));
+        let mut perf_tick =
+            tokio::time::interval(tokio::time::Duration::from_secs(self.config.perf_tick_secs));
         let mut alloc_tick = tokio::time::interval(tokio::time::Duration::from_secs(
             self.config.alloc_tick_secs,
         ));
-        let mut heartbeat_tick =
-            tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut heartbeat_tick = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
         regime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         perf_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

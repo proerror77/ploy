@@ -87,10 +87,7 @@ pub enum StraddleSignal {
         max_price: Decimal,
     },
     /// Cancel/expire a straddle — no Leg2 trigger arrived
-    Expire {
-        straddle_id: String,
-        reason: String,
-    },
+    Expire { straddle_id: String, reason: String },
 }
 
 /// Manages active straddle state machines
@@ -181,10 +178,7 @@ impl StraddleManager {
                         straddle.state = StraddleState::Expired;
                         signals.push(StraddleSignal::Expire {
                             straddle_id: id.clone(),
-                            reason: format!(
-                                "Leg2 trigger timeout after {}s",
-                                elapsed
-                            ),
+                            reason: format!("Leg2 trigger timeout after {}s", elapsed),
                         });
                         completed.push(id.clone());
                         continue;

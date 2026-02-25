@@ -324,7 +324,6 @@ fn default_require_price_to_beat() -> bool {
     true
 }
 
-
 fn default_model_blend_weight() -> Decimal {
     dec!(0.80)
 }
@@ -767,8 +766,8 @@ impl CryptoLobMlAgent {
             return None;
         }
 
-        let normalize = feature_offsets.len() == SEQ_FEATURE_DIM
-            && feature_scales.len() == SEQ_FEATURE_DIM;
+        let normalize =
+            feature_offsets.len() == SEQ_FEATURE_DIM && feature_scales.len() == SEQ_FEATURE_DIM;
 
         let mut flat: Vec<f32> = Vec::with_capacity(seq_len * SEQ_FEATURE_DIM);
         let start_idx = window.len().saturating_sub(seq_len);
@@ -1079,11 +1078,7 @@ impl CryptoLobMlAgent {
         }
     }
 
-    fn build_window_context(
-        &self,
-        spot: &SpotPrice,
-        event: &EventInfo,
-    ) -> Option<WindowContext> {
+    fn build_window_context(&self, spot: &SpotPrice, event: &EventInfo) -> Option<WindowContext> {
         let now = spot.timestamp;
         if now < event.start_time || now >= event.end_time {
             return None;
@@ -1164,16 +1159,38 @@ impl CryptoLobMlAgent {
                 }
                 CryptoLobMlEntrySidePolicy::LaggingOnly => {
                     // Follow model direction, only enter when that side's ask is cheap (<= 0.50)
-                    let model_dir = if p_up_blended >= dec!(0.50) { Side::Up } else { Side::Down };
+                    let model_dir = if p_up_blended >= dec!(0.50) {
+                        Side::Up
+                    } else {
+                        Side::Down
+                    };
                     let (dir_token, dir_ask, dir_edge, dir_gross, dir_fair) = match model_dir {
-                        Side::Up => (up_token_id, up_ask, up_edge_net, up_edge_gross, p_up_blended),
-                        Side::Down => (down_token_id, down_ask, down_edge_net, down_edge_gross,
-                                       Decimal::ONE - p_up_blended),
+                        Side::Up => (
+                            up_token_id,
+                            up_ask,
+                            up_edge_net,
+                            up_edge_gross,
+                            p_up_blended,
+                        ),
+                        Side::Down => (
+                            down_token_id,
+                            down_ask,
+                            down_edge_net,
+                            down_edge_gross,
+                            Decimal::ONE - p_up_blended,
+                        ),
                     };
                     if dir_ask > dec!(0.50) {
                         return None;
                     }
-                    (model_dir, dir_token.to_string(), dir_ask, dir_edge, dir_gross, dir_fair)
+                    (
+                        model_dir,
+                        dir_token.to_string(),
+                        dir_ask,
+                        dir_edge,
+                        dir_gross,
+                        dir_fair,
+                    )
                 }
             };
 
@@ -2560,8 +2577,7 @@ mod tests {
     }
 
     fn sample_blended_prob(agent: &CryptoLobMlAgent) -> BlendedProb {
-        agent
-            .compute_blended_probability(dec!(0.62), dec!(0.58))
+        agent.compute_blended_probability(dec!(0.62), dec!(0.58))
     }
 
     fn sample_sequence_snapshot(ts: DateTime<Utc>) -> SequenceSnapshot {
@@ -2634,8 +2650,8 @@ mod tests {
         }
 
         // Without normalization
-        let raw = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[])
-            .expect("raw sequence");
+        let raw =
+            CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[]).expect("raw sequence");
 
         // With identity normalization (offset=0, scale=1)
         let offsets = vec![0.0f32; SEQ_FEATURE_DIM];
@@ -2683,10 +2699,9 @@ mod tests {
         let err = CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM + 1)
             .err()
             .expect("non-snapshot input_dim must fail fast");
-        assert!(
-            err.to_string()
-                .contains("must be a multiple of sequence feature dim")
-        );
+        assert!(err
+            .to_string()
+            .contains("must be a multiple of sequence feature dim"));
     }
 
     #[test]
@@ -2906,16 +2921,9 @@ mod tests {
             onnx_model: None,
         };
 
-        let blended = agent
-            .compute_blended_probability(dec!(0.40), dec!(0.42));
+        let blended = agent.compute_blended_probability(dec!(0.40), dec!(0.42));
         let signal = agent
-            .evaluate_entry_signal(
-                &blended,
-                "up-token",
-                "down-token",
-                dec!(0.28),
-                dec!(0.25),
-            )
+            .evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.28), dec!(0.25))
             .expect("signal should pass filters");
 
         assert_eq!(signal.side, Side::Down);
@@ -2938,13 +2946,8 @@ mod tests {
         };
 
         let blended = sample_blended_prob(&agent);
-        let signal = agent.evaluate_entry_signal(
-            &blended,
-            "up-token",
-            "down-token",
-            dec!(0.80),
-            dec!(0.95),
-        );
+        let signal =
+            agent.evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.80), dec!(0.95));
         assert!(signal.is_none());
     }
 
@@ -2965,13 +2968,8 @@ mod tests {
         };
 
         let blended = sample_blended_prob(&agent);
-        let signal = agent.evaluate_entry_signal(
-            &blended,
-            "up-token",
-            "down-token",
-            dec!(0.31),
-            dec!(0.32),
-        );
+        let signal =
+            agent.evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.31), dec!(0.32));
         assert!(signal.is_none(), "ask > 0.30 must be rejected");
     }
 
@@ -2979,15 +2977,18 @@ mod tests {
     fn test_gbm_anchor_falls_back_to_window_move_when_no_price_to_beat() {
         // Without price_to_beat, GBM anchor uses window_move fallback
         let p = CryptoLobMlAgent::estimate_p_up_gbm_anchor(
-            dec!(101),      // spot_price
-            dec!(100),      // start_price
-            None,           // no price_to_beat
+            dec!(101),         // spot_price
+            dec!(100),         // start_price
+            None,              // no price_to_beat
             Some(dec!(0.001)), // sigma_1s
-            270,            // remaining_secs
-            0,              // oracle_lag_buffer_secs
+            270,               // remaining_secs
+            0,                 // oracle_lag_buffer_secs
         );
         // window_move = +1%, with small volatility over 270s → P(UP) > 0.50
-        assert!(p > dec!(0.50), "p_up with positive momentum should be > 0.50, got {p}");
+        assert!(
+            p > dec!(0.50),
+            "p_up with positive momentum should be > 0.50, got {p}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 pub mod adapters;
-pub mod ai_clients;
 pub mod agents;
+pub mod ai_clients;
 pub mod analysis;
 #[cfg(feature = "api")]
 pub mod api;

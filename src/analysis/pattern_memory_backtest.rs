@@ -104,7 +104,10 @@ pub struct SymbolResult {
 /// Run the walk-forward Pattern Memory backtest.
 ///
 /// Uses const generic N=20 for the default pattern length.
-pub async fn run_backtest(cfg: &PatternMemoryBacktestConfig, pool: &PgPool) -> Result<BacktestResult> {
+pub async fn run_backtest(
+    cfg: &PatternMemoryBacktestConfig,
+    pool: &PgPool,
+) -> Result<BacktestResult> {
     info!(symbols = ?cfg.symbols, lookback_days = cfg.lookback_days, "starting pattern memory backtest");
 
     // Fetch 5m klines from DB sorted by time
@@ -135,14 +138,8 @@ pub async fn run_backtest(cfg: &PatternMemoryBacktestConfig, pool: &PgPool) -> R
             Some(KlineRow {
                 symbol: row.try_get::<String, _>("symbol").ok()?,
                 open_time: row.try_get::<DateTime<Utc>, _>("open_time").ok()?,
-                open: row
-                    .try_get::<Decimal, _>("open")
-                    .ok()?
-                    .to_f64()?,
-                close: row
-                    .try_get::<Decimal, _>("close")
-                    .ok()?
-                    .to_f64()?,
+                open: row.try_get::<Decimal, _>("open").ok()?.to_f64()?,
+                close: row.try_get::<Decimal, _>("close").ok()?.to_f64()?,
                 interval: row.try_get::<String, _>("interval").ok()?,
             })
         })
@@ -202,7 +199,10 @@ pub async fn run_backtest(cfg: &PatternMemoryBacktestConfig, pool: &PgPool) -> R
     let mut next_returns: HashMap<(String, DateTime<Utc>), f64> = HashMap::new();
     let mut by_symbol_klines: HashMap<String, Vec<&KlineRow>> = HashMap::new();
     for k in &klines {
-        by_symbol_klines.entry(k.symbol.clone()).or_default().push(k);
+        by_symbol_klines
+            .entry(k.symbol.clone())
+            .or_default()
+            .push(k);
     }
     for (_sym, sym_klines) in &by_symbol_klines {
         for i in 0..sym_klines.len().saturating_sub(1) {

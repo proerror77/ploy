@@ -1649,25 +1649,22 @@ async fn report_accuracy_pm_settlement(
             };
 
             if let Some(ref cond) = market.condition_id {
-                if !seen_conditions.insert(cond.clone()) {
+                let cond_str = cond.to_string();
+                if !seen_conditions.insert(cond_str) {
                     continue;
                 }
             }
 
-            let clob_ids = market
+            let clob_ids: Vec<String> = market
                 .clob_token_ids
-                .as_deref()
-                .and_then(|s| parse_json_array_strings(s).ok())
+                .as_ref()
+                .map(|ids| ids.iter().map(|id| id.to_string()).collect())
                 .unwrap_or_default();
-            let outcomes = market
-                .outcomes
-                .as_deref()
-                .and_then(|s| parse_json_array_strings(s).ok())
-                .unwrap_or_default();
-            let price_strs = market
+            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+            let price_strs: Vec<String> = market
                 .outcome_prices
-                .as_deref()
-                .and_then(|s| parse_json_array_strings(s).ok())
+                .as_ref()
+                .map(|ps| ps.iter().map(|d| d.to_string()).collect())
                 .unwrap_or_default();
 
             if clob_ids.is_empty() || price_strs.is_empty() {
@@ -1692,7 +1689,7 @@ async fn report_accuracy_pm_settlement(
             let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
 
             let market_slug = market.slug.clone();
-            let condition_id = market.condition_id.clone();
+            let condition_id = market.condition_id.map(|b| b.to_string());
 
             for (i, tid) in clob_ids.iter().enumerate() {
                 let outcome = outcomes.get(i).cloned();
@@ -2167,25 +2164,22 @@ async fn export_crypto_lob_dataset(
             };
 
             if let Some(ref cond) = market.condition_id {
-                if !seen_conditions.insert(cond.clone()) {
+                let cond_str = cond.to_string();
+                if !seen_conditions.insert(cond_str) {
                     continue;
                 }
             }
 
-            let clob_ids = market
+            let clob_ids: Vec<String> = market
                 .clob_token_ids
-                .as_deref()
-                .and_then(|s| parse_json_array_strings(s).ok())
+                .as_ref()
+                .map(|ids| ids.iter().map(|id| id.to_string()).collect())
                 .unwrap_or_default();
-            let outcomes = market
-                .outcomes
-                .as_deref()
-                .and_then(|s| parse_json_array_strings(s).ok())
-                .unwrap_or_default();
-            let price_strs = market
+            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+            let price_strs: Vec<String> = market
                 .outcome_prices
-                .as_deref()
-                .and_then(|s| parse_json_array_strings(s).ok())
+                .as_ref()
+                .map(|ps| ps.iter().map(|d| d.to_string()).collect())
                 .unwrap_or_default();
 
             if clob_ids.is_empty() || price_strs.is_empty() {
@@ -2209,7 +2203,7 @@ async fn export_crypto_lob_dataset(
             let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
 
             let market_slug = market.slug.clone();
-            let condition_id = market.condition_id.clone();
+            let condition_id = market.condition_id.map(|b| b.to_string());
 
             for (i, tid) in clob_ids.iter().enumerate() {
                 let outcome = outcomes.get(i).cloned();
