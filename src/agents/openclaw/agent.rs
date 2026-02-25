@@ -164,6 +164,10 @@ impl TradingAgent for OpenClawAgent {
                         let performances = perf_tracker.all();
                         let resolutions = ConflictDetector::resolve(&conflicts, performances);
                         for resolution in resolutions {
+                            // Skip if already tracked as paused
+                            if paused_agents.contains(&resolution.pause_agent_id) {
+                                continue;
+                            }
                             // Use control command to pause conflicting agent
                             if let Err(e) = ctx.submit_pause_agent(&resolution.pause_agent_id).await {
                                 warn!(
@@ -204,17 +208,17 @@ impl TradingAgent for OpenClawAgent {
 
                     let update = allocator.decide(regime, performances, &paused_agents);
 
-                    // Apply governance metadata update
-                    let mut all_metadata = update.metadata;
+                    // Build governance policy update with metadata
+                    // Read current snapshot first, then merge to avoid overwriting non-OpenClaw metadata
+                    let policy_snapshot = ctx.read_governance_policy().await;
+                    let mut all_metadata = policy_snapshot.metadata.clone();
+                    all_metadata.extend(update.metadata);
 
                     // Merge straddle metadata
                     if straddle_mgr.is_enabled() {
                         all_metadata.extend(straddle_mgr.governance_metadata());
                     }
 
-                    // Build governance policy update with metadata
-                    // Note: We push metadata through the governance policy's metadata field
-                    let policy_snapshot = ctx.read_governance_policy().await;
                     let gov_update = crate::coordinator::GovernancePolicyUpdate {
                         block_new_intents: policy_snapshot.block_new_intents,
                         blocked_domains: policy_snapshot.blocked_domains.clone(),

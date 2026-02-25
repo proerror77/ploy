@@ -198,9 +198,6 @@ CREATE TABLE IF NOT EXISTS binance_klines (
     UNIQUE (symbol, interval, open_time)
 );
 
-CREATE INDEX IF NOT EXISTS idx_binance_klines_symbol_interval_time
-    ON binance_klines(symbol, interval, open_time DESC);
-
 -- ============================================================
 -- 9. BACKFILL: pm_market_metadata from pm_token_settlements
 --
@@ -270,27 +267,53 @@ END $$;
 --     number.  Gamma API returns groupItemThreshold=0 for these
 --     relative markets.  This UPDATE fills in the opening price
 --     from binance_price_ticks where available.
+--     Guarded: only updates rows where price_to_beat is still 0.
 -- ============================================================
-UPDATE pm_market_metadata md
-SET price_to_beat = sub.spot_at_start,
-    updated_at = NOW()
-FROM (
-    SELECT md2.market_slug,
-        (SELECT b.price
-         FROM binance_price_ticks b
-         WHERE b.symbol = md2.symbol
-           AND b.trade_time <= md2.start_time
-         ORDER BY b.trade_time DESC
-         LIMIT 1
-        ) AS spot_at_start
-    FROM pm_market_metadata md2
-    WHERE md2.symbol IS NOT NULL
-      AND md2.start_time IS NOT NULL
-      AND md2.price_to_beat = 0
-) sub
-WHERE md.market_slug = sub.market_slug
-  AND sub.spot_at_start IS NOT NULL
-  AND sub.spot_at_start > 0;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'pm_market_metadata')
+       AND EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'binance_price_ticks')
+    THEN
+        UPDATE pm_market_metadata md
+        SET price_to_beat = sub.spot_at_start,
+            updated_at = NOW()
+        FROM (
+            SELECT md2.market_slug,
+                (SELECT b.price
+                 FROM binance_price_ticks b
+                 WHERE b.symbol = md2.symbol
+                   AND b.trade_time <= md2.start_time
+                 ORDER BY b.trade_time DESC
+                 LIMIT 1
+                ) AS spot_at_start
+            FROM pm_market_metadata md2
+            WHERE md2.symbol IS NOT NULL
+              AND md2.start_time IS NOT NULL
+              AND md2.price_to_beat = 0
+        ) sub
+        WHERE md.market_slug = sub.market_slug
+          AND sub.spot_at_start IS NOT NULL
+          AND sub.spot_at_start > 0;
+    END IF;
+END $$;
+
+-- ============================================================
+-- 11. Pattern Memory Samples table
+--     (formalized from runtime CREATE TABLE IF NOT EXISTS)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pattern_memory_samples (
+    id BIGSERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    pattern_len SMALLINT NOT NULL,
+    pattern DOUBLE PRECISION[] NOT NULL,
+    next_return DOUBLE PRECISION NOT NULL,
+    sample_ts TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(symbol, pattern_len, sample_ts)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pm_samples_symbol_len
+    ON pattern_memory_samples(symbol, pattern_len, sample_ts DESC);
 
 -- Optional: grant to app role if present.
 DO $$

@@ -187,9 +187,12 @@ fn compute_performance(
     let sharpe_norm = ((sharpe + 3.0) / 6.0).clamp(0.0, 1.0);
 
     // Drawdown ratio: max_dd / peak (clamped 0-1)
-    let drawdown_ratio = if peak_pnl.abs() > 1e-12 {
-        (max_dd / peak_pnl.abs()).clamp(0.0, 1.0)
+    // Only meaningful when peak_pnl is positive (agent has been profitable)
+    let drawdown_ratio = if peak_pnl > 1e-12 {
+        (max_dd / peak_pnl).clamp(0.0, 1.0)
     } else {
+        // Agent has never been profitable in this window — treat as zero drawdown
+        // rather than inflating the ratio from a negative denominator
         0.0
     };
 

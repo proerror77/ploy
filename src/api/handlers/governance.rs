@@ -80,7 +80,7 @@ pub async fn get_governance_policy_history(
         .governance_policy_history(limit)
         .await
         .map_err(|e| match e {
-            PloyError::Validation(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
+            PloyError::Validation(msg) => (StatusCode::BAD_REQUEST, msg),
             other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
         })?;
     Ok(Json(rows))

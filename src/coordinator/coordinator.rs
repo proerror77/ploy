@@ -1309,6 +1309,7 @@ pub struct Coordinator {
     domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
     governance_policy: Arc<RwLock<GovernancePolicy>>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
+    paused_agent_ids: Arc<RwLock<HashSet<String>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -2557,6 +2558,7 @@ impl Coordinator {
             domain_ingress_mode,
             governance_policy,
             stale_heartbeat_warn_at,
+            paused_agent_ids: Arc::new(RwLock::new(HashSet::new())),
             order_tx,
             order_rx,
             state_tx,
@@ -3096,9 +3098,12 @@ impl Coordinator {
                             self.shutdown_domain(domain).await
                         }
                         CoordinatorControlCommand::PauseAgent(id) => {
+                            // Track per-agent pause so handle_order_intent blocks BUY intents
+                            self.paused_agent_ids.write().await.insert(id.clone());
                             self.send_command(&id, CoordinatorCommand::Pause).await.ok();
                         }
                         CoordinatorControlCommand::ResumeAgent(id) => {
+                            self.paused_agent_ids.write().await.remove(&id);
                             self.send_command(&id, CoordinatorCommand::Resume).await.ok();
                         }
                     }
@@ -3228,6 +3233,20 @@ impl Coordinator {
                 );
                 return;
             }
+        }
+        // Per-agent pause check
+        if intent.is_buy && self.paused_agent_ids.read().await.contains(&intent.agent_id) {
+            let reason = format!(
+                "Agent {} is paused; blocking BUY intent",
+                intent.agent_id
+            );
+            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                .await;
+            warn!(
+                %agent_id, %intent_id, reason = %reason,
+                "order blocked by per-agent pause"
+            );
+            return;
         }
 
         if let Some(reason) = self.check_governance_policy(&intent).await {

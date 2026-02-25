@@ -1150,12 +1150,15 @@ impl PolymarketWebSocket {
                 );
 
                 if let Some(quote) = self.quote_cache.get(&change.asset_id) {
-                    let update = QuoteUpdate {
-                        token_id: change.asset_id.clone(),
-                        side,
-                        quote,
-                    };
-                    let _ = self.update_tx.send(update);
+                    // Only broadcast if we have at least one side from a prior book snapshot
+                    if quote.best_bid.is_some() || quote.best_ask.is_some() {
+                        let update = QuoteUpdate {
+                            token_id: change.asset_id.clone(),
+                            side,
+                            quote,
+                        };
+                        let _ = self.update_tx.send(update);
+                    }
                 }
             }
         }
