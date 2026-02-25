@@ -1785,8 +1785,9 @@ async fn collect_trades_for_market(
             }
         };
 
+        let cid_b256: alloy::primitives::B256 = condition_id.parse().unwrap_or_default();
         let req_builder = DataTradesRequest::builder()
-            .filter(DataMarketFilter::markets([condition_id.to_string()]));
+            .filter(DataMarketFilter::markets([cid_b256]));
         let req_builder = match req_builder.limit(page_limit_i32) {
             Ok(builder) => builder,
             Err(e) => {
@@ -1881,16 +1882,19 @@ async fn collect_trades_for_market(
                 let trade_ts = Utc.timestamp_opt(t.timestamp, 0).single();
                 let side = t.side.to_string();
                 let proxy_wallet = format!("{:#x}", t.proxy_wallet);
+                let cond_id_str = t.condition_id.to_string();
+                let asset_str = t.asset.to_string();
+                let tx_hash_str = t.transaction_hash.to_string();
 
                 b.push_bind(domain)
-                    .push_bind(&t.condition_id)
-                    .push_bind(&t.asset)
+                    .push_bind(cond_id_str)
+                    .push_bind(asset_str)
                     .push_bind(side)
                     .push_bind(t.size)
                     .push_bind(t.price)
                     .push_bind(trade_ts.unwrap_or_else(Utc::now))
                     .push_bind(t.timestamp)
-                    .push_bind(&t.transaction_hash)
+                    .push_bind(tx_hash_str)
                     .push_bind(proxy_wallet)
                     .push_bind(&t.title)
                     .push_bind(&t.slug)
@@ -2633,10 +2637,8 @@ async fn refresh_pm_token_settlements_for_domains(
 
                 let condition_key = market
                     .condition_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(ToString::to_string)
+                    .map(|b| b.to_string())
+                    .filter(|v| !v.trim().is_empty())
                     .unwrap_or_else(|| format!("market:{}", market.id));
 
                 {
@@ -2676,20 +2678,19 @@ async fn upsert_pm_token_settlement_rows(
     pool: &PgPool,
     market: &polymarket_client_sdk::gamma::types::response::Market,
 ) -> Result<(usize, bool)> {
-    let clob_token_ids = market
+    let clob_token_ids: Vec<String> = market
         .clob_token_ids
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .as_ref()
+        .map(|ids| ids.iter().map(|id| id.to_string()).collect())
         .unwrap_or_default();
-    let outcomes = market
+    let outcomes: Vec<String> = market
         .outcomes
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .clone()
         .unwrap_or_default();
-    let outcome_prices = market
+    let outcome_prices: Vec<String> = market
         .outcome_prices
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .as_ref()
+        .map(|ps| ps.iter().map(|d| d.to_string()).collect())
         .unwrap_or_default();
 
     if clob_token_ids.is_empty() || outcome_prices.is_empty() {
@@ -2739,7 +2740,7 @@ async fn upsert_pm_token_settlement_rows(
             "#,
         )
         .bind(token_id)
-        .bind(market.condition_id.as_deref())
+        .bind(market.condition_id.map(|b| b.to_string()))
         .bind(&market.id)
         .bind(market.slug.as_deref())
         .bind(outcome.as_deref())

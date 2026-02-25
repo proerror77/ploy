@@ -553,17 +553,37 @@ impl PolymarketPoliticsClient {
     fn map_political_market_data(market: GammaMarket) -> PoliticalMarketData {
         let volume = market
             .volume
-            .as_deref()
-            .and_then(|v| v.parse::<f64>().ok())
+            .and_then(Self::decimal_to_f64)
             .or_else(|| market.volume_num.and_then(Self::decimal_to_f64));
+
+        let outcome_prices = market.outcome_prices.map(|prices| {
+            serde_json::to_string(
+                &prices
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_default()
+        });
+
+        let clob_token_ids = market.clob_token_ids.map(|ids| {
+            serde_json::to_string(
+                &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            )
+            .unwrap_or_default()
+        });
+
+        let outcomes = market.outcomes.map(|o| {
+            serde_json::to_string(&o).unwrap_or_default()
+        });
 
         PoliticalMarketData {
             question: market.question.unwrap_or_default(),
-            condition_id: market.condition_id,
-            outcome_prices: market.outcome_prices,
-            clob_token_ids: market.clob_token_ids,
+            condition_id: market.condition_id.map(|c| c.to_string()),
+            outcome_prices,
+            clob_token_ids,
             volume,
-            outcomes: market.outcomes,
+            outcomes,
         }
     }
 
@@ -609,27 +629,43 @@ impl PolymarketPoliticsClient {
     fn map_politics_market(market: GammaMarket) -> PolymarketPoliticsMarket {
         let volume = market
             .volume
-            .as_deref()
-            .and_then(|v| v.parse::<f64>().ok())
+            .and_then(Self::decimal_to_f64)
             .or_else(|| market.volume_num.and_then(Self::decimal_to_f64));
 
         let liquidity = market
             .liquidity
-            .as_deref()
-            .and_then(|v| v.parse::<f64>().ok())
+            .and_then(Self::decimal_to_f64)
             .or_else(|| market.liquidity_num.and_then(Self::decimal_to_f64));
 
+        let outcome_prices = market.outcome_prices.map(|prices| {
+            serde_json::to_string(
+                &prices
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_default()
+        });
+
+        let clob_token_ids = market.clob_token_ids.map(|ids| {
+            serde_json::to_string(
+                &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            )
+            .unwrap_or_default()
+        });
+
         PolymarketPoliticsMarket {
-            condition_id: market.condition_id.unwrap_or_default(),
+            condition_id: market.condition_id.map(|c| c.to_string()).unwrap_or_default(),
             question: market.question,
             slug: market.slug,
             active: market.active.unwrap_or(true),
             closed: market.closed.unwrap_or(false),
             end_date: market
                 .end_date_iso
+                .map(|d| d.to_string())
                 .or_else(|| market.end_date.map(|d| d.to_rfc3339())),
-            clob_token_ids: market.clob_token_ids,
-            outcome_prices: market.outcome_prices,
+            clob_token_ids,
+            outcome_prices,
             volume,
             liquidity,
             description: market.description,

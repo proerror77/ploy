@@ -5,8 +5,10 @@
 
 use crate::domain::{OrderRequest, OrderSide};
 use crate::error::{PloyError, Result};
+use alloy::primitives::U256;
 use alloy::signers::local::PrivateKeySigner;
 use chrono::Utc;
+use std::str::FromStr;
 use polymarket_client_sdk::clob::types::{
     request::{
         BalanceAllowanceRequest, LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest,
@@ -137,7 +139,9 @@ impl SdkPolymarketClient {
     /// Get midpoint price for a token
     #[instrument(skip(self))]
     pub async fn get_midpoint(&self, token_id: &str) -> Result<Decimal> {
-        let req = MidpointRequest::builder().token_id(token_id).build();
+        let token_id_u256 = U256::from_str(token_id)
+            .map_err(|e| PloyError::Validation(format!("invalid token_id: {e}")))?;
+        let req = MidpointRequest::builder().token_id(token_id_u256).build();
 
         let resp = self
             .read_client
@@ -151,8 +155,10 @@ impl SdkPolymarketClient {
     /// Get order book for a token
     #[instrument(skip(self))]
     pub async fn get_order_book(&self, token_id: &str) -> Result<OrderBookResponse> {
+        let token_id_u256 = U256::from_str(token_id)
+            .map_err(|e| PloyError::Validation(format!("invalid token_id: {e}")))?;
         let req = OrderBookSummaryRequest::builder()
-            .token_id(token_id)
+            .token_id(token_id_u256)
             .build();
 
         let resp = self
@@ -211,8 +217,10 @@ impl SdkPolymarketClient {
             _ => return Err(PloyError::Validation(format!("Invalid side: {}", side))),
         };
 
+        let token_id_u256 = U256::from_str(token_id)
+            .map_err(|e| PloyError::Validation(format!("invalid token_id: {e}")))?;
         let req = PriceRequest::builder()
-            .token_id(token_id)
+            .token_id(token_id_u256)
             .side(sdk_side)
             .build();
 
@@ -228,7 +236,9 @@ impl SdkPolymarketClient {
     /// Get last trade price
     #[instrument(skip(self))]
     pub async fn get_last_trade_price(&self, token_id: &str) -> Result<Decimal> {
-        let req = LastTradePriceRequest::builder().token_id(token_id).build();
+        let token_id_u256 = U256::from_str(token_id)
+            .map_err(|e| PloyError::Validation(format!("invalid token_id: {e}")))?;
+        let req = LastTradePriceRequest::builder().token_id(token_id_u256).build();
 
         let resp =
             self.read_client.last_trade_price(&req).await.map_err(|e| {
@@ -282,9 +292,12 @@ impl SdkPolymarketClient {
             OrderSide::Sell => SdkSide::Sell,
         };
 
+        let token_id_u256 = U256::from_str(&request.token_id)
+            .map_err(|e| PloyError::Validation(format!("invalid token_id: {e}")))?;
+
         let order = auth_client
             .limit_order()
-            .token_id(&request.token_id)
+            .token_id(token_id_u256)
             .price(request.limit_price)
             .size(Decimal::from(request.shares))
             .side(sdk_side)

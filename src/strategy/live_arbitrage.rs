@@ -389,12 +389,13 @@ impl LiveArbitrageMonitor {
 
             // Find main moneyline (not 1H)
             if question.contains(" vs. ") && !question.contains("1H") && !question.contains("O/U") && !question.contains("Spread") {
-                let prices = self.parse_json_array_strings(market.outcome_prices.as_deref());
-                let outcomes = self.parse_json_array_strings(market.outcomes.as_deref());
-                let volume = market
+                let prices: Vec<String> = market.outcome_prices.as_ref()
+                    .map(|ps| ps.iter().map(|d| d.to_string()).collect())
+                    .unwrap_or_default();
+                let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+                let volume: f64 = market
                     .volume
-                    .as_deref()
-                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|d| d.to_string().parse::<f64>().ok())
                     .unwrap_or(0.0);
 
                 if prices.len() >= 2 && outcomes.len() >= 2 {
