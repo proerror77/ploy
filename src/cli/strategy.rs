@@ -548,6 +548,13 @@ async fn list_strategies() -> Result<()> {
     Ok(())
 }
 
+/// Check if the legacy `ploy strategy start` live path is explicitly allowed
+/// via the global `PLOY_ALLOW_LEGACY_LIVE` env var.
+fn legacy_strategy_live_allowed() -> bool {
+    std::env::var("PLOY_ALLOW_LEGACY_LIVE")
+        .map_or(false, |v| v == "true" || v == "1")
+}
+
 /// Start a strategy
 fn enforce_legacy_strategy_live_gate(dry_run: bool) -> Result<()> {
     if !dry_run && !legacy_strategy_live_allowed() {
