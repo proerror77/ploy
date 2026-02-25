@@ -24,7 +24,7 @@ use sqlx::{PgPool, Row};
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue,
+    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue, Position,
     PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
 };
 use crate::strategy::executor::OrderExecutor;
@@ -1818,6 +1818,94 @@ impl CryptoCapitalAllocator {
         self.pending_by_intent.clear();
     }
 
+    /// Rebuild the `open` ExposureBook from actual open positions.
+    /// Called after crash recovery to reconcile the allocator with the PositionAggregator,
+    /// because replay of historical fills often produces mismatches (sell fills can't find
+    /// matching buy position keys → allocator never drains those entries).
+    fn reconcile_with_positions(&mut self, positions: &[Position]) {
+        let stale_total = self.open.total;
+        self.open = ExposureBook::default();
+        let mut rebuilt_total = Decimal::ZERO;
+        for pos in positions {
+            if pos.domain != Domain::Crypto {
+                continue;
+            }
+            let notional = pos.entry_price * Decimal::from(pos.shares);
+            if notional <= Decimal::ZERO {
+                continue;
+            }
+
+            // Reconstruct dimensions from position fields
+            let coin = CryptoIntentDimensions::parse_coin_from_slug(&pos.market_slug)
+                .or_else(|| {
+                    pos.metadata
+                        .get("coin")
+                        .and_then(|c| CryptoIntentDimensions::normalize_coin(c))
+                })
+                .unwrap_or_else(|| "OTHER".to_string());
+            let horizon = CryptoHorizon::from_hint(&pos.market_slug)
+                .or_else(|| {
+                    pos.metadata
+                        .get("horizon")
+                        .and_then(|h| CryptoHorizon::from_hint(h))
+                })
+                .unwrap_or(CryptoHorizon::Other);
+            let deployment_scope = pos
+                .metadata
+                .get("deployment_id")
+                .and_then(|v| {
+                    let t = v.trim().to_ascii_lowercase();
+                    if t.is_empty() { None } else { Some(t) }
+                })
+                .unwrap_or_else(|| {
+                    let strategy = pos
+                        .metadata
+                        .get("strategy")
+                        .and_then(|v| {
+                            let t = v.trim().to_ascii_lowercase();
+                            if t.is_empty() { None } else { Some(t) }
+                        })
+                        .unwrap_or_else(|| "default".to_string());
+                    format!("agent:{}|strategy:{}", pos.agent_id.trim().to_ascii_lowercase(), strategy)
+                });
+            let market_identity = pos
+                .metadata
+                .get("condition_id")
+                .and_then(|v| {
+                    let t = v.trim().to_ascii_lowercase();
+                    if t.is_empty() { None } else { Some(format!("condition:{}", t)) }
+                })
+                .unwrap_or_else(|| {
+                    let slug = pos.market_slug.trim().to_ascii_lowercase();
+                    if slug.is_empty() {
+                        format!("token:{}", pos.token_id.trim().to_ascii_lowercase())
+                    } else {
+                        format!("slug:{}", slug)
+                    }
+                });
+            let position_key = format!(
+                "{}|{}|{}|{}",
+                deployment_scope, market_identity, pos.token_id, pos.side.as_str()
+            );
+
+            let dims = CryptoIntentDimensions {
+                coin,
+                horizon,
+                deployment_scope,
+                position_key,
+            };
+            self.open.add(&dims, notional);
+            rebuilt_total += notional;
+        }
+
+        tracing::info!(
+            stale_total = %stale_total,
+            rebuilt_total = %rebuilt_total,
+            delta = %(stale_total - rebuilt_total),
+            "crypto allocator reconciled with position aggregator"
+        );
+    }
+
     fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
         if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
             return Ok(());
@@ -2984,6 +3072,16 @@ impl Coordinator {
                     }
                 }
             }
+        }
+
+        // Reconcile crypto allocator with actual open positions.
+        // During crash recovery, sell fills often can't match buy position keys in the
+        // allocator (different metadata → different keys), leaving phantom exposure.
+        // This rebuild replaces the stale open book with one derived from actual positions.
+        {
+            let open_positions = self.positions.all_positions().await;
+            let mut allocator = self.crypto_allocator.write().await;
+            allocator.reconcile_with_positions(&open_positions);
         }
 
         self.refresh_global_state().await;
