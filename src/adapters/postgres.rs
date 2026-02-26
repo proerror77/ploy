@@ -284,70 +284,87 @@ impl PostgresStore {
         Ok(row.get("id"))
     }
 
-    /// Update cycle state
-    pub async fn update_cycle_state(&self, cycle_id: i32, state: StrategyState) -> Result<()> {
-        sqlx::query("UPDATE cycles SET state = $1 WHERE id = $2")
-            .bind(state.as_str())
-            .bind(cycle_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Update cycle state with optimistic locking.
+    /// Returns `true` if the update succeeded, `false` if version conflict.
+    pub async fn update_cycle_state(
+        &self,
+        cycle_id: i32,
+        state: StrategyState,
+        expected_version: i32,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE cycles SET state = $1, version = version + 1 WHERE id = $2 AND version = $3",
+        )
+        .bind(state.as_str())
+        .bind(cycle_id)
+        .bind(expected_version)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
-    /// Update cycle with Leg1 fill
+    /// Update cycle with Leg1 fill, using optimistic locking.
+    /// Returns `true` if the update succeeded, `false` if version conflict.
     pub async fn update_cycle_leg1(
         &self,
         cycle_id: i32,
         side: Side,
         entry_price: Decimal,
         shares: u64,
-    ) -> Result<()> {
-        sqlx::query(
+        expected_version: i32,
+    ) -> Result<bool> {
+        let result = sqlx::query(
             r#"
             UPDATE cycles SET
                 state = 'LEG1_FILLED',
                 leg1_side = $1,
                 leg1_entry_price = $2,
                 leg1_shares = $3,
-                leg1_filled_at = NOW()
-            WHERE id = $4
+                leg1_filled_at = NOW(),
+                version = version + 1
+            WHERE id = $4 AND version = $5
             "#,
         )
         .bind(side.as_str())
         .bind(entry_price)
         .bind(shares as i32)
         .bind(cycle_id)
+        .bind(expected_version)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
-    /// Update cycle with Leg2 fill and PnL
+    /// Update cycle with Leg2 fill and PnL, using optimistic locking.
+    /// Returns `true` if the update succeeded, `false` if version conflict.
     pub async fn update_cycle_leg2(
         &self,
         cycle_id: i32,
         entry_price: Decimal,
         shares: u64,
         pnl: Decimal,
-    ) -> Result<()> {
-        sqlx::query(
+        expected_version: i32,
+    ) -> Result<bool> {
+        let result = sqlx::query(
             r#"
             UPDATE cycles SET
                 state = 'CYCLE_COMPLETE',
                 leg2_entry_price = $1,
                 leg2_shares = $2,
                 leg2_filled_at = NOW(),
-                pnl = $3
-            WHERE id = $4
+                pnl = $3,
+                version = version + 1
+            WHERE id = $4 AND version = $5
             "#,
         )
         .bind(entry_price)
         .bind(shares as i32)
         .bind(pnl)
         .bind(cycle_id)
+        .bind(expected_version)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Abort a cycle
@@ -369,7 +386,7 @@ impl PostgresStore {
         let row = sqlx::query(
             r#"
             SELECT id, round_id, state, leg1_side, leg1_entry_price, leg1_shares, leg1_filled_at,
-                   leg2_entry_price, leg2_shares, leg2_filled_at, pnl, created_at, updated_at
+                   leg2_entry_price, leg2_shares, leg2_filled_at, pnl, version, created_at, updated_at
             FROM cycles WHERE id = $1
             "#,
         )
@@ -391,6 +408,7 @@ impl PostgresStore {
             leg2_shares: r.get::<Option<i32>, _>("leg2_shares").map(|s| s as u64),
             leg2_filled_at: r.get("leg2_filled_at"),
             pnl: r.get("pnl"),
+            version: r.get::<Option<i32>, _>("version").unwrap_or(0),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         }))

@@ -5069,8 +5069,23 @@ pub async fn start_platform(
             idem_store,
             account_id.clone(),
         ));
-        executor_builder = executor_builder.with_idempotency(idem_mgr);
+        executor_builder = executor_builder.with_idempotency(idem_mgr.clone());
         info!("order executor idempotency enabled");
+
+        // Spawn hourly idempotency key cleanup task
+        let cleanup_mgr = idem_mgr.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match cleanup_mgr.cleanup_expired().await {
+                    Ok(n) if n > 0 => info!("idempotency cleanup: removed {} expired keys", n),
+                    Err(e) => warn!("idempotency cleanup error: {}", e),
+                    _ => {}
+                }
+            }
+        });
     } else {
         warn!("order executor idempotency disabled (no database connection)");
     }

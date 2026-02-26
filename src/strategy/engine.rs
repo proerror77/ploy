@@ -52,6 +52,8 @@ struct CycleContext {
     leg1_shares: u64,
     leg1_order_id: String,
     leg2_order_id: Option<String>,
+    /// DB row version for optimistic locking (cycles.version column)
+    cycle_version: i32,
 }
 
 impl Default for EngineState {
@@ -530,6 +532,7 @@ impl StrategyEngine {
                 // Use client_order_id until we have an exchange order id.
                 leg1_order_id: request.client_order_id.clone(),
                 leg2_order_id: None,
+                cycle_version: 0,
             });
             state.version += 1;
 
@@ -641,12 +644,13 @@ impl StrategyEngine {
         if result.filled_shares > 0 {
             let fill_price = result.avg_fill_price.unwrap_or(order_price);
 
-            // Update database
-            if let Err(err) = self
+            // Update database with optimistic locking
+            let leg1_updated = self
                 .store
-                .update_cycle_leg1(cycle_id, side, fill_price, result.filled_shares)
-                .await
-            {
+                .update_cycle_leg1(cycle_id, side, fill_price, result.filled_shares, 0)
+                .await;
+
+            if let Err(err) = leg1_updated {
                 error!(
                     "Failed to update cycle {} after Leg1 fill (exposure exists): {}",
                     cycle_id, err
@@ -659,6 +663,7 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id.clone(),
                     leg2_order_id: None,
+                    cycle_version: 0,
                 };
 
                 let unwind_summary = match self
@@ -732,6 +737,8 @@ impl StrategyEngine {
                     leg1_shares: result.filled_shares,
                     leg1_order_id: result.order_id,
                     leg2_order_id: None,
+                    // version was 0 at insert, +1 after leg1 update = 1
+                    cycle_version: 1,
                 });
 
                 state.strategy_state = StrategyState::Leg1Filled;
@@ -932,6 +939,8 @@ impl StrategyEngine {
             state.strategy_state = StrategyState::Leg2Pending;
             if let Some(active) = state.current_cycle.as_mut() {
                 active.leg2_order_id = Some(request.client_order_id.clone());
+                // Bump DB cycle version to match upcoming update_cycle_state call
+                active.cycle_version += 1;
             }
             state.version += 1;
             expected_version
@@ -948,7 +957,7 @@ impl StrategyEngine {
         // Persist cycle state for crash recovery.
         let _ = self
             .store
-            .update_cycle_state(ctx.cycle_id, StrategyState::Leg2Pending)
+            .update_cycle_state(ctx.cycle_id, StrategyState::Leg2Pending, ctx.cycle_version)
             .await;
 
         // Persist the intent before submitting to the exchange (best effort).
@@ -1101,11 +1110,11 @@ impl StrategyEngine {
                 self.calculator
                     .expected_pnl(result.filled_shares, ctx.leg1_price, fill_price);
 
-            // Update database
+            // Update database with optimistic locking
             let mut cycle_update_error: Option<PloyError> = None;
             if let Err(err) = self
                 .store
-                .update_cycle_leg2(ctx.cycle_id, fill_price, result.filled_shares, net_pnl)
+                .update_cycle_leg2(ctx.cycle_id, fill_price, result.filled_shares, net_pnl, ctx.cycle_version)
                 .await
             {
                 error!(
