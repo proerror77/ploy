@@ -324,7 +324,6 @@ fn default_require_price_to_beat() -> bool {
     true
 }
 
-
 fn default_model_blend_weight() -> Decimal {
     dec!(0.80)
 }
@@ -454,6 +453,13 @@ struct SequenceSnapshot {
     remaining_secs: Decimal,
     price_to_beat: Decimal,
     distance_to_beat: Decimal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceAlignMode {
+    Exact,
+    TruncateOldest,
+    LeftPadZero,
 }
 
 fn sequence_len_for_horizon(horizon: &str) -> usize {
@@ -760,8 +766,8 @@ impl CryptoLobMlAgent {
             return None;
         }
 
-        let normalize = feature_offsets.len() == SEQ_FEATURE_DIM
-            && feature_scales.len() == SEQ_FEATURE_DIM;
+        let normalize =
+            feature_offsets.len() == SEQ_FEATURE_DIM && feature_scales.len() == SEQ_FEATURE_DIM;
 
         let mut flat: Vec<f32> = Vec::with_capacity(seq_len * SEQ_FEATURE_DIM);
         let start_idx = window.len().saturating_sub(seq_len);
@@ -861,6 +867,51 @@ impl CryptoLobMlAgent {
         Decimal::from_f64_retain(p.clamp(0.001, 0.999)).unwrap_or(dec!(0.50))
     }
 
+    fn align_sequence_to_model_input(
+        sequence: &[f32],
+        model_input_dim: usize,
+    ) -> Result<(Vec<f32>, SequenceAlignMode)> {
+        if model_input_dim == 0 {
+            return Err(PloyError::Validation(
+                "onnx model input_dim must be > 0".to_string(),
+            ));
+        }
+        if model_input_dim % SEQ_FEATURE_DIM != 0 {
+            return Err(PloyError::Validation(format!(
+                "onnx model input_dim {} must be a multiple of sequence feature dim {}",
+                model_input_dim, SEQ_FEATURE_DIM
+            )));
+        }
+        if sequence.len() % SEQ_FEATURE_DIM != 0 {
+            return Err(PloyError::Validation(format!(
+                "sequence input dim {} must be a multiple of sequence feature dim {}",
+                sequence.len(),
+                SEQ_FEATURE_DIM
+            )));
+        }
+
+        let model_snapshots = model_input_dim / SEQ_FEATURE_DIM;
+        let sequence_snapshots = sequence.len() / SEQ_FEATURE_DIM;
+
+        if sequence_snapshots == model_snapshots {
+            return Ok((sequence.to_vec(), SequenceAlignMode::Exact));
+        }
+
+        if sequence_snapshots > model_snapshots {
+            let start_snapshot = sequence_snapshots - model_snapshots;
+            let start = start_snapshot * SEQ_FEATURE_DIM;
+            return Ok((
+                sequence[start..].to_vec(),
+                SequenceAlignMode::TruncateOldest,
+            ));
+        }
+
+        let pad_snapshots = model_snapshots - sequence_snapshots;
+        let mut aligned = vec![0.0f32; pad_snapshots * SEQ_FEATURE_DIM];
+        aligned.extend_from_slice(sequence);
+        Ok((aligned, SequenceAlignMode::LeftPadZero))
+    }
+
     /// Estimate p(UP) using ONNX model from a flattened sequence input.
     fn estimate_p_up(&self, horizon: &str, sequence: &[f32]) -> Result<(f64, &'static str)> {
         #[cfg(feature = "onnx")]
@@ -879,15 +930,21 @@ impl CryptoLobMlAgent {
                 .onnx_model
                 .as_ref()
                 .ok_or_else(|| PloyError::InvalidState("onnx model not initialized".to_string()))?;
-            if m.input_dim() != sequence.len() {
-                return Err(PloyError::Validation(format!(
-                    "onnx input dim mismatch: got {}, model expects {}",
-                    sequence.len(),
-                    m.input_dim(),
-                )));
+
+            let (aligned, align_mode) =
+                Self::align_sequence_to_model_input(sequence, m.input_dim())?;
+            if align_mode != SequenceAlignMode::Exact {
+                debug!(
+                    agent = self.config.agent_id,
+                    horizon = normalize_timeframe(horizon),
+                    sequence_len = sequence.len(),
+                    model_input_dim = m.input_dim(),
+                    align_mode = ?align_mode,
+                    "aligned sequence input to onnx model input dim"
+                );
             }
 
-            let raw = m.predict_scalar(sequence)?;
+            let raw = m.predict_scalar(&aligned)?;
             if !raw.is_finite() {
                 return Err(PloyError::Internal(
                     "lob-ml onnx returned non-finite output".to_string(),
@@ -1021,11 +1078,7 @@ impl CryptoLobMlAgent {
         }
     }
 
-    fn build_window_context(
-        &self,
-        spot: &SpotPrice,
-        event: &EventInfo,
-    ) -> Option<WindowContext> {
+    fn build_window_context(&self, spot: &SpotPrice, event: &EventInfo) -> Option<WindowContext> {
         let now = spot.timestamp;
         if now < event.start_time || now >= event.end_time {
             return None;
@@ -1106,16 +1159,38 @@ impl CryptoLobMlAgent {
                 }
                 CryptoLobMlEntrySidePolicy::LaggingOnly => {
                     // Follow model direction, only enter when that side's ask is cheap (<= 0.50)
-                    let model_dir = if p_up_blended >= dec!(0.50) { Side::Up } else { Side::Down };
+                    let model_dir = if p_up_blended >= dec!(0.50) {
+                        Side::Up
+                    } else {
+                        Side::Down
+                    };
                     let (dir_token, dir_ask, dir_edge, dir_gross, dir_fair) = match model_dir {
-                        Side::Up => (up_token_id, up_ask, up_edge_net, up_edge_gross, p_up_blended),
-                        Side::Down => (down_token_id, down_ask, down_edge_net, down_edge_gross,
-                                       Decimal::ONE - p_up_blended),
+                        Side::Up => (
+                            up_token_id,
+                            up_ask,
+                            up_edge_net,
+                            up_edge_gross,
+                            p_up_blended,
+                        ),
+                        Side::Down => (
+                            down_token_id,
+                            down_ask,
+                            down_edge_net,
+                            down_edge_gross,
+                            Decimal::ONE - p_up_blended,
+                        ),
                     };
                     if dir_ask > dec!(0.50) {
                         return None;
                     }
-                    (model_dir, dir_token.to_string(), dir_ask, dir_edge, dir_gross, dir_fair)
+                    (
+                        model_dir,
+                        dir_token.to_string(),
+                        dir_ask,
+                        dir_edge,
+                        dir_gross,
+                        dir_fair,
+                    )
                 }
             };
 
@@ -2502,8 +2577,7 @@ mod tests {
     }
 
     fn sample_blended_prob(agent: &CryptoLobMlAgent) -> BlendedProb {
-        agent
-            .compute_blended_probability(dec!(0.62), dec!(0.58))
+        agent.compute_blended_probability(dec!(0.62), dec!(0.58))
     }
 
     fn sample_sequence_snapshot(ts: DateTime<Utc>) -> SequenceSnapshot {
@@ -2576,8 +2650,8 @@ mod tests {
         }
 
         // Without normalization
-        let raw = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[])
-            .expect("raw sequence");
+        let raw =
+            CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[]).expect("raw sequence");
 
         // With identity normalization (offset=0, scale=1)
         let offsets = vec![0.0f32; SEQ_FEATURE_DIM];
@@ -2608,6 +2682,64 @@ mod tests {
             (normed[1] - raw[1]).abs() < 1e-6,
             "second feature should be unchanged"
         );
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_handles_boundary_cases() {
+        let exact = vec![1.0f32; SEQ_FEATURE_DIM * 2];
+        let (exact_aligned, exact_mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&exact, SEQ_FEATURE_DIM * 2).unwrap();
+        assert_eq!(exact_mode, SequenceAlignMode::Exact);
+        assert_eq!(exact_aligned, exact);
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_rejects_non_snapshot_aligned_model_dim() {
+        let sequence = vec![1.0f32; SEQ_FEATURE_DIM * 2];
+        let err = CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM + 1)
+            .err()
+            .expect("non-snapshot input_dim must fail fast");
+        assert!(err
+            .to_string()
+            .contains("must be a multiple of sequence feature dim"));
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_truncate_and_pad_keep_snapshot_boundaries() {
+        let mut sequence = Vec::new();
+        for snapshot_value in [1.0f32, 2.0, 3.0] {
+            sequence.extend(std::iter::repeat(snapshot_value).take(SEQ_FEATURE_DIM));
+        }
+
+        let (truncated, truncate_mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM * 2)
+                .unwrap();
+        assert_eq!(truncate_mode, SequenceAlignMode::TruncateOldest);
+        assert_eq!(truncated.len(), SEQ_FEATURE_DIM * 2);
+        assert!(truncated[..SEQ_FEATURE_DIM].iter().all(|v| *v == 2.0));
+        assert!(truncated[SEQ_FEATURE_DIM..].iter().all(|v| *v == 3.0));
+
+        let (padded, pad_mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM * 4)
+                .unwrap();
+        assert_eq!(pad_mode, SequenceAlignMode::LeftPadZero);
+        assert_eq!(padded.len(), SEQ_FEATURE_DIM * 4);
+        assert!(padded[..SEQ_FEATURE_DIM].iter().all(|v| *v == 0.0));
+        assert_eq!(&padded[SEQ_FEATURE_DIM..], sequence.as_slice());
+    }
+
+    #[test]
+    fn test_align_sequence_to_model_input_allows_15m_sequence_with_5m_model_dim() {
+        let seq_15m_len = SEQ_LEN_15M * SEQ_FEATURE_DIM;
+        let seq_5m_len = SEQ_LEN_5M * SEQ_FEATURE_DIM;
+        let seq_15m: Vec<f32> = (0..seq_15m_len).map(|i| i as f32).collect();
+
+        let (aligned, mode) =
+            CryptoLobMlAgent::align_sequence_to_model_input(&seq_15m, seq_5m_len).unwrap();
+
+        assert_eq!(mode, SequenceAlignMode::TruncateOldest);
+        assert_eq!(aligned.len(), seq_5m_len);
+        assert_eq!(aligned, seq_15m[(seq_15m_len - seq_5m_len)..].to_vec());
     }
 
     #[test]
@@ -2789,16 +2921,9 @@ mod tests {
             onnx_model: None,
         };
 
-        let blended = agent
-            .compute_blended_probability(dec!(0.40), dec!(0.42));
+        let blended = agent.compute_blended_probability(dec!(0.40), dec!(0.42));
         let signal = agent
-            .evaluate_entry_signal(
-                &blended,
-                "up-token",
-                "down-token",
-                dec!(0.28),
-                dec!(0.25),
-            )
+            .evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.28), dec!(0.25))
             .expect("signal should pass filters");
 
         assert_eq!(signal.side, Side::Down);
@@ -2821,13 +2946,8 @@ mod tests {
         };
 
         let blended = sample_blended_prob(&agent);
-        let signal = agent.evaluate_entry_signal(
-            &blended,
-            "up-token",
-            "down-token",
-            dec!(0.80),
-            dec!(0.95),
-        );
+        let signal =
+            agent.evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.80), dec!(0.95));
         assert!(signal.is_none());
     }
 
@@ -2848,13 +2968,8 @@ mod tests {
         };
 
         let blended = sample_blended_prob(&agent);
-        let signal = agent.evaluate_entry_signal(
-            &blended,
-            "up-token",
-            "down-token",
-            dec!(0.31),
-            dec!(0.32),
-        );
+        let signal =
+            agent.evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.31), dec!(0.32));
         assert!(signal.is_none(), "ask > 0.30 must be rejected");
     }
 
@@ -2862,15 +2977,18 @@ mod tests {
     fn test_gbm_anchor_falls_back_to_window_move_when_no_price_to_beat() {
         // Without price_to_beat, GBM anchor uses window_move fallback
         let p = CryptoLobMlAgent::estimate_p_up_gbm_anchor(
-            dec!(101),      // spot_price
-            dec!(100),      // start_price
-            None,           // no price_to_beat
+            dec!(101),         // spot_price
+            dec!(100),         // start_price
+            None,              // no price_to_beat
             Some(dec!(0.001)), // sigma_1s
-            270,            // remaining_secs
-            0,              // oracle_lag_buffer_secs
+            270,               // remaining_secs
+            0,                 // oracle_lag_buffer_secs
         );
         // window_move = +1%, with small volatility over 270s → P(UP) > 0.50
-        assert!(p > dec!(0.50), "p_up with positive momentum should be > 0.50, got {p}");
+        assert!(
+            p > dec!(0.50),
+            "p_up with positive momentum should be > 0.50, got {p}"
+        );
     }
 
     #[test]

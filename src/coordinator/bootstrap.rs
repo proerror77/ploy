@@ -3,25 +3,25 @@
 //! Entry point for `ploy platform start`. Creates shared infrastructure,
 //! registers agents based on config flags, and runs the coordinator loop.
 
+use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
-use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agent_system::ai::PolymarketSportsClient;
-use crate::agent_system::runtime::{
+use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
     PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
     TradingAgent,
 };
 #[cfg(feature = "rl")]
-use crate::agent_system::runtime::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{
@@ -1787,8 +1787,9 @@ async fn collect_trades_for_market(
             }
         };
 
-        let req_builder = DataTradesRequest::builder()
-            .filter(DataMarketFilter::markets([condition_id.to_string()]));
+        let cid_b256: alloy::primitives::B256 = condition_id.parse().unwrap_or_default();
+        let req_builder =
+            DataTradesRequest::builder().filter(DataMarketFilter::markets([cid_b256]));
         let req_builder = match req_builder.limit(page_limit_i32) {
             Ok(builder) => builder,
             Err(e) => {
@@ -1883,16 +1884,19 @@ async fn collect_trades_for_market(
                 let trade_ts = Utc.timestamp_opt(t.timestamp, 0).single();
                 let side = t.side.to_string();
                 let proxy_wallet = format!("{:#x}", t.proxy_wallet);
+                let cond_id_str = t.condition_id.to_string();
+                let asset_str = t.asset.to_string();
+                let tx_hash_str = t.transaction_hash.to_string();
 
                 b.push_bind(domain)
-                    .push_bind(&t.condition_id)
-                    .push_bind(&t.asset)
+                    .push_bind(cond_id_str)
+                    .push_bind(asset_str)
                     .push_bind(side)
                     .push_bind(t.size)
                     .push_bind(t.price)
                     .push_bind(trade_ts.unwrap_or_else(Utc::now))
                     .push_bind(t.timestamp)
-                    .push_bind(&t.transaction_hash)
+                    .push_bind(tx_hash_str)
                     .push_bind(proxy_wallet)
                     .push_bind(&t.title)
                     .push_bind(&t.slug)
@@ -2472,7 +2476,7 @@ fn spawn_pm_token_settlement_persistence(
     pm_client: PolymarketClient,
     pool: PgPool,
     agent_id: String,
-    collector_domain: &'static str,
+    collector_domains: Vec<&'static str>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = ensure_pm_token_settlements_table(&pool).await {
@@ -2484,13 +2488,15 @@ fn spawn_pm_token_settlement_persistence(
             return;
         }
 
-        let poll_secs = env_u64("PM_SETTLEMENT_POLL_SECS", 60).max(10);
+        let poll_secs = env_u64("PM_SETTLEMENT_POLL_SECS", 120).max(10);
         let targets_limit = env_usize("PM_SETTLEMENT_TARGETS_LIMIT", 1000).clamp(1, 10000);
         let unresolved_limit = env_usize("PM_SETTLEMENT_UNRESOLVED_LIMIT", 1000).clamp(1, 10000);
         let lookback_secs = env_i64("PM_SETTLEMENT_TARGET_LOOKBACK_SECS", 86400).max(0);
         let max_tokens_per_cycle =
-            env_usize("PM_SETTLEMENT_MAX_TOKENS_PER_CYCLE", 500).clamp(1, 5000);
-        let max_concurrency = env_usize("PM_SETTLEMENT_CONCURRENCY", 4).clamp(1, 32);
+            env_usize("PM_SETTLEMENT_MAX_TOKENS_PER_CYCLE", 200).clamp(1, 5000);
+        let max_concurrency = env_usize("PM_SETTLEMENT_CONCURRENCY", 2).clamp(1, 32);
+
+        let collector_domains_label = collector_domains.join(",");
 
         let mut tick = tokio::time::interval(Duration::from_secs(poll_secs));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2498,10 +2504,10 @@ fn spawn_pm_token_settlement_persistence(
         loop {
             tick.tick().await;
 
-            match refresh_pm_token_settlements_for_domain(
+            match refresh_pm_token_settlements_for_domains(
                 &pm_client,
                 &pool,
-                collector_domain,
+                &collector_domains,
                 targets_limit,
                 unresolved_limit,
                 lookback_secs,
@@ -2516,7 +2522,7 @@ fn spawn_pm_token_settlement_persistence(
                     {
                         info!(
                             agent = %agent_id,
-                            collector_domain,
+                            collector_domains = %collector_domains_label,
                             targeted_tokens = stats.targeted_tokens,
                             refreshed_markets = stats.refreshed_markets,
                             upserted_rows = stats.upserted_rows,
@@ -2528,7 +2534,7 @@ fn spawn_pm_token_settlement_persistence(
                 Err(e) => {
                     warn!(
                         agent = %agent_id,
-                        collector_domain,
+                        collector_domains = %collector_domains_label,
                         error = %e,
                         "pm settlement persistence cycle failed"
                     );
@@ -2538,10 +2544,10 @@ fn spawn_pm_token_settlement_persistence(
     });
 }
 
-async fn refresh_pm_token_settlements_for_domain(
+async fn refresh_pm_token_settlements_for_domains(
     pm_client: &PolymarketClient,
     pool: &PgPool,
-    collector_domain: &str,
+    collector_domains: &[&str],
     targets_limit: usize,
     unresolved_limit: usize,
     lookback_secs: i64,
@@ -2553,27 +2559,29 @@ async fn refresh_pm_token_settlements_for_domain(
     let mut token_ids: BTreeSet<String> = BTreeSet::new();
 
     // 1) Active/recent collector targets (seed for upcoming or just-ended markets).
-    let scoped_targets = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT token_id
-        FROM collector_token_targets
-        WHERE domain = $1
-          AND (
-                expires_at IS NULL
-             OR expires_at > NOW() - ($2::bigint * INTERVAL '1 second')
-          )
-        ORDER BY updated_at DESC
-        LIMIT $3
-        "#,
-    )
-    .bind(collector_domain)
-    .bind(lookback_secs)
-    .bind(targets_limit as i64)
-    .fetch_all(pool)
-    .await?;
-    for token_id in scoped_targets {
-        if !token_id.trim().is_empty() {
-            token_ids.insert(token_id);
+    for domain in collector_domains {
+        let scoped_targets = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT token_id
+            FROM collector_token_targets
+            WHERE domain = $1
+              AND (
+                    expires_at IS NULL
+                 OR expires_at > NOW() - ($2::bigint * INTERVAL '1 second')
+              )
+            ORDER BY updated_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(*domain)
+        .bind(lookback_secs)
+        .bind(targets_limit as i64)
+        .fetch_all(pool)
+        .await?;
+        for token_id in scoped_targets {
+            if !token_id.trim().is_empty() {
+                token_ids.insert(token_id);
+            }
         }
     }
 
@@ -2631,10 +2639,8 @@ async fn refresh_pm_token_settlements_for_domain(
 
                 let condition_key = market
                     .condition_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(ToString::to_string)
+                    .map(|b| b.to_string())
+                    .filter(|v| !v.trim().is_empty())
                     .unwrap_or_else(|| format!("market:{}", market.id));
 
                 {
@@ -2655,7 +2661,9 @@ async fn refresh_pm_token_settlements_for_domain(
                         drop(guard);
 
                         // Backfill pm_market_metadata from settlement raw_market JSONB
-                        if let Err(e) = backfill_pm_market_metadata_from_settlement(pool, &market).await {
+                        if let Err(e) =
+                            backfill_pm_market_metadata_from_settlement(pool, &market).await
+                        {
                             debug!(
                                 market_id = %market.id,
                                 error = %e,
@@ -2684,20 +2692,16 @@ async fn upsert_pm_token_settlement_rows(
     pool: &PgPool,
     market: &polymarket_client_sdk::gamma::types::response::Market,
 ) -> Result<(usize, bool)> {
-    let clob_token_ids = market
+    let clob_token_ids: Vec<String> = market
         .clob_token_ids
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .as_ref()
+        .map(|ids| ids.iter().map(|id| id.to_string()).collect())
         .unwrap_or_default();
-    let outcomes = market
-        .outcomes
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
-        .unwrap_or_default();
-    let outcome_prices = market
+    let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+    let outcome_prices: Vec<String> = market
         .outcome_prices
-        .as_deref()
-        .and_then(|s| parse_json_array_strings_relaxed(s).ok())
+        .as_ref()
+        .map(|ps| ps.iter().map(|d| d.to_string()).collect())
         .unwrap_or_default();
 
     if clob_token_ids.is_empty() || outcome_prices.is_empty() {
@@ -2747,7 +2751,7 @@ async fn upsert_pm_token_settlement_rows(
             "#,
         )
         .bind(token_id)
-        .bind(market.condition_id.as_deref())
+        .bind(market.condition_id.map(|b| b.to_string()))
         .bind(&market.id)
         .bind(market.slug.as_deref())
         .bind(outcome.as_deref())
@@ -2784,8 +2788,8 @@ async fn backfill_pm_market_metadata_from_settlement(
     // Parse start/end times — prefer eventStartTime over startDate (market creation time)
     let end_time: Option<chrono::DateTime<Utc>> = market
         .end_date_iso
-        .as_deref()
-        .and_then(|s| s.parse().ok());
+        .map(|d| d.and_hms_opt(23, 59, 59).unwrap_or_default())
+        .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
     let start_time: Option<chrono::DateTime<Utc>> = raw_market
         .get("eventStartTime")
         .or_else(|| raw_market.get("startDate"))
@@ -2844,9 +2848,7 @@ async fn backfill_pm_market_metadata_from_settlement(
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok());
             match (upper, lower) {
-                (Some(u), Some(l)) => {
-                    rust_decimal::Decimal::try_from((u + l) / 2.0).ok()
-                }
+                (Some(u), Some(l)) => rust_decimal::Decimal::try_from((u + l) / 2.0).ok(),
                 _ => None,
             }
         });
@@ -3512,8 +3514,8 @@ fn spawn_clob_orderbook_persistence(
         let max_levels = env_usize("PM_ORDERBOOK_LEVELS", max_levels_default).clamp(1, 200);
         let min_interval_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
             Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default)
-                .max(0) as u64)
+            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default).max(0)
+                as u64)
                 .saturating_mul(1000),
         };
         let require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
@@ -4960,7 +4962,13 @@ pub async fn start_platform(
         )));
     }
 
-    let needs_polymarket_client = config.enable_crypto || config.enable_politics;
+    // Polymarket client is required for:
+    // - crypto event discovery (Gamma)
+    // - settlement persistence (Gamma)
+    // - politics agent
+    // - sports settlement labeling (Gamma)
+    let needs_polymarket_client =
+        config.enable_crypto || config.enable_sports || config.enable_politics;
     let pm_client = if needs_polymarket_client {
         let rest_url = app_config
             .market
@@ -5281,7 +5289,7 @@ pub async fn start_platform(
     #[cfg(feature = "api")]
     let _api_handle = {
         use crate::adapters::{start_api_server_platform_background, PostgresStore};
-        use crate::agent::grok::GrokClient;
+        use crate::ai_clients::grok::GrokClient;
         use crate::api::state::StrategyConfigState;
 
         let api_port = std::env::var("API_PORT")
@@ -5351,6 +5359,34 @@ pub async fn start_platform(
 
     // 3. Shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    // 3b. Optional Polymarket settlement persistence (Gamma) for training labels.
+    // Keep it read-only and enabled even in dry-run (no order placement).
+    if let Some(pool) = shared_pool.as_ref() {
+        let mut collector_domains: Vec<&'static str> = Vec::new();
+        if config.enable_crypto {
+            collector_domains.push("CRYPTO");
+        }
+        if config.enable_sports {
+            collector_domains.push("SPORTS_NBA");
+        }
+
+        if !collector_domains.is_empty() {
+            if let Some(client) = pm_client.clone() {
+                spawn_pm_token_settlement_persistence(
+                    client,
+                    pool.clone(),
+                    format!("settlements:{}", account_id),
+                    collector_domains,
+                );
+            } else {
+                warn!(
+                    account_id = %account_id,
+                    "pm client not configured; skipping token settlement persistence task"
+                );
+            }
+        }
+    }
 
     // 4. Spawn agents
     let mut agent_handles = Vec::new();
@@ -5611,19 +5647,6 @@ pub async fn start_platform(
         if let Some(pool) = shared_pool.as_ref() {
             let (orderbook_levels_default, orderbook_snapshot_secs_default) = (20usize, 60i64);
 
-            if let Some(client) = pm_client.clone() {
-                spawn_pm_token_settlement_persistence(
-                    client,
-                    pool.clone(),
-                    crypto_cfg.agent_id.clone(),
-                    "CRYPTO",
-                );
-            } else {
-                warn!(
-                    agent = crypto_cfg.agent_id,
-                    "pm client not configured; skipping token settlement persistence task"
-                );
-            }
             spawn_clob_quote_persistence(pm_ws.clone(), pool.clone(), crypto_cfg.agent_id.clone());
             spawn_clob_orderbook_persistence(
                 pm_ws.clone(),
@@ -5752,7 +5775,9 @@ pub async fn start_platform(
         if pattern_memory_enabled {
             // Ensure persistence table exists
             if let Some(ref pool) = shared_pool {
-                if let Err(e) = crate::strategy::pattern_memory::persistence::ensure_table(pool).await {
+                if let Err(e) =
+                    crate::strategy::pattern_memory::persistence::ensure_table(pool).await
+                {
                     warn!(error = %e, "failed to create pattern_memory_samples table");
                 }
             }
@@ -6052,7 +6077,7 @@ pub async fn start_platform(
                 }
             }
             if nba_cfg.grok_enabled {
-                match crate::agent::grok::GrokClient::from_env() {
+                match crate::ai_clients::grok::GrokClient::from_env() {
                     Ok(grok) if grok.is_configured() => {
                         info!(
                             agent = sports_cfg.agent_id,
@@ -6156,11 +6181,8 @@ pub async fn start_platform(
             allowed_markets: vec![],
         };
         let oc_agent_id = config.openclaw.agent_id.clone();
-        let cmd_rx = coordinator.register_agent(
-            oc_agent_id.clone(),
-            Domain::Custom(0),
-            oc_risk_params,
-        );
+        let cmd_rx =
+            coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
 
         let agent = OpenClawAgent::new(config.openclaw.clone(), oc_binance_ws);
         let ctx = AgentContext::new(

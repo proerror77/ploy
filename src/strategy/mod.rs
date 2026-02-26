@@ -59,43 +59,39 @@ pub mod backtest_feed;
 pub mod calculations;
 pub mod claimer;
 pub mod dump_hedge;
-pub mod engine;
+pub mod execution;
 pub mod execution_sim;
-pub mod executor;
-pub mod fund_manager;
-pub mod idempotency;
 pub mod integrity;
 pub mod momentum;
 pub mod momentum_backtest;
 pub mod multi_event;
 pub mod multi_outcome;
-pub mod nba_data_collector;
-pub mod nba_entry;
-pub mod nba_exit;
-pub mod nba_filters;
-pub mod nba_state_machine;
-pub mod nba_winprob;
 pub mod paper_runner;
 #[cfg(feature = "analysis")]
 pub mod parquet_analysis;
 pub mod position_manager;
 pub mod reconciliation;
-pub mod risk;
+pub mod risk_mgmt;
 pub mod signal;
-pub mod slippage;
 pub mod split_arb;
 pub mod trade_logger;
 pub mod trading_costs;
-pub mod validation;
 pub mod volatility;
 pub mod volatility_arb;
 
 // Runtime re-exports
 pub use claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
-pub use engine::StrategyEngine;
-pub use executor::OrderExecutor;
-pub use fund_manager::{FundManager, FundStatus, PositionSizeResult};
-pub use idempotency::{IdempotencyManager, IdempotencyResult};
+pub use execution::engine::StrategyEngine;
+pub use execution::engine_store;
+pub use execution::executor::OrderExecutor;
+pub use execution::fund_manager::{FundManager, FundStatus, PositionSizeResult};
+pub use execution::idempotency::{IdempotencyManager, IdempotencyResult};
+
+// Backward-compat module aliases (external code uses crate::strategy::executor::X)
+pub use execution::engine;
+pub use execution::executor;
+pub use execution::fund_manager;
+pub use execution::idempotency;
 pub use multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use multi_outcome::{
     analyze_market_making_opportunity,
@@ -143,19 +139,21 @@ pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
     MomentumDetector, MomentumEngine, MomentumSignal, Position,
 };
-pub use nba_data_collector::{
+pub use nba_comeback::nba_data_collector::{
     CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,
     GameState as NbaGameState, MarketSnapshot as NbaMarketSnapshot, OrderbookData, TeamStats,
 };
-pub use nba_entry::{EntryConfig, EntryDecision, EntryLogic, EntrySignal, PartialSignal};
-pub use nba_exit::{
+pub use nba_comeback::nba_entry::{
+    EntryConfig, EntryDecision, EntryLogic, EntrySignal, PartialSignal,
+};
+pub use nba_comeback::nba_exit::{
     ExitConfig as NbaExitConfig, ExitDecision, ExitLogic, ExitUrgency, PositionState,
 };
-pub use nba_filters::{FilterConfig, FilterResult, MarketContext, MarketFilters};
-pub use nba_state_machine::{
+pub use nba_comeback::nba_filters::{FilterConfig, FilterResult, MarketContext, MarketFilters};
+pub use nba_comeback::nba_state_machine::{
     StateEvent as NbaStateEvent, StateMachine as NbaStateMachine, StrategyState as NbaStrategyState,
 };
-pub use nba_winprob::{
+pub use nba_comeback::nba_winprob::{
     GameFeatures, LiveWinProbModel, ModelMetadata, WinProbCoefficients, WinProbPrediction,
 };
 pub use paper_runner::{run_paper_trading, PaperTradingConfig, PaperTradingRunner, TrackedMarket};
@@ -168,9 +166,9 @@ pub use reconciliation::{
     ReconciliationService,
 };
 pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
-pub use risk::RiskManager;
+pub use risk_mgmt::risk::RiskManager;
+pub use risk_mgmt::slippage::{MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection};
 pub use signal::SignalDetector;
-pub use slippage::{MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection};
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
     SplitArbConfig, SplitArbEngine,
@@ -193,11 +191,16 @@ pub use calculations::{
     calculate_cycle_pnl, check_leg2_condition, effective_sum_target, TradingCalculator,
     DEFAULT_SLIPPAGE, MIN_PROFIT_TARGET, POLYMARKET_FEE_RATE as CALC_FEE_RATE,
 };
-pub use validation::{
+pub use risk_mgmt::validation::{
     leg1_entry_chain, leg2_entry_chain, ExposureValidator, RiskStateValidator, SpreadValidator,
     SumTargetValidator, TimeRemainingValidator, ValidationChain, ValidationContext,
     ValidationError, Validator,
 };
+
+// Backward-compat module aliases for risk/slippage/validation
+pub use risk_mgmt::risk;
+pub use risk_mgmt::slippage;
+pub use risk_mgmt::validation;
 
 // =============================================================================
 // New architecture re-exports

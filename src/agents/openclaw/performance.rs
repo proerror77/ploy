@@ -117,10 +117,7 @@ fn compute_performance(
     if buffer.len() < 2 {
         return AgentPerformance {
             agent_id: agent_id.to_string(),
-            rolling_pnl: buffer
-                .back()
-                .map(|s| s.daily_pnl)
-                .unwrap_or(Decimal::ZERO),
+            rolling_pnl: buffer.back().map(|s| s.daily_pnl).unwrap_or(Decimal::ZERO),
             rolling_sharpe: 0.0,
             win_rate: 0.5,
             max_drawdown: Decimal::ZERO,
@@ -155,10 +152,7 @@ fn compute_performance(
         }
     }
 
-    let rolling_pnl = buffer
-        .back()
-        .map(|s| s.daily_pnl)
-        .unwrap_or(Decimal::ZERO);
+    let rolling_pnl = buffer.back().map(|s| s.daily_pnl).unwrap_or(Decimal::ZERO);
     let win_rate = if deltas.is_empty() {
         0.5
     } else {
@@ -167,8 +161,7 @@ fn compute_performance(
 
     // Sharpe: mean(deltas) / std(deltas) * sqrt(observations_per_day)
     let mean = deltas.iter().sum::<f64>() / deltas.len() as f64;
-    let variance =
-        deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / deltas.len() as f64;
+    let variance = deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / deltas.len() as f64;
     let std_dev = variance.sqrt();
 
     // Observations per day approximation

@@ -1140,14 +1140,8 @@ impl PolymarketWebSocket {
                 // downstream spread/arb calculations.  Pass None/None so the
                 // existing best_bid / best_ask from the last book snapshot are
                 // preserved while the entry timestamp is still refreshed.
-                self.quote_cache.update(
-                    &change.asset_id,
-                    side,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+                self.quote_cache
+                    .update(&change.asset_id, side, None, None, None, None);
 
                 if let Some(quote) = self.quote_cache.get(&change.asset_id) {
                     // Only broadcast if we have at least one side from a prior book snapshot

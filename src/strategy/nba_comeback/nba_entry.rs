@@ -16,7 +16,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::nba_filters::FilterResult;
-use super::nba_winprob::{GameFeatures, WinProbPrediction};
+use crate::strategy::nba_comeback::nba_winprob::{GameFeatures, WinProbPrediction};
 
 /// Entry logic configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,7 +295,7 @@ impl EntryDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::nba_winprob::{GameFeatures, LiveWinProbModel};
+    use crate::strategy::nba_comeback::nba_winprob::{GameFeatures, LiveWinProbModel};
 
     fn create_good_prediction() -> WinProbPrediction {
         let model = LiveWinProbModel::default_untrained();

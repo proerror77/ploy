@@ -97,9 +97,15 @@ impl RegimeDetector {
     /// Compute regime from latest market data. Returns (snapshot, changed).
     pub async fn tick(&mut self) -> (RegimeSnapshot, bool) {
         let cache = self.binance_ws.price_cache();
-        let vol_short = cache.volatility(&self.btc_symbol, self.config.vol_short_secs).await;
-        let vol_long = cache.volatility(&self.btc_symbol, self.config.vol_long_secs).await;
-        let momentum_short = cache.momentum(&self.btc_symbol, self.config.trend_window_secs).await;
+        let vol_short = cache
+            .volatility(&self.btc_symbol, self.config.vol_short_secs)
+            .await;
+        let vol_long = cache
+            .volatility(&self.btc_symbol, self.config.vol_long_secs)
+            .await;
+        let momentum_short = cache
+            .momentum(&self.btc_symbol, self.config.trend_window_secs)
+            .await;
 
         let (raw_regime, confidence, vol_ratio, trend_strength) =
             self.classify(vol_short, vol_long, momentum_short);
@@ -150,10 +156,10 @@ impl RegimeDetector {
         momentum: Option<Decimal>,
     ) -> (MarketRegime, f64, Option<f64>, Option<f64>) {
         let vol_ratio = match (vol_short, vol_long) {
-            (Some(s), Some(l)) if !l.is_zero() => {
-                Some(s.to_string().parse::<f64>().unwrap_or(0.0)
-                    / l.to_string().parse::<f64>().unwrap_or(1.0))
-            }
+            (Some(s), Some(l)) if !l.is_zero() => Some(
+                s.to_string().parse::<f64>().unwrap_or(0.0)
+                    / l.to_string().parse::<f64>().unwrap_or(1.0),
+            ),
             _ => None,
         };
 
@@ -170,7 +176,8 @@ impl RegimeDetector {
         // Classification priority: HighVol > Trending > LowVol > Ranging
         if let Some(ratio) = vol_ratio {
             if ratio > self.config.high_vol_ratio {
-                let confidence = ((ratio - self.config.high_vol_ratio) / self.config.high_vol_ratio)
+                let confidence = ((ratio - self.config.high_vol_ratio)
+                    / self.config.high_vol_ratio)
                     .min(1.0)
                     .max(0.5);
                 return (MarketRegime::HighVol, confidence, vol_ratio, trend_strength);
@@ -182,7 +189,12 @@ impl RegimeDetector {
                         / (1.0 - self.config.trend_threshold))
                         .min(1.0)
                         .max(0.5);
-                    return (MarketRegime::Trending, confidence, vol_ratio, trend_strength);
+                    return (
+                        MarketRegime::Trending,
+                        confidence,
+                        vol_ratio,
+                        trend_strength,
+                    );
                 }
             }
 

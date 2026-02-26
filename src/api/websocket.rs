@@ -1,21 +1,38 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
+    http::StatusCode,
     response::IntoResponse,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use tracing::{error, info};
+use serde::Deserialize;
+use tracing::{error, info, warn};
 
+use crate::api::auth::is_valid_admin_token;
 use crate::api::state::AppState;
 
-/// WebSocket handler
+#[derive(Deserialize)]
+pub struct WsAuth {
+    token: Option<String>,
+}
+
+/// WebSocket handler — requires valid admin token via ?token= query param.
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
+    Query(auth): Query<WsAuth>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+) -> std::result::Result<impl IntoResponse, StatusCode> {
+    match auth.token {
+        Some(ref t) if is_valid_admin_token(t) => {
+            Ok(ws.on_upgrade(|socket| handle_socket(socket, state)))
+        }
+        _ => {
+            warn!("WebSocket connection rejected: missing or invalid token");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {

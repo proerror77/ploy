@@ -4,7 +4,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::adapters::PostgresStore;
-use crate::agent::grok::GrokClient;
+use crate::ai_clients::grok::GrokClient;
 use crate::api::state::StrategyConfigState;
 use crate::api::{create_router, AppState};
 use crate::coordinator::CoordinatorHandle;

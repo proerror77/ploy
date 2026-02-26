@@ -155,7 +155,9 @@ fn weighted_signal_score(
 
     // Component 2: Momentum agreement (fractional: how many timeframes agree?)
     let sign_matches = |mom: Decimal| -> bool {
-        if mom == Decimal::ZERO { return true; } // neutral = don't penalize
+        if mom == Decimal::ZERO {
+            return true;
+        } // neutral = don't penalize
         (mom > Decimal::ZERO) == dir_positive
     };
 
@@ -164,18 +166,24 @@ fn weighted_signal_score(
 
     if momentum_1s != Decimal::ZERO {
         mom_total += 1;
-        if sign_matches(momentum_1s) { mom_agree += 1; }
+        if sign_matches(momentum_1s) {
+            mom_agree += 1;
+        }
     }
     if let Some(sm) = short_momentum {
         if sm != Decimal::ZERO {
             mom_total += 1;
-            if sign_matches(sm) { mom_agree += 1; }
+            if sign_matches(sm) {
+                mom_agree += 1;
+            }
         }
     }
     if let Some(lm) = long_momentum {
         if lm != Decimal::ZERO {
             mom_total += 1;
-            if sign_matches(lm) { mom_agree += 1; }
+            if sign_matches(lm) {
+                mom_agree += 1;
+            }
         }
     }
 
@@ -847,7 +855,6 @@ impl TradingAgent for CryptoTradingAgent {
                     let quote_cache = self.pm_ws.quote_cache();
 
                     // Binary options default: exit on signal flip instead of TP/SL.
-                    let mut sold_slugs: Vec<String> = Vec::new();
                     for (slug, pos) in &positions {
                         if pos.symbol != update.symbol {
                             continue;
@@ -924,7 +931,6 @@ impl TradingAgent for CryptoTradingAgent {
 
                         match ctx.submit_order(intent).await {
                             Ok(()) => {
-                                sold_slugs.push(slug.clone());
                                 info!(
                                     agent = self.config.agent_id,
                                     slug = %slug,
@@ -943,11 +949,6 @@ impl TradingAgent for CryptoTradingAgent {
                                 );
                             }
                         }
-                    }
-                    // Remove positions that had sell orders submitted to prevent
-                    // re-selling on the next tick (sell-loop prevention).
-                    for slug in &sold_slugs {
-                        positions.remove(slug);
                     }
 
                     let mut entered_timeframes: HashSet<String> = HashSet::new();
@@ -1425,7 +1426,6 @@ impl TradingAgent for CryptoTradingAgent {
 
                     match ctx.submit_order(intent).await {
                         Ok(()) => {
-                            positions.remove(&slug);
                             info!(
                                 agent = self.config.agent_id,
                                 slug = %slug,

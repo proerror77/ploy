@@ -3,7 +3,7 @@
 //! Communicates with Claude via the `claude` CLI tool using subprocess calls.
 //! This approach provides isolation and leverages the existing Claude Code CLI.
 
-use crate::agent::protocol::{AgentContext, AgentResponse};
+use crate::ai_clients::protocol::{AgentContext, AgentResponse};
 use crate::error::{PloyError, Result};
 use serde::Deserialize;
 use serde_json;
@@ -321,7 +321,7 @@ struct FlexibleAgentResponse {
     summary: String,
 }
 
-use crate::agent::protocol::AgentAction;
+use crate::ai_clients::protocol::AgentAction;
 
 /// Parse a flexible response from Claude into our AgentResponse type
 fn parse_flexible_response(json_str: &str) -> Result<AgentResponse> {
@@ -358,8 +358,9 @@ fn parse_flexible_response(json_str: &str) -> Result<AgentResponse> {
         actions
     };
 
-    let risk_assessment = risk_assessment
-        .and_then(|v| serde_json::from_value::<crate::agent::protocol::RiskAssessment>(v).ok());
+    let risk_assessment = risk_assessment.and_then(|v| {
+        serde_json::from_value::<crate::ai_clients::protocol::RiskAssessment>(v).ok()
+    });
 
     Ok(AgentResponse {
         reasoning,

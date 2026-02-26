@@ -1,13 +1,12 @@
-//! Claude Agent integration for intelligent trading assistance
+//! AI client integrations for intelligent trading assistance.
 //!
-//! This module provides integration with Claude AI for:
-//! - Market analysis and advisory
-//! - Trading decision support
-//! - Strategy optimization
-//! - Autonomous trading operations
-//! - Sports event analysis with Grok + Claude
+//! LLM API wrappers and data providers:
+//! - Claude AI: advisory, autonomous trading, strategy optimization
+//! - Grok: real-time search, sentiment analysis
+//! - Sports data: odds providers, game analytics
 //!
-//! Also includes Grok API integration for real-time search.
+//! NOTE: This module was renamed from `agent/` to clarify that these are
+//! API clients, not autonomous runtime agents (see `agents/` for those).
 
 pub mod advisor;
 pub mod autonomous;

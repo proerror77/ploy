@@ -1,5 +1,5 @@
 use crate::adapters::PostgresStore;
-use crate::agent::grok::GrokClient;
+use crate::ai_clients::grok::GrokClient;
 use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
 use crate::coordinator::CoordinatorHandle;
 use crate::platform::{Domain, StrategyDeployment, StrategyEvaluationEvidence};

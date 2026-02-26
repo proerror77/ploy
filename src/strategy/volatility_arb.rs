@@ -676,7 +676,7 @@ impl VolatilityArbEngine {
         let max_shares = (self.config.max_position_usd / entry_price)
             .to_u64()
             .unwrap_or(100);
-        let kelly_shares = (adjusted_kelly * max_shares as f64) as u64;
+        let kelly_shares = (adjusted_kelly * max_shares as f64).round() as u64;
         let position_size = kelly_shares.max(10).min(max_shares);
 
         info!(

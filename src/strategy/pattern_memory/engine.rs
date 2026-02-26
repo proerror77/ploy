@@ -195,10 +195,7 @@ impl<const N: usize> PatternMemory<N> {
             }
             // Time decay: w = corr_weight * exp(-lambda * age_minutes)
             let decay = if age_decay_lambda > 0.0 {
-                let age_min = now
-                    .signed_duration_since(s.timestamp)
-                    .num_minutes()
-                    .max(0) as f64;
+                let age_min = now.signed_duration_since(s.timestamp).num_minutes().max(0) as f64;
                 (-age_decay_lambda * age_min).exp()
             } else {
                 1.0

@@ -343,7 +343,8 @@ impl DataFeedManager {
 
                 // Persist klines to DB for training scripts (if pool available)
                 if let Some(ref pool) = self.metadata_pool {
-                    match BinanceKlineClient::save_klines_to_db(pool, sym, interval, &klines).await {
+                    match BinanceKlineClient::save_klines_to_db(pool, sym, interval, &klines).await
+                    {
                         Ok(n) if n > 0 => {
                             info!("Persisted {} klines for {} {} to DB", n, sym, interval);
                         }

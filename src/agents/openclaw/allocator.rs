@@ -105,10 +105,7 @@ impl DynamicAllocator {
         let mut agents_to_resume: Vec<String> = Vec::new();
 
         // Set global regime metadata
-        metadata.insert(
-            "openclaw.regime".to_string(),
-            regime.to_string(),
-        );
+        metadata.insert("openclaw.regime".to_string(), regime.to_string());
         metadata.insert(
             "openclaw.crypto.entry_mode".to_string(),
             policy.crypto_mode.to_string(),
@@ -144,8 +141,7 @@ impl DynamicAllocator {
                 let would_remain = active_count - agents_to_pause.len();
                 if would_remain > 1 {
                     agents_to_pause.push(agent_id.to_string());
-                    self.pause_timestamps
-                        .insert(agent_id.to_string(), now);
+                    self.pause_timestamps.insert(agent_id.to_string(), now);
                     info!(
                         agent_id,
                         score,
@@ -155,8 +151,7 @@ impl DynamicAllocator {
                 } else {
                     warn!(
                         agent_id,
-                        score,
-                        "openclaw: would pause but min-1-running guard prevents it"
+                        score, "openclaw: would pause but min-1-running guard prevents it"
                     );
                 }
             }
@@ -167,8 +162,7 @@ impl DynamicAllocator {
                     .pause_timestamps
                     .get(*agent_id)
                     .map(|paused_at| {
-                        (now - *paused_at).num_seconds() as u64
-                            >= self.config.pause_cooldown_secs
+                        (now - *paused_at).num_seconds() as u64 >= self.config.pause_cooldown_secs
                     })
                     .unwrap_or(true);
 
@@ -185,8 +179,7 @@ impl DynamicAllocator {
             }
 
             // Per-agent allocation metadata
-            let agent_max = (score * policy.max_intent_pct)
-                .min(self.config.max_single_allocation);
+            let agent_max = (score * policy.max_intent_pct).min(self.config.max_single_allocation);
             metadata.insert(
                 format!("openclaw.agent.{}.max_alloc_pct", agent_id),
                 format!("{:.2}", agent_max),

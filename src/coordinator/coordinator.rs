@@ -24,7 +24,7 @@ use sqlx::{PgPool, Row};
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue, Position,
+    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue,
     PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
 };
 use crate::strategy::executor::OrderExecutor;
@@ -279,10 +279,6 @@ async fn load_execution_log_fills(
     account_id: &str,
     dry_run: bool,
 ) -> Result<Vec<PersistedExecutionFill>> {
-    // Only replay fills from the last 24 hours. Binary option positions (especially
-    // 5m events) settle on-chain but don't generate sell fills, so replaying all-time
-    // fills accumulates phantom positions that inflate the risk gate exposure.
-    let cutoff = Utc::now() - chrono::Duration::hours(24);
     let rows = sqlx::query_as::<
         _,
         (
@@ -318,13 +314,11 @@ async fn load_execution_log_fills(
         WHERE account_id = $1
           AND dry_run = $2
           AND filled_shares > 0
-          AND executed_at > $3
         ORDER BY executed_at ASC, id ASC
         "#,
     )
     .bind(account_id)
     .bind(dry_run)
-    .bind(cutoff)
     .fetch_all(pool)
     .await
     .map_err(|e| crate::error::PloyError::Internal(format!("load execution log fills: {}", e)))?;
@@ -1566,25 +1560,6 @@ impl CryptoIntentDimensions {
             other => other.to_string(),
         })
     }
-
-    /// Parse coin from a market slug without needing a full OrderIntent.
-    fn parse_coin_from_slug(slug: &str) -> Option<String> {
-        let slug_lower = slug.to_ascii_lowercase();
-        for (needle, coin) in [
-            ("bitcoin", "BTC"),
-            ("btc", "BTC"),
-            ("ethereum", "ETH"),
-            ("eth", "ETH"),
-            ("solana", "SOL"),
-            ("sol", "SOL"),
-            ("xrp", "XRP"),
-        ] {
-            if slug_lower.contains(needle) {
-                return Some(coin.to_string());
-            }
-        }
-        None
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1818,94 +1793,6 @@ impl CryptoCapitalAllocator {
         self.pending_by_intent.clear();
     }
 
-    /// Rebuild the `open` ExposureBook from actual open positions.
-    /// Called after crash recovery to reconcile the allocator with the PositionAggregator,
-    /// because replay of historical fills often produces mismatches (sell fills can't find
-    /// matching buy position keys → allocator never drains those entries).
-    fn reconcile_with_positions(&mut self, positions: &[Position]) {
-        let stale_total = self.open.total;
-        self.open = ExposureBook::default();
-        let mut rebuilt_total = Decimal::ZERO;
-        for pos in positions {
-            if pos.domain != Domain::Crypto {
-                continue;
-            }
-            let notional = pos.entry_price * Decimal::from(pos.shares);
-            if notional <= Decimal::ZERO {
-                continue;
-            }
-
-            // Reconstruct dimensions from position fields
-            let coin = CryptoIntentDimensions::parse_coin_from_slug(&pos.market_slug)
-                .or_else(|| {
-                    pos.metadata
-                        .get("coin")
-                        .and_then(|c| CryptoIntentDimensions::normalize_coin(c))
-                })
-                .unwrap_or_else(|| "OTHER".to_string());
-            let horizon = CryptoHorizon::from_hint(&pos.market_slug)
-                .or_else(|| {
-                    pos.metadata
-                        .get("horizon")
-                        .and_then(|h| CryptoHorizon::from_hint(h))
-                })
-                .unwrap_or(CryptoHorizon::Other);
-            let deployment_scope = pos
-                .metadata
-                .get("deployment_id")
-                .and_then(|v| {
-                    let t = v.trim().to_ascii_lowercase();
-                    if t.is_empty() { None } else { Some(t) }
-                })
-                .unwrap_or_else(|| {
-                    let strategy = pos
-                        .metadata
-                        .get("strategy")
-                        .and_then(|v| {
-                            let t = v.trim().to_ascii_lowercase();
-                            if t.is_empty() { None } else { Some(t) }
-                        })
-                        .unwrap_or_else(|| "default".to_string());
-                    format!("agent:{}|strategy:{}", pos.agent_id.trim().to_ascii_lowercase(), strategy)
-                });
-            let market_identity = pos
-                .metadata
-                .get("condition_id")
-                .and_then(|v| {
-                    let t = v.trim().to_ascii_lowercase();
-                    if t.is_empty() { None } else { Some(format!("condition:{}", t)) }
-                })
-                .unwrap_or_else(|| {
-                    let slug = pos.market_slug.trim().to_ascii_lowercase();
-                    if slug.is_empty() {
-                        format!("token:{}", pos.token_id.trim().to_ascii_lowercase())
-                    } else {
-                        format!("slug:{}", slug)
-                    }
-                });
-            let position_key = format!(
-                "{}|{}|{}|{}",
-                deployment_scope, market_identity, pos.token_id, pos.side.as_str()
-            );
-
-            let dims = CryptoIntentDimensions {
-                coin,
-                horizon,
-                deployment_scope,
-                position_key,
-            };
-            self.open.add(&dims, notional);
-            rebuilt_total += notional;
-        }
-
-        tracing::info!(
-            stale_total = %stale_total,
-            rebuilt_total = %rebuilt_total,
-            delta = %(stale_total - rebuilt_total),
-            "crypto allocator reconciled with position aggregator"
-        );
-    }
-
     fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
         if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
             return Ok(());
@@ -2064,90 +1951,6 @@ impl CryptoCapitalAllocator {
                 &dims.deployment_scope,
                 &dims.coin,
                 dims.horizon,
-                remaining,
-            );
-        }
-    }
-
-    /// Release exposure for a position that settled on-chain without generating a sell fill.
-    /// Binary option tokens (especially 5m events) settle at $0/$1 on-chain but the trading
-    /// system never sees a sell fill, so the allocator's `open` book retains phantom exposure.
-    /// This method drains that exposure using the position's entry_price as the reference.
-    fn release_settled_position(
-        &mut self,
-        market_slug: &str,
-        token_id: &str,
-        side: Side,
-        shares: u64,
-        entry_price: Decimal,
-        metadata: &HashMap<String, String>,
-    ) {
-        if !self.enabled || shares == 0 || entry_price <= Decimal::ZERO {
-            return;
-        }
-
-        // Reconstruct the same position_key that was used during settle_buy_execution.
-        // Position key = "{deployment_scope}|{market_identity}|{token_id}|{side}"
-        let deployment_scope = metadata
-            .get("deployment_id")
-            .and_then(|v| {
-                let t = v.trim().to_ascii_lowercase();
-                if t.is_empty() { None } else { Some(t) }
-            })
-            .unwrap_or_else(|| {
-                let agent_id = metadata
-                    .get("agent_id")
-                    .map(|a| a.trim().to_ascii_lowercase())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let strategy = metadata
-                    .get("strategy")
-                    .and_then(|v| {
-                        let t = v.trim().to_ascii_lowercase();
-                        if t.is_empty() { None } else { Some(t) }
-                    })
-                    .unwrap_or_else(|| "default".to_string());
-                format!("agent:{}|strategy:{}", agent_id, strategy)
-            });
-
-        let market_identity = metadata
-            .get("condition_id")
-            .and_then(|v| {
-                let t = v.trim().to_ascii_lowercase();
-                if t.is_empty() { None } else { Some(format!("condition:{}", t)) }
-            })
-            .unwrap_or_else(|| {
-                let slug = market_slug.trim().to_ascii_lowercase();
-                if slug.is_empty() {
-                    let tok = token_id.trim().to_ascii_lowercase();
-                    if tok.is_empty() { "unknown".to_string() } else { format!("token:{}", tok) }
-                } else {
-                    format!("slug:{}", slug)
-                }
-            });
-
-        let position_key = format!(
-            "{}|{}|{}|{}",
-            deployment_scope,
-            market_identity,
-            token_id,
-            side.as_str()
-        );
-
-        let release_notional = entry_price * Decimal::from(shares);
-        let removed = self.open.subtract_from_position_key(&position_key, release_notional);
-
-        // If exact key match didn't find the full amount, fall back to bucket-level drain.
-        // This handles cases where the position key reconstruction differs slightly.
-        if removed < release_notional {
-            let coin = CryptoIntentDimensions::parse_coin_from_slug(market_slug)
-                .unwrap_or_else(|| "OTHER".to_string());
-            let horizon = CryptoHorizon::from_hint(market_slug)
-                .unwrap_or(CryptoHorizon::Other);
-            let remaining = release_notional - removed;
-            self.open.subtract_matching_bucket(
-                &deployment_scope,
-                &coin,
-                horizon,
                 remaining,
             );
         }
@@ -2997,93 +2800,6 @@ impl Coordinator {
         for agent_id in &restored_agents {
             self.refresh_risk_exposure_for_agent(agent_id).await;
         }
-
-        // Close positions whose tokens have already settled on-chain.
-        // Binary option tokens settle at $0 or $1 but don't generate sell fills,
-        // so without this cleanup, 5m positions accumulate indefinitely.
-        if let Some(pool) = self.execution_log_pool.as_ref() {
-            let open_positions = self.positions.all_positions().await;
-            if !open_positions.is_empty() {
-                let token_ids: Vec<String> =
-                    open_positions.iter().map(|p| p.token_id.clone()).collect();
-
-                let settled = match sqlx::query_as::<_, (String, rust_decimal::Decimal)>(
-                    "SELECT token_id, settled_price FROM pm_token_settlements WHERE token_id = ANY($1) AND resolved = true",
-                )
-                .bind(&token_ids)
-                .fetch_all(pool)
-                .await
-                {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        warn!(error = %e, "failed to query settled tokens for position cleanup");
-                        vec![]
-                    }
-                };
-
-                if !settled.is_empty() {
-                    let settled_map: HashMap<String, Decimal> = settled.into_iter().collect();
-                    let mut closed_count = 0u32;
-                    let mut settled_crypto: Vec<(String, String, Side, u64, Decimal, HashMap<String, String>)> = Vec::new();
-                    for pos in &open_positions {
-                        if let Some(&exit_price) = settled_map.get(&pos.token_id) {
-                            self.positions
-                                .close_position(&pos.position_id, exit_price)
-                                .await;
-                            if pos.domain == Domain::Crypto {
-                                let mut meta = pos.metadata.clone();
-                                meta.entry("agent_id".to_string()).or_insert_with(|| pos.agent_id.clone());
-                                settled_crypto.push((
-                                    pos.market_slug.clone(),
-                                    pos.token_id.clone(),
-                                    pos.side,
-                                    pos.shares,
-                                    pos.entry_price,
-                                    meta,
-                                ));
-                            }
-                            closed_count += 1;
-                        }
-                    }
-                    // Release allocator exposure for settled crypto positions
-                    if !settled_crypto.is_empty() {
-                        let mut allocator = self.crypto_allocator.write().await;
-                        for (market_slug, token_id, side, shares, entry_price, metadata) in &settled_crypto {
-                            allocator.release_settled_position(
-                                market_slug,
-                                token_id,
-                                *side,
-                                *shares,
-                                *entry_price,
-                                metadata,
-                            );
-                        }
-                    }
-                    if closed_count > 0 {
-                        info!(
-                            closed_count,
-                            remaining = open_positions.len() as u32 - closed_count,
-                            "closed settled positions during crash recovery"
-                        );
-                        // Refresh exposure after settlement cleanup
-                        for agent_id in &restored_agents {
-                            self.refresh_risk_exposure_for_agent(agent_id).await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Reconcile crypto allocator with actual open positions.
-        // During crash recovery, sell fills often can't match buy position keys in the
-        // allocator (different metadata → different keys), leaving phantom exposure.
-        // This rebuild replaces the stale open book with one derived from actual positions.
-        {
-            let open_positions = self.positions.all_positions().await;
-            let mut allocator = self.crypto_allocator.write().await;
-            allocator.reconcile_with_positions(&open_positions);
-        }
-
         self.refresh_global_state().await;
 
         info!(
@@ -3097,163 +2813,6 @@ impl Coordinator {
             "restored coordinator runtime state from execution log"
         );
         Ok(())
-    }
-
-    /// Periodically check for on-chain settled tokens and close matching positions.
-    ///
-    /// Two cleanup strategies:
-    /// 1. Settlement-based: query `pm_token_settlements` for resolved tokens
-    /// 2. Age-based: close positions whose event window has expired (using metadata)
-    ///
-    /// Binary option tokens (especially 5m events) settle at $0 or $1 but don't
-    /// generate sell fills. Without this cleanup, positions accumulate and inflate
-    /// the risk gate's exposure counter indefinitely.
-    async fn close_settled_positions(&self) {
-        let open_positions = self.positions.all_positions().await;
-        if open_positions.is_empty() {
-            return;
-        }
-
-        let mut closed_count = 0u32;
-        let mut affected_agents = std::collections::HashSet::new();
-        // Collect positions that need allocator exposure release
-        let mut settled_positions: Vec<(String, String, Side, u64, Decimal, HashMap<String, String>)> = Vec::new();
-        let now = Utc::now();
-
-        // Strategy 1: Settlement-based cleanup via pm_token_settlements
-        if let Some(pool) = self.execution_log_pool.as_ref() {
-            let token_ids: Vec<String> =
-                open_positions.iter().map(|p| p.token_id.clone()).collect();
-
-            let settled = match sqlx::query_as::<_, (String, rust_decimal::Decimal)>(
-                "SELECT token_id, settled_price \
-                 FROM pm_token_settlements \
-                 WHERE token_id = ANY($1) AND resolved = true",
-            )
-            .bind(&token_ids)
-            .fetch_all(pool)
-            .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    warn!(error = %e, "settlement check: failed to query pm_token_settlements");
-                    vec![]
-                }
-            };
-
-            if !settled.is_empty() {
-                let settled_map: std::collections::HashMap<String, Decimal> =
-                    settled.into_iter().collect();
-                for pos in &open_positions {
-                    if let Some(&exit_price) = settled_map.get(&pos.token_id) {
-                        self.positions
-                            .close_position(&pos.position_id, exit_price)
-                            .await;
-                        affected_agents.insert(pos.agent_id.clone());
-                        if pos.domain == Domain::Crypto {
-                            let mut meta = pos.metadata.clone();
-                            meta.entry("agent_id".to_string()).or_insert_with(|| pos.agent_id.clone());
-                            settled_positions.push((
-                                pos.market_slug.clone(),
-                                pos.token_id.clone(),
-                                pos.side,
-                                pos.shares,
-                                pos.entry_price,
-                                meta,
-                            ));
-                        }
-                        closed_count += 1;
-                    }
-                }
-            }
-        }
-
-        // Strategy 2: Age-based expiry using event_end_time metadata or slug epoch.
-        // If a position's event window has expired (plus 2-min buffer for settlement
-        // propagation), close it at entry_price (neutral PnL) since we can't know the
-        // actual settlement price. This catches positions not in pm_token_settlements.
-        let expiry_buffer = chrono::Duration::minutes(2);
-        for pos in &open_positions {
-            // Skip if already closed by strategy 1
-            if self
-                .positions
-                .get_position(&pos.position_id)
-                .await
-                .is_none()
-            {
-                continue;
-            }
-
-            // Try metadata first, then parse epoch from slug (e.g. "btc-updown-5m-1771946400")
-            let event_end_utc: Option<DateTime<Utc>> = pos
-                .metadata
-                .get("event_end_time")
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.into())
-                .or_else(|| {
-                    pos.market_slug
-                        .rsplit('-')
-                        .next()
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .and_then(|epoch| {
-                            DateTime::from_timestamp(epoch, 0)
-                        })
-                });
-
-            if let Some(event_end) = event_end_utc {
-                if now > event_end + expiry_buffer {
-                    self.positions
-                        .close_position(&pos.position_id, pos.entry_price)
-                        .await;
-                    affected_agents.insert(pos.agent_id.clone());
-                    if pos.domain == Domain::Crypto {
-                        let mut meta = pos.metadata.clone();
-                        meta.entry("agent_id".to_string()).or_insert_with(|| pos.agent_id.clone());
-                        settled_positions.push((
-                            pos.market_slug.clone(),
-                            pos.token_id.clone(),
-                            pos.side,
-                            pos.shares,
-                            pos.entry_price,
-                            meta,
-                        ));
-                    }
-                    closed_count += 1;
-                }
-            }
-        }
-
-        // Release allocator exposure for all settled crypto positions.
-        // Without this, the CryptoCapitalAllocator's `open` ExposureBook retains
-        // phantom exposure for positions that settled on-chain without sell fills.
-        if !settled_positions.is_empty() {
-            let mut allocator = self.crypto_allocator.write().await;
-            for (market_slug, token_id, side, shares, entry_price, metadata) in &settled_positions {
-                allocator.release_settled_position(
-                    market_slug,
-                    token_id,
-                    *side,
-                    *shares,
-                    *entry_price,
-                    metadata,
-                );
-            }
-            info!(
-                released_count = settled_positions.len(),
-                "settlement check: released allocator exposure for settled positions"
-            );
-        }
-
-        if closed_count > 0 {
-            info!(
-                closed_count,
-                remaining = open_positions.len() as u32 - closed_count,
-                "settlement check: closed expired/settled positions"
-            );
-            for agent_id in &affected_agents {
-                self.refresh_risk_exposure_for_agent(agent_id).await;
-            }
-        }
     }
 
     /// Create a clonable handle for agents
@@ -3511,16 +3070,13 @@ impl Coordinator {
 
         let drain_interval = tokio::time::Duration::from_millis(self.config.queue_drain_ms);
         let refresh_interval = tokio::time::Duration::from_millis(self.config.state_refresh_ms);
-        let settlement_interval = tokio::time::Duration::from_secs(60);
 
         let mut drain_tick = tokio::time::interval(drain_interval);
         let mut refresh_tick = tokio::time::interval(refresh_interval);
-        let mut settlement_tick = tokio::time::interval(settlement_interval);
 
         // Don't burst-fire missed ticks
         drain_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        settlement_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -3571,11 +3127,6 @@ impl Coordinator {
                 // --- Periodic: refresh global state ---
                 _ = refresh_tick.tick() => {
                     self.refresh_global_state().await;
-                }
-
-                // --- Periodic: close positions whose tokens settled on-chain ---
-                _ = settlement_tick.tick() => {
-                    self.close_settled_positions().await;
                 }
 
                 // --- Shutdown signal ---
@@ -3684,11 +3235,14 @@ impl Coordinator {
             }
         }
         // Per-agent pause check
-        if intent.is_buy && self.paused_agent_ids.read().await.contains(&intent.agent_id) {
-            let reason = format!(
-                "Agent {} is paused; blocking BUY intent",
-                intent.agent_id
-            );
+        if intent.is_buy
+            && self
+                .paused_agent_ids
+                .read()
+                .await
+                .contains(&intent.agent_id)
+        {
+            let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
@@ -5496,7 +5050,12 @@ impl Coordinator {
         let daily_loss_limit = self.risk_gate.daily_loss_limit();
         let (current_drawdown, max_drawdown_observed) = self.risk_gate.drawdown_stats().await;
         let max_drawdown_limit = self.risk_gate.max_drawdown_limit();
-        let circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
+        let mut circuit_breaker_events = self.risk_gate.circuit_breaker_events().await;
+        // Retain only the most recent events to prevent unbounded memory growth in long-running deployments.
+        const MAX_CB_EVENTS: usize = 500;
+        if circuit_breaker_events.len() > MAX_CB_EVENTS {
+            circuit_breaker_events.drain(..circuit_breaker_events.len() - MAX_CB_EVENTS);
+        }
         let queue_stats = self.order_queue.read().await.stats();
         let total_realized = self.positions.total_realized_pnl().await;
 

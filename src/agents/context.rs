@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::coordinator::{
-    AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState,
-    GovernancePolicySnapshot, GovernancePolicyUpdate,
+    AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState, GovernancePolicySnapshot,
+    GovernancePolicyUpdate,
 };
 use crate::error::Result;
 use crate::platform::{AgentStatus, Domain, OrderIntent};

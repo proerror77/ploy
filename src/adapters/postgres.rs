@@ -397,7 +397,11 @@ impl PostgresStore {
         Ok(row.map(|r| Cycle {
             id: Some(r.get("id")),
             round_id: r.get("round_id"),
-            state: r.get("state"),
+            state: r
+                .get::<String, _>("state")
+                .as_str()
+                .try_into()
+                .unwrap_or(StrategyState::Idle),
             leg1_side: r
                 .get::<Option<String>, _>("leg1_side")
                 .and_then(|s| Side::try_from(s.as_str()).ok()),
@@ -722,7 +726,11 @@ impl PostgresStore {
             .map(|r| IncompleteCycle {
                 cycle_id: r.get("id"),
                 round_id: r.get("round_id"),
-                state: r.get("state"),
+                state: r
+                    .get::<String, _>("state")
+                    .as_str()
+                    .try_into()
+                    .unwrap_or(StrategyState::Idle),
                 leg1_side: r
                     .get::<Option<String>, _>("leg1_side")
                     .and_then(|s| Side::try_from(s.as_str()).ok()),
@@ -881,7 +889,7 @@ pub struct PersistedState {
 pub struct IncompleteCycle {
     pub cycle_id: i32,
     pub round_id: i32,
-    pub state: String,
+    pub state: StrategyState,
     pub leg1_side: Option<Side>,
     pub leg1_entry_price: Option<Decimal>,
     pub leg1_shares: Option<u64>,
@@ -988,7 +996,7 @@ impl PostgresStore {
     pub async fn load_nba_team_stats(
         &self,
         season: &str,
-    ) -> Result<Vec<crate::strategy::nba_data_collector::TeamStats>> {
+    ) -> Result<Vec<crate::strategy::nba_comeback::nba_data_collector::TeamStats>> {
         let rows = sqlx::query(
             r#"
             SELECT team_name, team_abbrev, season,
@@ -1007,24 +1015,26 @@ impl PostgresStore {
 
         let stats = rows
             .iter()
-            .map(|r| crate::strategy::nba_data_collector::TeamStats {
-                team_name: r.get("team_name"),
-                season: r.get("season"),
-                wins: r.get("wins"),
-                losses: r.get("losses"),
-                win_rate: r.get("win_rate"),
-                avg_points: r.get("avg_points"),
-                q1_avg_points: r.get("q1_avg_points"),
-                q2_avg_points: r.get("q2_avg_points"),
-                q3_avg_points: r.get("q3_avg_points"),
-                q4_avg_points: r.get("q4_avg_points"),
-                comeback_rate_5pt: r.get("comeback_rate_5pt"),
-                comeback_rate_10pt: r.get("comeback_rate_10pt"),
-                comeback_rate_15pt: r.get("comeback_rate_15pt"),
-                elo_rating: r.get("elo_rating"),
-                offensive_rating: r.get("offensive_rating"),
-                defensive_rating: r.get("defensive_rating"),
-            })
+            .map(
+                |r| crate::strategy::nba_comeback::nba_data_collector::TeamStats {
+                    team_name: r.get("team_name"),
+                    season: r.get("season"),
+                    wins: r.get("wins"),
+                    losses: r.get("losses"),
+                    win_rate: r.get("win_rate"),
+                    avg_points: r.get("avg_points"),
+                    q1_avg_points: r.get("q1_avg_points"),
+                    q2_avg_points: r.get("q2_avg_points"),
+                    q3_avg_points: r.get("q3_avg_points"),
+                    q4_avg_points: r.get("q4_avg_points"),
+                    comeback_rate_5pt: r.get("comeback_rate_5pt"),
+                    comeback_rate_10pt: r.get("comeback_rate_10pt"),
+                    comeback_rate_15pt: r.get("comeback_rate_15pt"),
+                    elo_rating: r.get("elo_rating"),
+                    offensive_rating: r.get("offensive_rating"),
+                    defensive_rating: r.get("defensive_rating"),
+                },
+            )
             .collect();
 
         Ok(stats)
@@ -1036,7 +1046,7 @@ impl PostgresStore {
         team_name: &str,
         team_abbrev: &str,
         season: &str,
-        stats: &crate::strategy::nba_data_collector::TeamStats,
+        stats: &crate::strategy::nba_comeback::nba_data_collector::TeamStats,
     ) -> Result<()> {
         sqlx::query(
             r#"

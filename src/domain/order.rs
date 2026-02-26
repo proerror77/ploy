@@ -1,3 +1,4 @@
+use super::StrategyState;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -230,7 +231,7 @@ pub struct Position {
 pub struct Cycle {
     pub id: Option<i32>,
     pub round_id: i32,
-    pub state: String,
+    pub state: StrategyState,
     pub leg1_side: Option<Side>,
     pub leg1_entry_price: Option<Decimal>,
     pub leg1_shares: Option<u64>,
@@ -245,12 +246,12 @@ pub struct Cycle {
 }
 
 impl Cycle {
-    pub fn new(round_id: i32, state: &str) -> Self {
+    pub fn new(round_id: i32, state: StrategyState) -> Self {
         let now = Utc::now();
         Self {
             id: None,
             round_id,
-            state: state.to_string(),
+            state,
             leg1_side: None,
             leg1_entry_price: None,
             leg1_shares: None,
@@ -324,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_cycle_expected_pnl() {
-        let mut cycle = Cycle::new(1, "LEG1_FILLED");
+        let mut cycle = Cycle::new(1, StrategyState::Leg1Filled);
         cycle.leg1_entry_price = Some(dec!(0.45));
         cycle.leg1_shares = Some(100);
 
@@ -338,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_cycle_leg2_trigger() {
-        let mut cycle = Cycle::new(1, "LEG1_FILLED");
+        let mut cycle = Cycle::new(1, StrategyState::Leg1Filled);
         cycle.leg1_entry_price = Some(dec!(0.45));
 
         // sum_target = 0.96, opposite_ask = 0.50

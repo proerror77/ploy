@@ -223,14 +223,12 @@ impl EventEdgeCore {
         Ok(self.pick_best_trade(&scan))
     }
 
-    /// Filter scan rows by edge/entry/cooldown/spend and return the best one.
+    /// Filter scan rows by edge/entry/cooldown/spend and return the best one by net_ev.
     pub fn pick_best_trade(&self, scan: &EventEdgeScan) -> Option<TradeDecision> {
-        for r in &scan.rows {
-            if let Some(decision) = self.evaluate_row(r, scan) {
-                return Some(decision);
-            }
-        }
-        None
+        scan.rows
+            .iter()
+            .filter_map(|r| self.evaluate_row(r, scan))
+            .max_by_key(|d| d.net_ev)
     }
 
     fn evaluate_row(&self, r: &EdgeRow, scan: &EventEdgeScan) -> Option<TradeDecision> {

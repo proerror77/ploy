@@ -165,6 +165,15 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             )
             .await?;
         }
+        Some(Commands::Pm(pm_cli)) => {
+            crate::main_runtime::init_logging_simple();
+            let mut pm_args = pm_cli.args.clone();
+            // Merge top-level --dry-run if set
+            pm_args.dry_run = pm_args.dry_run || cli.dry_run.unwrap_or(false);
+            ploy::cli::pm::run(pm_cli.command.clone(), &pm_args)
+                .await
+                .map_err(|e| PloyError::Validation(format!("pm command failed: {e}")))?;
+        }
         None => {
             return Err(PloyError::Validation(
                 "no command provided; use `ploy platform start` to launch coordinator + agents"

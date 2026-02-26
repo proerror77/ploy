@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
+use super::nba_winprob::{GameFeatures, LiveWinProbModel};
 use crate::config::NbaComebackConfig;
 use crate::strategy::nba_comeback::comeback_stats::ComebackStatsProvider;
 use crate::strategy::nba_comeback::espn::{EspnClient, LiveGame};
-use crate::strategy::nba_winprob::{GameFeatures, LiveWinProbModel};
 
 /// A single actionable comeback opportunity
 #[derive(Debug, Clone)]

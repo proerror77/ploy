@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod infra;
+pub mod pm;
 pub mod rpc;
 pub mod runtime;
 pub mod service;

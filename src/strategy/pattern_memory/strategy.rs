@@ -857,10 +857,9 @@ impl Strategy for PatternMemoryStrategy {
                 match interval.as_str() {
                     TF_5M => {
                         let max_s = self.cfg.pattern.max_samples;
-                        let mem = self
-                            .mem_5m
-                            .entry(symbol.clone())
-                            .or_insert_with(|| PatternMemory::<PATTERN_LEN>::new().with_max_samples(max_s));
+                        let mem = self.mem_5m.entry(symbol.clone()).or_insert_with(|| {
+                            PatternMemory::<PATTERN_LEN>::new().with_max_samples(max_s)
+                        });
                         mem.ingest_return(r, *timestamp);
 
                         if let Some(mut a) = self
@@ -872,10 +871,9 @@ impl Strategy for PatternMemoryStrategy {
                     }
                     TF_15M => {
                         let max_s = self.cfg.pattern.max_samples;
-                        let mem = self
-                            .mem_15m
-                            .entry(symbol.clone())
-                            .or_insert_with(|| PatternMemory::<PATTERN_LEN>::new().with_max_samples(max_s));
+                        let mem = self.mem_15m.entry(symbol.clone()).or_insert_with(|| {
+                            PatternMemory::<PATTERN_LEN>::new().with_max_samples(max_s)
+                        });
                         mem.ingest_return(r, *timestamp);
                     }
                     _ => {}

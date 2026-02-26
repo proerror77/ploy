@@ -5,6 +5,27 @@ use ethers::utils::keccak256;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Default order expiration: 30 minutes from submission.
+///
+/// This is the on-chain signature validity window, NOT the CLOB matching behavior
+/// (which is controlled by TimeInForce: IOC/FOK/GTC). For IOC/FOK orders the
+/// expiration is irrelevant (they resolve in <1s). For GTC orders this acts as a
+/// safety net: if the system crashes and can't cancel a stale order, the exchange
+/// contract will reject it after this window.
+///
+/// 30 min is chosen to be:
+/// - Long enough for any strategy round (crypto ~5min, sports ~hours)
+/// - Short enough that a crashed system's ghost orders don't linger indefinitely
+///
+/// Override via PLOY_ORDER_EXPIRY_SECS env var.
+fn order_expiry_secs() -> u64 {
+    std::env::var("PLOY_ORDER_EXPIRY_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1800)
+}
 
 /// Exchange contract addresses for Polygon Mainnet
 pub mod contracts {
@@ -124,7 +145,7 @@ impl OrderData {
             token_id,
             maker_amount,
             taker_amount,
-            expiration: U256::zero(), // No expiration
+            expiration: Self::default_expiration(),
             nonce: U256::from(nonce),
             fee_rate_bps: U256::zero(), // No fee
             side: OrderSide::Buy as u8,
@@ -161,7 +182,7 @@ impl OrderData {
             token_id,
             maker_amount,
             taker_amount,
-            expiration: U256::zero(),
+            expiration: Self::default_expiration(),
             nonce: U256::from(nonce),
             fee_rate_bps: U256::zero(),
             side: OrderSide::Sell as u8,
@@ -175,6 +196,15 @@ impl OrderData {
         let mut rng = rand::thread_rng();
         let bytes: [u8; 32] = rng.gen();
         U256::from_big_endian(&bytes)
+    }
+
+    /// Compute default order expiration (current time + configurable window).
+    fn default_expiration() -> U256 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        U256::from(now + order_expiry_secs())
     }
 
     /// Compute the EIP-712 struct hash
