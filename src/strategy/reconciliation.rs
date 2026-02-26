@@ -157,10 +157,14 @@ impl ReconciliationService {
         // Get all open positions from local DB
         let local_positions = self.position_manager.get_open_positions().await?;
 
-        // Build local position map: token_id -> shares
-        let mut local_map: HashMap<String, i64> = HashMap::new();
+        // Build local position map: token_id -> (total_shares, vec of (position_id, shares))
+        let mut local_map: HashMap<String, (i64, Vec<(i32, i64)>)> = HashMap::new();
         for pos in &local_positions {
-            *local_map.entry(pos.token_id.clone()).or_insert(0) += pos.shares;
+            let entry = local_map
+                .entry(pos.token_id.clone())
+                .or_insert_with(|| (0, Vec::new()));
+            entry.0 += pos.shares;
+            entry.1.push((pos.id, pos.shares));
         }
 
         // Get exchange balances
@@ -178,8 +182,10 @@ impl ReconciliationService {
             .cloned()
             .collect();
 
+        let empty_positions: (i64, Vec<(i32, i64)>) = (0, Vec::new());
         for token_id in all_tokens {
-            let local_shares = *local_map.get(&token_id).unwrap_or(&0);
+            let (local_shares, positions) = local_map.get(&token_id).unwrap_or(&empty_positions);
+            let local_shares = *local_shares;
             let exchange_shares = *exchange_balances.get(&token_id).unwrap_or(&0);
             let difference = local_shares - exchange_shares;
 
@@ -197,7 +203,7 @@ impl ReconciliationService {
 
                 // Auto-correct if within threshold
                 if severity == DiscrepancySeverity::Info {
-                    match self.auto_correct(&token_id, exchange_shares).await {
+                    match self.auto_correct(positions, exchange_shares).await {
                         Ok(()) => {
                             auto_corrections += 1;
                             info!(
@@ -285,20 +291,72 @@ impl ReconciliationService {
         }
     }
 
-    /// Auto-correct a position discrepancy
-    async fn auto_correct(&self, token_id: &str, correct_shares: i64) -> Result<()> {
-        // Update local position to match exchange
-        sqlx::query(
-            r#"
-            UPDATE positions
-            SET shares = $1
-            WHERE token_id = $2 AND status = 'OPEN'
-            "#,
-        )
-        .bind(correct_shares)
-        .bind(token_id)
-        .execute(self.store.pool())
-        .await?;
+    /// Auto-correct a position discrepancy by targeting specific position IDs.
+    ///
+    /// Distributes the share delta proportionally across tracked positions
+    /// for the given token. If only one position exists, it gets the full correction.
+    async fn auto_correct(
+        &self,
+        positions: &[(i32, i64)],
+        correct_total_shares: i64,
+    ) -> Result<()> {
+        if positions.is_empty() {
+            return Ok(());
+        }
+
+        // Single position: straightforward update by ID
+        if positions.len() == 1 {
+            let (pos_id, _) = positions[0];
+            sqlx::query(
+                r#"
+                UPDATE positions
+                SET shares = $1
+                WHERE id = $2 AND status = 'OPEN'
+                "#,
+            )
+            .bind(correct_total_shares)
+            .bind(pos_id)
+            .execute(self.store.pool())
+            .await?;
+            return Ok(());
+        }
+
+        // Multiple positions: distribute the delta proportionally
+        let current_total: i64 = positions.iter().map(|(_, s)| s).sum();
+        let delta = correct_total_shares - current_total;
+
+        for (i, &(pos_id, old_shares)) in positions.iter().enumerate() {
+            let new_shares = if i == positions.len() - 1 {
+                // Last position absorbs rounding remainder
+                let assigned_so_far: i64 = positions[..i]
+                    .iter()
+                    .map(|&(_, s)| {
+                        if current_total != 0 {
+                            s + (delta * s) / current_total
+                        } else {
+                            s
+                        }
+                    })
+                    .sum();
+                correct_total_shares - assigned_so_far
+            } else if current_total != 0 {
+                old_shares + (delta * old_shares) / current_total
+            } else {
+                old_shares
+            };
+
+            sqlx::query(
+                r#"
+                UPDATE positions
+                SET shares = $1
+                WHERE id = $2 AND status = 'OPEN'
+                "#,
+            )
+            .bind(new_shares)
+            .bind(pos_id)
+            .execute(self.store.pool())
+            .await?;
+        }
 
         Ok(())
     }

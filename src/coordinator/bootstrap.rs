@@ -8,7 +8,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::polymarket_ws::PriceLevel;
@@ -78,6 +78,11 @@ async fn ensure_clob_quote_ticks_table(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Add domain column if it doesn't exist (backcompat with existing tables).
+    sqlx::query("ALTER TABLE clob_quote_ticks ADD COLUMN IF NOT EXISTS domain TEXT")
+        .execute(pool)
+        .await?;
+
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_token_time ON clob_quote_ticks(token_id, received_at DESC)",
     )
@@ -86,6 +91,12 @@ async fn ensure_clob_quote_ticks_table(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_time ON clob_quote_ticks(received_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_domain_time ON clob_quote_ticks(domain, received_at DESC)",
     )
     .execute(pool)
     .await?;
@@ -1232,7 +1243,12 @@ async fn ensure_clob_trade_alerts_table(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-fn spawn_clob_quote_persistence(pm_ws: Arc<PolymarketWebSocket>, pool: PgPool, agent_id: String) {
+fn spawn_clob_quote_persistence(
+    pm_ws: Arc<PolymarketWebSocket>,
+    pool: PgPool,
+    agent_id: String,
+    domain: Domain,
+) {
     tokio::spawn(async move {
         if let Err(e) = ensure_clob_quote_ticks_table(&pool).await {
             warn!(
@@ -1282,12 +1298,13 @@ fn spawn_clob_quote_persistence(pm_ws: Arc<PolymarketWebSocket>, pool: PgPool, a
                     }
 
                     let side = update.side.as_str();
+                    let domain_str = domain.to_string();
                     if let Err(e) = sqlx::query(
                         r#"
                         INSERT INTO clob_quote_ticks
-                            (token_id, side, best_bid, best_ask, bid_size, ask_size, source)
+                            (token_id, side, best_bid, best_ask, bid_size, ask_size, source, domain)
                         VALUES
-                            ($1, $2, $3, $4, $5, $6, 'polymarket_ws')
+                            ($1, $2, $3, $4, $5, $6, 'polymarket_ws', $7)
                         "#,
                     )
                     .bind(&update.token_id)
@@ -1296,6 +1313,7 @@ fn spawn_clob_quote_persistence(pm_ws: Arc<PolymarketWebSocket>, pool: PgPool, a
                     .bind(update.quote.best_ask)
                     .bind(update.quote.bid_size)
                     .bind(update.quote.ask_size)
+                    .bind(&domain_str)
                     .execute(&pool)
                     .await
                     {
@@ -5077,8 +5095,23 @@ pub async fn start_platform(
             idem_store,
             account_id.clone(),
         ));
-        executor_builder = executor_builder.with_idempotency(idem_mgr);
+        executor_builder = executor_builder.with_idempotency(idem_mgr.clone());
         info!("order executor idempotency enabled");
+
+        // Spawn hourly idempotency key cleanup task
+        let cleanup_mgr = idem_mgr.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match cleanup_mgr.cleanup_expired().await {
+                    Ok(n) if n > 0 => info!("idempotency cleanup: removed {} expired keys", n),
+                    Err(e) => warn!("idempotency cleanup error: {}", e),
+                    _ => {}
+                }
+            }
+        });
     } else {
         warn!("order executor idempotency disabled (no database connection)");
     }
@@ -5632,7 +5665,12 @@ pub async fn start_platform(
         if let Some(pool) = shared_pool.as_ref() {
             let (orderbook_levels_default, orderbook_snapshot_secs_default) = (20usize, 60i64);
 
-            spawn_clob_quote_persistence(pm_ws.clone(), pool.clone(), crypto_cfg.agent_id.clone());
+            spawn_clob_quote_persistence(
+                pm_ws.clone(),
+                pool.clone(),
+                crypto_cfg.agent_id.clone(),
+                Domain::Crypto,
+            );
             spawn_clob_orderbook_persistence(
                 pm_ws.clone(),
                 pool.clone(),
@@ -6039,6 +6077,115 @@ pub async fn start_platform(
                 sports_cfg.agent_id.clone(),
                 Domain::Sports,
             );
+
+            // Sports L2 data collection: create a dedicated PM WebSocket for NBA token
+            // quote and orderbook snapshot persistence.  Tokens are seeded from
+            // collector_token_targets (domain = SPORTS_NBA) and refreshed every cycle
+            // together with the trade persistence above.
+            {
+                let sports_pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
+
+                // Seed initial NBA tokens from collector_token_targets
+                let mut sports_desired: HashMap<String, Side> = HashMap::new();
+                if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
+                    r#"
+                    SELECT token_id, metadata->>'side'
+                    FROM collector_token_targets
+                    WHERE domain = 'SPORTS_NBA'
+                      AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                    "#,
+                )
+                .fetch_all(&pool)
+                .await
+                {
+                    for (token_id, side_str) in rows {
+                        let side = match side_str.as_deref() {
+                            Some("DOWN") | Some("NO") => Side::Down,
+                            _ => Side::Up,
+                        };
+                        sports_desired.insert(token_id, side);
+                    }
+                }
+
+                let initial_count = sports_desired.len();
+                if initial_count > 0 {
+                    sports_pm_ws.reconcile_token_sides(&sports_desired).await;
+                    info!(
+                        agent = sports_cfg.agent_id,
+                        token_count = initial_count,
+                        "seeded sports PM WS tokens for L2 data collection"
+                    );
+                }
+
+                // Spawn periodic token refresh for sports WS
+                let refresh_ws = sports_pm_ws.clone();
+                let refresh_pool = pool.clone();
+                let refresh_agent = sports_cfg.agent_id.clone();
+                tokio::spawn(async move {
+                    let secs = env_u64("PM_SPORTS_COLLECTOR_REFRESH_SECS", 300).max(30);
+                    let mut tick = tokio::time::interval(Duration::from_secs(secs));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tick.tick().await;
+                        let mut desired: HashMap<String, Side> = HashMap::new();
+                        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
+                            r#"
+                            SELECT token_id, metadata->>'side'
+                            FROM collector_token_targets
+                            WHERE domain = 'SPORTS_NBA'
+                              AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
+                              AND (expires_at IS NULL OR expires_at > NOW())
+                            "#,
+                        )
+                        .fetch_all(&refresh_pool)
+                        .await
+                        {
+                            for (token_id, side_str) in rows {
+                                let side = match side_str.as_deref() {
+                                    Some("DOWN") | Some("NO") => Side::Down,
+                                    _ => Side::Up,
+                                };
+                                desired.insert(token_id, side);
+                            }
+                        }
+                        let (_a, _r, _u, total) = refresh_ws.reconcile_token_sides(&desired).await;
+                        trace!(
+                            agent = refresh_agent,
+                            total,
+                            "refreshed sports PM WS token subscriptions"
+                        );
+                    }
+                });
+
+                // Persistence: quotes + orderbook snapshots
+                spawn_clob_quote_persistence(
+                    sports_pm_ws.clone(),
+                    pool.clone(),
+                    sports_cfg.agent_id.clone(),
+                    Domain::Sports,
+                );
+                spawn_clob_orderbook_persistence(
+                    sports_pm_ws.clone(),
+                    pool.clone(),
+                    sports_cfg.agent_id.clone(),
+                    Domain::Sports,
+                    20,
+                    60,
+                );
+
+                // Run the sports PM WS
+                let sws = sports_pm_ws.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = sws.run(Vec::new()).await {
+                        error!(error = %e, "sports polymarket websocket error");
+                    }
+                });
+                info!(
+                    agent = sports_cfg.agent_id,
+                    "sports PM WS L2 data collection started"
+                );
+            }
 
             let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
             let stats = crate::strategy::nba_comeback::ComebackStatsProvider::new(

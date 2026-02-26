@@ -130,33 +130,74 @@ impl PositionManager {
             Side::Down => "DOWN",
         };
 
-        let position_id: i32 = sqlx::query_scalar(
+        // Use explicit transaction with SELECT ... FOR UPDATE to prevent
+        // stale avg_entry_price reads under concurrent inserts.
+        let mut tx = self.store.pool().begin().await?;
+
+        // Try to lock the existing position row
+        let existing: Option<(i32, i64, Decimal, Decimal)> = sqlx::query_as(
             r#"
-            INSERT INTO positions (
-                event_id, symbol, token_id, market_side,
-                shares, avg_entry_price, amount_usd, strategy_id
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (event_id, token_id) DO UPDATE
-            SET shares = positions.shares + EXCLUDED.shares,
-                avg_entry_price = (
-                    (positions.avg_entry_price * positions.shares + EXCLUDED.avg_entry_price * EXCLUDED.shares) /
-                    (positions.shares + EXCLUDED.shares)
-                ),
-                amount_usd = positions.amount_usd + EXCLUDED.amount_usd
-            RETURNING id
+            SELECT id, shares, avg_entry_price, amount_usd
+            FROM positions
+            WHERE event_id = $1 AND token_id = $2
+            FOR UPDATE
             "#,
         )
         .bind(event_id)
-        .bind(symbol)
         .bind(token_id)
-        .bind(side_str)
-        .bind(shares)
-        .bind(entry_price)
-        .bind(amount_usd)
-        .bind(strategy_id)
-        .fetch_one(self.store.pool())
+        .fetch_optional(&mut *tx)
         .await?;
+
+        let position_id: i32 = if let Some((id, old_shares, old_avg, old_amount)) = existing {
+            // Update with locked (consistent) values
+            let new_shares = old_shares + shares;
+            let new_avg = if new_shares > 0 {
+                (old_avg * Decimal::from(old_shares) + entry_price * Decimal::from(shares))
+                    / Decimal::from(new_shares)
+            } else {
+                entry_price
+            };
+            let new_amount = old_amount + amount_usd;
+
+            sqlx::query_scalar(
+                r#"
+                UPDATE positions
+                SET shares = $1, avg_entry_price = $2, amount_usd = $3
+                WHERE id = $4
+                RETURNING id
+                "#,
+            )
+            .bind(new_shares)
+            .bind(new_avg)
+            .bind(new_amount)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            // Insert fresh position
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO positions (
+                    event_id, symbol, token_id, market_side,
+                    shares, avg_entry_price, amount_usd, strategy_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id
+                "#,
+            )
+            .bind(event_id)
+            .bind(symbol)
+            .bind(token_id)
+            .bind(side_str)
+            .bind(shares)
+            .bind(entry_price)
+            .bind(amount_usd)
+            .bind(strategy_id)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+
+        tx.commit().await?;
 
         info!(
             "Opened position #{}: {} {} shares @ {} (${:.2})",

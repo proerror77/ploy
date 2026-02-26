@@ -240,6 +240,7 @@ pub struct Cycle {
     pub leg2_shares: Option<u64>,
     pub leg2_filled_at: Option<DateTime<Utc>>,
     pub pnl: Option<Decimal>,
+    pub version: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -259,6 +260,7 @@ impl Cycle {
             leg2_shares: None,
             leg2_filled_at: None,
             pnl: None,
+            version: 0,
             created_at: now,
             updated_at: now,
         }

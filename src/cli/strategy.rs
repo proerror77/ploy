@@ -393,6 +393,59 @@ pub enum StrategyCommands {
         #[arg(long)]
         database_url: Option<String>,
     },
+
+    /// Run data integrity checks on the database
+    IntegrityCheck {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
+    /// Run a strategy backtest against historical data
+    Backtest {
+        /// Strategy name (momentum)
+        name: String,
+
+        /// Kline CSV path (if not using DB)
+        #[arg(long)]
+        kline_csv: Option<PathBuf>,
+
+        /// PM quotes CSV path (if not using DB)
+        #[arg(long)]
+        pm_csv: Option<PathBuf>,
+
+        /// Start date (ISO 8601)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (ISO 8601)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Symbols (comma-separated)
+        #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT")]
+        symbols: String,
+
+        /// Initial capital (USD)
+        #[arg(long, default_value = "10000")]
+        capital: f64,
+
+        /// Save results to DB
+        #[arg(long)]
+        save: bool,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
 }
 
 impl StrategyCommands {
@@ -456,6 +509,35 @@ impl StrategyCommands {
                     limit,
                     format,
                     output,
+                    database_url,
+                )
+                .await
+            }
+            Self::IntegrityCheck { json, database_url } => {
+                run_integrity_check(json, database_url).await
+            }
+            Self::Backtest {
+                name,
+                kline_csv,
+                pm_csv,
+                from,
+                to,
+                symbols,
+                capital,
+                save,
+                json,
+                database_url,
+            } => {
+                run_backtest(
+                    &name,
+                    kline_csv,
+                    pm_csv,
+                    from,
+                    to,
+                    &symbols,
+                    capital,
+                    save,
+                    json,
                     database_url,
                 )
                 .await
@@ -2618,6 +2700,134 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Integrity Check handler
+// ─────────────────────────────────────────────────────────────
+
+async fn run_integrity_check(json_output: bool, database_url: Option<String>) -> Result<()> {
+    use crate::adapters::PostgresStore;
+    use crate::strategy::integrity::IntegrityChecker;
+
+    let db_url = database_url.unwrap_or_else(|| {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
+    });
+
+    let store = PostgresStore::new(&db_url, 5).await?;
+    let checker = IntegrityChecker::new(store.pool().clone());
+    let report = checker.run_full_check().await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report);
+    }
+
+    if !report.healthy {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Backtest handler
+// ─────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn run_backtest(
+    name: &str,
+    kline_csv: Option<PathBuf>,
+    pm_csv: Option<PathBuf>,
+    from: Option<String>,
+    to: Option<String>,
+    symbols: &str,
+    capital: f64,
+    save: bool,
+    json_output: bool,
+    database_url: Option<String>,
+) -> Result<()> {
+    use chrono::DateTime;
+    use rust_decimal::prelude::*;
+
+    use crate::adapters::PostgresStore;
+    use crate::strategy::backtest_feed::HistoricalFeed;
+    use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
+
+    match name {
+        "momentum" => {}
+        other => anyhow::bail!(
+            "Unknown backtest strategy: '{}'. Supported: momentum",
+            other
+        ),
+    }
+
+    let symbol_list: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
+
+    let from_dt = from
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+        })
+        .transpose()
+        .context("Invalid --from date (use ISO 8601 format)")?
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let to_dt = to
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+        })
+        .transpose()
+        .context("Invalid --to date (use ISO 8601 format)")?
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let db_url = database_url.unwrap_or_else(|| {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
+    });
+
+    // Build the data feed from CSV or DB
+    let mut feed = if let (Some(kline_path), Some(pm_path)) = (&kline_csv, &pm_csv) {
+        info!(
+            "Loading historical data from CSV: {:?}, {:?}",
+            kline_path, pm_path
+        );
+        HistoricalFeed::from_csv(kline_path, pm_path)?
+    } else {
+        let store = PostgresStore::new(&db_url, 5).await?;
+        info!("Loading historical data from database");
+        HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?
+    };
+
+    let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
+
+    let config = MomentumBacktestConfig::default_with_symbols(symbol_list.clone(), initial_capital);
+
+    let mut engine = MomentumBacktestEngine::new(config);
+    let results = engine.run(&mut feed);
+
+    // Optionally save to DB
+    if save {
+        let store = PostgresStore::new(&db_url, 5).await?;
+        crate::strategy::momentum_backtest::save_backtest_results(
+            store.pool(),
+            &engine.config(),
+            &results,
+        )
+        .await?;
+        info!("Backtest results saved to database");
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        println!("{}", results);
     }
 
     Ok(())

@@ -55,12 +55,15 @@ pub mod sports;
 // =============================================================================
 
 pub mod backtest;
+pub mod backtest_feed;
 pub mod calculations;
 pub mod claimer;
 pub mod dump_hedge;
 pub mod execution;
 pub mod execution_sim;
+pub mod integrity;
 pub mod momentum;
+pub mod momentum_backtest;
 pub mod multi_event;
 pub mod multi_outcome;
 pub mod paper_runner;
