@@ -658,7 +658,7 @@ pub async fn save_backtest_results(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::backtest_feed::{HistoricalFeed, UpdateType};
+    use crate::strategy::backtest_feed::{HistoricalFeed, MarketUpdate};
     use std::collections::VecDeque;
 
     /// Build a simple mock feed for testing
