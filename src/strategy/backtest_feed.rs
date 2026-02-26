@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use anyhow::Result;
@@ -89,8 +89,8 @@ impl HistoricalFeed {
     // ─── DB loader ───────────────────────────────────────────
 
     /// Load historical data from database tables:
-    /// - `sync_records` → SpotTrade (Binance spot)
-    /// - `clob_quote_ticks` → PmQuote (Polymarket quotes)
+    /// - `binance_price_ticks` (fallback from `sync_records`) → SpotTrade
+    /// - `clob_quote_ticks` → PmQuote (keyed by symbol via token→market mapping)
     /// - `pm_market_metadata` + `pm_token_settlements` → EventState
     pub async fn from_database(
         pool: &PgPool,
@@ -100,7 +100,7 @@ impl HistoricalFeed {
     ) -> Result<Self> {
         let mut updates: Vec<MarketUpdate> = Vec::new();
 
-        // 1. Binance spot trades from sync_records
+        // 1. Try sync_records first, fall back to binance_price_ticks
         let spot_rows: Vec<(DateTime<Utc>, String, Decimal)> = sqlx::query_as(
             r#"
             SELECT timestamp, symbol, bn_mid_price
@@ -121,28 +121,89 @@ impl HistoricalFeed {
         .fetch_all(pool)
         .await?;
 
-        for (ts, sym, price) in &spot_rows {
-            updates.push(MarketUpdate {
-                timestamp: *ts,
-                symbol: sym.clone(),
-                update_type: UpdateType::SpotTrade {
-                    price: *price,
-                    quantity: None,
-                },
-            });
-        }
-        info!("Loaded {} spot records from sync_records", spot_rows.len());
+        if !spot_rows.is_empty() {
+            for (ts, sym, price) in &spot_rows {
+                updates.push(MarketUpdate {
+                    timestamp: *ts,
+                    symbol: sym.clone(),
+                    update_type: UpdateType::SpotTrade {
+                        price: *price,
+                        quantity: None,
+                    },
+                });
+            }
+            info!("Loaded {} spot records from sync_records", spot_rows.len());
+        } else {
+            // Fallback: binance_price_ticks (used by platform start collector)
+            let price_rows: Vec<(DateTime<Utc>, String, Decimal, Option<Decimal>)> =
+                sqlx::query_as(
+                    r#"
+                SELECT received_at, symbol, price, quantity
+                FROM binance_price_ticks
+                WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+                  AND ($2::timestamptz IS NULL OR received_at >= $2)
+                  AND ($3::timestamptz IS NULL OR received_at <= $3)
+                ORDER BY received_at
+                "#,
+                )
+                .bind(if symbols.is_empty() {
+                    None::<Vec<String>>
+                } else {
+                    Some(symbols.to_vec())
+                })
+                .bind(from)
+                .bind(to)
+                .fetch_all(pool)
+                .await?;
 
-        // 2. Polymarket quotes from clob_quote_ticks
-        //    We need to pair UP/DOWN quotes by (token_id, received_at).
-        //    The simplest approach: load all and group by timestamp.
+            for (ts, sym, price, qty) in &price_rows {
+                updates.push(MarketUpdate {
+                    timestamp: *ts,
+                    symbol: sym.clone(),
+                    update_type: UpdateType::SpotTrade {
+                        price: *price,
+                        quantity: *qty,
+                    },
+                });
+            }
+            info!(
+                "Loaded {} spot records from binance_price_ticks (sync_records was empty)",
+                price_rows.len()
+            );
+        }
+
+        // 2. Build token_id → symbol mapping from pm_token_settlements + pm_market_metadata
+        let token_map_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT s.token_id, s.market_slug, m.symbol
+            FROM pm_token_settlements s
+            JOIN pm_market_metadata m ON m.market_slug = s.market_slug
+            WHERE m.symbol IS NOT NULL AND m.symbol != ''
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut token_to_symbol: HashMap<String, String> = HashMap::new();
+        for (token_id, _slug, symbol) in &token_map_rows {
+            if let Some(sym) = symbol {
+                token_to_symbol.insert(token_id.clone(), sym.clone());
+            }
+        }
+        info!(
+            "Built token→symbol mapping: {} entries",
+            token_to_symbol.len()
+        );
+
+        // 3. Polymarket quotes from clob_quote_ticks
+        //    Map token_id → symbol so the engine can match spot + quotes
         let quote_rows: Vec<(DateTime<Utc>, String, String, Option<Decimal>)> = sqlx::query_as(
             r#"
-            SELECT received_at, token_id, side,
-                   best_ask
+            SELECT received_at, token_id, side, best_ask
             FROM clob_quote_ticks
             WHERE ($1::timestamptz IS NULL OR received_at >= $1)
               AND ($2::timestamptz IS NULL OR received_at <= $2)
+              AND domain = 'Crypto'
             ORDER BY received_at
             "#,
         )
@@ -151,10 +212,14 @@ impl HistoricalFeed {
         .fetch_all(pool)
         .await?;
 
-        // Group consecutive UP/DOWN rows by token_id.
-        // For the backtest feed, we emit one PmQuote per row, letting the
-        // engine accumulate the latest ask prices as in live.
+        let mut mapped_quotes = 0u64;
         for (ts, token_id, side, best_ask) in &quote_rows {
+            // Map token_id to symbol; skip if we can't map
+            let symbol = match token_to_symbol.get(token_id.as_str()) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+
             let (up_ask, down_ask) = if side == "UP" {
                 (*best_ask, None)
             } else {
@@ -162,36 +227,38 @@ impl HistoricalFeed {
             };
             updates.push(MarketUpdate {
                 timestamp: *ts,
-                symbol: token_id.clone(),
+                symbol,
                 update_type: UpdateType::PmQuote { up_ask, down_ask },
             });
+            mapped_quotes += 1;
         }
         info!(
-            "Loaded {} quote ticks from clob_quote_ticks",
-            quote_rows.len()
+            "Loaded {} quote ticks ({} mapped to symbols, {} unmapped)",
+            quote_rows.len(),
+            mapped_quotes,
+            quote_rows.len() as u64 - mapped_quotes
         );
 
-        // 3. Event metadata + settlement from pm_market_metadata + pm_token_settlements
+        // 4. Event metadata + settlement
+        //    Join with settlements to get UP/DOWN outcome per market_slug.
+        //    A market has two tokens (UP + DOWN). We need ONE EventState per market_slug:
+        //    - At start_time: EventState with S0 + end_time (window open)
+        //    - At resolved_at: EventState with outcome (settlement)
         let event_rows: Vec<(
             String,                // market_slug
             Option<String>,        // symbol
+            Option<DateTime<Utc>>, // start_time
             Option<DateTime<Utc>>, // end_time
             Option<Decimal>,       // price_to_beat
-            Option<bool>,          // resolved (from settlements)
-            Option<DateTime<Utc>>, // resolved_at
         )> = sqlx::query_as(
             r#"
-            SELECT m.market_slug,
-                   m.symbol,
-                   m.end_time,
-                   m.price_to_beat,
-                   s.resolved,
-                   s.resolved_at
-            FROM pm_market_metadata m
-            LEFT JOIN pm_token_settlements s ON s.market_slug = m.market_slug
-            WHERE ($1::timestamptz IS NULL OR m.end_time >= $1)
-              AND ($2::timestamptz IS NULL OR m.end_time <= $2)
-            ORDER BY COALESCE(s.resolved_at, m.end_time)
+            SELECT market_slug, symbol, start_time, end_time, price_to_beat
+            FROM pm_market_metadata
+            WHERE symbol IS NOT NULL AND symbol != ''
+              AND price_to_beat IS NOT NULL AND price_to_beat > 0
+              AND ($1::timestamptz IS NULL OR end_time >= $1)
+              AND ($2::timestamptz IS NULL OR start_time <= $2)
+            ORDER BY start_time
             "#,
         )
         .bind(from)
@@ -199,28 +266,76 @@ impl HistoricalFeed {
         .fetch_all(pool)
         .await?;
 
-        for (slug, sym, end_time, price_to_beat, resolved, resolved_at) in &event_rows {
-            let ts = resolved_at.unwrap_or_else(|| end_time.unwrap_or(Utc::now()));
-            let outcome = if *resolved == Some(true) {
-                // Check settled price to determine UP/DOWN outcome
-                // For now, use simple boolean
-                Some(true)
-            } else {
-                None
-            };
-
-            updates.push(MarketUpdate {
-                timestamp: ts,
-                symbol: sym.clone().unwrap_or_default(),
-                update_type: UpdateType::EventState {
-                    event_slug: slug.clone(),
-                    end_time: *end_time,
-                    price_to_beat: *price_to_beat,
-                    outcome,
-                },
-            });
+        // Emit window-open events at start_time
+        for (slug, sym, start_time, end_time, price_to_beat) in &event_rows {
+            if let Some(st) = start_time {
+                updates.push(MarketUpdate {
+                    timestamp: *st,
+                    symbol: sym.clone().unwrap_or_default(),
+                    update_type: UpdateType::EventState {
+                        event_slug: slug.clone(),
+                        end_time: *end_time,
+                        price_to_beat: *price_to_beat,
+                        outcome: None,
+                    },
+                });
+            }
         }
-        info!("Loaded {} event records", event_rows.len());
+        info!("Loaded {} event windows from pm_market_metadata", event_rows.len());
+
+        // Settlement events: one per market_slug where outcome='Up' has settled_price=1
+        let settlement_rows: Vec<(
+            String,                // market_slug
+            String,                // outcome ('Up' or 'Down')
+            Decimal,               // settled_price
+            Option<DateTime<Utc>>, // resolved_at
+        )> = sqlx::query_as(
+            r#"
+            SELECT s.market_slug, s.outcome, s.settled_price, s.resolved_at
+            FROM pm_token_settlements s
+            JOIN pm_market_metadata m ON m.market_slug = s.market_slug
+            WHERE s.resolved = true
+              AND s.outcome = 'Up'
+              AND m.symbol IS NOT NULL AND m.symbol != ''
+              AND ($1::timestamptz IS NULL OR s.resolved_at >= $1)
+              AND ($2::timestamptz IS NULL OR s.resolved_at <= $2)
+            ORDER BY s.resolved_at
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(pool)
+        .await?;
+
+        // Build slug→symbol lookup
+        let slug_to_symbol: HashMap<String, String> = event_rows
+            .iter()
+            .filter_map(|(slug, sym, _, _, _)| {
+                sym.as_ref().map(|s| (slug.clone(), s.clone()))
+            })
+            .collect();
+
+        for (slug, _outcome, settled_price, resolved_at) in &settlement_rows {
+            if let Some(rat) = resolved_at {
+                let symbol = slug_to_symbol
+                    .get(slug.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                // settled_price=1 means Up won → outcome=true
+                let up_won = *settled_price == Decimal::ONE;
+                updates.push(MarketUpdate {
+                    timestamp: *rat,
+                    symbol,
+                    update_type: UpdateType::EventState {
+                        event_slug: slug.clone(),
+                        end_time: None,
+                        price_to_beat: None,
+                        outcome: Some(up_won),
+                    },
+                });
+            }
+        }
+        info!("Loaded {} settlement records", settlement_rows.len());
 
         // Sort all updates by timestamp for deterministic replay
         updates.sort_by_key(|u| u.timestamp);

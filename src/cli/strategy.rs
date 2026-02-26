@@ -407,7 +407,7 @@ pub enum StrategyCommands {
 
     /// Run a strategy backtest against historical data
     Backtest {
-        /// Strategy name (momentum)
+        /// Strategy name (momentum, directional)
         name: String,
 
         /// Kline CSV path (if not using DB)
@@ -2756,12 +2756,13 @@ async fn run_backtest(
 
     use crate::adapters::PostgresStore;
     use crate::strategy::backtest_feed::HistoricalFeed;
+    use crate::strategy::directional_backtest::{DirectionalBacktestConfig, DirectionalBacktestEngine};
     use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
 
     match name {
-        "momentum" => {}
+        "momentum" | "directional" => {}
         other => anyhow::bail!(
-            "Unknown backtest strategy: '{}'. Supported: momentum",
+            "Unknown backtest strategy: '{}'. Supported: momentum, directional",
             other
         ),
     }
@@ -2807,22 +2808,33 @@ async fn run_backtest(
 
     let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 
-    let config = MomentumBacktestConfig::default_with_symbols(symbol_list.clone(), initial_capital);
+    let results = match name {
+        "directional" => {
+            let mut config = DirectionalBacktestConfig::with_symbols(symbol_list.clone());
+            config.initial_capital = initial_capital;
+            let mut engine = DirectionalBacktestEngine::new(config);
+            engine.run(&mut feed)
+        }
+        _ => {
+            let config =
+                MomentumBacktestConfig::default_with_symbols(symbol_list.clone(), initial_capital);
+            let mut engine = MomentumBacktestEngine::new(config);
+            let results = engine.run(&mut feed);
 
-    let mut engine = MomentumBacktestEngine::new(config);
-    let results = engine.run(&mut feed);
-
-    // Optionally save to DB
-    if save {
-        let store = PostgresStore::new(&db_url, 5).await?;
-        crate::strategy::momentum_backtest::save_backtest_results(
-            store.pool(),
-            &engine.config(),
-            &results,
-        )
-        .await?;
-        info!("Backtest results saved to database");
-    }
+            // Optionally save momentum results to DB
+            if save {
+                let store = PostgresStore::new(&db_url, 5).await?;
+                crate::strategy::momentum_backtest::save_backtest_results(
+                    store.pool(),
+                    &engine.config(),
+                    &results,
+                )
+                .await?;
+                info!("Backtest results saved to database");
+            }
+            results
+        }
+    };
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&results)?);

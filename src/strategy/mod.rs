@@ -78,6 +78,9 @@ pub mod trade_logger;
 pub mod trading_costs;
 pub mod volatility;
 pub mod volatility_arb;
+pub mod directional_backtest;
+pub mod fee_model;
+pub mod probability;
 
 // Runtime re-exports
 pub use claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
@@ -185,6 +188,9 @@ pub use volatility_arb::{
     MarketPricing, VolArbSignal, VolArbStats, VolArbTrade, VolatilityArbConfig,
     VolatilityArbEngine, VolatilityEstimate,
 };
+pub use probability::{estimate_probability, full_estimate, Features, ProbabilityEstimate};
+pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
+pub use directional_backtest::{DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade};
 
 // New consolidated modules
 pub use calculations::{
