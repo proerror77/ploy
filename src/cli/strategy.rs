@@ -2813,7 +2813,13 @@ async fn run_backtest(
             let mut config = DirectionalBacktestConfig::with_symbols(symbol_list.clone());
             config.initial_capital = initial_capital;
             let mut engine = DirectionalBacktestEngine::new(config);
-            engine.run(&mut feed)
+            let results = engine.run(&mut feed);
+
+            // Print directional-specific summary (includes exit reasons, calibration)
+            if !json_output {
+                engine.print_directional_summary();
+            }
+            results
         }
         _ => {
             let config =

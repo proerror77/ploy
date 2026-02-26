@@ -18,7 +18,7 @@ use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use crate::adapters::SpotPrice;
 use crate::strategy::backtest::BacktestResults;
@@ -63,6 +63,12 @@ pub struct DirectionalBacktestConfig {
     pub hold_to_settlement: bool,
     /// Cooldown between entries on same symbol (seconds)
     pub cooldown_secs: u64,
+    /// Minimum time remaining to enter a position (seconds).
+    /// Prevents entering near settlement where model is degenerate.
+    pub min_time_remaining_secs: u64,
+    /// Volatility floor for the probability model.
+    /// Prevents overconfidence when realized vol is near zero.
+    pub vol_floor: f64,
 }
 
 impl Default for DirectionalBacktestConfig {
@@ -71,8 +77,8 @@ impl Default for DirectionalBacktestConfig {
             symbols: vec!["BTCUSDT".to_string()],
             initial_capital: dec!(10000),
             shares_per_trade: 100,
-            max_concurrent_positions: 5,
-            entry_threshold: 0.05,
+            max_concurrent_positions: 3,
+            entry_threshold: 0.10,
             max_entry_price: dec!(0.85),
             min_entry_price: dec!(0.15),
             mu: 0.0,
@@ -81,7 +87,9 @@ impl Default for DirectionalBacktestConfig {
             time_stop_secs: 30,
             hard_stop_usd: dec!(5),
             hold_to_settlement: true,
-            cooldown_secs: 30,
+            cooldown_secs: 60,
+            min_time_remaining_secs: 120,
+            vol_floor: 0.005,
         }
     }
 }
@@ -344,18 +352,35 @@ impl DirectionalBacktestEngine {
             None => return,
         };
 
-        // 2. Time remaining
+        // 2. Time remaining — must have minimum buffer to avoid near-settlement degeneracy
         let time_remaining = (window.end_time - ts).num_seconds() as f64;
-        if time_remaining <= 0.0 {
+        if time_remaining <= 0.0 || time_remaining < self.config.min_time_remaining_secs as f64 {
             return;
         }
 
         // 3. Realized vol from Binance history (proxy for Chainlink)
-        let sigma = spot
-            .volatility(self.config.vol_lookback_secs)
-            .and_then(|v| v.to_f64())
-            .unwrap_or(0.001)
-            .max(0.0001); // Floor to avoid degenerate cases
+        //
+        // SpotPrice.volatility() returns std-dev of consecutive tick returns.
+        // Each tick interval is ~200ms. To get per-period vol (σ for 900s window),
+        // we scale by √(N) where N = number of ticks in the lookback.
+        // This gives: σ_period ≈ σ_tick × √(ticks_in_lookback)
+        //
+        // Alternatively, if volatility() returns None (insufficient data), we use
+        // a conservative BTC 15-min vol estimate (0.005 ≈ 0.5%).
+        let sigma = {
+            let lookback = self.config.vol_lookback_secs;
+            let floor = self.config.vol_floor;
+            match spot.volatility(lookback).and_then(|v| v.to_f64()) {
+                Some(tick_vol) if tick_vol > 0.0 => {
+                    // Count ticks in the lookback window to scale properly
+                    let n_ticks = spot.history_len().min(5000) as f64;
+                    // Scale tick vol to period vol
+                    let period_vol = tick_vol * n_ticks.sqrt();
+                    period_vol.max(floor)
+                }
+                _ => floor, // Default: conservative floor
+            }
+        };
 
         // 4. Estimate probability: P(ST >= S0)
         let st = spot.price; // Binance current = Chainlink proxy
@@ -431,7 +456,7 @@ impl DirectionalBacktestEngine {
 
         let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
         if entry_cost > self.equity {
-            debug!(
+            trace!(
                 "Skipping entry: insufficient equity ({} < {})",
                 self.equity, entry_cost
             );
@@ -471,15 +496,11 @@ impl DirectionalBacktestEngine {
         for (i, pos) in self.positions.iter().enumerate() {
             let time_remaining = (pos.event_end_time - ts).num_seconds() as f64;
 
-            // A. Hold to settlement — no early exit unless hard stop or time stop
+            // A. Hold to settlement — no early exit at all. Binary options settle
+            // at $1.00 or $0.00, so unrealized PnL fluctuations are noise.
+            // The only meaningful exit is settlement itself.
             if self.config.hold_to_settlement && time_remaining > self.config.time_stop_secs as f64
             {
-                // Only check hard stop when holding to settlement
-                let unrealized =
-                    (pos.latest_pm_price - pos.entry_price) * Decimal::from(pos.shares);
-                if unrealized < Decimal::ZERO && unrealized.abs() > self.config.hard_stop_usd {
-                    to_close.push((i, pos.latest_pm_price, "hard_stop"));
-                }
                 continue;
             }
 
@@ -548,10 +569,20 @@ impl DirectionalBacktestEngine {
         let sigma = self
             .spot_prices
             .get(&pos.symbol)
-            .and_then(|s| s.volatility(self.config.vol_lookback_secs))
-            .and_then(|v| v.to_f64())
+            .and_then(|s| {
+                let lookback = self.config.vol_lookback_secs;
+                let floor = self.config.vol_floor;
+                s.volatility(lookback).and_then(|v| v.to_f64()).map(|tick_vol| {
+                    if tick_vol > 0.0 {
+                        let n_ticks = s.history_len().min(5000) as f64;
+                        (tick_vol * n_ticks.sqrt()).max(floor)
+                    } else {
+                        floor
+                    }
+                })
+            })
             .unwrap_or(pos.entry_sigma)
-            .max(0.0001);
+            .max(self.config.vol_floor);
 
         estimate_probability(pos.s0, st, sigma, time_remaining, self.config.mu)
     }
@@ -891,6 +922,28 @@ impl DirectionalBacktestEngine {
                 0.0
             }
         );
+
+        // Sigma distribution
+        let sigmas: Vec<f64> = self.closed_trades.iter().map(|t| t.entry_sigma).collect();
+        let avg_sigma = sigmas.iter().sum::<f64>() / sigmas.len().max(1) as f64;
+        let min_sigma = sigmas.iter().cloned().fold(f64::MAX, f64::min);
+        let max_sigma = sigmas.iter().cloned().fold(f64::MIN, f64::max);
+        println!("\nVolatility:");
+        println!("  Avg σ at entry: {:.5}", avg_sigma);
+        println!("  Min σ: {:.5}  Max σ: {:.5}", min_sigma, max_sigma);
+
+        // Holding time distribution
+        let hold_times: Vec<i64> = self.closed_trades.iter().map(|t| t.holding_secs).collect();
+        let avg_hold = hold_times.iter().sum::<i64>() as f64 / hold_times.len().max(1) as f64;
+        let min_hold = hold_times.iter().min().copied().unwrap_or(0);
+        let max_hold = hold_times.iter().max().copied().unwrap_or(0);
+        println!("\nHolding time:");
+        println!("  Avg: {:.0}s  Min: {}s  Max: {}s", avg_hold, min_hold, max_hold);
+
+        // Entry price distribution
+        let entry_prices: Vec<f64> = self.closed_trades.iter().map(|t| t.entry_price.to_f64().unwrap_or(0.0)).collect();
+        let avg_entry = entry_prices.iter().sum::<f64>() / entry_prices.len().max(1) as f64;
+        println!("  Avg entry price: ${:.4}", avg_entry);
     }
 }
 
@@ -1189,7 +1242,7 @@ mod tests {
     fn test_hard_stop() {
         let mut config = DirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".into()]);
         config.entry_threshold = 0.0;
-        config.hold_to_settlement = true;
+        config.hold_to_settlement = false; // Must be false for hard stop to trigger
         config.hard_stop_usd = dec!(1); // Very tight stop: $1
         config.min_entry_price = dec!(0.01);
         config.max_entry_price = dec!(0.99);
