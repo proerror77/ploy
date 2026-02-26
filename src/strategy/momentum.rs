@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::{
     ChainlinkPriceCache, ChainlinkUpdate, GammaEventInfo, PolymarketClient, PriceCache,
@@ -157,6 +157,15 @@ pub struct MomentumConfig {
 
     /// Minimum deviation from VWAP required for confirmation (e.g., 0.001 = 0.1%).
     pub min_vwap_deviation: Decimal,
+
+    // === DIRECTIONAL MODE (BINANCE AS ORACLE) ===
+    /// When true, on_cex_update() uses estimate_probability() + FeeModel
+    /// instead of MomentumDetector/VolatilityDetector. Binance acts as
+    /// Chainlink proxy for the log-normal probability model.
+    pub directional_mode: bool,
+
+    /// Volatility floor for probability model (directional mode only).
+    pub directional_vol_floor: f64,
 }
 
 impl Default for MomentumConfig {
@@ -219,6 +228,10 @@ impl Default for MomentumConfig {
             require_vwap_confirmation: false,
             vwap_lookback_secs: 60,
             min_vwap_deviation: dec!(0),
+
+            // === DIRECTIONAL MODE (DEFAULT: OFF) ===
+            directional_mode: false,
+            directional_vol_floor: 0.005,
         }
     }
 }
@@ -2268,6 +2281,15 @@ impl MomentumEngine {
             info!("• Entry threshold: EV_net >= {:.1}%", self.entry_threshold * 100.0);
         }
 
+        if self.config.directional_mode {
+            info!("=== DIRECTIONAL MODE (BINANCE AS ORACLE) ===");
+            info!("• Ground truth: Binance spot price (Chainlink proxy)");
+            info!("• Fee model: parabolic (crypto, fee_rate=0.25, exp=2)");
+            info!("• Entry threshold: EV_net >= {:.1}%", self.entry_threshold * 100.0);
+            info!("• Vol floor: {:.4}", self.config.directional_vol_floor);
+            info!("• Symbols: {:?}", self.config.symbols);
+        }
+
         loop {
             tokio::select! {
                 // PRIMARY (when Chainlink active): Oracle price → probability → entry
@@ -2421,6 +2443,14 @@ impl MomentumEngine {
         // Get PM quotes for this event
         let (up_ask, down_ask) = self.get_pm_prices(pm_cache, &event).await;
 
+        // === DIRECTIONAL MODE: Binance as oracle, probability model entry ===
+        if self.config.directional_mode {
+            return self
+                .directional_entry_from_binance(symbol, &spot, &event, up_ask, down_ask)
+                .await;
+        }
+
+        // === MOMENTUM/VOLATILITY MODE (original path) ===
         // Check for momentum signal (CEX momentum-based)
         if let Some(signal) = self.detector.check(symbol, &spot, up_ask, down_ask) {
             self.maybe_enter(signal, &event).await?;
@@ -2467,6 +2497,134 @@ impl MomentumEngine {
                     vol_signal.edge * dec!(100)
                 );
                 self.maybe_enter(momentum_signal, &event).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Directional mode entry using Binance as oracle (same logic as Chainlink path).
+    ///
+    /// Uses estimate_probability() + FeeModel to compute EV_net and enter
+    /// when edge exceeds threshold. Binance spot price proxies Chainlink.
+    async fn directional_entry_from_binance(
+        &self,
+        symbol: &str,
+        spot: &SpotPrice,
+        event: &EventInfo,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+    ) -> Result<()> {
+        let time_remaining = event.time_remaining().num_seconds() as f64;
+        if time_remaining <= 0.0 {
+            return Ok(());
+        }
+
+        // Get S0 from event tracker or price_to_beat
+        let s0 = {
+            let tracker = self.event_tracker.read().await;
+            if let Some(record) = tracker.get_event(&event.condition_id) {
+                record.start_price
+            } else if let Some(ptb) = event.price_to_beat {
+                ptb
+            } else {
+                return Ok(());
+            }
+        };
+
+        let st = spot.price;
+
+        // Compute realized vol from Binance history (scaled to period-level)
+        let vol_floor = self.config.directional_vol_floor;
+        let sigma = spot
+            .volatility(300)
+            .and_then(|v| v.to_f64())
+            .map(|tick_vol| {
+                if tick_vol > 0.0 {
+                    let n_ticks = spot.history_len().min(5000) as f64;
+                    (tick_vol * n_ticks.sqrt()).max(vol_floor)
+                } else {
+                    vol_floor
+                }
+            })
+            .unwrap_or(vol_floor);
+
+        // Estimate probability using log-normal model
+        let p_hat = probability::estimate_probability(s0, st, sigma, time_remaining, 0.0);
+
+        // Determine direction and get market ask price
+        let (direction, market_ask) = if p_hat > 0.5 {
+            match up_ask {
+                Some(ask) => (Direction::Up, ask),
+                None => return Ok(()),
+            }
+        } else {
+            match down_ask {
+                Some(ask) => (Direction::Down, ask),
+                None => return Ok(()),
+            }
+        };
+        let effective_p = if direction == Direction::Up {
+            p_hat
+        } else {
+            1.0 - p_hat
+        };
+
+        // All-in cost via FeeModel (corrected: fee_per_share = price × effective_rate)
+        let fee_model = FeeModel::crypto();
+        let effective_rate = fee_model.effective_rate(market_ask);
+        let fee_per_share = market_ask * effective_rate;
+        let spread_cost = dec!(0.01); // Conservative 1¢ spread estimate
+        let market_ask_f64 = market_ask.to_f64().unwrap_or(0.5);
+        let cost_total_f64 = fee_per_share.to_f64().unwrap_or(0.01)
+            + spread_cost.to_f64().unwrap_or(0.01);
+
+        // EV_net check
+        let ev_net = effective_p - market_ask_f64 - cost_total_f64;
+
+        trace!(
+            "🎯 {} {} p_hat={:.3} eff_p={:.3} ask={:.3} cost={:.4} ev_net={:.4} σ={:.5}",
+            symbol, direction, p_hat, effective_p, market_ask_f64, cost_total_f64, ev_net, sigma
+        );
+
+        if ev_net < self.entry_threshold {
+            return Ok(());
+        }
+
+        info!(
+            "🎯 DIRECTIONAL ENTRY: {} {} p_hat={:.1}% ev_net={:.1}% ask={:.1}¢ σ={:.4}",
+            symbol,
+            direction,
+            effective_p * 100.0,
+            ev_net * 100.0,
+            market_ask_f64 * 100.0,
+            sigma,
+        );
+
+        // Create signal and enter via existing maybe_enter path
+        let cex_move_pct = Decimal::try_from((st - s0) / s0).unwrap_or(Decimal::ZERO);
+        let edge = Decimal::try_from(ev_net).unwrap_or(Decimal::ZERO);
+        let signal = MomentumSignal {
+            symbol: symbol.to_string(),
+            direction,
+            cex_move_pct,
+            pm_price: market_ask,
+            edge,
+            confidence: effective_p,
+            timestamp: Utc::now(),
+        };
+
+        self.maybe_enter(signal, event).await?;
+
+        // Update position with p_hat and S0
+        {
+            let mut positions = self.positions.write().await;
+            if let Some(pos) = positions
+                .values_mut()
+                .find(|p| p.condition_id == event.condition_id)
+            {
+                pos.entry_p_hat = Some(p_hat);
+                pos.window_open_price = Some(s0);
             }
         }
 

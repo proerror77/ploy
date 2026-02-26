@@ -410,16 +410,24 @@ impl DirectionalBacktestEngine {
         }
 
         // 7. All-in cost via FeeModel
+        // Polymarket fee formula: fee_usd = shares × price × feeRate × (p*(1-p))^exponent
+        // Per-share fee in USD = price × effective_rate(price)
         let best_bid = (market_ask - dec!(0.02)).max(dec!(0.01));
         let depth_ratio = Decimal::from(self.config.shares_per_trade) / dec!(10000);
         let cost = self
             .fee_model
             .all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
+        // cost.taker_fee = effective_rate(p) = feeRate × (p*(1-p))^exponent
+        // actual per-share fee in USD = market_ask × effective_rate(p)
+        let fee_per_share_usd = market_ask * cost.taker_fee;
+        let spread_plus_slip = cost.spread_cost + cost.depth_slippage;
 
         // 8. EV_net check
+        // EV = P(win) × $1.00 - entry_price - fee_per_share - spread - slippage
         let market_ask_f = market_ask.to_f64().unwrap_or(0.5);
-        let cost_f = cost.total.to_f64().unwrap_or(0.02);
-        let ev_net = effective_p - market_ask_f - cost_f;
+        let total_cost_f =
+            fee_per_share_usd.to_f64().unwrap_or(0.01) + spread_plus_slip.to_f64().unwrap_or(0.01);
+        let ev_net = effective_p - market_ask_f - total_cost_f;
         if ev_net < self.config.entry_threshold {
             return;
         }
@@ -455,15 +463,21 @@ impl DirectionalBacktestEngine {
         );
 
         let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
-        if entry_cost > self.equity {
+        // Taker fee at entry: shares × price × feeRate × (p*(1-p))^exponent
+        let entry_fee = self
+            .fee_model
+            .fee_shares(Decimal::from(sim_result.filled_shares), sim_result.fill_price)
+            * sim_result.fill_price;
+        let total_entry_cost = entry_cost + entry_fee;
+        if total_entry_cost > self.equity {
             trace!(
                 "Skipping entry: insufficient equity ({} < {})",
-                self.equity, entry_cost
+                self.equity, total_entry_cost
             );
             return;
         }
 
-        self.equity -= entry_cost;
+        self.equity -= total_entry_cost;
 
         self.positions.push(DirectionalPosition {
             symbol: symbol.to_string(),
@@ -620,23 +634,35 @@ impl DirectionalBacktestEngine {
         let pos = self.positions.remove(idx);
 
         // For settlement ($1 or $0), no need to simulate — it's binary payout.
-        // For early exits, simulate sell via ExecutionSimulator.
-        let (final_price, proceeds) = if reason == "settlement" {
+        // Fee at settlement ($1 or $0): p*(1-p) = 0, so settlement fee = $0.
+        // For early exits, simulate sell via ExecutionSimulator + exit fee.
+        let (final_price, proceeds, exit_fee) = if reason == "settlement" {
             let p = exit_price;
-            (p, p * Decimal::from(pos.shares))
+            // At $1.00 or $0.00, the parabolic fee curve = 0 (p*(1-p) = 0)
+            (p, p * Decimal::from(pos.shares), Decimal::ZERO)
         } else {
             let sim_result =
                 self.execution_sim
                     .simulate_sell(exit_price, ts, pos.shares, 10_000);
-            (
-                sim_result.fill_price,
-                Decimal::from(sim_result.filled_shares) * sim_result.fill_price,
-            )
+            let raw_proceeds = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
+            // Taker fee on sell: shares × price × feeRate × (p*(1-p))^exponent
+            let sell_fee = self
+                .fee_model
+                .fee_shares(Decimal::from(sim_result.filled_shares), sim_result.fill_price)
+                * sim_result.fill_price;
+            (sim_result.fill_price, raw_proceeds - sell_fee, sell_fee)
         };
 
         self.equity += proceeds;
 
-        let pnl = proceeds - Decimal::from(pos.shares) * pos.entry_price;
+        // Entry fee was already deducted from equity at entry time,
+        // so PnL = proceeds - (shares × entry_price) already reflects the entry fee implicitly.
+        // But we also need to account for exit fee in the PnL.
+        let entry_fee = self
+            .fee_model
+            .fee_shares(Decimal::from(pos.shares), pos.entry_price)
+            * pos.entry_price;
+        let pnl = proceeds - Decimal::from(pos.shares) * pos.entry_price - entry_fee;
         let holding_secs = (ts - pos.entry_time).num_seconds();
 
         self.closed_trades.push(DirectionalClosedTrade {
@@ -944,6 +970,54 @@ impl DirectionalBacktestEngine {
         let entry_prices: Vec<f64> = self.closed_trades.iter().map(|t| t.entry_price.to_f64().unwrap_or(0.0)).collect();
         let avg_entry = entry_prices.iter().sum::<f64>() / entry_prices.len().max(1) as f64;
         println!("  Avg entry price: ${:.4}", avg_entry);
+
+        // Per-symbol breakdown
+        let mut symbol_stats: HashMap<&str, (usize, usize, Decimal, Decimal)> = HashMap::new();
+        for t in &self.closed_trades {
+            let entry = symbol_stats
+                .entry(&t.symbol)
+                .or_insert((0, 0, Decimal::ZERO, Decimal::ZERO));
+            entry.0 += 1; // total trades
+            if t.won {
+                entry.1 += 1; // wins
+            }
+            entry.2 += t.pnl; // total pnl
+            entry.3 += Decimal::from(t.shares) * t.entry_price; // volume
+        }
+
+        let mut symbols: Vec<&&str> = symbol_stats.keys().collect();
+        symbols.sort();
+
+        println!("\nPer-symbol breakdown:");
+        println!(
+            "  {:<12} {:>6} {:>6} {:>8} {:>12} {:>12}",
+            "Symbol", "Trades", "Wins", "WinRate", "PnL", "Volume"
+        );
+        println!("  {}", "-".repeat(62));
+        for sym in &symbols {
+            let (trades, wins, pnl, vol) = symbol_stats[*sym];
+            let wr = if trades > 0 {
+                wins as f64 / trades as f64 * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  {:<12} {:>6} {:>6} {:>7.1}% {:>11.2} {:>11.2}",
+                sym, trades, wins, wr, pnl, vol
+            );
+        }
+        let total_vol: Decimal = symbol_stats.values().map(|v| v.3).sum();
+        let total_pnl: Decimal = symbol_stats.values().map(|v| v.2).sum();
+        println!("  {}", "-".repeat(62));
+        println!(
+            "  {:<12} {:>6} {:>6} {:>7.1}% {:>11.2} {:>11.2}",
+            "TOTAL",
+            total,
+            self.closed_trades.iter().filter(|t| t.won).count(),
+            self.closed_trades.iter().filter(|t| t.won).count() as f64 / total as f64 * 100.0,
+            total_pnl,
+            total_vol
+        );
     }
 }
 

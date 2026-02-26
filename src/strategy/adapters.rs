@@ -339,6 +339,15 @@ impl MomentumStrategyAdapter {
                     / 100.0,
             )
             .unwrap_or(dec!(0)),
+            // === DIRECTIONAL MODE ===
+            directional_mode: entry
+                .get("directional_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            directional_vol_floor: entry
+                .get("directional_vol_floor")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.005),
         };
 
         if exit.get("take_profit").is_some() {

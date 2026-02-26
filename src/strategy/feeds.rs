@@ -581,20 +581,30 @@ impl DataFeedManager {
                     let max_end_time = now + chrono::Duration::minutes(60);
 
                     let mut candidates: Vec<(chrono::DateTime<Utc>, String)> = Vec::new();
+                    let mut no_end_date = 0usize;
+                    let mut parse_fail = 0usize;
+                    let mut out_of_range = 0usize;
                     for e in &events {
                         let Some(end_str) = e.end_date.as_ref() else {
+                            no_end_date += 1;
                             continue;
                         };
                         let Ok(end) = chrono::DateTime::parse_from_rfc3339(end_str)
                             .map(|dt| dt.with_timezone(&Utc))
                         else {
+                            parse_fail += 1;
                             continue;
                         };
                         if end <= min_end_time || end > max_end_time {
+                            out_of_range += 1;
                             continue;
                         }
                         candidates.push((end, e.id.clone()));
                     }
+                    debug!(
+                        "Series {} filter: no_end_date={} parse_fail={} out_of_range={} candidates={}",
+                        series_id, no_end_date, parse_fail, out_of_range, candidates.len()
+                    );
 
                     candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
