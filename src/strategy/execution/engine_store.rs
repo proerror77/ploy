@@ -20,7 +20,12 @@ pub trait EngineStore: Send + Sync {
 
     // --- Cycles ---
     async fn create_cycle(&self, round_id: i32, state: StrategyState) -> Result<i32>;
-    async fn update_cycle_state(&self, cycle_id: i32, state: StrategyState, expected_version: i32) -> Result<bool>;
+    async fn update_cycle_state(
+        &self,
+        cycle_id: i32,
+        state: StrategyState,
+        expected_version: i32,
+    ) -> Result<bool>;
     async fn update_cycle_leg1(
         &self,
         cycle_id: i32,
@@ -79,8 +84,14 @@ impl EngineStore for crate::adapters::PostgresStore {
     async fn create_cycle(&self, round_id: i32, state: StrategyState) -> Result<i32> {
         self.create_cycle(round_id, state).await
     }
-    async fn update_cycle_state(&self, cycle_id: i32, state: StrategyState, expected_version: i32) -> Result<bool> {
-        self.update_cycle_state(cycle_id, state, expected_version).await
+    async fn update_cycle_state(
+        &self,
+        cycle_id: i32,
+        state: StrategyState,
+        expected_version: i32,
+    ) -> Result<bool> {
+        self.update_cycle_state(cycle_id, state, expected_version)
+            .await
     }
     async fn update_cycle_leg1(
         &self,
@@ -192,7 +203,12 @@ pub mod mock {
         async fn create_cycle(&self, _round_id: i32, _state: StrategyState) -> Result<i32> {
             Ok(self.next_id())
         }
-        async fn update_cycle_state(&self, _cycle_id: i32, _state: StrategyState, _expected_version: i32) -> Result<bool> {
+        async fn update_cycle_state(
+            &self,
+            _cycle_id: i32,
+            _state: StrategyState,
+            _expected_version: i32,
+        ) -> Result<bool> {
             Ok(true)
         }
         async fn update_cycle_leg1(

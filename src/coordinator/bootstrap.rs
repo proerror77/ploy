@@ -79,11 +79,9 @@ async fn ensure_clob_quote_ticks_table(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Add domain column if it doesn't exist (backcompat with existing tables).
-    sqlx::query(
-        "ALTER TABLE clob_quote_ticks ADD COLUMN IF NOT EXISTS domain TEXT",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("ALTER TABLE clob_quote_ticks ADD COLUMN IF NOT EXISTS domain TEXT")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_token_time ON clob_quote_ticks(token_id, received_at DESC)",
@@ -1245,7 +1243,12 @@ async fn ensure_clob_trade_alerts_table(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-fn spawn_clob_quote_persistence(pm_ws: Arc<PolymarketWebSocket>, pool: PgPool, agent_id: String, domain: Domain) {
+fn spawn_clob_quote_persistence(
+    pm_ws: Arc<PolymarketWebSocket>,
+    pool: PgPool,
+    agent_id: String,
+    domain: Domain,
+) {
     tokio::spawn(async move {
         if let Err(e) = ensure_clob_quote_ticks_table(&pool).await {
             warn!(
@@ -5662,7 +5665,12 @@ pub async fn start_platform(
         if let Some(pool) = shared_pool.as_ref() {
             let (orderbook_levels_default, orderbook_snapshot_secs_default) = (20usize, 60i64);
 
-            spawn_clob_quote_persistence(pm_ws.clone(), pool.clone(), crypto_cfg.agent_id.clone(), Domain::Crypto);
+            spawn_clob_quote_persistence(
+                pm_ws.clone(),
+                pool.clone(),
+                crypto_cfg.agent_id.clone(),
+                Domain::Crypto,
+            );
             spawn_clob_orderbook_persistence(
                 pm_ws.clone(),
                 pool.clone(),
@@ -6078,8 +6086,7 @@ pub async fn start_platform(
                 let sports_pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
 
                 // Seed initial NBA tokens from collector_token_targets
-                let mut sports_desired: HashMap<String, Side> =
-                    HashMap::new();
+                let mut sports_desired: HashMap<String, Side> = HashMap::new();
                 if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
                     r#"
                     SELECT token_id, metadata->>'side'
@@ -6103,9 +6110,7 @@ pub async fn start_platform(
 
                 let initial_count = sports_desired.len();
                 if initial_count > 0 {
-                    sports_pm_ws
-                        .reconcile_token_sides(&sports_desired)
-                        .await;
+                    sports_pm_ws.reconcile_token_sides(&sports_desired).await;
                     info!(
                         agent = sports_cfg.agent_id,
                         token_count = initial_count,
@@ -6123,8 +6128,7 @@ pub async fn start_platform(
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
-                        let mut desired: HashMap<String, Side> =
-                            HashMap::new();
+                        let mut desired: HashMap<String, Side> = HashMap::new();
                         if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
                             r#"
                             SELECT token_id, metadata->>'side'
@@ -6139,16 +6143,13 @@ pub async fn start_platform(
                         {
                             for (token_id, side_str) in rows {
                                 let side = match side_str.as_deref() {
-                                    Some("DOWN") | Some("NO") => {
-                                        Side::Down
-                                    }
+                                    Some("DOWN") | Some("NO") => Side::Down,
                                     _ => Side::Up,
                                 };
                                 desired.insert(token_id, side);
                             }
                         }
-                        let (_a, _r, _u, total) =
-                            refresh_ws.reconcile_token_sides(&desired).await;
+                        let (_a, _r, _u, total) = refresh_ws.reconcile_token_sides(&desired).await;
                         trace!(
                             agent = refresh_agent,
                             total,

@@ -173,11 +173,11 @@ impl HistoricalFeed {
 
         // 3. Event metadata + settlement from pm_market_metadata + pm_token_settlements
         let event_rows: Vec<(
-            String,           // market_slug
-            Option<String>,   // symbol
+            String,                // market_slug
+            Option<String>,        // symbol
             Option<DateTime<Utc>>, // end_time
-            Option<Decimal>,  // price_to_beat
-            Option<bool>,     // resolved (from settlements)
+            Option<Decimal>,       // price_to_beat
+            Option<bool>,          // resolved (from settlements)
             Option<DateTime<Utc>>, // resolved_at
         )> = sqlx::query_as(
             r#"
@@ -225,10 +225,7 @@ impl HistoricalFeed {
         // Sort all updates by timestamp for deterministic replay
         updates.sort_by_key(|u| u.timestamp);
 
-        info!(
-            "HistoricalFeed ready: {} total events",
-            updates.len()
-        );
+        info!("HistoricalFeed ready: {} total events", updates.len());
 
         Ok(Self {
             updates: VecDeque::from(updates),

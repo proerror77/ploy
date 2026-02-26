@@ -2760,7 +2760,10 @@ async fn run_backtest(
 
     match name {
         "momentum" => {}
-        other => anyhow::bail!("Unknown backtest strategy: '{}'. Supported: momentum", other),
+        other => anyhow::bail!(
+            "Unknown backtest strategy: '{}'. Supported: momentum",
+            other
+        ),
     }
 
     let symbol_list: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
@@ -2791,7 +2794,10 @@ async fn run_backtest(
 
     // Build the data feed from CSV or DB
     let mut feed = if let (Some(kline_path), Some(pm_path)) = (&kline_csv, &pm_csv) {
-        info!("Loading historical data from CSV: {:?}, {:?}", kline_path, pm_path);
+        info!(
+            "Loading historical data from CSV: {:?}, {:?}",
+            kline_path, pm_path
+        );
         HistoricalFeed::from_csv(kline_path, pm_path)?
     } else {
         let store = PostgresStore::new(&db_url, 5).await?;
@@ -2799,11 +2805,9 @@ async fn run_backtest(
         HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?
     };
 
-    let initial_capital =
-        Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
+    let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 
-    let config =
-        MomentumBacktestConfig::default_with_symbols(symbol_list.clone(), initial_capital);
+    let config = MomentumBacktestConfig::default_with_symbols(symbol_list.clone(), initial_capital);
 
     let mut engine = MomentumBacktestEngine::new(config);
     let results = engine.run(&mut feed);

@@ -1156,7 +1156,13 @@ impl StrategyEngine {
             let mut cycle_update_error: Option<PloyError> = None;
             if let Err(err) = self
                 .store
-                .update_cycle_leg2(ctx.cycle_id, fill_price, result.filled_shares, net_pnl, ctx.cycle_version)
+                .update_cycle_leg2(
+                    ctx.cycle_id,
+                    fill_price,
+                    result.filled_shares,
+                    net_pnl,
+                    ctx.cycle_version,
+                )
                 .await
             {
                 error!(

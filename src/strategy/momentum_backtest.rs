@@ -12,8 +12,8 @@ use std::fmt;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -196,7 +196,10 @@ impl MomentumBacktestEngine {
         ts: DateTime<Utc>,
     ) {
         // Update latest asks
-        let entry = self.pm_asks.entry(symbol.to_string()).or_insert((None, None));
+        let entry = self
+            .pm_asks
+            .entry(symbol.to_string())
+            .or_insert((None, None));
         if up_ask.is_some() {
             entry.0 = up_ask;
         }
@@ -254,7 +257,8 @@ impl MomentumBacktestEngine {
 
         // Don't enter if we already hold the same symbol+direction
         let already_holding = self.positions.iter().any(|p| {
-            p.symbol == signal.symbol && std::mem::discriminant(&p.direction) == std::mem::discriminant(&signal.direction)
+            p.symbol == signal.symbol
+                && std::mem::discriminant(&p.direction) == std::mem::discriminant(&signal.direction)
         });
         if already_holding {
             return;
@@ -343,12 +347,9 @@ impl MomentumBacktestEngine {
         let pos = self.positions.remove(idx);
 
         // Simulate sell
-        let sim_result = self.execution_sim.simulate_sell(
-            exit_price,
-            ts,
-            pos.shares,
-            10_000,
-        );
+        let sim_result = self
+            .execution_sim
+            .simulate_sell(exit_price, ts, pos.shares, 10_000);
 
         let proceeds = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
         self.equity += proceeds;
@@ -414,7 +415,12 @@ impl MomentumBacktestEngine {
             Decimal::ZERO
         };
 
-        let wins: Vec<Decimal> = self.closed_trades.iter().filter(|t| t.won).map(|t| t.pnl).collect();
+        let wins: Vec<Decimal> = self
+            .closed_trades
+            .iter()
+            .filter(|t| t.won)
+            .map(|t| t.pnl)
+            .collect();
         let losses: Vec<Decimal> = self
             .closed_trades
             .iter()
@@ -439,9 +445,7 @@ impl MomentumBacktestEngine {
         let total_wins: Decimal = wins.iter().sum();
         let total_losses_abs: Decimal = losses.iter().map(|l| l.abs()).sum();
         let profit_factor = if total_losses_abs > Decimal::ZERO {
-            (total_wins / total_losses_abs)
-                .to_f64()
-                .unwrap_or(0.0)
+            (total_wins / total_losses_abs).to_f64().unwrap_or(0.0)
         } else if total_wins > Decimal::ZERO {
             f64::INFINITY
         } else {
@@ -449,7 +453,11 @@ impl MomentumBacktestEngine {
         };
 
         let avg_holding = if total > 0 {
-            self.closed_trades.iter().map(|t| t.holding_secs as f64).sum::<f64>() / total as f64
+            self.closed_trades
+                .iter()
+                .map(|t| t.holding_secs as f64)
+                .sum::<f64>()
+                / total as f64
         } else {
             0.0
         };
@@ -524,9 +532,18 @@ impl MomentumBacktestEngine {
 impl fmt::Display for BacktestResults {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Momentum Backtest Results ===")?;
-        writeln!(f, "Period:        {} to {}", self.start_time.format("%Y-%m-%d %H:%M"), self.end_time.format("%Y-%m-%d %H:%M"))?;
+        writeln!(
+            f,
+            "Period:        {} to {}",
+            self.start_time.format("%Y-%m-%d %H:%M"),
+            self.end_time.format("%Y-%m-%d %H:%M")
+        )?;
         writeln!(f, "Total trades:  {}", self.total_trades)?;
-        writeln!(f, "Win/Loss:      {} / {}", self.winning_trades, self.losing_trades)?;
+        writeln!(
+            f,
+            "Win/Loss:      {} / {}",
+            self.winning_trades, self.losing_trades
+        )?;
         writeln!(f, "Win rate:      {:.1}%", self.win_rate * 100.0)?;
         writeln!(f, "Total PnL:     ${:.2}", self.total_pnl)?;
         writeln!(f, "Avg PnL/trade: ${:.4}", self.avg_pnl_per_trade)?;
@@ -653,10 +670,8 @@ mod tests {
 
     #[test]
     fn test_engine_empty_feed() {
-        let config = MomentumBacktestConfig::default_with_symbols(
-            vec!["BTCUSDT".into()],
-            dec!(10000),
-        );
+        let config =
+            MomentumBacktestConfig::default_with_symbols(vec!["BTCUSDT".into()], dec!(10000));
         let mut engine = MomentumBacktestEngine::new(config);
         let mut feed = mock_feed(vec![]);
         let results = engine.run(&mut feed);
@@ -667,10 +682,8 @@ mod tests {
 
     #[test]
     fn test_sharpe_calculation() {
-        let config = MomentumBacktestConfig::default_with_symbols(
-            vec!["BTCUSDT".into()],
-            dec!(10000),
-        );
+        let config =
+            MomentumBacktestConfig::default_with_symbols(vec!["BTCUSDT".into()], dec!(10000));
         let engine = MomentumBacktestEngine::new(config);
         // With no trades, sharpe should be 0
         assert_eq!(engine.calculate_sharpe(), 0.0);

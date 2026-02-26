@@ -69,7 +69,10 @@ impl IntegrityChecker {
         match self.run_sql_checks().await {
             Ok(sql_checks) => checks.extend(sql_checks),
             Err(e) => {
-                warn!("SQL integrity function not available (run migration 019?): {}", e);
+                warn!(
+                    "SQL integrity function not available (run migration 019?): {}",
+                    e
+                );
                 checks.push(CheckResult {
                     name: "sql_check_data_integrity".into(),
                     ok: false,
@@ -107,10 +110,9 @@ impl IntegrityChecker {
 
     /// Call the PL/pgSQL `check_data_integrity()` function and parse results.
     async fn run_sql_checks(&self) -> Result<Vec<CheckResult>> {
-        let row: (serde_json::Value,) =
-            sqlx::query_as("SELECT check_data_integrity()")
-                .fetch_one(&self.pool)
-                .await?;
+        let row: (serde_json::Value,) = sqlx::query_as("SELECT check_data_integrity()")
+            .fetch_one(&self.pool)
+            .await?;
 
         let json = row.0;
         let mut checks = Vec::new();
@@ -172,8 +174,15 @@ impl IntegrityChecker {
 
         let count = rows.len() as i64;
         let detail = if count > 0 {
-            let ids: Vec<String> = rows.iter().take(5).map(|(id, _, _)| id.to_string()).collect();
-            Some(format!("Drifted position IDs (first 5): {}", ids.join(", ")))
+            let ids: Vec<String> = rows
+                .iter()
+                .take(5)
+                .map(|(id, _, _)| id.to_string())
+                .collect();
+            Some(format!(
+                "Drifted position IDs (first 5): {}",
+                ids.join(", ")
+            ))
         } else {
             None
         };
