@@ -2,6 +2,7 @@
 pub mod api_server;
 pub mod binance_kline_ws;
 pub mod binance_ws;
+pub mod chainlink_rtds;
 pub mod feishu;
 pub mod kalshi_rest;
 pub mod onchain_indexer;
@@ -17,6 +18,7 @@ pub use api_server::{
 };
 pub use binance_kline_ws::{BinanceKlineBar, BinanceKlineWebSocket, KlineUpdate};
 pub use binance_ws::{BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice};
+pub use chainlink_rtds::{ChainlinkPriceCache, ChainlinkRtds, ChainlinkSpot, ChainlinkUpdate};
 pub use feishu::FeishuNotifier;
 pub use kalshi_rest::KalshiClient;
 pub use polymarket_clob::{

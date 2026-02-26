@@ -15,7 +15,7 @@ use crate::domain::Side;
 
 /// Standard normal CDF approximation (Abramowitz-Stegun)
 /// Accurate to ~4 decimal places
-fn normal_cdf(x: f64) -> f64 {
+pub fn normal_cdf(x: f64) -> f64 {
     let a1 = 0.254829592;
     let a2 = -0.284496736;
     let a3 = 1.421413741;
@@ -240,6 +240,15 @@ impl EventTracker {
         self.active_events
             .keys()
             .any(|k| k.ends_with(&format!(":{}", event_id)))
+    }
+
+    /// Get active event by event_id only (searches across all symbols)
+    pub fn get_event(&self, event_id: &str) -> Option<&ActiveEvent> {
+        let suffix = format!(":{}", event_id);
+        self.active_events
+            .iter()
+            .find(|(k, _)| k.ends_with(&suffix))
+            .map(|(_, v)| v)
     }
 
     /// Start tracking a new event (convenience wrapper)

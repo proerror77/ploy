@@ -19,13 +19,16 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{
-    GammaEventInfo, PolymarketClient, PriceCache, PriceUpdate, QuoteCache, QuoteUpdate, SpotPrice,
+    ChainlinkPriceCache, ChainlinkUpdate, GammaEventInfo, PolymarketClient, PriceCache,
+    PriceUpdate, QuoteCache, QuoteUpdate, SpotPrice,
 };
 use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
+use crate::strategy::fee_model::FeeModel;
 use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
+use crate::strategy::probability;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
 use crate::strategy::OrderExecutor;
 
@@ -1435,6 +1438,10 @@ pub struct Position {
     pub event_end_time: DateTime<Utc>,
     pub event_slug: String,
     pub condition_id: String,
+    /// P_hat at entry time (for probability-stop exit rule)
+    pub entry_p_hat: Option<f64>,
+    /// Chainlink open price (S0) at window start
+    pub window_open_price: Option<Decimal>,
 }
 
 impl Position {
@@ -1467,6 +1474,10 @@ pub enum ExitReason {
     TrailingStop { high: Decimal, current: Decimal },
     TimeExit,
     Manual,
+    /// Probability model thesis invalidated (p_hat dropped below threshold)
+    ProbabilityStop { entry_p_hat: f64, current_p_hat: f64 },
+    /// Hard loss limit per trade
+    HardStop { loss_usd: Decimal },
 }
 
 impl std::fmt::Display for ExitReason {
@@ -1488,6 +1499,18 @@ impl std::fmt::Display for ExitReason {
             }
             ExitReason::TimeExit => write!(f, "TimeExit"),
             ExitReason::Manual => write!(f, "Manual"),
+            ExitReason::ProbabilityStop {
+                entry_p_hat,
+                current_p_hat,
+            } => {
+                write!(
+                    f,
+                    "ProbStop(entry={:.0}%→{:.0}%)",
+                    entry_p_hat * 100.0,
+                    current_p_hat * 100.0
+                )
+            }
+            ExitReason::HardStop { loss_usd } => write!(f, "HardStop(${:.2})", loss_usd),
         }
     }
 }
@@ -1716,6 +1739,13 @@ pub struct MomentumEngine {
     dump_hedge: Option<Arc<DumpHedgeEngine>>,
     // Serialize entry path to avoid duplicate orders for the same event under concurrent updates.
     entry_mutex: Arc<Mutex<()>>,
+    // === Directional prediction infrastructure ===
+    // Dynamic fee model for cost-aware entry
+    fee_model: FeeModel,
+    // Chainlink price cache for ground truth oracle prices
+    chainlink_cache: Option<ChainlinkPriceCache>,
+    // Entry threshold for EV_net (directional mode)
+    entry_threshold: f64,
 }
 
 impl MomentumEngine {
@@ -1765,6 +1795,9 @@ impl MomentumEngine {
             kline_client: None,
             dump_hedge: None,
             entry_mutex: Arc::new(Mutex::new(())),
+            fee_model: FeeModel::crypto(),
+            chainlink_cache: None,
+            entry_threshold: 0.08,
         }
     }
 
@@ -1783,6 +1816,24 @@ impl MomentumEngine {
     /// Enable Dump & Hedge strategy
     pub fn with_dump_hedge(mut self, config: DumpHedgeConfig) -> Self {
         self.dump_hedge = Some(Arc::new(DumpHedgeEngine::new(config)));
+        self
+    }
+
+    /// Set dynamic fee model (default: crypto parabolic)
+    pub fn with_fee_model(mut self, model: FeeModel) -> Self {
+        self.fee_model = model;
+        self
+    }
+
+    /// Set Chainlink price cache for directional prediction
+    pub fn with_chainlink_cache(mut self, cache: ChainlinkPriceCache) -> Self {
+        self.chainlink_cache = Some(cache);
+        self
+    }
+
+    /// Set EV_net entry threshold for directional mode (default: 0.08)
+    pub fn with_entry_threshold(mut self, threshold: f64) -> Self {
+        self.entry_threshold = threshold;
         self
     }
 
@@ -2149,6 +2200,8 @@ impl MomentumEngine {
         mut pm_rx: broadcast::Receiver<QuoteUpdate>,
         binance_cache: &PriceCache,
         pm_cache: &QuoteCache,
+        mut chainlink_rx: Option<broadcast::Receiver<ChainlinkUpdate>>,
+        chainlink_cache: Option<&ChainlinkPriceCache>,
     ) -> Result<()> {
         info!("Starting momentum engine (dry_run={})", self.dry_run);
 
@@ -2207,12 +2260,37 @@ impl MomentumEngine {
             );
         }
 
+        let has_chainlink = chainlink_rx.is_some();
+        if has_chainlink {
+            info!("=== DIRECTIONAL PREDICTION MODE ===");
+            info!("• Ground truth: Chainlink RTDS (not Binance)");
+            info!("• Fee model: parabolic (crypto, fee_rate=0.25, exp=2)");
+            info!("• Entry threshold: EV_net >= {:.1}%", self.entry_threshold * 100.0);
+        }
+
         loop {
             tokio::select! {
-                // CEX price update - check for entry signals
+                // PRIMARY (when Chainlink active): Oracle price → probability → entry
+                Ok(cl_update) = async {
+                    match chainlink_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(cl_cache) = chainlink_cache {
+                        if let Err(e) = self.on_chainlink_update(&cl_update, cl_cache, binance_cache, pm_cache).await {
+                            error!("Error processing Chainlink update: {}", e);
+                        }
+                    }
+                }
+
+                // CEX price update - entry signals (fallback when no Chainlink)
                 Ok(price_update) = binance_rx.recv() => {
-                    if let Err(e) = self.on_cex_update(&price_update, binance_cache, pm_cache).await {
-                        error!("Error processing CEX update: {}", e);
+                    // When Chainlink is active, Binance is features-only (no direct entry)
+                    if !has_chainlink {
+                        if let Err(e) = self.on_cex_update(&price_update, binance_cache, pm_cache).await {
+                            error!("Error processing CEX update: {}", e);
+                        }
                     }
                 }
 
@@ -2410,6 +2488,168 @@ impl MomentumEngine {
         (up_ask, down_ask)
     }
 
+    /// Handle Chainlink price update — directional probability-based entry
+    ///
+    /// This is the PRIMARY signal path for directional prediction mode.
+    /// Uses the log-normal probability model to estimate P(Up) and checks
+    /// EV_net = effective_p - market_ask - all_in_cost >= threshold.
+    async fn on_chainlink_update(
+        &self,
+        update: &ChainlinkUpdate,
+        chainlink_cache: &ChainlinkPriceCache,
+        binance_cache: &PriceCache,
+        pm_cache: &QuoteCache,
+    ) -> Result<()> {
+        // Map Chainlink symbol to Binance symbol for event matching
+        let binance_symbol = match crate::adapters::chainlink_rtds::to_binance_symbol(&update.symbol) {
+            Some(s) => s.to_string(),
+            None => return Ok(()),
+        };
+
+        if !self.config.symbols.contains(&binance_symbol) {
+            return Ok(());
+        }
+
+        // Find matching event
+        let event = match self
+            .event_matcher
+            .find_event_with_timing(
+                &binance_symbol,
+                self.config.min_time_remaining_secs,
+                self.config.max_time_remaining_secs as i64,
+                true,
+            )
+            .await
+        {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+
+        let time_remaining = event.time_remaining().num_seconds() as f64;
+        if time_remaining <= 0.0 {
+            return Ok(());
+        }
+
+        // Get Chainlink spot with history
+        let cl_spot = match chainlink_cache.get(&update.symbol).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Get window open price (S0) from event tracker or price_to_beat
+        let s0 = {
+            let tracker = self.event_tracker.read().await;
+            if let Some(record) = tracker.get_event(&event.condition_id) {
+                record.start_price
+            } else if let Some(ptb) = event.price_to_beat {
+                ptb
+            } else {
+                return Ok(());
+            }
+        };
+
+        let st = cl_spot.price;
+
+        // Compute realized vol from Chainlink history (5min rolling)
+        let sigma = cl_spot
+            .volatility(300)
+            .and_then(|v| v.to_f64())
+            .unwrap_or(0.001); // fallback to 0.1% vol
+
+        // Estimate probability using log-normal model
+        let p_hat = probability::estimate_probability(s0, st, sigma, time_remaining, 0.0);
+
+        // Determine direction and get market ask price
+        let (up_ask, down_ask) = self.get_pm_prices(pm_cache, &event).await;
+        let (direction, market_ask) = if p_hat > 0.5 {
+            match up_ask {
+                Some(ask) => (Direction::Up, ask),
+                None => return Ok(()),
+            }
+        } else {
+            match down_ask {
+                Some(ask) => (Direction::Down, ask),
+                None => return Ok(()),
+            }
+        };
+        let effective_p = if direction == Direction::Up {
+            p_hat
+        } else {
+            1.0 - p_hat
+        };
+
+        // Compute all-in cost
+        let best_bid = if direction == Direction::Up {
+            pm_cache.get(&event.up_token_id).and_then(|q| q.best_bid).unwrap_or(market_ask)
+        } else {
+            pm_cache.get(&event.down_token_id).and_then(|q| q.best_bid).unwrap_or(market_ask)
+        };
+        let depth_ratio = dec!(0.3); // conservative default
+        let cost = self.fee_model.all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
+        let cost_total_f64 = cost.total.to_f64().unwrap_or(0.02);
+        let market_ask_f64 = market_ask.to_f64().unwrap_or(0.5);
+
+        // EV_net check
+        let ev_net = effective_p - market_ask_f64 - cost_total_f64;
+
+        debug!(
+            "🔮 {} {} p_hat={:.3} effective_p={:.3} ask={:.3} cost={:.4} ev_net={:.4} threshold={:.3}",
+            binance_symbol, direction, p_hat, effective_p,
+            market_ask_f64, cost_total_f64, ev_net, self.entry_threshold
+        );
+
+        if ev_net < self.entry_threshold {
+            return Ok(());
+        }
+
+        // Get Binance features for logging (used in future calibration)
+        let (_momentum_10s, _momentum_60s) = if let Some(spot) = binance_cache.get(&binance_symbol).await {
+            (
+                spot.momentum(10).and_then(|m| m.to_f64()).unwrap_or(0.0),
+                spot.momentum(60).and_then(|m| m.to_f64()).unwrap_or(0.0),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+
+        info!(
+            "🔮 DIRECTIONAL ENTRY: {} {} p_hat={:.1}% ev_net={:.1}% ask={:.1}¢ cost={:.2}% σ={:.4}",
+            binance_symbol,
+            direction,
+            effective_p * 100.0,
+            ev_net * 100.0,
+            market_ask_f64 * 100.0,
+            cost_total_f64 * 100.0,
+            sigma,
+        );
+
+        // Create signal and enter via existing maybe_enter path
+        let cex_move_pct = Decimal::try_from((st - s0) / s0).unwrap_or(Decimal::ZERO);
+        let edge = Decimal::try_from(ev_net).unwrap_or(Decimal::ZERO);
+        let signal = MomentumSignal {
+            symbol: binance_symbol,
+            direction,
+            cex_move_pct,
+            pm_price: market_ask,
+            edge,
+            confidence: effective_p,
+            timestamp: Utc::now(),
+        };
+
+        self.maybe_enter(signal, &event).await?;
+
+        // If we entered, update the position with p_hat and S0
+        {
+            let mut positions = self.positions.write().await;
+            if let Some(pos) = positions.values_mut().find(|p| p.condition_id == event.condition_id) {
+                pos.entry_p_hat = Some(p_hat);
+                pos.window_open_price = Some(s0);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle Polymarket quote update - check exit conditions and dump signals
     async fn on_pm_update(&self, update: &QuoteUpdate) -> Result<()> {
         // Update dump hedge price tracker if enabled
@@ -2421,8 +2661,90 @@ impl MomentumEngine {
             }
         }
 
-        // CRYINGLITTLEBABY mode: skip exit checks, hold to resolution for $1
-        if self.config.hold_to_resolution {
+        // Probability-driven exit check for directional mode positions
+        if let Some(ref cl_cache) = self.chainlink_cache {
+            let positions = self.positions.read().await;
+            if let Some((key, pos)) = positions
+                .iter()
+                .find(|(_, p)| p.token_id == update.token_id)
+            {
+                if let (Some(entry_p), Some(s0)) = (pos.entry_p_hat, pos.window_open_price) {
+                    let key = key.clone();
+                    let direction = pos.direction;
+                    let time_remaining = pos.time_to_resolution().num_seconds() as f64;
+
+                    // Map Binance symbol back to Chainlink
+                    if let Some(cl_symbol) = crate::adapters::chainlink_rtds::to_chainlink_symbol(&pos.symbol) {
+                        if let Some(cl_spot) = cl_cache.get(cl_symbol).await {
+                            let sigma = cl_spot
+                                .volatility(300)
+                                .and_then(|v| v.to_f64())
+                                .unwrap_or(0.001);
+                            let current_p_hat = probability::estimate_probability(
+                                s0, cl_spot.price, sigma, time_remaining, 0.0,
+                            );
+                            let effective_p = if direction == Direction::Up {
+                                current_p_hat
+                            } else {
+                                1.0 - current_p_hat
+                            };
+                            let entry_effective = if direction == Direction::Up {
+                                entry_p
+                            } else {
+                                1.0 - entry_p
+                            };
+
+                            // Probability stop: p_hat drops below 60% of entry
+                            if effective_p < entry_effective * 0.6 {
+                                if let Some(bid) = update.quote.best_bid {
+                                    drop(positions);
+                                    let reason = ExitReason::ProbabilityStop {
+                                        entry_p_hat: entry_effective,
+                                        current_p_hat: effective_p,
+                                    };
+                                    self.execute_exit(&key, bid, reason).await?;
+                                    return Ok(());
+                                }
+                            }
+
+                            // Time stop: < 30s remaining AND negative EV
+                            if time_remaining < 30.0 {
+                                let ask_f64 = update.quote.best_ask
+                                    .and_then(|a| a.to_f64())
+                                    .unwrap_or(0.5);
+                                let cost = self.fee_model.effective_rate(
+                                    update.quote.best_ask.unwrap_or(dec!(0.5))
+                                ).to_f64().unwrap_or(0.015);
+                                let ev_net = effective_p - ask_f64 - cost;
+                                if ev_net < 0.0 {
+                                    if let Some(bid) = update.quote.best_bid {
+                                        drop(positions);
+                                        self.execute_exit(&key, bid, ExitReason::TimeExit).await?;
+                                        return Ok(());
+                                    }
+                                }
+                            }
+
+                            // Hard stop: unrealized loss > $5
+                            if let Some(bid) = update.quote.best_bid {
+                                let unrealized_pnl = (bid - pos.entry_price) * Decimal::from(pos.shares);
+                                if unrealized_pnl < dec!(-5) {
+                                    drop(positions);
+                                    let reason = ExitReason::HardStop {
+                                        loss_usd: -unrealized_pnl,
+                                    };
+                                    self.execute_exit(&key, bid, reason).await?;
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // CRYINGLITTLEBABY mode: skip traditional exit checks, hold to resolution for $1
+        if self.config.hold_to_resolution && self.chainlink_cache.is_none() {
             return Ok(()); // No early exits - positions resolve automatically
         }
 
@@ -2702,6 +3024,8 @@ impl MomentumEngine {
                         event_end_time: event.end_time,
                         event_slug: event.slug.clone(),
                         condition_id: event.condition_id.clone(),
+                        entry_p_hat: None,
+                        window_open_price: None,
                     };
 
                     let mut positions = self.positions.write().await;
@@ -3024,6 +3348,8 @@ impl MomentumEngine {
                         event_end_time: event.end_time,
                         event_slug: event.slug.clone(),
                         condition_id: event.condition_id.clone(),
+                        entry_p_hat: None,
+                        window_open_price: None,
                     };
 
                     let mut positions = self.positions.write().await;
@@ -3099,6 +3425,8 @@ mod tests {
             event_end_time: Utc::now() + ChronoDuration::minutes(10),
             event_slug: "test".into(),
             condition_id: "test_condition".into(),
+            entry_p_hat: None,
+            window_open_price: None,
         };
 
         // 10% profit
@@ -3131,6 +3459,8 @@ mod tests {
             event_end_time: Utc::now() + ChronoDuration::minutes(10),
             event_slug: "test".into(),
             condition_id: "test_condition".into(),
+            entry_p_hat: None,
+            window_open_price: None,
         };
 
         // 25% profit should trigger take profit
@@ -3155,6 +3485,8 @@ mod tests {
             event_end_time: Utc::now() + ChronoDuration::minutes(10),
             event_slug: "test".into(),
             condition_id: "test_condition".into(),
+            entry_p_hat: None,
+            window_open_price: None,
         };
 
         // 20% loss should trigger stop loss

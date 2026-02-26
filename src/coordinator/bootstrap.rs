@@ -1459,6 +1459,123 @@ fn spawn_binance_price_persistence(
     });
 }
 
+// ---------------------------------------------------------------------------
+// Chainlink RTDS tick persistence
+// ---------------------------------------------------------------------------
+
+async fn ensure_chainlink_tables(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS chainlink_price_ticks (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            price NUMERIC NOT NULL,
+            source_timestamp TIMESTAMPTZ NOT NULL,
+            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_chainlink_ticks_symbol_time ON chainlink_price_ticks(symbol, source_timestamp DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_chainlink_ticks_time ON chainlink_price_ticks(received_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS market_window_labels (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            window_start TIMESTAMPTZ NOT NULL,
+            window_end TIMESTAMPTZ NOT NULL,
+            open_price NUMERIC NOT NULL,
+            close_price NUMERIC,
+            label SMALLINT,
+            condition_id TEXT,
+            UNIQUE(symbol, window_start)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_market_window_labels_symbol ON market_window_labels(symbol, window_start DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+fn spawn_chainlink_persistence(
+    chainlink_ws: Arc<crate::adapters::ChainlinkRtds>,
+    pool: PgPool,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = ensure_chainlink_tables(&pool).await {
+            warn!(
+                error = %e,
+                "failed to ensure chainlink tables; Chainlink persistence disabled"
+            );
+            return;
+        }
+
+        let mut rx = chainlink_ws.subscribe();
+        let mut persisted_count: u64 = 0;
+
+        loop {
+            match rx.recv().await {
+                Ok(update) => {
+                    if let Err(e) = sqlx::query(
+                        r#"
+                        INSERT INTO chainlink_price_ticks
+                            (symbol, price, source_timestamp)
+                        VALUES
+                            ($1, $2, $3)
+                        "#,
+                    )
+                    .bind(&update.symbol)
+                    .bind(update.price)
+                    .bind(update.timestamp)
+                    .execute(&pool)
+                    .await
+                    {
+                        warn!(
+                            symbol = %update.symbol,
+                            error = %e,
+                            "failed to persist Chainlink price tick"
+                        );
+                        continue;
+                    }
+
+                    persisted_count = persisted_count.saturating_add(1);
+
+                    if persisted_count % 10_000 == 0 {
+                        info!(persisted_count, "persisted Chainlink price ticks");
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "chainlink persistence receiver lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    warn!("chainlink persistence receiver closed");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 fn lob_levels_json(
     state: &crate::collector::OrderBookState,
     is_bids: bool,
