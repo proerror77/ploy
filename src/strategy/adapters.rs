@@ -521,6 +521,13 @@ impl MomentumStrategyAdapter {
         if time_remaining <= self.config.min_time_remaining_secs as f64
             || time_remaining > self.config.max_time_remaining_secs as f64
         {
+            // Log every 30s to avoid spam (keyed on symbol+minute)
+            let minute = ts.timestamp() / 30;
+            static LAST_LOG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+            let prev = LAST_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed);
+            if prev != minute {
+                debug!("[{}] DIRECTIONAL: {} time_remaining={:.0}s (window: {}..{}s)", self.id, symbol, time_remaining, self.config.min_time_remaining_secs, self.config.max_time_remaining_secs);
+            }
             return None;
         }
 
@@ -546,14 +553,28 @@ impl MomentumStrategyAdapter {
         // Direction + market ask
         let (direction, market_ask) = if p_hat > 0.5 {
             let quotes = self.pm_quotes.read().await;
-            let ask = quotes.get(&up_token)?.best_ask?;
-            drop(quotes);
-            (Direction::Up, ask)
+            match quotes.get(&up_token).and_then(|q| q.best_ask) {
+                Some(ask) => {
+                    drop(quotes);
+                    (Direction::Up, ask)
+                }
+                None => {
+                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (token={}..)", self.id, symbol, p_hat * 100.0, &up_token[..8.min(up_token.len())]);
+                    return None;
+                }
+            }
         } else {
             let quotes = self.pm_quotes.read().await;
-            let ask = quotes.get(&down_token)?.best_ask?;
-            drop(quotes);
-            (Direction::Down, ask)
+            match quotes.get(&down_token).and_then(|q| q.best_ask) {
+                Some(ask) => {
+                    drop(quotes);
+                    (Direction::Down, ask)
+                }
+                None => {
+                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no DOWN ask (token={}..)", self.id, symbol, p_hat * 100.0, &down_token[..8.min(down_token.len())]);
+                    return None;
+                }
+            }
         };
         let effective_p = if direction == Direction::Up {
             p_hat
@@ -578,6 +599,12 @@ impl MomentumStrategyAdapter {
         // EV_net check (default threshold 0.08 = 8%)
         let ev_net = effective_p - market_ask_f64 - cost_total_f64;
         if ev_net < 0.08 {
+            debug!(
+                "[{}] DIRECTIONAL: {} {} p={:.1}% ask={:.0}¢ ev={:.1}% < 8% (σ={:.4} t={:.0}s)",
+                self.id, symbol, if p_hat > 0.5 { "UP" } else { "DOWN" },
+                effective_p * 100.0, market_ask_f64 * 100.0, ev_net * 100.0,
+                sigma, time_remaining
+            );
             return None;
         }
 
