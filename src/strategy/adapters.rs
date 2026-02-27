@@ -239,41 +239,48 @@ impl MomentumStrategyAdapter {
                 .get("volatility_lookback")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(60) as u64,
-            shares_per_trade: risk
-                .get("shares")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(100) as u64,
-            max_positions: risk
+            shares_per_trade: entry
+                .get("shares_per_trade")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(100.0) as u64,
+            max_positions: entry
                 .get("max_positions")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(5) as usize,
-            cooldown_secs: 60,
-            max_daily_trades: 50,
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(5.0) as usize,
+            cooldown_secs: entry
+                .get("cooldown_secs")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(60.0) as u64,
+            max_daily_trades: entry
+                .get("max_daily_trades")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(50.0) as u32,
             symbols,
             hold_to_resolution,
-            min_time_remaining_secs: timing
+            min_time_remaining_secs: entry
                 .get("min_time_remaining")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(300) as u64,
-            max_time_remaining_secs: timing
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(300.0) as u64,
+            max_time_remaining_secs: entry
                 .get("max_time_remaining")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(900) as u64,
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(900.0) as u64,
             // Cross-symbol risk control
             max_window_exposure_usd: Decimal::try_from(
-                risk.get("max_window_exposure")
-                    .and_then(|v| v.as_float())
+                entry
+                    .get("max_window_exposure")
+                    .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
                     .unwrap_or(25.0),
             )
             .unwrap_or(dec!(25)),
-            best_edge_only: risk
+            best_edge_only: entry
                 .get("best_edge_only")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-            signal_collection_delay_ms: risk
+            signal_collection_delay_ms: entry
                 .get("signal_delay_ms")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(2000) as u64,
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .unwrap_or(2000.0) as u64,
             // === ENHANCED MOMENTUM DETECTION ===
             require_mtf_agreement: entry
                 .get("require_mtf_agreement")
