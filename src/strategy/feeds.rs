@@ -114,7 +114,7 @@ fn parse_rfc3339_utc(value: Option<&str>) -> Option<DateTime<Utc>> {
 async fn upsert_pm_market_metadata(
     pool: Option<&PgPool>,
     details: &crate::adapters::polymarket_clob::GammaEventInfo,
-    price_to_beat: rust_decimal::Decimal,
+    price_to_beat: Option<rust_decimal::Decimal>,
     end_time: DateTime<Utc>,
 ) -> Result<()> {
     let Some(pool) = pool else {
@@ -685,10 +685,8 @@ impl DataFeedManager {
                         let (Some(up_token), Some(down_token)) = (up_token, down_token) else {
                             continue;
                         };
-                        let Some(price_to_beat) = price_to_beat else {
-                            // Keep only events with explicit threshold to align labels/features.
-                            continue;
-                        };
+                        // price_to_beat is optional — new-format "Up or Down" events
+                        // don't include it in the API; it's set dynamically at window open.
 
                         if let Err(e) = upsert_pm_market_metadata(
                             self.metadata_pool.as_deref(),
@@ -717,7 +715,7 @@ impl DataFeedManager {
                             up_token: up_token.clone(),
                             down_token: down_token.clone(),
                             end_time,
-                            price_to_beat: Some(price_to_beat),
+                            price_to_beat,
                             title: title.clone(),
                         };
 
@@ -982,9 +980,7 @@ impl DataFeedManager {
                         let (Some(up_token), Some(down_token)) = (up_token, down_token) else {
                             continue;
                         };
-                        let Some(price_to_beat) = price_to_beat else {
-                            continue;
-                        };
+                        // price_to_beat is optional for new-format events
 
                         if let Err(e) = upsert_pm_market_metadata(
                             metadata_pool.as_deref(),
@@ -1017,7 +1013,7 @@ impl DataFeedManager {
                                 up_token,
                                 down_token,
                                 end_time,
-                                price_to_beat: Some(price_to_beat),
+                                price_to_beat,
                                 title,
                             },
                         );
