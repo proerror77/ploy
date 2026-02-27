@@ -564,9 +564,7 @@ impl MomentumStrategyAdapter {
                     (Direction::Up, ask)
                 }
                 None => {
-                    let key_lens: Vec<usize> = quotes.keys().map(|k| k.len()).collect();
-                    let has_prefix = quotes.keys().any(|k| k.starts_with(&up_token[..8.min(up_token.len())]));
-                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (token_len={} token={}.. quotes={} key_lens={:?} has_prefix={})", self.id, symbol, p_hat * 100.0, up_token.len(), &up_token[..16.min(up_token.len())], quotes.len(), &key_lens[..5.min(key_lens.len())], has_prefix);
+                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (quotes={})", self.id, symbol, p_hat * 100.0, quotes.len());
                     return None;
                 }
             }
@@ -959,12 +957,18 @@ impl Strategy for MomentumStrategyAdapter {
                 let mut events = self.events.write().await;
 
                 // Prefer the event with the shortest time remaining (most urgent).
-                // If we already have an event for this symbol, only replace if
-                // the new event ends sooner (closer to entry window).
+                // Always replace expired events so new windows aren't blocked.
                 if let Some(existing) = events.get(symbol) {
-                    if existing.end_time <= *end_time {
-                        // Existing event is sooner or same — keep it
+                    let now = chrono::Utc::now();
+                    if existing.end_time > now && existing.end_time <= *end_time {
+                        // Existing event is still active AND ends sooner — keep it
                         return Ok(actions);
+                    }
+                    if existing.end_time <= now {
+                        debug!(
+                            "[{}] Replacing expired event for {} (was {}, ended {})",
+                            self.id, symbol, existing.event_id, existing.end_time
+                        );
                     }
                 }
 
