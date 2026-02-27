@@ -133,7 +133,8 @@ mockall = "0.12"
 tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
-lto = "thin"
-codegen-units = 4
+lto = false
+codegen-units = 8
 panic = "abort"
-strip = "debuginfo"
+strip = true
+opt-level = "s"
