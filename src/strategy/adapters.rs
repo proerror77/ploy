@@ -125,6 +125,8 @@ struct EventState {
     end_time: DateTime<Utc>,
     /// CEX price when event was first discovered (used as S0 for directional mode)
     open_price: Option<Decimal>,
+    /// Window duration in seconds (300 = 5m, 900 = 15m)
+    window_secs: u64,
 }
 
 /// Position in a momentum trade
@@ -536,16 +538,19 @@ impl MomentumStrategyAdapter {
         let st = *current_price;
         let up_token = event.up_token_id.clone();
         let down_token = event.down_token_id.clone();
+        let window_secs = event.window_secs;
         drop(events);
 
-        // Sigma: fixed per-symbol estimates for 15-min window (can upgrade to realized vol later)
-        let sigma: f64 = match symbol {
+        // Sigma: per-symbol estimates calibrated for 15-min windows.
+        // Scale by √(window/900) for different durations (5m windows → smaller σ).
+        let sigma_15m: f64 = match symbol {
             "BTCUSDT" => 0.005,
             "ETHUSDT" => 0.008,
             "SOLUSDT" => 0.015,
             _ => 0.010,
         };
-        let sigma = sigma.max(self.config.directional_vol_floor);
+        let window_scale = (window_secs as f64 / 900.0).sqrt();
+        let sigma = (sigma_15m * window_scale).max(self.config.directional_vol_floor);
 
         // Probability model
         let p_hat = probability::estimate_probability(s0, st, sigma, time_remaining, 0.0);
@@ -600,16 +605,16 @@ impl MomentumStrategyAdapter {
         let ev_net = effective_p - market_ask_f64 - cost_total_f64;
         if ev_net < 0.08 {
             debug!(
-                "[{}] DIRECTIONAL: {} {} p={:.1}% ask={:.0}¢ ev={:.1}% < 8% (σ={:.4} t={:.0}s)",
+                "[{}] DIRECTIONAL: {} {} p={:.1}% ask={:.0}¢ ev={:.1}% < 8% (σ={:.4} t={:.0}s {}m)",
                 self.id, symbol, if p_hat > 0.5 { "UP" } else { "DOWN" },
                 effective_p * 100.0, market_ask_f64 * 100.0, ev_net * 100.0,
-                sigma, time_remaining
+                sigma, time_remaining, window_secs / 60
             );
             return None;
         }
 
         info!(
-            "[{}] 🎯 DIRECTIONAL: {} {} p={:.1}% ev={:.1}% ask={:.0}¢ σ={:.4} S0={:.2} ST={:.2}",
+            "[{}] 🎯 DIRECTIONAL: {} {} p={:.1}% ev={:.1}% ask={:.0}¢ σ={:.4} S0={:.2} ST={:.2} ({}m)",
             self.id,
             symbol,
             direction,
@@ -619,6 +624,7 @@ impl MomentumStrategyAdapter {
             sigma,
             s0,
             st,
+            window_secs / 60,
         );
 
         self.generate_entry(symbol, direction, market_ask).await
@@ -713,6 +719,11 @@ impl Strategy for MomentumStrategyAdapter {
             },
             DataFeed::PolymarketEvents {
                 series_ids: vec![
+                    // 5m windows
+                    "10684".into(), // BTC 5m
+                    "10683".into(), // ETH 5m
+                    "10686".into(), // SOL 5m
+                    // 15m windows
                     "10192".into(), // BTC 15m
                     "10191".into(), // ETH 15m
                     "10423".into(), // SOL 15m
@@ -929,15 +940,31 @@ impl Strategy for MomentumStrategyAdapter {
                 title: _,
             } => {
                 // Map series to symbol
-                let symbol = match series_id.as_str() {
-                    "10192" => "BTCUSDT",
-                    "10191" => "ETHUSDT",
-                    "10423" => "SOLUSDT",
-                    "10422" => "XRPUSDT",
+                let (symbol, window_secs) = match series_id.as_str() {
+                    // 5m windows
+                    "10684" => ("BTCUSDT", 300u64),
+                    "10683" => ("ETHUSDT", 300),
+                    "10686" => ("SOLUSDT", 300),
+                    "10685" => ("XRPUSDT", 300),
+                    // 15m windows
+                    "10192" => ("BTCUSDT", 900),
+                    "10191" => ("ETHUSDT", 900),
+                    "10423" => ("SOLUSDT", 900),
+                    "10422" => ("XRPUSDT", 900),
                     _ => return Ok(actions),
                 };
 
                 let mut events = self.events.write().await;
+
+                // Prefer the event with the shortest time remaining (most urgent).
+                // If we already have an event for this symbol, only replace if
+                // the new event ends sooner (closer to entry window).
+                if let Some(existing) = events.get(symbol) {
+                    if existing.end_time <= *end_time {
+                        // Existing event is sooner or same — keep it
+                        return Ok(actions);
+                    }
+                }
 
                 // Get current CEX price as S0 for directional mode
                 let open_price = if self.config.directional_mode {
@@ -956,12 +983,13 @@ impl Strategy for MomentumStrategyAdapter {
                         down_token_id: down_token.clone(),
                         end_time: *end_time,
                         open_price,
+                        window_secs,
                     },
                 );
 
                 debug!(
-                    "[{}] Event discovered: {} for {}",
-                    self.id, event_id, symbol
+                    "[{}] Event discovered: {} for {} ({}m window, ends {})",
+                    self.id, event_id, symbol, window_secs / 60, end_time
                 );
             }
 

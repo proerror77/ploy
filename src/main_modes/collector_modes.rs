@@ -9,9 +9,13 @@ use tokio::signal;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
-/// Crypto series IDs for "Up or Down" 15-min markets on Polymarket.
-/// BTC: 10192, ETH: 10191, SOL: 10423 + 10422
-const CRYPTO_SERIES_IDS: &[&str] = &["10192", "10191", "10423", "10422"];
+/// Crypto series IDs for "Up or Down" markets on Polymarket.
+/// 5m: BTC=10684, ETH=10683, SOL=10686, XRP=10685
+/// 15m: BTC=10192, ETH=10191, SOL=10423, XRP=10422
+const CRYPTO_SERIES_IDS: &[&str] = &[
+    "10684", "10683", "10686", "10685", // 5m
+    "10192", "10191", "10423", "10422", // 15m
+];
 
 const PM_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const PM_REST_URL: &str = "https://clob.polymarket.com";
