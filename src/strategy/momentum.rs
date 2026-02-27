@@ -2570,6 +2570,15 @@ impl MomentumEngine {
             1.0 - p_hat
         };
 
+        // Price bounds: skip extremes (too cheap = bad risk/reward, too expensive = low edge)
+        if market_ask > self.config.max_entry_price {
+            return Ok(());
+        }
+        if market_ask < dec!(0.10) {
+            trace!("Skipping {} {} — ask {:.2}¢ below 10¢ floor", symbol, direction, market_ask * dec!(100));
+            return Ok(());
+        }
+
         // All-in cost via FeeModel (corrected: fee_per_share = price × effective_rate)
         let fee_model = FeeModel::crypto();
         let effective_rate = fee_model.effective_rate(market_ask);
