@@ -366,15 +366,23 @@ impl SyncCollector {
                 bn_price_change_5s DECIMAL(10, 6),
                 bn_momentum DECIMAL(10, 6),
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sync_records_ts ON sync_records(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_sync_records_symbol ON sync_records(symbol);
-            CREATE INDEX IF NOT EXISTS idx_sync_records_symbol_ts ON sync_records(symbol, timestamp);
+            )
             "#,
         )
         .execute(pool)
         .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_records_ts ON sync_records(timestamp)")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_sync_records_symbol ON sync_records(symbol)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_records_symbol_ts ON sync_records(symbol, timestamp)")
+            .execute(pool)
+            .await?;
 
         info!("Created sync_records table");
         Ok(())
