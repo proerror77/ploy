@@ -403,6 +403,16 @@ impl MomentumStrategyAdapter {
                 .unwrap_or(30) as u64,
         };
 
+        info!(
+            "MomentumAdapter config: directional_mode={} shares={} max_pos={} min_t={}s max_t={}s vol_floor={}",
+            momentum_config.directional_mode,
+            momentum_config.shares_per_trade,
+            momentum_config.max_positions,
+            momentum_config.min_time_remaining_secs,
+            momentum_config.max_time_remaining_secs,
+            momentum_config.directional_vol_floor,
+        );
+
         Ok(Self::new(id, momentum_config, exit_config, dry_run))
     }
 
@@ -499,7 +509,13 @@ impl MomentumStrategyAdapter {
         use rust_decimal::prelude::ToPrimitive;
 
         let events = self.events.read().await;
-        let event = events.get(symbol)?;
+        let event = match events.get(symbol) {
+            Some(e) => e,
+            None => {
+                debug!("[{}] DIRECTIONAL: no event for {}, events={:?}", self.id, symbol, events.keys().collect::<Vec<_>>());
+                return None;
+            }
+        };
 
         let time_remaining = (event.end_time - ts).num_seconds() as f64;
         if time_remaining <= self.config.min_time_remaining_secs as f64
