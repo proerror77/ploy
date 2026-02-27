@@ -44,8 +44,8 @@ pub struct MomentumStrategyAdapter {
     cex_prices: Arc<RwLock<HashMap<String, CexPriceState>>>,
     /// Polymarket quotes (token_id -> quote)
     pm_quotes: Arc<RwLock<HashMap<String, PmQuoteState>>>,
-    /// Event mappings (symbol -> event info)
-    events: Arc<RwLock<HashMap<String, EventState>>>,
+    /// Event mappings (symbol -> upcoming events, sorted by end_time)
+    events: Arc<RwLock<HashMap<String, Vec<EventState>>>>,
     /// Trade cooldowns (symbol -> last trade time)
     cooldowns: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
     /// Daily trade counter
@@ -511,27 +511,42 @@ impl MomentumStrategyAdapter {
         use rust_decimal::prelude::ToPrimitive;
 
         let events = self.events.read().await;
-        let event = match events.get(symbol) {
-            Some(e) => e,
-            None => {
+        let event_list = match events.get(symbol) {
+            Some(list) if !list.is_empty() => list,
+            _ => {
                 debug!("[{}] DIRECTIONAL: no event for {}, events={:?}", self.id, symbol, events.keys().collect::<Vec<_>>());
                 return None;
             }
         };
 
-        let time_remaining = (event.end_time - ts).num_seconds() as f64;
-        if time_remaining <= self.config.min_time_remaining_secs as f64
-            || time_remaining > self.config.max_time_remaining_secs as f64
+        // Pick the event closest to entering the window [min, max] seconds
+        let min_secs = self.config.min_time_remaining_secs as f64;
+        let max_secs = self.config.max_time_remaining_secs as f64;
+        let event = match event_list
+            .iter()
+            .filter(|e| {
+                let t = (e.end_time - ts).num_seconds() as f64;
+                t >= min_secs && t <= max_secs
+            })
+            .min_by_key(|e| e.end_time)
         {
-            // Log every 30s to avoid spam (keyed on symbol+minute)
-            let minute = ts.timestamp() / 30;
-            static LAST_LOG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-            let prev = LAST_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed);
-            if prev != minute {
-                debug!("[{}] DIRECTIONAL: {} time_remaining={:.0}s (window: {}..{}s)", self.id, symbol, time_remaining, self.config.min_time_remaining_secs, self.config.max_time_remaining_secs);
+            Some(e) => e,
+            None => {
+                // Log every 30s to avoid spam
+                let minute = ts.timestamp() / 30;
+                static LAST_LOG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                let prev = LAST_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed);
+                if prev != minute {
+                    let nearest = event_list.iter().filter(|e| e.end_time > ts)
+                        .min_by_key(|e| e.end_time)
+                        .map(|e| (e.end_time - ts).num_seconds())
+                        .unwrap_or(-1);
+                    debug!("[{}] DIRECTIONAL: {} no event in window ({}..{}s), {} events, nearest_t={}s", self.id, symbol, self.config.min_time_remaining_secs, self.config.max_time_remaining_secs, event_list.len(), nearest);
+                }
+                return None;
             }
-            return None;
-        }
+        };
+        let time_remaining = (event.end_time - ts).num_seconds() as f64;
 
         // S0: CEX price at window open
         let s0 = event.open_price.unwrap_or(*current_price);
@@ -633,7 +648,9 @@ impl MomentumStrategyAdapter {
     /// Get the best ask price for a direction
     async fn get_entry_price(&self, symbol: &str, direction: Direction) -> Option<Decimal> {
         let events = self.events.read().await;
-        let event = events.get(symbol)?;
+        let event_list = events.get(symbol)?;
+        let now = Utc::now();
+        let event = event_list.iter().filter(|e| e.end_time > now).min_by_key(|e| e.end_time)?;
 
         let token_id = match direction {
             Direction::Up => &event.up_token_id,
@@ -653,7 +670,9 @@ impl MomentumStrategyAdapter {
         entry_price: Decimal,
     ) -> Option<StrategyAction> {
         let events = self.events.read().await;
-        let event = events.get(symbol)?;
+        let event_list = events.get(symbol)?;
+        let now = Utc::now();
+        let event = event_list.iter().filter(|e| e.end_time > now).min_by_key(|e| e.end_time)?;
 
         let token_id = match direction {
             Direction::Up => event.up_token_id.clone(),
@@ -837,7 +856,8 @@ impl Strategy for MomentumStrategyAdapter {
                             // Log why we can't get entry price
                             let events = self.events.read().await;
                             let quotes = self.pm_quotes.read().await;
-                            if let Some(event) = events.get(symbol) {
+                            let now = Utc::now();
+                            if let Some(event) = events.get(symbol).and_then(|list| list.iter().filter(|e| e.end_time > now).min_by_key(|e| e.end_time)) {
                                 let token_id = match direction {
                                     Direction::Up => &event.up_token_id,
                                     Direction::Down => &event.down_token_id,
@@ -955,21 +975,15 @@ impl Strategy for MomentumStrategyAdapter {
                 };
 
                 let mut events = self.events.write().await;
+                let event_vec = events.entry(symbol.to_string()).or_default();
 
-                // Prefer the event with the shortest time remaining (most urgent).
-                // Always replace expired events so new windows aren't blocked.
-                if let Some(existing) = events.get(symbol) {
-                    let now = chrono::Utc::now();
-                    if existing.end_time > now && existing.end_time <= *end_time {
-                        // Existing event is still active AND ends sooner — keep it
-                        return Ok(actions);
-                    }
-                    if existing.end_time <= now {
-                        debug!(
-                            "[{}] Replacing expired event for {} (was {}, ended {})",
-                            self.id, symbol, existing.event_id, existing.end_time
-                        );
-                    }
+                // Prune expired events
+                let now = chrono::Utc::now();
+                event_vec.retain(|e| e.end_time > now);
+
+                // Dedup by event_id
+                if event_vec.iter().any(|e| e.event_id == *event_id) {
+                    return Ok(actions);
                 }
 
                 // Get current CEX price as S0 for directional mode
@@ -980,18 +994,15 @@ impl Strategy for MomentumStrategyAdapter {
                     None
                 };
 
-                events.insert(
-                    symbol.to_string(),
-                    EventState {
-                        event_id: event_id.clone(),
-                        symbol: symbol.to_string(),
-                        up_token_id: up_token.clone(),
-                        down_token_id: down_token.clone(),
-                        end_time: *end_time,
-                        open_price,
-                        window_secs,
-                    },
-                );
+                event_vec.push(EventState {
+                    event_id: event_id.clone(),
+                    symbol: symbol.to_string(),
+                    up_token_id: up_token.clone(),
+                    down_token_id: down_token.clone(),
+                    end_time: *end_time,
+                    open_price,
+                    window_secs,
+                });
 
                 debug!(
                     "[{}] Event discovered: {} for {} ({}m window, ends {})",
@@ -1001,7 +1012,9 @@ impl Strategy for MomentumStrategyAdapter {
 
             MarketUpdate::EventExpired { event_id } => {
                 let mut events = self.events.write().await;
-                events.retain(|_, e| &e.event_id != event_id);
+                for list in events.values_mut() {
+                    list.retain(|e| &e.event_id != event_id);
+                }
             }
 
             MarketUpdate::BinanceKline { .. } => {}
