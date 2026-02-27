@@ -564,8 +564,9 @@ impl MomentumStrategyAdapter {
                     (Direction::Up, ask)
                 }
                 None => {
-                    let quote_keys: Vec<String> = quotes.keys().map(|k| k[..8.min(k.len())].to_string()).collect();
-                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (token_len={} token={}.. quotes={} keys={:?})", self.id, symbol, p_hat * 100.0, up_token.len(), &up_token[..16.min(up_token.len())], quotes.len(), &quote_keys[..5.min(quote_keys.len())]);
+                    let key_lens: Vec<usize> = quotes.keys().map(|k| k.len()).collect();
+                    let has_prefix = quotes.keys().any(|k| k.starts_with(&up_token[..8.min(up_token.len())]));
+                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (token_len={} token={}.. quotes={} key_lens={:?} has_prefix={})", self.id, symbol, p_hat * 100.0, up_token.len(), &up_token[..16.min(up_token.len())], quotes.len(), &key_lens[..5.min(key_lens.len())], has_prefix);
                     return None;
                 }
             }
