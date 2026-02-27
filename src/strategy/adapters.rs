@@ -123,6 +123,8 @@ struct EventState {
     up_token_id: String,
     down_token_id: String,
     end_time: DateTime<Utc>,
+    /// CEX price when event was first discovered (used as S0 for directional mode)
+    open_price: Option<Decimal>,
 }
 
 /// Position in a momentum trade
@@ -484,6 +486,101 @@ impl MomentumStrategyAdapter {
         }
     }
 
+    /// Directional mode entry: log-normal probability model with fee-adjusted EV check.
+    /// Uses Binance spot as Chainlink oracle proxy.
+    async fn check_directional_entry(
+        &self,
+        symbol: &str,
+        current_price: &Decimal,
+        ts: DateTime<Utc>,
+    ) -> Option<StrategyAction> {
+        use crate::strategy::probability;
+        use crate::strategy::fee_model::FeeModel;
+        use rust_decimal::prelude::ToPrimitive;
+
+        let events = self.events.read().await;
+        let event = events.get(symbol)?;
+
+        let time_remaining = (event.end_time - ts).num_seconds() as f64;
+        if time_remaining <= self.config.min_time_remaining_secs as f64
+            || time_remaining > self.config.max_time_remaining_secs as f64
+        {
+            return None;
+        }
+
+        // S0: CEX price at window open
+        let s0 = event.open_price.unwrap_or(*current_price);
+        let st = *current_price;
+        let up_token = event.up_token_id.clone();
+        let down_token = event.down_token_id.clone();
+        drop(events);
+
+        // Sigma: fixed per-symbol estimates for 15-min window (can upgrade to realized vol later)
+        let sigma: f64 = match symbol {
+            "BTCUSDT" => 0.005,
+            "ETHUSDT" => 0.008,
+            "SOLUSDT" => 0.015,
+            _ => 0.010,
+        };
+        let sigma = sigma.max(self.config.directional_vol_floor);
+
+        // Probability model
+        let p_hat = probability::estimate_probability(s0, st, sigma, time_remaining, 0.0);
+
+        // Direction + market ask
+        let (direction, market_ask) = if p_hat > 0.5 {
+            let quotes = self.pm_quotes.read().await;
+            let ask = quotes.get(&up_token)?.best_ask?;
+            drop(quotes);
+            (Direction::Up, ask)
+        } else {
+            let quotes = self.pm_quotes.read().await;
+            let ask = quotes.get(&down_token)?.best_ask?;
+            drop(quotes);
+            (Direction::Down, ask)
+        };
+        let effective_p = if direction == Direction::Up {
+            p_hat
+        } else {
+            1.0 - p_hat
+        };
+
+        // Price bounds
+        if market_ask > self.config.max_entry_price || market_ask < dec!(0.10) {
+            return None;
+        }
+
+        // Fee model: parabolic crypto fees
+        let fee_model = FeeModel::crypto();
+        let effective_rate = fee_model.effective_rate(market_ask);
+        let fee_per_share = market_ask * effective_rate;
+        let spread_cost = dec!(0.01); // Conservative 1¢ spread estimate
+        let market_ask_f64 = market_ask.to_f64().unwrap_or(0.5);
+        let cost_total_f64 = fee_per_share.to_f64().unwrap_or(0.01)
+            + spread_cost.to_f64().unwrap_or(0.01);
+
+        // EV_net check (default threshold 0.08 = 8%)
+        let ev_net = effective_p - market_ask_f64 - cost_total_f64;
+        if ev_net < 0.08 {
+            return None;
+        }
+
+        info!(
+            "[{}] 🎯 DIRECTIONAL: {} {} p={:.1}% ev={:.1}% ask={:.0}¢ σ={:.4} S0={:.2} ST={:.2}",
+            self.id,
+            symbol,
+            direction,
+            effective_p * 100.0,
+            ev_net * 100.0,
+            market_ask_f64 * 100.0,
+            sigma,
+            s0,
+            st,
+        );
+
+        self.generate_entry(symbol, direction, market_ask).await
+    }
+
     /// Get the best ask price for a direction
     async fn get_entry_price(&self, symbol: &str, direction: Direction) -> Option<Decimal> {
         let events = self.events.read().await;
@@ -629,6 +726,18 @@ impl Strategy for MomentumStrategyAdapter {
                     return Ok(actions);
                 }
                 drop(positions);
+
+                // === DIRECTIONAL MODE: probability model entry ===
+                if self.config.directional_mode {
+                    if let Some(action) =
+                        self.check_directional_entry(symbol, price, *timestamp).await
+                    {
+                        let mut cooldowns = self.cooldowns.write().await;
+                        cooldowns.insert(symbol.clone(), Utc::now());
+                        actions.push(action);
+                    }
+                    return Ok(actions);
+                }
 
                 // Check for momentum signal
                 if let Some((direction, move_pct)) = self.check_momentum(symbol).await {
@@ -786,6 +895,15 @@ impl Strategy for MomentumStrategyAdapter {
                 };
 
                 let mut events = self.events.write().await;
+
+                // Get current CEX price as S0 for directional mode
+                let open_price = if self.config.directional_mode {
+                    let prices = self.cex_prices.read().await;
+                    prices.get(symbol).map(|s| s.price)
+                } else {
+                    None
+                };
+
                 events.insert(
                     symbol.to_string(),
                     EventState {
@@ -794,6 +912,7 @@ impl Strategy for MomentumStrategyAdapter {
                         up_token_id: up_token.clone(),
                         down_token_id: down_token.clone(),
                         end_time: *end_time,
+                        open_price,
                     },
                 );
 
