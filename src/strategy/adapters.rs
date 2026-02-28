@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 use tracing::{debug, info, warn};
 
 use super::momentum::{Direction, ExitConfig, MomentumConfig};
@@ -20,6 +20,26 @@ use super::traits::{
 };
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
+
+fn database_url_from_env() -> Option<String> {
+    std::env::var("PLOY_DATABASE__URL")
+        .ok()
+        .or_else(|| std::env::var("PLOY__DATABASE__URL").ok())
+        .or_else(|| std::env::var("PLOY_DATABASE_URL").ok())
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn account_id_from_env() -> String {
+    std::env::var("PLOY_ACCOUNT__ID")
+        .ok()
+        .or_else(|| std::env::var("PLOY__ACCOUNT__ID").ok())
+        .or_else(|| std::env::var("PLOY_ACCOUNT_ID").ok())
+        .unwrap_or_else(|| "default".to_string())
+        .trim()
+        .to_string()
+}
 
 // ============================================================================
 // Momentum Strategy Adapter
@@ -54,6 +74,9 @@ pub struct MomentumStrategyAdapter {
     last_reset: Arc<RwLock<DateTime<Utc>>>,
     /// Strategy enabled flag
     enabled: bool,
+    /// Optional Postgres pool for recording dry-run signals (signal_history).
+    signal_log_pool: OnceCell<Arc<sqlx::PgPool>>,
+    signal_log_ready: OnceCell<()>,
 }
 
 /// Price history entry for momentum calculation
@@ -159,7 +182,135 @@ impl MomentumStrategyAdapter {
             daily_trades: Arc::new(RwLock::new(0)),
             last_reset: Arc::new(RwLock::new(Utc::now())),
             enabled: true,
+            signal_log_pool: OnceCell::new(),
+            signal_log_ready: OnceCell::new(),
         }
+    }
+
+    async fn get_signal_log_pool(&self) -> Option<Arc<sqlx::PgPool>> {
+        let existing = self.signal_log_pool.get();
+        if let Some(pool) = existing {
+            return Some(pool.clone());
+        }
+
+        let db_url = database_url_from_env()?;
+
+        let pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&db_url)
+            .await
+        {
+            Ok(p) => Arc::new(p),
+            Err(e) => {
+                warn!(error = %e, "signal recorder: failed to connect to Postgres (signal logging disabled)");
+                return None;
+            }
+        };
+
+        let _ = self.signal_log_pool.set(pool.clone());
+        Some(pool)
+    }
+
+    async fn ensure_signal_log_ready(&self, pool: &sqlx::PgPool) {
+        if self.signal_log_ready.get().is_some() {
+            return;
+        }
+
+        if let Err(e) = crate::coordinator::bootstrap::ensure_strategy_observability_tables(pool).await
+        {
+            warn!(error = %e, "signal recorder: failed to ensure observability tables");
+            return;
+        }
+
+        let _ = self.signal_log_ready.set(());
+    }
+
+    async fn record_directional_signal(
+        &self,
+        symbol: &str,
+        direction: Direction,
+        event_id: &str,
+        token_id: &str,
+        p_hat: f64,
+        effective_p: f64,
+        ev_net: f64,
+        market_ask: Decimal,
+        sigma: f64,
+        s0: Decimal,
+        st: Decimal,
+        time_remaining_secs: f64,
+        window_secs: u64,
+    ) {
+        let Some(pool) = self.get_signal_log_pool().await else {
+            return;
+        };
+        self.ensure_signal_log_ready(&pool).await;
+        if self.signal_log_ready.get().is_none() {
+            return;
+        }
+
+        let account_id = account_id_from_env();
+        let agent_id = std::env::var("PLOY_AGENT_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| self.id.clone());
+
+        let strategy_id = self.id.clone();
+        let symbol = symbol.to_string();
+        let side = match direction {
+            Direction::Up => "UP",
+            Direction::Down => "DOWN",
+        }
+        .to_string();
+
+        let context = serde_json::json!({
+            "mode": "directional",
+            "dry_run": self.dry_run,
+            "event_id": event_id,
+            "p_hat": p_hat,
+            "effective_p": effective_p,
+            "ev_net": ev_net,
+            "sigma": sigma,
+            "s0": s0.to_string(),
+            "st": st.to_string(),
+            "time_remaining_secs": time_remaining_secs,
+            "window_secs": window_secs,
+        });
+
+        let token_id = token_id.to_string();
+        let market_ask = market_ask;
+
+        tokio::spawn(async move {
+            let res = sqlx::query(
+                r#"
+                INSERT INTO signal_history (
+                    account_id, intent_id, agent_id, strategy_id, domain, signal_type,
+                    market_slug, token_id, symbol, side, confidence, fair_value, market_price, edge, config_hash, context
+                )
+                VALUES (
+                    $1, NULL, $2, $3, 'crypto', 'directional_entry',
+                    NULL, $4, $5, $6, $7, $8, $9, $10, NULL, $11
+                )
+                "#,
+            )
+            .bind(account_id)
+            .bind(agent_id)
+            .bind(strategy_id)
+            .bind(token_id)
+            .bind(symbol)
+            .bind(side)
+            .bind(effective_p)
+            .bind(p_hat)
+            .bind(market_ask)
+            .bind(ev_net)
+            .bind(sqlx::types::Json(context))
+            .execute(&*pool)
+            .await;
+
+            if let Err(e) = res {
+                warn!(error = %e, "signal recorder: failed to insert directional signal");
+            }
+        });
     }
 
     /// Create from TOML configuration
@@ -551,6 +702,7 @@ impl MomentumStrategyAdapter {
         // S0: CEX price at window open
         let s0 = event.open_price.unwrap_or(*current_price);
         let st = *current_price;
+        let event_id = event.event_id.clone();
         let up_token = event.up_token_id.clone();
         let down_token = event.down_token_id.clone();
         let window_secs = event.window_secs;
@@ -641,6 +793,27 @@ impl MomentumStrategyAdapter {
             st,
             window_secs / 60,
         );
+
+        let token_id_for_signal = match direction {
+            Direction::Up => up_token.as_str(),
+            Direction::Down => down_token.as_str(),
+        };
+        self.record_directional_signal(
+            symbol,
+            direction,
+            &event_id,
+            token_id_for_signal,
+            p_hat,
+            effective_p,
+            ev_net,
+            market_ask,
+            sigma,
+            s0,
+            st,
+            time_remaining,
+            window_secs,
+        )
+        .await;
 
         self.generate_entry(symbol, direction, market_ask).await
     }

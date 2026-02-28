@@ -29,6 +29,12 @@ pub enum CryptoLobDatasetFormat {
     Parquet,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyBacktestMode {
+    Replay,
+    Settlement,
+}
+
 impl Default for CryptoLobDatasetFormat {
     fn default() -> Self {
         #[cfg(feature = "analysis")]
@@ -355,6 +361,40 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
+    /// Backtest directional signals (signal_history) using Polymarket official settlement (token pays 1/0)
+    ///
+    /// Legacy alias for:
+    /// `ploy strategy backtest directional --mode settlement ...`
+    DirectionalSignalBacktest {
+        /// Lookback window in hours (which directional signals are included)
+        #[arg(long, default_value = "168")]
+        lookback_hours: u64,
+
+        /// Filter by account_id (defaults to all)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Filter by agent_id (defaults to all)
+        #[arg(long)]
+        agent_id: Option<String>,
+
+        /// Only include live signals (exclude context->>'dry_run' = true)
+        #[arg(long)]
+        live_only: bool,
+
+        /// Max number of signals to backtest (latest first)
+        #[arg(long, default_value = "50000")]
+        limit: usize,
+
+        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
+        #[arg(long)]
+        no_refresh: bool,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
     /// Export a labeled dataset for crypto LOB model training (uses Polymarket settlement y_up).
     ExportCryptoLobDataset {
         /// Lookback window in hours (which entry intents are exported)
@@ -405,18 +445,14 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
-    /// Run a strategy backtest against historical data
+    /// Run a strategy backtest against the integrated DB pipeline
     Backtest {
         /// Strategy name (momentum, directional)
         name: String,
 
-        /// Kline CSV path (if not using DB)
-        #[arg(long)]
-        kline_csv: Option<PathBuf>,
-
-        /// PM quotes CSV path (if not using DB)
-        #[arg(long)]
-        pm_csv: Option<PathBuf>,
+        /// Backtest mode: replay historical feed, or score directional signals by settlement
+        #[arg(long, value_enum, default_value_t = StrategyBacktestMode::Replay)]
+        mode: StrategyBacktestMode,
 
         /// Start date (ISO 8601)
         #[arg(long)]
@@ -441,6 +477,30 @@ pub enum StrategyCommands {
         /// Output JSON
         #[arg(long)]
         json: bool,
+
+        /// Settlement-mode lookback window in hours
+        #[arg(long, default_value = "168")]
+        lookback_hours: u64,
+
+        /// Settlement-mode filter by account_id (defaults to all)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Settlement-mode filter by agent_id (defaults to all)
+        #[arg(long)]
+        agent_id: Option<String>,
+
+        /// Settlement-mode only include live signals (exclude dry-run)
+        #[arg(long)]
+        live_only: bool,
+
+        /// Settlement-mode max number of signals to score (latest first)
+        #[arg(long, default_value = "50000")]
+        limit: usize,
+
+        /// Settlement-mode skip Gamma refresh and use cached settlement rows only
+        #[arg(long)]
+        no_refresh: bool,
 
         /// Database URL (uses DATABASE_URL env var if omitted)
         #[arg(long)]
@@ -489,6 +549,34 @@ impl StrategyCommands {
                 )
                 .await
             }
+            Self::DirectionalSignalBacktest {
+                lookback_hours,
+                account_id,
+                agent_id,
+                live_only,
+                limit,
+                no_refresh,
+                database_url,
+            } => {
+                run_backtest(
+                    "directional",
+                    StrategyBacktestMode::Settlement,
+                    None,
+                    None,
+                    "BTCUSDT,ETHUSDT,SOLUSDT",
+                    10000.0,
+                    false,
+                    false,
+                    lookback_hours,
+                    account_id,
+                    agent_id,
+                    live_only,
+                    limit,
+                    no_refresh,
+                    database_url,
+                )
+                .await
+            }
             Self::ExportCryptoLobDataset {
                 lookback_hours,
                 account_id,
@@ -518,26 +606,36 @@ impl StrategyCommands {
             }
             Self::Backtest {
                 name,
-                kline_csv,
-                pm_csv,
+                mode,
                 from,
                 to,
                 symbols,
                 capital,
                 save,
                 json,
+                lookback_hours,
+                account_id,
+                agent_id,
+                live_only,
+                limit,
+                no_refresh,
                 database_url,
             } => {
                 run_backtest(
                     &name,
-                    kline_csv,
-                    pm_csv,
+                    mode,
                     from,
                     to,
                     &symbols,
                     capital,
                     save,
                     json,
+                    lookback_hours,
+                    account_id,
+                    agent_id,
+                    live_only,
+                    limit,
+                    no_refresh,
                     database_url,
                 )
                 .await
@@ -2088,6 +2186,427 @@ async fn report_accuracy_pm_settlement(
     Ok(())
 }
 
+async fn backtest_directional_signals_pm_settlement(
+    lookback_hours: u64,
+    account_id: Option<String>,
+    agent_id: Option<String>,
+    live_only: bool,
+    limit: usize,
+    no_refresh: bool,
+    database_url: Option<String>,
+) -> Result<()> {
+    use crate::adapters::PostgresStore;
+    use crate::adapters::PolymarketClient;
+    use crate::strategy::fee_model::FeeModel;
+    use chrono::{DateTime, Utc};
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use sqlx::Row;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    let db_url = database_url
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| std::env::var("PLOY_DATABASE__URL").ok())
+        .unwrap_or_else(|| "postgres://localhost/ploy".to_string());
+
+    let store = PostgresStore::new(&db_url, 5)
+        .await
+        .context("Failed to connect to database")?;
+
+    crate::coordinator::bootstrap::ensure_strategy_observability_tables(store.pool())
+        .await
+        .context("Failed to ensure strategy observability tables")?;
+    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
+        .await
+        .context("Failed to ensure pm_token_settlements table")?;
+
+    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
+    println!("\x1b[36m║  Directional Signal Backtest (Settlement)                     ║\x1b[0m");
+    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
+    println!(
+        "  lookback_hours={} account_id={} agent_id={} live_only={} limit={} refresh={}",
+        lookback_hours,
+        account_id.as_deref().unwrap_or("all"),
+        agent_id.as_deref().unwrap_or("all"),
+        live_only,
+        limit,
+        !no_refresh
+    );
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            recorded_at,
+            account_id,
+            agent_id,
+            strategy_id,
+            token_id,
+            symbol,
+            side,
+            confidence,
+            market_price,
+            edge,
+            context
+        FROM signal_history
+        WHERE recorded_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
+          AND signal_type = 'directional_entry'
+          AND ($2::text IS NULL OR account_id = $2)
+          AND ($3::text IS NULL OR agent_id = $3)
+          AND ($4::bool = FALSE OR COALESCE((context->>'dry_run')::bool, false) = false)
+        ORDER BY recorded_at DESC
+        LIMIT $5
+        "#,
+    )
+    .bind(lookback_hours as i64)
+    .bind(account_id.as_deref())
+    .bind(agent_id.as_deref())
+    .bind(live_only)
+    .bind(limit as i64)
+    .fetch_all(store.pool())
+    .await
+    .context("Failed to query signal_history")?;
+
+    if rows.is_empty() {
+        println!("\n  No directional signals found in this window.\n");
+        return Ok(());
+    }
+
+    #[derive(Debug, Clone)]
+    struct SignalRow {
+        recorded_at: DateTime<Utc>,
+        token_id: String,
+        symbol: Option<String>,
+        side: Option<String>,
+        confidence: Option<f64>,
+        entry_price: Decimal,
+        ev_net: Option<f64>,
+        context: serde_json::Value,
+    }
+
+    let mut signals: Vec<SignalRow> = Vec::with_capacity(rows.len());
+    let mut token_ids: Vec<String> = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let recorded_at: DateTime<Utc> = row.get("recorded_at");
+        let token_id: Option<String> = row.get("token_id");
+        let Some(token_id) = token_id else { continue };
+        let entry_price: Option<Decimal> = row.get("market_price");
+        let Some(entry_price) = entry_price else { continue };
+
+        let symbol: Option<String> = row.get("symbol");
+        let side: Option<String> = row.get("side");
+        let confidence: Option<f64> = row.get("confidence");
+        let ev_net: Option<f64> = row.get("edge");
+        let context: serde_json::Value = row.get::<sqlx::types::Json<serde_json::Value>, _>("context").0;
+
+        token_ids.push(token_id.clone());
+        signals.push(SignalRow {
+            recorded_at,
+            token_id,
+            symbol,
+            side,
+            confidence,
+            entry_price,
+            ev_net,
+            context,
+        });
+    }
+
+    if signals.is_empty() {
+        println!("\n  No usable signals found (missing token_id/market_price).\n");
+        return Ok(());
+    }
+
+    token_ids.sort();
+    token_ids.dedup();
+
+    if !no_refresh {
+        let existing = sqlx::query(
+            r#"
+            SELECT token_id, resolved
+            FROM pm_token_settlements
+            WHERE token_id = ANY($1)
+            "#,
+        )
+        .bind(&token_ids)
+        .fetch_all(store.pool())
+        .await
+        .context("Failed to query pm_token_settlements")?;
+
+        let mut resolved_map: HashMap<String, bool> = HashMap::new();
+        for row in existing {
+            let token_id: String = row.get("token_id");
+            let resolved: bool = row.get("resolved");
+            resolved_map.insert(token_id, resolved);
+        }
+
+        let mut to_refresh: Vec<String> = token_ids
+            .iter()
+            .filter(|t| !resolved_map.get(*t).copied().unwrap_or(false))
+            .cloned()
+            .collect();
+
+        const MAX_REFRESH: usize = 500;
+        if to_refresh.len() > MAX_REFRESH {
+            to_refresh.truncate(MAX_REFRESH);
+        }
+
+        if !to_refresh.is_empty() {
+            println!(
+                "\n  Refreshing settlement status for {} token(s) via Gamma...",
+                to_refresh.len()
+            );
+        }
+
+        let pm = PolymarketClient::new("https://clob.polymarket.com", true)
+            .context("Failed to create Polymarket client")?;
+
+        let mut refreshed_markets = 0usize;
+        let mut refreshed_tokens = 0usize;
+        let mut seen_conditions: HashSet<String> = HashSet::new();
+
+        for token_id in to_refresh {
+            let market = match pm.get_gamma_market_by_token_id(&token_id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(token_id = %token_id, error = %e, "failed to fetch gamma market for token");
+                    continue;
+                }
+            };
+
+            if let Some(ref cond) = market.condition_id {
+                let cond_str = cond.to_string();
+                if !seen_conditions.insert(cond_str) {
+                    continue;
+                }
+            }
+
+            let clob_ids: Vec<String> = market
+                .clob_token_ids
+                .as_ref()
+                .map(|ids| ids.iter().map(|id| id.to_string()).collect())
+                .unwrap_or_default();
+            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+            let price_strs: Vec<String> = market
+                .outcome_prices
+                .as_ref()
+                .map(|ps| ps.iter().map(|d| d.to_string()).collect())
+                .unwrap_or_default();
+
+            if clob_ids.is_empty() || price_strs.is_empty() {
+                tracing::debug!(
+                    token_id = %token_id,
+                    market_id = %market.id,
+                    "gamma market missing clob_token_ids or outcome_prices; skipping"
+                );
+                continue;
+            }
+
+            let mut prices: Vec<Decimal> = Vec::new();
+            for s in &price_strs {
+                if let Ok(p) = s.parse::<Decimal>() {
+                    prices.push(p);
+                }
+            }
+
+            // Treat as "officially settled" only once the market is closed and prices are 1/0.
+            let resolved = market.closed.unwrap_or(false) && is_market_resolved(&prices);
+            let resolved_at: Option<DateTime<Utc>> = resolved.then(|| Utc::now());
+            let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
+
+            let market_slug = market.slug.clone();
+            let condition_id = market.condition_id.map(|b| b.to_string());
+
+            for (i, tid) in clob_ids.iter().enumerate() {
+                let outcome = outcomes.get(i).cloned();
+                let settled_price = price_strs.get(i).and_then(|s| s.parse::<Decimal>().ok());
+
+                if let Err(e) = sqlx::query(
+                    r#"
+                    INSERT INTO pm_token_settlements (
+                        token_id,
+                        condition_id,
+                        market_id,
+                        market_slug,
+                        outcome,
+                        settled_price,
+                        resolved,
+                        resolved_at,
+                        fetched_at,
+                        raw_market
+                    )
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
+                    ON CONFLICT (token_id) DO UPDATE SET
+                        condition_id = EXCLUDED.condition_id,
+                        market_id = EXCLUDED.market_id,
+                        market_slug = EXCLUDED.market_slug,
+                        outcome = EXCLUDED.outcome,
+                        settled_price = EXCLUDED.settled_price,
+                        resolved = EXCLUDED.resolved,
+                        resolved_at = COALESCE(pm_token_settlements.resolved_at, EXCLUDED.resolved_at),
+                        fetched_at = NOW(),
+                        raw_market = EXCLUDED.raw_market
+                    "#,
+                )
+                .bind(tid)
+                .bind(condition_id.as_deref())
+                .bind(&market.id)
+                .bind(market_slug.as_deref())
+                .bind(outcome.as_deref())
+                .bind(settled_price)
+                .bind(resolved)
+                .bind(resolved_at)
+                .bind(sqlx::types::Json(raw_market.clone()))
+                .execute(store.pool())
+                .await
+                {
+                    warn!(token_id = %token_id, error = %e, "failed to upsert pm_token_settlements row");
+                    continue;
+                }
+
+                refreshed_tokens += 1;
+            }
+
+            refreshed_markets += 1;
+        }
+
+        if refreshed_markets > 0 {
+            println!(
+                "  ✓ Refreshed {} market(s), {} token rows\n",
+                refreshed_markets, refreshed_tokens
+            );
+        }
+    }
+
+    let settlement_rows = sqlx::query(
+        r#"
+        SELECT token_id, resolved, settled_price, resolved_at
+        FROM pm_token_settlements
+        WHERE token_id = ANY($1)
+        "#,
+    )
+    .bind(&token_ids)
+    .fetch_all(store.pool())
+    .await
+    .context("Failed to query pm_token_settlements for signal tokens")?;
+
+    #[derive(Debug, Clone)]
+    struct SettlementRow {
+        resolved: bool,
+        settled_price: Option<Decimal>,
+        resolved_at: Option<DateTime<Utc>>,
+    }
+
+    let mut settlements: HashMap<String, SettlementRow> = HashMap::new();
+    for row in settlement_rows {
+        let token_id: String = row.get("token_id");
+        settlements.insert(
+            token_id,
+            SettlementRow {
+                resolved: row.get("resolved"),
+                settled_price: row.get("settled_price"),
+                resolved_at: row.get("resolved_at"),
+            },
+        );
+    }
+
+    let fee_model = FeeModel::crypto();
+    let spread_cost = dec!(0.01);
+
+    let mut total = 0usize;
+    let mut resolved = 0usize;
+    let mut wins = 0usize;
+    let mut sum_pnl = 0.0f64;
+    let mut equity = 0.0f64;
+    let mut peak = 0.0f64;
+    let mut max_dd = 0.0f64;
+
+    let mut by_symbol: BTreeMap<String, (usize, usize, f64)> = BTreeMap::new(); // (n, wins, pnl_sum)
+
+    // Process oldest→newest for drawdown.
+    signals.sort_by_key(|s| s.recorded_at);
+    for s in &signals {
+        total += 1;
+
+        let entry_price_f64 = s.entry_price.to_f64().unwrap_or(0.0);
+        let fee_rate = fee_model.effective_rate(s.entry_price);
+        let fee_per_share = (s.entry_price * fee_rate).to_f64().unwrap_or(0.0);
+        let costs = fee_per_share + spread_cost.to_f64().unwrap_or(0.01);
+
+        let Some(settlement) = settlements.get(&s.token_id) else {
+            continue;
+        };
+        if !settlement.resolved {
+            continue;
+        }
+        let Some(settled_price) = settlement.settled_price else {
+            continue;
+        };
+
+        resolved += 1;
+        let payout = settled_price.to_f64().unwrap_or(0.0);
+        let win = payout >= 0.99;
+        if win {
+            wins += 1;
+        }
+
+        let pnl = payout - entry_price_f64 - costs;
+        sum_pnl += pnl;
+        equity += pnl;
+        if equity > peak {
+            peak = equity;
+        }
+        let dd = peak - equity;
+        if dd > max_dd {
+            max_dd = dd;
+        }
+
+        let sym = s.symbol.clone().unwrap_or_else(|| "UNKNOWN".to_string());
+        let entry = by_symbol.entry(sym).or_insert((0, 0, 0.0));
+        entry.0 += 1;
+        if win {
+            entry.1 += 1;
+        }
+        entry.2 += pnl;
+    }
+
+    if resolved == 0 {
+        println!("\n  Signals: {} (0 resolved yet). Wait for settlements, or run with longer lookback.\n", total);
+        return Ok(());
+    }
+
+    let win_rate = wins as f64 / resolved as f64;
+    let avg_pnl = sum_pnl / resolved as f64;
+
+    println!(
+        "\n  Signals: {} (resolved: {}) | Win rate: {:.1}% | Avg PnL/share: {:+.4} | Total PnL: {:+.4} | Max DD: {:.4}\n",
+        total,
+        resolved,
+        win_rate * 100.0,
+        avg_pnl,
+        sum_pnl,
+        max_dd
+    );
+
+    println!("  By symbol (resolved only):");
+    for (sym, (n, w, pnl_sum)) in by_symbol {
+        if n == 0 {
+            continue;
+        }
+        println!(
+            "    {:<8} n={:<5} win={:>5.1}% pnl_sum={:+.4} avg={:+.4}",
+            sym,
+            n,
+            (w as f64 / n as f64) * 100.0,
+            pnl_sum,
+            pnl_sum / n as f64
+        );
+    }
+
+    Ok(())
+}
+
 async fn export_crypto_lob_dataset(
     lookback_hours: u64,
     account_id: Option<String>,
@@ -2741,14 +3260,19 @@ async fn run_integrity_check(json_output: bool, database_url: Option<String>) ->
 #[allow(clippy::too_many_arguments)]
 async fn run_backtest(
     name: &str,
-    kline_csv: Option<PathBuf>,
-    pm_csv: Option<PathBuf>,
+    mode: StrategyBacktestMode,
     from: Option<String>,
     to: Option<String>,
     symbols: &str,
     capital: f64,
     save: bool,
     json_output: bool,
+    lookback_hours: u64,
+    account_id: Option<String>,
+    agent_id: Option<String>,
+    live_only: bool,
+    limit: usize,
+    no_refresh: bool,
     database_url: Option<String>,
 ) -> Result<()> {
     use chrono::DateTime;
@@ -2761,10 +3285,29 @@ async fn run_backtest(
 
     match name {
         "momentum" | "directional" => {}
-        other => anyhow::bail!(
-            "Unknown backtest strategy: '{}'. Supported: momentum, directional",
-            other
-        ),
+        other => anyhow::bail!("Unknown backtest strategy: '{}'. Supported: momentum, directional", other),
+    }
+
+    if mode == StrategyBacktestMode::Settlement {
+        if name != "directional" {
+            anyhow::bail!("Settlement mode is only supported for directional strategy");
+        }
+        if json_output {
+            warn!("--json is not supported in settlement mode yet; falling back to text output");
+        }
+        if save {
+            warn!("--save has no effect in settlement mode");
+        }
+        return backtest_directional_signals_pm_settlement(
+            lookback_hours,
+            account_id,
+            agent_id,
+            live_only,
+            limit,
+            no_refresh,
+            database_url,
+        )
+        .await;
     }
 
     let symbol_list: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
@@ -2793,18 +3336,10 @@ async fn run_backtest(
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
     });
 
-    // Build the data feed from CSV or DB
-    let mut feed = if let (Some(kline_path), Some(pm_path)) = (&kline_csv, &pm_csv) {
-        info!(
-            "Loading historical data from CSV: {:?}, {:?}",
-            kline_path, pm_path
-        );
-        HistoricalFeed::from_csv(kline_path, pm_path)?
-    } else {
-        let store = PostgresStore::new(&db_url, 5).await?;
-        info!("Loading historical data from database");
-        HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?
-    };
+    // Unified backtest feed path: database only.
+    let store = PostgresStore::new(&db_url, 5).await?;
+    info!("Loading historical data from database");
+    let mut feed = HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
 
     let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 
@@ -2818,6 +3353,9 @@ async fn run_backtest(
             // Print directional-specific summary (includes exit reasons, calibration)
             if !json_output {
                 engine.print_directional_summary();
+            }
+            if save {
+                warn!("--save currently persists momentum replay backtests only; directional replay prints summary only");
             }
             results
         }
