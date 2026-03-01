@@ -31,7 +31,10 @@ use crate::coordinator::{
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, MarketSelector, StrategyDeployment};
+use crate::platform::{
+    AgentRiskParams, AgentStatus, DataPlaneConfig, Domain, MarketSelector, PlatformDataPlane,
+    StrategyDeployment,
+};
 use crate::signing::Wallet;
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
@@ -1517,10 +1520,7 @@ async fn ensure_chainlink_tables(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-fn spawn_chainlink_persistence(
-    chainlink_ws: Arc<crate::adapters::ChainlinkRtds>,
-    pool: PgPool,
-) {
+fn spawn_chainlink_persistence(chainlink_ws: Arc<crate::adapters::ChainlinkRtds>, pool: PgPool) {
     tokio::spawn(async move {
         if let Err(e) = ensure_chainlink_tables(&pool).await {
             warn!(
@@ -4854,6 +4854,7 @@ async fn run_managed_strategy_runtime(
     dry_run: bool,
     pm_client: PolymarketClient,
     pm_ws_url: String,
+    data_plane: Option<Arc<PlatformDataPlane>>,
     mut cmd_rx: mpsc::Receiver<CoordinatorCommand>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
@@ -4906,34 +4907,40 @@ async fn run_managed_strategy_runtime(
     binance_kline_intervals.sort();
     binance_kline_intervals.dedup();
 
-    let mut feed_manager = DataFeedManager::new(manager.clone());
-    if !binance_spot_symbols.is_empty() {
-        feed_manager = feed_manager.with_binance(binance_spot_symbols.clone());
-    }
+    let feed_manager = if let Some(dp) = data_plane {
+        DataFeedManager::from_data_plane(dp, manager.clone()).with_pm_client(pm_client.clone())
+    } else {
+        let mut feed_manager = DataFeedManager::new(manager.clone());
+        if !binance_spot_symbols.is_empty() {
+            feed_manager = feed_manager.with_binance(binance_spot_symbols.clone());
+        }
 
-    if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
-        let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(300);
-        feed_manager = feed_manager.with_binance_klines(
-            binance_kline_symbols.clone(),
-            binance_kline_intervals.clone(),
-            binance_kline_closed_only,
-            backfill_limit,
-        );
-    }
+        if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
+            let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(300);
+            feed_manager = feed_manager.with_binance_klines(
+                binance_kline_symbols.clone(),
+                binance_kline_intervals.clone(),
+                binance_kline_closed_only,
+                backfill_limit,
+            );
+        }
 
-    let has_polymarket_feed = required_feeds.iter().any(|f| {
-        matches!(
-            f,
-            DataFeed::PolymarketEvents { .. } | DataFeed::PolymarketQuotes { .. }
-        )
-    });
-    if has_polymarket_feed {
-        let pm_ws = PolymarketWebSocket::new(&pm_ws_url);
-        feed_manager = feed_manager.with_polymarket(pm_ws, pm_client.clone());
-    }
+        let has_polymarket_feed = required_feeds.iter().any(|f| {
+            matches!(
+                f,
+                DataFeed::PolymarketEvents { .. } | DataFeed::PolymarketQuotes { .. }
+            )
+        });
+        if has_polymarket_feed {
+            let pm_ws = PolymarketWebSocket::new(&pm_ws_url);
+            feed_manager = feed_manager.with_polymarket(pm_ws, pm_client.clone());
+        }
+
+        feed_manager
+    };
 
     manager.start_strategy(strategy, None).await?;
     feed_manager.start().await?;
@@ -5528,6 +5535,7 @@ pub async fn start_platform(
 
     // Shared per-symbol freshness tracker — attached to all WS adapters.
     let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
+    let use_data_plane = env_bool("PLOY_DATA_PLANE", false);
 
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
@@ -5568,13 +5576,14 @@ pub async fn start_platform(
         // Build a unified coin set across all enabled crypto strategies.
         // Also build a SubscriptionPlan for audit/observability (Phase 1 shadow).
         let mut all_coins: Vec<String> = Vec::new();
-        let mut planner_requirements: Vec<(
-            crate::platform::ConsumerId,
-            Domain,
-            Vec<DataFeed>,
-        )> = Vec::new();
+        let mut planner_requirements: Vec<(crate::platform::ConsumerId, Domain, Vec<DataFeed>)> =
+            Vec::new();
         if momentum_enabled {
-            let symbols: Vec<String> = crypto_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
+            let symbols: Vec<String> = crypto_cfg
+                .coins
+                .iter()
+                .map(|c| format!("{}USDT", c))
+                .collect();
             planner_requirements.push((
                 crate::platform::ConsumerId::from(format!("momentum-{}", crypto_cfg.agent_id)),
                 Domain::Crypto,
@@ -5613,6 +5622,42 @@ pub async fn start_platform(
                 }
             }
         }
+        if use_data_plane && pattern_memory_enabled {
+            let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
+                crypto_cfg.coins.clone()
+            } else {
+                runtime_crypto_targets
+                    .pattern_memory_coins
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
+            coins.sort();
+            coins.dedup();
+            for coin in coins {
+                if !all_coins.contains(&coin) {
+                    all_coins.push(coin);
+                }
+            }
+        }
+        if use_data_plane && split_arb_enabled {
+            let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
+                crypto_cfg.coins.clone()
+            } else {
+                runtime_crypto_targets
+                    .split_arb_coins
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
+            coins.sort();
+            coins.dedup();
+            for coin in coins {
+                if !all_coins.contains(&coin) {
+                    all_coins.push(coin);
+                }
+            }
+        }
         if all_coins.is_empty() {
             warn!("crypto domain enabled but no crypto agents are active (coins set is empty)");
         }
@@ -5629,13 +5674,44 @@ pub async fn start_platform(
 
         // Create WebSocket feeds
         let symbols: Vec<String> = all_coins.iter().map(|c| format!("{}USDT", c)).collect();
-        let binance_ws = Arc::new(BinanceWebSocket::new(symbols));
-        let pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
+        let mut data_plane: Option<Arc<PlatformDataPlane>> = None;
+        let (binance_ws, pm_ws) = if use_data_plane {
+            let data_plane_config = DataPlaneConfig {
+                polymarket_ws_url: app_config.market.ws_url.clone(),
+                binance_spot_symbols: symbols.clone(),
+                binance_kline_symbols: symbols.clone(),
+                binance_kline_intervals: vec!["5m".to_string(), "15m".to_string()],
+                binance_kline_closed_only: true,
+                chainlink_symbols: vec![],
+            };
+            let dp = Arc::new(PlatformDataPlane::new(data_plane_config, Arc::clone(&freshness)));
+            dp.start(Vec::new()).await?;
+            info!("PlatformDataPlane started");
 
-        // Attach per-symbol freshness tracker to WS adapters.
-        binance_ws.set_freshness(Arc::clone(&freshness));
-        pm_ws.set_freshness(Arc::clone(&freshness));
-        info!("data plane freshness tracker attached to WS adapters");
+            let binance_ws = dp.binance_ws().ok_or_else(|| {
+                crate::error::PloyError::Validation(
+                    "PLOY_DATA_PLANE=1 but PlatformDataPlane has no Binance WS adapter"
+                        .to_string(),
+                )
+            })?;
+            let pm_ws = dp.polymarket_ws().ok_or_else(|| {
+                crate::error::PloyError::Validation(
+                    "PLOY_DATA_PLANE=1 but PlatformDataPlane has no Polymarket WS adapter"
+                        .to_string(),
+                )
+            })?;
+            data_plane = Some(dp);
+            (binance_ws, pm_ws)
+        } else {
+            let binance_ws = Arc::new(BinanceWebSocket::new(symbols));
+            let pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
+
+            // Attach per-symbol freshness tracker to WS adapters.
+            binance_ws.set_freshness(Arc::clone(&freshness));
+            pm_ws.set_freshness(Arc::clone(&freshness));
+            info!("data plane freshness tracker attached to WS adapters");
+            (binance_ws, pm_ws)
+        };
 
         // Seed PM token → side mapping for data collection, so QuoteUpdates carry the correct
         // UP/DOWN side and can be persisted to Postgres.
@@ -5685,12 +5761,24 @@ pub async fn start_platform(
                 );
             }
         }
-        let (_added, _removed, _updated, total) = pm_ws.reconcile_token_sides(&desired).await;
-        info!(
-            agent = %crypto_cfg.agent_id,
-            token_count = total,
-            "seeded PM token mappings for crypto data collection"
-        );
+        if use_data_plane {
+            for (token, side) in desired.iter() {
+                pm_ws.register_token(token, *side).await;
+            }
+            pm_ws.request_resubscribe();
+            info!(
+                agent = %crypto_cfg.agent_id,
+                token_count = desired.len(),
+                "seeded PM token mappings for crypto data collection"
+            );
+        } else {
+            let (_added, _removed, _updated, total) = pm_ws.reconcile_token_sides(&desired).await;
+            info!(
+                agent = %crypto_cfg.agent_id,
+                token_count = total,
+                "seeded PM token mappings for crypto data collection"
+            );
+        }
 
         if let Some(pool) = shared_pool.as_ref() {
             if let Err(e) = crate::collector::ensure_collector_token_targets_table(pool).await {
@@ -5720,11 +5808,18 @@ pub async fn start_platform(
         let coins_collector = all_coins.clone();
         let agent_id_collector = crypto_cfg.agent_id.clone();
         let pool_collector = shared_pool.clone();
+        let use_data_plane_collector = use_data_plane;
+        let initial_last_desired = if use_data_plane_collector {
+            desired.clone()
+        } else {
+            HashMap::new()
+        };
         tokio::spawn(async move {
             let refresh_secs =
                 env_u64("PM_COLLECTOR_REFRESH_SECS", PM_COLLECTOR_REFRESH_SECS).max(10);
             let mut tick = tokio::time::interval(Duration::from_secs(refresh_secs));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_desired = initial_last_desired;
 
             loop {
                 tick.tick().await;
@@ -5779,18 +5874,35 @@ pub async fn start_platform(
                     }
                 }
 
-                let (added, removed, updated, total) =
-                    pm_ws_collector.reconcile_token_sides(&desired).await;
-                if added > 0 || removed > 0 {
-                    pm_ws_collector.request_resubscribe();
-                    info!(
-                        agent = %agent_id_collector,
-                        added,
-                        removed,
-                        updated,
-                        token_count = total,
-                        "pm token collector reconciled token set; resubscribe requested"
-                    );
+                if use_data_plane_collector {
+                    if desired != last_desired {
+                        let previous_token_count = last_desired.len();
+                        for (token, side) in desired.iter() {
+                            pm_ws_collector.register_token(token, *side).await;
+                        }
+                        pm_ws_collector.request_resubscribe();
+                        info!(
+                            agent = %agent_id_collector,
+                            previous_token_count,
+                            token_count = desired.len(),
+                            "pm token collector refreshed token set on shared data-plane ws; resubscribe requested"
+                        );
+                        last_desired = desired;
+                    }
+                } else {
+                    let (added, removed, updated, total) =
+                        pm_ws_collector.reconcile_token_sides(&desired).await;
+                    if added > 0 || removed > 0 {
+                        pm_ws_collector.request_resubscribe();
+                        info!(
+                            agent = %agent_id_collector,
+                            added,
+                            removed,
+                            updated,
+                            token_count = total,
+                            "pm token collector reconciled token set; resubscribe requested"
+                        );
+                    }
                 }
 
                 if let Some(pool) = pool_collector.as_ref() {
@@ -5842,92 +5954,131 @@ pub async fn start_platform(
                 let pipeline_handle =
                     crate::platform::PersistencePipeline::spawn(pool.clone(), pipeline_config);
 
-                // Bridge PM WS quote updates → pipeline
-                let ph = pipeline_handle.clone();
-                let mut quote_rx = pm_ws.subscribe_updates();
-                tokio::spawn(async move {
-                    loop {
-                        match quote_rx.recv().await {
-                            Ok(update) => {
-                                let tick = crate::platform::ClobQuoteTick {
-                                    token_id: update.token_id.clone(),
-                                    side: format!("{:?}", update.side),
-                                    best_bid: update.quote.best_bid,
-                                    best_ask: update.quote.best_ask,
-                                    bid_size: update.quote.bid_size,
-                                    ask_size: update.quote.ask_size,
-                                    domain: Domain::Crypto,
-                                    received_at: Utc::now(),
-                                };
-                                let _ = ph.try_ingest(crate::platform::PersistenceEvent::ClobQuote(tick));
+                // Bridge PM quote updates → pipeline
+                let quote_rx = if use_data_plane {
+                    data_plane.as_ref().and_then(|dp| dp.subscribe_quotes())
+                } else {
+                    Some(pm_ws.subscribe_updates())
+                };
+                if let Some(mut quote_rx) = quote_rx {
+                    let ph = pipeline_handle.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            match quote_rx.recv().await {
+                                Ok(update) => {
+                                    let tick = crate::platform::ClobQuoteTick {
+                                        token_id: update.token_id.clone(),
+                                        side: format!("{:?}", update.side),
+                                        best_bid: update.quote.best_bid,
+                                        best_ask: update.quote.best_ask,
+                                        bid_size: update.quote.bid_size,
+                                        ask_size: update.quote.ask_size,
+                                        domain: Domain::Crypto,
+                                        received_at: Utc::now(),
+                                    };
+                                    let _ = ph.try_ingest(
+                                        crate::platform::PersistenceEvent::ClobQuote(tick),
+                                    );
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(lagged = n, "unified persistence quote bridge lagged");
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(lagged = n, "unified persistence quote bridge lagged");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
                         }
-                    }
-                });
+                    });
+                } else {
+                    warn!("unified persistence quote bridge unavailable: no quote receiver");
+                }
 
-                // Bridge Binance WS price updates → pipeline
-                let ph = pipeline_handle.clone();
-                let mut price_rx = binance_ws.subscribe();
-                tokio::spawn(async move {
-                    loop {
-                        match price_rx.recv().await {
-                            Ok(update) => {
-                                let tick = crate::platform::BinancePriceTick {
-                                    symbol: update.symbol.clone(),
-                                    price: Some(update.price),
-                                    quantity: update.quantity,
-                                    trade_time: update.timestamp,
-                                };
-                                let _ = ph.try_ingest(crate::platform::PersistenceEvent::BinancePrice(tick));
+                // Bridge Binance price updates → pipeline
+                let price_rx = if use_data_plane {
+                    data_plane.as_ref().and_then(|dp| dp.subscribe_prices())
+                } else {
+                    Some(binance_ws.subscribe())
+                };
+                if let Some(mut price_rx) = price_rx {
+                    let ph = pipeline_handle.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            match price_rx.recv().await {
+                                Ok(update) => {
+                                    let tick = crate::platform::BinancePriceTick {
+                                        symbol: update.symbol.clone(),
+                                        price: Some(update.price),
+                                        quantity: update.quantity,
+                                        trade_time: update.timestamp,
+                                    };
+                                    let _ = ph.try_ingest(
+                                        crate::platform::PersistenceEvent::BinancePrice(tick),
+                                    );
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(lagged = n, "unified persistence price bridge lagged");
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(lagged = n, "unified persistence price bridge lagged");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
                         }
-                    }
-                });
+                    });
+                } else {
+                    warn!("unified persistence price bridge unavailable: no price receiver");
+                }
 
-                // Bridge PM WS orderbook updates → pipeline
-                let ph = pipeline_handle.clone();
-                let mut book_rx = pm_ws.subscribe_books();
-                tokio::spawn(async move {
-                    use sha2::{Digest, Sha256};
-                    loop {
-                        match book_rx.recv().await {
-                            Ok(book_msg) => {
-                                let bids_json = serde_json::to_value(&book_msg.bids).unwrap_or_default();
-                                let asks_json = serde_json::to_value(&book_msg.asks).unwrap_or_default();
-                                let mut hasher = Sha256::new();
-                                hasher.update(bids_json.to_string().as_bytes());
-                                hasher.update(asks_json.to_string().as_bytes());
-                                let hash = format!("{:x}", hasher.finalize());
-                                let snap = crate::platform::ClobOrderbookSnapshot {
-                                    domain: Domain::Crypto,
-                                    token_id: book_msg.asset_id.clone(),
-                                    market: Some(book_msg.market.clone()),
-                                    bids: bids_json,
-                                    asks: asks_json,
-                                    book_timestamp: book_msg.timestamp.as_deref()
-                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                        .map(|dt| dt.with_timezone(&Utc)),
-                                    hash,
-                                    source: "polymarket_ws".into(),
-                                    context: None,
-                                };
-                                let _ = ph.try_ingest(crate::platform::PersistenceEvent::ClobOrderbook(snap));
+                // Bridge PM orderbook updates → pipeline
+                let book_rx = if use_data_plane {
+                    data_plane.as_ref().and_then(|dp| dp.subscribe_books())
+                } else {
+                    Some(pm_ws.subscribe_books())
+                };
+                if let Some(mut book_rx) = book_rx {
+                    let ph = pipeline_handle.clone();
+                    tokio::spawn(async move {
+                        use sha2::{Digest, Sha256};
+                        loop {
+                            match book_rx.recv().await {
+                                Ok(book_msg) => {
+                                    let bids_json =
+                                        serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                                    let asks_json =
+                                        serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(bids_json.to_string().as_bytes());
+                                    hasher.update(asks_json.to_string().as_bytes());
+                                    let hash = format!("{:x}", hasher.finalize());
+                                    let snap = crate::platform::ClobOrderbookSnapshot {
+                                        domain: Domain::Crypto,
+                                        token_id: book_msg.asset_id.clone(),
+                                        market: Some(book_msg.market.clone()),
+                                        bids: bids_json,
+                                        asks: asks_json,
+                                        book_timestamp: book_msg
+                                            .timestamp
+                                            .as_deref()
+                                            .and_then(|s| {
+                                                chrono::DateTime::parse_from_rfc3339(s).ok()
+                                            })
+                                            .map(|dt| dt.with_timezone(&Utc)),
+                                        hash,
+                                        source: "polymarket_ws".into(),
+                                        context: None,
+                                    };
+                                    let _ = ph.try_ingest(
+                                        crate::platform::PersistenceEvent::ClobOrderbook(snap),
+                                    );
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(
+                                        lagged = n,
+                                        "unified persistence orderbook bridge lagged"
+                                    );
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!(lagged = n, "unified persistence orderbook bridge lagged");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
                         }
-                    }
-                });
+                    });
+                } else {
+                    warn!("unified persistence orderbook bridge unavailable: no book receiver");
+                }
 
                 info!(
                     agent = crypto_cfg.agent_id,
@@ -6021,21 +6172,23 @@ pub async fn start_platform(
             );
         }
 
-        // Spawn Binance WS in background
-        let bws = binance_ws.clone();
-        tokio::spawn(async move {
-            if let Err(e) = bws.run().await {
-                error!(error = %e, "binance websocket error");
-            }
-        });
+        if !use_data_plane {
+            // Spawn Binance WS in background
+            let bws = binance_ws.clone();
+            tokio::spawn(async move {
+                if let Err(e) = bws.run().await {
+                    error!(error = %e, "binance websocket error");
+                }
+            });
 
-        // Spawn PM WS in background
-        let pws = pm_ws.clone();
-        tokio::spawn(async move {
-            if let Err(e) = pws.run(Vec::new()).await {
-                error!(error = %e, "polymarket websocket error");
-            }
-        });
+            // Spawn PM WS in background
+            let pws = pm_ws.clone();
+            tokio::spawn(async move {
+                if let Err(e) = pws.run(Vec::new()).await {
+                    error!(error = %e, "polymarket websocket error");
+                }
+            });
+        }
 
         if momentum_enabled {
             if let Some(cmd_rx) = cmd_rx_opt {
@@ -6104,6 +6257,7 @@ pub async fn start_platform(
                             crypto_cfg.risk_params.clone(),
                         );
                         let strategy_ws_url = app_config.market.ws_url.clone();
+                        let strategy_data_plane = data_plane.clone();
                         let strategy_shutdown_rx = shutdown_tx.subscribe();
                         let strategy_dry_run = config.dry_run;
                         let jh = tokio::spawn(async move {
@@ -6114,6 +6268,7 @@ pub async fn start_platform(
                                 strategy_dry_run,
                                 strategy_pm_client,
                                 strategy_ws_url,
+                                strategy_data_plane,
                                 strategy_cmd_rx,
                                 strategy_shutdown_rx,
                             )
@@ -6194,6 +6349,7 @@ pub async fn start_platform(
                         crypto_cfg.risk_params.clone(),
                     );
                     let strategy_ws_url = app_config.market.ws_url.clone();
+                    let strategy_data_plane = data_plane.clone();
                     let strategy_shutdown_rx = shutdown_tx.subscribe();
                     let strategy_dry_run = config.dry_run;
                     let jh = tokio::spawn(async move {
@@ -6204,6 +6360,7 @@ pub async fn start_platform(
                             strategy_dry_run,
                             strategy_pm_client,
                             strategy_ws_url,
+                            strategy_data_plane,
                             strategy_cmd_rx,
                             strategy_shutdown_rx,
                         )
