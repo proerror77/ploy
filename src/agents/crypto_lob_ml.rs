@@ -224,6 +224,11 @@ pub struct CryptoLobMlConfig {
     )]
     pub model_blend_weight: Decimal,
 
+    /// Minimum directional confidence from blended probability.
+    /// Reject entries when |p_up_blended - 0.5| is below this threshold.
+    #[serde(default = "default_min_direction_strength")]
+    pub min_direction_strength: Decimal,
+
     /// Minimum seconds between entries per symbol (avoid thrash).
     pub cooldown_secs: u64,
 
@@ -330,6 +335,10 @@ fn default_model_blend_weight() -> Decimal {
     dec!(0.80)
 }
 
+fn default_min_direction_strength() -> Decimal {
+    dec!(0.05)
+}
+
 fn default_entry_late_window_secs_5m() -> u64 {
     180
 }
@@ -368,6 +377,7 @@ impl Default for CryptoLobMlConfig {
             use_price_to_beat: default_use_price_to_beat(),
             require_price_to_beat: default_require_price_to_beat(),
             model_blend_weight: default_model_blend_weight(),
+            min_direction_strength: default_min_direction_strength(),
             cooldown_secs: 30,
             max_lob_snapshot_age_secs: 2,
             model_type: default_lob_ml_model_type(),
@@ -457,6 +467,7 @@ struct SequenceSnapshot {
     distance_to_beat: Decimal,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SequenceAlignMode {
     Exact,
@@ -866,6 +877,7 @@ impl CryptoLobMlAgent {
         Decimal::from_f64_retain(p.clamp(0.001, 0.999)).unwrap_or(dec!(0.50))
     }
 
+    #[allow(dead_code)]
     fn align_sequence_to_model_input(
         sequence: &[f32],
         model_input_dim: usize,
@@ -1128,6 +1140,10 @@ impl CryptoLobMlAgent {
         }
 
         let p_up_blended = blended.p_up_blended;
+        let direction_strength = (p_up_blended - dec!(0.50)).abs();
+        if direction_strength < self.config.min_direction_strength {
+            return None;
+        }
         let up_edge_gross = p_up_blended - up_ask;
         let down_edge_gross = (Decimal::ONE - p_up_blended) - down_ask;
         let up_edge_net = self.net_ev_for_binary_side(p_up_blended, up_ask);
@@ -2573,16 +2589,6 @@ mod tests {
         )
     }
 
-    fn sample_window_context() -> WindowContext {
-        WindowContext {
-            now: Utc::now(),
-            start_price: dec!(100),
-            window_move: dec!(0.01),
-            elapsed_secs: 30,
-            remaining_secs: 270,
-        }
-    }
-
     fn sample_blended_prob(agent: &CryptoLobMlAgent) -> BlendedProb {
         agent.compute_blended_probability(dec!(0.62), dec!(0.58))
     }
@@ -2781,6 +2787,7 @@ mod tests {
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(cfg.max_entry_price, dec!(0.70));
         assert_eq!(cfg.model_blend_weight, dec!(0.80));
+        assert_eq!(cfg.min_direction_strength, dec!(0.05));
         assert_eq!(
             cfg.entry_side_policy,
             CryptoLobMlEntrySidePolicy::LaggingOnly
@@ -2969,6 +2976,31 @@ mod tests {
         let signal =
             agent.evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.31), dec!(0.32));
         assert!(signal.is_none(), "ask > 0.30 must be rejected");
+    }
+
+    #[test]
+    fn test_evaluate_entry_signal_rejects_weak_direction_strength_near_half() {
+        let mut cfg = CryptoLobMlConfig::default();
+        cfg.min_edge = Decimal::ZERO;
+        cfg.max_entry_price = dec!(0.80);
+        let agent = CryptoLobMlAgent {
+            config: cfg,
+            market_data: sample_market_data(),
+            event_matcher: Arc::new(EventMatcher::new(
+                crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
+            )),
+            lob_cache: LobCache::new(),
+            #[cfg(feature = "onnx")]
+            onnx_model: None,
+        };
+
+        let blended = agent.compute_blended_probability(dec!(0.52), dec!(0.52));
+        let signal =
+            agent.evaluate_entry_signal(&blended, "up-token", "down-token", dec!(0.45), dec!(0.48));
+        assert!(
+            signal.is_none(),
+            "weak direction around 0.5 should be filtered"
+        );
     }
 
     #[test]

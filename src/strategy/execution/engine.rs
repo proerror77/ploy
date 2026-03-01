@@ -51,6 +51,7 @@ struct CycleContext {
     leg1_side: Side,
     leg1_price: Decimal,
     leg1_shares: u64,
+    #[allow(dead_code)]
     leg1_order_id: String,
     leg2_order_id: Option<String>,
     /// Guard against duplicate forced Leg2 submissions from concurrent paths.
@@ -1695,10 +1696,7 @@ impl StrategyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::{
-        BalanceResponse, MarketResponse, MarketSummary, OrderResponse, PositionResponse,
-        TradeResponse,
-    };
+    use crate::adapters::OrderResponse;
     use crate::config::AppConfig;
     use crate::domain::Round;
     use crate::exchange::{ExchangeClient, ExchangeKind};
