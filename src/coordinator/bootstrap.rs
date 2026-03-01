@@ -5364,8 +5364,11 @@ pub async fn start_platform(
                     clob_orderbook_require_hash_change: orderbook_require_hash_change,
                     ..Default::default()
                 };
-                let pipeline_handle =
-                    crate::platform::PersistencePipeline::spawn(pool.clone(), pipeline_config);
+                let pipeline_handle = crate::platform::PersistencePipeline::spawn_with_freshness(
+                    pool.clone(),
+                    pipeline_config,
+                    Some(Arc::clone(&freshness)),
+                );
                 crypto_persistence_pipeline = Some(pipeline_handle.clone());
 
                 if quote_table_ready {
@@ -6058,10 +6061,12 @@ pub async fn start_platform(
                         clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
                         ..Default::default()
                     };
-                    let sports_pipeline = crate::platform::PersistencePipeline::spawn(
-                        pool.clone(),
-                        sports_pipeline_config,
-                    );
+                    let sports_pipeline =
+                        crate::platform::PersistencePipeline::spawn_with_freshness(
+                            pool.clone(),
+                            sports_pipeline_config,
+                            Some(Arc::clone(&freshness)),
+                        );
 
                     if sports_quote_table_ready {
                         if let Some(quote_rx) = sports_data_plane.subscribe_quotes() {

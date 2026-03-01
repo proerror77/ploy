@@ -716,7 +716,10 @@ impl PolymarketWebSocket {
 
     /// Wire an optional `DataPlaneFreshness` for per-symbol tracking.
     pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        let _ = self.freshness.set(freshness);
+        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
+            freshness.set_source_connected(crate::platform::DataSource::PolymarketWs, false);
+            freshness.set_subscription_count(crate::platform::DataSource::PolymarketWs, 0);
+        }
     }
 
     /// Get the circuit breaker (for external monitoring)
@@ -961,6 +964,7 @@ impl PolymarketWebSocket {
     /// Connect and subscribe to token updates
     async fn connect_and_subscribe(&self, token_ids: &[String]) -> Result<()> {
         let health = self.health_state.get().cloned();
+        let freshness = self.freshness.get().cloned();
         struct WsHealthGuard(Option<Arc<HealthState>>);
         impl Drop for WsHealthGuard {
             fn drop(&mut self) {
@@ -969,7 +973,16 @@ impl PolymarketWebSocket {
                 }
             }
         }
+        struct WsFreshnessGuard(Option<Arc<crate::platform::DataPlaneFreshness>>);
+        impl Drop for WsFreshnessGuard {
+            fn drop(&mut self) {
+                if let Some(ref f) = self.0 {
+                    f.set_source_connected(crate::platform::DataSource::PolymarketWs, false);
+                }
+            }
+        }
         let _guard = WsHealthGuard(health.clone());
+        let _fresh_guard = WsFreshnessGuard(freshness.clone());
 
         let url = Url::parse(&self.ws_url)
             .map_err(|e| PloyError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
@@ -981,6 +994,9 @@ impl PolymarketWebSocket {
         info!("WebSocket connected");
         if let Some(ref h) = health {
             h.set_ws_connected(true);
+        }
+        if let Some(ref f) = freshness {
+            f.set_source_connected(crate::platform::DataSource::PolymarketWs, true);
         }
 
         let (mut write, mut read) = ws_stream.split();

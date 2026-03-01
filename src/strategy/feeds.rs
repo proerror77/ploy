@@ -458,6 +458,7 @@ impl DataFeedManager {
         // Start Binance feed if configured
         if let Some(ref binance_ws) = self.binance_ws {
             let manager = self.manager.clone();
+            let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
             let mut rx = binance_ws.subscribe();
 
             tokio::spawn(async move {
@@ -474,6 +475,9 @@ impl DataFeedManager {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("Binance price feed lagged by {} messages", n);
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_lag(n as u64);
+                            }
                             continue;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -503,6 +507,7 @@ impl DataFeedManager {
             self.backfill_binance_klines().await?;
 
             let manager = self.manager.clone();
+            let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
             let mut rx = binance_ws.subscribe();
             let last_close = self.binance_kline_last_close.clone();
 
@@ -551,6 +556,9 @@ impl DataFeedManager {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("Binance kline feed lagged by {} messages", n);
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_lag(n as u64);
+                            }
                             continue;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -574,6 +582,7 @@ impl DataFeedManager {
         // Start Polymarket feed if configured
         if let Some(ref pm_ws) = self.polymarket_ws {
             let manager = self.manager.clone();
+            let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
             let mut rx = pm_ws.subscribe_updates();
 
             tokio::spawn(async move {
@@ -610,12 +619,16 @@ impl DataFeedManager {
                             };
                             manager.send_market_update(market_update);
                         }
-                        Err(e) => {
-                            warn!("Quote feed recv error: {:?}", e);
-                            // Continue on lagged, break on closed
-                            if matches!(e, tokio::sync::broadcast::error::RecvError::Closed) {
-                                break;
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Quote feed lagged by {} messages", n);
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_lag(n as u64);
                             }
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            warn!("Quote feed recv error: channel closed");
+                            break;
                         }
                     }
                 }

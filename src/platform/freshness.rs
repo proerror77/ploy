@@ -113,6 +113,8 @@ pub struct DataPlaneFreshness {
     source_subscription_count: Arc<DashMap<DataSource, AtomicU64>>,
     /// Broadcast channel lag events (dropped messages).
     broadcast_lag_count: Arc<AtomicU64>,
+    /// Broadcast channel drops due to full/closed downstream queues.
+    broadcast_drop_count: Arc<AtomicU64>,
 }
 
 impl DataPlaneFreshness {
@@ -123,6 +125,7 @@ impl DataPlaneFreshness {
             source_message_count: Arc::new(DashMap::new()),
             source_subscription_count: Arc::new(DashMap::new()),
             broadcast_lag_count: Arc::new(AtomicU64::new(0)),
+            broadcast_drop_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -152,6 +155,11 @@ impl DataPlaneFreshness {
     /// Record a broadcast channel lag event.
     pub fn record_broadcast_lag(&self, count: u64) {
         self.broadcast_lag_count.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Record a broadcast drop event.
+    pub fn record_broadcast_drop(&self, count: u64) {
+        self.broadcast_drop_count.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Update the subscription count for a source (called when tokens are added/removed).
@@ -214,6 +222,11 @@ impl DataPlaneFreshness {
         self.broadcast_lag_count.load(Ordering::Relaxed)
     }
 
+    /// Total broadcast drops.
+    pub fn total_broadcast_drop(&self) -> u64 {
+        self.broadcast_drop_count.load(Ordering::Relaxed)
+    }
+
     /// Export per-symbol freshness metrics in Prometheus text format.
     pub fn prometheus_metrics(&self) -> String {
         let mut out = String::with_capacity(4096);
@@ -266,6 +279,32 @@ impl DataPlaneFreshness {
             ));
         }
 
+        // Per-source feed health derived from message count + staleness.
+        // 1 = healthy, 0 = degraded, -1 = down (no messages observed yet).
+        out.push_str("\n# HELP ploy_source_feed_health Feed health per source (-1=down, 0=degraded, 1=healthy)\n");
+        out.push_str("# TYPE ploy_source_feed_health gauge\n");
+        for source in [
+            DataSource::PolymarketWs,
+            DataSource::BinanceSpot,
+            DataSource::BinanceKline,
+            DataSource::BinanceLob,
+            DataSource::ChainlinkRtds,
+        ] {
+            let msg_count = self.source_message_count(source);
+            let health = if msg_count == 0 {
+                -1
+            } else if self.stale_symbol_count_for_source(source, 30.0) > 0 {
+                0
+            } else {
+                1
+            };
+            out.push_str(&format!(
+                "ploy_source_feed_health{{source=\"{}\"}} {}\n",
+                source.as_str(),
+                health
+            ));
+        }
+
         // Tracked symbol count
         out.push_str(&format!(
             "\n# HELP ploy_tracked_symbols_total Total unique symbols being tracked\n\
@@ -293,6 +332,13 @@ impl DataPlaneFreshness {
              # TYPE ploy_broadcast_lag_total counter\n\
              ploy_broadcast_lag_total {}\n",
             self.broadcast_lag_count.load(Ordering::Relaxed),
+        ));
+
+        out.push_str(&format!(
+            "\n# HELP ploy_broadcast_drop_total Total dropped events when forwarding broadcast updates\n\
+             # TYPE ploy_broadcast_drop_total counter\n\
+             ploy_broadcast_drop_total {}\n",
+            self.broadcast_drop_count.load(Ordering::Relaxed),
         ));
 
         out
@@ -403,6 +449,16 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_drop_counting() {
+        let f = DataPlaneFreshness::new();
+
+        f.record_broadcast_drop(2);
+        f.record_broadcast_drop(4);
+
+        assert_eq!(f.total_broadcast_drop(), 6);
+    }
+
+    #[test]
     fn prometheus_output_format() {
         let f = DataPlaneFreshness::new();
 
@@ -410,6 +466,7 @@ mod tests {
         f.set_source_connected(DataSource::BinanceSpot, true);
         f.set_subscription_count(DataSource::BinanceSpot, 3);
         f.record_broadcast_lag(2);
+        f.record_broadcast_drop(1);
 
         let output = f.prometheus_metrics();
 
@@ -422,6 +479,8 @@ mod tests {
         assert!(output.contains("ploy_source_subscriptions_total{source=\"binance_spot\"} 3"));
         assert!(output.contains("ploy_tracked_symbols_total 1"));
         assert!(output.contains("ploy_broadcast_lag_total 2"));
+        assert!(output.contains("ploy_broadcast_drop_total 1"));
+        assert!(output.contains("ploy_source_feed_health{source=\"binance_spot\"} 1"));
     }
 
     #[test]

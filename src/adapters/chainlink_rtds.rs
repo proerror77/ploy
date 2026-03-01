@@ -455,7 +455,13 @@ impl ChainlinkRtds {
 
     /// Attach a shared freshness tracker for the data plane.
     pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        let _ = self.freshness.set(freshness);
+        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
+            freshness.set_subscription_count(
+                crate::platform::DataSource::ChainlinkRtds,
+                self.symbols.len() as u64,
+            );
+            freshness.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+        }
     }
 
     /// Get a reference to the price cache
@@ -516,6 +522,16 @@ impl ChainlinkRtds {
 
     /// Connect, subscribe, and stream price data
     async fn connect_and_stream(&self) -> Result<()> {
+        struct ConnectionGuard<'a>(&'a ChainlinkRtds);
+        impl Drop for ConnectionGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.freshness.get() {
+                    f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+                }
+            }
+        }
+        let _guard = ConnectionGuard(self);
+
         let url = Url::parse(CHAINLINK_RTDS_WS_URL)
             .map_err(|e| PloyError::Internal(format!("Invalid RTDS WebSocket URL: {}", e)))?;
 
@@ -524,6 +540,9 @@ impl ChainlinkRtds {
         let ws_stream = connect_websocket_with_proxy(&url).await?;
 
         info!("Connected to Chainlink RTDS WebSocket");
+        if let Some(f) = self.freshness.get() {
+            f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, true);
+        }
 
         let (mut write, mut read) = ws_stream.split();
 

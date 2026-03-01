@@ -268,7 +268,13 @@ impl BinanceKlineWebSocket {
 
     /// Attach a shared freshness tracker for the data plane.
     pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        let _ = self.freshness.set(freshness);
+        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
+            freshness.set_subscription_count(
+                crate::platform::DataSource::BinanceKline,
+                (self.symbols.len() * self.intervals.len()) as u64,
+            );
+            freshness.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<KlineUpdate> {
@@ -329,6 +335,16 @@ impl BinanceKlineWebSocket {
     }
 
     async fn connect_and_stream(&self) -> Result<()> {
+        struct ConnectionGuard<'a>(&'a BinanceKlineWebSocket);
+        impl Drop for ConnectionGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.freshness.get() {
+                    f.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+                }
+            }
+        }
+        let _guard = ConnectionGuard(self);
+
         let url = self.build_url();
         let url = Url::parse(&url)
             .map_err(|e| PloyError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
@@ -337,6 +353,9 @@ impl BinanceKlineWebSocket {
 
         let ws_stream = connect_websocket_with_proxy(&url).await?;
         info!("Connected to Binance kline WS");
+        if let Some(f) = self.freshness.get() {
+            f.set_source_connected(crate::platform::DataSource::BinanceKline, true);
+        }
 
         let (mut write, mut read) = ws_stream.split();
         let mut ping_interval = interval(Duration::from_secs(PING_INTERVAL_SECS));
