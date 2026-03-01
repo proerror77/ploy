@@ -109,7 +109,7 @@ ratatui = "0.29"
 
 # Health check server and API
 axum = { version = "0.8" }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 # Reinforcement Learning (optional)
 # Using ndarray backend for CPU-based RL training
