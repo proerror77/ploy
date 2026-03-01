@@ -4625,6 +4625,8 @@ async fn run_managed_strategy_runtime(
     pm_client: PolymarketClient,
     pm_ws_url: String,
     data_plane: Option<Arc<PlatformDataPlane>>,
+    observability_pool: Option<PgPool>,
+    observability_account_id: String,
     mut cmd_rx: mpsc::Receiver<CoordinatorCommand>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
@@ -6109,6 +6111,8 @@ pub async fn start_platform(
                                 strategy_pm_client,
                                 strategy_ws_url,
                                 strategy_data_plane,
+                                strategy_observability_pool,
+                                strategy_account_id,
                                 strategy_cmd_rx,
                                 strategy_shutdown_rx,
                             )
@@ -6223,6 +6227,8 @@ pub async fn start_platform(
                             strategy_pm_client,
                             strategy_ws_url,
                             strategy_data_plane,
+                            strategy_observability_pool,
+                            strategy_account_id,
                             strategy_cmd_rx,
                             strategy_shutdown_rx,
                         )

@@ -62,6 +62,7 @@ pub mod backtest_report;
 pub mod calculations;
 #[cfg(feature = "claimer_daemon")]
 pub mod claimer;
+pub mod deribit_probability_arb;
 pub mod directional_backtest;
 pub mod dump_hedge;
 pub mod execution;
@@ -138,6 +139,15 @@ pub use backtest::{
     calculate_kline_volatility, load_klines_from_csv, load_pm_prices_from_csv, BacktestEngine,
     BacktestResults, BacktestTrade, KlineRecord, MarketSnapshot, PMPriceRecord, PaperSignal,
     PaperTrader, PaperTradingStats,
+};
+pub use backtest_recorder::{
+    BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, PgBacktestRecorder, SignalType,
+};
+pub use backtest_report::{load_report, BacktestReport, Suggestion, SuggestionPriority};
+pub use deribit_probability_arb::{
+    binary_call_prob_forward, interpolate_iv_linear, net_edge, norm_cdf, parse_polymarket_question,
+    run_deribit_probability_arb, DeribitProbabilityArbConfig, ParsedPolymarketQuestion,
+    SurfacePoint, VolSurfaceSnapshot,
 };
 pub use directional_backtest::{
     DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
