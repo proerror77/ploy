@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::platform::types::Domain;
@@ -202,6 +202,43 @@ impl PersistencePipelineHandle {
     pub fn try_ingest(&self, event: PersistenceEvent) -> Result<(), PersistenceEvent> {
         self.tx.try_send(event).map_err(|e| match e {
             mpsc::error::TrySendError::Full(ev) | mpsc::error::TrySendError::Closed(ev) => ev,
+        })
+    }
+
+    /// Spawn a bridge task from a broadcast receiver into this pipeline.
+    ///
+    /// The mapper closure transforms incoming broadcast messages into optional
+    /// persistence events. Returning `None` drops the message.
+    pub fn spawn_bridge<T, F>(
+        &self,
+        mut rx: broadcast::Receiver<T>,
+        bridge_name: impl Into<String>,
+        mut map_event: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        T: Clone + Send + 'static,
+        F: FnMut(T) -> Option<PersistenceEvent> + Send + 'static,
+    {
+        let pipeline = self.clone();
+        let bridge_name = bridge_name.into();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let Some(event) = map_event(msg) else {
+                            continue;
+                        };
+                        if pipeline.try_ingest(event).is_err() {
+                            warn!(bridge = %bridge_name, "persistence bridge dropped event");
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(bridge = %bridge_name, lagged = n, "persistence bridge lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            debug!(bridge = %bridge_name, "persistence bridge stopped");
         })
     }
 }
