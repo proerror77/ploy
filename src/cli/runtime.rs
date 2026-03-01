@@ -152,6 +152,7 @@ pub enum Commands {
     Strategy(super::strategy::StrategyCommands),
 
     /// Claim/redeem winning positions from resolved markets
+    #[cfg(feature = "claimer_cli")]
     Claim {
         /// Check only (don't actually claim)
         #[arg(long)]
@@ -206,6 +207,30 @@ pub enum Commands {
         /// Stats print interval (seconds)
         #[arg(long, default_value = "300")]
         stats_interval: u64,
+
+        /// Reverse-engineered profile URL (when set, runs Shadow Pulse paper mode instead of vol-arb paper mode)
+        #[arg(long)]
+        reverse_profile_url: Option<String>,
+
+        /// Poll interval (seconds) for reverse paper mode
+        #[arg(long, default_value = "30")]
+        reverse_poll_secs: u64,
+
+        /// Min buy notional per synthetic order in reverse paper mode
+        #[arg(long, default_value = "5.0")]
+        reverse_min_trade_usdc: f64,
+
+        /// Max notional per event in reverse paper mode
+        #[arg(long, default_value = "250.0")]
+        reverse_max_event_usdc: f64,
+
+        /// Max total notional in reverse paper mode
+        #[arg(long, default_value = "2000.0")]
+        reverse_max_total_usdc: f64,
+
+        /// Target assets for reverse paper mode (comma-separated keyword filter)
+        #[arg(long, default_value = "Bitcoin,Ethereum,Solana,XRP")]
+        reverse_target_assets: String,
     },
 
     /// Multi-agent platform (Coordinator + Agents)
@@ -268,6 +293,7 @@ pub enum CryptoCommands {
         dry_run: bool,
     },
     /// Backtest crypto UP/DOWN markets (5m + 15m) using Gamma settled events + Binance spot.
+    #[cfg(feature = "analysis_tools")]
     BacktestUpDown {
         /// Symbols to analyze (comma-separated: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT)
         #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
@@ -299,6 +325,51 @@ pub enum CryptoCommands {
         /// Reject DB snapshots older than this many seconds vs entry time
         #[arg(long, default_value = "120")]
         max_snapshot_age_secs: i64,
+    },
+    /// Deribit-implied probability arbitrage with automatic Polymarket execution
+    DeribitProbArb {
+        /// Symbols to trade (comma-separated: BTC,ETH)
+        #[arg(long, default_value = "BTC,ETH")]
+        symbols: String,
+        /// Minimum net edge in cents after fee buffer
+        #[arg(long, default_value = "3.0")]
+        min_edge: f64,
+        /// Fee/slippage buffer in cents deducted from model edge
+        #[arg(long, default_value = "2.0")]
+        fee_buffer: f64,
+        /// Main loop poll interval in milliseconds
+        #[arg(long, default_value = "2000")]
+        poll_ms: u64,
+        /// Surface refresh interval in seconds
+        #[arg(long, default_value = "5")]
+        surface_refresh_secs: u64,
+        /// Market discovery refresh interval in seconds
+        #[arg(long, default_value = "30")]
+        discovery_refresh_secs: u64,
+        /// Minimum seconds to expiry for new entries
+        #[arg(long, default_value = "45")]
+        min_remaining_secs: u64,
+        /// Maximum seconds to expiry for new entries
+        #[arg(long, default_value = "900")]
+        max_remaining_secs: u64,
+        /// Max acceptable bid/ask spread (bps)
+        #[arg(long, default_value = "250")]
+        max_spread_bps: u32,
+        /// Maximum USD notional per trade
+        #[arg(long, default_value = "50")]
+        max_trade_usd: f64,
+        /// Maximum symbol exposure in USD
+        #[arg(long, default_value = "150")]
+        max_symbol_exposure_usd: f64,
+        /// Kelly scaling factor (0.0 - 1.0)
+        #[arg(long, default_value = "0.25")]
+        kelly_fraction: f64,
+        /// Cooldown per condition in seconds
+        #[arg(long, default_value = "45")]
+        cooldown_secs: u64,
+        /// Dry run mode
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

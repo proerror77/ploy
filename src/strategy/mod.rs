@@ -39,6 +39,7 @@ pub use traits::{
 pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};
 pub use feeds::{DataFeedBuilder, DataFeedManager};
 pub use manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus};
+pub use staggered_arb_live::StaggeredArbAdapter;
 
 // =============================================================================
 // New modular architecture
@@ -56,7 +57,10 @@ pub mod sports;
 
 pub mod backtest;
 pub mod backtest_feed;
+pub mod backtest_recorder;
+pub mod backtest_report;
 pub mod calculations;
+#[cfg(feature = "claimer_daemon")]
 pub mod claimer;
 pub mod directional_backtest;
 pub mod dump_hedge;
@@ -74,15 +78,19 @@ pub mod parquet_analysis;
 pub mod position_manager;
 pub mod probability;
 pub mod reconciliation;
+pub mod reverse_engineered;
 pub mod risk_mgmt;
 pub mod signal;
 pub mod split_arb;
+pub mod staggered_arb_backtest;
+pub mod staggered_arb_live;
 pub mod trade_logger;
 pub mod trading_costs;
 pub mod volatility;
 pub mod volatility_arb;
 
 // Runtime re-exports
+#[cfg(feature = "claimer_daemon")]
 pub use claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
 pub use execution::engine::StrategyEngine;
 pub use execution::engine_store;
@@ -174,12 +182,21 @@ pub use reconciliation::{
     ReconciliationService,
 };
 pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
+pub use reverse_engineered::{
+    extract_profile_snapshot, infer_strategy_params, run_reverse_engineered_profile_paper,
+    ProfileSnapshot as ReverseProfileSnapshot, ReverseDryRunResult, ReverseEngineeredConfig,
+    ReverseTradeEvent, StrategyParams as ReverseStrategyParams, REVERSE_PROFILE_STRATEGY_NAME,
+    REVERSE_PROFILE_STRATEGY_SLUG,
+};
 pub use risk_mgmt::risk::RiskManager;
 pub use risk_mgmt::slippage::{MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection};
 pub use signal::SignalDetector;
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
     SplitArbConfig, SplitArbEngine,
+};
+pub use staggered_arb_backtest::{
+    StaggeredArbBacktestConfig, StaggeredArbBacktestEngine, StaggeredArbClosedTrade,
 };
 pub use trading_costs::{
     OrderType, TradingCostBreakdown, TradingCostCalculator, TradingCostConfig,

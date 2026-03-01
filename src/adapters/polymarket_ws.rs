@@ -14,7 +14,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::{interval, timeout, Instant};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    client_async_tls_with_config, connect_async, tungstenite::Message, MaybeTlsStream,
+    WebSocketStream,
+};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -126,20 +129,12 @@ async fn connect_websocket_with_proxy(
 
             let tcp_stream = connect_via_proxy(&proxy_host, proxy_port, host, port).await?;
 
-            let connector = native_tls::TlsConnector::new()
-                .map_err(|e| PloyError::Internal(format!("TLS connector error: {}", e)))?;
-            let connector = tokio_native_tls::TlsConnector::from(connector);
-
-            let tls_stream = connector
-                .connect(host, tcp_stream)
-                .await
-                .map_err(|e| PloyError::Internal(format!("TLS handshake failed: {}", e)))?;
-
-            let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
-
-            let (ws_stream, _response) = tokio_tungstenite::client_async(url.as_str(), maybe_tls)
-                .await
-                .map_err(|e| PloyError::Internal(format!("WebSocket handshake failed: {}", e)))?;
+            let (ws_stream, _response) =
+                client_async_tls_with_config(url.as_str(), tcp_stream, None, None)
+                    .await
+                    .map_err(|e| {
+                        PloyError::Internal(format!("WebSocket handshake failed: {}", e))
+                    })?;
 
             return Ok(ws_stream);
         }
@@ -1009,7 +1004,7 @@ impl PolymarketWebSocket {
         };
 
         let msg_json = serde_json::to_string(&subscribe_msg)?;
-        write.send(Message::Text(msg_json)).await?;
+        write.send(Message::Text(msg_json.into())).await?;
         info!("Subscribed to {} tokens", token_ids.len());
 
         // Set up ping interval
@@ -1049,7 +1044,7 @@ impl PolymarketWebSocket {
                 }
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    write.send(Message::Ping(vec![])).await?;
+                    write.send(Message::Ping(vec![].into())).await?;
                     debug!("Sent ping");
                 }
                 // Connection health / resubscribe checks

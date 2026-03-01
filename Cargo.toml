@@ -5,22 +5,27 @@ edition = "2021"
 description = "Polymarket two-leg arbitrage trading bot"
 authors = ["Your Name"]
 
+[workspace]
+members = [
+    ".",
+    "tools/sdk_auth_check",
+]
+resolver = "2"
+
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "process"] }
 
 # WebSocket
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 futures = "0.3"
-native-tls = "0.2"
-tokio-native-tls = "0.3"
 
 # HTTP client
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # Database
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "rust_decimal", "uuid"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "chrono", "rust_decimal", "uuid"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -52,18 +57,19 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Crypto for signing (Polymarket requires EIP-712 signatures)
-ethers = { version = "2", features = ["rustls"] }
+ethers-core = { version = "2", default-features = false }
+ethers-signers = { version = "2", default-features = false }
 
 # Official Polymarket CLOB client SDK
 polymarket-client-sdk = { version = "0.4", features = ["ws", "gamma", "data", "tracing", "bridge", "clob", "ctf"] }
-builder-relayer-client-rust = { version = "=0.1.3", optional = true }
+builder-relayer-client-rust = { version = "=0.2.2", optional = true }
 builder_signing_sdk_rs = { version = "0.1.0", optional = true }
 
 # Agent framework (Claude Code CLI) with MCP tools
-claude-agent-sdk-rs = "0.6.3"
+claude-agent-sdk-rs = { version = "0.6.3", optional = true }
 
 # Alloy for signing (used by polymarket-client-sdk)
-alloy = { version = "1", features = ["signers", "signer-local", "provider-http", "network", "contract", "sol-types", "providers", "reqwest"] }
+alloy = { version = "1", default-features = false, features = ["signers", "signer-local", "provider-http", "network", "contract", "sol-types", "providers", "rpc-types", "reqwest"] }
 
 # HMAC authentication
 hmac = "0.12"
@@ -102,7 +108,7 @@ crossterm = { version = "0.27", features = ["event-stream"] }
 ratatui = "0.29"
 
 # Health check server and API
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8" }
 tower-http = { version = "0.5", features = ["cors"] }
 
 # Reinforcement Learning (optional)
@@ -119,18 +125,29 @@ duckdb = { version = "1.4", features = ["bundled"], optional = true }
 tract-onnx = { version = "0.22.0", optional = true }
 
 [features]
-default = ["builder_relayer_sdk"]
+default = []
 api = []  # Enable API module with SQLx compile-time checks (requires DATABASE_URL)
+api_ws = ["api", "axum/ws"]
+claimer = ["claimer_cli", "claimer_daemon"]
+claimer_cli = ["claimer_daemon"]
+claimer_daemon = []
+analysis_tools = ["analysis_core"]
+analysis_core = []
 rl = ["burn", "burn-ndarray", "bincode"]
-analysis = ["duckdb"]
+analysis = ["analysis_parquet"]
+analysis_parquet = ["duckdb"]
 onnx = ["tract-onnx"]
 tcn_db = [] # Legacy db-backed TCN path (currently unused)
 builder_relayer_sdk = ["dep:builder-relayer-client-rust", "dep:builder_signing_sdk_rs"]
+event_edge_claude_sdk = ["dep:claude-agent-sdk-rs"]
 
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"
 tower = { version = "0.5", features = ["util"] }
+
+[patch.crates-io]
+polymarket-client-sdk = { path = "vendor/polymarket-client-sdk" }
 
 [profile.release]
 lto = "thin"
@@ -138,3 +155,11 @@ codegen-units = 4
 panic = "abort"
 strip = true
 opt-level = 2
+
+[profile.dev]
+debug = 1
+incremental = true
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = 0

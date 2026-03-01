@@ -724,6 +724,7 @@ impl EventMatcher {
     }
 
     /// Convert Gamma API event to EventInfo
+    #[allow(dead_code)]
     fn convert_gamma_event(&self, gamma: &GammaEventInfo) -> Option<EventInfo> {
         debug!(
             "Converting event: id={}, markets={}",
@@ -1737,6 +1738,7 @@ impl WindowRiskTracker {
 /// Main engine orchestrating the momentum strategy
 pub struct MomentumEngine {
     config: MomentumConfig,
+    #[allow(dead_code)]
     exit_config: ExitConfig,
     detector: MomentumDetector,
     exit_manager: ExitManager,
@@ -1752,6 +1754,7 @@ pub struct MomentumEngine {
     // Fund management
     fund_manager: Option<Arc<FundManager>>,
     // Auto-claimer for winning positions
+    #[cfg(feature = "claimer_daemon")]
     claimer: Option<Arc<super::claimer::AutoClaimer>>,
     // Trade logger for persistent records
     trade_logger: Option<Arc<super::trade_logger::TradeLogger>>,
@@ -1814,6 +1817,7 @@ impl MomentumEngine {
             volatility_detector,
             event_tracker: Arc::new(RwLock::new(event_tracker)),
             fund_manager: None,
+            #[cfg(feature = "claimer_daemon")]
             claimer: None,
             trade_logger: None,
             window_tracker: Arc::new(RwLock::new(WindowRiskTracker::default())),
@@ -1885,6 +1889,7 @@ impl MomentumEngine {
     }
 
     /// Set auto-claimer for winning positions
+    #[cfg(feature = "claimer_daemon")]
     pub fn with_claimer(mut self, claimer: super::claimer::AutoClaimer) -> Self {
         self.claimer = Some(Arc::new(claimer));
         self
@@ -2070,41 +2075,54 @@ impl MomentumEngine {
                         won_count += 1;
                         total_payout += payout;
 
-                        // Trigger claimer to redeem winning position
-                        if let Some(ref claimer) = self.claimer {
-                            info!(
-                                "📋 Triggering claimer for {}: condition_id={}, shares={}",
-                                symbol,
-                                &pos.condition_id[..16.min(pos.condition_id.len())],
-                                pos.shares
-                            );
-                            match claimer.check_and_claim().await {
-                                Ok(results) => {
-                                    for result in results {
-                                        if result.success {
-                                            info!(
-                                                "✅ Claimed ${:.2} from {}: tx={}",
-                                                result.amount_claimed,
-                                                &result.condition_id
-                                                    [..16.min(result.condition_id.len())],
-                                                result.tx_hash
-                                            );
-                                        } else if let Some(err) = result.error {
-                                            warn!(
-                                                "❌ Failed to claim {}: {}",
-                                                result.condition_id, err
-                                            );
+                        #[cfg(feature = "claimer_daemon")]
+                        {
+                            // Trigger claimer to redeem winning position
+                            if let Some(ref claimer) = self.claimer {
+                                info!(
+                                    "📋 Triggering claimer for {}: condition_id={}, shares={}",
+                                    symbol,
+                                    &pos.condition_id[..16.min(pos.condition_id.len())],
+                                    pos.shares
+                                );
+                                match claimer.check_and_claim().await {
+                                    Ok(results) => {
+                                        for result in results {
+                                            if result.success {
+                                                info!(
+                                                    "✅ Claimed ${:.2} from {}: tx={}",
+                                                    result.amount_claimed,
+                                                    &result.condition_id
+                                                        [..16.min(result.condition_id.len())],
+                                                    result.tx_hash
+                                                );
+                                            } else if let Some(err) = result.error {
+                                                warn!(
+                                                    "❌ Failed to claim {}: {}",
+                                                    result.condition_id, err
+                                                );
+                                            }
                                         }
                                     }
+                                    Err(e) => {
+                                        warn!("Failed to trigger claimer: {}", e);
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to trigger claimer: {}", e);
-                                }
+                            } else {
+                                // No claimer configured - just log
+                                info!(
+                                    "📋 Position {} needs claiming (no claimer configured): condition_id={}, shares={}",
+                                    symbol,
+                                    &pos.condition_id[..16.min(pos.condition_id.len())],
+                                    pos.shares
+                                );
                             }
-                        } else {
-                            // No claimer configured - just log
+                        }
+
+                        #[cfg(not(feature = "claimer_daemon"))]
+                        {
                             info!(
-                                "📋 Position {} needs claiming (no claimer configured): condition_id={}, shares={}",
+                                "📋 Position {} needs claiming (claimer feature disabled): condition_id={}, shares={}",
                                 symbol,
                                 &pos.condition_id[..16.min(pos.condition_id.len())],
                                 pos.shares

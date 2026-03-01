@@ -54,7 +54,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             };
 
             // Send to client
-            if sender.send(Message::Text(json)).await.is_err() {
+            if sender.send(Message::Text(json.into())).await.is_err() {
                 break;
             }
         }

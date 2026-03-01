@@ -112,6 +112,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             crate::main_runtime::init_logging();
             crate::main_commands::rl::run_rl_command(rl_cmd).await?;
         }
+        #[cfg(feature = "claimer_cli")]
         Some(Commands::Claim {
             check_only,
             min_size,
@@ -134,6 +135,12 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             min_price_edge,
             log_file,
             stats_interval,
+            reverse_profile_url,
+            reverse_poll_secs,
+            reverse_min_trade_usdc,
+            reverse_max_event_usdc,
+            reverse_max_total_usdc,
+            reverse_target_assets,
         }) => {
             crate::main_runtime::init_logging();
             crate::main_modes::run_paper_trading(
@@ -142,6 +149,12 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
                 *min_price_edge,
                 log_file.clone(),
                 *stats_interval,
+                reverse_profile_url.clone(),
+                *reverse_poll_secs,
+                *reverse_min_trade_usdc,
+                *reverse_max_event_usdc,
+                *reverse_max_total_usdc,
+                reverse_target_assets.clone(),
             )
             .await?;
         }

@@ -6,7 +6,8 @@
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::PrivateKeySigner;
+use alloy::rpc::types::TransactionRequest as AlloyTransactionRequest;
+use alloy::signers::{local::PrivateKeySigner, Signer as _};
 use alloy::sol;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 #[cfg(feature = "builder_relayer_sdk")]
@@ -19,20 +20,14 @@ use builder_relayer_client_rust::{
 #[cfg(feature = "builder_relayer_sdk")]
 use builder_signing_sdk_rs::BuilderApiKeyCreds;
 use chrono::{NaiveDate, Utc};
-use ethers::abi::{encode as abi_encode, AbiParser, Token};
-use ethers::middleware::SignerMiddleware;
-use ethers::providers::{
-    Http as EthersHttp, Middleware as EthersMiddleware, Provider as EthersProvider,
+use ethers_core::abi::{encode as abi_encode, AbiParser, Token};
+use ethers_core::types::{
+    Address as EthersAddress, H256 as EthersH256, U256 as EthersU256,
 };
-use ethers::signers::{LocalWallet, Signer as _};
-use ethers::types::{
-    transaction::eip2718::TypedTransaction as EthersTypedTransaction, Address as EthersAddress,
-    Bytes as EthersBytes, TransactionRequest as EthersTransactionRequest, H256 as EthersH256,
-    U256 as EthersU256, U64 as EthersU64,
-};
-use ethers::utils::{
+use ethers_core::utils::{
     get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256,
 };
+use ethers_signers::{LocalWallet, Signer as _};
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
@@ -314,6 +309,10 @@ fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Result<String> 
 
 fn u256_to_u128_saturating(value: U256) -> u128 {
     value.to_string().parse::<u128>().unwrap_or(u128::MAX)
+}
+
+fn ethers_to_alloy_address(value: EthersAddress) -> Address {
+    Address::from_slice(value.as_bytes())
 }
 
 fn compact_http_body(raw: &str, max_chars: usize) -> String {
@@ -978,27 +977,28 @@ impl AutoClaimer {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
-
-        let provider = match EthersProvider::<EthersHttp>::try_from(polygon_rpc.as_str()) {
-            Ok(p) => p,
+        let rpc_url = match polygon_rpc.parse() {
+            Ok(url) => url,
             Err(e) => {
                 warn!("Auto top-up skipped: invalid POLYGON_RPC_URL: {}", e);
                 return Ok(None);
             }
         };
 
-        let topup_wallet = match topup_private_key.parse::<LocalWallet>() {
-            Ok(w) => w.with_chain_id(POLYGON_CHAIN_ID),
+        let topup_signer = match topup_private_key.parse::<PrivateKeySigner>() {
+            Ok(signer) => signer.with_chain_id(Some(POLYGON_CHAIN_ID)),
             Err(e) => {
                 warn!("Auto top-up skipped: invalid top-up private key: {}", e);
                 return Ok(None);
             }
         };
-        let topup_addr = topup_wallet.address();
-        let client = SignerMiddleware::new(provider.clone(), topup_wallet);
+        let topup_addr = topup_signer.address();
+        let wallet_provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(topup_signer))
+            .connect_http(rpc_url);
 
-        let topup_balance_wei = match provider.get_balance(topup_addr, None).await {
-            Ok(v) => v.to_string().parse::<u128>().unwrap_or(u128::MAX),
+        let topup_balance_wei = match wallet_provider.get_balance(topup_addr).await {
+            Ok(v) => u256_to_u128_saturating(v),
             Err(e) => {
                 warn!(
                     "Auto top-up skipped: failed reading top-up wallet balance: {}",
@@ -1017,28 +1017,16 @@ impl AutoClaimer {
             return Ok(None);
         }
 
-        let target_str = format!("{:#x}", target_wallet);
-        let target_addr: EthersAddress = match target_str.parse() {
-            Ok(addr) => addr,
-            Err(e) => {
-                warn!(
-                    "Auto top-up skipped: invalid target wallet address {}: {}",
-                    target_str, e
-                );
-                return Ok(None);
-            }
-        };
-
         info!(
             "Auto top-up triggered: sending {} wei to claimer wallet {} (current={} threshold={} target={})",
-            topup_wei, target_addr, current_wei, threshold_wei, target_wei
+            topup_wei, target_wallet, current_wei, threshold_wei, target_wei
         );
 
-        let tx = EthersTransactionRequest::new()
-            .to(target_addr)
-            .value(EthersU256::from(topup_wei));
+        let tx = AlloyTransactionRequest::default()
+            .to(target_wallet)
+            .value(U256::from(topup_wei));
 
-        let pending_tx = match client.send_transaction(tx, None).await {
+        let pending_tx = match wallet_provider.send_transaction(tx).await {
             Ok(p) => p,
             Err(e) => {
                 warn!("Auto top-up tx submission failed: {}", e);
@@ -1046,22 +1034,19 @@ impl AutoClaimer {
             }
         };
 
-        let receipt = match pending_tx.await {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                warn!("Auto top-up tx dropped before receipt");
-                return Ok(None);
-            }
+        let receipt = match pending_tx.get_receipt().await {
+            Ok(r) => r,
             Err(e) => {
                 warn!("Auto top-up tx confirmation failed: {}", e);
                 return Ok(None);
             }
         };
 
-        if receipt.status != Some(EthersU64::from(1u64)) {
+        if !receipt.status() {
             warn!(
-                "Auto top-up tx reverted: hash={:?}, status={:?}",
-                receipt.transaction_hash, receipt.status
+                "Auto top-up tx reverted: hash={:?}, status={}",
+                receipt.transaction_hash,
+                receipt.status()
             );
             return Ok(None);
         }
@@ -1076,8 +1061,8 @@ impl AutoClaimer {
             state.spent_wei = state.spent_wei.saturating_add(topup_wei);
         }
 
-        let refreshed = match provider.get_balance(target_addr, None).await {
-            Ok(v) => v.to_string().parse::<u128>().unwrap_or(u128::MAX),
+        let refreshed_alloy = match wallet_provider.get_balance(target_wallet).await {
+            Ok(v) => v,
             Err(e) => {
                 warn!(
                     "Auto top-up sent but failed to read refreshed balance: {}",
@@ -1086,11 +1071,7 @@ impl AutoClaimer {
                 return Ok(None);
             }
         };
-
-        let refreshed_alloy = refreshed
-            .to_string()
-            .parse::<U256>()
-            .unwrap_or(current_balance);
+        let refreshed = u256_to_u128_saturating(refreshed_alloy);
 
         info!(
             "Auto top-up success: tx={:?}, new claimer wallet balance={} wei",
@@ -1429,18 +1410,17 @@ impl AutoClaimer {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
-        let provider =
-            EthersProvider::<EthersHttp>::try_from(polygon_rpc.as_str()).map_err(|e| {
-                crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
-            })?;
+        let rpc_url = polygon_rpc.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
+        })?;
+        let provider = ProviderBuilder::new().connect_http(rpc_url);
 
-        let gas_estimate_tx: EthersTypedTransaction = EthersTransactionRequest::new()
-            .from(signer_addr)
-            .to(proxy_factory_addr)
-            .data(EthersBytes::from(proxy_call_data.clone()))
-            .into();
-        let gas_limit = match provider.estimate_gas(&gas_estimate_tx, None).await {
-            Ok(v) => v,
+        let gas_estimate_tx = AlloyTransactionRequest::default()
+            .from(ethers_to_alloy_address(signer_addr))
+            .to(ethers_to_alloy_address(proxy_factory_addr))
+            .input(proxy_call_data.clone().into());
+        let gas_limit = match provider.estimate_gas(gas_estimate_tx).await {
+            Ok(v) => EthersU256::from(v),
             Err(e) => {
                 warn!(
                     "Relayer redeem gas estimation failed, using default {}: {}",
@@ -1660,7 +1640,9 @@ impl AutoClaimer {
         let rpc_url = polygon_rpc.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
         })?;
-        let provider = ProviderBuilder::new().wallet(wallet).connect_http(rpc_url);
+        let provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_http(rpc_url);
 
         let conditional_tokens_addr: Address = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!(

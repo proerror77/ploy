@@ -1,3 +1,5 @@
+#![cfg(feature = "claimer_cli")]
+
 use ploy::adapters::PolymarketClient;
 use ploy::error::Result;
 use tracing::{error, info, warn};
