@@ -159,7 +159,8 @@ impl DataPlaneFreshness {
 
     /// Record a broadcast drop event.
     pub fn record_broadcast_drop(&self, count: u64) {
-        self.broadcast_drop_count.fetch_add(count, Ordering::Relaxed);
+        self.broadcast_drop_count
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// Update the subscription count for a source (called when tokens are added/removed).
