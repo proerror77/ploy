@@ -1,8 +1,7 @@
 use crate::error::{PloyError, Result};
-use alloy::primitives::{B256, Signature as AlloySignature};
+use alloy::primitives::{Address, B256, Signature};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer as AlloySigner;
-use ethers_core::types::{Address, H256, Signature};
 use tracing::{info, warn};
 use zeroize::Zeroize;
 
@@ -74,7 +73,7 @@ impl Wallet {
 
     /// Get the wallet address
     pub fn address(&self) -> Address {
-        Address::from_slice(self.inner.address().as_slice())
+        self.inner.address()
     }
 
     /// Get the chain ID
@@ -99,15 +98,11 @@ impl Wallet {
     }
 
     /// Sign a message hash (32 bytes)
-    pub async fn sign_hash(&self, hash: H256) -> Result<Signature> {
-        let hash_b256 = B256::from(hash.to_fixed_bytes());
-        let signature = self
-            .inner
-            .sign_hash(&hash_b256)
+    pub async fn sign_hash(&self, hash: B256) -> Result<Signature> {
+        self.inner
+            .sign_hash(&hash)
             .await
-            .map_err(|e| PloyError::Signature(format!("Failed to sign hash: {}", e)))?;
-
-        Ok(alloy_signature_to_ethers(signature))
+            .map_err(|e| PloyError::Signature(format!("Failed to sign hash: {}", e)))
     }
 
     /// Sign a message (will be prefixed with Ethereum signed message)
@@ -118,7 +113,6 @@ impl Wallet {
         self.inner
             .sign_message(message.as_ref())
             .await
-            .map(alloy_signature_to_ethers)
             .map_err(|e| PloyError::Signature(format!("Failed to sign message: {}", e)))
     }
 
@@ -126,14 +120,6 @@ impl Wallet {
     pub fn inner(&self) -> &PrivateKeySigner {
         &self.inner
     }
-}
-
-fn alloy_signature_to_ethers(signature: AlloySignature) -> Signature {
-    let bytes: [u8; 65] = signature.into();
-    let r = ethers_core::types::U256::from_big_endian(&bytes[..32]);
-    let s = ethers_core::types::U256::from_big_endian(&bytes[32..64]);
-    let v = bytes[64] as u64;
-    Signature { r, s, v }
 }
 
 impl std::fmt::Debug for Wallet {
