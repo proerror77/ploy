@@ -9,13 +9,12 @@ use std::time::Duration;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::adapters::{
-    BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PriceCache, QuoteCache,
-};
+use crate::adapters::{PolymarketClient, PriceCache, QuoteCache};
 use crate::domain::Side;
 use crate::error::Result;
+use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::tui::app::TuiApp;
 use crate::tui::data::{DisplayAgent, DisplayRiskState, DisplayTransaction};
 use crate::tui::event::{AppEvent, KeyAction};
@@ -316,20 +315,25 @@ impl DashboardRunner {
     ) {
         info!("Connecting to Binance WebSocket...");
 
-        let binance_ws = BinanceWebSocket::new(symbols);
-        let mut rx = binance_ws.subscribe();
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                binance_spot_symbols: symbols,
+                ..Default::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+        let Some(binance_ws) = data_plane.binance_ws() else {
+            let _ = event_tx.send(AppEvent::Error(
+                "Binance data plane is missing websocket adapter".to_string(),
+            ));
+            return;
+        };
+        if let Err(e) = data_plane.start(Vec::new()).await {
+            let _ = event_tx.send(AppEvent::Error(format!("Binance data plane start: {}", e)));
+            return;
+        }
 
-        // Spawn WebSocket runner
-        let ws_running = Arc::clone(&running);
-        let err_tx = event_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = binance_ws.run().await {
-                if ws_running.load(Ordering::SeqCst) {
-                    error!("Binance WebSocket error: {}", e);
-                    let _ = err_tx.send(AppEvent::Error(format!("Binance WS: {}", e)));
-                }
-            }
-        });
+        let mut rx = binance_ws.subscribe();
 
         let mut first_update = true;
 
@@ -366,30 +370,36 @@ impl DashboardRunner {
     ) {
         info!("Connecting to Polymarket WebSocket...");
 
-        let pm_ws = Arc::new(PolymarketWebSocket::new(
-            "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+                    .to_string(),
+                ..Default::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
         ));
+        let Some(pm_ws) = data_plane.polymarket_ws() else {
+            let _ = event_tx.send(AppEvent::Error(
+                "Polymarket data plane is missing websocket adapter".to_string(),
+            ));
+            return;
+        };
 
         // Register tokens (alternate UP/DOWN)
         for (i, token_id) in token_ids.iter().enumerate() {
             let side = if i % 2 == 0 { Side::Up } else { Side::Down };
             pm_ws.register_token(token_id, side).await;
         }
+        if let Err(e) = data_plane.start(Vec::new()).await {
+            let _ = event_tx.send(AppEvent::Error(format!(
+                "Polymarket data plane start: {}",
+                e
+            )));
+            return;
+        }
 
         let mut rx = pm_ws.subscribe_updates();
         let _quote_cache = pm_ws.quote_cache().clone();
-
-        // Spawn WebSocket runner
-        let pm_ws_clone = Arc::clone(&pm_ws);
-        let tokens = token_ids.clone();
-        let ws_running = Arc::clone(&running);
-        tokio::spawn(async move {
-            if let Err(e) = pm_ws_clone.run(tokens).await {
-                if ws_running.load(Ordering::SeqCst) {
-                    error!("Polymarket WebSocket error: {}", e);
-                }
-            }
-        });
 
         // Track UP and DOWN quotes separately
         let mut up_quote: Option<crate::domain::Quote> = None;

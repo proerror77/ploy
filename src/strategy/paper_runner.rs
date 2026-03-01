@@ -7,16 +7,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket};
+use crate::adapters::PolymarketClient;
 use crate::collector::BinanceKlineClient;
+use crate::domain::Side;
+use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::core::{BinaryMarket, MarketDiscovery};
 use crate::strategy::{CryptoMarketDiscovery, PaperTrader, PaperTradingStats, VolatilityArbConfig};
 
@@ -166,18 +168,35 @@ impl PaperTradingRunner {
             }
         }
 
-        // Create WebSocket connections
-        let pm_ws =
-            PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
-
-        // Binance WS needs lowercase symbols
+        // Build a shared data plane for PM + Binance instead of standalone WS instances.
         let binance_symbols: Vec<String> = self
             .config
             .symbols
             .iter()
             .map(|s| s.to_lowercase())
             .collect();
-        let binance_ws = Arc::new(BinanceWebSocket::new(binance_symbols.clone()));
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+                    .to_string(),
+                binance_spot_symbols: binance_symbols.clone(),
+                ..Default::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+        let pm_ws = data_plane
+            .polymarket_ws()
+            .ok_or_else(|| anyhow!("paper_runner data plane missing polymarket websocket"))?;
+        let binance_ws = data_plane
+            .binance_ws()
+            .ok_or_else(|| anyhow!("paper_runner data plane missing binance websocket"))?;
+
+        // Register yes/no token mappings so QuoteUpdate side routing is active.
+        for market in &markets {
+            pm_ws.register_token(&market.yes_token_id, Side::Up).await;
+            pm_ws.register_token(&market.no_token_id, Side::Down).await;
+        }
+        data_plane.start(Vec::new()).await?;
 
         // Get update channels
         let mut pm_update_rx = pm_ws.subscribe_updates();
@@ -227,22 +246,6 @@ impl PaperTradingRunner {
                 let trader = paper_trader_stats.read().await;
                 let stats = trader.statistics();
                 Self::print_stats(&stats);
-            }
-        });
-
-        // Spawn PM WebSocket runner
-        let token_ids_clone = token_ids.clone();
-        tokio::spawn(async move {
-            if let Err(e) = pm_ws.run(token_ids_clone).await {
-                error!("Polymarket WebSocket error: {}", e);
-            }
-        });
-
-        // Spawn Binance WebSocket runner
-        let binance_ws_runner = Arc::clone(&binance_ws);
-        tokio::spawn(async move {
-            if let Err(e) = binance_ws_runner.run().await {
-                error!("Binance WebSocket error: {}", e);
             }
         });
 

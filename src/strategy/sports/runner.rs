@@ -3,8 +3,10 @@
 //! Main entry point for running split arbitrage on sports markets.
 
 use super::{SportsLeague, SportsMarketDiscovery};
-use crate::adapters::{PolymarketClient, PolymarketWebSocket};
-use crate::error::Result;
+use crate::adapters::PolymarketClient;
+use crate::domain::Side;
+use crate::error::{PloyError, Result};
+use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::core::{MarketDiscovery, SplitArbConfig, SplitArbEngine};
 use crate::strategy::OrderExecutor;
 use rust_decimal_macros::dec;
@@ -99,9 +101,25 @@ pub async fn run_sports_split_arb(
     // Connect to WebSocket
     info!("Sports Split Arbitrage Engine started");
 
-    let ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
-    let ws = PolymarketWebSocket::new(ws_url);
-
+    let data_plane = Arc::new(PlatformDataPlane::new(
+        DataPlaneConfig {
+            polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+            ..Default::default()
+        },
+        Arc::new(DataPlaneFreshness::new()),
+    ));
+    let ws = data_plane.polymarket_ws().ok_or_else(|| {
+        PloyError::Validation(
+            "sports split_arb data plane missing polymarket websocket".to_string(),
+        )
+    })?;
+    for chunk in token_ids.chunks(2) {
+        ws.register_token(&chunk[0], Side::Up).await;
+        if let Some(token_id) = chunk.get(1) {
+            ws.register_token(token_id, Side::Down).await;
+        }
+    }
+    data_plane.start(Vec::new()).await?;
     let mut update_rx = ws.subscribe_updates();
 
     // Stats timer
@@ -111,14 +129,6 @@ pub async fn run_sports_split_arb(
         loop {
             interval.tick().await;
             engine_clone.print_stats().await;
-        }
-    });
-
-    // Spawn WebSocket runner
-    let token_ids_clone = token_ids.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ws.run(token_ids_clone).await {
-            warn!("WebSocket error: {}", e);
         }
     });
 

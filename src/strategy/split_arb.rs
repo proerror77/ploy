@@ -9,9 +9,10 @@
 //! Key insight: Don't need to buy both sides simultaneously.
 //! Retail panic creates mispricings at different times.
 
-use crate::adapters::{PolymarketClient, PolymarketWebSocket, QuoteUpdate};
+use crate::adapters::{PolymarketClient, QuoteUpdate};
 use crate::domain::Side;
-use crate::error::Result;
+use crate::error::{PloyError, Result};
+use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::OrderExecutor;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
@@ -823,16 +824,28 @@ pub async fn run_split_arb(
 
     info!("Found {} tokens to monitor", token_ids.len());
 
-    // Connect to WebSocket
-    let pm_ws = PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
-    let quote_rx = pm_ws.subscribe_updates();
+    // Build a local data plane instead of creating standalone WS adapters.
+    let data_plane = Arc::new(PlatformDataPlane::new(
+        DataPlaneConfig {
+            polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+            ..Default::default()
+        },
+        Arc::new(DataPlaneFreshness::new()),
+    ));
+    let pm_ws = data_plane.polymarket_ws().ok_or_else(|| {
+        PloyError::Validation("split_arb data plane missing polymarket websocket".to_string())
+    })?;
 
-    // Spawn WebSocket task
-    let ws_handle = tokio::spawn(async move {
-        if let Err(e) = pm_ws.run(token_ids).await {
-            error!("WebSocket error: {}", e);
+    // Token list is generated as [up, down, up, down, ...].
+    for chunk in token_ids.chunks(2) {
+        pm_ws.register_token(&chunk[0], Side::Up).await;
+        if let Some(token_id) = chunk.get(1) {
+            pm_ws.register_token(token_id, Side::Down).await;
         }
-    });
+    }
+    data_plane.start(Vec::new()).await?;
+
+    let quote_rx = pm_ws.subscribe_updates();
 
     // Spawn status printer
     let engine_clone = engine.stats.clone();
@@ -855,6 +868,5 @@ pub async fn run_split_arb(
     // Run engine
     engine.run(quote_rx).await?;
 
-    ws_handle.abort();
     Ok(())
 }

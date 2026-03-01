@@ -22,13 +22,13 @@ pub(super) async fn run_agent(
     policy_output: &str,
     policy_version: &Option<String>,
 ) -> Result<()> {
-    use ploy::adapters::{
-        polymarket_clob::POLYGON_CHAIN_ID, BinanceWebSocket, PolymarketClient, PolymarketWebSocket,
-    };
+    use ploy::adapters::{polymarket_clob::POLYGON_CHAIN_ID, PolymarketClient};
     use ploy::domain::Side;
+    use ploy::error::PloyError;
     use ploy::platform::{
-        AgentRiskParams, AgentSubscription, CryptoEvent, Domain, DomainAgent, DomainEvent,
-        EventRouter, OrderPlatform, PlatformConfig, QuoteData, RLCryptoAgent, RLCryptoAgentConfig,
+        AgentRiskParams, AgentSubscription, CryptoEvent, DataPlaneConfig, DataPlaneFreshness,
+        Domain, DomainAgent, DomainEvent, EventRouter, OrderPlatform, PlatformConfig,
+        PlatformDataPlane, QuoteData, RLCryptoAgent, RLCryptoAgentConfig,
     };
     use ploy::rl::config::RLConfig;
     use ploy::signing::Wallet;
@@ -116,35 +116,27 @@ pub(super) async fn run_agent(
         .await;
 
     let symbol_upper = symbol.to_uppercase();
-    let bn_ws = BinanceWebSocket::new(vec![symbol_upper.clone()]);
+    let data_plane = Arc::new(PlatformDataPlane::new(
+        DataPlaneConfig {
+            polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+            binance_spot_symbols: vec![symbol_upper.clone()],
+            ..Default::default()
+        },
+        Arc::new(DataPlaneFreshness::new()),
+    ));
+    let bn_ws = data_plane.binance_ws().ok_or_else(|| {
+        PloyError::Validation("rl agent data plane missing binance websocket".to_string())
+    })?;
+    let pm_ws = data_plane.polymarket_ws().ok_or_else(|| {
+        PloyError::Validation("rl agent data plane missing polymarket websocket".to_string())
+    })?;
+
     let price_cache = bn_ws.price_cache().clone();
-
-    let bn_ws_handle = tokio::spawn(async move {
-        if let Err(e) = bn_ws.run().await {
-            error!("Binance WS error: {}", e);
-        }
-    });
-
-    let pm_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
-    let pm_ws = Arc::new(PolymarketWebSocket::new(pm_ws_url));
     pm_ws.register_token(up_token, Side::Up).await;
     pm_ws.register_token(down_token, Side::Down).await;
+    data_plane.start(Vec::new()).await?;
 
     let quote_cache = pm_ws.quote_cache().clone();
-    let up_token_ws = up_token.to_string();
-    let down_token_ws = down_token.to_string();
-
-    let pm_ws_clone = Arc::clone(&pm_ws);
-    let pm_ws_handle = tokio::spawn(async move {
-        let token_ids = vec![up_token_ws, down_token_ws];
-        info!(
-            "Connecting to Polymarket WebSocket for tokens: {:?}",
-            token_ids
-        );
-        if let Err(e) = pm_ws_clone.run(token_ids).await {
-            error!("Polymarket WS error: {}", e);
-        }
-    });
 
     println!("🚀 Agent started. Listening for market data...\n");
     println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
@@ -317,8 +309,6 @@ pub(super) async fn run_agent(
         }
     }
 
-    bn_ws_handle.abort();
-    pm_ws_handle.abort();
     router.stop_all_agents().await?;
     Ok(())
 }
