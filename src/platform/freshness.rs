@@ -109,6 +109,8 @@ pub struct DataPlaneFreshness {
     source_connected: Arc<DashMap<DataSource, bool>>,
     /// Per-source total message count.
     source_message_count: Arc<DashMap<DataSource, AtomicU64>>,
+    /// Per-source subscription count (tokens/symbols subscribed).
+    source_subscription_count: Arc<DashMap<DataSource, AtomicU64>>,
     /// Broadcast channel lag events (dropped messages).
     broadcast_lag_count: Arc<AtomicU64>,
 }
@@ -119,6 +121,7 @@ impl DataPlaneFreshness {
             entries: Arc::new(DashMap::new()),
             source_connected: Arc::new(DashMap::new()),
             source_message_count: Arc::new(DashMap::new()),
+            source_subscription_count: Arc::new(DashMap::new()),
             broadcast_lag_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -149,6 +152,14 @@ impl DataPlaneFreshness {
     /// Record a broadcast channel lag event.
     pub fn record_broadcast_lag(&self, count: u64) {
         self.broadcast_lag_count.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Update the subscription count for a source (called when tokens are added/removed).
+    pub fn set_subscription_count(&self, source: DataSource, count: u64) {
+        self.source_subscription_count
+            .entry(source)
+            .or_insert_with(|| AtomicU64::new(0))
+            .store(count, Ordering::Relaxed);
     }
 
     /// Get staleness for a specific (source, symbol).
@@ -244,6 +255,17 @@ impl DataPlaneFreshness {
              ploy_tracked_symbols_total {}\n",
             self.entries.len(),
         ));
+
+        // Per-source subscription count
+        out.push_str("\n# HELP ploy_source_subscriptions_total Subscribed tokens/symbols per source\n");
+        out.push_str("# TYPE ploy_source_subscriptions_total gauge\n");
+        for entry in self.source_subscription_count.iter() {
+            out.push_str(&format!(
+                "ploy_source_subscriptions_total{{source=\"{}\"}} {}\n",
+                entry.key().as_str(),
+                entry.value().load(Ordering::Relaxed),
+            ));
+        }
 
         // Broadcast lag
         out.push_str(&format!(
@@ -360,6 +382,7 @@ mod tests {
 
         f.record_update(DataSource::BinanceSpot, "BTCUSDT");
         f.set_source_connected(DataSource::BinanceSpot, true);
+        f.set_subscription_count(DataSource::BinanceSpot, 3);
         f.record_broadcast_lag(2);
 
         let output = f.prometheus_metrics();
@@ -368,7 +391,25 @@ mod tests {
         assert!(output.contains("ploy_symbol_updates_total{source=\"binance_spot\",symbol=\"BTCUSDT\"} 1"));
         assert!(output.contains("ploy_source_connected{source=\"binance_spot\"} 1"));
         assert!(output.contains("ploy_source_messages_total{source=\"binance_spot\"} 1"));
+        assert!(output.contains("ploy_source_subscriptions_total{source=\"binance_spot\"} 3"));
         assert!(output.contains("ploy_tracked_symbols_total 1"));
         assert!(output.contains("ploy_broadcast_lag_total 2"));
+    }
+
+    #[test]
+    fn subscription_count_tracking() {
+        let f = DataPlaneFreshness::new();
+
+        f.set_subscription_count(DataSource::PolymarketWs, 10);
+        f.set_subscription_count(DataSource::BinanceSpot, 3);
+
+        let output = f.prometheus_metrics();
+        assert!(output.contains("ploy_source_subscriptions_total{source=\"polymarket_ws\"} 10"));
+        assert!(output.contains("ploy_source_subscriptions_total{source=\"binance_spot\"} 3"));
+
+        // Update count
+        f.set_subscription_count(DataSource::PolymarketWs, 15);
+        let output = f.prometheus_metrics();
+        assert!(output.contains("ploy_source_subscriptions_total{source=\"polymarket_ws\"} 15"));
     }
 }

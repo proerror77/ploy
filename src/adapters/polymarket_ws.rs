@@ -751,6 +751,8 @@ impl PolymarketWebSocket {
         let mut mapping = self.token_to_side.write().await;
         mapping.insert(up_token_id.to_string(), Side::Up);
         mapping.insert(down_token_id.to_string(), Side::Down);
+        drop(mapping);
+        self.report_subscription_count().await;
         info!(
             "Registered tokens: UP={}, DOWN={}",
             up_token_id, down_token_id
@@ -761,6 +763,8 @@ impl PolymarketWebSocket {
     pub async fn register_token(&self, token_id: &str, side: Side) {
         let mut mapping = self.token_to_side.write().await;
         mapping.insert(token_id.to_string(), side);
+        drop(mapping);
+        self.report_subscription_count().await;
         debug!("Registered token: {} as {:?}", token_id, side);
     }
 
@@ -802,6 +806,7 @@ impl PolymarketWebSocket {
         });
 
         let total = mapping.len();
+        self.report_subscription_count().await;
         (added, removed, updated, total)
     }
 
@@ -831,7 +836,21 @@ impl PolymarketWebSocket {
         });
 
         let total = extra.len();
+        drop(extra);
+        self.report_subscription_count().await;
         (added, removed, total)
+    }
+
+    /// Report the current subscription count to the freshness tracker.
+    async fn report_subscription_count(&self) {
+        if let Some(f) = self.freshness.get() {
+            let sides = self.token_to_side.read().await.len();
+            let extras = self.extra_tokens.read().await.len();
+            f.set_subscription_count(
+                crate::platform::DataSource::PolymarketWs,
+                (sides + extras) as u64,
+            );
+        }
     }
 
     /// Get side for a token ID
