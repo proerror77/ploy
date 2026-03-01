@@ -812,7 +812,7 @@ async fn start_strategy(
 
 /// Run strategy in foreground using StrategyManager
 async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: bool) -> Result<()> {
-    use crate::adapters::PolymarketWebSocket;
+    use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use crate::strategy::DataFeedManager;
 
     // Load config
@@ -928,35 +928,6 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
     binance_kline_intervals.sort();
     binance_kline_intervals.dedup();
 
-    // Create data feed manager with required feeds
-    let mut feed_manager = DataFeedManager::new(manager.clone());
-
-    if !binance_spot_symbols.is_empty() {
-        println!(
-            "  \x1b[36mConfiguring Binance spot feed: {:?}\x1b[0m",
-            binance_spot_symbols
-        );
-        feed_manager = feed_manager.with_binance(binance_spot_symbols);
-    }
-
-    if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
-        let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(300);
-
-        println!(
-            "  \x1b[36mConfiguring Binance kline feed: symbols={:?} intervals={:?} closed_only={} backfill_limit={}\x1b[0m",
-            binance_kline_symbols, binance_kline_intervals, binance_kline_closed_only, backfill_limit
-        );
-        feed_manager = feed_manager.with_binance_klines(
-            binance_kline_symbols,
-            binance_kline_intervals,
-            binance_kline_closed_only,
-            backfill_limit,
-        );
-    }
-
     // Configure Polymarket if needed
     let has_polymarket_feed = required_feeds.iter().any(|f| {
         matches!(
@@ -966,12 +937,50 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
         )
     });
 
+    if !binance_spot_symbols.is_empty() {
+        println!(
+            "  \x1b[36mConfiguring Binance spot feed: {:?}\x1b[0m",
+            binance_spot_symbols
+        );
+    }
+
+    if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
+        let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(300);
+        println!(
+            "  \x1b[36mConfiguring Binance kline feed: symbols={:?} intervals={:?} closed_only={} backfill_limit={}\x1b[0m",
+            binance_kline_symbols, binance_kline_intervals, binance_kline_closed_only, backfill_limit
+        );
+    }
+
     if has_polymarket_feed {
         println!("  \x1b[36mConfiguring Polymarket feed\x1b[0m");
+    }
+
+    let data_plane = Arc::new(PlatformDataPlane::new(
+        DataPlaneConfig {
+            polymarket_ws_url: if has_polymarket_feed {
+                "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string()
+            } else {
+                String::new()
+            },
+            binance_spot_symbols: binance_spot_symbols.clone(),
+            binance_kline_symbols: binance_kline_symbols.clone(),
+            binance_kline_intervals: binance_kline_intervals.clone(),
+            binance_kline_closed_only,
+            ..Default::default()
+        },
+        Arc::new(DataPlaneFreshness::new()),
+    ));
+    data_plane.start(Vec::new()).await?;
+
+    // Create data feed manager backed by the shared data plane.
+    let mut feed_manager = DataFeedManager::from_data_plane(data_plane, manager.clone());
+    if has_polymarket_feed {
         let pm_client = PolymarketClient::new("https://clob.polymarket.com", dry_run)?;
-        let pm_ws =
-            PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
-        feed_manager = feed_manager.with_polymarket(pm_ws, pm_client);
+        feed_manager = feed_manager.with_pm_client(pm_client);
     }
 
     // Start the strategy
