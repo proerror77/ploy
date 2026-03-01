@@ -1,6 +1,8 @@
 use crate::error::{PloyError, Result};
-use ethers::signers::{LocalWallet, Signer as EthersSigner};
-use ethers::types::{Address, Signature, H256};
+use alloy::primitives::{B256, Signature as AlloySignature};
+use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer as AlloySigner;
+use ethers_core::types::{Address, H256, Signature};
 use tracing::{info, warn};
 use zeroize::Zeroize;
 
@@ -12,7 +14,7 @@ use zeroize::Zeroize;
 /// This prevents memory dumps from exposing the private key.
 #[derive(Clone)]
 pub struct Wallet {
-    inner: LocalWallet,
+    inner: PrivateKeySigner,
     chain_id: u64,
 }
 
@@ -30,9 +32,9 @@ impl Wallet {
         let mut secure_key = key_hex.to_string();
 
         let wallet = secure_key
-            .parse::<LocalWallet>()
+            .parse::<PrivateKeySigner>()
             .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
-            .with_chain_id(chain_id);
+            .with_chain_id(Some(chain_id));
 
         // Zeroize the key from memory
         secure_key.zeroize();
@@ -72,7 +74,7 @@ impl Wallet {
 
     /// Get the wallet address
     pub fn address(&self) -> Address {
-        self.inner.address()
+        Address::from_slice(self.inner.address().as_slice())
     }
 
     /// Get the chain ID
@@ -98,9 +100,14 @@ impl Wallet {
 
     /// Sign a message hash (32 bytes)
     pub async fn sign_hash(&self, hash: H256) -> Result<Signature> {
-        self.inner
-            .sign_hash(hash)
-            .map_err(|e| PloyError::Signature(format!("Failed to sign hash: {}", e)))
+        let hash_b256 = B256::from(hash.to_fixed_bytes());
+        let signature = self
+            .inner
+            .sign_hash(&hash_b256)
+            .await
+            .map_err(|e| PloyError::Signature(format!("Failed to sign hash: {}", e)))?;
+
+        Ok(alloy_signature_to_ethers(signature))
     }
 
     /// Sign a message (will be prefixed with Ethereum signed message)
@@ -109,15 +116,24 @@ impl Wallet {
         message: S,
     ) -> Result<Signature> {
         self.inner
-            .sign_message(message)
+            .sign_message(message.as_ref())
             .await
+            .map(alloy_signature_to_ethers)
             .map_err(|e| PloyError::Signature(format!("Failed to sign message: {}", e)))
     }
 
-    /// Get the underlying ethers wallet for EIP-712 signing
-    pub fn inner(&self) -> &LocalWallet {
+    /// Get the underlying local signer.
+    pub fn inner(&self) -> &PrivateKeySigner {
         &self.inner
     }
+}
+
+fn alloy_signature_to_ethers(signature: AlloySignature) -> Signature {
+    let bytes: [u8; 65] = signature.into();
+    let r = ethers_core::types::U256::from_big_endian(&bytes[..32]);
+    let s = ethers_core::types::U256::from_big_endian(&bytes[32..64]);
+    let v = bytes[64] as u64;
+    Signature { r, s, v }
 }
 
 impl std::fmt::Debug for Wallet {

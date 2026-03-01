@@ -5802,7 +5802,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.21.7",
+ "base64 0.22.1",
  "bincode",
  "builder-relayer-client-rust",
  "builder_signing_sdk_rs",
