@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::error;
 
-use super::freshness::DataPlaneFreshness;
+use super::freshness::{DataPlaneFreshness, DataSource};
 use crate::adapters::polymarket_ws::BookMessage;
 use crate::adapters::{
     BinanceKlineWebSocket, BinanceWebSocket, ChainlinkRtds, ChainlinkUpdate, KlineUpdate,
@@ -43,6 +43,23 @@ impl DataPlaneConfig {
 
         Ok(())
     }
+}
+
+/// Health status for a configured data source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceHealth {
+    Healthy,
+    Degraded,
+    Down,
+}
+
+/// Health snapshot across all optional PlatformDataPlane sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataPlaneHealth {
+    pub binance_spot: Option<SourceHealth>,
+    pub binance_kline: Option<SourceHealth>,
+    pub polymarket_ws: Option<SourceHealth>,
+    pub chainlink_rtds: Option<SourceHealth>,
 }
 
 /// Reusable handle for crypto market data adapters.
@@ -261,6 +278,47 @@ impl PlatformDataPlane {
         Arc::clone(&self.freshness)
     }
 
+    /// Compute per-source health using freshness message counts and staleness.
+    ///
+    /// Rules:
+    /// - `Down`: no messages observed yet for the source.
+    /// - `Degraded`: messages observed, but at least one tracked symbol is stale.
+    /// - `Healthy`: messages observed and no stale symbols.
+    pub fn source_health(&self, stale_threshold_secs: f64) -> DataPlaneHealth {
+        DataPlaneHealth {
+            binance_spot: self.binance_ws.as_ref().map(|_| {
+                self.evaluate_source_health(DataSource::BinanceSpot, stale_threshold_secs)
+            }),
+            binance_kline: self.binance_kline_ws.as_ref().map(|_| {
+                self.evaluate_source_health(DataSource::BinanceKline, stale_threshold_secs)
+            }),
+            polymarket_ws: self.polymarket_ws.as_ref().map(|_| {
+                self.evaluate_source_health(DataSource::PolymarketWs, stale_threshold_secs)
+            }),
+            chainlink_rtds: self.chainlink_ws.as_ref().map(|_| {
+                self.evaluate_source_health(DataSource::ChainlinkRtds, stale_threshold_secs)
+            }),
+        }
+    }
+
+    fn evaluate_source_health(
+        &self,
+        source: DataSource,
+        stale_threshold_secs: f64,
+    ) -> SourceHealth {
+        if self.freshness.source_message_count(source) == 0 {
+            return SourceHealth::Down;
+        }
+        if self
+            .freshness
+            .stale_symbol_count_for_source(source, stale_threshold_secs)
+            > 0
+        {
+            return SourceHealth::Degraded;
+        }
+        SourceHealth::Healthy
+    }
+
     pub fn config(&self) -> &DataPlaneConfig {
         &self.config
     }
@@ -340,6 +398,37 @@ mod tests {
         assert!(pm_only.subscribe_prices().is_none());
         assert!(pm_only.subscribe_klines().is_none());
         assert!(pm_only.subscribe_chainlink().is_none());
+    }
+
+    #[tokio::test]
+    async fn source_health_reports_down_healthy_and_degraded() {
+        let freshness = Arc::new(DataPlaneFreshness::new());
+        let plane = PlatformDataPlane::new(
+            DataPlaneConfig {
+                polymarket_ws_url: "wss://example.invalid/ws".to_string(),
+                binance_spot_symbols: vec!["BTCUSDT".to_string()],
+                ..DataPlaneConfig::default()
+            },
+            Arc::clone(&freshness),
+        );
+
+        // No messages observed yet.
+        let down = plane.source_health(60.0);
+        assert_eq!(down.binance_spot, Some(SourceHealth::Down));
+        assert_eq!(down.polymarket_ws, Some(SourceHealth::Down));
+
+        // Fresh updates -> healthy.
+        freshness.record_update(DataSource::BinanceSpot, "BTCUSDT");
+        freshness.record_update(DataSource::PolymarketWs, "tok-1");
+        let healthy = plane.source_health(60.0);
+        assert_eq!(healthy.binance_spot, Some(SourceHealth::Healthy));
+        assert_eq!(healthy.polymarket_ws, Some(SourceHealth::Healthy));
+
+        // Tight threshold after small delay -> degraded.
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let degraded = plane.source_health(0.001);
+        assert_eq!(degraded.binance_spot, Some(SourceHealth::Degraded));
+        assert_eq!(degraded.polymarket_ws, Some(SourceHealth::Degraded));
     }
 
     #[tokio::test]

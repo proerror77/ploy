@@ -162,6 +162,24 @@ impl DataPlaneFreshness {
             .store(count, Ordering::Relaxed);
     }
 
+    /// Get total message count observed for a source.
+    pub fn source_message_count(&self, source: DataSource) -> u64 {
+        self.source_message_count
+            .get(&source)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Count symbols for a source that are staler than the threshold.
+    pub fn stale_symbol_count_for_source(&self, source: DataSource, threshold_secs: f64) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.key().source == source)
+            .filter_map(|entry| entry.value().staleness_secs())
+            .filter(|staleness| *staleness > threshold_secs)
+            .count()
+    }
+
     /// Get staleness for a specific (source, symbol).
     pub fn staleness(&self, source: DataSource, symbol: &str) -> Option<f64> {
         let key = FreshnessKey {
