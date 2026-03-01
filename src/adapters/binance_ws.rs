@@ -8,6 +8,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -593,6 +594,8 @@ pub struct BinanceWebSocket {
     update_tx: broadcast::Sender<PriceUpdate>,
     symbols: Vec<String>,
     reconnect_delay: Duration,
+    // Optional: per-symbol freshness tracking for the data plane.
+    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
 }
 
 impl BinanceWebSocket {
@@ -609,12 +612,18 @@ impl BinanceWebSocket {
             update_tx,
             symbols,
             reconnect_delay: Duration::from_secs(1),
+            freshness: OnceLock::new(),
         }
     }
 
     /// Get a reference to the price cache
     pub fn price_cache(&self) -> &PriceCache {
         &self.price_cache
+    }
+
+    /// Attach a shared freshness tracker for the data plane.
+    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+        let _ = self.freshness.set(freshness);
     }
 
     /// Subscribe to price updates
@@ -788,6 +797,11 @@ impl BinanceWebSocket {
         self.price_cache
             .update(symbol, price, quantity, timestamp)
             .await;
+
+        // Record per-symbol freshness for the data plane.
+        if let Some(f) = self.freshness.get() {
+            f.record_update(crate::platform::DataSource::BinanceSpot, symbol);
+        }
 
         // Broadcast update
         let update = PriceUpdate {

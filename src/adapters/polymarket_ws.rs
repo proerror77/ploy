@@ -667,6 +667,8 @@ pub struct PolymarketWebSocket {
     resubscribe_requested: Arc<std::sync::atomic::AtomicBool>,
     // Optional: wired in at runtime by the binary to report connectivity to /health.
     health_state: OnceLock<Arc<HealthState>>,
+    // Optional: per-symbol freshness tracking for the data plane.
+    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
 }
 
 /// Quote update notification
@@ -701,6 +703,7 @@ impl PolymarketWebSocket {
             circuit_breaker: Arc::new(CircuitBreaker::new(cb_config)),
             resubscribe_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             health_state: OnceLock::new(),
+            freshness: OnceLock::new(),
         }
     }
 
@@ -709,6 +712,11 @@ impl PolymarketWebSocket {
     /// Safe to call multiple times; only the first call wins.
     pub fn set_health_state(&self, state: Arc<HealthState>) {
         let _ = self.health_state.set(state);
+    }
+
+    /// Wire an optional `DataPlaneFreshness` for per-symbol tracking.
+    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+        let _ = self.freshness.set(freshness);
     }
 
     /// Get the circuit breaker (for external monitoring)
@@ -1080,6 +1088,11 @@ impl PolymarketWebSocket {
         if let Some(side) = self.get_side(&asset_id).await {
             self.quote_cache
                 .update_snapshot(&asset_id, side, best_bid, best_ask, bid_size, ask_size);
+
+            // Record per-symbol freshness for the data plane.
+            if let Some(f) = self.freshness.get() {
+                f.record_update(crate::platform::DataSource::PolymarketWs, &asset_id);
+            }
 
             // Notify subscribers
             if let Some(quote) = self.quote_cache.get(&asset_id) {

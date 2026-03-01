@@ -6,6 +6,8 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -237,6 +239,8 @@ pub struct BinanceKlineWebSocket {
     intervals: Vec<String>,
     closed_only: bool,
     reconnect_delay: Duration,
+    // Optional: per-symbol freshness tracking for the data plane.
+    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
 }
 
 impl BinanceKlineWebSocket {
@@ -258,7 +262,13 @@ impl BinanceKlineWebSocket {
             intervals,
             closed_only,
             reconnect_delay: Duration::from_secs(1),
+            freshness: OnceLock::new(),
         }
+    }
+
+    /// Attach a shared freshness tracker for the data plane.
+    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+        let _ = self.freshness.set(freshness);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<KlineUpdate> {
@@ -438,6 +448,11 @@ impl BinanceKlineWebSocket {
             DateTime::from_timestamp_millis(ev.kline.close_time as i64).unwrap_or_else(Utc::now);
         let event_time =
             DateTime::from_timestamp_millis(ev.event_time as i64).unwrap_or_else(Utc::now);
+
+        // Record per-symbol freshness for the data plane (before ev.symbol is moved).
+        if let Some(f) = self.freshness.get() {
+            f.record_update(crate::platform::DataSource::BinanceKline, &ev.symbol);
+        }
 
         let update = KlineUpdate {
             symbol: ev.symbol,

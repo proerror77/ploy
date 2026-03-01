@@ -5526,6 +5526,9 @@ pub async fn start_platform(
     // 4. Spawn agents
     let mut agent_handles = Vec::new();
 
+    // Shared per-symbol freshness tracker — attached to all WS adapters.
+    let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
+
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
         let momentum_enabled = config.enable_crypto_momentum;
@@ -5628,6 +5631,11 @@ pub async fn start_platform(
         let symbols: Vec<String> = all_coins.iter().map(|c| format!("{}USDT", c)).collect();
         let binance_ws = Arc::new(BinanceWebSocket::new(symbols));
         let pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
+
+        // Attach per-symbol freshness tracker to WS adapters.
+        binance_ws.set_freshness(Arc::clone(&freshness));
+        pm_ws.set_freshness(Arc::clone(&freshness));
+        info!("data plane freshness tracker attached to WS adapters");
 
         // Seed PM token → side mapping for data collection, so QuoteUpdates carry the correct
         // UP/DOWN side and can be persisted to Postgres.
@@ -6353,6 +6361,7 @@ pub async fn start_platform(
             // together with the trade persistence above.
             {
                 let sports_pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
+                sports_pm_ws.set_freshness(Arc::clone(&freshness));
 
                 // Seed initial NBA tokens from collector_token_targets
                 let mut sports_desired: HashMap<String, Side> = HashMap::new();
@@ -6564,6 +6573,7 @@ pub async fn start_platform(
         // We create a dedicated one for OpenClaw using the configured BTC symbol.
         let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
         let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
+        oc_binance_ws.set_freshness(Arc::clone(&freshness));
 
         // Spawn Binance WS feed for OpenClaw
         let oc_ws = oc_binance_ws.clone();
