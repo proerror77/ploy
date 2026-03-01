@@ -192,6 +192,7 @@ Respond ONLY with valid JSON."#,
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         if let Some(ref model) = self.config.model {
             cmd.arg("--model").arg(model);
@@ -247,6 +248,7 @@ Respond ONLY with valid JSON."#,
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let mut child = cmd
             .spawn()

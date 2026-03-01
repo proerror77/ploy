@@ -113,6 +113,38 @@ struct InfraConfig {
     user: String,
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
+}
+
+fn ssh_base_args(config: &InfraConfig, host: &str) -> Vec<String> {
+    let strict_host_key_checking = if env_bool("PLOY_INSECURE_SSH", false) {
+        "no"
+    } else {
+        "accept-new"
+    };
+
+    let known_hosts = std::env::var("PLOY_SSH_KNOWN_HOSTS")
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.ssh/known_hosts")))
+        .unwrap_or_else(|_| "~/.ssh/known_hosts".to_string());
+
+    vec![
+        "-i".to_string(),
+        config.key_path.clone(),
+        "-o".to_string(),
+        format!("StrictHostKeyChecking={strict_host_key_checking}"),
+        "-o".to_string(),
+        format!("UserKnownHostsFile={known_hosts}"),
+        format!("{}@{}", config.user, host),
+    ]
+}
+
 async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
     let config = get_infra_config(env)?;
 
@@ -193,15 +225,10 @@ async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
              docker run -d --name ploy-trading --restart unless-stopped ploy-trading:latest"
         );
 
+        let mut ssh_args = ssh_base_args(&config, host);
+        ssh_args.push(ssh_cmd);
         let status = std::process::Command::new("ssh")
-            .args([
-                "-i",
-                &config.key_path,
-                "-o",
-                "StrictHostKeyChecking=no",
-                &format!("{}@{}", config.user, host),
-                &ssh_cmd,
-            ])
+            .args(&ssh_args)
             .status()
             .context("Failed to deploy to EC2")?;
 
@@ -240,15 +267,14 @@ async fn show_status(env: &str) -> Result<()> {
         println!("\n  Checking remote status...\n");
 
         // Check Docker containers
-        let output = std::process::Command::new("ssh")
-            .args([
-                "-i", &config.key_path,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=5",
-                &format!("{}@{}", config.user, host),
-                "docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || echo 'Docker not available'",
-            ])
-            .output();
+        let mut ssh_args = ssh_base_args(&config, host);
+        ssh_args.push("-o".to_string());
+        ssh_args.push("ConnectTimeout=5".to_string());
+        ssh_args.push(
+            "docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || echo 'Docker not available'"
+                .to_string(),
+        );
+        let output = std::process::Command::new("ssh").args(&ssh_args).output();
 
         match output {
             Ok(out) if out.status.success() => {
@@ -294,13 +320,7 @@ async fn ssh_connect(env: &str, command: Option<&str>) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No host configured for {}", env))?;
 
-    let mut ssh_args = vec![
-        "-i".to_string(),
-        config.key_path.clone(),
-        "-o".to_string(),
-        "StrictHostKeyChecking=no".to_string(),
-        format!("{}@{}", config.user, host),
-    ];
+    let mut ssh_args = ssh_base_args(&config, host);
 
     if let Some(cmd) = command {
         ssh_args.push(cmd.to_string());
@@ -345,15 +365,10 @@ async fn show_logs(env: &str, tail: usize, follow: bool) -> Result<()> {
 
     println!("Fetching logs from {}...\n", config.name);
 
+    let mut ssh_args = ssh_base_args(&config, host);
+    ssh_args.push(docker_cmd);
     let status = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &config.key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            &format!("{}@{}", config.user, host),
-            &docker_cmd,
-        ])
+        .args(&ssh_args)
         .status()
         .context("Failed to fetch logs")?;
 
@@ -394,15 +409,10 @@ async fn update_infra(env: &str, component: &str) -> Result<()> {
         ),
     };
 
+    let mut ssh_args = ssh_base_args(&config, host);
+    ssh_args.push(update_cmd.to_string());
     let status = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &config.key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            &format!("{}@{}", config.user, host),
-            update_cmd,
-        ])
+        .args(&ssh_args)
         .status()
         .context("Failed to update infrastructure")?;
 

@@ -8,6 +8,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -211,6 +212,8 @@ pub struct DataFeedManager {
     active_feeds: Arc<RwLock<Vec<DataFeed>>>,
     /// Latest discovered events per series (bounded, for refresh + token reconciliation)
     series_events: Arc<RwLock<HashMap<String, HashMap<String, DiscoveredEvent>>>>,
+    /// Ensure we only spawn one Polymarket websocket run loop per manager instance.
+    pm_ws_run_started: Arc<AtomicBool>,
     /// Optional DB pool used to persist normalized market metadata for model training.
     metadata_pool: Option<Arc<PgPool>>,
 }
@@ -261,6 +264,7 @@ impl DataFeedManager {
             token_events: Arc::new(RwLock::new(HashMap::new())),
             active_feeds: Arc::new(RwLock::new(Vec::new())),
             series_events: Arc::new(RwLock::new(HashMap::new())),
+            pm_ws_run_started: Arc::new(AtomicBool::new(false)),
             metadata_pool,
         }
     }
@@ -306,6 +310,7 @@ impl DataFeedManager {
             token_events: Arc::new(RwLock::new(HashMap::new())),
             active_feeds: Arc::new(RwLock::new(Vec::new())),
             series_events: Arc::new(RwLock::new(HashMap::new())),
+            pm_ws_run_started: Arc::new(AtomicBool::new(false)),
             metadata_pool,
         }
     }
@@ -652,12 +657,22 @@ impl DataFeedManager {
                 return Ok(());
             }
 
+            if self.pm_ws_run_started.swap(true, Ordering::SeqCst) {
+                debug!(
+                    "Polymarket WS run loop already started for this manager; requesting resubscribe"
+                );
+                pm_ws.request_resubscribe();
+                return Ok(());
+            }
+
             // Start WebSocket with tokens
             let ws = pm_ws.clone();
+            let pm_ws_run_started = self.pm_ws_run_started.clone();
             tokio::spawn(async move {
                 if let Err(e) = ws.run(token_ids).await {
                     error!("Polymarket WebSocket error: {}", e);
                 }
+                pm_ws_run_started.store(false, Ordering::SeqCst);
             });
         }
         Ok(())

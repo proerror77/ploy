@@ -3,7 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
@@ -18,14 +18,27 @@ pub struct WsAuth {
     token: Option<String>,
 }
 
-/// WebSocket handler — requires valid admin token via ?token= query param.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    raw.strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+/// WebSocket handler — requires valid admin token via Authorization header or `?token=`.
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     Query(auth): Query<WsAuth>,
     State(state): State<AppState>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
-    match auth.token {
-        Some(ref t) if is_valid_admin_token(t) => {
+    let header_token = bearer_token(&headers);
+    let token = header_token.or(auth.token.as_deref());
+    if header_token.is_none() && auth.token.is_some() {
+        warn!("WebSocket auth via query token is deprecated; use Authorization: Bearer <token>");
+    }
+    match token {
+        Some(t) if is_valid_admin_token(t) => {
             Ok(ws.on_upgrade(|socket| handle_socket(socket, state)))
         }
         _ => {
@@ -43,19 +56,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Spawn a task to forward broadcast messages to this WebSocket
     let send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            // Serialize message to JSON
-            let json = match serde_json::to_string(&msg) {
-                Ok(json) => json,
-                Err(e) => {
-                    error!("Failed to serialize WebSocket message: {}", e);
-                    continue;
-                }
-            };
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    // Serialize message to JSON
+                    let json = match serde_json::to_string(&msg) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize WebSocket message: {}", e);
+                            continue;
+                        }
+                    };
 
-            // Send to client
-            if sender.send(Message::Text(json)).await.is_err() {
-                break;
+                    // Send to client
+                    if sender.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        "WebSocket broadcast lagged; skipped {} messages for one client",
+                        skipped
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
             }
         }
     });
@@ -77,4 +103,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     send_task.abort();
 
     info!("WebSocket connection closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bearer_token;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn bearer_token_extracts_valid_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer abc123"),
+        );
+
+        assert_eq!(bearer_token(&headers), Some("abc123"));
+    }
+
+    #[test]
+    fn bearer_token_rejects_non_bearer_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Token abc123"),
+        );
+
+        assert_eq!(bearer_token(&headers), None);
+    }
 }

@@ -1925,7 +1925,9 @@ async fn persist_sidecar_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{StrategyLifecycleStage, StrategyProductType, Timeframe};
+    use crate::platform::{
+        DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
+    };
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1954,6 +1956,8 @@ mod tests {
             risk_profile: "default".to_string(),
             priority: 80,
             cooldown_secs: 30,
+            account_ids: Vec::new(),
+            execution_mode: DeploymentExecutionMode::Any,
             lifecycle_stage,
             product_type: StrategyProductType::BinaryOption,
             last_evaluated_at: Some(Utc::now()),
@@ -2030,7 +2034,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            AUTHORIZATION,
+            axum::http::header::AUTHORIZATION,
             axum::http::HeaderValue::from_static("Bearer expected-token"),
         );
 
