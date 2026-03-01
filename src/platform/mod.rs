@@ -5,6 +5,7 @@
 
 pub mod agents;
 mod contracts;
+pub mod data_plane;
 pub mod freshness;
 pub mod persistence_pipeline;
 mod platform;
@@ -21,6 +22,7 @@ pub use contracts::{
     RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
     StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
 };
+pub use data_plane::{DataPlaneConfig, PlatformDataPlane};
 pub use freshness::{DataPlaneFreshness, DataSource};
 pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,

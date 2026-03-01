@@ -187,6 +187,8 @@ fn parse_price_from_question(question: &str) -> Option<rust_decimal::Decimal> {
 pub struct DataFeedManager {
     /// Reference to strategy manager
     manager: Arc<StrategyManager>,
+    /// Optional shared data plane owner for WS lifecycles.
+    data_plane: Option<Arc<crate::platform::PlatformDataPlane>>,
     /// Binance WebSocket (optional)
     binance_ws: Option<Arc<BinanceWebSocket>>,
     /// Binance Kline WebSocket (optional)
@@ -247,6 +249,7 @@ impl DataFeedManager {
             .map(Arc::new);
         Self {
             manager,
+            data_plane: None,
             binance_ws: None,
             binance_kline_ws: None,
             binance_kline_symbols: Vec::new(),
@@ -254,6 +257,51 @@ impl DataFeedManager {
             binance_kline_backfill_limit: 0,
             binance_kline_last_close: Arc::new(RwLock::new(HashMap::new())),
             polymarket_ws: None,
+            pm_client: None,
+            token_events: Arc::new(RwLock::new(HashMap::new())),
+            active_feeds: Arc::new(RwLock::new(Vec::new())),
+            series_events: Arc::new(RwLock::new(HashMap::new())),
+            metadata_pool,
+        }
+    }
+
+    /// Create a DataFeedManager backed by a shared PlatformDataPlane.
+    pub fn from_data_plane(
+        dp: Arc<crate::platform::PlatformDataPlane>,
+        manager: Arc<StrategyManager>,
+    ) -> Self {
+        let metadata_pool = std::env::var("PLOY_DATABASE__URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+            .and_then(|url| {
+                PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect_lazy(&url)
+                    .ok()
+            })
+            .map(Arc::new);
+
+        let (binance_kline_symbols, binance_kline_intervals) = {
+            let cfg = dp.config();
+            (
+                cfg.binance_kline_symbols.clone(),
+                cfg.binance_kline_intervals.clone(),
+            )
+        };
+
+        Self {
+            manager,
+            data_plane: Some(dp.clone()),
+            binance_ws: dp.binance_ws(),
+            binance_kline_ws: dp.binance_kline_ws(),
+            binance_kline_symbols,
+            binance_kline_intervals,
+            binance_kline_backfill_limit: std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(300),
+            binance_kline_last_close: Arc::new(RwLock::new(HashMap::new())),
+            polymarket_ws: dp.polymarket_ws(),
             pm_client: None,
             token_events: Arc::new(RwLock::new(HashMap::new())),
             active_feeds: Arc::new(RwLock::new(Vec::new())),
@@ -294,6 +342,12 @@ impl DataFeedManager {
     /// Configure Polymarket feed
     pub fn with_polymarket(mut self, ws: PolymarketWebSocket, client: PolymarketClient) -> Self {
         self.polymarket_ws = Some(Arc::new(ws));
+        self.pm_client = Some(Arc::new(client));
+        self
+    }
+
+    /// Inject a Polymarket REST client without creating another WS instance.
+    pub fn with_pm_client(mut self, client: PolymarketClient) -> Self {
         self.pm_client = Some(Arc::new(client));
         self
     }
@@ -408,24 +462,37 @@ impl DataFeedManager {
 
             tokio::spawn(async move {
                 info!("Binance price feed started");
-                while let Ok(update) = rx.recv().await {
-                    let market_update = MarketUpdate::BinancePrice {
-                        symbol: update.symbol,
-                        price: update.price,
-                        timestamp: Utc::now(),
-                    };
-                    manager.send_market_update(market_update);
+                loop {
+                    match rx.recv().await {
+                        Ok(update) => {
+                            let market_update = MarketUpdate::BinancePrice {
+                                symbol: update.symbol,
+                                price: update.price,
+                                timestamp: Utc::now(),
+                            };
+                            manager.send_market_update(market_update);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Binance price feed lagged by {} messages", n);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            warn!("Binance price feed ended");
+                            break;
+                        }
+                    }
                 }
-                warn!("Binance price feed ended");
             });
 
-            // Start the WebSocket connection
-            let ws = binance_ws.clone();
-            tokio::spawn(async move {
-                if let Err(e) = ws.run().await {
-                    error!("Binance WebSocket error: {}", e);
-                }
-            });
+            if self.data_plane.is_none() {
+                // Start the WebSocket connection
+                let ws = binance_ws.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws.run().await {
+                        error!("Binance WebSocket error: {}", e);
+                    }
+                });
+            }
         }
 
         // Start Binance kline feed if configured
@@ -441,54 +508,67 @@ impl DataFeedManager {
 
             tokio::spawn(async move {
                 info!("Binance kline feed started");
-                while let Ok(update) = rx.recv().await {
-                    // Skip duplicates from backfill overlap or WS reconnect replay.
-                    let should_skip = {
-                        let map = last_close.read().await;
-                        map.get(&update.symbol)
-                            .and_then(|m| m.get(&update.interval))
-                            .map(|t| update.kline.close_time <= *t)
-                            .unwrap_or(false)
-                    };
-                    if should_skip {
-                        continue;
+                loop {
+                    match rx.recv().await {
+                        Ok(update) => {
+                            // Skip duplicates from backfill overlap or WS reconnect replay.
+                            let should_skip = {
+                                let map = last_close.read().await;
+                                map.get(&update.symbol)
+                                    .and_then(|m| m.get(&update.interval))
+                                    .map(|t| update.kline.close_time <= *t)
+                                    .unwrap_or(false)
+                            };
+                            if should_skip {
+                                continue;
+                            }
+
+                            {
+                                let mut map = last_close.write().await;
+                                map.entry(update.symbol.clone())
+                                    .or_default()
+                                    .insert(update.interval.clone(), update.kline.close_time);
+                            }
+
+                            let bar = KlineBar {
+                                open_time: update.kline.open_time,
+                                close_time: update.kline.close_time,
+                                open: update.kline.open,
+                                high: update.kline.high,
+                                low: update.kline.low,
+                                close: update.kline.close,
+                                volume: update.kline.volume,
+                                is_closed: update.kline.is_closed,
+                            };
+
+                            let market_update = MarketUpdate::BinanceKline {
+                                symbol: update.symbol,
+                                interval: update.interval,
+                                kline: bar,
+                                timestamp: update.event_time,
+                            };
+                            manager.send_market_update(market_update);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Binance kline feed lagged by {} messages", n);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            warn!("Binance kline feed ended");
+                            break;
+                        }
                     }
-
-                    {
-                        let mut map = last_close.write().await;
-                        map.entry(update.symbol.clone())
-                            .or_default()
-                            .insert(update.interval.clone(), update.kline.close_time);
-                    }
-
-                    let bar = KlineBar {
-                        open_time: update.kline.open_time,
-                        close_time: update.kline.close_time,
-                        open: update.kline.open,
-                        high: update.kline.high,
-                        low: update.kline.low,
-                        close: update.kline.close,
-                        volume: update.kline.volume,
-                        is_closed: update.kline.is_closed,
-                    };
-
-                    let market_update = MarketUpdate::BinanceKline {
-                        symbol: update.symbol,
-                        interval: update.interval,
-                        kline: bar,
-                        timestamp: update.event_time,
-                    };
-                    manager.send_market_update(market_update);
                 }
-                warn!("Binance kline feed ended");
             });
 
-            let ws = binance_ws.clone();
-            tokio::spawn(async move {
-                if let Err(e) = ws.run().await {
-                    error!("Binance kline WebSocket error: {}", e);
-                }
-            });
+            if self.data_plane.is_none() {
+                let ws = binance_ws.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws.run().await {
+                        error!("Binance kline WebSocket error: {}", e);
+                    }
+                });
+            }
         }
 
         // Start Polymarket feed if configured
@@ -550,6 +630,14 @@ impl DataFeedManager {
     pub async fn subscribe_tokens(&self, token_ids: Vec<String>) -> Result<()> {
         if let Some(ref pm_ws) = self.polymarket_ws {
             info!("Subscribing to {} Polymarket tokens", token_ids.len());
+
+            if self.data_plane.is_some() {
+                debug!(
+                    "Polymarket WS run is managed by PlatformDataPlane; skipping local ws.run()"
+                );
+                pm_ws.request_resubscribe();
+                return Ok(());
+            }
 
             // Start WebSocket with tokens
             let ws = pm_ws.clone();
@@ -864,11 +952,13 @@ impl DataFeedManager {
         let manager = self.manager.clone();
         let series_events = self.series_events.clone();
         let metadata_pool = self.metadata_pool.clone();
+        let use_data_plane = self.data_plane.is_some();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(POLYMARKET_REFRESH_SECS));
             loop {
                 ticker.tick().await;
+                let mut refresh_changed = false;
 
                 for series_id in &series_ids {
                     // Fetch active events and keep only the nearest ones.
@@ -1031,6 +1121,9 @@ impl DataFeedManager {
                             .filter(|id| !discovered.contains_key(*id))
                             .cloned()
                             .collect();
+                        if !removed.is_empty() {
+                            refresh_changed = true;
+                        }
                         for event_id in removed {
                             prev.remove(&event_id);
                             manager.send_market_update(MarketUpdate::EventExpired { event_id });
@@ -1048,6 +1141,7 @@ impl DataFeedManager {
                             };
 
                             if should_send {
+                                refresh_changed = true;
                                 manager.send_market_update(MarketUpdate::EventDiscovered {
                                     event_id: ev.event_id.clone(),
                                     series_id: ev.series_id.clone(),
@@ -1062,6 +1156,13 @@ impl DataFeedManager {
                             prev.insert(event_id, ev);
                         }
                     }
+                }
+
+                if use_data_plane {
+                    if refresh_changed {
+                        pm_ws.request_resubscribe();
+                    }
+                    continue;
                 }
 
                 // Reconcile token subscriptions to keep the set bounded.
