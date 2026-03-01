@@ -23,7 +23,8 @@ pub use contracts::{
     StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
 };
 pub use data_plane::{
-    BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, PlatformDataPlane,
+    BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, DataPlaneHealth,
+    PlatformDataPlane, SourceHealth,
 };
 pub use freshness::{DataPlaneFreshness, DataSource};
 pub use persistence_pipeline::{
