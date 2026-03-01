@@ -268,7 +268,13 @@ impl BinanceKlineWebSocket {
 
     /// Attach a shared freshness tracker for the data plane.
     pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        let _ = self.freshness.set(freshness);
+        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
+            freshness.set_subscription_count(
+                crate::platform::DataSource::BinanceKline,
+                (self.symbols.len() * self.intervals.len()) as u64,
+            );
+            freshness.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<KlineUpdate> {
@@ -329,6 +335,16 @@ impl BinanceKlineWebSocket {
     }
 
     async fn connect_and_stream(&self) -> Result<()> {
+        struct ConnectionGuard<'a>(&'a BinanceKlineWebSocket);
+        impl Drop for ConnectionGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.freshness.get() {
+                    f.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+                }
+            }
+        }
+        let _guard = ConnectionGuard(self);
+
         let url = self.build_url();
         let url = Url::parse(&url)
             .map_err(|e| PloyError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
@@ -337,6 +353,9 @@ impl BinanceKlineWebSocket {
 
         let ws_stream = connect_websocket_with_proxy(&url).await?;
         info!("Connected to Binance kline WS");
+        if let Some(f) = self.freshness.get() {
+            f.set_source_connected(crate::platform::DataSource::BinanceKline, true);
+        }
 
         let (mut write, mut read) = ws_stream.split();
         let mut ping_interval = interval(Duration::from_secs(PING_INTERVAL_SECS));
@@ -472,11 +491,18 @@ impl BinanceKlineWebSocket {
 
         let _ = self.update_tx.send(update);
     }
+
+    /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
+    #[cfg(test)]
+    pub async fn ingest_test_message(&self, text: &str) {
+        self.handle_message(text).await;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn parse_combined_stream_closed_kline() {
@@ -512,5 +538,166 @@ mod tests {
         assert_eq!(wrapper.data.symbol, "BTCUSDT");
         assert_eq!(wrapper.data.kline.interval, "5m");
         assert!(wrapper.data.kline.is_closed);
+    }
+
+    #[tokio::test]
+    async fn characterization_closed_kline_emits_update() {
+        let ws = BinanceKlineWebSocket::new(vec!["BTCUSDT".into()], vec!["5m".into()], true);
+        let mut rx = ws.subscribe();
+
+        let msg = r#"{
+            "stream":"btcusdt@kline_5m",
+            "data":{
+                "e":"kline",
+                "E":1700000000000,
+                "s":"BTCUSDT",
+                "k":{
+                    "t":1700000000000,
+                    "T":1700000299999,
+                    "s":"BTCUSDT",
+                    "i":"5m",
+                    "f":0,
+                    "L":0,
+                    "o":"100.0",
+                    "c":"101.0",
+                    "h":"102.0",
+                    "l":"99.0",
+                    "v":"123.4",
+                    "n":0,
+                    "x":true,
+                    "q":"0",
+                    "V":"0",
+                    "Q":"0",
+                    "B":"0"
+                }
+            }
+        }"#;
+
+        ws.ingest_test_message(msg).await;
+        let update = rx.try_recv().expect("closed kline should produce update");
+        assert_eq!(update.symbol, "BTCUSDT");
+        assert_eq!(update.interval, "5m");
+        assert_eq!(update.kline.open, dec!(100.0));
+        assert_eq!(update.kline.close, dec!(101.0));
+        assert!(update.kline.is_closed);
+    }
+
+    #[tokio::test]
+    async fn characterization_open_kline_skipped_when_closed_only() {
+        let ws = BinanceKlineWebSocket::new(vec!["BTCUSDT".into()], vec!["5m".into()], true);
+        let mut rx = ws.subscribe();
+
+        let msg = r#"{
+            "stream":"btcusdt@kline_5m",
+            "data":{
+                "e":"kline",
+                "E":1700000000000,
+                "s":"BTCUSDT",
+                "k":{
+                    "t":1700000000000,
+                    "T":1700000299999,
+                    "s":"BTCUSDT",
+                    "i":"5m",
+                    "f":0,
+                    "L":0,
+                    "o":"100.0",
+                    "c":"101.0",
+                    "h":"102.0",
+                    "l":"99.0",
+                    "v":"123.4",
+                    "n":0,
+                    "x":false,
+                    "q":"0",
+                    "V":"0",
+                    "Q":"0",
+                    "B":"0"
+                }
+            }
+        }"#;
+
+        ws.ingest_test_message(msg).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "open kline should be filtered when closed_only=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn characterization_open_kline_emitted_when_closed_only_disabled() {
+        let ws = BinanceKlineWebSocket::new(vec!["BTCUSDT".into()], vec!["5m".into()], false);
+        let mut rx = ws.subscribe();
+
+        let msg = r#"{
+            "stream":"btcusdt@kline_5m",
+            "data":{
+                "e":"kline",
+                "E":1700000000000,
+                "s":"BTCUSDT",
+                "k":{
+                    "t":1700000000000,
+                    "T":1700000299999,
+                    "s":"BTCUSDT",
+                    "i":"5m",
+                    "f":0,
+                    "L":0,
+                    "o":"100.0",
+                    "c":"100.5",
+                    "h":"101.0",
+                    "l":"99.5",
+                    "v":"45.6",
+                    "n":0,
+                    "x":false,
+                    "q":"0",
+                    "V":"0",
+                    "Q":"0",
+                    "B":"0"
+                }
+            }
+        }"#;
+
+        ws.ingest_test_message(msg).await;
+        let update = rx.try_recv().expect("open kline should be emitted");
+        assert!(!update.kline.is_closed);
+        assert_eq!(update.kline.close, dec!(100.5));
+    }
+
+    #[tokio::test]
+    async fn characterization_freshness_recorded_on_kline() {
+        let ws = BinanceKlineWebSocket::new(vec!["BTCUSDT".into()], vec!["5m".into()], true);
+        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        ws.set_freshness(freshness.clone());
+
+        let msg = r#"{
+            "stream":"btcusdt@kline_5m",
+            "data":{
+                "e":"kline",
+                "E":1700000000000,
+                "s":"BTCUSDT",
+                "k":{
+                    "t":1700000000000,
+                    "T":1700000299999,
+                    "s":"BTCUSDT",
+                    "i":"5m",
+                    "f":0,
+                    "L":0,
+                    "o":"100.0",
+                    "c":"101.0",
+                    "h":"102.0",
+                    "l":"99.0",
+                    "v":"123.4",
+                    "n":0,
+                    "x":true,
+                    "q":"0",
+                    "V":"0",
+                    "Q":"0",
+                    "B":"0"
+                }
+            }
+        }"#;
+
+        ws.ingest_test_message(msg).await;
+        let staleness = freshness.staleness(crate::platform::DataSource::BinanceKline, "BTCUSDT");
+        assert!(staleness.is_some(), "freshness should be recorded");
+        assert!(staleness.unwrap() < 1.0);
     }
 }

@@ -455,7 +455,13 @@ impl ChainlinkRtds {
 
     /// Attach a shared freshness tracker for the data plane.
     pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        let _ = self.freshness.set(freshness);
+        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
+            freshness.set_subscription_count(
+                crate::platform::DataSource::ChainlinkRtds,
+                self.symbols.len() as u64,
+            );
+            freshness.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+        }
     }
 
     /// Get a reference to the price cache
@@ -516,6 +522,16 @@ impl ChainlinkRtds {
 
     /// Connect, subscribe, and stream price data
     async fn connect_and_stream(&self) -> Result<()> {
+        struct ConnectionGuard<'a>(&'a ChainlinkRtds);
+        impl Drop for ConnectionGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.freshness.get() {
+                    f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+                }
+            }
+        }
+        let _guard = ConnectionGuard(self);
+
         let url = Url::parse(CHAINLINK_RTDS_WS_URL)
             .map_err(|e| PloyError::Internal(format!("Invalid RTDS WebSocket URL: {}", e)))?;
 
@@ -524,6 +540,9 @@ impl ChainlinkRtds {
         let ws_stream = connect_websocket_with_proxy(&url).await?;
 
         info!("Connected to Chainlink RTDS WebSocket");
+        if let Some(f) = self.freshness.get() {
+            f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, true);
+        }
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -641,6 +660,12 @@ impl ChainlinkRtds {
         // Ignore send errors (no subscribers)
         let _ = self.update_tx.send(update);
     }
+
+    /// Test-only hook: inject a raw RTDS payload into parser/cache/broadcast path.
+    #[cfg(test)]
+    pub async fn ingest_test_message(&self, text: &str) {
+        self.handle_message(text).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -651,6 +676,7 @@ impl ChainlinkRtds {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::sync::Arc;
 
     #[test]
     fn test_chainlink_spot_momentum() {
@@ -739,5 +765,43 @@ mod tests {
         // Verify we can subscribe
         let _rx = rtds.subscribe();
         assert!(rtds.symbols.len() == 2);
+    }
+
+    #[tokio::test]
+    async fn characterization_rtds_payload_produces_update() {
+        let rtds = ChainlinkRtds::new(vec!["btc/usd".to_string()]);
+        let mut rx = rtds.subscribe();
+
+        let msg = r#"{"symbol":"btc/usd","timestamp":1700000000000,"value":43250.25}"#;
+        rtds.ingest_test_message(msg).await;
+
+        let update = rx.try_recv().expect("expected Chainlink update");
+        assert_eq!(update.symbol, "btc/usd");
+        assert_eq!(update.price, dec!(43250.25));
+    }
+
+    #[tokio::test]
+    async fn characterization_rtds_payload_updates_cache() {
+        let rtds = ChainlinkRtds::new(vec!["eth/usd".to_string()]);
+        let msg = r#"{"symbol":"eth/usd","timestamp":1700000000000,"value":2150.5}"#;
+        rtds.ingest_test_message(msg).await;
+
+        let cached = rtds.price_cache().get("eth/usd").await;
+        assert!(cached.is_some(), "cache entry should exist");
+        assert_eq!(cached.unwrap().price, dec!(2150.5));
+    }
+
+    #[tokio::test]
+    async fn characterization_rtds_records_freshness() {
+        let rtds = ChainlinkRtds::new(vec!["sol/usd".to_string()]);
+        let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
+        rtds.set_freshness(freshness.clone());
+
+        let msg = r#"{"symbol":"sol/usd","timestamp":1700000000000,"value":101.01}"#;
+        rtds.ingest_test_message(msg).await;
+
+        let staleness = freshness.staleness(crate::platform::DataSource::ChainlinkRtds, "sol/usd");
+        assert!(staleness.is_some(), "freshness should be recorded");
+        assert!(staleness.unwrap() < 1.0);
     }
 }

@@ -458,6 +458,7 @@ impl DataFeedManager {
         // Start Binance feed if configured
         if let Some(ref binance_ws) = self.binance_ws {
             let manager = self.manager.clone();
+            let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
             let mut rx = binance_ws.subscribe();
 
             tokio::spawn(async move {
@@ -474,6 +475,9 @@ impl DataFeedManager {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("Binance price feed lagged by {} messages", n);
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_lag(n as u64);
+                            }
                             continue;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -503,6 +507,7 @@ impl DataFeedManager {
             self.backfill_binance_klines().await?;
 
             let manager = self.manager.clone();
+            let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
             let mut rx = binance_ws.subscribe();
             let last_close = self.binance_kline_last_close.clone();
 
@@ -551,6 +556,9 @@ impl DataFeedManager {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("Binance kline feed lagged by {} messages", n);
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_lag(n as u64);
+                            }
                             continue;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -574,6 +582,7 @@ impl DataFeedManager {
         // Start Polymarket feed if configured
         if let Some(ref pm_ws) = self.polymarket_ws {
             let manager = self.manager.clone();
+            let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
             let mut rx = pm_ws.subscribe_updates();
 
             tokio::spawn(async move {
@@ -610,12 +619,16 @@ impl DataFeedManager {
                             };
                             manager.send_market_update(market_update);
                         }
-                        Err(e) => {
-                            warn!("Quote feed recv error: {:?}", e);
-                            // Continue on lagged, break on closed
-                            if matches!(e, tokio::sync::broadcast::error::RecvError::Closed) {
-                                break;
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Quote feed lagged by {} messages", n);
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_lag(n as u64);
                             }
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            warn!("Quote feed recv error: channel closed");
+                            break;
                         }
                     }
                 }
@@ -1227,6 +1240,127 @@ impl DataFeedBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
+    use crate::strategy::traits::{
+        AlertLevel, DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction,
+        StrategyStateInfo,
+    };
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use tokio::time::{timeout, Duration};
+
+    struct FeedCaptureStrategy {
+        id: String,
+    }
+
+    impl FeedCaptureStrategy {
+        fn new(id: &str) -> Self {
+            Self { id: id.to_string() }
+        }
+    }
+
+    #[async_trait]
+    impl Strategy for FeedCaptureStrategy {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn name(&self) -> &str {
+            "feed_capture"
+        }
+
+        fn description(&self) -> &str {
+            "capture market update kinds for tests"
+        }
+
+        fn required_feeds(&self) -> Vec<DataFeed> {
+            vec![]
+        }
+
+        async fn on_market_update(
+            &mut self,
+            update: &MarketUpdate,
+        ) -> crate::error::Result<Vec<StrategyAction>> {
+            let tag = match update {
+                MarketUpdate::PolymarketQuote { .. } => "polymarket_quote",
+                MarketUpdate::BinancePrice { .. } => "binance_price",
+                MarketUpdate::BinanceKline { .. } => "binance_kline",
+                MarketUpdate::EventDiscovered { .. } => "event_discovered",
+                MarketUpdate::EventExpired { .. } => "event_expired",
+            };
+            Ok(vec![StrategyAction::Alert {
+                level: AlertLevel::Info,
+                message: format!("market:{}", tag),
+            }])
+        }
+
+        async fn on_order_update(
+            &mut self,
+            _update: &OrderUpdate,
+        ) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(Vec::new())
+        }
+
+        async fn on_tick(
+            &mut self,
+            _now: chrono::DateTime<Utc>,
+        ) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(Vec::new())
+        }
+
+        fn state(&self) -> StrategyStateInfo {
+            StrategyStateInfo {
+                strategy_id: self.id.clone(),
+                enabled: true,
+                ..StrategyStateInfo::default()
+            }
+        }
+
+        fn positions(&self) -> Vec<crate::strategy::traits::PositionInfo> {
+            Vec::new()
+        }
+
+        fn is_active(&self) -> bool {
+            true
+        }
+
+        async fn shutdown(&mut self) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(Vec::new())
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    async fn setup_manager_with_strategy(
+        strategy_id: &str,
+    ) -> (
+        Arc<StrategyManager>,
+        mpsc::Receiver<(String, StrategyAction)>,
+    ) {
+        let manager = Arc::new(StrategyManager::new(60_000));
+        let action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+        manager
+            .start_strategy(Box::new(FeedCaptureStrategy::new(strategy_id)), None)
+            .await
+            .expect("start strategy");
+        (manager, action_rx)
+    }
+
+    async fn recv_market_alert(
+        action_rx: &mut mpsc::Receiver<(String, StrategyAction)>,
+    ) -> (String, String) {
+        let (strategy_id, action) = timeout(Duration::from_secs(1), action_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("action channel closed");
+        match action {
+            StrategyAction::Alert { message, .. } => (strategy_id, message),
+            other => panic!("unexpected action: {:?}", other),
+        }
+    }
 
     #[test]
     fn test_feed_builder() {
@@ -1236,5 +1370,148 @@ mod tests {
 
         let binance = builder.build_binance();
         assert!(binance.is_some());
+    }
+
+    #[test]
+    fn test_feed_builder_empty_symbols_returns_none() {
+        let builder = DataFeedBuilder::new();
+        assert!(builder.build_binance().is_none());
+    }
+
+    #[test]
+    fn test_from_data_plane_reuses_singleton_adapters() {
+        let manager = Arc::new(StrategyManager::new(1000));
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                polymarket_ws_url: "wss://example.invalid/ws".to_string(),
+                binance_spot_symbols: vec!["BTCUSDT".to_string()],
+                ..DataPlaneConfig::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+
+        let feed = DataFeedManager::from_data_plane(data_plane.clone(), manager);
+        assert!(feed.data_plane.is_some());
+        assert!(feed.pm_client.is_none());
+
+        let feed_bn = feed.binance_ws.as_ref().expect("feed binance ws");
+        let dp_bn = data_plane.binance_ws().expect("dp binance ws");
+        assert!(Arc::ptr_eq(feed_bn, &dp_bn));
+
+        let feed_pm = feed.polymarket_ws.as_ref().expect("feed pm ws");
+        let dp_pm = data_plane.polymarket_ws().expect("dp pm ws");
+        assert!(Arc::ptr_eq(feed_pm, &dp_pm));
+    }
+
+    #[tokio::test]
+    async fn characterization_replay_binance_price_to_strategy_market_update() {
+        let (manager, mut action_rx) = setup_manager_with_strategy("feed_s1").await;
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                binance_spot_symbols: vec!["BTCUSDT".to_string()],
+                ..DataPlaneConfig::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+
+        let feed = DataFeedManager::from_data_plane(data_plane.clone(), manager);
+        feed.start().await.expect("start feed manager");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let ws = data_plane.binance_ws().expect("binance ws");
+        ws.ingest_test_message(
+            r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43250.50","q":"0.123","T":1700000000000}"#,
+        )
+        .await;
+
+        let (sid, message) = recv_market_alert(&mut action_rx).await;
+        assert_eq!(sid, "feed_s1");
+        assert_eq!(message, "market:binance_price");
+    }
+
+    #[tokio::test]
+    async fn characterization_replay_polymarket_quote_to_strategy_market_update() {
+        let (manager, mut action_rx) = setup_manager_with_strategy("feed_s2").await;
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                polymarket_ws_url: "wss://example.invalid/ws".to_string(),
+                ..DataPlaneConfig::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+
+        let pm_ws = data_plane.polymarket_ws().expect("pm ws");
+        pm_ws
+            .register_token("0xabc123", crate::domain::Side::Up)
+            .await;
+
+        let feed = DataFeedManager::from_data_plane(data_plane.clone(), manager);
+        feed.start().await.expect("start feed manager");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let handled = pm_ws.ingest_test_message(
+            r#"[{"asset_id":"0xabc123","market":"0xmarket","bids":[{"price":"0.45","size":"100"}],"asks":[{"price":"0.47","size":"50"}]}]"#,
+        ).await;
+        assert!(handled, "polymarket message should be handled");
+
+        let (sid, message) = recv_market_alert(&mut action_rx).await;
+        assert_eq!(sid, "feed_s2");
+        assert_eq!(message, "market:polymarket_quote");
+    }
+
+    #[tokio::test]
+    async fn characterization_replay_binance_kline_to_strategy_market_update() {
+        let (manager, mut action_rx) = setup_manager_with_strategy("feed_s3").await;
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                binance_kline_symbols: vec!["BTCUSDT".to_string()],
+                binance_kline_intervals: vec!["5m".to_string()],
+                binance_kline_closed_only: true,
+                ..DataPlaneConfig::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+
+        let mut feed = DataFeedManager::from_data_plane(data_plane.clone(), manager);
+        // Keep test deterministic/offline: skip REST backfill.
+        feed.binance_kline_backfill_limit = 0;
+        feed.start().await.expect("start feed manager");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let ws = data_plane.binance_kline_ws().expect("binance kline ws");
+        ws.ingest_test_message(
+            r#"{
+                "stream":"btcusdt@kline_5m",
+                "data":{
+                    "e":"kline",
+                    "E":1700000000000,
+                    "s":"BTCUSDT",
+                    "k":{
+                        "t":1700000000000,
+                        "T":1700000299999,
+                        "s":"BTCUSDT",
+                        "i":"5m",
+                        "f":0,
+                        "L":0,
+                        "o":"100.0",
+                        "c":"101.0",
+                        "h":"102.0",
+                        "l":"99.0",
+                        "v":"123.4",
+                        "n":0,
+                        "x":true,
+                        "q":"0",
+                        "V":"0",
+                        "Q":"0",
+                        "B":"0"
+                    }
+                }
+            }"#,
+        )
+        .await;
+
+        let (sid, message) = recv_market_alert(&mut action_rx).await;
+        assert_eq!(sid, "feed_s3");
+        assert_eq!(message, "market:binance_kline");
     }
 }

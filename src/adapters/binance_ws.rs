@@ -623,7 +623,13 @@ impl BinanceWebSocket {
 
     /// Attach a shared freshness tracker for the data plane.
     pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        let _ = self.freshness.set(freshness);
+        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
+            freshness.set_subscription_count(
+                crate::platform::DataSource::BinanceSpot,
+                self.symbols.len() as u64,
+            );
+            freshness.set_source_connected(crate::platform::DataSource::BinanceSpot, false);
+        }
     }
 
     /// Subscribe to price updates
@@ -686,6 +692,16 @@ impl BinanceWebSocket {
 
     /// Connect and stream price data
     async fn connect_and_stream(&self) -> Result<()> {
+        struct ConnectionGuard<'a>(&'a BinanceWebSocket);
+        impl Drop for ConnectionGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.freshness.get() {
+                    f.set_source_connected(crate::platform::DataSource::BinanceSpot, false);
+                }
+            }
+        }
+        let _guard = ConnectionGuard(self);
+
         let url = self.build_url();
         let url = Url::parse(&url)
             .map_err(|e| PloyError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
@@ -695,6 +711,9 @@ impl BinanceWebSocket {
         let ws_stream = connect_websocket_with_proxy(&url).await?;
 
         info!("Connected to Binance WebSocket");
+        if let Some(f) = self.freshness.get() {
+            f.set_source_connected(crate::platform::DataSource::BinanceSpot, true);
+        }
 
         let (mut write, mut read) = ws_stream.split();
         let mut ping_interval = interval(Duration::from_secs(PING_INTERVAL_SECS));
@@ -813,6 +832,12 @@ impl BinanceWebSocket {
 
         // Ignore send errors (no subscribers)
         let _ = self.update_tx.send(update);
+    }
+
+    /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
+    #[cfg(test)]
+    pub async fn ingest_test_message(&self, text: &str) {
+        self.handle_message(text).await;
     }
 }
 

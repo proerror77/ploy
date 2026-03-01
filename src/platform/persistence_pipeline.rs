@@ -9,6 +9,7 @@
 //! - Preserves existing DB schema and SQL
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -19,6 +20,7 @@ use tokio::time::{self, Duration};
 use tracing::{debug, info, warn};
 
 use crate::platform::types::Domain;
+use crate::platform::DataPlaneFreshness;
 
 // ---------------------------------------------------------------------------
 // Pipeline configuration
@@ -219,6 +221,7 @@ impl PendingBuffers {
 #[derive(Clone)]
 pub struct PersistencePipelineHandle {
     tx: mpsc::Sender<PersistenceEvent>,
+    freshness: Option<Arc<DataPlaneFreshness>>,
 }
 
 impl PersistencePipelineHandle {
@@ -248,6 +251,7 @@ impl PersistencePipelineHandle {
         F: FnMut(T) -> Option<PersistenceEvent> + Send + 'static,
     {
         let pipeline = self.clone();
+        let freshness = self.freshness.clone();
         let bridge_name = bridge_name.into();
         tokio::spawn(async move {
             loop {
@@ -258,10 +262,16 @@ impl PersistencePipelineHandle {
                         };
                         if pipeline.try_ingest(event).is_err() {
                             warn!(bridge = %bridge_name, "persistence bridge dropped event");
+                            if let Some(ref f) = freshness {
+                                f.record_broadcast_drop(1);
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(bridge = %bridge_name, lagged = n, "persistence bridge lagged");
+                        if let Some(ref f) = freshness {
+                            f.record_broadcast_lag(n as u64);
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -302,9 +312,18 @@ impl PersistencePipeline {
     /// Create the pipeline and spawn the background writer task.
     /// Returns a handle that producers use to send events.
     pub fn spawn(pool: PgPool, config: PersistenceConfig) -> PersistencePipelineHandle {
+        Self::spawn_with_freshness(pool, config, None)
+    }
+
+    /// Create the pipeline with optional shared freshness tracking.
+    pub fn spawn_with_freshness(
+        pool: PgPool,
+        config: PersistenceConfig,
+        freshness: Option<Arc<DataPlaneFreshness>>,
+    ) -> PersistencePipelineHandle {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         tokio::spawn(Self::run(rx, pool, config));
-        PersistencePipelineHandle { tx }
+        PersistencePipelineHandle { tx, freshness }
     }
 
     async fn run(

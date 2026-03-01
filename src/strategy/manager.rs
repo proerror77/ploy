@@ -477,6 +477,98 @@ pub struct StrategyInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::traits::{
+        AlertLevel, DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction,
+        StrategyStateInfo,
+    };
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+    use tokio::time::{timeout, Duration};
+
+    struct TestStrategy {
+        id: String,
+        name: String,
+    }
+
+    impl TestStrategy {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                name: "test_strategy".to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Strategy for TestStrategy {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "test"
+        }
+
+        fn required_feeds(&self) -> Vec<DataFeed> {
+            vec![DataFeed::BinanceSpot {
+                symbols: vec!["BTCUSDT".to_string()],
+            }]
+        }
+
+        async fn on_market_update(
+            &mut self,
+            _update: &MarketUpdate,
+        ) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(vec![StrategyAction::Alert {
+                level: AlertLevel::Info,
+                message: "market_update".to_string(),
+            }])
+        }
+
+        async fn on_order_update(
+            &mut self,
+            _update: &OrderUpdate,
+        ) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(vec![StrategyAction::Alert {
+                level: AlertLevel::Info,
+                message: "order_update".to_string(),
+            }])
+        }
+
+        async fn on_tick(
+            &mut self,
+            _now: chrono::DateTime<Utc>,
+        ) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(Vec::new())
+        }
+
+        fn state(&self) -> StrategyStateInfo {
+            StrategyStateInfo {
+                strategy_id: self.id.clone(),
+                enabled: true,
+                ..StrategyStateInfo::default()
+            }
+        }
+
+        fn positions(&self) -> Vec<crate::strategy::traits::PositionInfo> {
+            Vec::new()
+        }
+
+        fn is_active(&self) -> bool {
+            true
+        }
+
+        async fn shutdown(&mut self) -> crate::error::Result<Vec<StrategyAction>> {
+            Ok(Vec::new())
+        }
+
+        fn reset(&mut self) {}
+    }
 
     #[tokio::test]
     async fn test_strategy_manager_creation() {
@@ -489,5 +581,69 @@ mod tests {
         let strategies = StrategyFactory::available_strategies();
         assert!(!strategies.is_empty());
         assert!(strategies.iter().any(|s| s.name == "momentum"));
+    }
+
+    #[tokio::test]
+    async fn test_market_update_routed_to_running_strategy() {
+        let manager = StrategyManager::new(60_000);
+        let mut action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+
+        manager
+            .start_strategy(Box::new(TestStrategy::new("s1")), None)
+            .await
+            .expect("start strategy");
+
+        manager.send_market_update(MarketUpdate::BinancePrice {
+            symbol: "BTCUSDT".to_string(),
+            price: dec!(43210.5),
+            timestamp: Utc::now(),
+        });
+
+        let (strategy_id, action) = timeout(Duration::from_secs(1), action_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("channel closed");
+        assert_eq!(strategy_id, "s1");
+        match action {
+            StrategyAction::Alert { message, .. } => assert_eq!(message, "market_update"),
+            other => panic!("unexpected action: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_order_update_routed_to_running_strategy() {
+        let manager = StrategyManager::new(60_000);
+        let mut action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+
+        manager
+            .start_strategy(Box::new(TestStrategy::new("s2")), None)
+            .await
+            .expect("start strategy");
+
+        manager.send_order_update(OrderUpdate {
+            order_id: "o1".to_string(),
+            client_order_id: Some("c1".to_string()),
+            status: crate::domain::OrderStatus::Filled,
+            filled_qty: 10,
+            avg_fill_price: Some(dec!(0.42)),
+            timestamp: Utc::now(),
+            error: None,
+        });
+
+        let (strategy_id, action) = timeout(Duration::from_secs(1), action_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("channel closed");
+        assert_eq!(strategy_id, "s2");
+        match action {
+            StrategyAction::Alert { message, .. } => assert_eq!(message, "order_update"),
+            other => panic!("unexpected action: {:?}", other),
+        }
     }
 }
