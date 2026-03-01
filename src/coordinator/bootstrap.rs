@@ -5374,38 +5374,25 @@ pub async fn start_platform(
                     } else {
                         Some(pm_ws.subscribe_updates())
                     };
-                    if let Some(mut quote_rx) = quote_rx {
-                        let ph = pipeline_handle.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                match quote_rx.recv().await {
-                                    Ok(update) => {
-                                        let tick = crate::platform::ClobQuoteTick {
-                                            token_id: update.token_id.clone(),
-                                            side: update.side.as_str().to_string(),
-                                            best_bid: update.quote.best_bid,
-                                            best_ask: update.quote.best_ask,
-                                            bid_size: update.quote.bid_size,
-                                            ask_size: update.quote.ask_size,
-                                            domain: Domain::Crypto,
-                                            received_at: Utc::now(),
-                                        };
-                                        if ph
-                                            .try_ingest(
-                                                crate::platform::PersistenceEvent::ClobQuote(tick),
-                                            )
-                                            .is_err()
-                                        {
-                                            warn!("persistence quote bridge dropped event");
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(lagged = n, "persistence quote bridge lagged");
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        });
+                    if let Some(quote_rx) = quote_rx {
+                        pipeline_handle.spawn_bridge(
+                            quote_rx,
+                            format!("{}.quote", crypto_cfg.agent_id),
+                            |update| {
+                                Some(crate::platform::PersistenceEvent::ClobQuote(
+                                    crate::platform::ClobQuoteTick {
+                                        token_id: update.token_id.clone(),
+                                        side: update.side.as_str().to_string(),
+                                        best_bid: update.quote.best_bid,
+                                        best_ask: update.quote.best_ask,
+                                        bid_size: update.quote.bid_size,
+                                        ask_size: update.quote.ask_size,
+                                        domain: Domain::Crypto,
+                                        received_at: Utc::now(),
+                                    },
+                                ))
+                            },
+                        );
                     } else {
                         warn!("persistence quote bridge unavailable: no quote receiver");
                     }
@@ -5417,36 +5404,21 @@ pub async fn start_platform(
                     } else {
                         Some(binance_ws.subscribe())
                     };
-                    if let Some(mut price_rx) = price_rx {
-                        let ph = pipeline_handle.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                match price_rx.recv().await {
-                                    Ok(update) => {
-                                        let tick = crate::platform::BinancePriceTick {
-                                            symbol: update.symbol.clone(),
-                                            price: Some(update.price),
-                                            quantity: update.quantity,
-                                            trade_time: update.timestamp,
-                                        };
-                                        if ph
-                                            .try_ingest(
-                                                crate::platform::PersistenceEvent::BinancePrice(
-                                                    tick,
-                                                ),
-                                            )
-                                            .is_err()
-                                        {
-                                            warn!("persistence price bridge dropped event");
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(lagged = n, "persistence price bridge lagged");
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        });
+                    if let Some(price_rx) = price_rx {
+                        pipeline_handle.spawn_bridge(
+                            price_rx,
+                            format!("{}.price", crypto_cfg.agent_id),
+                            |update| {
+                                Some(crate::platform::PersistenceEvent::BinancePrice(
+                                    crate::platform::BinancePriceTick {
+                                        symbol: update.symbol.clone(),
+                                        price: Some(update.price),
+                                        quantity: update.quantity,
+                                        trade_time: update.timestamp,
+                                    },
+                                ))
+                            },
+                        );
                     } else {
                         warn!("persistence price bridge unavailable: no price receiver");
                     }
@@ -5458,56 +5430,41 @@ pub async fn start_platform(
                     } else {
                         Some(pm_ws.subscribe_books())
                     };
-                    if let Some(mut book_rx) = book_rx {
-                        let ph = pipeline_handle.clone();
-                        tokio::spawn(async move {
-                            use sha2::{Digest, Sha256};
-                            loop {
-                                match book_rx.recv().await {
-                                    Ok(book_msg) => {
-                                        let bids_json = serde_json::to_value(&book_msg.bids)
-                                            .unwrap_or_default();
-                                        let asks_json = serde_json::to_value(&book_msg.asks)
-                                            .unwrap_or_default();
-                                        let mut hasher = Sha256::new();
-                                        hasher.update(bids_json.to_string().as_bytes());
-                                        hasher.update(asks_json.to_string().as_bytes());
-                                        let hash = format!("{:x}", hasher.finalize());
-                                        let snap = crate::platform::ClobOrderbookSnapshot {
-                                            domain: Domain::Crypto,
-                                            token_id: book_msg.asset_id.clone(),
-                                            market: Some(book_msg.market.clone()),
-                                            bids: bids_json,
-                                            asks: asks_json,
-                                            book_timestamp: book_msg
-                                                .timestamp
-                                                .as_deref()
-                                                .and_then(|s| {
-                                                    chrono::DateTime::parse_from_rfc3339(s).ok()
-                                                })
-                                                .map(|dt| dt.with_timezone(&Utc)),
-                                            hash,
-                                            source: "polymarket_ws".into(),
-                                            context: None,
-                                        };
-                                        if ph
-                                            .try_ingest(
-                                                crate::platform::PersistenceEvent::ClobOrderbook(
-                                                    snap,
-                                                ),
-                                            )
-                                            .is_err()
-                                        {
-                                            warn!("persistence orderbook bridge dropped event");
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(lagged = n, "persistence orderbook bridge lagged");
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        });
+                    if let Some(book_rx) = book_rx {
+                        pipeline_handle.spawn_bridge(
+                            book_rx,
+                            format!("{}.orderbook", crypto_cfg.agent_id),
+                            |book_msg| {
+                                use sha2::{Digest, Sha256};
+                                let bids_json =
+                                    serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                                let asks_json =
+                                    serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                                let mut hasher = Sha256::new();
+                                hasher.update(bids_json.to_string().as_bytes());
+                                hasher.update(asks_json.to_string().as_bytes());
+                                let hash = format!("{:x}", hasher.finalize());
+                                Some(crate::platform::PersistenceEvent::ClobOrderbook(
+                                    crate::platform::ClobOrderbookSnapshot {
+                                        domain: Domain::Crypto,
+                                        token_id: book_msg.asset_id.clone(),
+                                        market: Some(book_msg.market.clone()),
+                                        bids: bids_json,
+                                        asks: asks_json,
+                                        book_timestamp: book_msg
+                                            .timestamp
+                                            .as_deref()
+                                            .and_then(|s| {
+                                                chrono::DateTime::parse_from_rfc3339(s).ok()
+                                            })
+                                            .map(|dt| dt.with_timezone(&Utc)),
+                                        hash,
+                                        source: "polymarket_ws".into(),
+                                        context: None,
+                                    },
+                                ))
+                            },
+                        );
                     } else {
                         warn!("persistence orderbook bridge unavailable: no book receiver");
                     }
@@ -5565,72 +5522,41 @@ pub async fn start_platform(
                 match ensure_binance_lob_ticks_table(pool).await {
                     Ok(()) => {
                         if let Some(ph) = crypto_persistence_pipeline.clone() {
-                            let mut rx = depth_stream.subscribe();
+                            let rx = depth_stream.subscribe();
                             let agent_id = crypto_cfg.agent_id.clone();
                             let max_levels = env_usize("BN_LOB_LEVELS", 20).clamp(0, 200);
-                            tokio::spawn(async move {
-                                loop {
-                                    match rx.recv().await {
-                                        Ok(update) => {
-                                            let symbol = update.symbol.clone();
-                                            let (bids, asks) = if max_levels == 0 {
-                                                (Vec::new(), Vec::new())
-                                            } else {
-                                                (
-                                                    lob_levels_json(
-                                                        &update.raw_state,
-                                                        true,
-                                                        max_levels,
-                                                    ),
-                                                    lob_levels_json(
-                                                        &update.raw_state,
-                                                        false,
-                                                        max_levels,
-                                                    ),
-                                                )
-                                            };
-                                            let tick = crate::platform::BinanceLobTick {
-                                                symbol,
-                                                update_id: update.snapshot.update_id,
-                                                best_bid: Some(update.snapshot.best_bid),
-                                                best_ask: Some(update.snapshot.best_ask),
-                                                mid_price: Some(update.snapshot.mid_price),
-                                                spread_bps: Some(update.snapshot.spread_bps),
-                                                obi_5: update.snapshot.obi_5.to_f64(),
-                                                obi_10: update.snapshot.obi_10.to_f64(),
-                                                bid_volume_5: Some(update.snapshot.bid_volume_5),
-                                                ask_volume_5: Some(update.snapshot.ask_volume_5),
-                                                bids: serde_json::to_value(&bids)
-                                                    .unwrap_or_default(),
-                                                asks: serde_json::to_value(&asks)
-                                                    .unwrap_or_default(),
-                                                event_time: update.snapshot.timestamp,
-                                            };
-                                            if ph
-                                                .try_ingest(
-                                                    crate::platform::PersistenceEvent::BinanceLob(
-                                                        tick,
-                                                    ),
-                                                )
-                                                .is_err()
-                                            {
-                                                warn!(
-                                                    agent = agent_id,
-                                                    "persistence Binance LOB bridge dropped event"
-                                                );
-                                            }
-                                        }
-                                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                                            warn!(
-                                                agent = agent_id,
-                                                lagged = n,
-                                                "persistence Binance LOB bridge lagged"
-                                            );
-                                        }
-                                        Err(broadcast::error::RecvError::Closed) => break,
-                                    }
-                                }
-                            });
+                            ph.spawn_bridge(
+                                rx,
+                                format!("{}.binance_lob", agent_id),
+                                move |update| {
+                                    let symbol = update.symbol.clone();
+                                    let (bids, asks) = if max_levels == 0 {
+                                        (Vec::new(), Vec::new())
+                                    } else {
+                                        (
+                                            lob_levels_json(&update.raw_state, true, max_levels),
+                                            lob_levels_json(&update.raw_state, false, max_levels),
+                                        )
+                                    };
+                                    Some(crate::platform::PersistenceEvent::BinanceLob(
+                                        crate::platform::BinanceLobTick {
+                                            symbol,
+                                            update_id: update.snapshot.update_id,
+                                            best_bid: Some(update.snapshot.best_bid),
+                                            best_ask: Some(update.snapshot.best_ask),
+                                            mid_price: Some(update.snapshot.mid_price),
+                                            spread_bps: Some(update.snapshot.spread_bps),
+                                            obi_5: update.snapshot.obi_5.to_f64(),
+                                            obi_10: update.snapshot.obi_10.to_f64(),
+                                            bid_volume_5: Some(update.snapshot.bid_volume_5),
+                                            ask_volume_5: Some(update.snapshot.ask_volume_5),
+                                            bids: serde_json::to_value(&bids).unwrap_or_default(),
+                                            asks: serde_json::to_value(&asks).unwrap_or_default(),
+                                            event_time: update.snapshot.timestamp,
+                                        },
+                                    ))
+                                },
+                            );
                         } else {
                             warn!(
                                 agent = crypto_cfg.agent_id,
@@ -6138,96 +6064,66 @@ pub async fn start_platform(
                     );
 
                     if sports_quote_table_ready {
-                        if let Some(mut quote_rx) = sports_data_plane.subscribe_quotes() {
-                            let ph = sports_pipeline.clone();
-                            tokio::spawn(async move {
-                                loop {
-                                    match quote_rx.recv().await {
-                                        Ok(update) => {
-                                            let tick = crate::platform::ClobQuoteTick {
-                                                token_id: update.token_id.clone(),
-                                                side: update.side.as_str().to_string(),
-                                                best_bid: update.quote.best_bid,
-                                                best_ask: update.quote.best_ask,
-                                                bid_size: update.quote.bid_size,
-                                                ask_size: update.quote.ask_size,
-                                                domain: Domain::Sports,
-                                                received_at: Utc::now(),
-                                            };
-                                            if ph
-                                                .try_ingest(
-                                                    crate::platform::PersistenceEvent::ClobQuote(
-                                                        tick,
-                                                    ),
-                                                )
-                                                .is_err()
-                                            {
-                                                warn!("sports quote bridge dropped event");
-                                            }
-                                        }
-                                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                                            warn!(lagged = n, "sports quote bridge lagged");
-                                        }
-                                        Err(broadcast::error::RecvError::Closed) => break,
-                                    }
-                                }
-                            });
+                        if let Some(quote_rx) = sports_data_plane.subscribe_quotes() {
+                            sports_pipeline.spawn_bridge(
+                                quote_rx,
+                                format!("{}.sports_quote", sports_cfg.agent_id),
+                                |update| {
+                                    Some(crate::platform::PersistenceEvent::ClobQuote(
+                                        crate::platform::ClobQuoteTick {
+                                            token_id: update.token_id.clone(),
+                                            side: update.side.as_str().to_string(),
+                                            best_bid: update.quote.best_bid,
+                                            best_ask: update.quote.best_ask,
+                                            bid_size: update.quote.bid_size,
+                                            ask_size: update.quote.ask_size,
+                                            domain: Domain::Sports,
+                                            received_at: Utc::now(),
+                                        },
+                                    ))
+                                },
+                            );
                         } else {
                             warn!("sports quote bridge unavailable: no quote receiver");
                         }
                     }
 
                     if sports_orderbook_table_ready {
-                        if let Some(mut book_rx) = sports_data_plane.subscribe_books() {
-                            let ph = sports_pipeline.clone();
-                            tokio::spawn(async move {
-                                use sha2::{Digest, Sha256};
-                                loop {
-                                    match book_rx.recv().await {
-                                        Ok(book_msg) => {
-                                            let bids_json = serde_json::to_value(&book_msg.bids)
-                                                .unwrap_or_default();
-                                            let asks_json = serde_json::to_value(&book_msg.asks)
-                                                .unwrap_or_default();
-                                            let mut hasher = Sha256::new();
-                                            hasher.update(bids_json.to_string().as_bytes());
-                                            hasher.update(asks_json.to_string().as_bytes());
-                                            let hash = format!("{:x}", hasher.finalize());
-                                            let snap = crate::platform::ClobOrderbookSnapshot {
-                                                domain: Domain::Sports,
-                                                token_id: book_msg.asset_id.clone(),
-                                                market: Some(book_msg.market.clone()),
-                                                bids: bids_json,
-                                                asks: asks_json,
-                                                book_timestamp: book_msg
-                                                    .timestamp
-                                                    .as_deref()
-                                                    .and_then(|s| {
-                                                        chrono::DateTime::parse_from_rfc3339(s).ok()
-                                                    })
-                                                    .map(|dt| dt.with_timezone(&Utc)),
-                                                hash,
-                                                source: "polymarket_ws".into(),
-                                                context: None,
-                                            };
-                                            if ph
-                                                .try_ingest(
-                                                    crate::platform::PersistenceEvent::ClobOrderbook(
-                                                        snap,
-                                                    ),
-                                                )
-                                                .is_err()
-                                            {
-                                                warn!("sports orderbook bridge dropped event");
-                                            }
-                                        }
-                                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                                            warn!(lagged = n, "sports orderbook bridge lagged");
-                                        }
-                                        Err(broadcast::error::RecvError::Closed) => break,
-                                    }
-                                }
-                            });
+                        if let Some(book_rx) = sports_data_plane.subscribe_books() {
+                            sports_pipeline.spawn_bridge(
+                                book_rx,
+                                format!("{}.sports_orderbook", sports_cfg.agent_id),
+                                |book_msg| {
+                                    use sha2::{Digest, Sha256};
+                                    let bids_json =
+                                        serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                                    let asks_json =
+                                        serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(bids_json.to_string().as_bytes());
+                                    hasher.update(asks_json.to_string().as_bytes());
+                                    let hash = format!("{:x}", hasher.finalize());
+                                    Some(crate::platform::PersistenceEvent::ClobOrderbook(
+                                        crate::platform::ClobOrderbookSnapshot {
+                                            domain: Domain::Sports,
+                                            token_id: book_msg.asset_id.clone(),
+                                            market: Some(book_msg.market.clone()),
+                                            bids: bids_json,
+                                            asks: asks_json,
+                                            book_timestamp: book_msg
+                                                .timestamp
+                                                .as_deref()
+                                                .and_then(|s| {
+                                                    chrono::DateTime::parse_from_rfc3339(s).ok()
+                                                })
+                                                .map(|dt| dt.with_timezone(&Utc)),
+                                            hash,
+                                            source: "polymarket_ws".into(),
+                                            context: None,
+                                        },
+                                    ))
+                                },
+                            );
                         } else {
                             warn!("sports orderbook bridge unavailable: no book receiver");
                         }
