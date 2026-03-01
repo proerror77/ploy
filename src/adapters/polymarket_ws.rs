@@ -1376,4 +1376,146 @@ mod tests {
         assert_eq!(cb.get_state().await, CircuitBreakerState::Closed);
         assert!(cb.should_allow().await);
     }
+
+    // =========================================================================
+    // Characterization tests — replay realistic WS JSON and verify output
+    // =========================================================================
+
+    /// Replay a book snapshot JSON and verify QuoteUpdate broadcast.
+    #[tokio::test]
+    async fn characterization_book_snapshot_produces_quote_update() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("0xabc123", Side::Up).await;
+
+        let mut rx = ws.subscribe_updates();
+
+        // Realistic book snapshot JSON (array of BookMessage)
+        let json = r#"[{
+            "asset_id": "0xabc123",
+            "market": "0xmarket1",
+            "bids": [
+                {"price": "0.45", "size": "100"},
+                {"price": "0.44", "size": "200"}
+            ],
+            "asks": [
+                {"price": "0.47", "size": "50"},
+                {"price": "0.48", "size": "150"}
+            ],
+            "timestamp": "1700000000",
+            "hash": "abc"
+        }]"#;
+
+        let handled = ws.handle_message(json).await;
+        assert!(handled, "book snapshot should be handled");
+
+        let update = rx.try_recv().expect("should receive QuoteUpdate");
+        assert_eq!(update.token_id, "0xabc123");
+        assert_eq!(update.side, Side::Up);
+        assert_eq!(update.quote.best_bid, Some(dec!(0.45)));
+        assert_eq!(update.quote.best_ask, Some(dec!(0.47)));
+    }
+
+    /// Replay a single book message (not array) and verify output.
+    #[tokio::test]
+    async fn characterization_single_book_message() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("0xdef456", Side::Down).await;
+
+        let mut rx = ws.subscribe_updates();
+
+        let json = r#"{
+            "asset_id": "0xdef456",
+            "market": "0xmarket2",
+            "bids": [{"price": "0.52", "size": "300"}],
+            "asks": [{"price": "0.55", "size": "100"}]
+        }"#;
+
+        let handled = ws.handle_message(json).await;
+        assert!(handled);
+
+        let update = rx.try_recv().expect("should receive QuoteUpdate");
+        assert_eq!(update.side, Side::Down);
+        assert_eq!(update.quote.best_bid, Some(dec!(0.52)));
+        assert_eq!(update.quote.best_ask, Some(dec!(0.55)));
+    }
+
+    /// Unregistered token should NOT produce a QuoteUpdate.
+    #[tokio::test]
+    async fn characterization_unregistered_token_no_quote() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        // Don't register any tokens
+
+        let mut rx = ws.subscribe_updates();
+
+        let json = r#"[{
+            "asset_id": "0xunknown",
+            "market": "0xmarket3",
+            "bids": [{"price": "0.50", "size": "100"}],
+            "asks": [{"price": "0.51", "size": "100"}]
+        }]"#;
+
+        ws.handle_message(json).await;
+
+        // Should NOT receive any update
+        assert!(rx.try_recv().is_err(), "unregistered token should not produce QuoteUpdate");
+    }
+
+    /// Empty book (no bids/asks) should still be handled but produce None quotes.
+    #[tokio::test]
+    async fn characterization_empty_book_clears_quotes() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("0xempty", Side::Up).await;
+
+        let mut rx = ws.subscribe_updates();
+
+        // First: populate with real data
+        let json1 = r#"[{"asset_id":"0xempty","market":"m","bids":[{"price":"0.40","size":"10"}],"asks":[{"price":"0.60","size":"10"}]}]"#;
+        ws.handle_message(json1).await;
+        let _ = rx.try_recv().expect("first update");
+
+        // Second: empty book snapshot
+        let json2 = r#"[{"asset_id":"0xempty","market":"m","bids":[],"asks":[]}]"#;
+        ws.handle_message(json2).await;
+
+        let update = rx.try_recv().expect("should receive update for empty book");
+        assert_eq!(update.quote.best_bid, None, "empty bids should clear best_bid");
+        assert_eq!(update.quote.best_ask, None, "empty asks should clear best_ask");
+    }
+
+    /// Book broadcast channel should emit Arc<BookMessage> for all tokens (even unregistered).
+    #[tokio::test]
+    async fn characterization_book_broadcast_includes_all_tokens() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        // Register as extra token (no side mapping)
+        let mut extra = std::collections::HashSet::new();
+        extra.insert("0xextra".to_string());
+        ws.reconcile_extra_tokens(&extra).await;
+
+        let mut book_rx = ws.subscribe_books();
+
+        let json = r#"[{"asset_id":"0xextra","market":"m","bids":[{"price":"0.30","size":"5"}],"asks":[{"price":"0.70","size":"5"}]}]"#;
+        ws.handle_message(json).await;
+
+        let book = book_rx.try_recv().expect("should receive BookMessage broadcast");
+        assert_eq!(book.asset_id, "0xextra");
+        assert_eq!(book.bids.len(), 1);
+        assert_eq!(book.asks.len(), 1);
+    }
+
+    /// Freshness tracker should record updates when attached.
+    #[tokio::test]
+    async fn characterization_freshness_recorded_on_book_update() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("0xfresh", Side::Up).await;
+
+        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        ws.set_freshness(freshness.clone());
+
+        let json = r#"[{"asset_id":"0xfresh","market":"m","bids":[{"price":"0.50","size":"10"}],"asks":[{"price":"0.51","size":"10"}]}]"#;
+        ws.handle_message(json).await;
+
+        let staleness = freshness.staleness(crate::platform::DataSource::PolymarketWs, "0xfresh");
+        assert!(staleness.is_some(), "freshness should be recorded after book update");
+        assert!(staleness.unwrap() < 1.0, "staleness should be very low (just recorded)");
+    }
 }

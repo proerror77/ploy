@@ -877,4 +877,77 @@ mod tests {
 
         assert_eq!(cache.len().await, 2);
     }
+
+    // =========================================================================
+    // Characterization tests — replay realistic WS JSON and verify output
+    // =========================================================================
+
+    /// Replay an aggregated trade JSON and verify PriceUpdate broadcast.
+    #[tokio::test]
+    async fn characterization_agg_trade_produces_price_update() {
+        let ws = BinanceWebSocket::new(vec!["BTCUSDT".into()]);
+        let mut rx = ws.subscribe();
+
+        let json = r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43250.50","q":"0.123","T":1700000000000}"#;
+        ws.handle_message(json).await;
+
+        let update = rx.try_recv().expect("should receive PriceUpdate");
+        assert_eq!(update.symbol, "BTCUSDT");
+        assert_eq!(update.price, dec!(43250.50));
+        assert_eq!(update.quantity, Some(dec!(0.123)));
+    }
+
+    /// Replay a regular trade JSON and verify PriceUpdate broadcast.
+    #[tokio::test]
+    async fn characterization_regular_trade_produces_price_update() {
+        let ws = BinanceWebSocket::new(vec!["ETHUSDT".into()]);
+        let mut rx = ws.subscribe();
+
+        let json = r#"{"e":"trade","E":1700000000000,"s":"ETHUSDT","p":"2150.75","q":"1.5","T":1700000000000}"#;
+        ws.handle_message(json).await;
+
+        let update = rx.try_recv().expect("should receive PriceUpdate");
+        assert_eq!(update.symbol, "ETHUSDT");
+        assert_eq!(update.price, dec!(2150.75));
+    }
+
+    /// Price cache should be updated after processing a trade.
+    #[tokio::test]
+    async fn characterization_trade_updates_price_cache() {
+        let ws = BinanceWebSocket::new(vec!["SOLUSDT".into()]);
+
+        let json = r#"{"e":"aggTrade","E":1700000000000,"s":"SOLUSDT","p":"98.50","q":"10","T":1700000000000}"#;
+        ws.handle_message(json).await;
+
+        let cached = ws.price_cache().get("SOLUSDT").await;
+        assert!(cached.is_some(), "price cache should be updated");
+        assert_eq!(cached.unwrap().price, dec!(98.50));
+    }
+
+    /// Freshness tracker should record updates when attached.
+    #[tokio::test]
+    async fn characterization_freshness_recorded_on_trade() {
+        let ws = BinanceWebSocket::new(vec!["BTCUSDT".into()]);
+        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        ws.set_freshness(freshness.clone());
+
+        let json = r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43000","q":"0.5","T":1700000000000}"#;
+        ws.handle_message(json).await;
+
+        let staleness = freshness.staleness(crate::platform::DataSource::BinanceSpot, "BTCUSDT");
+        assert!(staleness.is_some(), "freshness should be recorded");
+        assert!(staleness.unwrap() < 1.0);
+    }
+
+    /// Invalid price string should not crash or produce an update.
+    #[tokio::test]
+    async fn characterization_invalid_price_no_crash() {
+        let ws = BinanceWebSocket::new(vec!["BTCUSDT".into()]);
+        let mut rx = ws.subscribe();
+
+        let json = r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"not_a_number","q":"0.5","T":1700000000000}"#;
+        ws.handle_message(json).await;
+
+        assert!(rx.try_recv().is_err(), "invalid price should not produce update");
+    }
 }
