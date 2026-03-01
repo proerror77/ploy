@@ -15,6 +15,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::{self, Duration};
 use tracing::{debug, info, warn};
 
 use crate::platform::types::Domain;
@@ -182,6 +183,33 @@ struct DedupState {
     orderbooks: HashMap<String, OrderbookState>, // key: token_id
 }
 
+#[derive(Debug, Default)]
+struct PendingBuffers {
+    quotes: Vec<ClobQuoteTick>,
+    prices: Vec<BinancePriceTick>,
+    lobs: Vec<BinanceLobTick>,
+    chainlink_prices: Vec<ChainlinkPriceTick>,
+    orderbooks: Vec<ClobOrderbookSnapshot>,
+}
+
+impl PendingBuffers {
+    fn len(&self) -> usize {
+        self.quotes.len()
+            + self.prices.len()
+            + self.lobs.len()
+            + self.chainlink_prices.len()
+            + self.orderbooks.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.quotes.is_empty()
+            && self.prices.is_empty()
+            && self.lobs.is_empty()
+            && self.chainlink_prices.is_empty()
+            && self.orderbooks.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline handle — the public API for producers
 // ---------------------------------------------------------------------------
@@ -285,81 +313,41 @@ impl PersistencePipeline {
         config: PersistenceConfig,
     ) {
         let mut dedup = DedupState::default();
+        let mut buffers = PendingBuffers::default();
         let mut stats = PipelineStats::default();
         let mut log_counter: u64 = 0;
+        let mut flush_interval =
+            time::interval(Duration::from_millis(config.flush_interval_ms.max(1)));
+        flush_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         info!(
             "persistence pipeline started (capacity={})",
             config.channel_capacity
         );
 
-        while let Some(event) = rx.recv().await {
-            match event {
-                PersistenceEvent::ClobQuote(tick) => {
-                    if Self::should_persist_quote(&tick, &mut dedup, &config) {
-                        if let Err(e) = Self::write_clob_quote(&pool, &tick).await {
-                            warn!(error = %e, token = %tick.token_id, "clob quote persist failed");
-                        } else {
-                            stats.clob_quotes_persisted += 1;
+        loop {
+            tokio::select! {
+                maybe_event = rx.recv() => {
+                    match maybe_event {
+                        Some(event) => {
+                            Self::enqueue_event(event, &mut dedup, &config, &mut stats, &mut buffers);
+                            log_counter += 1;
                         }
-                    } else {
-                        stats.clob_quotes_deduped += 1;
+                        None => break,
                     }
                 }
-                PersistenceEvent::BinancePrice(tick) => {
-                    if Self::should_persist_price(&tick, &mut dedup, &config) {
-                        if let Err(e) = Self::write_binance_price(&pool, &tick).await {
-                            warn!(error = %e, symbol = %tick.symbol, "binance price persist failed");
-                        } else {
-                            stats.binance_prices_persisted += 1;
-                        }
-                    } else {
-                        stats.binance_prices_deduped += 1;
-                    }
-                }
-                PersistenceEvent::BinanceLob(tick) => {
-                    if Self::should_persist_lob(&tick, &mut dedup, &config) {
-                        if let Err(e) =
-                            Self::write_binance_lob(&pool, &tick, config.binance_lob_max_levels)
-                                .await
-                        {
-                            warn!(error = %e, symbol = %tick.symbol, "binance lob persist failed");
-                        } else {
-                            stats.binance_lobs_persisted += 1;
-                        }
-                    } else {
-                        stats.binance_lobs_deduped += 1;
-                    }
-                }
-                PersistenceEvent::ChainlinkPrice(tick) => {
-                    // Chainlink has no dedup — persist every update
-                    if let Err(e) = Self::write_chainlink_price(&pool, &tick).await {
-                        warn!(error = %e, symbol = %tick.symbol, "chainlink price persist failed");
-                    } else {
-                        stats.chainlink_prices_persisted += 1;
-                    }
-                }
-                PersistenceEvent::ClobOrderbook(snap) => {
-                    if Self::should_persist_orderbook(&snap, &mut dedup, &config) {
-                        if let Err(e) = Self::write_clob_orderbook(
-                            &pool,
-                            &snap,
-                            config.clob_orderbook_max_levels,
-                        )
-                        .await
-                        {
-                            warn!(error = %e, token = %snap.token_id, "clob orderbook persist failed");
-                        } else {
-                            stats.clob_orderbooks_persisted += 1;
-                        }
-                    } else {
-                        stats.clob_orderbooks_deduped += 1;
+                _ = flush_interval.tick() => {
+                    if !buffers.is_empty() {
+                        Self::flush_buffers(&pool, &config, &mut buffers, &mut stats).await;
                     }
                 }
             }
 
-            log_counter += 1;
-            if log_counter % 1000 == 0 {
+            if buffers.len() >= config.max_batch_size.max(1) {
+                Self::flush_buffers(&pool, &config, &mut buffers, &mut stats).await;
+            }
+
+            if log_counter > 0 && log_counter.is_multiple_of(1000) {
                 debug!(
                     quotes = stats.clob_quotes_persisted,
                     quotes_dedup = stats.clob_quotes_deduped,
@@ -367,12 +355,111 @@ impl PersistencePipeline {
                     lobs = stats.binance_lobs_persisted,
                     chainlink = stats.chainlink_prices_persisted,
                     orderbooks = stats.clob_orderbooks_persisted,
+                    pending = buffers.len(),
                     "persistence pipeline stats"
                 );
             }
         }
 
+        if !buffers.is_empty() {
+            Self::flush_buffers(&pool, &config, &mut buffers, &mut stats).await;
+        }
+
         info!("persistence pipeline shutting down");
+    }
+
+    fn enqueue_event(
+        event: PersistenceEvent,
+        dedup: &mut DedupState,
+        config: &PersistenceConfig,
+        stats: &mut PipelineStats,
+        buffers: &mut PendingBuffers,
+    ) {
+        match event {
+            PersistenceEvent::ClobQuote(tick) => {
+                if Self::should_persist_quote(&tick, dedup, config) {
+                    buffers.quotes.push(tick);
+                } else {
+                    stats.clob_quotes_deduped += 1;
+                }
+            }
+            PersistenceEvent::BinancePrice(tick) => {
+                if Self::should_persist_price(&tick, dedup, config) {
+                    buffers.prices.push(tick);
+                } else {
+                    stats.binance_prices_deduped += 1;
+                }
+            }
+            PersistenceEvent::BinanceLob(tick) => {
+                if Self::should_persist_lob(&tick, dedup, config) {
+                    buffers.lobs.push(tick);
+                } else {
+                    stats.binance_lobs_deduped += 1;
+                }
+            }
+            PersistenceEvent::ChainlinkPrice(tick) => {
+                // Chainlink has no dedup — enqueue every update.
+                buffers.chainlink_prices.push(tick);
+            }
+            PersistenceEvent::ClobOrderbook(snap) => {
+                if Self::should_persist_orderbook(&snap, dedup, config) {
+                    buffers.orderbooks.push(snap);
+                } else {
+                    stats.clob_orderbooks_deduped += 1;
+                }
+            }
+        }
+    }
+
+    async fn flush_buffers(
+        pool: &PgPool,
+        config: &PersistenceConfig,
+        buffers: &mut PendingBuffers,
+        stats: &mut PipelineStats,
+    ) {
+        for tick in buffers.quotes.drain(..) {
+            if let Err(e) = Self::write_clob_quote(pool, &tick).await {
+                warn!(error = %e, token = %tick.token_id, "clob quote persist failed");
+            } else {
+                stats.clob_quotes_persisted += 1;
+            }
+        }
+
+        for tick in buffers.prices.drain(..) {
+            if let Err(e) = Self::write_binance_price(pool, &tick).await {
+                warn!(error = %e, symbol = %tick.symbol, "binance price persist failed");
+            } else {
+                stats.binance_prices_persisted += 1;
+            }
+        }
+
+        for tick in buffers.lobs.drain(..) {
+            if let Err(e) =
+                Self::write_binance_lob(pool, &tick, config.binance_lob_max_levels).await
+            {
+                warn!(error = %e, symbol = %tick.symbol, "binance lob persist failed");
+            } else {
+                stats.binance_lobs_persisted += 1;
+            }
+        }
+
+        for tick in buffers.chainlink_prices.drain(..) {
+            if let Err(e) = Self::write_chainlink_price(pool, &tick).await {
+                warn!(error = %e, symbol = %tick.symbol, "chainlink price persist failed");
+            } else {
+                stats.chainlink_prices_persisted += 1;
+            }
+        }
+
+        for snap in buffers.orderbooks.drain(..) {
+            if let Err(e) =
+                Self::write_clob_orderbook(pool, &snap, config.clob_orderbook_max_levels).await
+            {
+                warn!(error = %e, token = %snap.token_id, "clob orderbook persist failed");
+            } else {
+                stats.clob_orderbooks_persisted += 1;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -498,7 +585,8 @@ impl PersistencePipeline {
         sqlx::query(
             r#"INSERT INTO clob_quote_ticks
                (token_id, side, best_bid, best_ask, bid_size, ask_size, source, domain)
-               VALUES ($1, $2, $3, $4, $5, $6, 'polymarket_ws', $7)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, 'polymarket_ws', $7)
+               ON CONFLICT DO NOTHING"#,
         )
         .bind(&tick.token_id)
         .bind(&tick.side)
@@ -519,7 +607,8 @@ impl PersistencePipeline {
         sqlx::query(
             r#"INSERT INTO binance_price_ticks
                (symbol, price, quantity, trade_time)
-               VALUES ($1, $2, $3, $4)"#,
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT DO NOTHING"#,
         )
         .bind(&tick.symbol)
         .bind(tick.price)
@@ -539,7 +628,8 @@ impl PersistencePipeline {
             r#"INSERT INTO binance_lob_ticks
                (symbol, update_id, best_bid, best_ask, mid_price, spread_bps,
                 obi_5, obi_10, bid_volume_5, ask_volume_5, bids, asks, event_time)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+               ON CONFLICT DO NOTHING"#,
         )
         .bind(&tick.symbol)
         .bind(tick.update_id)
@@ -566,7 +656,8 @@ impl PersistencePipeline {
         sqlx::query(
             r#"INSERT INTO chainlink_price_ticks
                (symbol, price, source_timestamp)
-               VALUES ($1, $2, $3)"#,
+               VALUES ($1, $2, $3)
+               ON CONFLICT DO NOTHING"#,
         )
         .bind(&tick.symbol)
         .bind(tick.price)
@@ -584,7 +675,8 @@ impl PersistencePipeline {
         sqlx::query(
             r#"INSERT INTO clob_orderbook_snapshots
                (domain, token_id, market, bids, asks, book_timestamp, hash, source, context)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT DO NOTHING"#,
         )
         .bind(snap.domain.to_string())
         .bind(&snap.token_id)
