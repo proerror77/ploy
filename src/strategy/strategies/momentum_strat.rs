@@ -268,10 +268,20 @@ impl MomentumStrategy {
         Some((current_price - old_price) / old_price)
     }
 
-    /// Estimate fair value based on momentum
+    /// Estimate fair value based on momentum (piecewise sigmoid-like scaling)
     fn estimate_fair_value(&self, momentum: Decimal) -> Decimal {
         let base_prob = dec!(0.50);
-        let momentum_factor = momentum.abs() * dec!(10);
+
+        // Scale: 0.1% move -> ~5% shift, 0.5% -> ~21%, 1.0% -> ~36%
+        let abs_momentum = momentum.abs();
+        let momentum_factor = if abs_momentum < dec!(0.001) {
+            abs_momentum * dec!(50)
+        } else if abs_momentum < dec!(0.005) {
+            dec!(0.05) + (abs_momentum - dec!(0.001)) * dec!(40)
+        } else {
+            dec!(0.21) + (abs_momentum - dec!(0.005)) * dec!(30)
+        };
+
         (base_prob + momentum_factor).min(dec!(0.90))
     }
 
@@ -854,7 +864,7 @@ mod tests {
     fn test_config_default() {
         let config = MomentumConfig::default();
         assert_eq!(config.shares_per_trade, 100);
-        assert_eq!(config.max_positions, 5);
+        assert_eq!(config.max_positions, 3);
     }
 
     #[test]

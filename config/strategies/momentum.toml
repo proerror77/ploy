@@ -21,10 +21,10 @@ min_edge = 5.0  # Production: 5% minimum edge
 
 [exit]
 # Binary options: minimum modeled edge floor (%) before forced exit
-exit_edge_floor_pct = 20
+exit_edge_floor_pct = 20.0
 
 # Binary options: adverse price-band threshold (%) for risk exit
-exit_price_band_pct = 12
+exit_price_band_pct = 12.0
 
 # NOTE:
 # Hold-to-resolution is controlled by [strategy].mode:
@@ -33,19 +33,19 @@ exit_price_band_pct = 12
 
 [timing]
 # Entry window before resolution (seconds)
-min_time_remaining = 300  # 5 minutes
-max_time_remaining = 900  # 15 minutes
-cooldown_secs = 60
+min_time_remaining = 300.0  # 5 minutes
+max_time_remaining = 900.0  # 15 minutes
+cooldown_secs = 60.0
 
 [risk]
 # Shares per trade (~$1 at 30-35¢ per share)
-shares = 3
+shares = 3.0
 
 # Maximum concurrent positions
-max_positions = 5
+max_positions = 5.0
 
 # Daily trade cap (0 = unlimited)
-max_daily_trades = 50
+max_daily_trades = 50.0
 
 # Optional fixed USD sizing (overrides shares when set)
 # fixed_amount_usd = 1.0

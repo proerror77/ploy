@@ -37,6 +37,7 @@ impl Default for SportsSplitArbConfig {
                 shares_per_trade: 100,
                 max_unhedged_positions: 5,
                 unhedged_stop_loss: dec!(0.20),
+                fee_rate: dec!(0.02),
             },
             leagues: vec![SportsLeague::NBA, SportsLeague::NFL],
         }

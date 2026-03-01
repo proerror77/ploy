@@ -40,6 +40,9 @@ pub struct SplitArbConfig {
 
     /// Stop loss percentage for unhedged exit (e.g., 0.10 = 10%)
     pub unhedged_stop_loss: Decimal,
+
+    /// Taker fee rate per leg (e.g., 0.02 = 2%)
+    pub fee_rate: Decimal,
 }
 
 impl Default for SplitArbConfig {
@@ -52,6 +55,7 @@ impl Default for SplitArbConfig {
             shares_per_trade: 100,
             max_unhedged_positions: 3,
             unhedged_stop_loss: dec!(0.15),
+            fee_rate: dec!(0.02),
         }
     }
 }
@@ -199,8 +203,10 @@ impl SplitArbEngine {
                 return; // Neither side is cheap enough
             };
 
-        // Calculate max hedge price
-        let max_hedge_price = self.config.target_total_cost - entry_price;
+        // Calculate max hedge price (accounting for fees)
+        let budget = (Decimal::ONE - self.config.min_profit_margin)
+            / (Decimal::ONE + self.config.fee_rate);
+        let max_hedge_price = budget - entry_price;
 
         // Check if hedge is even possible
         let other_ask = if side == ArbSide::Yes {
@@ -247,7 +253,7 @@ impl SplitArbEngine {
             );
         }
 
-        // Record partial position
+        // Record partial position (unconfirmed until fill in live mode)
         let position = PartialPosition {
             event_id: market.event_id.clone(),
             condition_id: market.condition_id.clone(),
@@ -260,6 +266,7 @@ impl SplitArbEngine {
             other_token_id: other_token.clone(),
             status: PositionStatus::WaitingForHedge,
             max_hedge_price,
+            confirmed: self.dry_run,
             first_side_label: label.clone(),
             other_side_label: other_label.clone(),
         };
@@ -279,7 +286,7 @@ impl SplitArbEngine {
     async fn check_for_hedge(&self, condition_id: &str) {
         let mut positions = self.partial_positions.write().await;
         let position = match positions.get(condition_id) {
-            Some(p) if p.status == PositionStatus::WaitingForHedge => p.clone(),
+            Some(p) if p.status == PositionStatus::WaitingForHedge && p.confirmed => p.clone(),
             _ => return,
         };
 
@@ -296,9 +303,10 @@ impl SplitArbEngine {
             return;
         }
 
-        // Calculate locked profit
+        // Calculate locked profit (accounting for taker fees on both legs)
         let total_cost = position.first_entry_price + hedge_ask;
-        let locked_profit = Decimal::ONE - total_cost;
+        let fee_cost = total_cost * self.config.fee_rate;
+        let locked_profit = Decimal::ONE - total_cost - fee_cost;
 
         if locked_profit < self.config.min_profit_margin {
             return;

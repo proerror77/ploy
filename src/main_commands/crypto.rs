@@ -63,6 +63,7 @@ pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
                     max_unhedged_positions: *max_unhedged,
                     unhedged_stop_loss: Decimal::from_str(&format!("{:.6}", stop_loss / 100.0))
                         .unwrap_or(dec!(0.15)),
+                    fee_rate: dec!(0.02),
                 },
                 series_ids,
             };

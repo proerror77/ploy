@@ -3287,16 +3287,15 @@ impl MomentumEngine {
                             )
                             .await;
                     }
+                    // Update cooldown only on confirmed fill
+                    let mut last_trade = self.last_trade_time.write().await;
+                    last_trade.insert(signal.symbol.clone(), Utc::now());
                 }
                 Err(e) => {
                     error!("Order failed: {}", e);
                 }
             }
         }
-
-        // Update last trade time
-        let mut last_trade = self.last_trade_time.write().await;
-        last_trade.insert(signal.symbol, Utc::now());
 
         Ok(())
     }
@@ -3611,16 +3610,15 @@ impl MomentumEngine {
                             )
                             .await;
                     }
+                    // Update cooldown only on confirmed fill
+                    let mut last_trade = self.last_trade_time.write().await;
+                    last_trade.insert(signal.symbol.clone(), Utc::now());
                 }
                 Err(e) => {
                     error!("Order failed: {}", e);
                 }
             }
         }
-
-        // Update cooldown
-        let mut last_trade = self.last_trade_time.write().await;
-        last_trade.insert(signal.symbol.clone(), Utc::now());
 
         Ok(())
     }

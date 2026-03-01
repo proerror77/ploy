@@ -83,6 +83,9 @@ pub struct PartialPosition {
     /// Maximum price we can pay for hedge to hit target profit
     pub max_hedge_price: Decimal,
 
+    /// Whether the first leg fill has been confirmed
+    pub confirmed: bool,
+
     /// Human-readable labels for logging
     pub first_side_label: String,
     pub other_side_label: String,

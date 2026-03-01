@@ -74,6 +74,9 @@ pub struct SplitArbConfig {
     /// Stop loss percentage for unhedged exit (e.g., 0.10 = 10%)
     pub unhedged_stop_loss: Decimal,
 
+    /// Taker fee rate per leg (e.g., 0.02 = 2%)
+    pub fee_rate: Decimal,
+
     /// Series IDs to monitor
     pub series_ids: Vec<String>,
 }
@@ -88,6 +91,7 @@ impl Default for SplitArbConfig {
             shares_per_trade: 100,          // ~$35 per leg
             max_unhedged_positions: 3,      // Max 3 unhedged at once
             unhedged_stop_loss: dec!(0.15), // 15% stop loss on unhedged
+            fee_rate: dec!(0.02),               // 2% taker fee per leg
             series_ids: vec![
                 "10423".into(), // SOL 15m
                 "10191".into(), // ETH 15m
@@ -132,6 +136,9 @@ pub struct PartialPosition {
 
     /// Maximum price we can pay for hedge to hit target profit
     pub max_hedge_price: Decimal,
+
+    /// Whether the first leg fill has been confirmed
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,8 +459,13 @@ impl SplitArbEngine {
             return; // Neither side is cheap enough
         };
 
-        // Calculate max hedge price to hit target
-        let max_hedge_price = self.config.target_total_cost - entry_price;
+        // Calculate max hedge price to hit target (accounting for fees)
+        // locked_profit = 1.0 - total_cost - fee_rate * total_cost >= min_profit
+        // => total_cost <= (1.0 - min_profit) / (1 + fee_rate)
+        // => hedge <= budget - entry_price
+        let budget = (Decimal::ONE - self.config.min_profit_margin)
+            / (Decimal::ONE + self.config.fee_rate);
+        let max_hedge_price = budget - entry_price;
 
         // Check if hedge is even possible (other side not already too expensive)
         let other_ask = if side == ArbSide::Up {
@@ -513,7 +525,7 @@ impl SplitArbEngine {
             }
         }
 
-        // Record partial position
+        // Record partial position (unconfirmed until fill callback in live mode)
         let position = PartialPosition {
             event_id: market.event_id.clone(),
             condition_id: market.condition_id.clone(),
@@ -526,6 +538,7 @@ impl SplitArbEngine {
             other_token_id: other_token_id.clone(),
             status: PositionStatus::WaitingForHedge,
             max_hedge_price,
+            confirmed: self.dry_run, // dry run is auto-confirmed; live waits for fill
         };
 
         {
@@ -544,7 +557,7 @@ impl SplitArbEngine {
         let mut positions = self.partial_positions.write().await;
 
         let position = match positions.get_mut(condition_id) {
-            Some(p) if p.status == PositionStatus::WaitingForHedge => p,
+            Some(p) if p.status == PositionStatus::WaitingForHedge && p.confirmed => p,
             _ => return,
         };
 
@@ -559,9 +572,10 @@ impl SplitArbEngine {
             return; // Too expensive
         }
 
-        // Calculate locked profit
+        // Calculate locked profit (accounting for taker fees on both legs)
         let total_cost = position.first_entry_price + hedge_price;
-        let locked_profit = Decimal::ONE - total_cost;
+        let fee_cost = total_cost * self.config.fee_rate;
+        let locked_profit = Decimal::ONE - total_cost - fee_cost;
 
         if locked_profit < self.config.min_profit_margin {
             return; // Not enough profit
@@ -771,6 +785,23 @@ impl SplitArbEngine {
 
         self.executor.execute(&order).await?;
         Ok(())
+    }
+
+    /// Confirm a partial position after fill (call from fill callback)
+    pub async fn confirm_position(&self, condition_id: &str) -> bool {
+        let mut positions = self.partial_positions.write().await;
+        if let Some(pos) = positions.get_mut(condition_id) {
+            pos.confirmed = true;
+            info!(
+                "Position confirmed: {} {} @ {}c",
+                pos.first_side,
+                &condition_id[..8.min(condition_id.len())],
+                pos.first_entry_price * dec!(100)
+            );
+            true
+        } else {
+            false
+        }
     }
 
     /// Get current stats

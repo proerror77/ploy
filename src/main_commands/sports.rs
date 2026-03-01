@@ -58,6 +58,7 @@ pub(crate) async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
                     max_unhedged_positions: *max_unhedged,
                     unhedged_stop_loss: Decimal::from_str(&format!("{:.6}", stop_loss / 100.0))
                         .unwrap_or(dec!(0.20)),
+                    fee_rate: dec!(0.02),
                 },
                 leagues: league_list,
             };

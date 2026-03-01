@@ -1766,6 +1766,7 @@ struct SplitPosition {
     entry_price: Decimal,
     opened_at: DateTime<Utc>,
     order_id: Option<String>,
+    hedge_retries: u32,
 }
 
 /// A fully hedged position
@@ -1913,6 +1914,12 @@ impl SplitArbStrategyAdapter {
                     / 100.0,
             )
             .unwrap_or(dec!(0.10)),
+            fee_rate: Decimal::try_from(
+                risk.get("fee_rate")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.02),
+            )
+            .unwrap_or(dec!(0.02)),
         };
         let mut series_ids: Vec<String> = markets
             .get("series_ids")
@@ -1949,9 +1956,10 @@ impl SplitArbStrategyAdapter {
         let yes_ask = (*yes_ask)?;
         let no_ask = (*no_ask)?;
 
-        // Check if sum of asks is below target (profit opportunity)
+        // Check if sum of asks is below target (profit opportunity after fees)
         let total_cost = yes_ask + no_ask;
-        if total_cost < self.config.target_total_cost {
+        let fee_cost = total_cost * self.config.fee_rate;
+        if total_cost + fee_cost < dec!(1.0) && (dec!(1.0) - total_cost - fee_cost) >= self.config.min_profit_margin {
             // Determine which side to enter first (cheaper side)
             if yes_ask <= no_ask && yes_ask <= self.config.max_entry_price {
                 return Some((Side::Up, yes_ask));
@@ -2094,10 +2102,13 @@ impl Strategy for SplitArbStrategyAdapter {
 
                                 let prices = self.prices.read().await;
                                 if let Some((_, Some(opposite_ask))) = prices.get(&hedge_token) {
-                                    let fee_buffer = dec!(0.02);
                                     let combined = partial.entry_price + *opposite_ask;
-                                    if combined < dec!(1.0) - fee_buffer {
-                                        let profit = dec!(1.0) - combined - fee_buffer;
+                                    let fee_cost = combined * self.config.fee_rate;
+                                    if combined + fee_cost < dec!(1.0) {
+                                        let profit = dec!(1.0) - combined - fee_cost;
+                                        if profit < self.config.min_profit_margin {
+                                            return Ok(actions); // Not enough profit after fees
+                                        }
                                         let hedge_price = *opposite_ask;
                                         let shares = partial.shares;
                                         let partial_market_id = partial.market_id.clone();
@@ -2288,6 +2299,7 @@ impl Strategy for SplitArbStrategyAdapter {
                             entry_price: fill_price,
                             opened_at: Utc::now(),
                             order_id: Some(order_key.clone()),
+                            hedge_retries: 0,
                         };
 
                         let mut partials = self.partial_positions.write().await;
@@ -2311,7 +2323,8 @@ impl Strategy for SplitArbStrategyAdapter {
                         let mut partials = self.partial_positions.write().await;
                         if let Some(partial) = partials.remove(&market_id) {
                             let total_cost = partial.entry_price + fill_price;
-                            let profit = dec!(1.0) - total_cost;
+                            let fee_cost = total_cost * self.config.fee_rate;
+                            let profit = dec!(1.0) - total_cost - fee_cost;
 
                             let markets = self.markets.read().await;
                             let (yes_token, no_token, yes_price, no_price) =
@@ -2386,16 +2399,80 @@ impl Strategy for SplitArbStrategyAdapter {
                     "[{}] Order {} - {:?}",
                     self.id, update.order_id, update.error
                 );
-                // Clear in-flight flag so the market can be re-entered
                 let order_key = update
                     .client_order_id
                     .clone()
                     .unwrap_or_else(|| update.order_id.clone());
-                if let Some((market_id, _)) =
-                    self.order_market_map.read().await.get(&order_key).cloned()
-                {
-                    self.pending_leg1_markets.write().await.remove(&market_id);
+                let mapping = self.order_market_map.read().await.get(&order_key).cloned();
+
+                if let Some((market_id, _side)) = mapping {
+                    // Check if this was a hedge (leg2) failure — partial position exists
+                    let is_hedge_failure = {
+                        let partials = self.partial_positions.read().await;
+                        partials.contains_key(&market_id)
+                    };
+
+                    if is_hedge_failure {
+                        // Hedge order failed — increment retry counter
+                        const MAX_HEDGE_RETRIES: u32 = 3;
+                        let mut partials = self.partial_positions.write().await;
+                        let should_exit = if let Some(pos) = partials.get_mut(&market_id) {
+                            pos.hedge_retries += 1;
+                            warn!(
+                                "[{}] Hedge retry {}/{} for {}",
+                                self.id, pos.hedge_retries, MAX_HEDGE_RETRIES, market_id
+                            );
+                            pos.hedge_retries >= MAX_HEDGE_RETRIES
+                        } else {
+                            false
+                        };
+
+                        if should_exit {
+                            // Max retries exceeded — remove orphaned partial and exit leg1
+                            if let Some(pos) = partials.remove(&market_id) {
+                                warn!(
+                                    "[{}] Removing orphaned partial for {} after {} hedge failures",
+                                    self.id, market_id, MAX_HEDGE_RETRIES
+                                );
+
+                                let urgency_buffer = dec!(0.01);
+                                let exit_price = pos.entry_price - urgency_buffer;
+                                let exit_price = if exit_price < dec!(0.01) {
+                                    dec!(0.01)
+                                } else {
+                                    exit_price
+                                };
+
+                                let client_order_id = format!(
+                                    "{}_orphan_exit_{}_{}",
+                                    self.id,
+                                    market_id,
+                                    Utc::now().timestamp_millis()
+                                );
+
+                                let order = OrderRequest::sell_limit(
+                                    pos.first_token_id.clone(),
+                                    pos.first_side,
+                                    pos.shares,
+                                    exit_price,
+                                );
+
+                                actions.push(StrategyAction::SubmitOrder {
+                                    client_order_id,
+                                    order,
+                                    priority: 15,
+                                });
+
+                                let mut stats = self.stats.write().await;
+                                stats.unhedged_exits += 1;
+                            }
+                        }
+                    } else {
+                        // Leg1 failure — just clear the in-flight flag
+                        self.pending_leg1_markets.write().await.remove(&market_id);
+                    }
                 }
+
                 self.order_market_map.write().await.remove(&order_key);
             }
             _ => {}
