@@ -136,7 +136,8 @@ impl ExecutionSimulator {
         };
 
         // Final fill price includes spread and market impact
-        let fill_price = ask_price + market_impact;
+        // Cap at $0.99 for binary options (can't pay more than payout)
+        let fill_price = (ask_price + market_impact).min(dec!(0.99));
 
         // Calculate fill time
         let fill_time = if self.config.enable_fill_delay {

@@ -330,7 +330,8 @@ impl BinanceDepthStream {
 
         info!("Connecting to Binance depth stream: {}", url);
 
-        let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(&url))
+        let (ws_stream, _) =
+            tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
             .await
             .map_err(|_| PloyError::Internal("Binance WebSocket connection timeout".to_string()))?
             .map_err(PloyError::WebSocket)?;
@@ -369,7 +370,7 @@ impl BinanceDepthStream {
                     }
                 }
                 _ = ping_interval.tick() => {
-                    if let Err(e) = write.send(Message::Ping(vec![])).await {
+                    if let Err(e) = write.send(Message::Ping(vec![].into())).await {
                         error!("Failed to send ping: {}", e);
                         break;
                     }

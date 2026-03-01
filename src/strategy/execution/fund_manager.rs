@@ -202,6 +202,7 @@ impl FundManager {
     }
 
     /// Calculate position size based on config
+    #[allow(dead_code)]
     fn calculate_position_size(&self, balance: Decimal, price: Decimal) -> Result<(Decimal, u64)> {
         self.calculate_position_size_with_limit(balance, price, Decimal::MAX)
     }

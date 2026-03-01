@@ -423,6 +423,20 @@ impl OrderExecutor {
         self.client.cancel_order(order_id).await
     }
 
+    /// Query latest order status from exchange without submitting/canceling.
+    pub async fn query_order_status(&self, order_id: &str) -> Result<ExecutionResult> {
+        let order = self.client.get_order(order_id).await?;
+        let status = self.client.infer_order_status(&order);
+        let (filled_u64, avg_fill_price) = self.client.calculate_fill(&order);
+        Ok(ExecutionResult {
+            order_id: order_id.to_string(),
+            status,
+            filled_shares: filled_u64,
+            avg_fill_price,
+            elapsed_ms: 0,
+        })
+    }
+
     /// Get current best prices for a token
     pub async fn get_prices(&self, token_id: &str) -> Result<(Option<Decimal>, Option<Decimal>)> {
         self.client.get_best_prices(token_id).await

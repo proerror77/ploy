@@ -206,31 +206,6 @@ where
     }
 }
 
-fn parse_json_array_strings(input: &str) -> std::result::Result<Vec<String>, serde_json::Error> {
-    let s = input.trim();
-    if s.is_empty() || s == "null" {
-        return Ok(Vec::new());
-    }
-
-    // Common case: JSON array of strings.
-    if let Ok(v) = serde_json::from_str::<Vec<String>>(s) {
-        return Ok(v);
-    }
-
-    // Fallback: JSON array of numbers/values.
-    let vals = serde_json::from_str::<Vec<serde_json::Value>>(s)?;
-    Ok(vals
-        .into_iter()
-        .map(|v| match v {
-            serde_json::Value::String(s) => s,
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Null => String::new(),
-            other => other.to_string(),
-        })
-        .collect())
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct OrderBookResponse {
     pub market: Option<String>,

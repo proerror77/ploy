@@ -26,13 +26,16 @@ exit_edge_floor_pct = 20
 # Binary options: adverse price-band threshold (%) for risk exit
 exit_price_band_pct = 12
 
-# Hold to resolution (confirmatory mode only)
-hold_to_resolution = false
+# NOTE:
+# Hold-to-resolution is controlled by [strategy].mode:
+# - "confirmatory" => hold to resolution
+# - "predictive"   => allow early exits
 
 [timing]
 # Entry window before resolution (seconds)
 min_time_remaining = 300  # 5 minutes
 max_time_remaining = 900  # 15 minutes
+cooldown_secs = 60
 
 [risk]
 # Shares per trade (~$1 at 30-35¢ per share)
@@ -40,3 +43,9 @@ shares = 3
 
 # Maximum concurrent positions
 max_positions = 5
+
+# Daily trade cap (0 = unlimited)
+max_daily_trades = 50
+
+# Optional fixed USD sizing (overrides shares when set)
+# fixed_amount_usd = 1.0

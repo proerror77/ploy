@@ -70,7 +70,6 @@ struct KlineRow {
     open_time: DateTime<Utc>,
     open: f64,
     close: f64,
-    interval: String,
 }
 
 #[derive(Debug, Clone)]
@@ -140,7 +139,6 @@ pub async fn run_backtest(
                 open_time: row.try_get::<DateTime<Utc>, _>("open_time").ok()?,
                 open: row.try_get::<Decimal, _>("open").ok()?.to_f64()?,
                 close: row.try_get::<Decimal, _>("close").ok()?.to_f64()?,
-                interval: row.try_get::<String, _>("interval").ok()?,
             })
         })
         .collect();

@@ -62,16 +62,19 @@ impl Default for CryptoAgentConfig {
 /// 內部持倉追蹤
 #[derive(Debug, Clone)]
 struct InternalPosition {
+    #[allow(dead_code)]
     market_slug: String,
     token_id: String,
     side: Side,
     shares: u64,
     entry_price: Decimal,
+    #[allow(dead_code)]
     entry_time: DateTime<Utc>,
     is_hedged: bool,
 }
 
 impl InternalPosition {
+    #[allow(dead_code)]
     fn unrealized_pnl(&self, current_price: Decimal) -> Decimal {
         (current_price - self.entry_price) * Decimal::from(self.shares)
     }
@@ -382,6 +385,7 @@ impl CryptoAgent {
     }
 
     /// 更新內部暴露計算
+    #[allow(dead_code)]
     fn update_exposure(&mut self) {
         self.total_exposure = self
             .positions

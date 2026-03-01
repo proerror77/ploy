@@ -59,7 +59,9 @@ impl Default for SplitArbConfig {
 /// Generic Split Arbitrage Engine
 pub struct SplitArbEngine {
     config: SplitArbConfig,
+    #[allow(dead_code)]
     client: PolymarketClient,
+    #[allow(dead_code)]
     executor: OrderExecutor,
     price_cache: Arc<RwLock<PriceCache>>,
 

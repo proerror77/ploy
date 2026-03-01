@@ -105,10 +105,7 @@ pub struct PMPriceCSV {
 struct TrackedMarket {
     market_id: String,
     condition_id: String,
-    symbol: String,
-    threshold: Decimal,
     resolution_time: DateTime<Utc>,
-    recorded_at: DateTime<Utc>,
 }
 
 // ============================================================================
@@ -117,7 +114,6 @@ struct TrackedMarket {
 
 pub struct BacktestCollector {
     config: CollectorConfig,
-    kline_client: BinanceKlineClient,
     pm_client: Option<Arc<PolymarketClient>>,
     /// Tracked markets awaiting resolution
     tracked_markets: Arc<RwLock<HashMap<String, TrackedMarket>>>,
@@ -139,7 +135,6 @@ impl BacktestCollector {
     pub fn new(config: CollectorConfig) -> Self {
         Self {
             config,
-            kline_client: BinanceKlineClient::new(),
             pm_client: None,
             tracked_markets: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(CollectorStats::default())),
@@ -354,10 +349,7 @@ impl BacktestCollector {
                                         TrackedMarket {
                                             market_id: market.market_id.clone(),
                                             condition_id: market.condition_id.clone(),
-                                            symbol: symbol.clone(),
-                                            threshold: market.threshold,
                                             resolution_time: market.resolution_time,
-                                            recorded_at: Utc::now(),
                                         },
                                     );
                                 }

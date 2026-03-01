@@ -43,16 +43,6 @@ impl PriceWindow {
         self.prices.iter().map(|(_, p)| *p).max()
     }
 
-    /// Get the most recent price
-    fn latest(&self) -> Option<Decimal> {
-        self.prices.back().map(|(_, p)| *p)
-    }
-
-    /// Check if we have enough data
-    fn has_data(&self) -> bool {
-        !self.prices.is_empty()
-    }
-
     /// Clear all data
     fn clear(&mut self) {
         self.prices.clear();
@@ -68,8 +58,6 @@ pub struct SignalDetector {
     up_window: PriceWindow,
     /// Rolling window for DOWN side best_ask
     down_window: PriceWindow,
-    /// Window size in seconds (for 3-second rolling high)
-    window_seconds: i64,
     /// Whether we've triggered in the current round
     triggered_up: bool,
     triggered_down: bool,
@@ -89,7 +77,6 @@ impl SignalDetector {
             config,
             up_window: PriceWindow::new(window_seconds),
             down_window: PriceWindow::new(window_seconds),
-            window_seconds,
             triggered_up: false,
             triggered_down: false,
             current_round: None,

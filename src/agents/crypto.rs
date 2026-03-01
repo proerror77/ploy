@@ -210,6 +210,26 @@ fn weighted_signal_score(
     dec!(0.40) * w_trend + dec!(0.30) * w_momentum + dec!(0.20) * w_vol + dec!(0.10) * w_xa
 }
 
+fn passes_hard_momentum_gate(
+    side: Side,
+    window_move: Decimal,
+    momentum_1s: Decimal,
+    min_window_move_pct: Decimal,
+    min_momentum_1s: Decimal,
+) -> bool {
+    if window_move.abs() < min_window_move_pct {
+        return false;
+    }
+    if momentum_1s.abs() < min_momentum_1s {
+        return false;
+    }
+
+    match side {
+        Side::Up => momentum_1s > Decimal::ZERO,
+        Side::Down => momentum_1s < Decimal::ZERO,
+    }
+}
+
 fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
@@ -808,6 +828,9 @@ impl TradingAgent for CryptoTradingAgent {
                     let long_momentum_opt = spot.momentum(30);
                     let short_momentum = short_momentum_opt.unwrap_or(Decimal::ZERO);
                     let long_momentum = long_momentum_opt.unwrap_or(Decimal::ZERO);
+                    let min_momentum_1s = Decimal::from_f64(self.config.min_momentum_1s)
+                        .unwrap_or(dec!(0.001))
+                        .max(Decimal::ZERO);
                     let rolling_volatility_opt = spot.volatility(60);
                     let rolling_volatility = rolling_volatility_opt.unwrap_or(Decimal::ZERO);
 
@@ -975,7 +998,13 @@ impl TradingAgent for CryptoTradingAgent {
                         if window_remaining_secs > self.config.max_time_remaining_secs as i64 {
                             continue;
                         }
-                        if window_move.abs() < self.config.min_window_move_pct {
+                        if !passes_hard_momentum_gate(
+                            side,
+                            window_move,
+                            momentum_1s,
+                            self.config.min_window_move_pct,
+                            min_momentum_1s,
+                        ) {
                             continue;
                         }
 
@@ -1237,7 +1266,7 @@ impl TradingAgent for CryptoTradingAgent {
                             momentum_1s,
                             short_momentum,
                             long_momentum,
-                            Decimal::try_from(self.config.min_momentum_1s).unwrap_or(dec!(0.001)),
+                            min_momentum_1s,
                         );
 
                         let intent = OrderIntent::new(
@@ -1665,5 +1694,40 @@ mod tests {
             deployment_id_for("crypto_momentum", "BTC", "15m"),
             "crypto-momentum-15m"
         );
+    }
+
+    #[test]
+    fn test_passes_hard_momentum_gate_rejects_weak_or_misaligned_signals() {
+        let min_window_move = dec!(0.0005);
+        let min_momentum_1s = dec!(0.0010);
+
+        assert!(!passes_hard_momentum_gate(
+            Side::Up,
+            dec!(0.0004),
+            dec!(0.0015),
+            min_window_move,
+            min_momentum_1s
+        ));
+        assert!(!passes_hard_momentum_gate(
+            Side::Up,
+            dec!(0.0012),
+            dec!(0.0008),
+            min_window_move,
+            min_momentum_1s
+        ));
+        assert!(!passes_hard_momentum_gate(
+            Side::Up,
+            dec!(0.0012),
+            dec!(-0.0015),
+            min_window_move,
+            min_momentum_1s
+        ));
+        assert!(passes_hard_momentum_gate(
+            Side::Up,
+            dec!(0.0012),
+            dec!(0.0015),
+            min_window_move,
+            min_momentum_1s
+        ));
     }
 }

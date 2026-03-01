@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{OnceCell, RwLock};
 use tracing::{debug, info, warn};
@@ -77,6 +77,12 @@ pub struct MomentumStrategyAdapter {
     /// Optional Postgres pool for recording dry-run signals (signal_history).
     signal_log_pool: OnceCell<Arc<sqlx::PgPool>>,
     signal_log_ready: OnceCell<()>,
+    /// Fixed USD amount per trade (overrides shares_per_trade when set)
+    fixed_amount_usd: Option<f64>,
+    /// Minimum directional EV required after fees/slippage.
+    directional_entry_threshold: f64,
+    /// In-flight entry/exit orders keyed by client_order_id.
+    pending_orders: Arc<RwLock<HashMap<String, MomentumOrderTrack>>>,
 }
 
 /// Price history entry for momentum calculation
@@ -87,6 +93,7 @@ struct PriceEntry {
 }
 
 /// CEX price state with history for momentum detection
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct CexPriceState {
     symbol: String,
@@ -130,6 +137,7 @@ impl CexPriceState {
 }
 
 /// Polymarket quote state
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PmQuoteState {
     token_id: String,
@@ -139,6 +147,7 @@ struct PmQuoteState {
 }
 
 /// Event state for tracking active markets
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct EventState {
     event_id: String,
@@ -153,6 +162,7 @@ struct EventState {
 }
 
 /// Position in a momentum trade
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct MomentumPosition {
     token_id: String,
@@ -164,6 +174,23 @@ struct MomentumPosition {
     current_price: Option<Decimal>,
     opened_at: DateTime<Utc>,
     order_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MomentumOrderKind {
+    Entry,
+    Exit,
+}
+
+#[derive(Debug, Clone)]
+struct MomentumOrderTrack {
+    kind: MomentumOrderKind,
+    symbol: String,
+    token_id: String,
+    side: Side,
+    direction: Direction,
+    shares: u64,
+    price: Decimal,
 }
 
 impl MomentumStrategyAdapter {
@@ -184,6 +211,9 @@ impl MomentumStrategyAdapter {
             enabled: true,
             signal_log_pool: OnceCell::new(),
             signal_log_ready: OnceCell::new(),
+            fixed_amount_usd: None,
+            directional_entry_threshold: 0.08,
+            pending_orders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -359,6 +389,14 @@ impl MomentumStrategyAdapter {
         baseline_volatility.insert("SOLUSDT".into(), dec!(0.0015)); // 0.15%
         baseline_volatility.insert("XRPUSDT".into(), dec!(0.0012)); // 0.12%
 
+        // Accept decimal (0.08) or percent-style number (8 = 8%).
+        let directional_entry_threshold = entry
+            .get("directional_entry_threshold")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+            .map(|v| if v > 1.0 { v / 100.0 } else { v })
+            .unwrap_or(0.08)
+            .clamp(0.0, 1.0);
+
         let momentum_config = MomentumConfig {
             min_move_pct: Decimal::try_from(
                 entry
@@ -395,37 +433,71 @@ impl MomentumStrategyAdapter {
                 .get("volatility_lookback")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(60) as u64,
-            shares_per_trade: entry
-                .get("shares_per_trade")
+            shares_per_trade: risk
+                .get("shares")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .or_else(|| {
+                    entry
+                        .get("shares_per_trade")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                })
                 .unwrap_or(100.0) as u64,
-            max_positions: entry
+            max_positions: risk
                 .get("max_positions")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .or_else(|| {
+                    entry
+                        .get("max_positions")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                })
                 .unwrap_or(5.0) as usize,
-            cooldown_secs: entry
+            cooldown_secs: timing
                 .get("cooldown_secs")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .or_else(|| {
+                    entry
+                        .get("cooldown_secs")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                })
                 .unwrap_or(60.0) as u64,
-            max_daily_trades: entry
+            max_daily_trades: risk
                 .get("max_daily_trades")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .or_else(|| {
+                    entry
+                        .get("max_daily_trades")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                })
                 .unwrap_or(50.0) as u32,
             symbols,
             hold_to_resolution,
-            min_time_remaining_secs: entry
+            min_time_remaining_secs: timing
                 .get("min_time_remaining")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .or_else(|| {
+                    entry
+                        .get("min_time_remaining")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                })
                 .unwrap_or(300.0) as u64,
-            max_time_remaining_secs: entry
+            max_time_remaining_secs: timing
                 .get("max_time_remaining")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .or_else(|| {
+                    entry
+                        .get("max_time_remaining")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                })
                 .unwrap_or(900.0) as u64,
             // Cross-symbol risk control
             max_window_exposure_usd: Decimal::try_from(
-                entry
-                    .get("max_window_exposure")
+                risk.get("max_window_exposure")
                     .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                    .or_else(|| {
+                        entry
+                            .get("max_window_exposure")
+                            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                    })
                     .unwrap_or(25.0),
             )
             .unwrap_or(dec!(25)),
@@ -558,16 +630,27 @@ impl MomentumStrategyAdapter {
         };
 
         info!(
-            "MomentumAdapter config: directional_mode={} shares={} max_pos={} min_t={}s max_t={}s vol_floor={}",
+            "MomentumAdapter config: directional_mode={} shares={} max_pos={} min_t={}s max_t={}s vol_floor={} dir_entry_th={:.1}%",
             momentum_config.directional_mode,
             momentum_config.shares_per_trade,
             momentum_config.max_positions,
             momentum_config.min_time_remaining_secs,
             momentum_config.max_time_remaining_secs,
             momentum_config.directional_vol_floor,
+            directional_entry_threshold * 100.0,
         );
 
-        Ok(Self::new(id, momentum_config, exit_config, dry_run))
+        let mut adapter = Self::new(id, momentum_config, exit_config, dry_run);
+        adapter.fixed_amount_usd = risk.get("fixed_amount_usd").and_then(|v| v.as_float());
+        adapter.directional_entry_threshold = directional_entry_threshold;
+        Ok(adapter)
+    }
+
+    async fn has_pending_exit_for_token(&self, token_id: &str) -> bool {
+        let pending = self.pending_orders.read().await;
+        pending
+            .values()
+            .any(|o| o.kind == MomentumOrderKind::Exit && o.token_id == token_id)
     }
 
     /// Check if daily trade limit is reached
@@ -598,6 +681,56 @@ impl MomentumStrategyAdapter {
         } else {
             false
         }
+    }
+
+    fn pick_entry_event_in_window<'a>(
+        &'a self,
+        event_list: &'a [EventState],
+        now: DateTime<Utc>,
+    ) -> Option<&'a EventState> {
+        let min_secs = self.config.min_time_remaining_secs as i64;
+        let max_secs = self.config.max_time_remaining_secs as i64;
+
+        event_list
+            .iter()
+            .filter(|e| {
+                let time_remaining = (e.end_time - now).num_seconds();
+                time_remaining >= min_secs && time_remaining <= max_secs
+            })
+            .min_by_key(|e| e.end_time)
+    }
+
+    fn estimate_non_directional_fair_value(&self, move_pct: Decimal) -> Decimal {
+        let base_prob = dec!(0.50);
+        let abs_momentum = move_pct.abs();
+
+        let momentum_factor = if abs_momentum < dec!(0.001) {
+            abs_momentum * dec!(50)
+        } else if abs_momentum < dec!(0.005) {
+            dec!(0.05) + (abs_momentum - dec!(0.001)) * dec!(40)
+        } else {
+            dec!(0.21) + (abs_momentum - dec!(0.005)) * dec!(30)
+        };
+
+        (base_prob + momentum_factor).min(dec!(0.90))
+    }
+
+    fn non_directional_ev_after_costs(
+        &self,
+        fair_value: Decimal,
+        entry_price: Decimal,
+    ) -> Option<Decimal> {
+        use crate::strategy::fee_model::FeeModel;
+
+        let fee_model = FeeModel::crypto();
+        let effective_rate = fee_model.effective_rate(entry_price);
+        let fee_per_share = entry_price * effective_rate;
+        let spread_cost = dec!(0.01); // Conservative 1¢ slippage/spread buffer.
+
+        fair_value
+            .checked_sub(entry_price)?
+            .checked_sub(fee_per_share)?
+            .checked_sub(spread_cost)
     }
 
     /// Check for momentum signal based on CEX price move over lookback window
@@ -689,23 +822,31 @@ impl MomentumStrategyAdapter {
         {
             Some(e) => e,
             None => {
-                // Log every 30s to avoid spam
-                let minute = ts.timestamp() / 30;
+                // Log every 30s to avoid spam (per-symbol using symbol hash)
+                let bucket = ts.timestamp() / 30;
                 static LAST_LOG: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
-                let prev = LAST_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed);
-                if prev != minute {
+                let prev = LAST_LOG.swap(bucket, std::sync::atomic::Ordering::Relaxed);
+                if prev != bucket {
                     let nearest = event_list
                         .iter()
                         .filter(|e| e.end_time > ts)
                         .min_by_key(|e| e.end_time)
                         .map(|e| (e.end_time - ts).num_seconds())
                         .unwrap_or(-1);
-                    debug!("[{}] DIRECTIONAL: {} no event in window ({}..{}s), {} events, nearest_t={}s", self.id, symbol, self.config.min_time_remaining_secs, self.config.max_time_remaining_secs, event_list.len(), nearest);
+                    info!("[{}] DIRECTIONAL: {} no event in window ({}..{}s), {} events, nearest_t={}s, ts={}", self.id, symbol, self.config.min_time_remaining_secs, self.config.max_time_remaining_secs, event_list.len(), nearest, ts.format("%H:%M:%S"));
                 }
                 return None;
             }
         };
+        info!(
+            "[{}] DIRECTIONAL: {} event {} in window, t_remain={:.0}s, window={}m",
+            self.id,
+            symbol,
+            event.event_id,
+            (event.end_time - ts).num_seconds(),
+            event.window_secs / 60
+        );
         let time_remaining = (event.end_time - ts).num_seconds() as f64;
 
         // S0: CEX price at window open
@@ -740,7 +881,7 @@ impl MomentumStrategyAdapter {
                     (Direction::Up, ask)
                 }
                 None => {
-                    debug!(
+                    info!(
                         "[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (quotes={})",
                         self.id,
                         symbol,
@@ -758,7 +899,7 @@ impl MomentumStrategyAdapter {
                     (Direction::Down, ask)
                 }
                 None => {
-                    debug!(
+                    info!(
                         "[{}] DIRECTIONAL: {} p={:.1}% but no DOWN ask (token={}..)",
                         self.id,
                         symbol,
@@ -789,17 +930,18 @@ impl MomentumStrategyAdapter {
         let cost_total_f64 =
             fee_per_share.to_f64().unwrap_or(0.01) + spread_cost.to_f64().unwrap_or(0.01);
 
-        // EV_net check (default threshold 0.08 = 8%)
+        // EV_net check (configurable threshold)
         let ev_net = effective_p - market_ask_f64 - cost_total_f64;
-        if ev_net < 0.08 {
-            debug!(
-                "[{}] DIRECTIONAL: {} {} p={:.1}% ask={:.0}¢ ev={:.1}% < 8% (σ={:.4} t={:.0}s {}m)",
+        if ev_net < self.directional_entry_threshold {
+            info!(
+                "[{}] DIRECTIONAL: {} {} p={:.1}% ask={:.0}¢ ev={:.1}% < {:.1}% (σ={:.4} t={:.0}s {}m)",
                 self.id,
                 symbol,
                 if p_hat > 0.5 { "UP" } else { "DOWN" },
                 effective_p * 100.0,
                 market_ask_f64 * 100.0,
                 ev_net * 100.0,
+                self.directional_entry_threshold * 100.0,
                 sigma,
                 time_remaining,
                 window_secs / 60
@@ -850,10 +992,7 @@ impl MomentumStrategyAdapter {
         let events = self.events.read().await;
         let event_list = events.get(symbol)?;
         let now = Utc::now();
-        let event = event_list
-            .iter()
-            .filter(|e| e.end_time > now)
-            .min_by_key(|e| e.end_time)?;
+        let event = self.pick_entry_event_in_window(event_list, now)?;
 
         let token_id = match direction {
             Direction::Up => &event.up_token_id,
@@ -875,10 +1014,7 @@ impl MomentumStrategyAdapter {
         let events = self.events.read().await;
         let event_list = events.get(symbol)?;
         let now = Utc::now();
-        let event = event_list
-            .iter()
-            .filter(|e| e.end_time > now)
-            .min_by_key(|e| e.end_time)?;
+        let event = self.pick_entry_event_in_window(event_list, now)?;
 
         let token_id = match direction {
             Direction::Up => event.up_token_id.clone(),
@@ -899,20 +1035,45 @@ impl MomentumStrategyAdapter {
             Direction::Down => Side::Down,
         };
 
-        let order = OrderRequest::buy_limit(
-            token_id.clone(),
-            market_side,
-            self.config.shares_per_trade,
-            entry_price,
-        );
+        // Calculate shares: use fixed_amount_usd if set, otherwise fall back to config
+        let shares = if let Some(amount_usd) = self.fixed_amount_usd {
+            let price_f64 = entry_price.to_string().parse::<f64>().unwrap_or(0.5);
+            if price_f64 > 0.0 {
+                (amount_usd / price_f64).floor() as u64
+            } else {
+                self.config.shares_per_trade
+            }
+        } else {
+            self.config.shares_per_trade
+        }
+        .max(5);
+
+        let order = OrderRequest::buy_limit(token_id.clone(), market_side, shares, entry_price);
+
+        {
+            let mut pending = self.pending_orders.write().await;
+            pending.insert(
+                client_order_id.clone(),
+                MomentumOrderTrack {
+                    kind: MomentumOrderKind::Entry,
+                    symbol: symbol.to_string(),
+                    token_id: token_id.clone(),
+                    side: market_side,
+                    direction,
+                    shares,
+                    price: entry_price,
+                },
+            );
+        }
 
         info!(
-            "[{}] Entry signal: {} {} @ {:.2}¢ ({} shares)",
+            "[{}] Entry signal: {} {} @ {:.2}¢ ({} shares, ${:.2})",
             self.id,
             direction,
             symbol,
             entry_price * dec!(100),
-            self.config.shares_per_trade
+            shares,
+            entry_price.to_string().parse::<f64>().unwrap_or(0.0) * shares as f64,
         );
 
         Some(StrategyAction::SubmitOrder {
@@ -948,6 +1109,7 @@ impl Strategy for MomentumStrategyAdapter {
                     "10684".into(), // BTC 5m
                     "10683".into(), // ETH 5m
                     "10686".into(), // SOL 5m
+                    "10685".into(), // XRP 5m
                     // 15m windows
                     "10192".into(), // BTC 15m
                     "10191".into(), // ETH 15m
@@ -1026,28 +1188,55 @@ impl Strategy for MomentumStrategyAdapter {
                         Some(entry_price) => {
                             // Check entry conditions
                             if entry_price <= self.config.max_entry_price {
-                                if let Some(action) =
-                                    self.generate_entry(symbol, direction, entry_price).await
-                                {
-                                    // Update cooldown
-                                    let mut cooldowns = self.cooldowns.write().await;
-                                    cooldowns.insert(symbol.clone(), Utc::now());
+                                let fair_value = self.estimate_non_directional_fair_value(move_pct);
+                                let edge = fair_value - entry_price;
 
-                                    // Log event
-                                    actions.push(StrategyAction::LogEvent {
-                                        event: StrategyEvent::new(
-                                            StrategyEventType::SignalDetected,
-                                            format!(
-                                                "{} {} signal: {:.2}% move, entry {:.0}¢",
-                                                symbol,
-                                                direction,
-                                                move_pct * dec!(100),
-                                                entry_price * dec!(100)
+                                if edge < self.config.min_edge {
+                                    debug!(
+                                        "[{}] {} {} edge {:.1}% < min {:.1}%, skip",
+                                        self.id,
+                                        symbol,
+                                        direction,
+                                        edge * dec!(100),
+                                        self.config.min_edge * dec!(100)
+                                    );
+                                } else {
+                                    let ev_net = self
+                                        .non_directional_ev_after_costs(fair_value, entry_price)
+                                        .unwrap_or(Decimal::ZERO);
+                                    if ev_net <= Decimal::ZERO {
+                                        debug!(
+                                            "[{}] {} {} ev_net {:.2}% <= 0 after fees/slippage, skip",
+                                            self.id,
+                                            symbol,
+                                            direction,
+                                            ev_net * dec!(100)
+                                        );
+                                    } else if let Some(action) =
+                                        self.generate_entry(symbol, direction, entry_price).await
+                                    {
+                                        // Update cooldown
+                                        let mut cooldowns = self.cooldowns.write().await;
+                                        cooldowns.insert(symbol.clone(), Utc::now());
+
+                                        // Log event
+                                        actions.push(StrategyAction::LogEvent {
+                                            event: StrategyEvent::new(
+                                                StrategyEventType::SignalDetected,
+                                                format!(
+                                                    "{} {} signal: {:.2}% move, entry {:.0}¢ edge {:.1}% ev {:.1}%",
+                                                    symbol,
+                                                    direction,
+                                                    move_pct * dec!(100),
+                                                    entry_price * dec!(100),
+                                                    edge * dec!(100),
+                                                    ev_net * dec!(100),
+                                                ),
                                             ),
-                                        ),
-                                    });
+                                        });
 
-                                    actions.push(action);
+                                        actions.push(action);
+                                    }
                                 }
                             } else {
                                 debug!(
@@ -1064,26 +1253,41 @@ impl Strategy for MomentumStrategyAdapter {
                             let events = self.events.read().await;
                             let quotes = self.pm_quotes.read().await;
                             let now = Utc::now();
-                            if let Some(event) = events.get(symbol).and_then(|list| {
-                                list.iter()
-                                    .filter(|e| e.end_time > now)
-                                    .min_by_key(|e| e.end_time)
-                            }) {
-                                let token_id = match direction {
-                                    Direction::Up => &event.up_token_id,
-                                    Direction::Down => &event.down_token_id,
-                                };
-                                if let Some(q) = quotes.get(token_id) {
-                                    debug!(
-                                        "[{}] Quote has no best_ask for {} (bid={:?})",
-                                        self.id, direction, q.best_bid
-                                    );
+                            if let Some(event_list) = events.get(symbol) {
+                                if let Some(event) =
+                                    self.pick_entry_event_in_window(event_list, now)
+                                {
+                                    let token_id = match direction {
+                                        Direction::Up => &event.up_token_id,
+                                        Direction::Down => &event.down_token_id,
+                                    };
+                                    if let Some(q) = quotes.get(token_id) {
+                                        debug!(
+                                            "[{}] Quote has no best_ask for {} (bid={:?})",
+                                            self.id, direction, q.best_bid
+                                        );
+                                    } else {
+                                        debug!(
+                                            "[{}] No quote for token {} ({})",
+                                            self.id,
+                                            &token_id[..8],
+                                            direction
+                                        );
+                                    }
                                 } else {
+                                    let nearest = event_list
+                                        .iter()
+                                        .filter(|e| e.end_time > now)
+                                        .min_by_key(|e| e.end_time)
+                                        .map(|e| (e.end_time - now).num_seconds())
+                                        .unwrap_or(-1);
                                     debug!(
-                                        "[{}] No quote for token {} ({})",
+                                        "[{}] No event in timing window for {} ({}..{}s, nearest={}s)",
                                         self.id,
-                                        &token_id[..8],
-                                        direction
+                                        symbol,
+                                        self.config.min_time_remaining_secs,
+                                        self.config.max_time_remaining_secs,
+                                        nearest
                                     );
                                 }
                             } else {
@@ -1114,6 +1318,14 @@ impl Strategy for MomentumStrategyAdapter {
                 );
                 drop(quotes);
 
+                {
+                    let mut positions = self.positions.write().await;
+                    if let Some(pos) = positions.get_mut(token_id) {
+                        // Mark-to-market with executable side first.
+                        pos.current_price = quote.best_bid.or(quote.best_ask);
+                    }
+                }
+
                 // Log LOB updates (first update or significant changes)
                 if is_new {
                     info!(
@@ -1133,30 +1345,85 @@ impl Strategy for MomentumStrategyAdapter {
 
                 // Check exit conditions for positions
                 if !self.config.hold_to_resolution {
-                    let positions = self.positions.read().await;
-                    for pos in positions.values() {
-                        if &pos.token_id == token_id {
-                            // Check take profit / stop loss
-                            if let Some(current) = pos.current_price {
-                                let pnl_pct = (current - pos.entry_price) / pos.entry_price;
-
-                                if pnl_pct >= self.exit_config.take_profit_pct {
-                                    info!(
-                                        "[{}] Take profit triggered: {:.1}%",
-                                        self.id,
-                                        pnl_pct * dec!(100)
-                                    );
-                                    // Would generate exit order
-                                } else if pnl_pct <= -self.exit_config.stop_loss_pct {
-                                    warn!(
-                                        "[{}] Stop loss triggered: {:.1}%",
-                                        self.id,
-                                        pnl_pct * dec!(100)
-                                    );
-                                    // Would generate exit order
-                                }
+                    let trigger = {
+                        let positions = self.positions.read().await;
+                        positions.get(token_id).and_then(|pos| {
+                            let current = pos.current_price?;
+                            if pos.entry_price.is_zero() {
+                                return None;
                             }
+                            let pnl_pct = (current - pos.entry_price) / pos.entry_price;
+                            if pnl_pct >= self.exit_config.take_profit_pct {
+                                Some((pos.clone(), "take_profit", pnl_pct))
+                            } else if pnl_pct <= -self.exit_config.stop_loss_pct {
+                                Some((pos.clone(), "stop_loss", pnl_pct))
+                            } else {
+                                None
+                            }
+                        })
+                    };
+
+                    if let Some((pos, reason, pnl_pct)) = trigger {
+                        if self.has_pending_exit_for_token(&pos.token_id).await {
+                            return Ok(actions);
                         }
+
+                        let exit_price = match quote.best_bid {
+                            Some(p) if p > Decimal::ZERO => p,
+                            _ => return Ok(actions),
+                        };
+                        let client_order_id = format!(
+                            "{}_exit_{}_{}",
+                            self.id,
+                            pos.symbol,
+                            Utc::now().timestamp_millis()
+                        );
+                        let order = OrderRequest::sell_limit(
+                            pos.token_id.clone(),
+                            pos.side,
+                            pos.shares,
+                            exit_price,
+                        );
+
+                        {
+                            let mut pending = self.pending_orders.write().await;
+                            pending.insert(
+                                client_order_id.clone(),
+                                MomentumOrderTrack {
+                                    kind: MomentumOrderKind::Exit,
+                                    symbol: pos.symbol.clone(),
+                                    token_id: pos.token_id.clone(),
+                                    side: pos.side,
+                                    direction: pos.direction,
+                                    shares: pos.shares,
+                                    price: exit_price,
+                                },
+                            );
+                        }
+
+                        if reason == "take_profit" {
+                            info!(
+                                "[{}] Take profit triggered: {} {:.1}% @ {:.2}¢",
+                                self.id,
+                                pos.symbol,
+                                pnl_pct * dec!(100),
+                                exit_price * dec!(100)
+                            );
+                        } else {
+                            warn!(
+                                "[{}] Stop loss triggered: {} {:.1}% @ {:.2}¢",
+                                self.id,
+                                pos.symbol,
+                                pnl_pct * dec!(100),
+                                exit_price * dec!(100)
+                            );
+                        }
+
+                        actions.push(StrategyAction::SubmitOrder {
+                            client_order_id,
+                            order,
+                            priority: 8,
+                        });
                     }
                 }
             }
@@ -1241,6 +1508,15 @@ impl Strategy for MomentumStrategyAdapter {
     async fn on_order_update(&mut self, update: &OrderUpdate) -> Result<Vec<StrategyAction>> {
         let mut actions = Vec::new();
 
+        let order_key = update
+            .client_order_id
+            .clone()
+            .unwrap_or_else(|| update.order_id.clone());
+        let track = {
+            let pending = self.pending_orders.read().await;
+            pending.get(&order_key).cloned()
+        };
+
         match update.status {
             crate::domain::OrderStatus::Filled => {
                 info!(
@@ -1248,9 +1524,45 @@ impl Strategy for MomentumStrategyAdapter {
                     self.id, update.order_id, update.avg_fill_price
                 );
 
-                // Increment daily trade counter
-                let mut trades = self.daily_trades.write().await;
-                *trades += 1;
+                if let Some(track) = track {
+                    match track.kind {
+                        MomentumOrderKind::Entry => {
+                            let fill_price = update.avg_fill_price.unwrap_or(track.price);
+                            let filled_shares = if update.filled_qty > 0 {
+                                update.filled_qty
+                            } else {
+                                track.shares
+                            };
+
+                            {
+                                let mut positions = self.positions.write().await;
+                                positions.insert(
+                                    track.token_id.clone(),
+                                    MomentumPosition {
+                                        token_id: track.token_id.clone(),
+                                        symbol: track.symbol.clone(),
+                                        direction: track.direction,
+                                        side: track.side,
+                                        shares: filled_shares,
+                                        entry_price: fill_price,
+                                        current_price: Some(fill_price),
+                                        opened_at: update.timestamp,
+                                        order_id: Some(update.order_id.clone()),
+                                    },
+                                );
+                            }
+
+                            let mut trades = self.daily_trades.write().await;
+                            *trades += 1;
+                        }
+                        MomentumOrderKind::Exit => {
+                            let mut positions = self.positions.write().await;
+                            positions.remove(&track.token_id);
+                        }
+                    }
+
+                    self.pending_orders.write().await.remove(&order_key);
+                }
 
                 actions.push(StrategyAction::LogEvent {
                     event: StrategyEvent::new(
@@ -1261,12 +1573,15 @@ impl Strategy for MomentumStrategyAdapter {
             }
             crate::domain::OrderStatus::Cancelled => {
                 warn!("[{}] Order cancelled: {}", self.id, update.order_id);
+                self.pending_orders.write().await.remove(&order_key);
             }
             crate::domain::OrderStatus::Failed => {
                 warn!(
                     "[{}] Order failed: {} - {:?}",
                     self.id, update.order_id, update.error
                 );
+
+                self.pending_orders.write().await.remove(&order_key);
 
                 actions.push(StrategyAction::Alert {
                     level: AlertLevel::Warning,
@@ -1285,14 +1600,26 @@ impl Strategy for MomentumStrategyAdapter {
     }
 
     fn state(&self) -> StrategyStateInfo {
+        let position_count = self.positions.try_read().map(|p| p.len()).unwrap_or(0);
+        let pending_count = self.pending_orders.try_read().map(|p| p.len()).unwrap_or(0);
+        let total_exposure = self
+            .positions
+            .try_read()
+            .map(|p| {
+                p.values()
+                    .map(|pos| pos.entry_price * Decimal::from(pos.shares))
+                    .sum::<Decimal>()
+            })
+            .unwrap_or(Decimal::ZERO);
+
         StrategyStateInfo {
             strategy_id: self.id.clone(),
             phase: if self.enabled { "running" } else { "paused" }.to_string(),
             enabled: self.enabled,
-            active: true,
-            position_count: 0, // Would need async access
-            pending_order_count: 0,
-            total_exposure: Decimal::ZERO,
+            active: self.enabled,
+            position_count,
+            pending_order_count: pending_count,
+            total_exposure,
             unrealized_pnl: Decimal::ZERO,
             realized_pnl_today: Decimal::ZERO,
             last_update: Utc::now(),
@@ -1314,9 +1641,23 @@ impl Strategy for MomentumStrategyAdapter {
     }
 
     fn positions(&self) -> Vec<PositionInfo> {
-        // Would need to synchronously get positions - return empty for now
-        // In practice, would use try_read or cache the positions
-        vec![]
+        let positions = match self.positions.try_read() {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+
+        positions
+            .values()
+            .map(|p| {
+                PositionInfo::new(
+                    p.token_id.clone(),
+                    p.side,
+                    p.shares,
+                    p.entry_price,
+                    self.id.clone(),
+                )
+            })
+            .collect()
     }
 
     fn is_active(&self) -> bool {
@@ -1353,8 +1694,14 @@ impl Strategy for MomentumStrategyAdapter {
     }
 
     fn reset(&mut self) {
-        // Clear state for new session
-        // Would need blocking access or restructure
+        self.positions = Arc::new(RwLock::new(HashMap::new()));
+        self.cex_prices = Arc::new(RwLock::new(HashMap::new()));
+        self.pm_quotes = Arc::new(RwLock::new(HashMap::new()));
+        self.events = Arc::new(RwLock::new(HashMap::new()));
+        self.cooldowns = Arc::new(RwLock::new(HashMap::new()));
+        self.daily_trades = Arc::new(RwLock::new(0));
+        self.last_reset = Arc::new(RwLock::new(Utc::now()));
+        self.pending_orders = Arc::new(RwLock::new(HashMap::new()));
     }
 }
 
@@ -1387,6 +1734,10 @@ pub struct SplitArbStrategyAdapter {
     prices: Arc<RwLock<HashMap<String, (Option<Decimal>, Option<Decimal>)>>>,
     /// Order-to-market mapping (order_id -> (market_id, side))
     order_market_map: Arc<RwLock<HashMap<String, (String, Side)>>>,
+    /// Markets with in-flight Leg1 orders (prevents duplicate entries)
+    pending_leg1_markets: Arc<RwLock<HashSet<String>>>,
+    /// Fixed USD amount per trade (overrides shares_per_trade when set)
+    fixed_amount_usd: Option<f64>,
     /// Stats
     stats: Arc<RwLock<SplitStats>>,
     /// Enabled flag
@@ -1394,6 +1745,7 @@ pub struct SplitArbStrategyAdapter {
 }
 
 /// A monitored binary market
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct MonitoredMarket {
     market_id: String,
@@ -1404,6 +1756,7 @@ struct MonitoredMarket {
 }
 
 /// A partial (unhedged) position
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct SplitPosition {
     market_id: String,
@@ -1416,6 +1769,7 @@ struct SplitPosition {
 }
 
 /// A fully hedged position
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct HedgedSplitPosition {
     market_id: String,
@@ -1430,6 +1784,7 @@ struct HedgedSplitPosition {
 }
 
 /// Statistics for split arb
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 struct SplitStats {
     signals_detected: u64,
@@ -1466,6 +1821,8 @@ impl SplitArbStrategyAdapter {
             hedged_positions: Arc::new(RwLock::new(Vec::new())),
             prices: Arc::new(RwLock::new(HashMap::new())),
             order_market_map: Arc::new(RwLock::new(HashMap::new())),
+            pending_leg1_markets: Arc::new(RwLock::new(HashSet::new())),
+            fixed_amount_usd: None,
             stats: Arc::new(RwLock::new(SplitStats::default())),
             enabled: true,
         }
@@ -1576,6 +1933,7 @@ impl SplitArbStrategyAdapter {
 
         let mut adapter = Self::new(id, split_config, dry_run);
         adapter.series_ids = series_ids;
+        adapter.fixed_amount_usd = risk.get("fixed_amount_usd").and_then(|v| v.as_float());
         Ok(adapter)
     }
 
@@ -1627,15 +1985,27 @@ impl SplitArbStrategyAdapter {
             Utc::now().timestamp_millis()
         );
 
-        let order =
-            OrderRequest::buy_limit(token_id.clone(), side, self.config.shares_per_trade, price);
+        // Calculate shares: use fixed_amount_usd if set, otherwise fall back to config
+        let shares = if let Some(amount_usd) = self.fixed_amount_usd {
+            let price_f64 = price.to_string().parse::<f64>().unwrap_or(0.5);
+            if price_f64 > 0.0 {
+                (amount_usd / price_f64).floor() as u64
+            } else {
+                self.config.shares_per_trade
+            }
+        } else {
+            self.config.shares_per_trade
+        };
+
+        let order = OrderRequest::buy_limit(token_id.clone(), side, shares, price);
 
         info!(
-            "[{}] First leg entry: {} @ {:.2}¢ ({} shares)",
+            "[{}] First leg entry: {} @ {:.2}¢ ({} shares, ${:.2})",
             self.id,
             if side == Side::Up { "YES" } else { "NO" },
             price * dec!(100),
-            self.config.shares_per_trade
+            shares,
+            price.to_string().parse::<f64>().unwrap_or(0.0) * shares as f64,
         );
 
         // Track order -> market mapping so we can associate fills with positions
@@ -1794,10 +2164,23 @@ impl Strategy for SplitArbStrategyAdapter {
                         if partials.len() < self.config.max_unhedged_positions {
                             drop(partials);
 
+                            // Skip if we already have an in-flight Leg1 order for this market
+                            let pending = self.pending_leg1_markets.read().await;
+                            if pending.contains(&market_id) {
+                                return Ok(actions);
+                            }
+                            drop(pending);
+
                             if let Some((side, price)) = self.check_opportunity(&market_id).await {
                                 if let Some(action) =
                                     self.generate_first_leg(&market_id, side, price).await
                                 {
+                                    // Mark market as having an in-flight order
+                                    self.pending_leg1_markets
+                                        .write()
+                                        .await
+                                        .insert(market_id.clone());
+
                                     let mut stats = self.stats.write().await;
                                     stats.signals_detected += 1;
 
@@ -1910,6 +2293,9 @@ impl Strategy for SplitArbStrategyAdapter {
                         let mut partials = self.partial_positions.write().await;
                         partials.insert(market_id.clone(), partial);
 
+                        // Clear in-flight flag now that we have a tracked position
+                        self.pending_leg1_markets.write().await.remove(&market_id);
+
                         let mut stats = self.stats.write().await;
                         stats.first_leg_entries += 1;
 
@@ -2000,6 +2386,17 @@ impl Strategy for SplitArbStrategyAdapter {
                     "[{}] Order {} - {:?}",
                     self.id, update.order_id, update.error
                 );
+                // Clear in-flight flag so the market can be re-entered
+                let order_key = update
+                    .client_order_id
+                    .clone()
+                    .unwrap_or_else(|| update.order_id.clone());
+                if let Some((market_id, _)) =
+                    self.order_market_map.read().await.get(&order_key).cloned()
+                {
+                    self.pending_leg1_markets.write().await.remove(&market_id);
+                }
+                self.order_market_map.write().await.remove(&order_key);
             }
             _ => {}
         }
@@ -2198,6 +2595,117 @@ max_positions = 5
 
         assert_eq!(adapter.config.symbols.len(), 2);
         assert!(!adapter.config.hold_to_resolution);
+        assert_eq!(adapter.config.shares_per_trade, 100);
+        assert_eq!(adapter.config.max_positions, 5);
+        assert_eq!(adapter.config.min_time_remaining_secs, 300);
+        assert_eq!(adapter.config.max_time_remaining_secs, 900);
+    }
+
+    #[test]
+    fn test_from_toml_directional_entry_threshold() {
+        let toml_pct = r#"
+[strategy]
+name = "momentum"
+mode = "predictive"
+
+[entry]
+symbols = ["BTCUSDT"]
+directional_mode = true
+directional_entry_threshold = 8
+"#;
+        let adapter_pct =
+            MomentumStrategyAdapter::from_toml("test".into(), toml_pct, true).unwrap();
+        assert!((adapter_pct.directional_entry_threshold - 0.08).abs() < f64::EPSILON);
+
+        let toml_decimal = r#"
+[strategy]
+name = "momentum"
+mode = "predictive"
+
+[entry]
+symbols = ["BTCUSDT"]
+directional_mode = true
+directional_entry_threshold = 0.11
+"#;
+        let adapter_decimal =
+            MomentumStrategyAdapter::from_toml("test".into(), toml_decimal, true).unwrap();
+        assert!((adapter_decimal.directional_entry_threshold - 0.11).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_generate_entry_respects_timing_window() {
+        let mut config = MomentumConfig::default();
+        config.min_time_remaining_secs = 300;
+        config.max_time_remaining_secs = 900;
+
+        let adapter = MomentumStrategyAdapter::new(
+            "test_momentum".into(),
+            config,
+            ExitConfig::default(),
+            true,
+        );
+        let now = Utc::now();
+        let up_token = "up_token".to_string();
+        let down_token = "down_token".to_string();
+
+        {
+            let mut events = adapter.events.write().await;
+            events.insert(
+                "BTCUSDT".to_string(),
+                vec![EventState {
+                    event_id: "evt_outside".to_string(),
+                    symbol: "BTCUSDT".to_string(),
+                    up_token_id: up_token.clone(),
+                    down_token_id: down_token.clone(),
+                    end_time: now + chrono::Duration::seconds(120),
+                    open_price: None,
+                    window_secs: 300,
+                }],
+            );
+        }
+
+        {
+            let mut quotes = adapter.pm_quotes.write().await;
+            quotes.insert(
+                up_token.clone(),
+                PmQuoteState {
+                    token_id: up_token.clone(),
+                    best_bid: Some(dec!(0.40)),
+                    best_ask: Some(dec!(0.42)),
+                    timestamp: now,
+                },
+            );
+        }
+
+        assert!(adapter
+            .get_entry_price("BTCUSDT", Direction::Up)
+            .await
+            .is_none());
+        assert!(adapter
+            .generate_entry("BTCUSDT", Direction::Up, dec!(0.42))
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn test_momentum_required_feeds_include_xrp_5m() {
+        let adapter = MomentumStrategyAdapter::new(
+            "test_momentum".into(),
+            MomentumConfig::default(),
+            ExitConfig::default(),
+            true,
+        );
+
+        let feeds = adapter.required_feeds();
+        let series_ids = feeds
+            .iter()
+            .find_map(|feed| match feed {
+                DataFeed::PolymarketEvents { series_ids } => Some(series_ids.clone()),
+                _ => None,
+            })
+            .expect("expected polymarket events feed");
+
+        assert!(series_ids.contains(&"10685".to_string()));
     }
 
     #[test]

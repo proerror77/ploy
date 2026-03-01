@@ -23,11 +23,7 @@ use tracing::{info, warn};
 #[derive(Debug, Clone)]
 struct TokenGuard {
     ok_to_buy_until: DateTime<Utc>,
-    min_edge: Decimal,
     last_seen_ask: Decimal,
-    last_seen_p_true: Decimal,
-    outcome: String,
-    event_id: String,
 }
 
 struct FrameworkState {
@@ -274,11 +270,7 @@ fn build_scan_tool(
                             TokenGuard {
                                 ok_to_buy_until: now
                                     + chrono::Duration::from_std(guard_ttl).unwrap_or_default(),
-                                min_edge,
                                 last_seen_ask: ask,
-                                last_seen_p_true: r.p_true,
-                                outcome: r.outcome.clone(),
-                                event_id: event_id.clone(),
                             },
                         );
                     }

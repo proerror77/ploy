@@ -3,14 +3,17 @@
 // Based on: github.com/llSourcell/Poly-Trader
 
 use crate::error::{PloyError, Result};
+use polymarket_client_sdk::clob::types::request::OrderBookSummaryRequest;
+use polymarket_client_sdk::clob::types::response::OrderBookSummaryResponse;
+use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma::types::request::{
     EventByIdRequest, MarketsRequest, SeriesByIdRequest,
 };
 use polymarket_client_sdk::gamma::types::response::{Event as GammaEvent, Market as GammaMarket};
 use polymarket_client_sdk::gamma::Client as GammaClient;
-use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use tracing::{debug, info, warn};
 
 const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
@@ -518,25 +521,21 @@ impl SportsMarketDetails {
 
 /// Polymarket Sports Client for fetching and trading sports markets
 pub struct PolymarketSportsClient {
-    client: Client,
     gamma_client: GammaClient,
-    clob_url: String,
+    clob_client: ClobClient,
 }
 
 impl PolymarketSportsClient {
     /// Create new sports client
     pub fn new() -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| PloyError::Internal(format!("HTTP client error: {}", e)))?;
         let gamma_client = GammaClient::new(GAMMA_API_URL)
             .map_err(|e| PloyError::Internal(format!("Gamma client error: {}", e)))?;
+        let clob_client = ClobClient::new(CLOB_API_URL, ClobConfig::default())
+            .map_err(|e| PloyError::Internal(format!("CLOB client error: {}", e)))?;
 
         Ok(Self {
-            client,
             gamma_client,
-            clob_url: CLOB_API_URL.to_string(),
+            clob_client,
         })
     }
 
@@ -1040,31 +1039,42 @@ impl PolymarketSportsClient {
 
     /// Get order book for a token
     pub async fn get_order_book(&self, token_id: &str) -> Result<SportsOrderBook> {
-        let url = format!("{}/book", self.clob_url);
-
-        let resp = self
-            .client
-            .get(&url)
-            .query(&[("token_id", token_id)])
-            .send()
+        let token_id = alloy::primitives::U256::from_str(token_id)
+            .map_err(|e| PloyError::Internal(format!("Invalid token_id '{}': {}", token_id, e)))?;
+        let req = OrderBookSummaryRequest::builder()
+            .token_id(token_id)
+            .build();
+        let book = self
+            .clob_client
+            .order_book(&req)
             .await
-            .map_err(|e| PloyError::Internal(format!("Network error: {}", e)))?;
+            .map_err(|e| PloyError::Internal(format!("CLOB order_book failed: {}", e)))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(PloyError::Internal(format!(
-                "CLOB API error {}: {}",
-                status, text
-            )));
+        Ok(Self::map_order_book_response(book))
+    }
+
+    fn map_order_book_response(book: OrderBookSummaryResponse) -> SportsOrderBook {
+        SportsOrderBook {
+            market: Some(book.market.to_string()),
+            asset_id: book.asset_id.to_string(),
+            bids: book
+                .bids
+                .into_iter()
+                .map(|level| OrderBookLevel {
+                    price: level.price.to_string(),
+                    size: level.size.to_string(),
+                })
+                .collect(),
+            asks: book
+                .asks
+                .into_iter()
+                .map(|level| OrderBookLevel {
+                    price: level.price.to_string(),
+                    size: level.size.to_string(),
+                })
+                .collect(),
+            timestamp: Some(book.timestamp.timestamp_millis().to_string()),
         }
-
-        let book: SportsOrderBook = resp
-            .json()
-            .await
-            .map_err(|e| PloyError::Internal(format!("Parse error: {}", e)))?;
-
-        Ok(book)
     }
 
     /// Get full market details with order books

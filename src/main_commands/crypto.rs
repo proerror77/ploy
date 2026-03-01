@@ -1,6 +1,7 @@
 use crate::main_runtime::enforce_coordinator_only_live;
 use ploy::adapters::PolymarketClient;
 use ploy::cli::runtime::CryptoCommands;
+use ploy::config::ExecutionConfig;
 use ploy::error::Result;
 use ploy::strategy::OrderExecutor;
 use tracing::info;
@@ -85,6 +86,7 @@ pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             // Run strategy
             run_crypto_split_arb(client, executor, config, *dry_run).await?;
         }
+        #[cfg(feature = "analysis_tools")]
         CryptoCommands::BacktestUpDown {
             symbols,
             days,
@@ -131,6 +133,91 @@ pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             };
 
             run_updown_backtest(cfg).await?;
+        }
+        CryptoCommands::DeribitProbArb {
+            symbols,
+            min_edge,
+            fee_buffer,
+            poll_ms,
+            surface_refresh_secs,
+            discovery_refresh_secs,
+            min_remaining_secs,
+            max_remaining_secs,
+            max_spread_bps,
+            max_trade_usd,
+            max_symbol_exposure_usd,
+            kelly_fraction,
+            cooldown_secs,
+            dry_run,
+        } => {
+            use ploy::strategy::{run_deribit_probability_arb, DeribitProbabilityArbConfig};
+            use rust_decimal::Decimal;
+            use rust_decimal_macros::dec;
+
+            if !*dry_run {
+                enforce_coordinator_only_live("ploy crypto deribit-prob-arb")?;
+            }
+
+            let raw_symbols: Vec<String> = symbols
+                .split(',')
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            // Reuse existing coin -> series mapping helper.
+            let series_ids: Vec<String> = raw_symbols
+                .iter()
+                .flat_map(|s| map_crypto_coin_to_series_ids(s))
+                .collect();
+
+            let client = if *dry_run {
+                PolymarketClient::new("https://clob.polymarket.com", true)?
+            } else {
+                let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
+                PolymarketClient::new_authenticated(
+                    "https://clob.polymarket.com",
+                    wallet,
+                    true, // neg-risk for UP/DOWN
+                )
+                .await?
+            };
+
+            let mut exec_cfg = ExecutionConfig::default();
+            exec_cfg.confirm_fills = true;
+            exec_cfg.confirm_fill_timeout_ms = 2_500;
+            exec_cfg.max_spread_bps = *max_spread_bps;
+
+            let executor = OrderExecutor::new(client.clone(), exec_cfg);
+
+            let config = DeribitProbabilityArbConfig {
+                symbols: raw_symbols,
+                series_ids,
+                poll_interval_ms: *poll_ms,
+                discovery_refresh_secs: *discovery_refresh_secs,
+                surface_refresh_secs: *surface_refresh_secs,
+                min_time_remaining_secs: *min_remaining_secs,
+                max_time_remaining_secs: *max_remaining_secs,
+                min_edge: Decimal::from_f64_retain(min_edge / 100.0).unwrap_or(dec!(0.03)),
+                fee_buffer: Decimal::from_f64_retain(fee_buffer / 100.0).unwrap_or(dec!(0.02)),
+                max_spread_bps: *max_spread_bps,
+                max_trade_usd: Decimal::from_f64_retain(*max_trade_usd).unwrap_or(dec!(50)),
+                max_symbol_exposure_usd: Decimal::from_f64_retain(*max_symbol_exposure_usd)
+                    .unwrap_or(dec!(150)),
+                kelly_fraction: (*kelly_fraction).clamp(0.0, 1.0),
+                cooldown_secs: *cooldown_secs,
+                ..Default::default()
+            };
+
+            info!(
+                symbols = ?config.symbols,
+                series_ids = ?config.series_ids,
+                min_edge = %config.min_edge,
+                fee_buffer = %config.fee_buffer,
+                dry_run = *dry_run,
+                "Starting Deribit probability arbitrage strategy"
+            );
+
+            run_deribit_probability_arb(client, executor, config).await?;
         }
     }
 

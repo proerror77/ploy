@@ -206,8 +206,10 @@ pub struct DataFeedManager {
     /// Polymarket client for event discovery
     pm_client: Option<Arc<PolymarketClient>>,
     /// Token to event mapping for Polymarket
+    #[allow(dead_code)]
     token_events: Arc<RwLock<HashMap<String, EventMapping>>>,
     /// Active feeds
+    #[allow(dead_code)]
     active_feeds: Arc<RwLock<Vec<DataFeed>>>,
     /// Latest discovered events per series (bounded, for refresh + token reconciliation)
     series_events: Arc<RwLock<HashMap<String, HashMap<String, DiscoveredEvent>>>>,
@@ -216,6 +218,7 @@ pub struct DataFeedManager {
 }
 
 /// Mapping from token to event info
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct EventMapping {
     event_id: String,

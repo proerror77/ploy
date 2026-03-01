@@ -281,6 +281,7 @@ struct PositionLeg {
 
 #[derive(Debug, Clone)]
 struct TrackedPosition {
+    #[allow(dead_code)]
     market_slug: String,
     symbol: String,
     legs: Vec<PositionLeg>, // 1 or 2 (hedged)

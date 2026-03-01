@@ -194,7 +194,6 @@ fn select_polymarket_price_for_symbol(
 
 /// Synchronized data collector
 pub struct SyncCollector {
-    config: SyncCollectorConfig,
     depth_stream: Arc<BinanceDepthStream>,
     price_histories: Arc<RwLock<std::collections::HashMap<String, PriceHistory>>>,
     polymarket_prices: Arc<RwLock<std::collections::HashMap<String, PolymarketPrice>>>,
@@ -209,7 +208,6 @@ impl SyncCollector {
         let (record_tx, _) = broadcast::channel(10000);
 
         Self {
-            config,
             depth_stream,
             price_histories: Arc::new(RwLock::new(std::collections::HashMap::new())),
             polymarket_prices: Arc::new(RwLock::new(std::collections::HashMap::new())),

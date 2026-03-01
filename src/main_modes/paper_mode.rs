@@ -7,10 +7,37 @@ pub async fn run_paper_trading(
     min_price_edge: f64,
     log_file: String,
     stats_interval: u64,
+    reverse_profile_url: Option<String>,
+    reverse_poll_secs: u64,
+    reverse_min_trade_usdc: f64,
+    reverse_max_event_usdc: f64,
+    reverse_max_total_usdc: f64,
+    reverse_target_assets: String,
 ) -> Result<()> {
-    use ploy::strategy::{run_paper_trading, PaperTradingConfig, VolatilityArbConfig};
+    use ploy::strategy::{
+        run_paper_trading, run_reverse_engineered_profile_paper, PaperTradingConfig,
+        ReverseEngineeredConfig, VolatilityArbConfig,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    if let Some(profile_url) = reverse_profile_url {
+        let cfg = ReverseEngineeredConfig {
+            profile_url,
+            poll_interval_secs: reverse_poll_secs,
+            min_trade_usdc: reverse_min_trade_usdc,
+            max_event_usdc: reverse_max_event_usdc,
+            max_total_usdc: reverse_max_total_usdc,
+            target_assets: reverse_target_assets
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        run_reverse_engineered_profile_paper(cfg).await?;
+        return Ok(());
+    }
 
     let symbols: Vec<String> = symbols
         .split(',')

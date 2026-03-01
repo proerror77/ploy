@@ -73,7 +73,6 @@ struct BacktestPosition {
     entry_price: Decimal,
     entry_time: DateTime<Utc>,
     shares: u64,
-    event_slug: Option<String>,
     /// Latest PM ask for this direction (for exit tracking)
     latest_pm_price: Decimal,
 }
@@ -165,6 +164,9 @@ impl MomentumBacktestEngine {
                 }
                 UpdateType::EventState { .. } => {
                     // Metadata update — could be used for time-remaining filtering
+                }
+                UpdateType::LobSnapshot { .. } => {
+                    // LOB depth not used by momentum backtest
                 }
             }
         }
@@ -289,7 +291,6 @@ impl MomentumBacktestEngine {
             entry_price: sim_result.fill_price,
             entry_time: ts,
             shares: sim_result.filled_shares,
-            event_slug: None,
             latest_pm_price: signal.pm_price,
         });
 

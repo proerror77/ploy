@@ -1,4 +1,4 @@
-# Directional Live Trading — $280 Capital
+# Directional Live Trading — $15/trade target
 # Uses Binance as oracle for log-normal probability model entry.
 # Hold to resolution ($1/$0 settlement), no early exits.
 
@@ -13,8 +13,8 @@ directional_vol_floor = 0.005
 # Symbols to trade (all 3 profitable in backtest)
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
-# Position sizing: ~$21/trade at avg 30¢ entry (quarter-Kelly for $280)
-shares_per_trade = 70.0
+# Position sizing: dynamic based on fixed_amount_usd in [risk] section
+# shares_per_trade is now ignored when fixed_amount_usd is set
 
 # === ENTRY TIMING ===
 # 2-5 min before resolution (avoid near-settlement degeneracy)
@@ -30,18 +30,18 @@ max_entry = 85.0       # Max 85¢ entry price
 min_edge = 0.0         # Handled by EV_net threshold in directional mode
 
 # === RISK CONTROL ===
-max_positions = 2           # Max 2 concurrent (correlation risk with $280)
+max_positions = 2           # Max 2 concurrent (prevent correlation risk)
 cooldown_secs = 60.0        # 60s between same symbol
 max_daily_trades = 50.0     # Allow more trades for 3 symbols
-max_window_exposure = 50.0  # Max $50 total per 15-min window
+max_window_exposure = 40.0  # Max $40 total per 15-min window (2 × $15 + buffer)
 
 # === SIGNAL PROCESSING ===
 best_edge_only = false       # Enter all qualifying signals
 use_price_to_beat = true     # Use market question price for S0
 
 # === POSITION SIZING ===
-dynamic_position_sizing = false  # Fixed shares for simplicity
-use_kelly_sizing = false         # Fixed at 70 shares
+dynamic_position_sizing = true   # Use FundManager for dynamic sizing
+use_kelly_sizing = false         # Use fixed_amount_usd instead
 
 # === DISABLE MOMENTUM-SPECIFIC FEATURES ===
 min_move = 0.05             # Unused in directional mode
@@ -55,5 +55,10 @@ exit_before_resolution_secs = 30.0    # Exit 30s before if needed
 exit_edge_floor_pct = -100.0          # Never exit on edge (hold to settlement)
 
 [risk]
-max_single_exposure_usd = 25.0
-daily_loss_limit_usd = 100.0    # Stop if down $100 (36% of $280)
+# === FUND MANAGEMENT ===
+fixed_amount_usd = 1.0          # Fixed $1 per trade (auto-calculate shares)
+min_balance_usd = 5.0           # Keep $5 reserve
+
+# === EXPOSURE LIMITS ===
+max_single_exposure_usd = 2.0   # Max $2 per position (safety buffer)
+daily_loss_limit_usd = 10.0     # Stop if down $10

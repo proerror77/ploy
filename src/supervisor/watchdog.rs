@@ -281,40 +281,6 @@ impl Watchdog {
         }
     }
 
-    /// Run health check cycle
-    async fn check_health(&self) {
-        let now = Utc::now();
-        let timeout = chrono::Duration::seconds(self.config.heartbeat_timeout_secs as i64);
-
-        let mut components = self.components.write().await;
-
-        for (name, component) in components.iter_mut() {
-            // Skip stopped components
-            if component.health.status == HealthStatus::Stopped {
-                continue;
-            }
-
-            // Check heartbeat timeout
-            if let Some(last_hb) = component.health.last_heartbeat {
-                if now.signed_duration_since(last_hb) > timeout {
-                    if component.health.status != HealthStatus::Stale {
-                        component.health.status = HealthStatus::Stale;
-
-                        let _ = self.event_tx.send(WatchdogEvent::ComponentStale {
-                            component: name.clone(),
-                            last_heartbeat: last_hb,
-                        });
-
-                        warn!(
-                            "Component {} is stale (last heartbeat: {:?})",
-                            name, last_hb
-                        );
-                    }
-                }
-            }
-        }
-    }
-
     /// Start the watchdog daemon
     pub async fn start<F, Fut>(&self, restart_fn: F)
     where

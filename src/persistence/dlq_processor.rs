@@ -35,6 +35,7 @@ impl Default for DLQProcessorConfig {
 }
 
 impl DLQProcessorConfig {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn backoff_duration(&self, retry_count: u32) -> Duration {
         let delay = self
             .base_backoff_secs

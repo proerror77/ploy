@@ -67,11 +67,7 @@ impl Default for UpDownBacktestConfig {
 #[derive(Debug, Clone)]
 struct ResolvedWindow {
     symbol: String,
-    series_id: String,
     horizon: String,
-    event_id: String,
-    slug: String,
-    title: String,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
     up_token_id: String,
@@ -245,11 +241,7 @@ fn resolved_window_from_gamma(
 
     Some(ResolvedWindow {
         symbol: symbol.to_string(),
-        series_id: series_id.to_string(),
         horizon: horizon_for_series(series_id).to_string(),
-        event_id: event.id.clone(),
-        slug: event.slug.clone().unwrap_or_default(),
-        title: event.title.clone().unwrap_or_default(),
         start_time,
         end_time,
         up_token_id: tokens.get(up_idx).cloned().unwrap_or_default(),

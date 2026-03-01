@@ -433,6 +433,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strat))
             }
+            "staggered_arb" => {
+                let adapter = super::staggered_arb_live::StaggeredArbAdapter::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(adapter))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
@@ -454,6 +462,12 @@ impl StrategyFactory {
                 name: "pattern_memory".to_string(),
                 description: "Associative memory on Binance klines for 5m UP/DOWN".to_string(),
                 config_template: "pattern_memory_default.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "staggered_arb".to_string(),
+                description: "Time-staggered two-leg arb on crypto UP/DOWN binary options"
+                    .to_string(),
+                config_template: "staggered_arb.toml".to_string(),
             },
         ]
     }

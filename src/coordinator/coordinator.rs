@@ -2906,10 +2906,6 @@ impl Coordinator {
         }
     }
 
-    fn domain_for_agent(&self, agent_id: &str) -> Option<Domain> {
-        self.agent_commands.get(agent_id).map(|entry| entry.domain)
-    }
-
     fn should_apply_domain_cmd(&self, entry: &AgentCommandChannel, target: Domain) -> bool {
         entry.domain == target
     }

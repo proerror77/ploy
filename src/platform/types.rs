@@ -11,7 +11,7 @@ use std::str::FromStr;
 use crate::domain::Side;
 
 /// 領域類型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Domain {
     /// 體育賽事 (NBA, NFL, etc.)
     Sports,
@@ -61,6 +61,47 @@ impl FromStr for Domain {
             "economics" => Ok(Domain::Economics),
             _ => Err("invalid domain; expected crypto|sports|politics|economics|custom:<id>"),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for Domain {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct DomainVisitor;
+
+        impl<'de> de::Visitor<'de> for DomainVisitor {
+            type Value = Domain;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a domain string like \"crypto\" or \"custom:42\"")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Domain, E> {
+                Domain::from_str(v).map_err(de::Error::custom)
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Domain, A::Error> {
+                // Handle derived-Serialize format: {"Custom": 42}
+                if let Some(key) = map.next_key::<String>()? {
+                    if key.eq_ignore_ascii_case("custom") {
+                        let id: u32 = map.next_value()?;
+                        return Ok(Domain::Custom(id));
+                    }
+                    // Try as a known domain name (shouldn't happen, but be safe)
+                    return Domain::from_str(&key).map_err(de::Error::custom);
+                }
+                Err(de::Error::custom("empty map for Domain"))
+            }
+        }
+
+        deserializer.deserialize_any(DomainVisitor)
     }
 }
 

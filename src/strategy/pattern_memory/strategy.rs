@@ -71,6 +71,7 @@ struct Config {
     trade: TradeConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct QuoteState {
     side: Side,
@@ -79,6 +80,7 @@ struct QuoteState {
     ts: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct EventState {
     event_id: String,
@@ -90,6 +92,7 @@ struct EventState {
     title: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct LastDecision {
     event_id: String,
@@ -112,6 +115,7 @@ pub struct PatternMemoryStrategy {
 
     // Config-derived maps.
     symbol_by_series: HashMap<String, String>,
+    #[allow(dead_code)]
     series_by_symbol: HashMap<String, String>,
 
     // Live state.

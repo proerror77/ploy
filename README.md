@@ -336,10 +336,14 @@ examples/        Example integrations (OpenClaw RPC)
 ## Development
 
 ```bash
+cargo check --bin ploy               # Fast local type-check loop
+cargo build --bin ploy               # Build only the main binary
+cargo build --bin ploy --features builder_relayer_sdk  # Enable builder relayer SDK when needed
 cargo test                           # Run test suite
 cargo fmt --check                    # Check formatting
 cargo clippy -- -D warnings          # Lint
 cargo build --features rl,onnx       # Build with all optional features
+cargo check -p sdk_auth_check            # Optional SDK auth tool
 ```
 
 See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the contributor guide.

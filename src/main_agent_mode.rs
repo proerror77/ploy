@@ -94,24 +94,6 @@ async fn fetch_market_snapshot(
         snapshot.minutes_remaining = Some(duration.num_minutes());
     }
 
-    let parse_json_array = |raw: Option<&str>| -> Vec<String> {
-        let Some(raw) = raw else { return vec![] };
-        if let Ok(v) = serde_json::from_str::<Vec<String>>(raw) {
-            return v;
-        }
-        if let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
-            return v
-                .into_iter()
-                .map(|x| {
-                    x.as_str()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| x.to_string())
-                })
-                .collect();
-        }
-        vec![]
-    };
-
     if let Some(markets) = event.markets.as_ref() {
         let mut sum_yes_asks = Decimal::ZERO;
         let mut sum_no_bids = Decimal::ZERO;

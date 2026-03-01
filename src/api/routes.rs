@@ -5,7 +5,9 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
-use crate::api::{handlers, state::AppState, websocket::websocket_handler};
+use crate::api::{handlers, state::AppState};
+#[cfg(feature = "api_ws")]
+use crate::api::websocket::websocket_handler;
 
 fn build_cors_layer() -> CorsLayer {
     let mut origins: Vec<HeaderValue> = std::env::var("PLOY_API_CORS_ALLOWED_ORIGINS")
@@ -107,7 +109,8 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/strategy-evaluations",
-            get(handlers::list_strategy_evaluations).post(handlers::create_strategy_evaluation),
+            get(handlers::strategy_evaluations::list_strategy_evaluations)
+                .post(handlers::create_strategy_evaluation),
         )
         .route(
             "/api/strategy-evaluations/:deployment_id/latest",
@@ -161,10 +164,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sidecar/risk", get(handlers::sidecar_get_risk))
         .route(
             "/api/sidecar/strategy-evaluations",
-            post(handlers::upsert_strategy_evaluation).get(handlers::list_strategy_evaluations),
-        )
+            post(handlers::upsert_strategy_evaluation)
+                .get(handlers::evaluations::list_strategy_evaluations),
+        );
+
+    #[cfg(feature = "api_ws")]
+    {
         // WebSocket endpoint
-        .route("/ws", get(websocket_handler));
+        router = router.route("/ws", get(websocket_handler));
+    }
 
     if sidecar_orders_live_enabled() {
         router = router.route("/api/sidecar/orders", post(handlers::sidecar_submit_order));

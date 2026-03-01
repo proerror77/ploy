@@ -128,10 +128,9 @@ pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u6
 /// Discover active PM tokens for crypto series and spawn a WebSocket bridge
 /// that feeds real-time PM prices into the collector.
 async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
-    use ploy::adapters::PolymarketClient;
+    use ploy::adapters::{PolymarketClient, PolymarketWebSocket};
     use ploy::collector::PolymarketPrice;
     use ploy::domain::market::Side;
-    use ploy::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 
     // Create read-only PM client for event discovery
     let pm_client = match PolymarketClient::new(PM_REST_URL, true) {
@@ -197,33 +196,23 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
         token_to_market.len() / 2 // UP+DOWN = 1 market
     );
 
-    // Create PM data plane and subscribe.
-    let data_plane = Arc::new(PlatformDataPlane::new(
-        DataPlaneConfig {
-            polymarket_ws_url: PM_WS_URL.to_string(),
-            ..Default::default()
-        },
-        Arc::new(DataPlaneFreshness::new()),
-    ));
-    let pm_ws = match data_plane.polymarket_ws() {
-        Some(ws) => ws,
-        None => {
-            warn!("Collector PM data plane missing polymarket websocket; bridge disabled.");
-            return;
-        }
-    };
+    // Create PM WebSocket and subscribe
+    let pm_ws = Arc::new(PolymarketWebSocket::new(PM_WS_URL));
+    let mut quote_rx = pm_ws.subscribe_updates();
 
-    // Register token sides for correct quote mapping.
+    // Register token sides for correct quote mapping
     for (token_id, (_slug, side)) in &token_to_market {
         pm_ws.register_token(token_id, *side).await;
     }
 
-    if let Err(e) = data_plane.start(Vec::new()).await {
-        error!("Failed to start collector PM data plane: {}", e);
-        return;
-    }
-
-    let mut quote_rx = pm_ws.subscribe_updates();
+    // Spawn PM WebSocket runner
+    let ws_tokens = all_token_ids.clone();
+    let ws = Arc::clone(&pm_ws);
+    tokio::spawn(async move {
+        if let Err(e) = ws.run(ws_tokens).await {
+            error!("Collector PM WebSocket error: {}", e);
+        }
+    });
 
     // Spawn quote bridge: QuoteUpdate -> PolymarketPrice -> collector
     // Maintains latest (yes, no) per slug and pushes full updates
