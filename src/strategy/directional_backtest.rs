@@ -464,15 +464,16 @@ impl DirectionalBacktestEngine {
 
         let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
         // Taker fee at entry: shares × price × feeRate × (p*(1-p))^exponent
-        let entry_fee = self
-            .fee_model
-            .fee_shares(Decimal::from(sim_result.filled_shares), sim_result.fill_price)
-            * sim_result.fill_price;
+        let entry_fee = self.fee_model.fee_shares(
+            Decimal::from(sim_result.filled_shares),
+            sim_result.fill_price,
+        ) * sim_result.fill_price;
         let total_entry_cost = entry_cost + entry_fee;
         if total_entry_cost > self.equity {
             trace!(
                 "Skipping entry: insufficient equity ({} < {})",
-                self.equity, total_entry_cost
+                self.equity,
+                total_entry_cost
             );
             return;
         }
@@ -586,14 +587,16 @@ impl DirectionalBacktestEngine {
             .and_then(|s| {
                 let lookback = self.config.vol_lookback_secs;
                 let floor = self.config.vol_floor;
-                s.volatility(lookback).and_then(|v| v.to_f64()).map(|tick_vol| {
-                    if tick_vol > 0.0 {
-                        let n_ticks = s.history_len().min(5000) as f64;
-                        (tick_vol * n_ticks.sqrt()).max(floor)
-                    } else {
-                        floor
-                    }
-                })
+                s.volatility(lookback)
+                    .and_then(|v| v.to_f64())
+                    .map(|tick_vol| {
+                        if tick_vol > 0.0 {
+                            let n_ticks = s.history_len().min(5000) as f64;
+                            (tick_vol * n_ticks.sqrt()).max(floor)
+                        } else {
+                            floor
+                        }
+                    })
             })
             .unwrap_or(pos.entry_sigma)
             .max(self.config.vol_floor);
@@ -624,13 +627,7 @@ impl DirectionalBacktestEngine {
 
     // ─── Close position ──────────────────────────────────────
 
-    fn close_position(
-        &mut self,
-        idx: usize,
-        exit_price: Decimal,
-        reason: &str,
-        ts: DateTime<Utc>,
-    ) {
+    fn close_position(&mut self, idx: usize, exit_price: Decimal, reason: &str, ts: DateTime<Utc>) {
         let pos = self.positions.remove(idx);
 
         // For settlement ($1 or $0), no need to simulate — it's binary payout.
@@ -641,15 +638,15 @@ impl DirectionalBacktestEngine {
             // At $1.00 or $0.00, the parabolic fee curve = 0 (p*(1-p) = 0)
             (p, p * Decimal::from(pos.shares), Decimal::ZERO)
         } else {
-            let sim_result =
-                self.execution_sim
-                    .simulate_sell(exit_price, ts, pos.shares, 10_000);
+            let sim_result = self
+                .execution_sim
+                .simulate_sell(exit_price, ts, pos.shares, 10_000);
             let raw_proceeds = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
             // Taker fee on sell: shares × price × feeRate × (p*(1-p))^exponent
-            let sell_fee = self
-                .fee_model
-                .fee_shares(Decimal::from(sim_result.filled_shares), sim_result.fill_price)
-                * sim_result.fill_price;
+            let sell_fee = self.fee_model.fee_shares(
+                Decimal::from(sim_result.filled_shares),
+                sim_result.fill_price,
+            ) * sim_result.fill_price;
             (sim_result.fill_price, raw_proceeds - sell_fee, sell_fee)
         };
 
@@ -918,7 +915,10 @@ impl DirectionalBacktestEngine {
             .count();
 
         println!("\n=== Directional Backtest Summary ===");
-        println!("Settlement rate:  {:.1}% ({}/{})", settlement_rate, settled, total);
+        println!(
+            "Settlement rate:  {:.1}% ({}/{})",
+            settlement_rate, settled, total
+        );
         println!("Exit reasons:");
         for (reason, count) in &exit_counts {
             println!("  {:<16} {}", reason, count);
@@ -964,19 +964,27 @@ impl DirectionalBacktestEngine {
         let min_hold = hold_times.iter().min().copied().unwrap_or(0);
         let max_hold = hold_times.iter().max().copied().unwrap_or(0);
         println!("\nHolding time:");
-        println!("  Avg: {:.0}s  Min: {}s  Max: {}s", avg_hold, min_hold, max_hold);
+        println!(
+            "  Avg: {:.0}s  Min: {}s  Max: {}s",
+            avg_hold, min_hold, max_hold
+        );
 
         // Entry price distribution
-        let entry_prices: Vec<f64> = self.closed_trades.iter().map(|t| t.entry_price.to_f64().unwrap_or(0.0)).collect();
+        let entry_prices: Vec<f64> = self
+            .closed_trades
+            .iter()
+            .map(|t| t.entry_price.to_f64().unwrap_or(0.0))
+            .collect();
         let avg_entry = entry_prices.iter().sum::<f64>() / entry_prices.len().max(1) as f64;
         println!("  Avg entry price: ${:.4}", avg_entry);
 
         // Per-symbol breakdown
         let mut symbol_stats: HashMap<&str, (usize, usize, Decimal, Decimal)> = HashMap::new();
         for t in &self.closed_trades {
-            let entry = symbol_stats
-                .entry(&t.symbol)
-                .or_insert((0, 0, Decimal::ZERO, Decimal::ZERO));
+            let entry =
+                symbol_stats
+                    .entry(&t.symbol)
+                    .or_insert((0, 0, Decimal::ZERO, Decimal::ZERO));
             entry.0 += 1; // total trades
             if t.won {
                 entry.1 += 1; // wins
@@ -1046,11 +1054,7 @@ impl fmt::Display for DirectionalBacktestEngine {
         writeln!(f, "Avg PnL/trade: ${:.4}", results.avg_pnl_per_trade)?;
         writeln!(f, "Sharpe ratio:  {:.2}", results.sharpe_ratio)?;
         writeln!(f, "Profit factor: {:.2}", results.profit_factor)?;
-        writeln!(
-            f,
-            "Max drawdown:  {:.2}%",
-            results.max_drawdown * dec!(100)
-        )?;
+        writeln!(f, "Max drawdown:  {:.2}%", results.max_drawdown * dec!(100))?;
         writeln!(f, "Avg hold time: {:.0}s", results.avg_holding_time_secs)?;
         writeln!(f, "Largest win:   ${:.4}", results.largest_win)?;
         writeln!(f, "Largest loss:  ${:.4}", results.largest_loss)?;

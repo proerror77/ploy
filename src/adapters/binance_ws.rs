@@ -948,6 +948,9 @@ mod tests {
         let json = r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"not_a_number","q":"0.5","T":1700000000000}"#;
         ws.handle_message(json).await;
 
-        assert!(rx.try_recv().is_err(), "invalid price should not produce update");
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid price should not produce update"
+        );
     }
 }

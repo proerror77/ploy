@@ -540,8 +540,9 @@ impl ChainlinkRtds {
                 }],
             };
 
-            let payload = serde_json::to_string(&msg)
-                .map_err(|e| PloyError::Internal(format!("Failed to serialize subscribe: {}", e)))?;
+            let payload = serde_json::to_string(&msg).map_err(|e| {
+                PloyError::Internal(format!("Failed to serialize subscribe: {}", e))
+            })?;
 
             write
                 .send(Message::Text(payload))

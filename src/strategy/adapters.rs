@@ -216,7 +216,8 @@ impl MomentumStrategyAdapter {
             return;
         }
 
-        if let Err(e) = crate::coordinator::bootstrap::ensure_strategy_observability_tables(pool).await
+        if let Err(e) =
+            crate::coordinator::bootstrap::ensure_strategy_observability_tables(pool).await
         {
             warn!(error = %e, "signal recorder: failed to ensure observability tables");
             return;
@@ -657,15 +658,20 @@ impl MomentumStrategyAdapter {
         current_price: &Decimal,
         ts: DateTime<Utc>,
     ) -> Option<StrategyAction> {
-        use crate::strategy::probability;
         use crate::strategy::fee_model::FeeModel;
+        use crate::strategy::probability;
         use rust_decimal::prelude::ToPrimitive;
 
         let events = self.events.read().await;
         let event_list = match events.get(symbol) {
             Some(list) if !list.is_empty() => list,
             _ => {
-                debug!("[{}] DIRECTIONAL: no event for {}, events={:?}", self.id, symbol, events.keys().collect::<Vec<_>>());
+                debug!(
+                    "[{}] DIRECTIONAL: no event for {}, events={:?}",
+                    self.id,
+                    symbol,
+                    events.keys().collect::<Vec<_>>()
+                );
                 return None;
             }
         };
@@ -685,10 +691,13 @@ impl MomentumStrategyAdapter {
             None => {
                 // Log every 30s to avoid spam
                 let minute = ts.timestamp() / 30;
-                static LAST_LOG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                static LAST_LOG: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(0);
                 let prev = LAST_LOG.swap(minute, std::sync::atomic::Ordering::Relaxed);
                 if prev != minute {
-                    let nearest = event_list.iter().filter(|e| e.end_time > ts)
+                    let nearest = event_list
+                        .iter()
+                        .filter(|e| e.end_time > ts)
                         .min_by_key(|e| e.end_time)
                         .map(|e| (e.end_time - ts).num_seconds())
                         .unwrap_or(-1);
@@ -731,7 +740,13 @@ impl MomentumStrategyAdapter {
                     (Direction::Up, ask)
                 }
                 None => {
-                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (quotes={})", self.id, symbol, p_hat * 100.0, quotes.len());
+                    debug!(
+                        "[{}] DIRECTIONAL: {} p={:.1}% but no UP ask (quotes={})",
+                        self.id,
+                        symbol,
+                        p_hat * 100.0,
+                        quotes.len()
+                    );
                     return None;
                 }
             }
@@ -743,7 +758,13 @@ impl MomentumStrategyAdapter {
                     (Direction::Down, ask)
                 }
                 None => {
-                    debug!("[{}] DIRECTIONAL: {} p={:.1}% but no DOWN ask (token={}..)", self.id, symbol, p_hat * 100.0, &down_token[..8.min(down_token.len())]);
+                    debug!(
+                        "[{}] DIRECTIONAL: {} p={:.1}% but no DOWN ask (token={}..)",
+                        self.id,
+                        symbol,
+                        p_hat * 100.0,
+                        &down_token[..8.min(down_token.len())]
+                    );
                     return None;
                 }
             }
@@ -765,17 +786,23 @@ impl MomentumStrategyAdapter {
         let fee_per_share = market_ask * effective_rate;
         let spread_cost = dec!(0.01); // Conservative 1¢ spread estimate
         let market_ask_f64 = market_ask.to_f64().unwrap_or(0.5);
-        let cost_total_f64 = fee_per_share.to_f64().unwrap_or(0.01)
-            + spread_cost.to_f64().unwrap_or(0.01);
+        let cost_total_f64 =
+            fee_per_share.to_f64().unwrap_or(0.01) + spread_cost.to_f64().unwrap_or(0.01);
 
         // EV_net check (default threshold 0.08 = 8%)
         let ev_net = effective_p - market_ask_f64 - cost_total_f64;
         if ev_net < 0.08 {
             debug!(
                 "[{}] DIRECTIONAL: {} {} p={:.1}% ask={:.0}¢ ev={:.1}% < 8% (σ={:.4} t={:.0}s {}m)",
-                self.id, symbol, if p_hat > 0.5 { "UP" } else { "DOWN" },
-                effective_p * 100.0, market_ask_f64 * 100.0, ev_net * 100.0,
-                sigma, time_remaining, window_secs / 60
+                self.id,
+                symbol,
+                if p_hat > 0.5 { "UP" } else { "DOWN" },
+                effective_p * 100.0,
+                market_ask_f64 * 100.0,
+                ev_net * 100.0,
+                sigma,
+                time_remaining,
+                window_secs / 60
             );
             return None;
         }
@@ -823,7 +850,10 @@ impl MomentumStrategyAdapter {
         let events = self.events.read().await;
         let event_list = events.get(symbol)?;
         let now = Utc::now();
-        let event = event_list.iter().filter(|e| e.end_time > now).min_by_key(|e| e.end_time)?;
+        let event = event_list
+            .iter()
+            .filter(|e| e.end_time > now)
+            .min_by_key(|e| e.end_time)?;
 
         let token_id = match direction {
             Direction::Up => &event.up_token_id,
@@ -845,7 +875,10 @@ impl MomentumStrategyAdapter {
         let events = self.events.read().await;
         let event_list = events.get(symbol)?;
         let now = Utc::now();
-        let event = event_list.iter().filter(|e| e.end_time > now).min_by_key(|e| e.end_time)?;
+        let event = event_list
+            .iter()
+            .filter(|e| e.end_time > now)
+            .min_by_key(|e| e.end_time)?;
 
         let token_id = match direction {
             Direction::Up => event.up_token_id.clone(),
@@ -975,8 +1008,9 @@ impl Strategy for MomentumStrategyAdapter {
 
                 // === DIRECTIONAL MODE: probability model entry ===
                 if self.config.directional_mode {
-                    if let Some(action) =
-                        self.check_directional_entry(symbol, price, *timestamp).await
+                    if let Some(action) = self
+                        .check_directional_entry(symbol, price, *timestamp)
+                        .await
                     {
                         let mut cooldowns = self.cooldowns.write().await;
                         cooldowns.insert(symbol.clone(), Utc::now());
@@ -1030,7 +1064,11 @@ impl Strategy for MomentumStrategyAdapter {
                             let events = self.events.read().await;
                             let quotes = self.pm_quotes.read().await;
                             let now = Utc::now();
-                            if let Some(event) = events.get(symbol).and_then(|list| list.iter().filter(|e| e.end_time > now).min_by_key(|e| e.end_time)) {
+                            if let Some(event) = events.get(symbol).and_then(|list| {
+                                list.iter()
+                                    .filter(|e| e.end_time > now)
+                                    .min_by_key(|e| e.end_time)
+                            }) {
                                 let token_id = match direction {
                                     Direction::Up => &event.up_token_id,
                                     Direction::Down => &event.down_token_id,
@@ -1179,7 +1217,11 @@ impl Strategy for MomentumStrategyAdapter {
 
                 debug!(
                     "[{}] Event discovered: {} for {} ({}m window, ends {})",
-                    self.id, event_id, symbol, window_secs / 60, end_time
+                    self.id,
+                    event_id,
+                    symbol,
+                    window_secs / 60,
+                    end_time
                 );
             }
 

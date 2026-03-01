@@ -252,7 +252,10 @@ mod tests {
     fn test_all_in_cost_components_sum() {
         let model = FeeModel::crypto();
         let cost = model.all_in_cost(dec!(0.50), dec!(0.48), dec!(0.52), dec!(0.3));
-        assert_eq!(cost.total, cost.taker_fee + cost.spread_cost + cost.depth_slippage);
+        assert_eq!(
+            cost.total,
+            cost.taker_fee + cost.spread_cost + cost.depth_slippage
+        );
     }
 
     #[test]

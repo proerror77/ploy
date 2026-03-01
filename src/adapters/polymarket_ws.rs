@@ -1457,7 +1457,10 @@ mod tests {
         ws.handle_message(json).await;
 
         // Should NOT receive any update
-        assert!(rx.try_recv().is_err(), "unregistered token should not produce QuoteUpdate");
+        assert!(
+            rx.try_recv().is_err(),
+            "unregistered token should not produce QuoteUpdate"
+        );
     }
 
     /// Empty book (no bids/asks) should still be handled but produce None quotes.
@@ -1478,8 +1481,14 @@ mod tests {
         ws.handle_message(json2).await;
 
         let update = rx.try_recv().expect("should receive update for empty book");
-        assert_eq!(update.quote.best_bid, None, "empty bids should clear best_bid");
-        assert_eq!(update.quote.best_ask, None, "empty asks should clear best_ask");
+        assert_eq!(
+            update.quote.best_bid, None,
+            "empty bids should clear best_bid"
+        );
+        assert_eq!(
+            update.quote.best_ask, None,
+            "empty asks should clear best_ask"
+        );
     }
 
     /// Book broadcast channel should emit Arc<BookMessage> for all tokens (even unregistered).
@@ -1496,7 +1505,9 @@ mod tests {
         let json = r#"[{"asset_id":"0xextra","market":"m","bids":[{"price":"0.30","size":"5"}],"asks":[{"price":"0.70","size":"5"}]}]"#;
         ws.handle_message(json).await;
 
-        let book = book_rx.try_recv().expect("should receive BookMessage broadcast");
+        let book = book_rx
+            .try_recv()
+            .expect("should receive BookMessage broadcast");
         assert_eq!(book.asset_id, "0xextra");
         assert_eq!(book.bids.len(), 1);
         assert_eq!(book.asks.len(), 1);
@@ -1515,7 +1526,13 @@ mod tests {
         ws.handle_message(json).await;
 
         let staleness = freshness.staleness(crate::platform::DataSource::PolymarketWs, "0xfresh");
-        assert!(staleness.is_some(), "freshness should be recorded after book update");
-        assert!(staleness.unwrap() < 1.0, "staleness should be very low (just recorded)");
+        assert!(
+            staleness.is_some(),
+            "freshness should be recorded after book update"
+        );
+        assert!(
+            staleness.unwrap() < 1.0,
+            "staleness should be very low (just recorded)"
+        );
     }
 }
