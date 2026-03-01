@@ -6,5 +6,5 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-alloy = { version = "1", default-features = false, features = ["signers", "signer-local"] }
+alloy = { version = "1", default-features = false, features = ["signer-local"] }
 polymarket-client-sdk = { version = "0.4", features = ["clob"] }
