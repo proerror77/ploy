@@ -814,6 +814,12 @@ impl BinanceWebSocket {
         // Ignore send errors (no subscribers)
         let _ = self.update_tx.send(update);
     }
+
+    /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
+    #[cfg(test)]
+    pub async fn ingest_test_message(&self, text: &str) {
+        self.handle_message(text).await;
+    }
 }
 
 #[cfg(test)]

@@ -1097,6 +1097,12 @@ impl PolymarketWebSocket {
         false
     }
 
+    /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
+    #[cfg(test)]
+    pub async fn ingest_test_message(&self, text: &str) -> bool {
+        self.handle_message(text).await
+    }
+
     /// Process an order book message
     async fn process_book_message(&self, book: BookMessage) {
         // Avoid borrowing `book` across await points so we can move it into the broadcast channel.
