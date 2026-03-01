@@ -127,9 +127,15 @@ fn print_shell_help() {
     println!("  data     {{positions, trades, activity, leaderboard, ...}}");
     println!("  orders   {{create, market-buy, market-sell, list, cancel, ...}}");
     println!("  wallet   {{address, balance, api-keys, ...}}");
+    #[cfg(feature = "pm_ctf")]
     println!("  ctf      {{split, merge, redeem, condition-id}}");
+    #[cfg(not(feature = "pm_ctf"))]
+    println!("  ctf      (disabled in this build; rebuild with --features pm_ctf)");
     println!("  approve  {{check, set}}");
+    #[cfg(feature = "pm_bridge")]
     println!("  bridge   {{deposit, supported-assets}}");
+    #[cfg(not(feature = "pm_bridge"))]
+    println!("  bridge   (disabled in this build; rebuild with --features pm_bridge)");
     println!("  setup    (interactive setup wizard)");
     println!("  help     (this message)");
     println!("  exit     (quit shell)");

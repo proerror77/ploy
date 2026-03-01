@@ -9,10 +9,8 @@ pub mod output;
 
 // Command modules (Phase 2-5)
 pub mod approve;
-pub mod bridge;
 pub mod clob;
 pub mod comments;
-pub mod ctf;
 pub mod data;
 pub mod events;
 pub mod markets;
@@ -24,6 +22,97 @@ pub mod shell;
 pub mod sports;
 pub mod tags;
 pub mod wallet;
+
+#[cfg(feature = "pm_bridge")]
+pub mod bridge;
+#[cfg(not(feature = "pm_bridge"))]
+mod bridge {
+    use clap::Subcommand;
+
+    use super::auth::PmAuth;
+    use super::output::OutputMode;
+
+    #[derive(Subcommand, Debug, Clone)]
+    pub enum BridgeCommands {
+        /// Get deposit addresses for bridging assets to Polymarket.
+        Deposit {
+            /// Override wallet address (defaults to signer address).
+            #[arg(long)]
+            address: Option<String>,
+        },
+        /// List supported bridge assets and chains.
+        SupportedAssets,
+        /// Check deposit transaction status.
+        Status {
+            /// Deposit address to check status for.
+            address: String,
+        },
+    }
+
+    pub async fn run(
+        _cmd: BridgeCommands,
+        _auth: &PmAuth,
+        _mode: OutputMode,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("`pm bridge` is disabled in this build. Rebuild with `--features pm_bridge`")
+    }
+}
+
+#[cfg(feature = "pm_ctf")]
+pub mod ctf;
+#[cfg(not(feature = "pm_ctf"))]
+mod ctf {
+    use clap::Subcommand;
+
+    use super::auth::PmAuth;
+    use super::output::OutputMode;
+    use super::GlobalPmArgs;
+
+    #[derive(Subcommand, Debug, Clone)]
+    pub enum CtfCommands {
+        /// Split collateral into conditional tokens.
+        Split {
+            /// Condition ID (bytes32 hex).
+            condition_id: String,
+            /// Amount of collateral to split (USDC, e.g., "10.0").
+            amount: String,
+        },
+        /// Merge conditional tokens back into collateral.
+        Merge {
+            /// Condition ID (bytes32 hex).
+            condition_id: String,
+            /// Amount to merge.
+            amount: String,
+        },
+        /// Redeem resolved conditional tokens.
+        Redeem {
+            /// Condition ID (bytes32 hex).
+            condition_id: String,
+            /// Use NegRisk adapter for negative-risk markets.
+            #[arg(long)]
+            neg_risk: bool,
+        },
+        /// Compute a condition ID from oracle + question ID + outcome count.
+        ConditionId {
+            /// Oracle address.
+            oracle: String,
+            /// Question ID (bytes32 hex).
+            question_id: String,
+            /// Number of outcomes (usually 2).
+            #[arg(long, default_value = "2")]
+            outcome_count: u32,
+        },
+    }
+
+    pub async fn run(
+        _cmd: CtfCommands,
+        _auth: &PmAuth,
+        _mode: OutputMode,
+        _args: &GlobalPmArgs,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("`pm ctf` is disabled in this build. Rebuild with `--features pm_ctf`")
+    }
+}
 
 use clap::{Args, Subcommand};
 
