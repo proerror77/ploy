@@ -333,12 +333,11 @@ features = ["macros"]
 version = "0.9.2"
 
 [dependencies.reqwest]
-version = "0.13.1"
+version = "0.12"
 default-features = false
 features = [
     "json",
-    "query",
-    "rustls",
+    "rustls-tls-native-roots",
 ]
 
 [dependencies.rust_decimal]
