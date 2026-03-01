@@ -4,6 +4,7 @@
 //! and Prometheus metrics endpoint.
 
 use crate::domain::StrategyState;
+use crate::platform::DataPlaneFreshness;
 use crate::services::Metrics;
 use crate::strategy::RiskManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
@@ -70,6 +71,8 @@ pub struct HealthState {
     pub risk_manager: Option<Arc<RiskManager>>,
     /// Metrics reference
     pub metrics: Option<Arc<Metrics>>,
+    /// Data plane freshness tracker (per-symbol, per-source)
+    pub freshness: Option<Arc<DataPlaneFreshness>>,
     /// Quote staleness threshold in seconds
     pub quote_staleness_threshold: u64,
 }
@@ -85,6 +88,7 @@ impl HealthState {
             strategy_state: RwLock::new(StrategyState::Idle),
             risk_manager: None,
             metrics: None,
+            freshness: None,
             quote_staleness_threshold: 30, // 30 seconds default
         }
     }
@@ -96,6 +100,11 @@ impl HealthState {
 
     pub fn with_metrics(mut self, m: Arc<Metrics>) -> Self {
         self.metrics = Some(m);
+        self
+    }
+
+    pub fn with_freshness(mut self, f: Arc<DataPlaneFreshness>) -> Self {
+        self.freshness = Some(f);
         self
     }
 
@@ -338,7 +347,7 @@ async fn metrics_handler(State(state): State<Arc<HealthState>>) -> impl IntoResp
         HealthStatus::Unhealthy => -1,
     };
 
-    let metrics = format!(
+    let mut metrics = format!(
         r#"# HELP ploy_up Health status (1=healthy, 0=degraded, -1=unhealthy)
 # TYPE ploy_up gauge
 ploy_up {}
@@ -395,6 +404,12 @@ ploy_consecutive_failures {}
         cycle_count,
         consecutive_failures,
     );
+
+    // Append per-symbol freshness metrics if available
+    if let Some(ref freshness) = state.freshness {
+        metrics.push('\n');
+        metrics.push_str(&freshness.prometheus_metrics());
+    }
 
     (
         StatusCode::OK,

@@ -5,11 +5,14 @@
 
 pub mod agents;
 mod contracts;
+pub mod freshness;
+pub mod persistence_pipeline;
 mod platform;
 mod position;
 mod queue;
 mod risk;
 mod router;
+pub mod subscription_planner;
 mod traits;
 mod types;
 
@@ -17,6 +20,12 @@ pub use contracts::{
     DeploymentExecutionMode, MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision,
     RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
     StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
+};
+pub use freshness::{DataPlaneFreshness, DataSource};
+pub use persistence_pipeline::{
+    BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,
+    PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
+    PipelineStats,
 };
 pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
@@ -26,6 +35,9 @@ pub use risk::{
     RiskConfig, RiskGate,
 };
 pub use router::{AgentSubscription, EventRouter, RouterStats};
+pub use subscription_planner::{
+    ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
+};
 pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent, SimpleAgent};
 pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,

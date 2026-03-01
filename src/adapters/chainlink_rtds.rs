@@ -9,6 +9,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -432,6 +433,8 @@ pub struct ChainlinkRtds {
     update_tx: broadcast::Sender<ChainlinkUpdate>,
     price_cache: ChainlinkPriceCache,
     symbols: Vec<String>,
+    // Optional: per-symbol freshness tracking for the data plane.
+    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
 }
 
 impl ChainlinkRtds {
@@ -446,7 +449,13 @@ impl ChainlinkRtds {
             update_tx,
             price_cache: ChainlinkPriceCache::new(),
             symbols,
+            freshness: OnceLock::new(),
         }
+    }
+
+    /// Attach a shared freshness tracker for the data plane.
+    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+        let _ = self.freshness.set(freshness);
     }
 
     /// Get a reference to the price cache
@@ -615,6 +624,11 @@ impl ChainlinkRtds {
         self.price_cache
             .update(&payload.symbol, price, timestamp)
             .await;
+
+        // Record per-symbol freshness for the data plane.
+        if let Some(f) = self.freshness.get() {
+            f.record_update(crate::platform::DataSource::ChainlinkRtds, &payload.symbol);
+        }
 
         // Broadcast update
         let update = ChainlinkUpdate {
