@@ -6,14 +6,12 @@
 //! - Trending: strong directional consistency in recent price moves
 //! - Ranging: neither trending nor vol-anomalous (mean-reverting)
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::adapters::binance_ws::BinanceWebSocket;
+use crate::platform::BinanceDataPlaneHandle;
 
 use super::config::RegimeConfig;
 
@@ -63,7 +61,7 @@ pub struct RegimeSnapshot {
 pub struct RegimeDetector {
     config: RegimeConfig,
     btc_symbol: String,
-    binance_ws: Arc<BinanceWebSocket>,
+    market_data: BinanceDataPlaneHandle,
 
     /// Current confirmed regime
     current_regime: MarketRegime,
@@ -77,12 +75,12 @@ impl RegimeDetector {
     pub fn new(
         config: RegimeConfig,
         btc_symbol: String,
-        binance_ws: Arc<BinanceWebSocket>,
+        market_data: BinanceDataPlaneHandle,
     ) -> Self {
         Self {
             config,
             btc_symbol,
-            binance_ws,
+            market_data,
             current_regime: MarketRegime::Ranging,
             candidate_regime: MarketRegime::Ranging,
             candidate_count: 0,
@@ -96,7 +94,7 @@ impl RegimeDetector {
 
     /// Compute regime from latest market data. Returns (snapshot, changed).
     pub async fn tick(&mut self) -> (RegimeSnapshot, bool) {
-        let cache = self.binance_ws.price_cache();
+        let cache = self.market_data.price_cache();
         let vol_short = cache
             .volatility(&self.btc_symbol, self.config.vol_short_secs)
             .await;

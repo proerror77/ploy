@@ -7,18 +7,15 @@
 //! 4. Detects and resolves cross-agent position conflicts
 //! 5. Coordinates temporal straddle positions
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::adapters::binance_ws::BinanceWebSocket;
 use crate::agents::context::AgentContext;
 use crate::agents::traits::TradingAgent;
 use crate::coordinator::CoordinatorCommand;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain};
+use crate::platform::{AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
 use super::config::OpenClawConfig;
@@ -30,12 +27,15 @@ use super::straddle::StraddleManager;
 /// OpenClaw meta-agent: observes, governs, and allocates — never trades directly.
 pub struct OpenClawAgent {
     config: OpenClawConfig,
-    binance_ws: Arc<BinanceWebSocket>,
+    market_data: BinanceDataPlaneHandle,
 }
 
 impl OpenClawAgent {
-    pub fn new(config: OpenClawConfig, binance_ws: Arc<BinanceWebSocket>) -> Self {
-        Self { config, binance_ws }
+    pub fn new(config: OpenClawConfig, market_data: BinanceDataPlaneHandle) -> Self {
+        Self {
+            config,
+            market_data,
+        }
     }
 }
 
@@ -90,7 +90,7 @@ impl TradingAgent for OpenClawAgent {
         let mut regime_detector = RegimeDetector::new(
             self.config.regime.clone(),
             self.config.btc_symbol.clone(),
-            self.binance_ws.clone(),
+            self.market_data.clone(),
         );
         let mut perf_tracker =
             PerformanceTracker::new(self.config.allocator.clone(), self.config.perf_window_secs);
@@ -181,7 +181,7 @@ impl TradingAgent for OpenClawAgent {
 
                     // Straddle tick (if enabled)
                     if straddle_mgr.is_enabled() {
-                        if let Some(spot) = self.binance_ws.price_cache()
+                        if let Some(spot) = self.market_data.price_cache()
                             .get(&self.config.btc_symbol).await
                         {
                             let _signals = straddle_mgr.tick(spot.price);

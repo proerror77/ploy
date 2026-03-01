@@ -60,7 +60,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket};
 use crate::agents::{AgentContext, TradingAgent};
 use crate::collector::LobCache;
 #[cfg(feature = "onnx")]
@@ -70,7 +69,9 @@ use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
+use crate::platform::{
+    AgentRiskParams, AgentStatus, CryptoDataPlaneHandle, Domain, OrderIntent, OrderPriority,
+};
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 #[cfg(feature = "onnx")]
@@ -291,8 +292,7 @@ fn deployment_id_for_symbol(symbol: &str) -> String {
 
 pub struct CryptoRlPolicyAgent {
     config: CryptoRlPolicyConfig,
-    binance_ws: Arc<BinanceWebSocket>,
-    pm_ws: Arc<PolymarketWebSocket>,
+    market_data: CryptoDataPlaneHandle,
     event_matcher: Arc<EventMatcher>,
     lob_cache: LobCache,
 
@@ -303,8 +303,7 @@ pub struct CryptoRlPolicyAgent {
 impl CryptoRlPolicyAgent {
     pub fn new(
         mut config: CryptoRlPolicyConfig,
-        binance_ws: Arc<BinanceWebSocket>,
-        pm_ws: Arc<PolymarketWebSocket>,
+        market_data: CryptoDataPlaneHandle,
         event_matcher: Arc<EventMatcher>,
         lob_cache: LobCache,
     ) -> Self {
@@ -408,8 +407,7 @@ impl CryptoRlPolicyAgent {
 
         Self {
             config,
-            binance_ws,
-            pm_ws,
+            market_data,
             event_matcher,
             lob_cache,
             #[cfg(feature = "onnx")]
@@ -816,11 +814,11 @@ impl TradingAgent for CryptoRlPolicyAgent {
 
                     if desired_tokens != subscribed_tokens {
                         for event in active_events.values() {
-                            self.pm_ws
+                            self.market_data
                                 .register_tokens(&event.up_token_id, &event.down_token_id)
                                 .await;
                         }
-                        self.pm_ws.request_resubscribe();
+                        self.market_data.request_resubscribe();
                         info!(
                             agent = self.config.agent_id,
                             token_count = desired_tokens.len(),
@@ -837,8 +835,8 @@ impl TradingAgent for CryptoRlPolicyAgent {
                     }
 
                     let now = Utc::now();
-                    let quote_cache = self.pm_ws.quote_cache();
-                    let spot_cache = self.binance_ws.price_cache();
+                    let quote_cache = self.market_data.quote_cache();
+                    let spot_cache = self.market_data.price_cache();
 
                     for coin in &self.config.coins {
                         let symbol = format!("{}USDT", coin.to_uppercase());
@@ -992,7 +990,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                                     let discrete = action.to_discrete();
                                     let priority = if action.is_aggressive() { OrderPriority::High } else { OrderPriority::Normal };
                                     let policy_version = self.config.policy_model_version.as_deref().unwrap_or("");
-                                    let deployment_id = deployment_id_for_symbol(symbol);
+                                    let deployment_id = deployment_id_for_symbol(&symbol);
 
                                     match discrete {
                                         DiscreteAction::Hold => {}
@@ -1709,7 +1707,7 @@ impl TradingAgent for CryptoRlPolicyAgent {
                         }
                         Some(CoordinatorCommand::ForceClose) => {
                             warn!(agent = self.config.agent_id, "force close — submitting exit orders");
-                            let quote_cache = self.pm_ws.quote_cache();
+                            let quote_cache = self.market_data.quote_cache();
                             for (slug, pos) in &positions {
                                 let deployment_id = deployment_id_for_symbol(&pos.symbol);
                                 for leg in &pos.legs {

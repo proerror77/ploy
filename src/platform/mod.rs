@@ -22,7 +22,9 @@ pub use contracts::{
     RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
     StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
 };
-pub use data_plane::{DataPlaneConfig, PlatformDataPlane};
+pub use data_plane::{
+    BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, PlatformDataPlane,
+};
 pub use freshness::{DataPlaneFreshness, DataSource};
 pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,
