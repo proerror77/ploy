@@ -12,21 +12,21 @@ use super::volatility::normal_cdf;
 /// Full probability estimate with features for logging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbabilityEstimate {
-    pub p_hat: f64,          // P(Up) estimate [0, 1]
-    pub confidence: f64,     // model confidence [0, 1]
-    pub features: Features,  // for logging/debugging
+    pub p_hat: f64,         // P(Up) estimate [0, 1]
+    pub confidence: f64,    // model confidence [0, 1]
+    pub features: Features, // for logging/debugging
 }
 
 /// Feature vector used in probability estimation
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Features {
-    pub distance_to_beat: f64,  // (St - S0) / S0
-    pub realized_vol: f64,      // σ from Chainlink history
-    pub time_remaining: f64,    // Δt in seconds
-    pub momentum_10s: f64,      // Binance 10s momentum (feature, not truth)
-    pub momentum_60s: f64,      // Binance 60s momentum
-    pub obi: f64,               // Binance L2 orderbook imbalance
-    pub binance_chainlink_spread: f64,  // basis risk indicator
+    pub distance_to_beat: f64,         // (St - S0) / S0
+    pub realized_vol: f64,             // σ from Chainlink history
+    pub time_remaining: f64,           // Δt in seconds
+    pub momentum_10s: f64,             // Binance 10s momentum (feature, not truth)
+    pub momentum_60s: f64,             // Binance 60s momentum
+    pub obi: f64,                      // Binance L2 orderbook imbalance
+    pub binance_chainlink_spread: f64, // basis risk indicator
 }
 
 /// Estimate P(ST >= S0) using log-normal model
@@ -127,18 +127,18 @@ mod tests {
     fn test_price_above_s0_high_probability() {
         // BTC moved up 1% with low vol, 7.5 min remaining
         let p = estimate_probability(dec!(100), dec!(101), 0.001, 450.0, 0.0);
-        assert!(p > 0.7, "p_hat={} should be > 0.7 when price is above S0", p);
+        assert!(
+            p > 0.7,
+            "p_hat={} should be > 0.7 when price is above S0",
+            p
+        );
     }
 
     #[test]
     fn test_price_at_s0_near_half() {
         // Price at S0, should be ~0.5
         let p = estimate_probability(dec!(100), dec!(100), 0.001, 450.0, 0.0);
-        assert!(
-            (p - 0.5).abs() < 0.05,
-            "p_hat={} should be ~0.5 at S0",
-            p
-        );
+        assert!((p - 0.5).abs() < 0.05, "p_hat={} should be ~0.5 at S0", p);
     }
 
     #[test]
@@ -188,10 +188,7 @@ mod tests {
         // Same price move but higher vol should give less extreme probability
         let p_low_vol = estimate_probability(dec!(100), dec!(101), 0.001, 450.0, 0.0);
         let p_high_vol = estimate_probability(dec!(100), dec!(101), 0.01, 450.0, 0.0);
-        assert!(
-            p_low_vol > p_high_vol,
-            "higher vol should reduce certainty"
-        );
+        assert!(p_low_vol > p_high_vol, "higher vol should reduce certainty");
     }
 
     #[test]

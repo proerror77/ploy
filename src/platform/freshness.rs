@@ -257,7 +257,9 @@ impl DataPlaneFreshness {
         ));
 
         // Per-source subscription count
-        out.push_str("\n# HELP ploy_source_subscriptions_total Subscribed tokens/symbols per source\n");
+        out.push_str(
+            "\n# HELP ploy_source_subscriptions_total Subscribed tokens/symbols per source\n",
+        );
         out.push_str("# TYPE ploy_source_subscriptions_total gauge\n");
         for entry in self.source_subscription_count.iter() {
             out.push_str(&format!(
@@ -362,8 +364,14 @@ mod tests {
         f.set_source_connected(DataSource::BinanceSpot, true);
         f.set_source_connected(DataSource::PolymarketWs, false);
 
-        assert_eq!(*f.source_connected.get(&DataSource::BinanceSpot).unwrap(), true);
-        assert_eq!(*f.source_connected.get(&DataSource::PolymarketWs).unwrap(), false);
+        assert_eq!(
+            *f.source_connected.get(&DataSource::BinanceSpot).unwrap(),
+            true
+        );
+        assert_eq!(
+            *f.source_connected.get(&DataSource::PolymarketWs).unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -387,8 +395,10 @@ mod tests {
 
         let output = f.prometheus_metrics();
 
-        assert!(output.contains("ploy_symbol_staleness_seconds{source=\"binance_spot\",symbol=\"BTCUSDT\"}"));
-        assert!(output.contains("ploy_symbol_updates_total{source=\"binance_spot\",symbol=\"BTCUSDT\"} 1"));
+        assert!(output
+            .contains("ploy_symbol_staleness_seconds{source=\"binance_spot\",symbol=\"BTCUSDT\"}"));
+        assert!(output
+            .contains("ploy_symbol_updates_total{source=\"binance_spot\",symbol=\"BTCUSDT\"} 1"));
         assert!(output.contains("ploy_source_connected{source=\"binance_spot\"} 1"));
         assert!(output.contains("ploy_source_messages_total{source=\"binance_spot\"} 1"));
         assert!(output.contains("ploy_source_subscriptions_total{source=\"binance_spot\"} 3"));

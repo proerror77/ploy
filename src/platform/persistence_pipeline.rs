@@ -176,9 +176,9 @@ struct OrderbookState {
 /// Internal dedup tracker.
 #[derive(Debug, Default)]
 struct DedupState {
-    quotes: HashMap<String, QuoteState>,       // key: token_id
-    prices: HashMap<String, PriceState>,       // key: symbol
-    lobs: HashMap<String, LobState>,           // key: symbol
+    quotes: HashMap<String, QuoteState>,         // key: token_id
+    prices: HashMap<String, PriceState>,         // key: symbol
+    lobs: HashMap<String, LobState>,             // key: symbol
     orderbooks: HashMap<String, OrderbookState>, // key: token_id
 }
 
@@ -251,7 +251,10 @@ impl PersistencePipeline {
         let mut stats = PipelineStats::default();
         let mut log_counter: u64 = 0;
 
-        info!("persistence pipeline started (capacity={})", config.channel_capacity);
+        info!(
+            "persistence pipeline started (capacity={})",
+            config.channel_capacity
+        );
 
         while let Some(event) = rx.recv().await {
             match event {
@@ -279,7 +282,10 @@ impl PersistencePipeline {
                 }
                 PersistenceEvent::BinanceLob(tick) => {
                     if Self::should_persist_lob(&tick, &mut dedup, &config) {
-                        if let Err(e) = Self::write_binance_lob(&pool, &tick, config.binance_lob_max_levels).await {
+                        if let Err(e) =
+                            Self::write_binance_lob(&pool, &tick, config.binance_lob_max_levels)
+                                .await
+                        {
                             warn!(error = %e, symbol = %tick.symbol, "binance lob persist failed");
                         } else {
                             stats.binance_lobs_persisted += 1;
@@ -298,7 +304,13 @@ impl PersistencePipeline {
                 }
                 PersistenceEvent::ClobOrderbook(snap) => {
                     if Self::should_persist_orderbook(&snap, &mut dedup, &config) {
-                        if let Err(e) = Self::write_clob_orderbook(&pool, &snap, config.clob_orderbook_max_levels).await {
+                        if let Err(e) = Self::write_clob_orderbook(
+                            &pool,
+                            &snap,
+                            config.clob_orderbook_max_levels,
+                        )
+                        .await
+                        {
                             warn!(error = %e, token = %snap.token_id, "clob orderbook persist failed");
                         } else {
                             stats.clob_orderbooks_persisted += 1;
@@ -463,7 +475,10 @@ impl PersistencePipeline {
         Ok(())
     }
 
-    async fn write_binance_price(pool: &PgPool, tick: &BinancePriceTick) -> Result<(), sqlx::Error> {
+    async fn write_binance_price(
+        pool: &PgPool,
+        tick: &BinancePriceTick,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"INSERT INTO binance_price_ticks
                (symbol, price, quantity, trade_time)
@@ -558,7 +573,12 @@ mod tests {
         PersistenceConfig::default()
     }
 
-    fn make_quote(token: &str, bid: Option<f64>, ask: Option<f64>, at: DateTime<Utc>) -> ClobQuoteTick {
+    fn make_quote(
+        token: &str,
+        bid: Option<f64>,
+        ask: Option<f64>,
+        at: DateTime<Utc>,
+    ) -> ClobQuoteTick {
         ClobQuoteTick {
             token_id: token.into(),
             side: "UP".into(),
@@ -587,19 +607,27 @@ mod tests {
         let t0 = Utc::now();
 
         let q1 = make_quote("tok-1", Some(0.42), Some(0.45), t0);
-        assert!(PersistencePipeline::should_persist_quote(&q1, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_quote(
+            &q1, &mut dedup, &config
+        ));
 
         // Same values, 1s later (< 2s interval) → skip
         let q2 = make_quote("tok-1", Some(0.42), Some(0.45), t0 + Duration::seconds(1));
-        assert!(!PersistencePipeline::should_persist_quote(&q2, &mut dedup, &config));
+        assert!(!PersistencePipeline::should_persist_quote(
+            &q2, &mut dedup, &config
+        ));
 
         // Same values, 3s later (>= 2s interval) but unchanged → skip
         let q3 = make_quote("tok-1", Some(0.42), Some(0.45), t0 + Duration::seconds(3));
-        assert!(!PersistencePipeline::should_persist_quote(&q3, &mut dedup, &config));
+        assert!(!PersistencePipeline::should_persist_quote(
+            &q3, &mut dedup, &config
+        ));
 
         // Changed values, 3s later → persist
         let q4 = make_quote("tok-1", Some(0.43), Some(0.45), t0 + Duration::seconds(3));
-        assert!(PersistencePipeline::should_persist_quote(&q4, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_quote(
+            &q4, &mut dedup, &config
+        ));
     }
 
     #[test]
@@ -616,7 +644,9 @@ mod tests {
             domain: Domain::Crypto,
             received_at: Utc::now(),
         };
-        assert!(!PersistencePipeline::should_persist_quote(&q, &mut dedup, &config));
+        assert!(!PersistencePipeline::should_persist_quote(
+            &q, &mut dedup, &config
+        ));
     }
 
     #[test]
@@ -626,15 +656,21 @@ mod tests {
         let t0 = Utc::now();
 
         let p1 = make_price("BTCUSDT", 50000.0, t0);
-        assert!(PersistencePipeline::should_persist_price(&p1, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_price(
+            &p1, &mut dedup, &config
+        ));
 
         // Same price, 0.5s later → skip
         let p2 = make_price("BTCUSDT", 50000.0, t0 + Duration::milliseconds(500));
-        assert!(!PersistencePipeline::should_persist_price(&p2, &mut dedup, &config));
+        assert!(!PersistencePipeline::should_persist_price(
+            &p2, &mut dedup, &config
+        ));
 
         // Different price, 2s later → persist
         let p3 = make_price("BTCUSDT", 50001.0, t0 + Duration::seconds(2));
-        assert!(PersistencePipeline::should_persist_price(&p3, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_price(
+            &p3, &mut dedup, &config
+        ));
     }
 
     #[test]
@@ -658,18 +694,24 @@ mod tests {
             asks: serde_json::json!([]),
             event_time: t0,
         };
-        assert!(PersistencePipeline::should_persist_lob(&l1, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_lob(
+            &l1, &mut dedup, &config
+        ));
 
         // Same update_id, 2s later → skip
         let mut l2 = l1.clone();
         l2.event_time = t0 + Duration::seconds(2);
-        assert!(!PersistencePipeline::should_persist_lob(&l2, &mut dedup, &config));
+        assert!(!PersistencePipeline::should_persist_lob(
+            &l2, &mut dedup, &config
+        ));
 
         // New update_id, 2s later → persist
         let mut l3 = l1.clone();
         l3.update_id = 101;
         l3.event_time = t0 + Duration::seconds(2);
-        assert!(PersistencePipeline::should_persist_lob(&l3, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_lob(
+            &l3, &mut dedup, &config
+        ));
     }
 
     #[test]
@@ -688,19 +730,24 @@ mod tests {
             source: "polymarket_ws".into(),
             context: None,
         };
-        assert!(PersistencePipeline::should_persist_orderbook(&s1, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_orderbook(
+            &s1, &mut dedup, &config
+        ));
 
         // Same hash, after interval → skip (require_hash_change=true)
         std::thread::sleep(std::time::Duration::from_millis(10));
         // Force enough time by manipulating dedup state
-        dedup.orderbooks.get_mut("tok-1").unwrap().last_at =
-            Utc::now() - Duration::seconds(10);
-        assert!(!PersistencePipeline::should_persist_orderbook(&s1, &mut dedup, &config));
+        dedup.orderbooks.get_mut("tok-1").unwrap().last_at = Utc::now() - Duration::seconds(10);
+        assert!(!PersistencePipeline::should_persist_orderbook(
+            &s1, &mut dedup, &config
+        ));
 
         // Different hash → persist
         let mut s2 = s1.clone();
         s2.hash = "def456".into();
-        assert!(PersistencePipeline::should_persist_orderbook(&s2, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_orderbook(
+            &s2, &mut dedup, &config
+        ));
     }
 
     #[test]
@@ -712,13 +759,21 @@ mod tests {
         let q1 = make_quote("tok-1", Some(0.42), Some(0.45), t0);
         let q2 = make_quote("tok-2", Some(0.55), Some(0.58), t0);
 
-        assert!(PersistencePipeline::should_persist_quote(&q1, &mut dedup, &config));
-        assert!(PersistencePipeline::should_persist_quote(&q2, &mut dedup, &config));
+        assert!(PersistencePipeline::should_persist_quote(
+            &q1, &mut dedup, &config
+        ));
+        assert!(PersistencePipeline::should_persist_quote(
+            &q2, &mut dedup, &config
+        ));
 
         // tok-1 unchanged within interval → skip; tok-2 changed → still skip (interval)
         let q3 = make_quote("tok-1", Some(0.42), Some(0.45), t0 + Duration::seconds(1));
         let q4 = make_quote("tok-2", Some(0.56), Some(0.58), t0 + Duration::seconds(1));
-        assert!(!PersistencePipeline::should_persist_quote(&q3, &mut dedup, &config));
-        assert!(!PersistencePipeline::should_persist_quote(&q4, &mut dedup, &config));
+        assert!(!PersistencePipeline::should_persist_quote(
+            &q3, &mut dedup, &config
+        ));
+        assert!(!PersistencePipeline::should_persist_quote(
+            &q4, &mut dedup, &config
+        ));
     }
 }

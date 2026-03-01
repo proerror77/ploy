@@ -3,6 +3,7 @@
 //! Entry point for `ploy platform start`. Creates shared infrastructure,
 //! registers agents based on config flags, and runs the coordinator loop.
 
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -11,7 +12,6 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
-use crate::adapters::polymarket_ws::PriceLevel;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
@@ -32,8 +32,8 @@ use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    AgentRiskParams, AgentStatus, DataPlaneConfig, Domain, MarketSelector, PlatformDataPlane,
-    StrategyDeployment,
+    AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig,
+    Domain, MarketSelector, PlatformDataPlane, StrategyDeployment,
 };
 use crate::signing::Wallet;
 use crate::strategy::event_edge::core::EventEdgeCore;
@@ -1246,336 +1246,6 @@ async fn ensure_clob_trade_alerts_table(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-fn spawn_clob_quote_persistence(
-    pm_ws: Arc<PolymarketWebSocket>,
-    pool: PgPool,
-    agent_id: String,
-    domain: Domain,
-) {
-    tokio::spawn(async move {
-        if let Err(e) = ensure_clob_quote_ticks_table(&pool).await {
-            warn!(
-                agent = agent_id,
-                error = %e,
-                "failed to ensure clob_quote_ticks table; quote persistence disabled"
-            );
-            return;
-        }
-
-        let mut rx = pm_ws.subscribe_updates();
-        let mut last_persisted: HashMap<
-            String,
-            (
-                chrono::DateTime<Utc>,
-                Option<rust_decimal::Decimal>,
-                Option<rust_decimal::Decimal>,
-                Option<rust_decimal::Decimal>,
-                Option<rust_decimal::Decimal>,
-            ),
-        > = HashMap::new();
-        let mut persisted_count: u64 = 0;
-
-        loop {
-            match rx.recv().await {
-                Ok(update) => {
-                    if update.quote.best_bid.is_none() && update.quote.best_ask.is_none() {
-                        continue;
-                    }
-
-                    let now = Utc::now();
-                    let should_persist = match last_persisted.get(&update.token_id) {
-                        None => true,
-                        Some((ts, prev_bid, prev_ask, prev_bid_size, prev_ask_size)) => {
-                            let changed = *prev_bid != update.quote.best_bid
-                                || *prev_ask != update.quote.best_ask
-                                || *prev_bid_size != update.quote.bid_size
-                                || *prev_ask_size != update.quote.ask_size;
-                            let elapsed = now.signed_duration_since(*ts).num_seconds()
-                                >= CLOB_PERSIST_MIN_INTERVAL_SECS;
-                            changed && elapsed
-                        }
-                    };
-
-                    if !should_persist {
-                        continue;
-                    }
-
-                    let side = update.side.as_str();
-                    let domain_str = domain.to_string();
-                    if let Err(e) = sqlx::query(
-                        r#"
-                        INSERT INTO clob_quote_ticks
-                            (token_id, side, best_bid, best_ask, bid_size, ask_size, source, domain)
-                        VALUES
-                            ($1, $2, $3, $4, $5, $6, 'polymarket_ws', $7)
-                        "#,
-                    )
-                    .bind(&update.token_id)
-                    .bind(side)
-                    .bind(update.quote.best_bid)
-                    .bind(update.quote.best_ask)
-                    .bind(update.quote.bid_size)
-                    .bind(update.quote.ask_size)
-                    .bind(&domain_str)
-                    .execute(&pool)
-                    .await
-                    {
-                        warn!(
-                            agent = agent_id,
-                            token_id = %update.token_id,
-                            error = %e,
-                            "failed to persist clob quote"
-                        );
-                        continue;
-                    }
-
-                    last_persisted.insert(
-                        update.token_id.clone(),
-                        (
-                            now,
-                            update.quote.best_bid,
-                            update.quote.best_ask,
-                            update.quote.bid_size,
-                            update.quote.ask_size,
-                        ),
-                    );
-                    persisted_count = persisted_count.saturating_add(1);
-
-                    if persisted_count % 1000 == 0 {
-                        info!(
-                            agent = agent_id,
-                            persisted_count, "persisted clob quote ticks"
-                        );
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        agent = agent_id,
-                        lagged = n,
-                        "clob persistence receiver lagged"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!(agent = agent_id, "clob persistence receiver closed");
-                    break;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_binance_price_persistence(
-    binance_ws: Arc<BinanceWebSocket>,
-    pool: PgPool,
-    agent_id: String,
-) {
-    tokio::spawn(async move {
-        if let Err(e) = ensure_binance_price_ticks_table(&pool).await {
-            warn!(
-                agent = agent_id,
-                error = %e,
-                "failed to ensure binance_price_ticks table; Binance persistence disabled"
-            );
-            return;
-        }
-
-        let mut rx = binance_ws.subscribe();
-        let mut last_persisted: HashMap<
-            String,
-            (
-                chrono::DateTime<Utc>,
-                Option<rust_decimal::Decimal>,
-                Option<rust_decimal::Decimal>,
-            ),
-        > = HashMap::new();
-        let mut persisted_count: u64 = 0;
-
-        loop {
-            match rx.recv().await {
-                Ok(update) => {
-                    let now = Utc::now();
-                    let should_persist = match last_persisted.get(&update.symbol) {
-                        None => true,
-                        Some((ts, prev_price, prev_qty)) => {
-                            let changed =
-                                *prev_price != Some(update.price) || *prev_qty != update.quantity;
-                            let elapsed = now.signed_duration_since(*ts).num_seconds()
-                                >= BINANCE_PERSIST_MIN_INTERVAL_SECS;
-                            changed && elapsed
-                        }
-                    };
-
-                    if !should_persist {
-                        continue;
-                    }
-
-                    if let Err(e) = sqlx::query(
-                        r#"
-                        INSERT INTO binance_price_ticks
-                            (symbol, price, quantity, trade_time)
-                        VALUES
-                            ($1, $2, $3, $4)
-                        "#,
-                    )
-                    .bind(&update.symbol)
-                    .bind(update.price)
-                    .bind(update.quantity)
-                    .bind(update.timestamp)
-                    .execute(&pool)
-                    .await
-                    {
-                        warn!(
-                            agent = agent_id,
-                            symbol = %update.symbol,
-                            error = %e,
-                            "failed to persist Binance price tick"
-                        );
-                        continue;
-                    }
-
-                    last_persisted.insert(
-                        update.symbol.clone(),
-                        (now, Some(update.price), update.quantity),
-                    );
-                    persisted_count = persisted_count.saturating_add(1);
-
-                    if persisted_count % 10_000 == 0 {
-                        info!(
-                            agent = agent_id,
-                            persisted_count, "persisted Binance price ticks"
-                        );
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        agent = agent_id,
-                        lagged = n,
-                        "binance persistence receiver lagged"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!(agent = agent_id, "binance persistence receiver closed");
-                    break;
-                }
-            }
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Chainlink RTDS tick persistence
-// ---------------------------------------------------------------------------
-
-async fn ensure_chainlink_tables(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS chainlink_price_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            price NUMERIC NOT NULL,
-            source_timestamp TIMESTAMPTZ NOT NULL,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_chainlink_ticks_symbol_time ON chainlink_price_ticks(symbol, source_timestamp DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_chainlink_ticks_time ON chainlink_price_ticks(received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS market_window_labels (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            window_start TIMESTAMPTZ NOT NULL,
-            window_end TIMESTAMPTZ NOT NULL,
-            open_price NUMERIC NOT NULL,
-            close_price NUMERIC,
-            label SMALLINT,
-            condition_id TEXT,
-            UNIQUE(symbol, window_start)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_market_window_labels_symbol ON market_window_labels(symbol, window_start DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-fn spawn_chainlink_persistence(chainlink_ws: Arc<crate::adapters::ChainlinkRtds>, pool: PgPool) {
-    tokio::spawn(async move {
-        if let Err(e) = ensure_chainlink_tables(&pool).await {
-            warn!(
-                error = %e,
-                "failed to ensure chainlink tables; Chainlink persistence disabled"
-            );
-            return;
-        }
-
-        let mut rx = chainlink_ws.subscribe();
-        let mut persisted_count: u64 = 0;
-
-        loop {
-            match rx.recv().await {
-                Ok(update) => {
-                    if let Err(e) = sqlx::query(
-                        r#"
-                        INSERT INTO chainlink_price_ticks
-                            (symbol, price, source_timestamp)
-                        VALUES
-                            ($1, $2, $3)
-                        "#,
-                    )
-                    .bind(&update.symbol)
-                    .bind(update.price)
-                    .bind(update.timestamp)
-                    .execute(&pool)
-                    .await
-                    {
-                        warn!(
-                            symbol = %update.symbol,
-                            error = %e,
-                            "failed to persist Chainlink price tick"
-                        );
-                        continue;
-                    }
-
-                    persisted_count = persisted_count.saturating_add(1);
-
-                    if persisted_count % 10_000 == 0 {
-                        info!(persisted_count, "persisted Chainlink price ticks");
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "chainlink persistence receiver lagged");
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!("chainlink persistence receiver closed");
-                    break;
-                }
-            }
-        }
-    });
-}
-
 fn lob_levels_json(
     state: &crate::collector::OrderBookState,
     is_bids: bool,
@@ -1607,138 +1277,6 @@ fn lob_levels_json(
             })
             .collect()
     }
-}
-
-fn spawn_binance_lob_persistence(
-    depth_stream: Arc<crate::collector::BinanceDepthStream>,
-    pool: PgPool,
-    agent_id: String,
-) {
-    tokio::spawn(async move {
-        if let Err(e) = ensure_binance_lob_ticks_table(&pool).await {
-            warn!(
-                agent = agent_id,
-                error = %e,
-                "failed to ensure binance_lob_ticks table; Binance LOB persistence disabled"
-            );
-            return;
-        }
-
-        let snapshot_interval_ms = env_u64("BN_LOB_SNAPSHOT_MS", 1000).max(100);
-        let max_levels = env_usize("BN_LOB_LEVELS", 20).clamp(0, 200);
-
-        let mut rx = depth_stream.subscribe();
-        let mut last_persisted: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
-        let mut last_update_id: HashMap<String, i64> = HashMap::new();
-        let mut persisted_count: u64 = 0;
-
-        loop {
-            match rx.recv().await {
-                Ok(update) => {
-                    let now = Utc::now();
-                    let symbol = update.symbol.clone();
-
-                    let should_persist =
-                        match (last_persisted.get(&symbol), last_update_id.get(&symbol)) {
-                            (None, _) => true,
-                            (Some(ts), Some(prev_id)) => {
-                                let elapsed_ms =
-                                    now.signed_duration_since(*ts).num_milliseconds().max(0) as u64;
-                                elapsed_ms >= snapshot_interval_ms
-                                    && *prev_id != update.snapshot.update_id
-                            }
-                            (Some(ts), None) => {
-                                let elapsed_ms =
-                                    now.signed_duration_since(*ts).num_milliseconds().max(0) as u64;
-                                elapsed_ms >= snapshot_interval_ms
-                            }
-                        };
-
-                    if !should_persist {
-                        continue;
-                    }
-
-                    let (bids, asks) = if max_levels == 0 {
-                        (Vec::new(), Vec::new())
-                    } else {
-                        (
-                            lob_levels_json(&update.raw_state, true, max_levels),
-                            lob_levels_json(&update.raw_state, false, max_levels),
-                        )
-                    };
-
-                    if let Err(e) = sqlx::query(
-                        r#"
-                        INSERT INTO binance_lob_ticks (
-                            symbol, update_id,
-                            best_bid, best_ask, mid_price, spread_bps,
-                            obi_5, obi_10,
-                            bid_volume_5, ask_volume_5,
-                            bids, asks,
-                            event_time
-                        ) VALUES (
-                            $1, $2,
-                            $3, $4, $5, $6,
-                            $7, $8,
-                            $9, $10,
-                            $11, $12,
-                            $13
-                        )
-                        "#,
-                    )
-                    .bind(&symbol)
-                    .bind(update.snapshot.update_id)
-                    .bind(update.snapshot.best_bid)
-                    .bind(update.snapshot.best_ask)
-                    .bind(update.snapshot.mid_price)
-                    .bind(update.snapshot.spread_bps)
-                    .bind(update.snapshot.obi_5)
-                    .bind(update.snapshot.obi_10)
-                    .bind(update.snapshot.bid_volume_5)
-                    .bind(update.snapshot.ask_volume_5)
-                    .bind(sqlx::types::Json(&bids))
-                    .bind(sqlx::types::Json(&asks))
-                    .bind(update.snapshot.timestamp)
-                    .execute(&pool)
-                    .await
-                    {
-                        warn!(
-                            agent = agent_id,
-                            symbol = %symbol,
-                            error = %e,
-                            "failed to persist Binance LOB tick"
-                        );
-                        continue;
-                    }
-
-                    last_persisted.insert(symbol.clone(), now);
-                    last_update_id.insert(symbol.clone(), update.snapshot.update_id);
-                    persisted_count = persisted_count.saturating_add(1);
-
-                    if persisted_count % 10_000 == 0 {
-                        info!(
-                            agent = agent_id,
-                            persisted_count,
-                            snapshot_interval_ms,
-                            max_levels,
-                            "persisted Binance LOB ticks"
-                        );
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        agent = agent_id,
-                        lagged = n,
-                        "binance lob persistence receiver lagged"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!(agent = agent_id, "binance lob persistence receiver closed");
-                    break;
-                }
-            }
-        }
-    });
 }
 
 type InsertedTradeTickRow = (
@@ -3080,52 +2618,6 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
     winners == 1 && losers == prices.len().saturating_sub(1)
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-struct DepthLevelJson {
-    price: String,
-    size: String,
-}
-
-fn parse_depth_levels(
-    levels: &[PriceLevel],
-    is_bid: bool,
-    max_levels: usize,
-) -> Vec<DepthLevelJson> {
-    use rust_decimal::Decimal;
-    let mut parsed: Vec<(Decimal, Decimal)> = Vec::with_capacity(levels.len());
-
-    for lvl in levels {
-        let Ok(price) = lvl.price.parse::<Decimal>() else {
-            continue;
-        };
-        let Ok(size) = lvl.size.parse::<Decimal>() else {
-            continue;
-        };
-        parsed.push((price, size));
-    }
-
-    if is_bid {
-        parsed.sort_by(|a, b| b.0.cmp(&a.0));
-    } else {
-        parsed.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-
-    parsed
-        .into_iter()
-        .take(max_levels)
-        .map(|(price, size)| DepthLevelJson {
-            price: price.to_string(),
-            size: size.to_string(),
-        })
-        .collect()
-}
-
-fn parse_book_timestamp(ts: &Option<String>) -> Option<chrono::DateTime<Utc>> {
-    let raw = ts.as_ref()?;
-    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
-    Some(parsed.with_timezone(&Utc))
-}
-
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -3620,133 +3112,6 @@ fn apply_strategy_deployments(
         timeframes = ?tf,
         "applied strategy deployment matrix to platform runtime"
     );
-}
-
-fn spawn_clob_orderbook_persistence(
-    pm_ws: Arc<PolymarketWebSocket>,
-    pool: PgPool,
-    agent_id: String,
-    domain: Domain,
-    max_levels_default: usize,
-    min_interval_secs_default: i64,
-) {
-    tokio::spawn(async move {
-        let agent_label = agent_id.clone();
-        let context_base = json!({
-            "agent_id": agent_id,
-        });
-
-        if let Err(e) = ensure_clob_orderbook_snapshots_table(&pool).await {
-            warn!(
-                agent = agent_label,
-                error = %e,
-                "failed to ensure clob_orderbook_snapshots table; orderbook persistence disabled"
-            );
-            return;
-        }
-
-        let mut rx = pm_ws.subscribe_books();
-        let max_levels = env_usize("PM_ORDERBOOK_LEVELS", max_levels_default).clamp(1, 200);
-        let min_interval_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
-            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", min_interval_secs_default).max(0)
-                as u64)
-                .saturating_mul(1000),
-        };
-        let require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
-
-        let mut last_persisted: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
-        let mut last_hash: HashMap<String, String> = HashMap::new();
-        let mut persisted_count: u64 = 0;
-
-        loop {
-            match rx.recv().await {
-                Ok(book) => {
-                    let now = Utc::now();
-                    let token_id = book.asset_id.clone();
-
-                    if min_interval_ms > 0 {
-                        let should_persist_by_interval = match last_persisted.get(&token_id) {
-                            None => true,
-                            Some(ts) => {
-                                now.signed_duration_since(*ts).num_milliseconds()
-                                    >= min_interval_ms as i64
-                            }
-                        };
-                        if !should_persist_by_interval {
-                            continue;
-                        }
-                    }
-
-                    if require_hash_change {
-                        if let Some(hash) = book.hash.as_deref() {
-                            if last_hash.get(&token_id).map(|v| v.as_str()) == Some(hash) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    let bids = parse_depth_levels(&book.bids, true, max_levels);
-                    let asks = parse_depth_levels(&book.asks, false, max_levels);
-                    let book_ts = parse_book_timestamp(&book.timestamp);
-
-                    let context = context_base.clone();
-
-                    if let Err(e) = sqlx::query(
-                        r#"
-                        INSERT INTO clob_orderbook_snapshots
-                            (domain, token_id, market, bids, asks, book_timestamp, hash, source, context)
-                        VALUES
-                            ($1, $2, $3, $4, $5, $6, $7, 'polymarket_ws', $8)
-                        "#,
-                    )
-                    .bind(domain.to_string())
-                    .bind(&token_id)
-                    .bind(&book.market)
-                    .bind(sqlx::types::Json(&bids))
-                    .bind(sqlx::types::Json(&asks))
-                    .bind(book_ts)
-                    .bind(&book.hash)
-                    .bind(sqlx::types::Json(context))
-                    .execute(&pool)
-                    .await
-                    {
-                        warn!(
-                            agent = %agent_label,
-                            token_id = %token_id,
-                            error = %e,
-                            "failed to persist clob orderbook snapshot"
-                        );
-                        continue;
-                    }
-
-                    last_persisted.insert(token_id, now);
-                    if let Some(hash) = book.hash.as_ref() {
-                        last_hash.insert(book.asset_id.clone(), hash.clone());
-                    }
-                    persisted_count = persisted_count.saturating_add(1);
-
-                    if persisted_count % 100 == 0 {
-                        info!(
-                            agent = %agent_label,
-                            persisted_count,
-                            max_levels,
-                            min_interval_ms,
-                            require_hash_change,
-                            "persisted clob orderbook snapshots"
-                        );
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(agent = %agent_label, lagged = n, "clob orderbook persistence receiver lagged");
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!(agent = %agent_label, "clob orderbook persistence receiver closed");
-                    break;
-                }
-            }
-        }
-    });
 }
 
 /// Top-level config for the platform bootstrap
@@ -5684,14 +5049,16 @@ pub async fn start_platform(
                 binance_kline_closed_only: true,
                 chainlink_symbols: vec![],
             };
-            let dp = Arc::new(PlatformDataPlane::new(data_plane_config, Arc::clone(&freshness)));
+            let dp = Arc::new(PlatformDataPlane::new(
+                data_plane_config,
+                Arc::clone(&freshness),
+            ));
             dp.start(Vec::new()).await?;
             info!("PlatformDataPlane started");
 
             let binance_ws = dp.binance_ws().ok_or_else(|| {
                 crate::error::PloyError::Validation(
-                    "PLOY_DATA_PLANE=1 but PlatformDataPlane has no Binance WS adapter"
-                        .to_string(),
+                    "PLOY_DATA_PLANE=1 but PlatformDataPlane has no Binance WS adapter".to_string(),
                 )
             })?;
             let pm_ws = dp.polymarket_ws().ok_or_else(|| {
@@ -5712,6 +5079,7 @@ pub async fn start_platform(
             info!("data plane freshness tracker attached to WS adapters");
             (binance_ws, pm_ws)
         };
+        let crypto_market_data = CryptoDataPlaneHandle::new(binance_ws.clone(), pm_ws.clone());
 
         // Seed PM token → side mapping for data collection, so QuoteUpdates carry the correct
         // UP/DOWN side and can be persisted to Postgres.
@@ -5931,187 +5299,229 @@ pub async fn start_platform(
             }
         });
 
-        // Optional persistence pipeline for CLOB quotes (best-effort).
+        let mut crypto_persistence_pipeline: Option<crate::platform::PersistencePipelineHandle> =
+            None;
+        // Optional persistence pipeline for WS-driven market data (best-effort).
         // Do not block agent startup if DB is temporarily unavailable.
         if let Some(pool) = shared_pool.as_ref() {
             let (orderbook_levels_default, orderbook_snapshot_secs_default) = (20usize, 60i64);
+            let orderbook_levels =
+                env_usize("PM_ORDERBOOK_LEVELS", orderbook_levels_default).clamp(1, 200);
+            let orderbook_snapshot_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
+                Ok(raw) => raw.parse::<u64>().unwrap_or(0),
+                Err(_) => (env_i64(
+                    "PM_ORDERBOOK_SNAPSHOT_SECS",
+                    orderbook_snapshot_secs_default,
+                )
+                .max(0) as u64)
+                    .saturating_mul(1000),
+            };
+            let orderbook_require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
 
-            // Phase 1: opt-in unified persistence pipeline.
-            // Set PLOY_UNIFIED_PERSISTENCE=1 to use the new pipeline instead of
-            // individual spawn_*_persistence() calls.
-            let use_unified = std::env::var("PLOY_UNIFIED_PERSISTENCE")
-                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-                .unwrap_or(false);
+            let quote_table_ready = match ensure_clob_quote_ticks_table(pool).await {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(
+                        agent = crypto_cfg.agent_id,
+                        error = %e,
+                        "failed to ensure clob_quote_ticks table; quote persistence bridge disabled"
+                    );
+                    false
+                }
+            };
+            let price_table_ready = match ensure_binance_price_ticks_table(pool).await {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(
+                        agent = crypto_cfg.agent_id,
+                        error = %e,
+                        "failed to ensure binance_price_ticks table; Binance price persistence bridge disabled"
+                    );
+                    false
+                }
+            };
+            let orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(pool).await {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(
+                        agent = crypto_cfg.agent_id,
+                        error = %e,
+                        "failed to ensure clob_orderbook_snapshots table; orderbook persistence bridge disabled"
+                    );
+                    false
+                }
+            };
 
-            if use_unified {
+            if quote_table_ready || price_table_ready || orderbook_table_ready {
                 let pipeline_config = crate::platform::PersistenceConfig {
                     clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
                     binance_price_min_interval_secs: BINANCE_PERSIST_MIN_INTERVAL_SECS,
-                    clob_orderbook_snapshot_interval_ms: orderbook_snapshot_secs_default * 1000,
-                    clob_orderbook_max_levels: orderbook_levels_default,
+                    binance_lob_snapshot_interval_ms: env_u64("BN_LOB_SNAPSHOT_MS", 1000).max(100)
+                        as i64,
+                    binance_lob_max_levels: env_usize("BN_LOB_LEVELS", 20).clamp(0, 200),
+                    clob_orderbook_snapshot_interval_ms: orderbook_snapshot_ms as i64,
+                    clob_orderbook_max_levels: orderbook_levels,
+                    clob_orderbook_require_hash_change: orderbook_require_hash_change,
                     ..Default::default()
                 };
                 let pipeline_handle =
                     crate::platform::PersistencePipeline::spawn(pool.clone(), pipeline_config);
+                crypto_persistence_pipeline = Some(pipeline_handle.clone());
 
-                // Bridge PM quote updates → pipeline
-                let quote_rx = if use_data_plane {
-                    data_plane.as_ref().and_then(|dp| dp.subscribe_quotes())
-                } else {
-                    Some(pm_ws.subscribe_updates())
-                };
-                if let Some(mut quote_rx) = quote_rx {
-                    let ph = pipeline_handle.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            match quote_rx.recv().await {
-                                Ok(update) => {
-                                    let tick = crate::platform::ClobQuoteTick {
-                                        token_id: update.token_id.clone(),
-                                        side: format!("{:?}", update.side),
-                                        best_bid: update.quote.best_bid,
-                                        best_ask: update.quote.best_ask,
-                                        bid_size: update.quote.bid_size,
-                                        ask_size: update.quote.ask_size,
-                                        domain: Domain::Crypto,
-                                        received_at: Utc::now(),
-                                    };
-                                    let _ = ph.try_ingest(
-                                        crate::platform::PersistenceEvent::ClobQuote(tick),
-                                    );
+                if quote_table_ready {
+                    let quote_rx = if use_data_plane {
+                        data_plane.as_ref().and_then(|dp| dp.subscribe_quotes())
+                    } else {
+                        Some(pm_ws.subscribe_updates())
+                    };
+                    if let Some(mut quote_rx) = quote_rx {
+                        let ph = pipeline_handle.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                match quote_rx.recv().await {
+                                    Ok(update) => {
+                                        let tick = crate::platform::ClobQuoteTick {
+                                            token_id: update.token_id.clone(),
+                                            side: update.side.as_str().to_string(),
+                                            best_bid: update.quote.best_bid,
+                                            best_ask: update.quote.best_ask,
+                                            bid_size: update.quote.bid_size,
+                                            ask_size: update.quote.ask_size,
+                                            domain: Domain::Crypto,
+                                            received_at: Utc::now(),
+                                        };
+                                        if ph
+                                            .try_ingest(
+                                                crate::platform::PersistenceEvent::ClobQuote(tick),
+                                            )
+                                            .is_err()
+                                        {
+                                            warn!("persistence quote bridge dropped event");
+                                        }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!(lagged = n, "persistence quote bridge lagged");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!(lagged = n, "unified persistence quote bridge lagged");
-                                }
-                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    });
-                } else {
-                    warn!("unified persistence quote bridge unavailable: no quote receiver");
+                        });
+                    } else {
+                        warn!("persistence quote bridge unavailable: no quote receiver");
+                    }
                 }
 
-                // Bridge Binance price updates → pipeline
-                let price_rx = if use_data_plane {
-                    data_plane.as_ref().and_then(|dp| dp.subscribe_prices())
-                } else {
-                    Some(binance_ws.subscribe())
-                };
-                if let Some(mut price_rx) = price_rx {
-                    let ph = pipeline_handle.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            match price_rx.recv().await {
-                                Ok(update) => {
-                                    let tick = crate::platform::BinancePriceTick {
-                                        symbol: update.symbol.clone(),
-                                        price: Some(update.price),
-                                        quantity: update.quantity,
-                                        trade_time: update.timestamp,
-                                    };
-                                    let _ = ph.try_ingest(
-                                        crate::platform::PersistenceEvent::BinancePrice(tick),
-                                    );
+                if price_table_ready {
+                    let price_rx = if use_data_plane {
+                        data_plane.as_ref().and_then(|dp| dp.subscribe_prices())
+                    } else {
+                        Some(binance_ws.subscribe())
+                    };
+                    if let Some(mut price_rx) = price_rx {
+                        let ph = pipeline_handle.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                match price_rx.recv().await {
+                                    Ok(update) => {
+                                        let tick = crate::platform::BinancePriceTick {
+                                            symbol: update.symbol.clone(),
+                                            price: Some(update.price),
+                                            quantity: update.quantity,
+                                            trade_time: update.timestamp,
+                                        };
+                                        if ph
+                                            .try_ingest(
+                                                crate::platform::PersistenceEvent::BinancePrice(
+                                                    tick,
+                                                ),
+                                            )
+                                            .is_err()
+                                        {
+                                            warn!("persistence price bridge dropped event");
+                                        }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!(lagged = n, "persistence price bridge lagged");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!(lagged = n, "unified persistence price bridge lagged");
-                                }
-                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    });
-                } else {
-                    warn!("unified persistence price bridge unavailable: no price receiver");
+                        });
+                    } else {
+                        warn!("persistence price bridge unavailable: no price receiver");
+                    }
                 }
 
-                // Bridge PM orderbook updates → pipeline
-                let book_rx = if use_data_plane {
-                    data_plane.as_ref().and_then(|dp| dp.subscribe_books())
-                } else {
-                    Some(pm_ws.subscribe_books())
-                };
-                if let Some(mut book_rx) = book_rx {
-                    let ph = pipeline_handle.clone();
-                    tokio::spawn(async move {
-                        use sha2::{Digest, Sha256};
-                        loop {
-                            match book_rx.recv().await {
-                                Ok(book_msg) => {
-                                    let bids_json =
-                                        serde_json::to_value(&book_msg.bids).unwrap_or_default();
-                                    let asks_json =
-                                        serde_json::to_value(&book_msg.asks).unwrap_or_default();
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(bids_json.to_string().as_bytes());
-                                    hasher.update(asks_json.to_string().as_bytes());
-                                    let hash = format!("{:x}", hasher.finalize());
-                                    let snap = crate::platform::ClobOrderbookSnapshot {
-                                        domain: Domain::Crypto,
-                                        token_id: book_msg.asset_id.clone(),
-                                        market: Some(book_msg.market.clone()),
-                                        bids: bids_json,
-                                        asks: asks_json,
-                                        book_timestamp: book_msg
-                                            .timestamp
-                                            .as_deref()
-                                            .and_then(|s| {
-                                                chrono::DateTime::parse_from_rfc3339(s).ok()
-                                            })
-                                            .map(|dt| dt.with_timezone(&Utc)),
-                                        hash,
-                                        source: "polymarket_ws".into(),
-                                        context: None,
-                                    };
-                                    let _ = ph.try_ingest(
-                                        crate::platform::PersistenceEvent::ClobOrderbook(snap),
-                                    );
+                if orderbook_table_ready {
+                    let book_rx = if use_data_plane {
+                        data_plane.as_ref().and_then(|dp| dp.subscribe_books())
+                    } else {
+                        Some(pm_ws.subscribe_books())
+                    };
+                    if let Some(mut book_rx) = book_rx {
+                        let ph = pipeline_handle.clone();
+                        tokio::spawn(async move {
+                            use sha2::{Digest, Sha256};
+                            loop {
+                                match book_rx.recv().await {
+                                    Ok(book_msg) => {
+                                        let bids_json = serde_json::to_value(&book_msg.bids)
+                                            .unwrap_or_default();
+                                        let asks_json = serde_json::to_value(&book_msg.asks)
+                                            .unwrap_or_default();
+                                        let mut hasher = Sha256::new();
+                                        hasher.update(bids_json.to_string().as_bytes());
+                                        hasher.update(asks_json.to_string().as_bytes());
+                                        let hash = format!("{:x}", hasher.finalize());
+                                        let snap = crate::platform::ClobOrderbookSnapshot {
+                                            domain: Domain::Crypto,
+                                            token_id: book_msg.asset_id.clone(),
+                                            market: Some(book_msg.market.clone()),
+                                            bids: bids_json,
+                                            asks: asks_json,
+                                            book_timestamp: book_msg
+                                                .timestamp
+                                                .as_deref()
+                                                .and_then(|s| {
+                                                    chrono::DateTime::parse_from_rfc3339(s).ok()
+                                                })
+                                                .map(|dt| dt.with_timezone(&Utc)),
+                                            hash,
+                                            source: "polymarket_ws".into(),
+                                            context: None,
+                                        };
+                                        if ph
+                                            .try_ingest(
+                                                crate::platform::PersistenceEvent::ClobOrderbook(
+                                                    snap,
+                                                ),
+                                            )
+                                            .is_err()
+                                        {
+                                            warn!("persistence orderbook bridge dropped event");
+                                        }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!(lagged = n, "persistence orderbook bridge lagged");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    warn!(
-                                        lagged = n,
-                                        "unified persistence orderbook bridge lagged"
-                                    );
-                                }
-                                Err(broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    });
-                } else {
-                    warn!("unified persistence orderbook bridge unavailable: no book receiver");
+                        });
+                    } else {
+                        warn!("persistence orderbook bridge unavailable: no book receiver");
+                    }
                 }
 
-                info!(
-                    agent = crypto_cfg.agent_id,
-                    "unified persistence pipeline started (PLOY_UNIFIED_PERSISTENCE=1)"
-                );
+                info!(agent = crypto_cfg.agent_id, "persistence pipeline started");
             } else {
-                // Legacy: individual persistence spawners
-                spawn_clob_quote_persistence(
-                    pm_ws.clone(),
-                    pool.clone(),
-                    crypto_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                );
-                spawn_clob_orderbook_persistence(
-                    pm_ws.clone(),
-                    pool.clone(),
-                    crypto_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    orderbook_levels_default,
-                    orderbook_snapshot_secs_default,
-                );
-                spawn_binance_price_persistence(
-                    binance_ws.clone(),
-                    pool.clone(),
-                    crypto_cfg.agent_id.clone(),
-                );
-                info!(
+                warn!(
                     agent = crypto_cfg.agent_id,
-                    "legacy persistence tasks started"
+                    "all market-data persistence tables unavailable; WS persistence bridges disabled"
                 );
             }
 
-            // Trade persistence (polling-based) — always uses legacy spawner
+            // Trade persistence (polling-based) — still separate from WS pipeline.
             spawn_polymarket_trade_persistence(
                 event_matcher.clone(),
                 pool.clone(),
@@ -6152,11 +5562,90 @@ pub async fn start_platform(
             lob_cache_opt = Some(lob_cache.clone());
 
             if let Some(pool) = shared_pool.as_ref() {
-                spawn_binance_lob_persistence(
-                    depth_stream.clone(),
-                    pool.clone(),
-                    crypto_cfg.agent_id.clone(),
-                );
+                match ensure_binance_lob_ticks_table(pool).await {
+                    Ok(()) => {
+                        if let Some(ph) = crypto_persistence_pipeline.clone() {
+                            let mut rx = depth_stream.subscribe();
+                            let agent_id = crypto_cfg.agent_id.clone();
+                            let max_levels = env_usize("BN_LOB_LEVELS", 20).clamp(0, 200);
+                            tokio::spawn(async move {
+                                loop {
+                                    match rx.recv().await {
+                                        Ok(update) => {
+                                            let symbol = update.symbol.clone();
+                                            let (bids, asks) = if max_levels == 0 {
+                                                (Vec::new(), Vec::new())
+                                            } else {
+                                                (
+                                                    lob_levels_json(
+                                                        &update.raw_state,
+                                                        true,
+                                                        max_levels,
+                                                    ),
+                                                    lob_levels_json(
+                                                        &update.raw_state,
+                                                        false,
+                                                        max_levels,
+                                                    ),
+                                                )
+                                            };
+                                            let tick = crate::platform::BinanceLobTick {
+                                                symbol,
+                                                update_id: update.snapshot.update_id,
+                                                best_bid: Some(update.snapshot.best_bid),
+                                                best_ask: Some(update.snapshot.best_ask),
+                                                mid_price: Some(update.snapshot.mid_price),
+                                                spread_bps: Some(update.snapshot.spread_bps),
+                                                obi_5: update.snapshot.obi_5.to_f64(),
+                                                obi_10: update.snapshot.obi_10.to_f64(),
+                                                bid_volume_5: Some(update.snapshot.bid_volume_5),
+                                                ask_volume_5: Some(update.snapshot.ask_volume_5),
+                                                bids: serde_json::to_value(&bids)
+                                                    .unwrap_or_default(),
+                                                asks: serde_json::to_value(&asks)
+                                                    .unwrap_or_default(),
+                                                event_time: update.snapshot.timestamp,
+                                            };
+                                            if ph
+                                                .try_ingest(
+                                                    crate::platform::PersistenceEvent::BinanceLob(
+                                                        tick,
+                                                    ),
+                                                )
+                                                .is_err()
+                                            {
+                                                warn!(
+                                                    agent = agent_id,
+                                                    "persistence Binance LOB bridge dropped event"
+                                                );
+                                            }
+                                        }
+                                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                                            warn!(
+                                                agent = agent_id,
+                                                lagged = n,
+                                                "persistence Binance LOB bridge lagged"
+                                            );
+                                        }
+                                        Err(broadcast::error::RecvError::Closed) => break,
+                                    }
+                                }
+                            });
+                        } else {
+                            warn!(
+                                agent = crypto_cfg.agent_id,
+                                "Binance LOB persistence requested but pipeline handle unavailable"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            agent = crypto_cfg.agent_id,
+                            error = %e,
+                            "failed to ensure binance_lob_ticks table; Binance LOB persistence bridge disabled"
+                        );
+                    }
+                }
             }
 
             let ds = depth_stream.clone();
@@ -6194,8 +5683,7 @@ pub async fn start_platform(
             if let Some(cmd_rx) = cmd_rx_opt {
                 let agent = CryptoTradingAgent::new(
                     crypto_cfg.clone(),
-                    binance_ws.clone(),
-                    pm_ws.clone(),
+                    crypto_market_data.clone(),
                     event_matcher.clone(),
                 );
                 let ctx = AgentContext::new(
@@ -6410,8 +5898,7 @@ pub async fn start_platform(
                     let risk_params = lob_cfg.risk_params.clone();
                     let agent = CryptoLobMlAgent::new(
                         lob_cfg.clone(),
-                        binance_ws.clone(),
-                        pm_ws.clone(),
+                        crypto_market_data.clone(),
                         event_matcher.clone(),
                         lob_cache,
                     )?;
@@ -6456,8 +5943,7 @@ pub async fn start_platform(
 
                 let agent = CryptoRlPolicyAgent::new(
                     rl_cfg.clone(),
-                    binance_ws.clone(),
-                    pm_ws.clone(),
+                    crypto_market_data.clone(),
                     event_matcher.clone(),
                     lob_cache,
                 );
@@ -6503,22 +5989,30 @@ pub async fn start_platform(
                         .await?
                 }
             };
-            if let Err(e) = ensure_clob_orderbook_snapshots_table(&pool).await {
-                warn!(agent = sports_cfg.agent_id, error = %e, "failed to ensure clob_orderbook_snapshots table");
-            }
             spawn_polymarket_trade_persistence_from_collector_targets(
                 pool.clone(),
                 sports_cfg.agent_id.clone(),
                 Domain::Sports,
             );
 
-            // Sports L2 data collection: create a dedicated PM WebSocket for NBA token
-            // quote and orderbook snapshot persistence.  Tokens are seeded from
-            // collector_token_targets (domain = SPORTS_NBA) and refreshed every cycle
-            // together with the trade persistence above.
+            // Sports L2 data collection: create a dedicated sports data plane so
+            // PM WS lifecycle stays domain-isolated from crypto.
             {
-                let sports_pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
-                sports_pm_ws.set_freshness(Arc::clone(&freshness));
+                let sports_data_plane_config = DataPlaneConfig {
+                    polymarket_ws_url: app_config.market.ws_url.clone(),
+                    ..DataPlaneConfig::default()
+                };
+                let sports_data_plane = Arc::new(PlatformDataPlane::new(
+                    sports_data_plane_config,
+                    Arc::clone(&freshness),
+                ));
+                sports_data_plane.start(Vec::new()).await?;
+                let sports_pm_ws = sports_data_plane.polymarket_ws().ok_or_else(|| {
+                    crate::error::PloyError::Validation(
+                        "sports data plane misconfigured: missing Polymarket WS adapter"
+                            .to_string(),
+                    )
+                })?;
 
                 // Seed initial NBA tokens from collector_token_targets
                 let mut sports_desired: HashMap<String, Side> = HashMap::new();
@@ -6593,29 +6087,158 @@ pub async fn start_platform(
                     }
                 });
 
-                // Persistence: quotes + orderbook snapshots
-                spawn_clob_quote_persistence(
-                    sports_pm_ws.clone(),
-                    pool.clone(),
-                    sports_cfg.agent_id.clone(),
-                    Domain::Sports,
-                );
-                spawn_clob_orderbook_persistence(
-                    sports_pm_ws.clone(),
-                    pool.clone(),
-                    sports_cfg.agent_id.clone(),
-                    Domain::Sports,
-                    20,
-                    60,
-                );
-
-                // Run the sports PM WS
-                let sws = sports_pm_ws.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = sws.run(Vec::new()).await {
-                        error!(error = %e, "sports polymarket websocket error");
+                // Persistence: quotes + orderbook snapshots via unified pipeline.
+                let sports_quote_table_ready = match ensure_clob_quote_ticks_table(&pool).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(
+                            agent = sports_cfg.agent_id,
+                            error = %e,
+                            "failed to ensure clob_quote_ticks table; sports quote persistence bridge disabled"
+                        );
+                        false
                     }
-                });
+                };
+                let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(
+                    &pool,
+                )
+                .await
+                {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(
+                            agent = sports_cfg.agent_id,
+                            error = %e,
+                            "failed to ensure clob_orderbook_snapshots table; sports orderbook persistence bridge disabled"
+                        );
+                        false
+                    }
+                };
+                if sports_quote_table_ready || sports_orderbook_table_ready {
+                    let sports_orderbook_levels =
+                        env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
+                    let sports_orderbook_snapshot_ms =
+                        match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
+                            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
+                            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64)
+                                .saturating_mul(1000),
+                        };
+                    let sports_orderbook_require_hash_change =
+                        env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
+                    let sports_pipeline_config = crate::platform::PersistenceConfig {
+                        clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
+                        clob_orderbook_snapshot_interval_ms: sports_orderbook_snapshot_ms as i64,
+                        clob_orderbook_max_levels: sports_orderbook_levels,
+                        clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
+                        ..Default::default()
+                    };
+                    let sports_pipeline = crate::platform::PersistencePipeline::spawn(
+                        pool.clone(),
+                        sports_pipeline_config,
+                    );
+
+                    if sports_quote_table_ready {
+                        if let Some(mut quote_rx) = sports_data_plane.subscribe_quotes() {
+                            let ph = sports_pipeline.clone();
+                            tokio::spawn(async move {
+                                loop {
+                                    match quote_rx.recv().await {
+                                        Ok(update) => {
+                                            let tick = crate::platform::ClobQuoteTick {
+                                                token_id: update.token_id.clone(),
+                                                side: update.side.as_str().to_string(),
+                                                best_bid: update.quote.best_bid,
+                                                best_ask: update.quote.best_ask,
+                                                bid_size: update.quote.bid_size,
+                                                ask_size: update.quote.ask_size,
+                                                domain: Domain::Sports,
+                                                received_at: Utc::now(),
+                                            };
+                                            if ph
+                                                .try_ingest(
+                                                    crate::platform::PersistenceEvent::ClobQuote(
+                                                        tick,
+                                                    ),
+                                                )
+                                                .is_err()
+                                            {
+                                                warn!("sports quote bridge dropped event");
+                                            }
+                                        }
+                                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                                            warn!(lagged = n, "sports quote bridge lagged");
+                                        }
+                                        Err(broadcast::error::RecvError::Closed) => break,
+                                    }
+                                }
+                            });
+                        } else {
+                            warn!("sports quote bridge unavailable: no quote receiver");
+                        }
+                    }
+
+                    if sports_orderbook_table_ready {
+                        if let Some(mut book_rx) = sports_data_plane.subscribe_books() {
+                            let ph = sports_pipeline.clone();
+                            tokio::spawn(async move {
+                                use sha2::{Digest, Sha256};
+                                loop {
+                                    match book_rx.recv().await {
+                                        Ok(book_msg) => {
+                                            let bids_json = serde_json::to_value(&book_msg.bids)
+                                                .unwrap_or_default();
+                                            let asks_json = serde_json::to_value(&book_msg.asks)
+                                                .unwrap_or_default();
+                                            let mut hasher = Sha256::new();
+                                            hasher.update(bids_json.to_string().as_bytes());
+                                            hasher.update(asks_json.to_string().as_bytes());
+                                            let hash = format!("{:x}", hasher.finalize());
+                                            let snap = crate::platform::ClobOrderbookSnapshot {
+                                                domain: Domain::Sports,
+                                                token_id: book_msg.asset_id.clone(),
+                                                market: Some(book_msg.market.clone()),
+                                                bids: bids_json,
+                                                asks: asks_json,
+                                                book_timestamp: book_msg
+                                                    .timestamp
+                                                    .as_deref()
+                                                    .and_then(|s| {
+                                                        chrono::DateTime::parse_from_rfc3339(s).ok()
+                                                    })
+                                                    .map(|dt| dt.with_timezone(&Utc)),
+                                                hash,
+                                                source: "polymarket_ws".into(),
+                                                context: None,
+                                            };
+                                            if ph
+                                                .try_ingest(
+                                                    crate::platform::PersistenceEvent::ClobOrderbook(
+                                                        snap,
+                                                    ),
+                                                )
+                                                .is_err()
+                                            {
+                                                warn!("sports orderbook bridge dropped event");
+                                            }
+                                        }
+                                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                                            warn!(lagged = n, "sports orderbook bridge lagged");
+                                        }
+                                        Err(broadcast::error::RecvError::Closed) => break,
+                                    }
+                                }
+                            });
+                        } else {
+                            warn!("sports orderbook bridge unavailable: no book receiver");
+                        }
+                    }
+                } else {
+                    warn!(
+                        agent = sports_cfg.agent_id,
+                        "sports persistence tables unavailable; WS persistence bridges disabled"
+                    );
+                }
+
                 info!(
                     agent = sports_cfg.agent_id,
                     "sports PM WS L2 data collection started"
@@ -6752,7 +6375,8 @@ pub async fn start_platform(
         let cmd_rx =
             coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
 
-        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_binance_ws);
+        let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws.clone());
+        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
         let ctx = AgentContext::new(
             oc_agent_id.clone(),
             Domain::Custom(0),

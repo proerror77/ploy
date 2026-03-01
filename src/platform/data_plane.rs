@@ -45,6 +45,68 @@ impl DataPlaneConfig {
     }
 }
 
+/// Reusable handle for crypto market data adapters.
+#[derive(Clone)]
+pub struct CryptoDataPlaneHandle {
+    binance_ws: Arc<BinanceWebSocket>,
+    polymarket_ws: Arc<PolymarketWebSocket>,
+}
+
+impl CryptoDataPlaneHandle {
+    pub fn new(binance_ws: Arc<BinanceWebSocket>, polymarket_ws: Arc<PolymarketWebSocket>) -> Self {
+        Self {
+            binance_ws,
+            polymarket_ws,
+        }
+    }
+
+    pub fn subscribe_prices(&self) -> broadcast::Receiver<PriceUpdate> {
+        self.binance_ws.subscribe()
+    }
+
+    pub fn subscribe_quotes(&self) -> broadcast::Receiver<QuoteUpdate> {
+        self.polymarket_ws.subscribe_updates()
+    }
+
+    pub fn price_cache(&self) -> crate::adapters::PriceCache {
+        self.binance_ws.price_cache().clone()
+    }
+
+    pub fn quote_cache(&self) -> crate::adapters::polymarket_ws::QuoteCache {
+        self.polymarket_ws.quote_cache().clone()
+    }
+
+    pub async fn register_tokens(&self, up_token_id: &str, down_token_id: &str) {
+        self.polymarket_ws
+            .register_tokens(up_token_id, down_token_id)
+            .await;
+    }
+
+    pub fn request_resubscribe(&self) {
+        self.polymarket_ws.request_resubscribe();
+    }
+}
+
+/// Reusable handle for Binance market-data adapter access.
+#[derive(Clone)]
+pub struct BinanceDataPlaneHandle {
+    binance_ws: Arc<BinanceWebSocket>,
+}
+
+impl BinanceDataPlaneHandle {
+    pub fn new(binance_ws: Arc<BinanceWebSocket>) -> Self {
+        Self { binance_ws }
+    }
+
+    pub fn subscribe_prices(&self) -> broadcast::Receiver<PriceUpdate> {
+        self.binance_ws.subscribe()
+    }
+
+    pub fn price_cache(&self) -> crate::adapters::PriceCache {
+        self.binance_ws.price_cache().clone()
+    }
+}
+
 /// Shared data-plane runtime with optional singleton WS adapters.
 pub struct PlatformDataPlane {
     binance_ws: Option<Arc<BinanceWebSocket>>,

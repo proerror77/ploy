@@ -2195,8 +2195,8 @@ async fn backtest_directional_signals_pm_settlement(
     no_refresh: bool,
     database_url: Option<String>,
 ) -> Result<()> {
-    use crate::adapters::PostgresStore;
     use crate::adapters::PolymarketClient;
+    use crate::adapters::PostgresStore;
     use crate::strategy::fee_model::FeeModel;
     use chrono::{DateTime, Utc};
     use rust_decimal::prelude::ToPrimitive;
@@ -2292,13 +2292,17 @@ async fn backtest_directional_signals_pm_settlement(
         let token_id: Option<String> = row.get("token_id");
         let Some(token_id) = token_id else { continue };
         let entry_price: Option<Decimal> = row.get("market_price");
-        let Some(entry_price) = entry_price else { continue };
+        let Some(entry_price) = entry_price else {
+            continue;
+        };
 
         let symbol: Option<String> = row.get("symbol");
         let side: Option<String> = row.get("side");
         let confidence: Option<f64> = row.get("confidence");
         let ev_net: Option<f64> = row.get("edge");
-        let context: serde_json::Value = row.get::<sqlx::types::Json<serde_json::Value>, _>("context").0;
+        let context: serde_json::Value = row
+            .get::<sqlx::types::Json<serde_json::Value>, _>("context")
+            .0;
 
         token_ids.push(token_id.clone());
         signals.push(SignalRow {
@@ -3280,12 +3284,17 @@ async fn run_backtest(
 
     use crate::adapters::PostgresStore;
     use crate::strategy::backtest_feed::HistoricalFeed;
-    use crate::strategy::directional_backtest::{DirectionalBacktestConfig, DirectionalBacktestEngine};
+    use crate::strategy::directional_backtest::{
+        DirectionalBacktestConfig, DirectionalBacktestEngine,
+    };
     use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
 
     match name {
         "momentum" | "directional" => {}
-        other => anyhow::bail!("Unknown backtest strategy: '{}'. Supported: momentum, directional", other),
+        other => anyhow::bail!(
+            "Unknown backtest strategy: '{}'. Supported: momentum, directional",
+            other
+        ),
     }
 
     if mode == StrategyBacktestMode::Settlement {
@@ -3339,7 +3348,8 @@ async fn run_backtest(
     // Unified backtest feed path: database only.
     let store = PostgresStore::new(&db_url, 5).await?;
     info!("Loading historical data from database");
-    let mut feed = HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
+    let mut feed =
+        HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
 
     let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 

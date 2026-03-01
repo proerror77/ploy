@@ -281,7 +281,10 @@ impl HistoricalFeed {
                 });
             }
         }
-        info!("Loaded {} event windows from pm_market_metadata", event_rows.len());
+        info!(
+            "Loaded {} event windows from pm_market_metadata",
+            event_rows.len()
+        );
 
         // Settlement events: one per market_slug where outcome='Up' has settled_price=1
         let settlement_rows: Vec<(
@@ -310,9 +313,7 @@ impl HistoricalFeed {
         // Build slug→symbol lookup
         let slug_to_symbol: HashMap<String, String> = event_rows
             .iter()
-            .filter_map(|(slug, sym, _, _, _)| {
-                sym.as_ref().map(|s| (slug.clone(), s.clone()))
-            })
+            .filter_map(|(slug, sym, _, _, _)| sym.as_ref().map(|s| (slug.clone(), s.clone())))
             .collect();
 
         for (slug, _outcome, settled_price, resolved_at) in &settlement_rows {

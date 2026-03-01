@@ -25,6 +25,7 @@ use crate::adapters::{
 use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
+use crate::platform::CryptoDataPlaneHandle;
 use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
@@ -1482,15 +1483,27 @@ impl Position {
 /// Reason for exiting a position
 #[derive(Debug, Clone)]
 pub enum ExitReason {
-    TakeProfit { profit_pct: Decimal },
-    StopLoss { loss_pct: Decimal },
-    TrailingStop { high: Decimal, current: Decimal },
+    TakeProfit {
+        profit_pct: Decimal,
+    },
+    StopLoss {
+        loss_pct: Decimal,
+    },
+    TrailingStop {
+        high: Decimal,
+        current: Decimal,
+    },
     TimeExit,
     Manual,
     /// Probability model thesis invalidated (p_hat dropped below threshold)
-    ProbabilityStop { entry_p_hat: f64, current_p_hat: f64 },
+    ProbabilityStop {
+        entry_p_hat: f64,
+        current_p_hat: f64,
+    },
     /// Hard loss limit per trade
-    HardStop { loss_usd: Decimal },
+    HardStop {
+        loss_usd: Decimal,
+    },
 }
 
 impl std::fmt::Display for ExitReason {
@@ -2209,14 +2222,15 @@ impl MomentumEngine {
     /// Run the momentum strategy
     pub async fn run(
         &self,
-        mut binance_rx: broadcast::Receiver<PriceUpdate>,
-        mut pm_rx: broadcast::Receiver<QuoteUpdate>,
-        binance_cache: &PriceCache,
-        pm_cache: &QuoteCache,
+        market_data: &CryptoDataPlaneHandle,
         mut chainlink_rx: Option<broadcast::Receiver<ChainlinkUpdate>>,
         chainlink_cache: Option<&ChainlinkPriceCache>,
     ) -> Result<()> {
         info!("Starting momentum engine (dry_run={})", self.dry_run);
+        let mut binance_rx = market_data.subscribe_prices();
+        let mut pm_rx = market_data.subscribe_quotes();
+        let binance_cache = market_data.price_cache();
+        let pm_cache = market_data.quote_cache();
 
         // Log mode-specific configuration
         if self.config.hold_to_resolution {
@@ -2278,14 +2292,20 @@ impl MomentumEngine {
             info!("=== DIRECTIONAL PREDICTION MODE ===");
             info!("• Ground truth: Chainlink RTDS (not Binance)");
             info!("• Fee model: parabolic (crypto, fee_rate=0.25, exp=2)");
-            info!("• Entry threshold: EV_net >= {:.1}%", self.entry_threshold * 100.0);
+            info!(
+                "• Entry threshold: EV_net >= {:.1}%",
+                self.entry_threshold * 100.0
+            );
         }
 
         if self.config.directional_mode {
             info!("=== DIRECTIONAL MODE (BINANCE AS ORACLE) ===");
             info!("• Ground truth: Binance spot price (Chainlink proxy)");
             info!("• Fee model: parabolic (crypto, fee_rate=0.25, exp=2)");
-            info!("• Entry threshold: EV_net >= {:.1}%", self.entry_threshold * 100.0);
+            info!(
+                "• Entry threshold: EV_net >= {:.1}%",
+                self.entry_threshold * 100.0
+            );
             info!("• Vol floor: {:.4}", self.config.directional_vol_floor);
             info!("• Symbols: {:?}", self.config.symbols);
         }
@@ -2300,7 +2320,7 @@ impl MomentumEngine {
                     }
                 } => {
                     if let Some(cl_cache) = chainlink_cache {
-                        if let Err(e) = self.on_chainlink_update(&cl_update, cl_cache, binance_cache, pm_cache).await {
+                        if let Err(e) = self.on_chainlink_update(&cl_update, cl_cache, &binance_cache, &pm_cache).await {
                             error!("Error processing Chainlink update: {}", e);
                         }
                     }
@@ -2310,7 +2330,7 @@ impl MomentumEngine {
                 Ok(price_update) = binance_rx.recv() => {
                     // When Chainlink is active, Binance is features-only (no direct entry)
                     if !has_chainlink {
-                        if let Err(e) = self.on_cex_update(&price_update, binance_cache, pm_cache).await {
+                        if let Err(e) = self.on_cex_update(&price_update, &binance_cache, &pm_cache).await {
                             error!("Error processing CEX update: {}", e);
                         }
                     }
@@ -2575,7 +2595,12 @@ impl MomentumEngine {
             return Ok(());
         }
         if market_ask < dec!(0.10) {
-            trace!("Skipping {} {} — ask {:.2}¢ below 10¢ floor", symbol, direction, market_ask * dec!(100));
+            trace!(
+                "Skipping {} {} — ask {:.2}¢ below 10¢ floor",
+                symbol,
+                direction,
+                market_ask * dec!(100)
+            );
             return Ok(());
         }
 
@@ -2585,15 +2610,22 @@ impl MomentumEngine {
         let fee_per_share = market_ask * effective_rate;
         let spread_cost = dec!(0.01); // Conservative 1¢ spread estimate
         let market_ask_f64 = market_ask.to_f64().unwrap_or(0.5);
-        let cost_total_f64 = fee_per_share.to_f64().unwrap_or(0.01)
-            + spread_cost.to_f64().unwrap_or(0.01);
+        let cost_total_f64 =
+            fee_per_share.to_f64().unwrap_or(0.01) + spread_cost.to_f64().unwrap_or(0.01);
 
         // EV_net check
         let ev_net = effective_p - market_ask_f64 - cost_total_f64;
 
         trace!(
             "🎯 {} {} p_hat={:.3} eff_p={:.3} ask={:.3} cost={:.4} ev_net={:.4} σ={:.5}",
-            symbol, direction, p_hat, effective_p, market_ask_f64, cost_total_f64, ev_net, sigma
+            symbol,
+            direction,
+            p_hat,
+            effective_p,
+            market_ask_f64,
+            cost_total_f64,
+            ev_net,
+            sigma
         );
 
         if ev_net < self.entry_threshold {
@@ -2668,10 +2700,11 @@ impl MomentumEngine {
         pm_cache: &QuoteCache,
     ) -> Result<()> {
         // Map Chainlink symbol to Binance symbol for event matching
-        let binance_symbol = match crate::adapters::chainlink_rtds::to_binance_symbol(&update.symbol) {
-            Some(s) => s.to_string(),
-            None => return Ok(()),
-        };
+        let binance_symbol =
+            match crate::adapters::chainlink_rtds::to_binance_symbol(&update.symbol) {
+                Some(s) => s.to_string(),
+                None => return Ok(()),
+            };
 
         if !self.config.symbols.contains(&binance_symbol) {
             return Ok(());
@@ -2747,12 +2780,20 @@ impl MomentumEngine {
 
         // Compute all-in cost
         let best_bid = if direction == Direction::Up {
-            pm_cache.get(&event.up_token_id).and_then(|q| q.best_bid).unwrap_or(market_ask)
+            pm_cache
+                .get(&event.up_token_id)
+                .and_then(|q| q.best_bid)
+                .unwrap_or(market_ask)
         } else {
-            pm_cache.get(&event.down_token_id).and_then(|q| q.best_bid).unwrap_or(market_ask)
+            pm_cache
+                .get(&event.down_token_id)
+                .and_then(|q| q.best_bid)
+                .unwrap_or(market_ask)
         };
         let depth_ratio = dec!(0.3); // conservative default
-        let cost = self.fee_model.all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
+        let cost = self
+            .fee_model
+            .all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
         let cost_total_f64 = cost.total.to_f64().unwrap_or(0.02);
         let market_ask_f64 = market_ask.to_f64().unwrap_or(0.5);
 
@@ -2770,14 +2811,15 @@ impl MomentumEngine {
         }
 
         // Get Binance features for logging (used in future calibration)
-        let (_momentum_10s, _momentum_60s) = if let Some(spot) = binance_cache.get(&binance_symbol).await {
-            (
-                spot.momentum(10).and_then(|m| m.to_f64()).unwrap_or(0.0),
-                spot.momentum(60).and_then(|m| m.to_f64()).unwrap_or(0.0),
-            )
-        } else {
-            (0.0, 0.0)
-        };
+        let (_momentum_10s, _momentum_60s) =
+            if let Some(spot) = binance_cache.get(&binance_symbol).await {
+                (
+                    spot.momentum(10).and_then(|m| m.to_f64()).unwrap_or(0.0),
+                    spot.momentum(60).and_then(|m| m.to_f64()).unwrap_or(0.0),
+                )
+            } else {
+                (0.0, 0.0)
+            };
 
         info!(
             "🔮 DIRECTIONAL ENTRY: {} {} p_hat={:.1}% ev_net={:.1}% ask={:.1}¢ cost={:.2}% σ={:.4}",
@@ -2808,7 +2850,10 @@ impl MomentumEngine {
         // If we entered, update the position with p_hat and S0
         {
             let mut positions = self.positions.write().await;
-            if let Some(pos) = positions.values_mut().find(|p| p.condition_id == event.condition_id) {
+            if let Some(pos) = positions
+                .values_mut()
+                .find(|p| p.condition_id == event.condition_id)
+            {
                 pos.entry_p_hat = Some(p_hat);
                 pos.window_open_price = Some(s0);
             }
@@ -2841,14 +2886,20 @@ impl MomentumEngine {
                     let time_remaining = pos.time_to_resolution().num_seconds() as f64;
 
                     // Map Binance symbol back to Chainlink
-                    if let Some(cl_symbol) = crate::adapters::chainlink_rtds::to_chainlink_symbol(&pos.symbol) {
+                    if let Some(cl_symbol) =
+                        crate::adapters::chainlink_rtds::to_chainlink_symbol(&pos.symbol)
+                    {
                         if let Some(cl_spot) = cl_cache.get(cl_symbol).await {
                             let sigma = cl_spot
                                 .volatility(300)
                                 .and_then(|v| v.to_f64())
                                 .unwrap_or(0.001);
                             let current_p_hat = probability::estimate_probability(
-                                s0, cl_spot.price, sigma, time_remaining, 0.0,
+                                s0,
+                                cl_spot.price,
+                                sigma,
+                                time_remaining,
+                                0.0,
                             );
                             let effective_p = if direction == Direction::Up {
                                 current_p_hat
@@ -2876,12 +2927,16 @@ impl MomentumEngine {
 
                             // Time stop: < 30s remaining AND negative EV
                             if time_remaining < 30.0 {
-                                let ask_f64 = update.quote.best_ask
+                                let ask_f64 = update
+                                    .quote
+                                    .best_ask
                                     .and_then(|a| a.to_f64())
                                     .unwrap_or(0.5);
-                                let cost = self.fee_model.effective_rate(
-                                    update.quote.best_ask.unwrap_or(dec!(0.5))
-                                ).to_f64().unwrap_or(0.015);
+                                let cost = self
+                                    .fee_model
+                                    .effective_rate(update.quote.best_ask.unwrap_or(dec!(0.5)))
+                                    .to_f64()
+                                    .unwrap_or(0.015);
                                 let ev_net = effective_p - ask_f64 - cost;
                                 if ev_net < 0.0 {
                                     if let Some(bid) = update.quote.best_bid {
@@ -2894,7 +2949,8 @@ impl MomentumEngine {
 
                             // Hard stop: unrealized loss > $5
                             if let Some(bid) = update.quote.best_bid {
-                                let unrealized_pnl = (bid - pos.entry_price) * Decimal::from(pos.shares);
+                                let unrealized_pnl =
+                                    (bid - pos.entry_price) * Decimal::from(pos.shares);
                                 if unrealized_pnl < dec!(-5) {
                                     drop(positions);
                                     let reason = ExitReason::HardStop {

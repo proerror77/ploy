@@ -199,21 +199,19 @@ impl SubscriptionPlanner {
                 .collect(),
             DataFeed::BinanceSpot { symbols } => symbols
                 .iter()
-                .map(|s| SubscriptionKey::BinanceSpot {
-                    symbol: s.clone(),
-                })
+                .map(|s| SubscriptionKey::BinanceSpot { symbol: s.clone() })
                 .collect(),
             DataFeed::BinanceKlines {
-                symbols,
-                intervals,
-                ..
+                symbols, intervals, ..
             } => symbols
                 .iter()
                 .flat_map(|s| {
-                    intervals.iter().map(move |i| SubscriptionKey::BinanceKline {
-                        symbol: s.clone(),
-                        interval: i.clone(),
-                    })
+                    intervals
+                        .iter()
+                        .map(move |i| SubscriptionKey::BinanceKline {
+                            symbol: s.clone(),
+                            interval: i.clone(),
+                        })
                 })
                 .collect(),
             DataFeed::PolymarketEvents { series_ids } => series_ids
@@ -338,10 +336,7 @@ mod tests {
 
     #[test]
     fn build_plan_deduplicates_overlapping_tokens() {
-        let plan = SubscriptionPlanner::build_plan(vec![
-            crypto_consumer(),
-            overlapping_consumer(),
-        ]);
+        let plan = SubscriptionPlanner::build_plan(vec![crypto_consumer(), overlapping_consumer()]);
 
         // BTCUSDT appears in both consumers but should be one key
         let bn_symbols = plan.binance_symbols();
@@ -365,10 +360,7 @@ mod tests {
 
     #[test]
     fn build_plan_isolates_domains() {
-        let plan = SubscriptionPlanner::build_plan(vec![
-            crypto_consumer(),
-            sports_consumer(),
-        ]);
+        let plan = SubscriptionPlanner::build_plan(vec![crypto_consumer(), sports_consumer()]);
 
         assert_eq!(
             plan.consumer_domain(&ConsumerId::from("momentum-btc-15m")),
@@ -423,9 +415,9 @@ mod tests {
             .contains(&SubscriptionKey::PolymarketQuote {
                 token_id: "tok-down-1".into()
             }));
-        assert!(delta.unsubscribe.contains(&SubscriptionKey::Tick {
-            interval_ms: 1000
-        }));
+        assert!(delta
+            .unsubscribe
+            .contains(&SubscriptionKey::Tick { interval_ms: 1000 }));
 
         // Updated keys: BTCUSDT (consumer set changed), tok-up-1 (consumer set changed)
         assert!(delta.updated.contains(&SubscriptionKey::BinanceSpot {
@@ -458,14 +450,13 @@ mod tests {
 
     #[test]
     fn expand_feed_handles_empty_inputs() {
-        assert!(SubscriptionPlanner::expand_feed(&DataFeed::PolymarketQuotes {
-            tokens: vec![]
-        })
-        .is_empty());
-        assert!(SubscriptionPlanner::expand_feed(&DataFeed::BinanceSpot {
-            symbols: vec![]
-        })
-        .is_empty());
+        assert!(
+            SubscriptionPlanner::expand_feed(&DataFeed::PolymarketQuotes { tokens: vec![] })
+                .is_empty()
+        );
+        assert!(
+            SubscriptionPlanner::expand_feed(&DataFeed::BinanceSpot { symbols: vec![] }).is_empty()
+        );
         assert!(SubscriptionPlanner::expand_feed(&DataFeed::BinanceKlines {
             symbols: vec![],
             intervals: vec!["1m".into()],

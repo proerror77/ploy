@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate, SpotPrice};
+use crate::adapters::{PriceUpdate, QuoteUpdate, SpotPrice};
 use crate::agents::{AgentContext, TradingAgent};
 use crate::collector::LobCache;
 use crate::coordinator::CoordinatorCommand;
@@ -27,7 +27,9 @@ use crate::domain::Side;
 use crate::error::{PloyError, Result};
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
+use crate::platform::{
+    AgentRiskParams, AgentStatus, CryptoDataPlaneHandle, Domain, OrderIntent, OrderPriority,
+};
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
@@ -471,8 +473,7 @@ fn sequence_len_for_horizon(horizon: &str) -> usize {
 
 pub struct CryptoLobMlAgent {
     config: CryptoLobMlConfig,
-    binance_ws: Arc<BinanceWebSocket>,
-    pm_ws: Arc<PolymarketWebSocket>,
+    market_data: CryptoDataPlaneHandle,
     event_matcher: Arc<EventMatcher>,
     lob_cache: LobCache,
     #[cfg(feature = "onnx")]
@@ -644,8 +645,7 @@ async fn sync_positions_from_global(
 impl CryptoLobMlAgent {
     pub fn new(
         config: CryptoLobMlConfig,
-        binance_ws: Arc<BinanceWebSocket>,
-        pm_ws: Arc<PolymarketWebSocket>,
+        market_data: CryptoDataPlaneHandle,
         event_matcher: Arc<EventMatcher>,
         lob_cache: LobCache,
     ) -> Result<Self> {
@@ -709,8 +709,7 @@ impl CryptoLobMlAgent {
 
             return Ok(Self {
                 config,
-                binance_ws,
-                pm_ws,
+                market_data,
                 event_matcher,
                 lob_cache,
                 onnx_model: Some(m),
@@ -719,7 +718,7 @@ impl CryptoLobMlAgent {
 
         #[cfg(not(feature = "onnx"))]
         {
-            let _ = (binance_ws, pm_ws, event_matcher, lob_cache);
+            let _ = (market_data, event_matcher, lob_cache);
             Err(PloyError::Validation(
                 "crypto_lob_ml requires building with --features onnx".to_string(),
             ))
@@ -1569,8 +1568,8 @@ impl TradingAgent for CryptoLobMlAgent {
         sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
 
         // Subscribe to data feeds
-        let mut binance_rx: broadcast::Receiver<PriceUpdate> = self.binance_ws.subscribe();
-        let mut pm_rx: broadcast::Receiver<QuoteUpdate> = self.pm_ws.subscribe_updates();
+        let mut binance_rx: broadcast::Receiver<PriceUpdate> = self.market_data.subscribe_prices();
+        let mut pm_rx: broadcast::Receiver<QuoteUpdate> = self.market_data.subscribe_quotes();
 
         let refresh_dur = tokio::time::Duration::from_secs(self.config.event_refresh_secs.max(1));
         let mut refresh_tick = tokio::time::interval(refresh_dur);
@@ -1628,12 +1627,12 @@ impl TradingAgent for CryptoLobMlAgent {
                     if desired_tokens != subscribed_tokens {
                         for events in active_events.values() {
                             for event in events {
-                                self.pm_ws
+                                self.market_data
                                     .register_tokens(&event.up_token_id, &event.down_token_id)
                                     .await;
                             }
                         }
-                        self.pm_ws.request_resubscribe();
+                        self.market_data.request_resubscribe();
                         info!(
                             agent = self.config.agent_id,
                             token_count = desired_tokens.len(),
@@ -1676,7 +1675,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     };
 
                     // Momentum + volatility from trade-tick cache.
-                    let spot_cache = self.binance_ws.price_cache();
+                    let spot_cache = self.market_data.price_cache();
                     let Some(spot) = spot_cache.get(&update.symbol).await else {
                         continue;
                     };
@@ -1713,7 +1712,7 @@ impl TradingAgent for CryptoLobMlAgent {
                     let obi_micro = obi_1 - lob.obi_5;
                     let obi_slope = lob.obi_5 - obi_20;
 
-                    let quote_cache = self.pm_ws.quote_cache();
+                    let quote_cache = self.market_data.quote_cache();
                     for event in events {
                         let timeframe = normalize_timeframe(&event.horizon);
                         let entry_key = format!("{}|{}", update.symbol, &timeframe);
@@ -2431,7 +2430,7 @@ impl TradingAgent for CryptoLobMlAgent {
                                 &mut positions,
                             )
                             .await;
-                            let quote_cache = self.pm_ws.quote_cache();
+                            let quote_cache = self.market_data.quote_cache();
                             for (slug, pos) in &positions {
                                 let bid = quote_cache
                                     .get(&pos.token_id)
@@ -2565,6 +2564,14 @@ impl TradingAgent for CryptoLobMlAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::{BinanceWebSocket, PolymarketWebSocket};
+
+    fn sample_market_data() -> CryptoDataPlaneHandle {
+        CryptoDataPlaneHandle::new(
+            Arc::new(BinanceWebSocket::new(vec![])),
+            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+        )
+    }
 
     fn sample_window_context() -> WindowContext {
         WindowContext {
@@ -2746,8 +2753,7 @@ mod tests {
     fn test_estimate_p_up_validates_sequence_input_dim() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2794,8 +2800,7 @@ mod tests {
                 exit_mode,
                 ..CryptoLobMlConfig::default()
             },
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2833,8 +2838,7 @@ mod tests {
 
         let result = CryptoLobMlAgent::new(
             cfg,
-            Arc::new(BinanceWebSocket::new(vec![])),
-            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            sample_market_data(),
             Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2854,8 +2858,7 @@ mod tests {
 
         let result = CryptoLobMlAgent::new(
             cfg,
-            Arc::new(BinanceWebSocket::new(vec![])),
-            Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            sample_market_data(),
             Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2873,8 +2876,7 @@ mod tests {
     fn test_model_blend_weight_default() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2891,8 +2893,7 @@ mod tests {
     fn test_entry_window_enforces_late_windows_for_5m_and_15m() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2911,8 +2912,7 @@ mod tests {
     fn test_evaluate_entry_signal_uses_lagging_side_default() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2935,8 +2935,7 @@ mod tests {
     fn test_evaluate_entry_signal_rejects_expensive_entry() {
         let agent = CryptoLobMlAgent {
             config: CryptoLobMlConfig::default(),
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),
@@ -2957,8 +2956,7 @@ mod tests {
         cfg.max_entry_price = dec!(0.30);
         let agent = CryptoLobMlAgent {
             config: cfg,
-            binance_ws: Arc::new(BinanceWebSocket::new(vec![])),
-            pm_ws: Arc::new(PolymarketWebSocket::new("wss://example.com")),
+            market_data: sample_market_data(),
             event_matcher: Arc::new(EventMatcher::new(
                 crate::adapters::PolymarketClient::new("https://example.com", true).unwrap(),
             )),

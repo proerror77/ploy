@@ -15,12 +15,14 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{BinanceWebSocket, PolymarketWebSocket, PriceUpdate, QuoteUpdate};
+use crate::adapters::{PriceUpdate, QuoteUpdate};
 use crate::agents::{AgentContext, TradingAgent};
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::Result;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
+use crate::platform::{
+    AgentRiskParams, AgentStatus, CryptoDataPlaneHandle, Domain, OrderIntent, OrderPriority,
+};
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
@@ -461,8 +463,7 @@ struct TrackedPosition {
 /// Pull-based crypto trading agent
 pub struct CryptoTradingAgent {
     config: CryptoTradingConfig,
-    binance_ws: Arc<BinanceWebSocket>,
-    pm_ws: Arc<PolymarketWebSocket>,
+    market_data: CryptoDataPlaneHandle,
     event_matcher: Arc<EventMatcher>,
 }
 
@@ -603,14 +604,12 @@ async fn sync_positions_from_global(
 impl CryptoTradingAgent {
     pub fn new(
         config: CryptoTradingConfig,
-        binance_ws: Arc<BinanceWebSocket>,
-        pm_ws: Arc<PolymarketWebSocket>,
+        market_data: CryptoDataPlaneHandle,
         event_matcher: Arc<EventMatcher>,
     ) -> Self {
         Self {
             config,
-            binance_ws,
-            pm_ws,
+            market_data,
             event_matcher,
         }
     }
@@ -689,8 +688,8 @@ impl TradingAgent for CryptoTradingAgent {
         sync_positions_from_global(&ctx, &self.config.agent_id, &mut positions).await;
 
         // Subscribe to data feeds
-        let mut binance_rx: broadcast::Receiver<PriceUpdate> = self.binance_ws.subscribe();
-        let mut pm_rx: broadcast::Receiver<QuoteUpdate> = self.pm_ws.subscribe_updates();
+        let mut binance_rx: broadcast::Receiver<PriceUpdate> = self.market_data.subscribe_prices();
+        let mut pm_rx: broadcast::Receiver<QuoteUpdate> = self.market_data.subscribe_quotes();
 
         // Periodic refresh of active events
         let refresh_dur = tokio::time::Duration::from_secs(self.config.event_refresh_secs);
@@ -748,13 +747,13 @@ impl TradingAgent for CryptoTradingAgent {
                     if desired_tokens != subscribed_tokens {
                         for events in active_events.values() {
                             for event in events {
-                                self.pm_ws
+                                self.market_data
                                     .register_tokens(&event.up_token_id, &event.down_token_id)
                                     .await;
                             }
                         }
 
-                        self.pm_ws.request_resubscribe();
+                        self.market_data.request_resubscribe();
                         info!(
                             agent = self.config.agent_id,
                             token_count = desired_tokens.len(),
@@ -799,7 +798,7 @@ impl TradingAgent for CryptoTradingAgent {
                     };
 
                     // Spot price + derived signals from the Binance tick cache.
-                    let spot_cache = self.binance_ws.price_cache();
+                    let spot_cache = self.market_data.price_cache();
                     let Some(spot) = spot_cache.get(&update.symbol).await else {
                         continue;
                     };
@@ -852,7 +851,7 @@ impl TradingAgent for CryptoTradingAgent {
                         Some((side, window_move, elapsed_secs, remaining_secs, start_price))
                     };
 
-                    let quote_cache = self.pm_ws.quote_cache();
+                    let quote_cache = self.market_data.quote_cache();
 
                     // Binary options default: exit on signal flip instead of TP/SL.
                     for (slug, pos) in &positions {
@@ -1468,7 +1467,7 @@ impl TradingAgent for CryptoTradingAgent {
                                 &mut positions,
                             )
                             .await;
-                            let quote_cache = self.pm_ws.quote_cache();
+                            let quote_cache = self.market_data.quote_cache();
                             for (slug, pos) in &positions {
                                 let bid = quote_cache
                                     .get(&pos.token_id)

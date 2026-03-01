@@ -54,9 +54,7 @@ pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u6
     let store = PostgresStore::new(&config.database.url, 5).await?;
 
     // Create collector with database, wrapped in Arc for shared access
-    let collector = Arc::new(
-        SyncCollector::new(collector_config).with_pool(store.pool().clone()),
-    );
+    let collector = Arc::new(SyncCollector::new(collector_config).with_pool(store.pool().clone()));
 
     // Subscribe to updates for logging
     let mut rx = collector.subscribe();
@@ -129,9 +127,7 @@ pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u6
 
 /// Discover active PM tokens for crypto series and spawn a WebSocket bridge
 /// that feeds real-time PM prices into the collector.
-async fn spawn_pm_price_bridge(
-    collector: Arc<ploy::collector::SyncCollector>,
-) {
+async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
     use ploy::adapters::{PolymarketClient, PolymarketWebSocket};
     use ploy::collector::PolymarketPrice;
     use ploy::domain::market::Side;
@@ -140,7 +136,10 @@ async fn spawn_pm_price_bridge(
     let pm_client = match PolymarketClient::new(PM_REST_URL, true) {
         Ok(c) => c,
         Err(e) => {
-            warn!("Failed to create PM client for collector: {}. PM prices will be unavailable.", e);
+            warn!(
+                "Failed to create PM client for collector: {}. PM prices will be unavailable.",
+                e
+            );
             return;
         }
     };
@@ -166,10 +165,8 @@ async fn spawn_pm_price_bridge(
                                 } else {
                                     Side::Down
                                 };
-                                token_to_market.insert(
-                                    token.token_id.clone(),
-                                    (slug.clone(), side),
-                                );
+                                token_to_market
+                                    .insert(token.token_id.clone(), (slug.clone(), side));
                                 all_token_ids.push(token.token_id.clone());
                             }
                         }

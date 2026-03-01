@@ -375,11 +375,9 @@ impl SyncCollector {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_records_ts ON sync_records(timestamp)")
             .execute(pool)
             .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_sync_records_symbol ON sync_records(symbol)",
-        )
-        .execute(pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_records_symbol ON sync_records(symbol)")
+            .execute(pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_records_symbol_ts ON sync_records(symbol, timestamp)")
             .execute(pool)
             .await?;

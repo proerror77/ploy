@@ -58,9 +58,11 @@ pub mod backtest;
 pub mod backtest_feed;
 pub mod calculations;
 pub mod claimer;
+pub mod directional_backtest;
 pub mod dump_hedge;
 pub mod execution;
 pub mod execution_sim;
+pub mod fee_model;
 pub mod integrity;
 pub mod momentum;
 pub mod momentum_backtest;
@@ -70,6 +72,7 @@ pub mod paper_runner;
 #[cfg(feature = "analysis")]
 pub mod parquet_analysis;
 pub mod position_manager;
+pub mod probability;
 pub mod reconciliation;
 pub mod risk_mgmt;
 pub mod signal;
@@ -78,9 +81,6 @@ pub mod trade_logger;
 pub mod trading_costs;
 pub mod volatility;
 pub mod volatility_arb;
-pub mod directional_backtest;
-pub mod fee_model;
-pub mod probability;
 
 // Runtime re-exports
 pub use claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
@@ -131,6 +131,9 @@ pub use backtest::{
     BacktestResults, BacktestTrade, KlineRecord, MarketSnapshot, PMPriceRecord, PaperSignal,
     PaperTrader, PaperTradingStats,
 };
+pub use directional_backtest::{
+    DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
+};
 pub use dump_hedge::{
     DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
     PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
@@ -138,6 +141,7 @@ pub use dump_hedge::{
 pub use event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 pub use event_edge::{run_event_edge, EventEdgeConfig};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
+pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
 pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
     MomentumDetector, MomentumEngine, MomentumSignal, Position,
@@ -164,6 +168,7 @@ pub use position_manager::{
     Position as PersistedPosition, PositionManager, PositionStatus as PersistedPositionStatus,
     PositionSummary,
 };
+pub use probability::{estimate_probability, full_estimate, Features, ProbabilityEstimate};
 pub use reconciliation::{
     DiscrepancySeverity, PositionDiscrepancy, ReconciliationConfig, ReconciliationResult,
     ReconciliationService,
@@ -188,9 +193,6 @@ pub use volatility_arb::{
     MarketPricing, VolArbSignal, VolArbStats, VolArbTrade, VolatilityArbConfig,
     VolatilityArbEngine, VolatilityEstimate,
 };
-pub use probability::{estimate_probability, full_estimate, Features, ProbabilityEstimate};
-pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
-pub use directional_backtest::{DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade};
 
 // New consolidated modules
 pub use calculations::{
