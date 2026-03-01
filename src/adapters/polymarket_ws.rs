@@ -330,7 +330,7 @@ pub struct PriceChangeItem {
     pub price: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct PriceLevel {
     pub price: String,
     pub size: String,

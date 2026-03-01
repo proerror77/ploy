@@ -5563,8 +5563,20 @@ pub async fn start_platform(
         }
 
         // Build a unified coin set across all enabled crypto strategies.
+        // Also build a SubscriptionPlan for audit/observability (Phase 1 shadow).
         let mut all_coins: Vec<String> = Vec::new();
+        let mut planner_requirements: Vec<(
+            crate::platform::ConsumerId,
+            Domain,
+            Vec<DataFeed>,
+        )> = Vec::new();
         if momentum_enabled {
+            let symbols: Vec<String> = crypto_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
+            planner_requirements.push((
+                crate::platform::ConsumerId::from(format!("momentum-{}", crypto_cfg.agent_id)),
+                Domain::Crypto,
+                vec![DataFeed::BinanceSpot { symbols }],
+            ));
             for coin in &crypto_cfg.coins {
                 if !all_coins.contains(coin) {
                     all_coins.push(coin.clone());
@@ -5572,6 +5584,12 @@ pub async fn start_platform(
             }
         }
         if lob_agent_enabled {
+            let symbols: Vec<String> = lob_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
+            planner_requirements.push((
+                crate::platform::ConsumerId::from("lob-ml"),
+                Domain::Crypto,
+                vec![DataFeed::BinanceSpot { symbols }],
+            ));
             for coin in &lob_cfg.coins {
                 if !all_coins.contains(coin) {
                     all_coins.push(coin.clone());
@@ -5580,6 +5598,12 @@ pub async fn start_platform(
         }
         #[cfg(feature = "rl")]
         if rl_agent_enabled {
+            let symbols: Vec<String> = rl_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
+            planner_requirements.push((
+                crate::platform::ConsumerId::from("rl-policy"),
+                Domain::Crypto,
+                vec![DataFeed::BinanceSpot { symbols }],
+            ));
             for coin in &rl_cfg.coins {
                 if !all_coins.contains(coin) {
                     all_coins.push(coin.clone());
@@ -5589,6 +5613,16 @@ pub async fn start_platform(
         if all_coins.is_empty() {
             warn!("crypto domain enabled but no crypto agents are active (coins set is empty)");
         }
+
+        // Build and log the subscription plan (Phase 1: shadow audit).
+        let subscription_plan =
+            crate::platform::SubscriptionPlanner::build_plan(planner_requirements);
+        info!(
+            unique_keys = subscription_plan.key_count(),
+            total_refs = subscription_plan.ref_count(),
+            binance_symbols = subscription_plan.binance_symbols().len(),
+            "subscription plan built (shadow audit)"
+        );
 
         // Create WebSocket feeds
         let symbols: Vec<String> = all_coins.iter().map(|c| format!("{}USDT", c)).collect();
@@ -5782,25 +5816,143 @@ pub async fn start_platform(
         if let Some(pool) = shared_pool.as_ref() {
             let (orderbook_levels_default, orderbook_snapshot_secs_default) = (20usize, 60i64);
 
-            spawn_clob_quote_persistence(
-                pm_ws.clone(),
-                pool.clone(),
-                crypto_cfg.agent_id.clone(),
-                Domain::Crypto,
-            );
-            spawn_clob_orderbook_persistence(
-                pm_ws.clone(),
-                pool.clone(),
-                crypto_cfg.agent_id.clone(),
-                Domain::Crypto,
-                orderbook_levels_default,
-                orderbook_snapshot_secs_default,
-            );
-            spawn_binance_price_persistence(
-                binance_ws.clone(),
-                pool.clone(),
-                crypto_cfg.agent_id.clone(),
-            );
+            // Phase 1: opt-in unified persistence pipeline.
+            // Set PLOY_UNIFIED_PERSISTENCE=1 to use the new pipeline instead of
+            // individual spawn_*_persistence() calls.
+            let use_unified = std::env::var("PLOY_UNIFIED_PERSISTENCE")
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+
+            if use_unified {
+                let pipeline_config = crate::platform::PersistenceConfig {
+                    clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
+                    binance_price_min_interval_secs: BINANCE_PERSIST_MIN_INTERVAL_SECS,
+                    clob_orderbook_snapshot_interval_ms: orderbook_snapshot_secs_default * 1000,
+                    clob_orderbook_max_levels: orderbook_levels_default,
+                    ..Default::default()
+                };
+                let pipeline_handle =
+                    crate::platform::PersistencePipeline::spawn(pool.clone(), pipeline_config);
+
+                // Bridge PM WS quote updates → pipeline
+                let ph = pipeline_handle.clone();
+                let mut quote_rx = pm_ws.subscribe_updates();
+                tokio::spawn(async move {
+                    loop {
+                        match quote_rx.recv().await {
+                            Ok(update) => {
+                                let tick = crate::platform::ClobQuoteTick {
+                                    token_id: update.token_id.clone(),
+                                    side: format!("{:?}", update.side),
+                                    best_bid: update.quote.best_bid,
+                                    best_ask: update.quote.best_ask,
+                                    bid_size: update.quote.bid_size,
+                                    ask_size: update.quote.ask_size,
+                                    domain: Domain::Crypto,
+                                    received_at: Utc::now(),
+                                };
+                                let _ = ph.try_ingest(crate::platform::PersistenceEvent::ClobQuote(tick));
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!(lagged = n, "unified persistence quote bridge lagged");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+
+                // Bridge Binance WS price updates → pipeline
+                let ph = pipeline_handle.clone();
+                let mut price_rx = binance_ws.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        match price_rx.recv().await {
+                            Ok(update) => {
+                                let tick = crate::platform::BinancePriceTick {
+                                    symbol: update.symbol.clone(),
+                                    price: Some(update.price),
+                                    quantity: update.quantity,
+                                    trade_time: update.timestamp,
+                                };
+                                let _ = ph.try_ingest(crate::platform::PersistenceEvent::BinancePrice(tick));
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!(lagged = n, "unified persistence price bridge lagged");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+
+                // Bridge PM WS orderbook updates → pipeline
+                let ph = pipeline_handle.clone();
+                let mut book_rx = pm_ws.subscribe_books();
+                tokio::spawn(async move {
+                    use sha2::{Digest, Sha256};
+                    loop {
+                        match book_rx.recv().await {
+                            Ok(book_msg) => {
+                                let bids_json = serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                                let asks_json = serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                                let mut hasher = Sha256::new();
+                                hasher.update(bids_json.to_string().as_bytes());
+                                hasher.update(asks_json.to_string().as_bytes());
+                                let hash = format!("{:x}", hasher.finalize());
+                                let snap = crate::platform::ClobOrderbookSnapshot {
+                                    domain: Domain::Crypto,
+                                    token_id: book_msg.asset_id.clone(),
+                                    market: Some(book_msg.market.clone()),
+                                    bids: bids_json,
+                                    asks: asks_json,
+                                    book_timestamp: book_msg.timestamp.as_deref()
+                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                        .map(|dt| dt.with_timezone(&Utc)),
+                                    hash,
+                                    source: "polymarket_ws".into(),
+                                    context: None,
+                                };
+                                let _ = ph.try_ingest(crate::platform::PersistenceEvent::ClobOrderbook(snap));
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!(lagged = n, "unified persistence orderbook bridge lagged");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+
+                info!(
+                    agent = crypto_cfg.agent_id,
+                    "unified persistence pipeline started (PLOY_UNIFIED_PERSISTENCE=1)"
+                );
+            } else {
+                // Legacy: individual persistence spawners
+                spawn_clob_quote_persistence(
+                    pm_ws.clone(),
+                    pool.clone(),
+                    crypto_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                );
+                spawn_clob_orderbook_persistence(
+                    pm_ws.clone(),
+                    pool.clone(),
+                    crypto_cfg.agent_id.clone(),
+                    Domain::Crypto,
+                    orderbook_levels_default,
+                    orderbook_snapshot_secs_default,
+                );
+                spawn_binance_price_persistence(
+                    binance_ws.clone(),
+                    pool.clone(),
+                    crypto_cfg.agent_id.clone(),
+                );
+                info!(
+                    agent = crypto_cfg.agent_id,
+                    "legacy persistence tasks started"
+                );
+            }
+
+            // Trade persistence (polling-based) — always uses legacy spawner
             spawn_polymarket_trade_persistence(
                 event_matcher.clone(),
                 pool.clone(),
