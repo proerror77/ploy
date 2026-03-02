@@ -1,0 +1,309 @@
+name: Release to Aliyun ECS
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (vX.Y.Z)"
+        required: true
+      git_ref:
+        description: "Git ref to release (branch, tag, or SHA)"
+        required: true
+        default: "main"
+      deploy_production:
+        description: "Deploy release to Aliyun ECS"
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-aliyun-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
+  DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
+
+jobs:
+  build:
+    name: Build Linux Release Artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      source_sha: ${{ steps.source-sha.outputs.source_sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref || github.event.release.target_commitish || github.ref }}
+
+      - name: Capture source commit
+        id: source-sha
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release tag
+        id: meta
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="${{ github.event.inputs.release_tag }}"
+          fi
+
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Invalid release tag: $tag"
+            echo "Expected format: vX.Y.Z"
+            exit 1
+          fi
+
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libpq-dev
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-aliyun
+
+      - name: Build production binary (Linux)
+        run: |
+          cargo build --release --locked --features "${PLOY_RELEASE_FEATURES}"
+          strip target/release/ploy || true
+
+      - name: Verify Linux binary format
+        run: |
+          file target/release/ploy | tee dist-file.txt
+          grep -q "ELF 64-bit LSB" dist-file.txt
+
+      - name: Create release bundle
+        run: |
+          mkdir -p dist
+          cp target/release/ploy dist/ploy
+          cp config/strategies/momentum.toml dist/momentum.toml
+          cp migrations/022_order_strategy_tracking.sql dist/022_order_strategy_tracking.sql
+          sha256sum dist/ploy > dist/ploy.sha256
+          cat > dist/RELEASE.txt <<EOF
+          Release: ${{ steps.meta.outputs.release_tag }}
+          Commit: ${{ steps.source-sha.outputs.source_sha }}
+          Features: ${PLOY_RELEASE_FEATURES}
+          Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+          tar czf "dist/ploy-release-${{ steps.meta.outputs.release_tag }}.tar.gz" -C dist \
+            ploy ploy.sha256 RELEASE.txt momentum.toml 022_order_strategy_tracking.sql
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aliyun-${{ steps.meta.outputs.release_tag }}
+          path: dist/*
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-aliyun-${{ needs.build.outputs.release_tag }}
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          name: ${{ needs.build.outputs.release_tag }}
+          target_commitish: ${{ needs.build.outputs.source_sha }}
+          generate_release_notes: true
+          files: |
+            dist/ploy
+            dist/ploy.sha256
+            dist/RELEASE.txt
+            dist/ploy-release-${{ needs.build.outputs.release_tag }}.tar.gz
+
+  deploy-production:
+    name: Deploy to Aliyun ECS
+    needs: [build, release]
+    if: ${{ github.event_name == 'release' || github.event.inputs.deploy_production == 'true' }}
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-aliyun-${{ needs.build.outputs.release_tag }}
+          path: dist
+
+      - name: Resolve ECS host (static or Aliyun CLI lookup)
+        id: resolve-host
+        env:
+          STATIC_HOST: ${{ secrets.ALIYUN_ECS_HOST }}
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+          ALIYUN_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
+          ALIYUN_ECS_INSTANCE_ID: ${{ vars.ALIYUN_ECS_INSTANCE_ID }}
+          ALIYUN_ECS_INSTANCE_NAME: ${{ vars.ALIYUN_ECS_INSTANCE_NAME }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${STATIC_HOST:-}" ]; then
+            echo "host=${STATIC_HOST}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${ALIYUN_ACCESS_KEY_ID:-}" ] || [ -z "${ALIYUN_ACCESS_KEY_SECRET:-}" ]; then
+            echo "ALIYUN_ECS_HOST not set, and Aliyun AK/SK not provided."
+            echo "Set ALIYUN_ECS_HOST, or set ALIYUN_ACCESS_KEY_ID + ALIYUN_ACCESS_KEY_SECRET."
+            exit 1
+          fi
+
+          if [ -z "${ALIYUN_ECS_INSTANCE_ID:-}" ] && [ -z "${ALIYUN_ECS_INSTANCE_NAME:-}" ]; then
+            echo "Provide ALIYUN_ECS_INSTANCE_ID or ALIYUN_ECS_INSTANCE_NAME as repo variable."
+            exit 1
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+          curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz | tar -xz
+          sudo mv aliyun /usr/local/bin/aliyun
+          aliyun configure set \
+            --profile ci \
+            --mode AK \
+            --region "${ALIYUN_REGION}" \
+            --access-key-id "${ALIYUN_ACCESS_KEY_ID}" \
+            --access-key-secret "${ALIYUN_ACCESS_KEY_SECRET}" \
+            --language en >/dev/null
+
+          data="$(aliyun ecs DescribeInstances --profile ci --region "${ALIYUN_REGION}" --PageSize 100)"
+          host="$(
+            echo "${data}" | jq -r \
+              --arg iid "${ALIYUN_ECS_INSTANCE_ID:-}" \
+              --arg iname "${ALIYUN_ECS_INSTANCE_NAME:-}" '
+                .Instances.Instance[]
+                | select(
+                    ($iid != "" and .InstanceId == $iid)
+                    or
+                    ($iid == "" and $iname != "" and .InstanceName == $iname)
+                  )
+                | (.PublicIpAddress.IpAddress[0] // .VpcAttributes.PrivateIpAddress.IpAddress[0] // empty)
+                ' | head -n1
+          )"
+
+          if [ -z "${host}" ]; then
+            echo "Failed to resolve ECS host. Check ALIYUN_REGION / instance id/name."
+            exit 1
+          fi
+
+          echo "host=${host}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bundle to ECS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.resolve-host.outputs.host }}
+          username: ${{ secrets.ALIYUN_ECS_USER }}
+          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
+          source: dist/ploy-release-${{ needs.build.outputs.release_tag }}.tar.gz
+          target: /tmp/
+          strip_components: 1
+
+      - name: Install release, run migration, restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.resolve-host.outputs.host }}
+          username: ${{ secrets.ALIYUN_ECS_USER }}
+          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
+          script_stop: true
+          envs: DEPLOY_ROOT
+          script: |
+            set -euo pipefail
+
+            RELEASE_TAG="${{ needs.build.outputs.release_tag }}"
+            DEPLOY_ROOT="${DEPLOY_ROOT:-/root/ploy}"
+            BUNDLE="/tmp/ploy-release-${RELEASE_TAG}.tar.gz"
+            WORKDIR="/tmp/ploy-release-${RELEASE_TAG}"
+            RELEASE_DIR="${DEPLOY_ROOT}/releases/${RELEASE_TAG}"
+
+            SUDO=""
+            if [ "$(id -u)" -ne 0 ]; then
+              SUDO="sudo"
+            fi
+
+            [ -f "${BUNDLE}" ]
+            rm -rf "${WORKDIR}"
+            mkdir -p "${WORKDIR}"
+            tar xzf "${BUNDLE}" -C "${WORKDIR}"
+
+            $SUDO mkdir -p \
+              "${RELEASE_DIR}" \
+              "${DEPLOY_ROOT}/bin" \
+              "${DEPLOY_ROOT}/config/strategies" \
+              "${DEPLOY_ROOT}/migrations"
+
+            if [ -f "${DEPLOY_ROOT}/bin/ploy" ]; then
+              ts="$(date +%Y%m%d_%H%M%S)"
+              $SUDO cp "${DEPLOY_ROOT}/bin/ploy" "${DEPLOY_ROOT}/bin/ploy.bak.${ts}"
+              $SUDO cp "${DEPLOY_ROOT}/bin/ploy" "${DEPLOY_ROOT}/bin/ploy.bak"
+            fi
+
+            $SUDO install -m 755 "${WORKDIR}/ploy" "${RELEASE_DIR}/ploy"
+            $SUDO install -m 755 "${WORKDIR}/ploy" "${DEPLOY_ROOT}/bin/ploy"
+            $SUDO install -m 600 "${WORKDIR}/momentum.toml" "${DEPLOY_ROOT}/config/strategies/momentum.toml"
+            $SUDO install -m 644 "${WORKDIR}/022_order_strategy_tracking.sql" "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
+
+            file "${DEPLOY_ROOT}/bin/ploy" | grep -q "ELF 64-bit LSB"
+            echo "${RELEASE_TAG}" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_release" >/dev/null
+
+            if [ -f "${DEPLOY_ROOT}/.env" ]; then
+              set -a
+              # shellcheck disable=SC1090
+              . "${DEPLOY_ROOT}/.env"
+              set +a
+            fi
+
+            if [ -n "${DATABASE_URL:-}" ]; then
+              psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
+            else
+              echo "DATABASE_URL not set; skip migration."
+            fi
+
+            if systemctl list-unit-files | grep -q '^ploy\.service'; then
+              $SUDO systemctl restart ploy
+              sleep 3
+              $SUDO systemctl is-active --quiet ploy
+            else
+              echo "ploy.service not found; skip restart."
+            fi
+
+            rm -rf "${WORKDIR}" "${BUNDLE}"
+
+      - name: Deployment summary
+        run: |
+          echo "## Aliyun ECS Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- Release: ${{ needs.build.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ needs.build.outputs.source_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Features: ${{ env.PLOY_RELEASE_FEATURES }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Target host: \`${{ steps.resolve-host.outputs.host }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

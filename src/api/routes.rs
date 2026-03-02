@@ -75,7 +75,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/stats/pnl", get(handlers::get_pnl_history))
         // Trade endpoints
         .route("/api/trades", get(handlers::get_trades))
-        .route("/api/trades/:id", get(handlers::get_trade_by_id))
+        .route("/api/trades/{id}", get(handlers::get_trade_by_id))
         // Position endpoints
         .route("/api/positions", get(handlers::get_positions))
         // System endpoints
@@ -104,7 +104,7 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::get_strategies_control),
         )
         .route(
-            "/api/strategies/control/:id",
+            "/api/strategies/control/{id}",
             put(handlers::update_strategy_control),
         )
         .route(
@@ -113,7 +113,7 @@ pub fn create_router(state: AppState) -> Router {
                 .post(handlers::create_strategy_evaluation),
         )
         .route(
-            "/api/strategy-evaluations/:deployment_id/latest",
+            "/api/strategy-evaluations/{deployment_id}/latest",
             get(handlers::get_latest_strategy_evaluation),
         )
         // Strategy deployment matrix (control-plane first-class resource)
@@ -122,15 +122,15 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::list_deployments).put(handlers::upsert_deployments),
         )
         .route(
-            "/api/deployments/:id",
+            "/api/deployments/{id}",
             get(handlers::get_deployment).delete(handlers::delete_deployment),
         )
         .route(
-            "/api/deployments/:id/enable",
+            "/api/deployments/{id}/enable",
             post(handlers::enable_deployment),
         )
         .route(
-            "/api/deployments/:id/disable",
+            "/api/deployments/{id}/disable",
             post(handlers::disable_deployment),
         )
         // Account-level governance policy (OpenClaw control-plane)

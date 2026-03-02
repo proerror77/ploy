@@ -80,14 +80,14 @@ fn capability_endpoints(governance_available: bool) -> Vec<CapabilityEndpoint> {
             auth: "x-ploy-admin-token".to_string(),
         },
         CapabilityEndpoint {
-            path: "/api/strategies/control|/api/strategies/control/:id".to_string(),
+            path: "/api/strategies/control|/api/strategies/control/{id}".to_string(),
             method: "GET/PUT".to_string(),
             description: "Strategy control projection and targeted lifecycle/version mutation"
                 .to_string(),
             auth: "x-ploy-admin-token".to_string(),
         },
         CapabilityEndpoint {
-            path: "/api/strategy-evaluations|/api/strategy-evaluations/:deployment_id/latest"
+            path: "/api/strategy-evaluations|/api/strategy-evaluations/{deployment_id}/latest"
                 .to_string(),
             method: "GET/POST".to_string(),
             description:
