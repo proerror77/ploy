@@ -24,7 +24,7 @@
 - Validation executed:
   - `cargo test strategy::risk_mgmt::risk::tests -- --nocapture` (5/5)
   - `cargo test strategy::execution::engine::tests -- --nocapture` (12/12)
-  - `cargo test services::health::tests -- --nocapture` (3/3)
+  - `cargo test services::health::tests -- --nocapture` (4/4)
   - `cargo test services::risk_view::tests -- --nocapture` (2/2)
   - `cargo build` (pass)
 - Notes:

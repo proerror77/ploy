@@ -435,6 +435,8 @@ ploy_consecutive_failures {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{RiskConfig as GateRiskConfig, RiskGate};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_health_state_new() {
@@ -459,5 +461,23 @@ mod tests {
 
         // Should be unhealthy when WS is not connected
         assert_eq!(health.status, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn test_with_risk_gate_reflects_halted_status() {
+        let mut cfg = GateRiskConfig::default();
+        cfg.max_consecutive_failures = 1;
+        let gate = Arc::new(RiskGate::new(cfg));
+        gate.record_failure("agent1", "forced failure").await;
+
+        let state = HealthState::new().with_risk_gate(gate);
+        state.set_ws_connected(true);
+        state.set_db_connected(true);
+        state.record_ws_message().await;
+        state.record_db_check(true).await;
+
+        let health = state.get_health().await;
+        assert_eq!(health.status, HealthStatus::Unhealthy);
+        assert_eq!(health.risk_state, "HALTED");
     }
 }
