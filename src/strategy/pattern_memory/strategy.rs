@@ -816,6 +816,7 @@ impl Strategy for PatternMemoryStrategy {
                 end_time,
                 price_to_beat,
                 title,
+                condition_id: _,
             } => {
                 let Some(symbol) = self.symbol_for_series(series_id) else {
                     return Ok(actions);

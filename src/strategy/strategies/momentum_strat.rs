@@ -625,6 +625,7 @@ impl Strategy for MomentumStrategy {
                 end_time,
                 price_to_beat: _,
                 title: _,
+                condition_id: _,
             } => {
                 // Find which symbol this series belongs to
                 for mapping in SeriesMapping::standard_mappings() {

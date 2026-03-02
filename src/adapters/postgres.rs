@@ -427,9 +427,9 @@ impl PostgresStore {
             INSERT INTO orders (
                 cycle_id, leg, client_order_id, exchange_order_id, market_side, order_side,
                 token_id, shares, limit_price, avg_fill_price, filled_shares, status,
-                submitted_at, filled_at, error
+                submitted_at, filled_at, error, strategy_id, fee
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             RETURNING id
             "#,
         )
@@ -448,6 +448,8 @@ impl PostgresStore {
         .bind(order.submitted_at)
         .bind(order.filled_at)
         .bind(&order.error)
+        .bind(&order.strategy_id)
+        .bind(order.fee)
         .fetch_one(&self.pool)
         .await?;
 
@@ -515,6 +517,25 @@ impl PostgresStore {
         .bind(filled_shares as i32)
         .bind(avg_fill_price)
         .bind(format!("{:?}", status))
+        .bind(client_order_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Update order fee after fill
+    pub async fn update_order_fee(
+        &self,
+        client_order_id: &str,
+        fee: Decimal,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE orders SET fee = $1, updated_at = NOW()
+            WHERE client_order_id = $2
+            "#,
+        )
+        .bind(fee)
         .bind(client_order_id)
         .execute(&self.pool)
         .await?;

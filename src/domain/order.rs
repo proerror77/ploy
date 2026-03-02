@@ -150,10 +150,19 @@ pub struct Order {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Which strategy placed this order (e.g. "momentum", "split_arb")
+    pub strategy_id: Option<String>,
+    /// Exchange fee charged on fill
+    pub fee: Option<Decimal>,
 }
 
 impl Order {
-    pub fn from_request(request: &OrderRequest, cycle_id: Option<i32>, leg: u8) -> Self {
+    pub fn from_request(
+        request: &OrderRequest,
+        cycle_id: Option<i32>,
+        leg: u8,
+        strategy_id: Option<String>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: None,
@@ -174,6 +183,8 @@ impl Order {
             error: None,
             created_at: now,
             updated_at: now,
+            strategy_id,
+            fee: None,
         }
     }
 
@@ -314,6 +325,8 @@ mod tests {
             error: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            strategy_id: None,
+            fee: None,
         };
 
         assert_eq!(order.fill_pct(), dec!(50));

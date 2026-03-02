@@ -140,6 +140,8 @@ pub enum MarketUpdate {
         price_to_beat: Option<Decimal>,
         /// Optional human title for logging/debugging.
         title: Option<String>,
+        /// CTF condition_id for merge/redeem operations.
+        condition_id: Option<String>,
     },
 
     /// Event expired/closed

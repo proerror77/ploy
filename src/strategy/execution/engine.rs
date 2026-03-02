@@ -565,7 +565,7 @@ impl StrategyEngine {
 
         // Persist the intent before submitting to the exchange.
         let client_order_id = request.client_order_id.clone();
-        let order = Order::from_request(&request, Some(cycle_id), 1);
+        let order = Order::from_request(&request, Some(cycle_id), 1, None);
         if let Err(e) = self.store.insert_order(&order).await {
             let halt_reason = "Failed to persist Leg1 order";
             self.risk_manager.trigger_circuit_breaker(halt_reason).await;
@@ -997,7 +997,7 @@ impl StrategyEngine {
 
         // Persist the intent before submitting to the exchange (best effort).
         let client_order_id = request.client_order_id.clone();
-        let order = Order::from_request(&request, Some(ctx.cycle_id), 2);
+        let order = Order::from_request(&request, Some(ctx.cycle_id), 2, None);
         if let Err(err) = self.store.insert_order(&order).await {
             // Exposure exists (Leg1) and we refuse to submit Leg2 if we can't persist it.
             let unwind_summary = match self
@@ -1383,7 +1383,7 @@ impl StrategyEngine {
 
         // Persist the intent (best effort) before submitting to the exchange.
         let client_order_id = request.client_order_id.clone();
-        let order = Order::from_request(&request, Some(ctx.cycle_id), 1);
+        let order = Order::from_request(&request, Some(ctx.cycle_id), 1, None);
         if let Err(e) = self.store.insert_order(&order).await {
             error!(
                 "Failed to persist unwind order (cycle {}): {}",

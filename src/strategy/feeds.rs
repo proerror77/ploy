@@ -235,6 +235,7 @@ struct DiscoveredEvent {
     end_time: chrono::DateTime<Utc>,
     price_to_beat: Option<rust_decimal::Decimal>,
     title: Option<String>,
+    condition_id: Option<String>,
 }
 
 impl DataFeedManager {
@@ -731,6 +732,7 @@ impl DataFeedManager {
 
                         let mut up_token: Option<String> = None;
                         let mut down_token: Option<String> = None;
+                        let mut condition_id: Option<String> = None;
 
                         let mut price_to_beat: Option<rust_decimal::Decimal> = details
                             .title
@@ -758,6 +760,7 @@ impl DataFeedManager {
                                     if ids.len() >= 2 {
                                         up_token = Some(ids[0].clone());
                                         down_token = Some(ids[1].clone());
+                                        condition_id = market.condition_id.clone();
                                         break;
                                     }
                                 }
@@ -780,6 +783,7 @@ impl DataFeedManager {
                                     if let (Some(u), Some(d)) = (up, down) {
                                         up_token = Some(u.token_id.clone());
                                         down_token = Some(d.token_id.clone());
+                                        condition_id = market.condition_id.clone();
                                         break;
                                     }
                                 }
@@ -821,6 +825,7 @@ impl DataFeedManager {
                             end_time,
                             price_to_beat,
                             title: title.clone(),
+                            condition_id: condition_id.clone(),
                         };
 
                         discovered.insert(details.id.clone(), ev);
@@ -866,6 +871,7 @@ impl DataFeedManager {
                                     end_time: ev.end_time,
                                     price_to_beat: ev.price_to_beat,
                                     title: ev.title.clone(),
+                                    condition_id: ev.condition_id.clone(),
                                 };
                                 self.manager.send_market_update(update);
                             }
@@ -1028,6 +1034,7 @@ impl DataFeedManager {
 
                         let mut up_token: Option<String> = None;
                         let mut down_token: Option<String> = None;
+                        let mut condition_id: Option<String> = None;
 
                         let mut price_to_beat: Option<rust_decimal::Decimal> = details
                             .title
@@ -1055,6 +1062,7 @@ impl DataFeedManager {
                                     if ids.len() >= 2 {
                                         up_token = Some(ids[0].clone());
                                         down_token = Some(ids[1].clone());
+                                        condition_id = market.condition_id.clone();
                                         break;
                                     }
                                 }
@@ -1077,6 +1085,7 @@ impl DataFeedManager {
                                     if let (Some(u), Some(d)) = (up, down) {
                                         up_token = Some(u.token_id.clone());
                                         down_token = Some(d.token_id.clone());
+                                        condition_id = market.condition_id.clone();
                                         break;
                                     }
                                 }
@@ -1121,6 +1130,7 @@ impl DataFeedManager {
                                 end_time,
                                 price_to_beat,
                                 title,
+                                condition_id,
                             },
                         );
                     }
@@ -1166,6 +1176,7 @@ impl DataFeedManager {
                                     end_time: ev.end_time,
                                     price_to_beat: ev.price_to_beat,
                                     title: ev.title.clone(),
+                                    condition_id: ev.condition_id.clone(),
                                 });
                             }
 

@@ -1436,6 +1436,7 @@ impl Strategy for MomentumStrategyAdapter {
                 end_time,
                 price_to_beat: _,
                 title: _,
+                condition_id: _,
             } => {
                 // Map series to symbol
                 let (symbol, window_secs) = match series_id.as_str() {
@@ -1753,6 +1754,8 @@ struct MonitoredMarket {
     no_token_id: String,
     description: String,
     end_time: DateTime<Utc>,
+    /// CTF condition_id for merge/redeem operations
+    condition_id: Option<String>,
 }
 
 /// A partial (unhedged) position
@@ -1794,6 +1797,58 @@ struct SplitStats {
     unhedged_exits: u64,
     total_profit: Decimal,
     total_loss: Decimal,
+}
+
+/// Spawn a CTF merge transaction to convert YES+NO token pair back to USDC.
+///
+/// This is a best-effort operation — if it fails, the claimer daemon will
+/// pick up the unmerged positions later during its periodic scan.
+#[cfg(feature = "pm_ctf")]
+async fn spawn_ctf_merge(condition_id: &str, shares: u64) -> std::result::Result<String, String> {
+    use alloy::primitives::{B256, U256};
+    use polymarket_client_sdk::ctf::types::MergePositionsRequest;
+    use std::str::FromStr;
+
+    // USDC on Polygon
+    let usdc: alloy::primitives::Address =
+        "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".parse().map_err(|e| format!("{e}"))?;
+    let cid = B256::from_str(condition_id).map_err(|e| format!("invalid condition_id: {e}"))?;
+    // Polymarket shares are 10^6 (USDC decimals)
+    let amount = U256::from(shares) * U256::from(1_000_000u64);
+
+    let pk = std::env::var("POLYMARKET_PRIVATE_KEY")
+        .map_err(|_| "POLYMARKET_PRIVATE_KEY not set".to_string())?;
+
+    let signer: alloy::signers::local::PrivateKeySigner =
+        pk.parse().map_err(|e| format!("invalid private key: {e}"))?;
+    let wallet = alloy::network::EthereumWallet::from(signer);
+
+    let rpc_url = std::env::var("POLYGON_RPC_URL")
+        .unwrap_or_else(|_| "https://polygon-rpc.com".to_string());
+
+    let provider = alloy::providers::ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(rpc_url.parse().map_err(|e| format!("bad RPC URL: {e}"))?);
+
+    let client = polymarket_client_sdk::ctf::Client::new(
+        provider,
+        polymarket_client_sdk::POLYGON,
+    )
+    .map_err(|e| format!("CTF client init: {e}"))?;
+
+    let request = MergePositionsRequest::for_binary_market(usdc, cid, amount);
+    let resp = client
+        .merge_positions(&request)
+        .await
+        .map_err(|e| format!("merge tx failed: {e}"))?;
+
+    Ok(format!("{:?}", resp.transaction_hash))
+}
+
+/// Fallback when CTF feature is not enabled — always returns an error.
+#[cfg(not(feature = "pm_ctf"))]
+async fn spawn_ctf_merge(_condition_id: &str, _shares: u64) -> std::result::Result<String, String> {
+    Err("CTF merge not available (pm_ctf feature disabled)".to_string())
 }
 
 fn default_split_arb_series_ids() -> Vec<String> {
@@ -2222,6 +2277,7 @@ impl Strategy for SplitArbStrategyAdapter {
                 end_time,
                 price_to_beat: _,
                 title: _,
+                condition_id,
             } => {
                 let mut markets = self.markets.write().await;
                 markets.insert(
@@ -2232,12 +2288,13 @@ impl Strategy for SplitArbStrategyAdapter {
                         no_token_id: down_token.clone(),
                         description: format!("Series {}", series_id),
                         end_time: *end_time,
+                        condition_id: condition_id.clone(),
                     },
                 );
 
                 debug!(
-                    "[{}] Market added: {} (YES={}, NO={})",
-                    self.id, event_id, up_token, down_token
+                    "[{}] Market added: {} (YES={}, NO={}, condition={:?})",
+                    self.id, event_id, up_token, down_token, condition_id
                 );
             }
 
@@ -2379,6 +2436,48 @@ impl Strategy for SplitArbStrategyAdapter {
                                 profit * dec!(100),
                                 partial.shares,
                             );
+
+                            // Auto-merge: convert YES+NO token pair → USDC via CTF
+                            let markets = self.markets.read().await;
+                            let merge_condition_id = markets
+                                .get(&market_id)
+                                .and_then(|m| m.condition_id.clone());
+                            drop(markets);
+
+                            if let Some(cid) = merge_condition_id {
+                                let merge_shares = partial.shares;
+                                let merge_market_id = market_id.clone();
+                                let strategy_id = self.id.clone();
+                                let dry_run = self.dry_run;
+                                tokio::spawn(async move {
+                                    if dry_run {
+                                        info!(
+                                            "[{}] CTF merge skipped (dry-run): {} shares for {}",
+                                            strategy_id, merge_shares, merge_market_id
+                                        );
+                                        return;
+                                    }
+                                    match spawn_ctf_merge(&cid, merge_shares).await {
+                                        Ok(tx_hash) => {
+                                            info!(
+                                                "[{}] CTF merge successful: {} shares for {} (tx: {})",
+                                                strategy_id, merge_shares, merge_market_id, tx_hash
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "[{}] CTF merge failed for {} ({} shares): {} — claimer will pick up later",
+                                                strategy_id, merge_market_id, merge_shares, e
+                                            );
+                                        }
+                                    }
+                                });
+                            } else {
+                                warn!(
+                                    "[{}] No condition_id for market {} — skipping auto-merge, claimer will handle",
+                                    self.id, market_id
+                                );
+                            }
                         }
                     }
 
