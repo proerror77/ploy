@@ -1,23 +1,25 @@
 # Todo
 
-- [x] Fix strategy action pipeline to persist orders into `orders` table with `strategy_id`
-- [x] Ensure strategy action `client_order_id` is synchronized into submitted `OrderRequest`
-- [x] Build-check locally with required features
-- [x] Build Linux release binary with required features
-- [x] Record review notes and residual risks
+- [x] Confirm Phase 0 deletion safety via code reference audit
+- [x] Remove dead `src/strategy/orchestrator.rs`
+- [x] Remove dead `EventEdgePlatformAgent` implementation and exports
+- [x] Verify build and targeted tests pass after cleanup
+- [x] Update review notes with retained non-deletable legacy paths
 
 ## Review
 
-- Implemented order persistence for `strategy start --foreground` path in `src/cli/strategy.rs`.
-- Added optional DB bootstrap (`DATABASE_URL`) and graceful fallback if DB unavailable.
-- Added status lifecycle persistence: `Pending` insert -> `Submitted` update -> `Filled/other` update.
-- Fixed `StrategyAction.client_order_id` mismatch by forcing request `client_order_id` to action ID before execution.
-- Verified compile: `cargo check --features "claimer_daemon,api,pm_ctf"`.
-- Linux release build:
-  - `cargo build --release --target x86_64-unknown-linux-gnu ...` failed on missing `x86_64-linux-gnu-gcc`.
-  - `cargo zigbuild --release --target x86_64-unknown-linux-gnu --features "claimer_daemon,api,pm_ctf"` succeeded.
-  - Verified artifact is Linux ELF via `file target/x86_64-unknown-linux-gnu/release/ploy`.
+- Planned execution target: GitHub issue #35 (Phase 0 dead code cleanup).
+- Removed items in this phase:
+  - `src/strategy/orchestrator.rs` (not in module graph, no runtime call sites)
+  - `src/platform/agents/event_edge_agent.rs` and related exports
+- Validation:
+  - `cargo build`
+  - `cargo test strategy::manager::tests -- --nocapture`
+  - `cargo test coordinator::bootstrap::tests -- --nocapture`
+- Explicitly retained (out of current safe-delete scope):
+  - `OrderPlatform` / `platform.rs` (still used by RL/legacy paths)
+  - `DomainAgent` trait family (still used by legacy platform/router and public exports)
+  - `NbaComebackAgent` (still used by CLI strategy path)
 
 Residual risks:
-- `strategy` path currently records `leg=1` with `cycle_id=NULL` (acceptable for generic strategy runner but not round/cycle semantics).
-- No automated integration test yet for dry-run order persistence; server-side dry-run validation still required.
+- Dead-code cleanup is partial by design; remaining legacy components still increase architectural surface area until later phases.
