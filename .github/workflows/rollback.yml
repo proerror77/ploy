@@ -1,0 +1,88 @@
+name: Rollback Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Rollback mode"
+        required: true
+        type: choice
+        options:
+          - latest-backup
+          - specific-tag
+        default: latest-backup
+      release_tag:
+        description: "Required when mode=specific-tag (vX.Y.Z)"
+        required: false
+      reason:
+        description: "Reason for rollback"
+        required: true
+
+concurrency:
+  group: production-rollback
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Execute Rollback
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Validate input
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "specific-tag" ] && [ -z "${{ github.event.inputs.release_tag }}" ]; then
+            echo "release_tag is required when mode=specific-tag"
+            exit 1
+          fi
+
+      - name: Roll back service on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            MODE="${{ github.event.inputs.mode }}"
+            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+
+            sudo systemctl stop ploy || true
+
+            if [ "$MODE" = "specific-tag" ]; then
+              target="/opt/ploy/releases/${RELEASE_TAG}/ploy"
+              if [ ! -f "$target" ]; then
+                echo "Release binary not found: $target"
+                exit 1
+              fi
+              sudo cp "$target" /opt/ploy/bin/ploy
+              echo "$RELEASE_TAG" | sudo tee /opt/ploy/bin/.current_release > /dev/null
+            else
+              latest_backup="$(ls -1t /opt/ploy/bin/ploy.bak.* 2>/dev/null | head -1 || true)"
+              if [ -n "$latest_backup" ]; then
+                sudo cp "$latest_backup" /opt/ploy/bin/ploy
+              elif [ -f /opt/ploy/bin/ploy.bak ]; then
+                sudo cp /opt/ploy/bin/ploy.bak /opt/ploy/bin/ploy
+              else
+                echo "No backup binary found in /opt/ploy/bin"
+                exit 1
+              fi
+            fi
+
+            sudo chmod +x /opt/ploy/bin/ploy
+            sudo chown ploy:ploy /opt/ploy/bin/ploy
+            sudo systemctl start ploy
+            sleep 5
+            sudo systemctl is-active --quiet ploy
+
+      - name: Rollback summary
+        run: |
+          echo "## Rollback Executed" >> $GITHUB_STEP_SUMMARY
+          echo "- Mode: ${{ github.event.inputs.mode }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Release tag: ${{ github.event.inputs.release_tag || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Reason: ${{ github.event.inputs.reason }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
