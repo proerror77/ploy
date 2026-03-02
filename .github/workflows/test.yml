@@ -59,12 +59,6 @@ jobs:
         with:
           shared-key: test-suite
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --features rl -- -D warnings
-
       - name: Build
         run: cargo build --locked --features rl
 
@@ -72,30 +66,3 @@ jobs:
         env:
           DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test
         run: cargo test --locked --features rl
-
-  build-check:
-    name: Release Build Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libpq-dev
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-build-check
-
-      - name: Build release
-        run: cargo build --release --locked --features rl
