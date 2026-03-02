@@ -44,6 +44,16 @@ Prefer **atomic commits**:
 - Integrate agent work with `cherry-pick` into the integration branch.
 - If overlap is unavoidable, run those file changes sequentially instead of in parallel.
 
+### Multi-Session Workflow (Required)
+
+- Treat each session as isolated: one session = one worktree + one branch.
+- Create sessions from updated main (example: `git fetch origin && git worktree add ../ploy-s1 -b session/s1 origin/main`).
+- Define file ownership in `tasks/todo.md` before implementation; avoid cross-session overlap.
+- Before editing, run preflight checks: `git status --short`, `git branch --show-current`, `git diff --name-only`.
+- Stage explicit paths only, then verify with `git diff --cached` before commit.
+- Use one integration session to merge work: `git switch main && git pull --rebase`, then `git cherry-pick <sha...>`.
+- After merge, remove temporary worktrees to prevent stale branches and accidental edits.
+
 ## Skills
 
 Skills are local instruction sets stored in `SKILL.md` files (usually under
