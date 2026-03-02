@@ -43,6 +43,26 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Commit hygiene (PR only)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          range="${BASE_SHA}..HEAD"
+          echo "Checking commit subjects in range: ${range}"
+          git log --oneline "${range}"
+
+          bad_commits="$(git log --format='%h %s' "${range}" | grep -E '^[0-9a-f]+ (WIP|wip|fixup!|squash!)' || true)"
+          if [ -n "${bad_commits}" ]; then
+            echo "Found non-atomic/WIP commit subjects:"
+            echo "${bad_commits}"
+            echo "Please squash or rewrite commit messages before merge."
+            exit 1
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

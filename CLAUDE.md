@@ -28,6 +28,22 @@ Prefer **atomic commits**:
 - Each commit should build (and run relevant tests when available).
 - Avoid WIP commits on shared branches.
 
+### Atomic Commit Execution Standard
+
+- Do not commit per command; commit per completed intent.
+- One commit unit should be independently testable and reversible.
+- Before commit: stage explicit paths, review staged diff, run smallest relevant validation.
+- If work is incomplete, keep it uncommitted or stash it; do not push partial WIP.
+- Use commit message format `<scope>: <intent>` with concrete scope (for example `build`, `api`, `docs`, `strategy`, `ci`).
+
+### Parallel Agent Isolation (Required)
+
+- Use one branch and one worktree per agent for parallel work.
+- Assign file ownership before coding; avoid overlapping edits across agents.
+- Reserve high-conflict files (for example `Cargo.lock`, root workflows, route registries) to a single integrator.
+- Integrate agent work with `cherry-pick` into the integration branch.
+- If overlap is unavoidable, run those file changes sequentially instead of in parallel.
+
 ## Skills
 
 Skills are local instruction sets stored in `SKILL.md` files (usually under
