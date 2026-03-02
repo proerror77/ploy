@@ -990,10 +990,16 @@ impl StrategyEngine {
         .await;
 
         // Persist cycle state for crash recovery.
-        let _ = self
+        if let Err(err) = self
             .store
             .update_cycle_state(ctx.cycle_id, StrategyState::Leg2Pending, ctx.cycle_version)
-            .await;
+            .await
+        {
+            error!(
+                "Failed to persist cycle {} as LEG2_PENDING: {}",
+                ctx.cycle_id, err
+            );
+        }
 
         // Persist the intent before submitting to the exchange (best effort).
         let client_order_id = request.client_order_id.clone();

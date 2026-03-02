@@ -1,25 +1,23 @@
 # Todo
 
-- [x] Confirm Phase 0 deletion safety via code reference audit
-- [x] Remove dead `src/strategy/orchestrator.rs`
-- [x] Remove dead `EventEdgePlatformAgent` implementation and exports
-- [x] Verify build and targeted tests pass after cleanup
-- [x] Update review notes with retained non-deletable legacy paths
+- [x] Add explicit `VersionConflict` error variant
+- [x] Change cycle update APIs from `Result<bool>` to `Result<()>`
+- [x] Make Postgres cycle updates return `VersionConflict` on optimistic-lock miss
+- [x] Make MockStore cycle updates return explicit version conflict errors
+- [x] Keep engine callsites compatible and remove one silent discard path
+- [x] Verify targeted engine/store tests pass
 
 ## Review
 
-- Planned execution target: GitHub issue #35 (Phase 0 dead code cleanup).
-- Removed items in this phase:
-  - `src/strategy/orchestrator.rs` (not in module graph, no runtime call sites)
-  - `src/platform/agents/event_edge_agent.rs` and related exports
+- Planned execution target: GitHub issue #36 (Phase 1 conflict error model).
+- Updated API/contracts:
+  - `EngineStore::{update_cycle_state, update_cycle_leg1, update_cycle_leg2}` now return `Result<()>`
+  - `PostgresStore` cycle update methods now return `PloyError::VersionConflict` when `rows_affected == 0`
+  - `MockStore` now tracks cycle versions and returns the same explicit conflict error
 - Validation:
-  - `cargo build`
-  - `cargo test strategy::manager::tests -- --nocapture`
-  - `cargo test coordinator::bootstrap::tests -- --nocapture`
-- Explicitly retained (out of current safe-delete scope):
-  - `OrderPlatform` / `platform.rs` (still used by RL/legacy paths)
-  - `DomainAgent` trait family (still used by legacy platform/router and public exports)
-  - `NbaComebackAgent` (still used by CLI strategy path)
+  - `cargo test strategy::execution::engine_store::mock::mock_store_cycle_updates_should_honor_expected_version -- --nocapture`
+  - `cargo test strategy::execution::engine::tests -- --nocapture`
 
 Residual risks:
-- Dead-code cleanup is partial by design; remaining legacy components still increase architectural surface area until later phases.
+- `enter_leg2` path still treats `update_cycle_state(LEG2_PENDING)` as best-effort (logs error), not abort+halt.
+- Legacy engine cycle-version semantics (`expected_version` sources) still need dedicated fix in subsequent phase.

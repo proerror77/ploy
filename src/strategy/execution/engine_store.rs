@@ -25,7 +25,7 @@ pub trait EngineStore: Send + Sync {
         cycle_id: i32,
         state: StrategyState,
         expected_version: i32,
-    ) -> Result<bool>;
+    ) -> Result<()>;
     async fn update_cycle_leg1(
         &self,
         cycle_id: i32,
@@ -33,7 +33,7 @@ pub trait EngineStore: Send + Sync {
         entry_price: Decimal,
         shares: u64,
         expected_version: i32,
-    ) -> Result<bool>;
+    ) -> Result<()>;
     async fn update_cycle_leg2(
         &self,
         cycle_id: i32,
@@ -41,7 +41,7 @@ pub trait EngineStore: Send + Sync {
         shares: u64,
         pnl: Decimal,
         expected_version: i32,
-    ) -> Result<bool>;
+    ) -> Result<()>;
     async fn abort_cycle(&self, cycle_id: i32, reason: &str) -> Result<()>;
 
     // --- Orders ---
@@ -89,7 +89,7 @@ impl EngineStore for crate::adapters::PostgresStore {
         cycle_id: i32,
         state: StrategyState,
         expected_version: i32,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         self.update_cycle_state(cycle_id, state, expected_version)
             .await
     }
@@ -100,7 +100,7 @@ impl EngineStore for crate::adapters::PostgresStore {
         entry_price: Decimal,
         shares: u64,
         expected_version: i32,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         self.update_cycle_leg1(cycle_id, side, entry_price, shares, expected_version)
             .await
     }
@@ -111,7 +111,7 @@ impl EngineStore for crate::adapters::PostgresStore {
         shares: u64,
         pnl: Decimal,
         expected_version: i32,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         self.update_cycle_leg2(cycle_id, entry_price, shares, pnl, expected_version)
             .await
     }
@@ -168,24 +168,44 @@ impl EngineStore for crate::adapters::PostgresStore {
 #[cfg(test)]
 pub mod mock {
     use super::*;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::Mutex;
 
     /// In-memory mock store for engine unit tests.
     ///
     /// All write operations succeed silently and return sequential IDs.
     pub struct MockStore {
         next_id: AtomicI32,
+        cycle_versions: Mutex<HashMap<i32, i32>>,
     }
 
     impl MockStore {
         pub fn new() -> Self {
             Self {
                 next_id: AtomicI32::new(1),
+                cycle_versions: Mutex::new(HashMap::new()),
             }
         }
 
         fn next_id(&self) -> i32 {
             self.next_id.fetch_add(1, Ordering::SeqCst)
+        }
+
+        fn compare_and_bump_cycle_version(&self, cycle_id: i32, expected_version: i32) -> bool {
+            let mut versions = self
+                .cycle_versions
+                .lock()
+                .expect("cycle_versions lock poisoned");
+            let Some(current) = versions.get_mut(&cycle_id) else {
+                return false;
+            };
+            if *current != expected_version {
+                return false;
+            }
+            *current += 1;
+            true
         }
     }
 
@@ -201,35 +221,64 @@ pub mod mock {
             Ok(self.next_id())
         }
         async fn create_cycle(&self, _round_id: i32, _state: StrategyState) -> Result<i32> {
-            Ok(self.next_id())
+            let cycle_id = self.next_id();
+            self.cycle_versions
+                .lock()
+                .expect("cycle_versions lock poisoned")
+                .insert(cycle_id, 1);
+            Ok(cycle_id)
         }
         async fn update_cycle_state(
             &self,
-            _cycle_id: i32,
+            cycle_id: i32,
             _state: StrategyState,
-            _expected_version: i32,
-        ) -> Result<bool> {
-            Ok(true)
+            expected_version: i32,
+        ) -> Result<()> {
+            if self.compare_and_bump_cycle_version(cycle_id, expected_version) {
+                Ok(())
+            } else {
+                Err(crate::error::PloyError::VersionConflict {
+                    entity: "cycle".to_string(),
+                    id: cycle_id,
+                    expected_version,
+                })
+            }
         }
         async fn update_cycle_leg1(
             &self,
-            _cycle_id: i32,
+            cycle_id: i32,
             _side: Side,
             _entry_price: Decimal,
             _shares: u64,
-            _expected_version: i32,
-        ) -> Result<bool> {
-            Ok(true)
+            expected_version: i32,
+        ) -> Result<()> {
+            if self.compare_and_bump_cycle_version(cycle_id, expected_version) {
+                Ok(())
+            } else {
+                Err(crate::error::PloyError::VersionConflict {
+                    entity: "cycle".to_string(),
+                    id: cycle_id,
+                    expected_version,
+                })
+            }
         }
         async fn update_cycle_leg2(
             &self,
-            _cycle_id: i32,
+            cycle_id: i32,
             _entry_price: Decimal,
             _shares: u64,
             _pnl: Decimal,
-            _expected_version: i32,
-        ) -> Result<bool> {
-            Ok(true)
+            expected_version: i32,
+        ) -> Result<()> {
+            if self.compare_and_bump_cycle_version(cycle_id, expected_version) {
+                Ok(())
+            } else {
+                Err(crate::error::PloyError::VersionConflict {
+                    entity: "cycle".to_string(),
+                    id: cycle_id,
+                    expected_version,
+                })
+            }
         }
         async fn abort_cycle(&self, _cycle_id: i32, _reason: &str) -> Result<()> {
             Ok(())
@@ -277,5 +326,37 @@ pub mod mock {
         async fn halt_trading(&self, _date: NaiveDate, _reason: &str) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn mock_store_cycle_updates_should_honor_expected_version() {
+        let store = MockStore::new();
+        let cycle_id = store
+            .create_cycle(1, StrategyState::Leg1Pending)
+            .await
+            .expect("create_cycle should succeed");
+
+        assert!(
+            store
+                .update_cycle_state(cycle_id, StrategyState::Leg1Pending, 1)
+                .await
+                .is_ok(),
+            "matching expected_version should succeed"
+        );
+
+        let stale_update = store
+            .update_cycle_leg1(cycle_id, Side::Up, dec!(0.50), 100, 1)
+            .await;
+        assert!(
+            matches!(
+                stale_update,
+                Err(crate::error::PloyError::VersionConflict {
+                    entity,
+                    id,
+                    expected_version
+                }) if entity == "cycle" && id == cycle_id && expected_version == 1
+            ),
+            "stale expected_version must raise explicit version conflict"
+        );
     }
 }

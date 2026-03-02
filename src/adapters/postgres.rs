@@ -285,13 +285,13 @@ impl PostgresStore {
     }
 
     /// Update cycle state with optimistic locking.
-    /// Returns `true` if the update succeeded, `false` if version conflict.
+    /// Returns `Ok(())` on success, `Err(PloyError::VersionConflict { .. })` on conflict.
     pub async fn update_cycle_state(
         &self,
         cycle_id: i32,
         state: StrategyState,
         expected_version: i32,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let result = sqlx::query(
             "UPDATE cycles SET state = $1, version = version + 1 WHERE id = $2 AND version = $3",
         )
@@ -300,11 +300,18 @@ impl PostgresStore {
         .bind(expected_version)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            return Err(crate::error::PloyError::VersionConflict {
+                entity: "cycle".to_string(),
+                id: cycle_id,
+                expected_version,
+            });
+        }
+        Ok(())
     }
 
     /// Update cycle with Leg1 fill, using optimistic locking.
-    /// Returns `true` if the update succeeded, `false` if version conflict.
+    /// Returns `Ok(())` on success, `Err(PloyError::VersionConflict { .. })` on conflict.
     pub async fn update_cycle_leg1(
         &self,
         cycle_id: i32,
@@ -312,7 +319,7 @@ impl PostgresStore {
         entry_price: Decimal,
         shares: u64,
         expected_version: i32,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let result = sqlx::query(
             r#"
             UPDATE cycles SET
@@ -332,11 +339,18 @@ impl PostgresStore {
         .bind(expected_version)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            return Err(crate::error::PloyError::VersionConflict {
+                entity: "cycle".to_string(),
+                id: cycle_id,
+                expected_version,
+            });
+        }
+        Ok(())
     }
 
     /// Update cycle with Leg2 fill and PnL, using optimistic locking.
-    /// Returns `true` if the update succeeded, `false` if version conflict.
+    /// Returns `Ok(())` on success, `Err(PloyError::VersionConflict { .. })` on conflict.
     pub async fn update_cycle_leg2(
         &self,
         cycle_id: i32,
@@ -344,7 +358,7 @@ impl PostgresStore {
         shares: u64,
         pnl: Decimal,
         expected_version: i32,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let result = sqlx::query(
             r#"
             UPDATE cycles SET
@@ -364,7 +378,14 @@ impl PostgresStore {
         .bind(expected_version)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            return Err(crate::error::PloyError::VersionConflict {
+                entity: "cycle".to_string(),
+                id: cycle_id,
+                expected_version,
+            });
+        }
+        Ok(())
     }
 
     /// Abort a cycle

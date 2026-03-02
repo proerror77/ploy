@@ -61,6 +61,13 @@ pub enum PloyError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
+    #[error("Version conflict on {entity} {id}: expected version {expected_version}")]
+    VersionConflict {
+        entity: String,
+        id: i32,
+        expected_version: i32,
+    },
+
     // Data availability errors (for 24/7 reliability)
     #[error("Quote unavailable for token: {token_id}")]
     QuoteUnavailable { token_id: String },
