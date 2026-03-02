@@ -29,3 +29,10 @@
 - Local Linux build checklist:
   - `cargo zigbuild --release --target x86_64-unknown-linux-gnu --features "claimer_daemon,api,pm_ctf"`
   - `file target/x86_64-unknown-linux-gnu/release/ploy` must contain `ELF 64-bit LSB`.
+
+- Pattern: User prefers no confirmation prompts before commit/push for completed requested work.
+- Rule: When requested outputs are complete and scoped changes are clear, commit and push directly without asking "要不要 commit" first.
+- Commit hygiene:
+  - Stage only files related to current request.
+  - Keep commits atomic and avoid including unrelated local changes.
+  - Report commit SHA and push result in final response.
