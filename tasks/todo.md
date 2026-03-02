@@ -28,4 +28,4 @@
   - `cargo test services::risk_view::tests -- --nocapture` (2/2)
   - `cargo build` (pass)
 - Notes:
-  - Existing unrelated warning may appear in some test invocations: `src/strategy/directional_backtest.rs:1594` (`unused variable: results`).
+  - Cleared prior `unused variable: results` warning in `src/strategy/directional_backtest.rs`.
