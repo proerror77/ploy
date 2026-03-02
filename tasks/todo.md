@@ -18,7 +18,7 @@
   - `RiskManager` remains adapter over shared `RiskGate` runtime.
   - `StrategyEngine` pre-trade path uses `RiskGate::check_order` through adapter.
   - Added `src/services/risk_view.rs` with `RiskView` abstraction and impls for both `RiskManager` and `RiskGate`.
-  - `HealthState` / `Metrics` now consume `RiskView`, enabling coordinator and single-strategy paths to share observability plumbing.
+  - `HealthState` / `Metrics` now consume `RiskView`, and `HealthState::with_risk_gate` allows direct coordinator wiring with `RiskGate`.
   - Added direct tests validating `RiskView` state/stat mapping semantics.
   - `i64 -> u64` time conversion pitfall removed in `check_leg1_entry`/`must_force_leg2`.
 - Validation executed:

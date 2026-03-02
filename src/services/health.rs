@@ -4,7 +4,7 @@
 //! and Prometheus metrics endpoint.
 
 use crate::domain::StrategyState;
-use crate::platform::DataPlaneFreshness;
+use crate::platform::{DataPlaneFreshness, RiskGate};
 use crate::services::Metrics;
 use crate::services::RiskView;
 use crate::strategy::risk::RiskManager;
@@ -101,6 +101,11 @@ impl HealthState {
 
     pub fn with_risk_view(mut self, risk_view: Arc<dyn RiskView>) -> Self {
         self.risk_view = Some(risk_view);
+        self
+    }
+
+    pub fn with_risk_gate(mut self, gate: Arc<RiskGate>) -> Self {
+        self.risk_view = Some(gate);
         self
     }
 
