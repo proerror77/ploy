@@ -1,0 +1,148 @@
+name: Auto Review
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: auto-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  review:
+    name: PR Auto Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libpq-dev
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: auto-review
+
+      - name: Check formatting
+        id: fmt
+        run: |
+          set +e
+          cargo fmt --all -- --check > fmt.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          tail -n 80 fmt.log > fmt.tail.log || true
+          exit 0
+
+      - name: Run clippy review
+        id: clippy
+        run: |
+          set +e
+          cargo clippy --all-targets --features rl > clippy.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          tail -n 120 clippy.log > clippy.tail.log || true
+          exit 0
+
+      - name: Create or update auto-review comment
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        env:
+          FMT_STATUS: ${{ steps.fmt.outputs.status }}
+          CLIPPY_STATUS: ${{ steps.clippy.outputs.status }}
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- auto-review-bot -->";
+            const fmtOk = process.env.FMT_STATUS === "0";
+            const clippyOk = process.env.CLIPPY_STATUS === "0";
+
+            const readLog = (path) => {
+              try {
+                const content = fs.readFileSync(path, "utf8").trim();
+                return content.length > 0 ? content : "(no output)";
+              } catch {
+                return "(log unavailable)";
+              }
+            };
+
+            const fmtLog = readLog("fmt.tail.log");
+            const clippyLog = readLog("clippy.tail.log");
+
+            const body = [
+              marker,
+              "## Auto Review Summary",
+              "",
+              `- \`cargo fmt --check\`: ${fmtOk ? "PASS" : "NEEDS FIX"}`,
+              `- \`cargo clippy\`: ${clippyOk ? "PASS" : "NEEDS FIX"}`,
+              "",
+              "<details><summary>fmt output (tail)</summary>",
+              "",
+              "```text",
+              fmtLog,
+              "```",
+              "",
+              "</details>",
+              "",
+              "<details><summary>clippy output (tail)</summary>",
+              "",
+              "```text",
+              clippyLog,
+              "```",
+              "",
+              "</details>",
+            ].join("\n");
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.find(
+              (comment) => comment.user?.type === "Bot" && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+              core.info(`Updated auto-review comment ${existing.id}`);
+            } else {
+              const created = await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+              core.info(`Created auto-review comment ${created.data.id}`);
+            }
