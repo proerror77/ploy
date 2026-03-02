@@ -6,6 +6,7 @@ pub mod event_edge_event_driven;
 pub mod health;
 pub mod metrics;
 pub mod order_monitor;
+pub mod risk_view;
 
 pub use data_collector::DataCollector;
 pub use discovery::DiscoveryService;
@@ -17,3 +18,4 @@ pub use metrics::Metrics;
 pub use order_monitor::{
     MonitorStats, OrderMonitor, OrderMonitorConfig, ReconciliationResult, TrackedOrder,
 };
+pub use risk_view::RiskView;

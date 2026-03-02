@@ -1,5 +1,5 @@
 use crate::domain::StrategyState;
-use crate::strategy::risk::RiskManager;
+use crate::services::RiskView;
 use chrono::Utc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
@@ -61,8 +61,8 @@ impl Metrics {
     }
 
     /// Get current metrics as a formatted string
-    pub async fn summary(&self, risk_manager: &RiskManager) -> String {
-        let (daily_pnl, cycle_count, leg2_completions) = risk_manager.daily_stats().await;
+    pub async fn summary(&self, risk_view: &dyn RiskView) -> String {
+        let (daily_pnl, cycle_count, leg2_completions) = risk_view.daily_stats().await;
         let completion_rate = if cycle_count > 0 {
             (leg2_completions as f64 / cycle_count as f64) * 100.0
         } else {
@@ -70,7 +70,7 @@ impl Metrics {
         };
 
         let state = self.current_state.read().await;
-        let risk_state = risk_manager.state().await;
+        let risk_state = risk_view.state().await;
 
         format!(
             r#"
@@ -87,7 +87,7 @@ WS Reconnections: {}
             daily_pnl,
             cycle_count,
             completion_rate,
-            risk_manager.consecutive_failures(),
+            risk_view.consecutive_failures(),
             self.quote_updates.load(Ordering::Relaxed),
             self.orders_filled.load(Ordering::Relaxed),
             self.orders_submitted.load(Ordering::Relaxed),
@@ -96,8 +96,8 @@ WS Reconnections: {}
     }
 
     /// Export metrics in Prometheus format
-    pub async fn prometheus(&self, risk_manager: &RiskManager) -> String {
-        let (daily_pnl, cycle_count, leg2_completions) = risk_manager.daily_stats().await;
+    pub async fn prometheus(&self, risk_view: &dyn RiskView) -> String {
+        let (daily_pnl, cycle_count, leg2_completions) = risk_view.daily_stats().await;
 
         format!(
             r#"# HELP ploy_quote_updates_total Total quote updates processed
@@ -139,13 +139,13 @@ ploy_consecutive_failures {}
             daily_pnl,
             cycle_count,
             leg2_completions,
-            risk_manager.consecutive_failures(),
+            risk_view.consecutive_failures(),
         )
     }
 
     /// Log periodic status
-    pub async fn log_status(&self, risk_manager: &RiskManager) {
-        info!("{}", self.summary(risk_manager).await);
+    pub async fn log_status(&self, risk_view: &dyn RiskView) {
+        info!("{}", self.summary(risk_view).await);
     }
 }
 

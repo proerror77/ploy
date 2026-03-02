@@ -6,6 +6,7 @@
 use crate::domain::StrategyState;
 use crate::platform::DataPlaneFreshness;
 use crate::services::Metrics;
+use crate::services::RiskView;
 use crate::strategy::risk::RiskManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
@@ -67,8 +68,8 @@ pub struct HealthState {
     pub last_db_check: RwLock<Option<DateTime<Utc>>>,
     /// Current strategy state
     pub strategy_state: RwLock<StrategyState>,
-    /// Risk manager reference
-    pub risk_manager: Option<Arc<RiskManager>>,
+    /// Risk view provider reference (RiskManager or RiskGate-backed).
+    pub risk_view: Option<Arc<dyn RiskView>>,
     /// Metrics reference
     pub metrics: Option<Arc<Metrics>>,
     /// Data plane freshness tracker (per-symbol, per-source)
@@ -86,7 +87,7 @@ impl HealthState {
             db_connected: AtomicBool::new(false),
             last_db_check: RwLock::new(None),
             strategy_state: RwLock::new(StrategyState::Idle),
-            risk_manager: None,
+            risk_view: None,
             metrics: None,
             freshness: None,
             quote_staleness_threshold: 30, // 30 seconds default
@@ -94,7 +95,12 @@ impl HealthState {
     }
 
     pub fn with_risk_manager(mut self, rm: Arc<RiskManager>) -> Self {
-        self.risk_manager = Some(rm);
+        self.risk_view = Some(rm);
+        self
+    }
+
+    pub fn with_risk_view(mut self, risk_view: Arc<dyn RiskView>) -> Self {
+        self.risk_view = Some(risk_view);
         self
     }
 
@@ -198,8 +204,8 @@ impl HealthState {
         });
 
         // Risk state
-        let risk_status = if let Some(ref rm) = self.risk_manager {
-            let state = rm.state().await;
+        let risk_status = if let Some(ref risk_view) = self.risk_view {
+            let state = risk_view.state().await;
             let status = match state {
                 crate::domain::RiskState::Normal => HealthStatus::Healthy,
                 crate::domain::RiskState::Elevated => HealthStatus::Degraded,
@@ -334,9 +340,9 @@ async fn metrics_handler(State(state): State<Arc<HealthState>>) -> impl IntoResp
         };
 
     // Get risk metrics
-    let (daily_pnl, cycle_count, consecutive_failures) = if let Some(ref rm) = state.risk_manager {
-        let (pnl, cycles, _) = rm.daily_stats().await;
-        (pnl.to_string(), cycles, rm.consecutive_failures())
+    let (daily_pnl, cycle_count, consecutive_failures) = if let Some(ref risk_view) = state.risk_view {
+        let (pnl, cycles, _) = risk_view.daily_stats().await;
+        (pnl.to_string(), cycles, risk_view.consecutive_failures())
     } else {
         ("0".to_string(), 0, 0)
     };
