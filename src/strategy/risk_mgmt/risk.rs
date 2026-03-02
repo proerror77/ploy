@@ -1,8 +1,9 @@
 use crate::config::RiskConfig;
-use crate::domain::{RiskState, Round};
+use crate::domain::{RiskState, Round, Side};
 use crate::error::{Result, RiskError};
 use crate::platform::{
-    AgentRiskParams, Domain, PlatformRiskState, RiskConfig as GateRiskConfig, RiskGate,
+    AgentRiskParams, BlockReason, Domain, OrderIntent, PlatformRiskState,
+    RiskCheckResult, RiskConfig as GateRiskConfig, RiskGate,
 };
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -133,6 +134,8 @@ impl RiskManager {
 
     /// Check if we can enter Leg1
     pub async fn check_leg1_entry(&self, shares: u64, price: Decimal, round: &Round) -> Result<()> {
+        self.ensure_engine_agent_registered().await;
+
         // Check risk state
         if !self.can_trade().await {
             let reason = self
@@ -144,12 +147,50 @@ impl RiskManager {
 
         // Check exposure limit
         let exposure = Decimal::from(shares) * price;
-        if exposure > self.config.max_single_exposure_usd {
-            return Err(RiskError::MaxExposureExceeded {
-                limit: self.config.max_single_exposure_usd,
-                requested: exposure,
+        let intent = OrderIntent::new(
+            ENGINE_AGENT_ID,
+            Domain::Custom(0),
+            round.slug.clone(),
+            round.up_token_id.clone(),
+            Side::Up,
+            true,
+            shares,
+            price,
+        );
+        match self.gate.check_order(&intent).await {
+            RiskCheckResult::Passed => {}
+            RiskCheckResult::Adjusted(suggestion) => {
+                let adjusted_limit = Decimal::from(suggestion.max_shares) * price;
+                return Err(RiskError::MaxExposureExceeded {
+                    limit: adjusted_limit,
+                    requested: exposure,
+                }
+                .into());
             }
-            .into());
+            RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped { reason }) => {
+                return Err(RiskError::TradingHalted { reason }.into());
+            }
+            RiskCheckResult::Blocked(BlockReason::ExceedsSingleLimit { limit, requested }) => {
+                return Err(RiskError::MaxExposureExceeded { limit, requested }.into());
+            }
+            RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
+                limit,
+                requested,
+                ..
+            })
+            | RiskCheckResult::Blocked(BlockReason::DomainExposureExceeded {
+                limit,
+                requested,
+                ..
+            }) => {
+                return Err(RiskError::MaxExposureExceeded { limit, requested }.into());
+            }
+            RiskCheckResult::Blocked(other) => {
+                return Err(RiskError::TradingHalted {
+                    reason: other.to_string(),
+                }
+                .into());
+            }
         }
 
         // Check time remaining (keep signed semantics; never cast negative to huge u64).

@@ -2,6 +2,7 @@
 
 - [x] Rewire `strategy::risk_mgmt::RiskManager` to delegate runtime state/circuit logic to `platform::RiskGate`
 - [x] Keep `RiskManager` public API stable for engine/services (`state`, `can_trade`, `daily_stats`, `halt_reason`, etc.)
+- [x] Route `check_leg1_entry` through unified `RiskGate::check_order` pre-trade gate
 - [x] Fix signed/unsigned time conversion edge case in `check_leg1_entry` and `must_force_leg2`
 - [x] Run targeted tests (`strategy::risk_mgmt::risk::tests`, `strategy::execution::engine::tests`)
 - [x] Run `cargo build` for regression check
@@ -15,10 +16,11 @@
   - Legacy `RiskManager` API remains stable for existing engine/service call sites.
   - Legacy risk-state mapping (`PlatformRiskState` -> `RiskState`) is explicit in adapter.
   - Halt reason compatibility preserved via adapter-side cache + gate event sync.
+  - `StrategyEngine` pre-trade check path now goes through unified `RiskGate::check_order` via `RiskManager::check_leg1_entry`.
   - `i64 -> u64` time conversion pitfall removed in `check_leg1_entry`/`must_force_leg2`.
 - Validation executed:
   - `cargo test strategy::risk_mgmt::risk::tests -- --nocapture` (5/5)
   - `cargo test strategy::execution::engine::tests -- --nocapture` (12/12)
   - `cargo build` (pass)
 - Notes:
-  - Existing unrelated warning may still appear in some test invocations: `src/strategy/directional_backtest.rs:1594` (`unused variable: results`).
+  - Existing unrelated warning may appear in test invocations: `src/strategy/directional_backtest.rs:1594` (`unused variable: results`).
