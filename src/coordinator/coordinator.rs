@@ -27,7 +27,7 @@ use crate::platform::{
     AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue,
     PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
 };
-use crate::strategy::executor::OrderExecutor;
+use crate::strategy::execution::executor::OrderExecutor;
 
 use super::command::{
     AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
@@ -4351,7 +4351,7 @@ impl Coordinator {
         &self,
         intent: &OrderIntent,
         request: &OrderRequest,
-        result: Option<&crate::strategy::executor::ExecutionResult>,
+        result: Option<&crate::strategy::execution::executor::ExecutionResult>,
         error_message: Option<String>,
         queue_delay_ms: Option<i64>,
     ) {
@@ -4671,7 +4671,7 @@ impl Coordinator {
     async fn persist_exit_reason_execution(
         &self,
         intent: &OrderIntent,
-        result: Option<&crate::strategy::executor::ExecutionResult>,
+        result: Option<&crate::strategy::execution::executor::ExecutionResult>,
         error_message: Option<String>,
     ) {
         let Some(pool) = self.execution_log_pool.as_ref() else {
@@ -4751,7 +4751,7 @@ impl Coordinator {
         &self,
         intent: &OrderIntent,
         request: &OrderRequest,
-        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
+        execution_result: Option<&crate::strategy::execution::executor::ExecutionResult>,
         queue_delay_ms: Option<i64>,
         config_hash: Option<String>,
     ) {
@@ -4862,7 +4862,7 @@ impl Coordinator {
         &self,
         intent: &OrderIntent,
         request: &OrderRequest,
-        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
+        execution_result: Option<&crate::strategy::execution::executor::ExecutionResult>,
         expected_slippage_bps: Option<Decimal>,
         actual_slippage_bps: Option<Decimal>,
         total_latency_ms: Option<i64>,
@@ -5247,7 +5247,7 @@ mod tests {
         AgentStatus, DeploymentExecutionMode, Domain, MarketSelector, OrderPriority, QueueStats,
         StrategyDeployment, StrategyLifecycleStage, StrategyProductType, Timeframe,
     };
-    use crate::strategy::executor::OrderExecutor;
+    use crate::strategy::execution::executor::OrderExecutor;
     use rust_decimal_macros::dec;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;

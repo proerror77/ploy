@@ -14,9 +14,9 @@ pub async fn run_paper_trading(
     reverse_max_total_usdc: f64,
     reverse_target_assets: String,
 ) -> Result<()> {
-    use ploy::strategy::{
-        run_paper_trading, run_reverse_engineered_profile_paper, PaperTradingConfig,
-        ReverseEngineeredConfig, VolatilityArbConfig,
+    use ploy::strategy::impls::{
+        run_paper_trading as run_paper_strategy, run_reverse_engineered_profile_paper,
+        PaperTradingConfig, ReverseEngineeredConfig, VolatilityArbConfig,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -70,7 +70,7 @@ pub async fn run_paper_trading(
     };
 
     let pm_client = PolymarketClient::new("https://clob.polymarket.com", true)?;
-    run_paper_trading(pm_client, Some(config)).await?;
+    run_paper_strategy(pm_client, Some(config)).await?;
 
     Ok(())
 }

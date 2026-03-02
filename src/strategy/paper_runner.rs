@@ -20,7 +20,9 @@ use crate::collector::BinanceKlineClient;
 use crate::domain::Side;
 use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::core::{BinaryMarket, MarketDiscovery};
-use crate::strategy::{CryptoMarketDiscovery, PaperTrader, PaperTradingStats, VolatilityArbConfig};
+use crate::strategy::impls::{
+    CryptoMarketDiscovery, PaperTrader, PaperTradingStats, VolatilityArbConfig,
+};
 
 /// Configuration for paper trading runner
 #[derive(Debug, Clone)]

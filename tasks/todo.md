@@ -1,23 +1,25 @@
 # Todo
 
-- [x] Add explicit `VersionConflict` error variant
-- [x] Change cycle update APIs from `Result<bool>` to `Result<()>`
-- [x] Make Postgres cycle updates return `VersionConflict` on optimistic-lock miss
-- [x] Make MockStore cycle updates return explicit version conflict errors
-- [x] Keep engine callsites compatible and remove one silent discard path
-- [x] Verify targeted engine/store tests pass
+- [x] Introduce `strategy::risk` as the canonical risk subdomain facade
+- [x] Introduce `strategy::impls` as strategy-implementation export surface
+- [x] Shrink `strategy/mod.rs` root re-export surface (remove flat implementation exports)
+- [x] Migrate in-tree imports away from removed root exports/module aliases
+- [x] Build and run targeted tests to validate no behavior change
+- [x] Update issue #37 work log with concrete diff/test evidence
 
 ## Review
 
-- Planned execution target: GitHub issue #36 (Phase 1 conflict error model).
-- Updated API/contracts:
-  - `EngineStore::{update_cycle_state, update_cycle_leg1, update_cycle_leg2}` now return `Result<()>`
-  - `PostgresStore` cycle update methods now return `PloyError::VersionConflict` when `rows_affected == 0`
-  - `MockStore` now tracks cycle versions and returns the same explicit conflict error
-- Validation:
-  - `cargo test strategy::execution::engine_store::mock::mock_store_cycle_updates_should_honor_expected_version -- --nocapture`
+- Planned execution target: GitHub issue #37 (Phase 2 export-surface convergence).
+- Delivered architecture changes:
+  - Added `src/strategy/risk.rs` facade over legacy `risk_mgmt/*`.
+  - Added `src/strategy/impls.rs` as implementation export surface.
+  - Rewrote `src/strategy/mod.rs` to keep only core contract re-exports and expose subdomains by module.
+  - Migrated in-tree imports from flat `strategy::*` / alias modules to explicit subdomains (`strategy::execution::*`, `strategy::risk::*`, `strategy::impls::*`, module-local paths).
+- Validation commands (executed):
+  - `cargo build`
   - `cargo test strategy::execution::engine::tests -- --nocapture`
-
-Residual risks:
-- `enter_leg2` path still treats `update_cycle_state(LEG2_PENDING)` as best-effort (logs error), not abort+halt.
-- Legacy engine cycle-version semantics (`expected_version` sources) still need dedicated fix in subsequent phase.
+  - `cargo test coordinator::bootstrap::tests -- --nocapture`
+- Validation outcome:
+  - Build passed.
+  - Target tests passed (`12/12`, `7/7`).
+  - Pre-existing warning remains: unused variable `results` in `src/strategy/directional_backtest.rs:1594`.

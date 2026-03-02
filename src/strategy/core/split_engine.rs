@@ -6,7 +6,7 @@ use super::{
     ArbSide, ArbStats, BinaryMarket, HedgedPosition, PartialPosition, PositionStatus, PriceCache,
 };
 use crate::adapters::PolymarketClient;
-use crate::strategy::OrderExecutor;
+use crate::strategy::execution::executor::OrderExecutor;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

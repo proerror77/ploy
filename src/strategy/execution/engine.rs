@@ -3,10 +3,12 @@ use crate::adapters::{QuoteCache, QuoteUpdate};
 use crate::config::AppConfig;
 use crate::domain::{Order, OrderStatus, Round, Side, StrategyState, TimeInForce};
 use crate::error::{PloyError, Result};
-use crate::strategy::{
-    MarketDepth, OrderExecutor, RiskManager, SignalDetector, SlippageCheck, SlippageConfig,
-    SlippageProtection, TradingCalculator,
+use crate::strategy::calculations::TradingCalculator;
+use crate::strategy::execution::executor::OrderExecutor;
+use crate::strategy::risk::{
+    MarketDepth, RiskManager, SlippageCheck, SlippageConfig, SlippageProtection,
 };
+use crate::strategy::signal::SignalDetector;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;

@@ -1,5 +1,5 @@
 use crate::domain::StrategyState;
-use crate::strategy::RiskManager;
+use crate::strategy::risk::RiskManager;
 use chrono::Utc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;

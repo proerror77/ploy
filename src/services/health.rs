@@ -6,7 +6,7 @@
 use crate::domain::StrategyState;
 use crate::platform::DataPlaneFreshness;
 use crate::services::Metrics;
-use crate::strategy::RiskManager;
+use crate::strategy::risk::RiskManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

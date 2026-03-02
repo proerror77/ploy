@@ -3,7 +3,7 @@ use ploy::adapters::PolymarketClient;
 use ploy::cli::runtime::CryptoCommands;
 use ploy::config::ExecutionConfig;
 use ploy::error::Result;
-use ploy::strategy::OrderExecutor;
+use ploy::strategy::execution::executor::OrderExecutor;
 use tracing::info;
 
 pub(crate) fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
@@ -21,7 +21,8 @@ pub(crate) fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String>
 pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
     use ploy::signing::Wallet;
-    use ploy::strategy::{core::SplitArbConfig, run_crypto_split_arb, CryptoSplitArbConfig};
+    use ploy::strategy::core::SplitArbConfig;
+    use ploy::strategy::impls::{run_crypto_split_arb, CryptoSplitArbConfig};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::str::FromStr;
@@ -151,7 +152,7 @@ pub(crate) async fn run_crypto_command(cmd: &CryptoCommands) -> Result<()> {
             cooldown_secs,
             dry_run,
         } => {
-            use ploy::strategy::{run_deribit_probability_arb, DeribitProbabilityArbConfig};
+            use ploy::strategy::impls::{run_deribit_probability_arb, DeribitProbabilityArbConfig};
             use rust_decimal::Decimal;
             use rust_decimal_macros::dec;
 
