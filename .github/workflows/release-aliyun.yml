@@ -157,7 +157,7 @@ jobs:
       - name: Resolve ECS host (static or Aliyun CLI lookup)
         id: resolve-host
         env:
-          STATIC_HOST: ${{ secrets.ALIYUN_ECS_HOST }}
+          STATIC_HOST: ${{ secrets.ALIYUN_ECS_HOST || secrets.AWS_EC2_HOST }}
           ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
           ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
           ALIYUN_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
@@ -221,8 +221,8 @@ jobs:
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.resolve-host.outputs.host }}
-          username: ${{ secrets.ALIYUN_ECS_USER }}
-          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
+          key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
           source: dist/ploy-release-${{ needs.build.outputs.release_tag }}.tar.gz
           target: /tmp/
@@ -232,8 +232,8 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ steps.resolve-host.outputs.host }}
-          username: ${{ secrets.ALIYUN_ECS_USER }}
-          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
+          key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
           script_stop: true
           envs: DEPLOY_ROOT
