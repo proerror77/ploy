@@ -1,25 +1,25 @@
 # Todo
 
-- [x] Introduce `strategy::risk` as the canonical risk subdomain facade
-- [x] Introduce `strategy::impls` as strategy-implementation export surface
-- [x] Shrink `strategy/mod.rs` root re-export surface (remove flat implementation exports)
-- [x] Migrate in-tree imports away from removed root exports/module aliases
-- [x] Build and run targeted tests to validate no behavior change
-- [x] Update issue #37 work log with concrete diff/test evidence
+- [x] Add Postgres integration test harness for engine-store scenarios (Docker or `PLOY_TEST_DATABASE_URL` fallback)
+- [x] Add cycle optimistic-lock success-path test (`update_cycle_state` increments version)
+- [x] Add conflict tests for `update_cycle_state` / `update_cycle_leg1` / `update_cycle_leg2`
+- [x] Add concurrent update race test (exactly one success, one conflict)
+- [x] Run targeted integration tests and capture pass/skip behavior
+- [x] Update issue #39 work log with diff + validation evidence
 
 ## Review
 
-- Planned execution target: GitHub issue #37 (Phase 2 export-surface convergence).
-- Delivered architecture changes:
-  - Added `src/strategy/risk.rs` facade over legacy `risk_mgmt/*`.
-  - Added `src/strategy/impls.rs` as implementation export surface.
-  - Rewrote `src/strategy/mod.rs` to keep only core contract re-exports and expose subdomains by module.
-  - Migrated in-tree imports from flat `strategy::*` / alias modules to explicit subdomains (`strategy::execution::*`, `strategy::risk::*`, `strategy::impls::*`, module-local paths).
-- Validation commands (executed):
-  - `cargo build`
-  - `cargo test strategy::execution::engine::tests -- --nocapture`
-  - `cargo test coordinator::bootstrap::tests -- --nocapture`
+- Planned execution target: GitHub issue #39 (Phase 4 Postgres integration coverage).
+- Added file:
+  - `tests/engine_store_pg.rs`
+- Covered scenarios:
+  - `update_cycle_state_success_increments_version`
+  - `update_cycle_state_conflict_returns_version_conflict`
+  - `update_cycle_leg1_conflict_returns_version_conflict`
+  - `update_cycle_leg2_conflict_returns_version_conflict`
+  - `concurrent_cycle_updates_yield_one_success_and_one_conflict`
+- Validation executed:
+  - `cargo test --test engine_store_pg -- --nocapture`
 - Validation outcome:
-  - Build passed.
-  - Target tests passed (`12/12`, `7/7`).
-  - Pre-existing warning remains: unused variable `results` in `src/strategy/directional_backtest.rs:1594`.
+  - Test suite passed (`5/5`).
+  - In this environment, tests printed skip message because neither Docker daemon nor `PLOY_TEST_DATABASE_URL` was available; assertions are guarded to no-op in that case.
