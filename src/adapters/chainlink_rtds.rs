@@ -166,8 +166,7 @@ async fn connect_websocket_with_proxy(
     }
 
     // No proxy — connect directly
-    let (ws_stream, _) =
-        tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
+    let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
         .await
         .map_err(|_| PloyError::Internal("Chainlink RTDS WebSocket connection timeout".into()))?
         .map_err(PloyError::WebSocket)?;

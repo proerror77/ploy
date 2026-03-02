@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
-use crate::adapters::PolymarketClient;
+use crate::adapters::{PolymarketClient, PostgresStore};
 use crate::config::ExecutionConfig;
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
@@ -1063,8 +1063,11 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
 
     println!("\x1b[32m✓ Data feeds started\x1b[0m\n");
 
-    // Spawn action handler task with executor
-    let action_handle = tokio::spawn(handle_strategy_actions(action_rx, executor));
+    // Initialize optional order persistence for strategy orders
+    let order_store = init_order_store().await;
+
+    // Spawn action handler task with executor + optional order store
+    let action_handle = tokio::spawn(handle_strategy_actions(action_rx, executor, order_store));
 
     // Wait for shutdown signal
     println!("Press Ctrl+C to stop...\n");
@@ -1087,10 +1090,40 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
     Ok(())
 }
 
+async fn init_order_store() -> Option<Arc<PostgresStore>> {
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            warn!("DATABASE_URL not set; strategy order persistence is disabled");
+            println!("  \x1b[33m⚠ DATABASE_URL not set - order persistence disabled\x1b[0m");
+            return None;
+        }
+    };
+
+    match PostgresStore::new(&database_url, 3).await {
+        Ok(store) => {
+            println!("  \x1b[32m✓ Order persistence enabled (PostgreSQL)\x1b[0m");
+            Some(Arc::new(store))
+        }
+        Err(e) => {
+            error!(
+                "Failed to connect to PostgreSQL for strategy order persistence: {}",
+                e
+            );
+            println!(
+                "  \x1b[33m⚠ Failed to connect PostgreSQL for order persistence: {}\x1b[0m",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// Handle actions emitted by strategies
 async fn handle_strategy_actions(
     mut rx: tokio::sync::mpsc::Receiver<(String, crate::strategy::StrategyAction)>,
     executor: Option<Arc<OrderExecutor>>,
+    store: Option<Arc<PostgresStore>>,
 ) {
     use crate::strategy::StrategyAction;
 
@@ -1098,9 +1131,18 @@ async fn handle_strategy_actions(
         match action {
             StrategyAction::SubmitOrder {
                 client_order_id,
-                order,
+                mut order,
                 priority: _,
             } => {
+                if order.client_order_id != client_order_id {
+                    warn!(
+                        "Mismatched order IDs in strategy action: action={}, request={}; using action ID",
+                        client_order_id, order.client_order_id
+                    );
+                    order.client_order_id = client_order_id.clone();
+                }
+
+                let tracked_order_id = order.client_order_id.clone();
                 let price_cents = order.limit_price * rust_decimal::Decimal::from(100);
                 println!("\n  \x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
                 println!("  \x1b[36m║\x1b[0m  📤 ORDER SUBMISSION                                          \x1b[36m║\x1b[0m");
@@ -1111,7 +1153,7 @@ async fn handle_strategy_actions(
                 );
                 println!(
                     "  \x1b[36m║\x1b[0m  Order ID: {:<47}\x1b[36m║\x1b[0m",
-                    client_order_id
+                    tracked_order_id
                 );
                 println!(
                     "  \x1b[36m║\x1b[0m  Token: {:<50}\x1b[36m║\x1b[0m",
@@ -1121,9 +1163,27 @@ async fn handle_strategy_actions(
                     order.market_side, order.shares, price_cents, "");
                 println!("  \x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m");
 
+                if let Some(ref store) = store {
+                    let db_order = crate::domain::Order::from_request(
+                        &order,
+                        None,
+                        1,
+                        Some(strategy_id.clone()),
+                    );
+                    if let Err(e) = store.insert_order(&db_order).await {
+                        warn!(
+                            "Failed to persist strategy order {}: {}",
+                            tracked_order_id, e
+                        );
+                    }
+                }
+
                 // Execute order if executor is available
                 if let Some(ref exec) = executor {
-                    info!("Executing order: {} @ {:.2}¢", client_order_id, price_cents);
+                    info!(
+                        "Executing order: {} @ {:.2}¢",
+                        tracked_order_id, price_cents
+                    );
                     match exec.execute(&order).await {
                         Ok(result) => {
                             println!("  \x1b[32m✓ Order executed!\x1b[0m");
@@ -1141,18 +1201,91 @@ async fn handle_strategy_actions(
                                 "Order {} filled: {} shares @ {:?}",
                                 result.order_id, result.filled_shares, result.avg_fill_price
                             );
+
+                            if let Some(ref store) = store {
+                                if let Err(e) = store
+                                    .update_order_status(
+                                        &tracked_order_id,
+                                        crate::domain::OrderStatus::Submitted,
+                                        Some(&result.order_id),
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to update order {} to Submitted: {}",
+                                        tracked_order_id, e
+                                    );
+                                }
+
+                                if result.filled_shares > 0 {
+                                    let fill_price =
+                                        result.avg_fill_price.unwrap_or(order.limit_price);
+                                    if let Err(e) = store
+                                        .update_order_fill(
+                                            &tracked_order_id,
+                                            result.filled_shares,
+                                            fill_price,
+                                            result.status,
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            "Failed to update order fill for {}: {}",
+                                            tracked_order_id, e
+                                        );
+                                    }
+                                } else if let Err(e) = store
+                                    .update_order_status(&tracked_order_id, result.status, None)
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to update order {} status to {:?}: {}",
+                                        tracked_order_id, result.status, e
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             println!("  \x1b[31m✗ Order failed: {}\x1b[0m\n", e);
                             error!("Order execution failed: {}", e);
+                            if let Some(ref store) = store {
+                                if let Err(db_err) = store
+                                    .update_order_status(
+                                        &tracked_order_id,
+                                        crate::domain::OrderStatus::Failed,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to mark order {} as Failed: {}",
+                                        tracked_order_id, db_err
+                                    );
+                                }
+                            }
                         }
                     }
                 } else {
                     println!("  \x1b[33m⚠ No executor - order logged but not submitted\x1b[0m\n");
                     warn!(
                         "Order {} not executed - no executor configured",
-                        client_order_id
+                        tracked_order_id
                     );
+                    if let Some(ref store) = store {
+                        if let Err(e) = store
+                            .update_order_status(
+                                &tracked_order_id,
+                                crate::domain::OrderStatus::Failed,
+                                None,
+                            )
+                            .await
+                        {
+                            warn!(
+                                "Failed to mark non-executed order {} as Failed: {}",
+                                tracked_order_id, e
+                            );
+                        }
+                    }
                 }
             }
             StrategyAction::CancelOrder { order_id } => {

@@ -1810,8 +1810,9 @@ async fn spawn_ctf_merge(condition_id: &str, shares: u64) -> std::result::Result
     use std::str::FromStr;
 
     // USDC on Polygon
-    let usdc: alloy::primitives::Address =
-        "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".parse().map_err(|e| format!("{e}"))?;
+    let usdc: alloy::primitives::Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        .parse()
+        .map_err(|e| format!("{e}"))?;
     let cid = B256::from_str(condition_id).map_err(|e| format!("invalid condition_id: {e}"))?;
     // Polymarket shares are 10^6 (USDC decimals)
     let amount = U256::from(shares) * U256::from(1_000_000u64);
@@ -1819,22 +1820,20 @@ async fn spawn_ctf_merge(condition_id: &str, shares: u64) -> std::result::Result
     let pk = std::env::var("POLYMARKET_PRIVATE_KEY")
         .map_err(|_| "POLYMARKET_PRIVATE_KEY not set".to_string())?;
 
-    let signer: alloy::signers::local::PrivateKeySigner =
-        pk.parse().map_err(|e| format!("invalid private key: {e}"))?;
+    let signer: alloy::signers::local::PrivateKeySigner = pk
+        .parse()
+        .map_err(|e| format!("invalid private key: {e}"))?;
     let wallet = alloy::network::EthereumWallet::from(signer);
 
-    let rpc_url = std::env::var("POLYGON_RPC_URL")
-        .unwrap_or_else(|_| "https://polygon-rpc.com".to_string());
+    let rpc_url =
+        std::env::var("POLYGON_RPC_URL").unwrap_or_else(|_| "https://polygon-rpc.com".to_string());
 
     let provider = alloy::providers::ProviderBuilder::new()
         .wallet(wallet)
         .connect_http(rpc_url.parse().map_err(|e| format!("bad RPC URL: {e}"))?);
 
-    let client = polymarket_client_sdk::ctf::Client::new(
-        provider,
-        polymarket_client_sdk::POLYGON,
-    )
-    .map_err(|e| format!("CTF client init: {e}"))?;
+    let client = polymarket_client_sdk::ctf::Client::new(provider, polymarket_client_sdk::POLYGON)
+        .map_err(|e| format!("CTF client init: {e}"))?;
 
     let request = MergePositionsRequest::for_binary_market(usdc, cid, amount);
     let resp = client
@@ -2014,7 +2013,9 @@ impl SplitArbStrategyAdapter {
         // Check if sum of asks is below target (profit opportunity after fees)
         let total_cost = yes_ask + no_ask;
         let fee_cost = total_cost * self.config.fee_rate;
-        if total_cost + fee_cost < dec!(1.0) && (dec!(1.0) - total_cost - fee_cost) >= self.config.min_profit_margin {
+        if total_cost + fee_cost < dec!(1.0)
+            && (dec!(1.0) - total_cost - fee_cost) >= self.config.min_profit_margin
+        {
             // Determine which side to enter first (cheaper side)
             if yes_ask <= no_ask && yes_ask <= self.config.max_entry_price {
                 return Some((Side::Up, yes_ask));
@@ -2439,9 +2440,8 @@ impl Strategy for SplitArbStrategyAdapter {
 
                             // Auto-merge: convert YES+NO token pair → USDC via CTF
                             let markets = self.markets.read().await;
-                            let merge_condition_id = markets
-                                .get(&market_id)
-                                .and_then(|m| m.condition_id.clone());
+                            let merge_condition_id =
+                                markets.get(&market_id).and_then(|m| m.condition_id.clone());
                             drop(markets);
 
                             if let Some(cid) = merge_condition_id {

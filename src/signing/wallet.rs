@@ -1,5 +1,5 @@
 use crate::error::{PloyError, Result};
-use alloy::primitives::{Address, B256, Signature};
+use alloy::primitives::{Address, Signature, B256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer as AlloySigner;
 use tracing::{info, warn};

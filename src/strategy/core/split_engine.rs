@@ -204,8 +204,8 @@ impl SplitArbEngine {
             };
 
         // Calculate max hedge price (accounting for fees)
-        let budget = (Decimal::ONE - self.config.min_profit_margin)
-            / (Decimal::ONE + self.config.fee_rate);
+        let budget =
+            (Decimal::ONE - self.config.min_profit_margin) / (Decimal::ONE + self.config.fee_rate);
         let max_hedge_price = budget - entry_price;
 
         // Check if hedge is even possible

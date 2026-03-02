@@ -91,7 +91,7 @@ impl Default for SplitArbConfig {
             shares_per_trade: 100,          // ~$35 per leg
             max_unhedged_positions: 3,      // Max 3 unhedged at once
             unhedged_stop_loss: dec!(0.15), // 15% stop loss on unhedged
-            fee_rate: dec!(0.02),               // 2% taker fee per leg
+            fee_rate: dec!(0.02),           // 2% taker fee per leg
             series_ids: vec![
                 "10423".into(), // SOL 15m
                 "10191".into(), // ETH 15m
@@ -463,8 +463,8 @@ impl SplitArbEngine {
         // locked_profit = 1.0 - total_cost - fee_rate * total_cost >= min_profit
         // => total_cost <= (1.0 - min_profit) / (1 + fee_rate)
         // => hedge <= budget - entry_price
-        let budget = (Decimal::ONE - self.config.min_profit_margin)
-            / (Decimal::ONE + self.config.fee_rate);
+        let budget =
+            (Decimal::ONE - self.config.min_profit_margin) / (Decimal::ONE + self.config.fee_rate);
         let max_hedge_price = budget - entry_price;
 
         // Check if hedge is even possible (other side not already too expensive)

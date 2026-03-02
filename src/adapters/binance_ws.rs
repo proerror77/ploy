@@ -171,8 +171,7 @@ async fn connect_websocket_with_proxy(
     }
 
     // No proxy or invalid proxy URL - connect directly
-    let (ws_stream, _) =
-        tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
+    let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
         .await
         .map_err(|_| PloyError::Internal("WebSocket connection timeout".to_string()))?
         .map_err(PloyError::WebSocket)?;

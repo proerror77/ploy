@@ -524,11 +524,7 @@ impl PostgresStore {
     }
 
     /// Update order fee after fill
-    pub async fn update_order_fee(
-        &self,
-        client_order_id: &str,
-        fee: Decimal,
-    ) -> Result<()> {
+    pub async fn update_order_fee(&self, client_order_id: &str, fee: Decimal) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE orders SET fee = $1, updated_at = NOW()

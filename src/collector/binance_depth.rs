@@ -332,9 +332,11 @@ impl BinanceDepthStream {
 
         let (ws_stream, _) =
             tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
-            .await
-            .map_err(|_| PloyError::Internal("Binance WebSocket connection timeout".to_string()))?
-            .map_err(PloyError::WebSocket)?;
+                .await
+                .map_err(|_| {
+                    PloyError::Internal("Binance WebSocket connection timeout".to_string())
+                })?
+                .map_err(PloyError::WebSocket)?;
 
         info!("Connected to Binance depth stream");
 

@@ -21,9 +21,7 @@ use builder_relayer_client_rust::{
 use builder_signing_sdk_rs::BuilderApiKeyCreds;
 use chrono::{NaiveDate, Utc};
 use ethers_core::abi::{encode as abi_encode, AbiParser, Token};
-use ethers_core::types::{
-    Address as EthersAddress, H256 as EthersH256, U256 as EthersU256,
-};
+use ethers_core::types::{Address as EthersAddress, H256 as EthersH256, U256 as EthersU256};
 use ethers_core::utils::{
     get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256,
 };
@@ -1640,9 +1638,7 @@ impl AutoClaimer {
         let rpc_url = polygon_rpc.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!("Invalid RPC URL: {}", e))
         })?;
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_http(rpc_url);
+        let provider = ProviderBuilder::new().wallet(wallet).connect_http(rpc_url);
 
         let conditional_tokens_addr: Address = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!(

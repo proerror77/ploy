@@ -15,6 +15,7 @@ When instructions mention Claude Code tools, map them like this in Codex:
 - Glob: use `rg --files` or `find`
 - LS: use `ls` via `functions.exec_command`
 - WebFetch/WebSearch: use `curl` (and Context7 for library docs when relevant)
+- If `curl` cannot fetch meaningful page content (JS-rendered pages, anti-bot/Cloudflare, login walls), switch to the `agent-browser` skill workflow (`open` -> `snapshot -i` -> `get text body`) before trying mirrors.
 - Parallel: use `multi_tool_use.parallel` for parallel shell reads/searches
 
 ## Git / Atomic Commits

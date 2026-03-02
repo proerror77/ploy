@@ -23,3 +23,9 @@
   - Use explicit production features: `claimer_daemon,api,pm_ctf,tokio/io-std`.
   - Run `file target/release/ploy` and require `ELF 64-bit LSB` in CI before deployment.
   - Deploy only the CI-built artifact, not local `target/release/ploy`.
+
+- Pattern: On macOS, `cargo build --target x86_64-unknown-linux-gnu` can fail for crates with C build steps (for example `ring`) when `x86_64-linux-gnu-gcc` is missing.
+- Rule: For local Linux artifacts from macOS, default to `cargo zigbuild --target x86_64-unknown-linux-gnu` and always verify with `file` before deploy.
+- Local Linux build checklist:
+  - `cargo zigbuild --release --target x86_64-unknown-linux-gnu --features "claimer_daemon,api,pm_ctf"`
+  - `file target/x86_64-unknown-linux-gnu/release/ploy` must contain `ELF 64-bit LSB`.

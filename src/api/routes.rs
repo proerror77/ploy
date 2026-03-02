@@ -5,9 +5,9 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
-use crate::api::{handlers, state::AppState};
 #[cfg(feature = "api_ws")]
 use crate::api::websocket::websocket_handler;
+use crate::api::{handlers, state::AppState};
 
 fn build_cors_layer() -> CorsLayer {
     let mut origins: Vec<HeaderValue> = std::env::var("PLOY_API_CORS_ALLOWED_ORIGINS")
