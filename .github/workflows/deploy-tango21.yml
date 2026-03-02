@@ -64,7 +64,7 @@ jobs:
           --exclude='data' \
           --exclude='results' \
           --exclude='dist' \
-          Cargo.toml Cargo.lock src/ examples/ migrations/
+          Cargo.toml Cargo.lock src/ examples/ migrations/ .cargo/ scripts/fast-linker.sh scripts/rustc-wrapper.sh
 
         aws s3 cp ploy-backend.tar.gz s3://${{ env.S3_BUCKET }}/
         echo "✅ Backend uploaded to S3"
@@ -99,7 +99,9 @@ jobs:
         # Install dependencies
         echo "📦 Installing dependencies..."
         sudo apt-get update -qq
-        sudo apt-get install -y nginx build-essential pkg-config libssl-dev -qq
+        sudo apt-get install -y nginx build-essential pkg-config libssl-dev clang lld -qq
+        sudo apt-get install -y sccache -qq || true
+        sudo apt-get install -y mold -qq || true
 
         # Install Rust if needed
         if ! command -v cargo &> /dev/null; then
@@ -107,6 +109,9 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         fi
         source $HOME/.cargo/env
+        if ! command -v sccache &> /dev/null; then
+          cargo install sccache --locked
+        fi
 
         # Configure Nginx
         echo "⚙️  Configuring Nginx..."
@@ -148,7 +153,10 @@ jobs:
         # Build backend
         echo "🔨 Building backend..."
         cd ~/ploy/backend
+        export RUSTC_WRAPPER=sccache
+        export SCCACHE_CACHE_SIZE=10G
         cargo build --release
+        sccache --show-stats || true
 
         # Create systemd service
         echo "⚙️  Creating systemd service..."
