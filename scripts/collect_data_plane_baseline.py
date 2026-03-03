@@ -199,6 +199,15 @@ def main() -> int:
     )
     parser.add_argument("--duration-secs", type=int, default=24 * 60 * 60)
     parser.add_argument("--interval-secs", type=int, default=10)
+    parser.add_argument(
+        "--time-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Virtual time scale factor (>1 accelerates wall-clock runtime). "
+            "Rates remain normalized to virtual --interval-secs."
+        ),
+    )
     parser.add_argument("--timeout-secs", type=float, default=5.0)
     parser.add_argument("--output-dir", default="data/baseline")
     parser.add_argument(
@@ -225,6 +234,12 @@ def main() -> int:
     if args.duration_secs <= 0:
         print("--duration-secs must be > 0", file=sys.stderr)
         return 2
+    if args.time_scale <= 0:
+        print("--time-scale must be > 0", file=sys.stderr)
+        return 2
+
+    wall_interval_secs = args.interval_secs / args.time_scale
+    wall_duration_secs = args.duration_secs / args.time_scale
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -242,13 +257,14 @@ def main() -> int:
     drop_deltas: List[float] = []
 
     start_epoch = time.time()
-    end_epoch = start_epoch + args.duration_secs
+    end_epoch = start_epoch + wall_duration_secs
     sample_count = 0
     error_count = 0
 
     print(
         f"[{utc_now_iso()}] starting baseline collection: "
-        f"url={args.metrics_url} duration={args.duration_secs}s interval={args.interval_secs}s"
+        f"url={args.metrics_url} duration={args.duration_secs}s interval={args.interval_secs}s "
+        f"time_scale={args.time_scale} wall_duration={wall_duration_secs:.2f}s"
     )
     print(f"[{utc_now_iso()}] writing samples to: {samples_path}")
 
@@ -271,6 +287,7 @@ def main() -> int:
                         {
                             "ts": now_iso,
                             "epoch_s": now_epoch,
+                            "virtual_epoch_s": (now_epoch - start_epoch) * args.time_scale,
                             "error": str(exc),
                         },
                         ensure_ascii=True,
@@ -278,7 +295,7 @@ def main() -> int:
                     + "\n"
                 )
                 out.flush()
-                time.sleep(args.interval_secs)
+                time.sleep(wall_interval_secs)
                 continue
 
             symbol_rates: Dict[str, float] = {}
@@ -319,6 +336,7 @@ def main() -> int:
                     {
                         "ts": now_iso,
                         "epoch_s": now_epoch,
+                        "virtual_epoch_s": (now_epoch - start_epoch) * args.time_scale,
                         "symbol_updates_total": snap.symbol_updates_total,
                         "source_messages_total": snap.source_messages_total,
                         "source_feed_health": snap.source_feed_health,
@@ -344,20 +362,23 @@ def main() -> int:
                     f"symbols={len(snap.symbol_updates_total)} sources={len(snap.source_messages_total)}"
                 )
 
-            sleep_for = max(0.0, args.interval_secs - (time.time() - now_epoch))
+            sleep_for = max(0.0, wall_interval_secs - (time.time() - now_epoch))
             time.sleep(sleep_for)
 
-    elapsed = max(1.0, time.time() - start_epoch)
-    symbol_summary = summarize_rate_series(symbol_deltas, args.interval_secs, elapsed)
-    source_summary = summarize_rate_series(source_deltas, args.interval_secs, elapsed)
+    wall_elapsed = max(1.0, time.time() - start_epoch)
+    virtual_elapsed = max(1.0, wall_elapsed * args.time_scale)
+    symbol_summary = summarize_rate_series(symbol_deltas, args.interval_secs, virtual_elapsed)
+    source_summary = summarize_rate_series(source_deltas, args.interval_secs, virtual_elapsed)
 
     summary = {
         "run_id": args.run_id,
         "generated_at": utc_now_iso(),
         "metrics_url": args.metrics_url,
         "duration_secs_requested": args.duration_secs,
-        "duration_secs_observed": elapsed,
+        "duration_secs_observed": virtual_elapsed,
+        "duration_secs_observed_wall": wall_elapsed,
         "interval_secs": args.interval_secs,
+        "time_scale": args.time_scale,
         "sample_count": sample_count,
         "error_count": error_count,
         "symbol_rates": symbol_summary,

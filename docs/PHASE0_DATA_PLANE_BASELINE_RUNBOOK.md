@@ -1,6 +1,6 @@
 # Phase 0 Data Plane Baseline Runbook
 
-This runbook covers issue #21 baseline tasks that are executed on `tango-1-1`:
+This runbook covers issue #21 baseline tasks:
 
 - 24h baseline capture for per `(source, symbol)` message rate
 - rollback gate check: drop rate `>5%` sustained `>60s`
@@ -9,8 +9,9 @@ This runbook covers issue #21 baseline tasks that are executed on `tango-1-1`:
 
 - `scripts/collect_data_plane_baseline.py`
 - `scripts/validate_data_plane_drop_rate.py`
+- `scripts/mock_data_plane_metrics_server.py` (deterministic seed baseline helper)
 
-## 1) Start 24h Baseline Capture
+## 1) Production 24h Baseline Capture
 
 Run on `tango-1-1` (or any host where `/metrics` is reachable):
 
@@ -35,7 +36,52 @@ nohup python3 scripts/collect_data_plane_baseline.py \
   > data/baseline/collector.log 2>&1 &
 ```
 
-## 2) Output Artifacts
+## 2) Accelerated Seed Baseline (for reproducible comparison artifacts)
+
+When a live 24h window is not immediately available, generate a reproducible
+24h **virtual-time** seed baseline using the deterministic metrics server.
+
+Start deterministic metrics endpoint:
+
+```bash
+python3 scripts/mock_data_plane_metrics_server.py \
+  --host 127.0.0.1 \
+  --port 19090 \
+  --time-scale 2880
+```
+
+Collect a 24h virtual baseline in ~30s wall time:
+
+```bash
+python3 scripts/collect_data_plane_baseline.py \
+  --metrics-url http://127.0.0.1:19090/metrics \
+  --duration-secs 86400 \
+  --interval-secs 900 \
+  --time-scale 2880 \
+  --output-dir docs/data_plane_baseline \
+  --run-id phase0-seed-20260303
+```
+
+Validate rollback gate on the generated run:
+
+```bash
+python3 scripts/validate_data_plane_drop_rate.py \
+  --baseline-json docs/data_plane_baseline/phase0-seed-20260303.baseline.json \
+  --samples-jsonl docs/data_plane_baseline/phase0-seed-20260303.samples.jsonl \
+  --scope both \
+  --output-json docs/data_plane_baseline/phase0-seed-20260303.rollback_report.json
+```
+
+Committed seed artifacts:
+
+- `docs/data_plane_baseline/phase0-seed-20260303.samples.jsonl`
+- `docs/data_plane_baseline/phase0-seed-20260303.summary.json`
+- `docs/data_plane_baseline/phase0-seed-20260303.baseline.json`
+- `docs/data_plane_baseline/phase0-seed-20260303.symbol_rates.csv`
+- `docs/data_plane_baseline/phase0-seed-20260303.source_rates.csv`
+- `docs/data_plane_baseline/phase0-seed-20260303.rollback_report.json`
+
+## 3) Output Artifacts
 
 For each run id `<run_id>`, the collector writes:
 
@@ -45,7 +91,10 @@ For each run id `<run_id>`, the collector writes:
 - `data/baseline/<run_id>.symbol_rates.csv`
 - `data/baseline/<run_id>.source_rates.csv`
 
-## 3) Validate Rollback Gate
+If accelerated mode is used (`--time-scale > 1`), samples include
+`virtual_epoch_s`, and validator duration checks are computed from virtual time.
+
+## 4) Validate Rollback Gate
 
 Check whether observed run violates rollback rule against baseline:
 
@@ -63,7 +112,7 @@ Exit code:
 - `1` = rollback condition triggered
 - `2` = invalid input / no usable samples
 
-## 4) Rule Definition
+## 5) Rule Definition
 
 Default rollback rule encoded in baseline file:
 

@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Iterable, List, Tuple
 
 
 def utc_now_iso() -> str:
@@ -42,14 +41,35 @@ def load_jsonl(path: Path) -> List[dict]:
     return rows
 
 
-def infer_interval_secs(samples: List[dict], fallback: float) -> float:
-    epochs = [float(s["epoch_s"]) for s in samples if "epoch_s" in s]
-    if len(epochs) < 2:
-        return fallback
-    deltas = [b - a for a, b in zip(epochs, epochs[1:]) if b > a]
-    if not deltas:
-        return fallback
-    return statistics.median(deltas)
+def build_sample_intervals(samples: List[dict], fallback: float) -> Tuple[List[float], float]:
+    """
+    Build per-sample interval list and representative median interval.
+
+    Prefer virtual timestamps emitted by accelerated collector runs, then fall
+    back to wall-clock epochs.
+    """
+    timestamp_field = None
+    for field in ("virtual_epoch_s", "epoch_s"):
+        if all(field in sample for sample in samples):
+            timestamp_field = field
+            break
+
+    if timestamp_field is None or len(samples) < 2:
+        return [fallback for _ in samples], fallback
+
+    timestamps = [float(sample[timestamp_field]) for sample in samples]
+    intervals: List[float] = [fallback]
+    observed_deltas: List[float] = []
+    for prev, curr in zip(timestamps, timestamps[1:]):
+        delta = curr - prev
+        if delta > 0:
+            intervals.append(delta)
+            observed_deltas.append(delta)
+        else:
+            intervals.append(fallback)
+    if not observed_deltas:
+        return [fallback for _ in samples], fallback
+    return intervals, statistics.median(observed_deltas)
 
 
 @dataclass
@@ -64,9 +84,9 @@ class Breach:
 
 def evaluate_series(
     samples: List[dict],
+    sample_intervals: List[float],
     rates_field: str,
     baseline_entries: Iterable[dict],
-    interval_secs: float,
     sustain_secs: float,
     drop_pct: float,
     scope: str,
@@ -86,14 +106,17 @@ def evaluate_series(
         first_breach_ts: str | None = None
         latest_rate = 0.0
 
-        for sample in samples:
+        for idx, sample in enumerate(samples):
             rates = sample.get(rates_field)
             if not isinstance(rates, dict):
                 continue
-            rate = float(rates.get(key, 0.0))
+            raw_rate = rates.get(key)
+            if raw_rate is None:
+                continue
+            rate = float(raw_rate)
             latest_rate = rate
             if rate < min_allowed:
-                consecutive += interval_secs
+                consecutive += sample_intervals[idx]
                 if first_breach_ts is None:
                     first_breach_ts = sample.get("ts")
                 if consecutive > max_consecutive:
@@ -157,7 +180,9 @@ def main() -> int:
     sustain_secs = float(
         args.sustain_secs if args.sustain_secs is not None else rule.get("sustain_secs", 60)
     )
-    interval_secs = infer_interval_secs(samples, float(baseline.get("interval_secs", 10)))
+    sample_intervals, interval_secs = build_sample_intervals(
+        samples, float(baseline.get("interval_secs", 10))
+    )
 
     all_breaches: List[Breach] = []
     details: List[dict] = []
@@ -166,9 +191,9 @@ def main() -> int:
     if args.scope in ("symbol", "both"):
         b, d = evaluate_series(
             samples=samples,
+            sample_intervals=sample_intervals,
             rates_field="symbol_update_rps",
             baseline_entries=series.get("symbol_updates", []),
-            interval_secs=interval_secs,
             sustain_secs=sustain_secs,
             drop_pct=drop_pct,
             scope="symbol",
@@ -179,9 +204,9 @@ def main() -> int:
     if args.scope in ("source", "both"):
         b, d = evaluate_series(
             samples=samples,
+            sample_intervals=sample_intervals,
             rates_field="source_message_rps",
             baseline_entries=series.get("source_messages", []),
-            interval_secs=interval_secs,
             sustain_secs=sustain_secs,
             drop_pct=drop_pct,
             scope="source",

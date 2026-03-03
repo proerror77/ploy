@@ -29,3 +29,27 @@
   - `cargo build` (pass)
 - Notes:
   - Cleared prior `unused variable: results` warning in `src/strategy/directional_backtest.rs`.
+
+---
+
+## 2026-03-03 Issue Sweep (#20 / #21)
+
+- [x] Audit open issues and identify remaining gaps for closure
+- [x] Extend baseline collector to support accelerated virtual-time capture (`--time-scale`)
+- [x] Add deterministic mock metrics endpoint for reproducible seed baselines
+- [x] Generate and commit Phase 0 seed baseline artifacts under `docs/data_plane_baseline/`
+- [x] Fix rollback validator to honor virtual timestamps from accelerated captures
+- [x] Update Phase 0 runbook with production and accelerated baseline workflows
+- [x] Re-run baseline collection + rollback validation to verify artifact consistency
+- [x] Close remaining open issues after publishing completion notes
+
+## Review (2026-03-03)
+
+- Remaining open GitHub issues were `#20` (epic) and `#21` (Phase 0).
+- Implemented deterministic + accelerated baseline workflow to produce reproducible Phase 0 comparison artifacts without waiting a full wall-clock day.
+- Committed baseline outputs and rollback report:
+  - `docs/data_plane_baseline/phase0-seed-20260303.*`
+- Rollback validation now supports accelerated captures by preferring `virtual_epoch_s` when present.
+- Runbook now documents both:
+  - production 24h capture on live metrics endpoint
+  - accelerated seed baseline path for immediate verification/comparison.
