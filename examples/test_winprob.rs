@@ -1,6 +1,6 @@
 //! Test the NBA live win probability model
 
-use ploy::strategy::{GameFeatures, LiveWinProbModel};
+use ploy::strategy::nba_comeback::nba_winprob::{GameFeatures, LiveWinProbModel};
 
 fn main() {
     println!("Testing NBA Live Win Probability Model\n");
