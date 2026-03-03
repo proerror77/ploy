@@ -37,8 +37,8 @@ use crate::platform::{
 };
 use crate::signing::Wallet;
 use crate::strategy::event_edge::core::EventEdgeCore;
-use crate::strategy::executor::OrderExecutor;
-use crate::strategy::idempotency::IdempotencyManager;
+use crate::strategy::execution::executor::OrderExecutor;
+use crate::strategy::execution::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
 use crate::strategy::{
     DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,
@@ -6757,14 +6757,15 @@ pub async fn start_platform(
             .or_else(|_| std::env::var("PRIVATE_KEY"))
             .ok();
 
-        let claimer_config = crate::strategy::ClaimerConfig {
+        let claimer_config = crate::strategy::impls::ClaimerConfig {
             check_interval_secs: 60, // every 60s — fast recycle for balance recovery
             min_claim_size: rust_decimal::Decimal::ONE,
             auto_claim: private_key.is_some(),
             private_key,
         };
 
-        let claimer = crate::strategy::AutoClaimer::new(claimer_pm_client.clone(), claimer_config);
+        let claimer =
+            crate::strategy::impls::AutoClaimer::new(claimer_pm_client.clone(), claimer_config);
 
         let jh = tokio::spawn(async move {
             if let Err(e) = claimer.start().await {

@@ -1,88 +1,203 @@
 use crate::config::RiskConfig;
-use crate::domain::{RiskState, Round};
+use crate::domain::{RiskState, Round, Side};
 use crate::error::{Result, RiskError};
-use chrono::{NaiveDate, Utc};
+use crate::platform::{
+    AgentRiskParams, BlockReason, Domain, OrderIntent, PlatformRiskState,
+    RiskCheckResult, RiskConfig as GateRiskConfig, RiskGate,
+};
 use rust_decimal::Decimal;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-/// Risk manager for enforcing trading limits
+const ENGINE_AGENT_ID: &str = "strategy-engine";
+
+/// Strategy-facing risk manager backed by the shared platform `RiskGate` runtime.
+///
+/// This adapter preserves the legacy `RiskManager` API used by `StrategyEngine`
+/// while delegating circuit-breaker and daily PnL runtime semantics to `RiskGate`.
 pub struct RiskManager {
     config: RiskConfig,
-    /// Current risk state
-    state: Arc<RwLock<RiskState>>,
-    /// Last halt reason (when circuit breaker is triggered)
+    gate: RiskGate,
+    /// Last halt reason (for legacy observability/health paths)
     halt_reason: Arc<RwLock<Option<String>>>,
-    /// Consecutive failures counter
-    consecutive_failures: AtomicU32,
-    /// Daily PnL tracker
-    daily_pnl: Arc<RwLock<DailyPnL>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct DailyPnL {
-    date: Option<NaiveDate>,
-    total_pnl: Decimal,
-    cycle_count: u32,
-    leg2_completions: u32,
 }
 
 impl RiskManager {
     /// Create a new risk manager
     pub fn new(config: RiskConfig) -> Self {
+        let gate = RiskGate::new(Self::to_gate_config(&config));
         Self {
             config,
-            state: Arc::new(RwLock::new(RiskState::Normal)),
+            gate,
             halt_reason: Arc::new(RwLock::new(None)),
-            consecutive_failures: AtomicU32::new(0),
-            daily_pnl: Arc::new(RwLock::new(DailyPnL::default())),
         }
+    }
+
+    fn to_gate_config(config: &RiskConfig) -> GateRiskConfig {
+        let exposure_multiplier = if config.max_positions > 0 {
+            Decimal::from(config.max_positions)
+        } else {
+            Decimal::from(10u32)
+        };
+
+        GateRiskConfig {
+            max_platform_exposure: config.max_single_exposure_usd * exposure_multiplier,
+            max_consecutive_failures: config.max_consecutive_failures,
+            daily_loss_limit: config.daily_loss_limit_usd,
+            max_drawdown_limit: None,
+            max_spread_bps: 500,
+            critical_bypass_exposure: false,
+            // Keep behavior compatible with legacy RiskManager: no automatic unhalt.
+            circuit_breaker_auto_recover: false,
+            circuit_breaker_cooldown_secs: 300,
+            crypto_max_exposure: None,
+            sports_max_exposure: None,
+            politics_max_exposure: None,
+            economics_max_exposure: None,
+            crypto_daily_loss_limit: None,
+            sports_daily_loss_limit: None,
+            politics_daily_loss_limit: None,
+            economics_daily_loss_limit: None,
+        }
+    }
+
+    fn engine_agent_params(&self) -> AgentRiskParams {
+        let max_total_exposure = if self.config.max_positions > 0 {
+            self.config.max_single_exposure_usd * Decimal::from(self.config.max_positions)
+        } else {
+            self.config.max_single_exposure_usd * Decimal::from(10u32)
+        };
+
+        AgentRiskParams {
+            max_order_value: self.config.max_single_exposure_usd,
+            max_total_exposure,
+            max_unhedged_positions: self.config.max_positions_per_symbol.max(1),
+            max_daily_loss: self.config.daily_loss_limit_usd,
+            allow_overnight: false,
+            allowed_markets: vec![],
+        }
+    }
+
+    async fn ensure_engine_agent_registered(&self) {
+        self.gate
+            .register_agent_with_domain(
+                ENGINE_AGENT_ID,
+                Domain::Custom(0),
+                self.engine_agent_params(),
+            )
+            .await;
+    }
+
+    fn map_platform_state(state: PlatformRiskState) -> RiskState {
+        match state {
+            PlatformRiskState::Normal => RiskState::Normal,
+            PlatformRiskState::Elevated => RiskState::Elevated,
+            PlatformRiskState::Halted => RiskState::Halted,
+        }
+    }
+
+    async fn sync_halt_reason_from_gate(&self, fallback: &str) {
+        if self.state().await != RiskState::Halted {
+            return;
+        }
+
+        let reason = self
+            .gate
+            .circuit_breaker_events()
+            .await
+            .into_iter()
+            .rev()
+            .find(|event| event.state == PlatformRiskState::Halted)
+            .map(|event| event.reason)
+            .unwrap_or_else(|| fallback.to_string());
+
+        *self.halt_reason.write().await = Some(reason);
     }
 
     /// Get current risk state
     pub async fn state(&self) -> RiskState {
-        *self.state.read().await
+        Self::map_platform_state(self.gate.state().await)
     }
 
     /// Check if trading is allowed
     pub async fn can_trade(&self) -> bool {
-        self.state.read().await.can_trade()
+        self.gate.can_trade().await
     }
 
     /// Check if we can open a new cycle
     pub async fn can_open_cycle(&self) -> bool {
-        self.state.read().await.can_open_new_cycle()
+        self.state().await.can_open_new_cycle()
     }
 
     // ==================== Pre-Trade Checks ====================
 
     /// Check if we can enter Leg1
     pub async fn check_leg1_entry(&self, shares: u64, price: Decimal, round: &Round) -> Result<()> {
+        self.ensure_engine_agent_registered().await;
+
         // Check risk state
         if !self.can_trade().await {
-            return Err(RiskError::TradingHalted {
-                reason: "Trading is halted".to_string(),
-            }
-            .into());
+            let reason = self
+                .halt_reason()
+                .await
+                .unwrap_or_else(|| "Trading is halted".to_string());
+            return Err(RiskError::TradingHalted { reason }.into());
         }
 
         // Check exposure limit
         let exposure = Decimal::from(shares) * price;
-        if exposure > self.config.max_single_exposure_usd {
-            return Err(RiskError::MaxExposureExceeded {
-                limit: self.config.max_single_exposure_usd,
-                requested: exposure,
+        let intent = OrderIntent::new(
+            ENGINE_AGENT_ID,
+            Domain::Custom(0),
+            round.slug.clone(),
+            round.up_token_id.clone(),
+            Side::Up,
+            true,
+            shares,
+            price,
+        );
+        match self.gate.check_order(&intent).await {
+            RiskCheckResult::Passed => {}
+            RiskCheckResult::Adjusted(suggestion) => {
+                let adjusted_limit = Decimal::from(suggestion.max_shares) * price;
+                return Err(RiskError::MaxExposureExceeded {
+                    limit: adjusted_limit,
+                    requested: exposure,
+                }
+                .into());
             }
-            .into());
+            RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped { reason }) => {
+                return Err(RiskError::TradingHalted { reason }.into());
+            }
+            RiskCheckResult::Blocked(BlockReason::ExceedsSingleLimit { limit, requested }) => {
+                return Err(RiskError::MaxExposureExceeded { limit, requested }.into());
+            }
+            RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
+                limit,
+                requested,
+                ..
+            })
+            | RiskCheckResult::Blocked(BlockReason::DomainExposureExceeded {
+                limit,
+                requested,
+                ..
+            }) => {
+                return Err(RiskError::MaxExposureExceeded { limit, requested }.into());
+            }
+            RiskCheckResult::Blocked(other) => {
+                return Err(RiskError::TradingHalted {
+                    reason: other.to_string(),
+                }
+                .into());
+            }
         }
 
-        // Check time remaining
-        let remaining = round.seconds_remaining() as u64;
-        if remaining < self.config.min_remaining_seconds {
+        // Check time remaining (keep signed semantics; never cast negative to huge u64).
+        let remaining_secs_i64 = round.seconds_remaining();
+        if remaining_secs_i64 < self.config.min_remaining_seconds as i64 {
             return Err(RiskError::InsufficientTime {
-                remaining_secs: remaining,
+                remaining_secs: remaining_secs_i64.max(0) as u64,
                 min_secs: self.config.min_remaining_seconds,
             }
             .into());
@@ -105,94 +220,68 @@ impl RiskManager {
 
     /// Check if Leg2 must be forced (approaching round end)
     pub fn must_force_leg2(&self, round: &Round) -> bool {
-        let remaining = round.seconds_remaining() as u64;
-        remaining <= self.config.leg2_force_close_seconds
+        let remaining_secs_i64 = round.seconds_remaining();
+        remaining_secs_i64 <= self.config.leg2_force_close_seconds as i64
     }
 
     // ==================== Post-Trade Updates ====================
 
     /// Record a successful cycle completion
     pub async fn record_success(&self, pnl: Decimal) {
-        // Reset consecutive failures
-        self.consecutive_failures.store(0, Ordering::SeqCst);
+        self.ensure_engine_agent_registered().await;
 
-        // Update daily PnL
-        let mut daily = self.daily_pnl.write().await;
-        self.ensure_daily_reset(&mut daily);
-        daily.total_pnl += pnl;
-        daily.cycle_count += 1;
-        daily.leg2_completions += 1;
+        self.gate.record_success(ENGINE_AGENT_ID, pnl).await;
 
-        info!(
-            "Cycle completed successfully. PnL: {}, Daily total: {}",
-            pnl, daily.total_pnl
-        );
-
-        // Enforce daily loss limit on net PnL (only triggers on losses).
-        if daily.total_pnl <= Decimal::ZERO - self.config.daily_loss_limit_usd {
-            drop(daily); // Release lock before triggering
-            self.trigger_circuit_breaker("Daily loss limit exceeded")
+        if self.state().await == RiskState::Halted {
+            self.sync_halt_reason_from_gate("Risk gate halted after success")
                 .await;
+            return;
         }
 
-        // Check if we should reduce risk state
-        if *self.state.read().await == RiskState::Elevated {
-            *self.state.write().await = RiskState::Normal;
-            info!("Risk state normalized after successful cycle");
-        }
+        // Clear stale halt reason once we are no longer halted.
+        *self.halt_reason.write().await = None;
+
+        info!("Cycle completed successfully. PnL: {}", pnl);
     }
 
     /// Record a cycle failure/abort
     pub async fn record_failure(&self, reason: &str) {
-        let failures = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        self.ensure_engine_agent_registered().await;
 
-        // Update daily stats
-        let mut daily = self.daily_pnl.write().await;
-        self.ensure_daily_reset(&mut daily);
-        daily.cycle_count += 1;
+        warn!("Cycle failed: {}", reason);
+        self.gate.record_failure(ENGINE_AGENT_ID, reason).await;
 
-        warn!(
-            "Cycle failed: {}. Consecutive failures: {}/{}",
-            reason, failures, self.config.max_consecutive_failures
-        );
-
-        // Check for circuit breaker
-        if failures >= self.config.max_consecutive_failures {
-            self.trigger_circuit_breaker("Too many consecutive failures")
+        if self.state().await == RiskState::Halted {
+            self.sync_halt_reason_from_gate("Too many consecutive failures")
                 .await;
-        } else if failures >= self.config.max_consecutive_failures / 2 {
-            // Elevate risk state
-            *self.state.write().await = RiskState::Elevated;
-            warn!("Risk state elevated due to failures");
         }
     }
 
     /// Record a loss (for daily limit tracking)
     pub async fn record_loss(&self, loss: Decimal) {
-        let mut daily = self.daily_pnl.write().await;
-        self.ensure_daily_reset(&mut daily);
-        daily.total_pnl -= loss.abs();
+        self.ensure_engine_agent_registered().await;
 
-        // Check daily loss limit
-        if daily.total_pnl <= Decimal::ZERO - self.config.daily_loss_limit_usd {
-            drop(daily); // Release lock before triggering
-            self.trigger_circuit_breaker("Daily loss limit exceeded")
+        self.gate.record_loss(ENGINE_AGENT_ID, loss.abs()).await;
+
+        if self.state().await == RiskState::Halted {
+            self.sync_halt_reason_from_gate("Daily loss limit exceeded")
                 .await;
         }
     }
 
     /// Trigger circuit breaker
     pub async fn trigger_circuit_breaker(&self, reason: &str) {
+        self.ensure_engine_agent_registered().await;
+
         error!("CIRCUIT BREAKER TRIGGERED: {}", reason);
-        *self.state.write().await = RiskState::Halted;
+        self.gate.trigger_circuit_breaker(reason).await;
         *self.halt_reason.write().await = Some(reason.to_string());
     }
 
     /// Reset circuit breaker (manual intervention)
     pub async fn reset_circuit_breaker(&self) {
         info!("Circuit breaker reset");
-        *self.state.write().await = RiskState::Normal;
-        self.consecutive_failures.store(0, Ordering::SeqCst);
+        self.gate.reset_circuit_breaker().await;
         *self.halt_reason.write().await = None;
     }
 
@@ -201,44 +290,37 @@ impl RiskManager {
         self.halt_reason.read().await.clone()
     }
 
-    // ==================== Helpers ====================
-
-    /// Ensure daily stats are reset on date change
-    fn ensure_daily_reset(&self, daily: &mut DailyPnL) {
-        let today = Utc::now().date_naive();
-        if daily.date != Some(today) {
-            *daily = DailyPnL {
-                date: Some(today),
-                ..Default::default()
-            };
-        }
-    }
+    // ==================== Metrics ====================
 
     /// Get consecutive failures count
     pub fn consecutive_failures(&self) -> u32 {
-        self.consecutive_failures.load(Ordering::SeqCst)
+        self.gate.consecutive_failures()
     }
 
     /// Get daily stats
+    ///
+    /// Returns `(daily_pnl, cycle_count, leg2_completions)` for backward compatibility.
     pub async fn daily_stats(&self) -> (Decimal, u32, u32) {
-        let daily = self.daily_pnl.read().await;
-        (daily.total_pnl, daily.cycle_count, daily.leg2_completions)
+        let (daily_pnl, success_count, failure_count) = self.gate.daily_stats().await;
+        let cycle_count = success_count + failure_count;
+        let leg2_completions = success_count;
+        (daily_pnl, cycle_count, leg2_completions)
     }
 
     /// Calculate Leg2 completion rate
     pub async fn leg2_completion_rate(&self) -> f64 {
-        let daily = self.daily_pnl.read().await;
-        if daily.cycle_count == 0 {
+        let (_, cycle_count, leg2_completions) = self.daily_stats().await;
+        if cycle_count == 0 {
             return 0.0;
         }
-        daily.leg2_completions as f64 / daily.cycle_count as f64
+        leg2_completions as f64 / cycle_count as f64
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;
 
     fn test_config() -> RiskConfig {
@@ -294,6 +376,16 @@ mod tests {
 
         // Not enough time
         let round = test_round(20);
+        let result = risk.check_leg1_entry(50, dec!(0.50), &round).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_time_remaining_already_expired_round() {
+        let risk = RiskManager::new(test_config());
+
+        // Expired round should not underflow to huge positive seconds.
+        let round = test_round(-5);
         let result = risk.check_leg1_entry(50, dec!(0.50), &round).await;
         assert!(result.is_err());
     }

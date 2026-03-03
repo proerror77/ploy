@@ -13,7 +13,7 @@ use crate::adapters::{PolymarketClient, QuoteUpdate};
 use crate::domain::Side;
 use crate::error::{PloyError, Result};
 use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
-use crate::strategy::OrderExecutor;
+use crate::strategy::execution::executor::OrderExecutor;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

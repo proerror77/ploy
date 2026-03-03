@@ -5,7 +5,7 @@ use crate::adapters::{GammaEventInfo, PolymarketClient};
 use crate::config::StrategyConfig;
 use crate::domain::{DumpSignal, Quote, Side};
 use crate::error::Result;
-use crate::strategy::SignalDetector;
+use crate::strategy::signal::SignalDetector;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;

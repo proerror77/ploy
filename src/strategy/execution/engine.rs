@@ -3,10 +3,12 @@ use crate::adapters::{QuoteCache, QuoteUpdate};
 use crate::config::AppConfig;
 use crate::domain::{Order, OrderStatus, Round, Side, StrategyState, TimeInForce};
 use crate::error::{PloyError, Result};
-use crate::strategy::{
-    MarketDepth, OrderExecutor, RiskManager, SignalDetector, SlippageCheck, SlippageConfig,
-    SlippageProtection, TradingCalculator,
+use crate::strategy::calculations::TradingCalculator;
+use crate::strategy::execution::executor::OrderExecutor;
+use crate::strategy::risk::{
+    MarketDepth, RiskManager, SlippageCheck, SlippageConfig, SlippageProtection,
 };
+use crate::strategy::signal::SignalDetector;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -990,10 +992,16 @@ impl StrategyEngine {
         .await;
 
         // Persist cycle state for crash recovery.
-        let _ = self
+        if let Err(err) = self
             .store
             .update_cycle_state(ctx.cycle_id, StrategyState::Leg2Pending, ctx.cycle_version)
-            .await;
+            .await
+        {
+            error!(
+                "Failed to persist cycle {} as LEG2_PENDING: {}",
+                ctx.cycle_id, err
+            );
+        }
 
         // Persist the intent before submitting to the exchange (best effort).
         let client_order_id = request.client_order_id.clone();

@@ -2,15 +2,14 @@ use crate::main_runtime::enforce_coordinator_only_live;
 use ploy::adapters::PolymarketClient;
 use ploy::cli::runtime::SportsCommands;
 use ploy::error::Result;
-use ploy::strategy::OrderExecutor;
+use ploy::strategy::execution::executor::OrderExecutor;
 use tracing::info;
 
 pub(crate) async fn run_sports_command(cmd: &SportsCommands) -> Result<()> {
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
     use ploy::signing::Wallet;
-    use ploy::strategy::{
-        core::SplitArbConfig, run_sports_split_arb, SportsLeague, SportsSplitArbConfig,
-    };
+    use ploy::strategy::core::SplitArbConfig;
+    use ploy::strategy::impls::{run_sports_split_arb, SportsLeague, SportsSplitArbConfig};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::str::FromStr;

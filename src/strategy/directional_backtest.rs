@@ -1591,7 +1591,7 @@ mod tests {
         });
 
         let mut feed = mock_feed(updates);
-        let results = engine.run(&mut feed);
+        let _results = engine.run(&mut feed);
 
         let trades = engine.closed_trades();
         if !trades.is_empty() {

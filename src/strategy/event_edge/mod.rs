@@ -13,7 +13,7 @@ use crate::error::{PloyError, Result};
 use crate::strategy::event_models::arena_text::{
     fetch_arena_text_snapshot, scores_to_probabilities, ArenaTextSnapshot,
 };
-use crate::strategy::{ExpectedValue, POLYMARKET_FEE_RATE};
+use crate::strategy::impls::{ExpectedValue, POLYMARKET_FEE_RATE};
 use chrono::{DateTime, Utc};
 use polymarket_client_sdk::gamma::types::request::SearchRequest;
 use polymarket_client_sdk::gamma::Client as GammaClient;

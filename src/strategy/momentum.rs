@@ -28,10 +28,10 @@ use crate::error::Result;
 use crate::platform::CryptoDataPlaneHandle;
 use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
 use crate::strategy::fee_model::FeeModel;
-use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
+use crate::strategy::execution::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::probability;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
-use crate::strategy::OrderExecutor;
+use crate::strategy::execution::executor::OrderExecutor;
 
 // ============================================================================
 // Configuration

@@ -6,7 +6,7 @@ pub async fn run_history(
     stats_only: bool,
     open_only: bool,
 ) -> Result<()> {
-    use ploy::strategy::TradeLogger;
+    use ploy::strategy::impls::{TradeLogger, TradeOutcome};
     use std::path::PathBuf;
 
     let logger = TradeLogger::new(PathBuf::from("data/trades.json"));
@@ -52,11 +52,11 @@ pub async fn run_history(
 
     for trade in trades {
         let outcome_str = match &trade.outcome {
-            ploy::strategy::TradeOutcome::Open => "OPEN",
-            ploy::strategy::TradeOutcome::Won => "WON",
-            ploy::strategy::TradeOutcome::Lost => "LOST",
-            ploy::strategy::TradeOutcome::ExitedEarly { .. } => "EXIT",
-            ploy::strategy::TradeOutcome::Cancelled => "CANCEL",
+            TradeOutcome::Open => "OPEN",
+            TradeOutcome::Won => "WON",
+            TradeOutcome::Lost => "LOST",
+            TradeOutcome::ExitedEarly { .. } => "EXIT",
+            TradeOutcome::Cancelled => "CANCEL",
         };
 
         let pnl_str = match trade.pnl_usd {

@@ -4,9 +4,10 @@
 //! and Prometheus metrics endpoint.
 
 use crate::domain::StrategyState;
-use crate::platform::DataPlaneFreshness;
+use crate::platform::{DataPlaneFreshness, RiskGate};
 use crate::services::Metrics;
-use crate::strategy::RiskManager;
+use crate::services::RiskView;
+use crate::strategy::risk::RiskManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,8 +68,8 @@ pub struct HealthState {
     pub last_db_check: RwLock<Option<DateTime<Utc>>>,
     /// Current strategy state
     pub strategy_state: RwLock<StrategyState>,
-    /// Risk manager reference
-    pub risk_manager: Option<Arc<RiskManager>>,
+    /// Risk view provider reference (RiskManager or RiskGate-backed).
+    pub risk_view: Option<Arc<dyn RiskView>>,
     /// Metrics reference
     pub metrics: Option<Arc<Metrics>>,
     /// Data plane freshness tracker (per-symbol, per-source)
@@ -86,7 +87,7 @@ impl HealthState {
             db_connected: AtomicBool::new(false),
             last_db_check: RwLock::new(None),
             strategy_state: RwLock::new(StrategyState::Idle),
-            risk_manager: None,
+            risk_view: None,
             metrics: None,
             freshness: None,
             quote_staleness_threshold: 30, // 30 seconds default
@@ -94,7 +95,17 @@ impl HealthState {
     }
 
     pub fn with_risk_manager(mut self, rm: Arc<RiskManager>) -> Self {
-        self.risk_manager = Some(rm);
+        self.risk_view = Some(rm);
+        self
+    }
+
+    pub fn with_risk_view(mut self, risk_view: Arc<dyn RiskView>) -> Self {
+        self.risk_view = Some(risk_view);
+        self
+    }
+
+    pub fn with_risk_gate(mut self, gate: Arc<RiskGate>) -> Self {
+        self.risk_view = Some(gate);
         self
     }
 
@@ -198,8 +209,8 @@ impl HealthState {
         });
 
         // Risk state
-        let risk_status = if let Some(ref rm) = self.risk_manager {
-            let state = rm.state().await;
+        let risk_status = if let Some(ref risk_view) = self.risk_view {
+            let state = risk_view.state().await;
             let status = match state {
                 crate::domain::RiskState::Normal => HealthStatus::Healthy,
                 crate::domain::RiskState::Elevated => HealthStatus::Degraded,
@@ -334,9 +345,9 @@ async fn metrics_handler(State(state): State<Arc<HealthState>>) -> impl IntoResp
         };
 
     // Get risk metrics
-    let (daily_pnl, cycle_count, consecutive_failures) = if let Some(ref rm) = state.risk_manager {
-        let (pnl, cycles, _) = rm.daily_stats().await;
-        (pnl.to_string(), cycles, rm.consecutive_failures())
+    let (daily_pnl, cycle_count, consecutive_failures) = if let Some(ref risk_view) = state.risk_view {
+        let (pnl, cycles, _) = risk_view.daily_stats().await;
+        (pnl.to_string(), cycles, risk_view.consecutive_failures())
     } else {
         ("0".to_string(), 0, 0)
     };
@@ -424,6 +435,8 @@ ploy_consecutive_failures {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{RiskConfig as GateRiskConfig, RiskGate};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_health_state_new() {
@@ -448,5 +461,23 @@ mod tests {
 
         // Should be unhealthy when WS is not connected
         assert_eq!(health.status, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn test_with_risk_gate_reflects_halted_status() {
+        let mut cfg = GateRiskConfig::default();
+        cfg.max_consecutive_failures = 1;
+        let gate = Arc::new(RiskGate::new(cfg));
+        gate.record_failure("agent1", "forced failure").await;
+
+        let state = HealthState::new().with_risk_gate(gate);
+        state.set_ws_connected(true);
+        state.set_db_connected(true);
+        state.record_ws_message().await;
+        state.record_db_check(true).await;
+
+        let health = state.get_health().await;
+        assert_eq!(health.status, HealthStatus::Unhealthy);
+        assert_eq!(health.risk_state, "HALTED");
     }
 }

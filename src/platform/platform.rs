@@ -16,7 +16,7 @@ use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
 use crate::exchange::ExchangeClient;
-use crate::strategy::executor::OrderExecutor;
+use crate::strategy::execution::executor::OrderExecutor;
 
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;

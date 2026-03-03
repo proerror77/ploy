@@ -1392,8 +1392,8 @@ mod tests {
         assert!(builder.build_binance().is_none());
     }
 
-    #[test]
-    fn test_from_data_plane_reuses_singleton_adapters() {
+    #[tokio::test]
+    async fn test_from_data_plane_reuses_singleton_adapters() {
         let manager = Arc::new(StrategyManager::new(1000));
         let data_plane = Arc::new(PlatformDataPlane::new(
             DataPlaneConfig {
