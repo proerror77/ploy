@@ -3,7 +3,7 @@ use ploy::adapters::PostgresStore;
 use ploy::domain::{Round, Side, StrategyState};
 use ploy::error::PloyError;
 use rust_decimal_macros::dec;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 use std::env;
 use std::process::Command;
@@ -123,6 +123,50 @@ struct TestDb {
     _docker: Option<DockerPostgres>,
 }
 
+async fn ensure_engine_store_schema(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rounds (
+            id SERIAL PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            up_token_id TEXT NOT NULL,
+            down_token_id TEXT NOT NULL,
+            start_time TIMESTAMPTZ NOT NULL,
+            end_time TIMESTAMPTZ NOT NULL,
+            outcome TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("failed to create rounds table for integration test");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS cycles (
+            id SERIAL PRIMARY KEY,
+            round_id INTEGER NOT NULL REFERENCES rounds(id),
+            state TEXT NOT NULL,
+            leg1_side TEXT,
+            leg1_entry_price DECIMAL,
+            leg1_shares INTEGER,
+            leg1_filled_at TIMESTAMPTZ,
+            leg2_entry_price DECIMAL,
+            leg2_shares INTEGER,
+            leg2_filled_at TIMESTAMPTZ,
+            pnl DECIMAL,
+            abort_reason TEXT,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("failed to create cycles table for integration test");
+}
+
 impl TestDb {
     async fn new() -> Option<Self> {
         let (docker, database_url) = if let Ok(url) = env::var("PLOY_TEST_DATABASE_URL") {
@@ -143,11 +187,9 @@ impl TestDb {
             .await
             .expect("failed to connect postgres test database");
 
+        ensure_engine_store_schema(&pool).await;
+
         let store = PostgresStore::from_pool(pool);
-        store
-            .migrate()
-            .await
-            .expect("failed to run sqlx migrations for integration test");
 
         Some(Self {
             store,
