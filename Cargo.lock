@@ -5741,6 +5741,7 @@ dependencies = [
  "mockall",
  "nix",
  "ordered-float",
+ "ploy-core",
  "polymarket-client-sdk",
  "rand 0.8.5",
  "ratatui",
@@ -5769,6 +5770,16 @@ dependencies = [
  "urlencoding",
  "uuid 1.21.0",
  "zeroize",
+]
+
+[[package]]
+name = "ploy-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rust_decimal",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

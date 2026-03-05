@@ -8,11 +8,15 @@ authors = ["Your Name"]
 [workspace]
 members = [
     ".",
+    "crates/ploy-core",
     "tools/sdk_auth_check",
 ]
 resolver = "2"
 
 [dependencies]
+# Workspace crates
+ploy-core = { path = "crates/ploy-core" }
+
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "process"] }
 
