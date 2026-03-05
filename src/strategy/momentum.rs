@@ -1754,7 +1754,7 @@ pub struct MomentumEngine {
     fund_manager: Option<Arc<FundManager>>,
     // Auto-claimer for winning positions
     #[cfg(feature = "claimer_daemon")]
-    claimer: Option<Arc<super::claimer::AutoClaimer>>,
+    claimer: Option<Arc<crate::account::claimer::AutoClaimer>>,
     // Trade logger for persistent records
     trade_logger: Option<Arc<super::trade_logger::TradeLogger>>,
     // Window risk tracker for cross-symbol exposure limits
@@ -1880,7 +1880,7 @@ impl MomentumEngine {
 
     /// Set auto-claimer for winning positions
     #[cfg(feature = "claimer_daemon")]
-    pub fn with_claimer(mut self, claimer: super::claimer::AutoClaimer) -> Self {
+    pub fn with_claimer(mut self, claimer: crate::account::claimer::AutoClaimer) -> Self {
         self.claimer = Some(Arc::new(claimer));
         self
     }

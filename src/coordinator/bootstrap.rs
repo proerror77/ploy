@@ -6757,7 +6757,7 @@ pub async fn start_platform(
             .or_else(|_| std::env::var("PRIVATE_KEY"))
             .ok();
 
-        let claimer_config = crate::strategy::impls::ClaimerConfig {
+        let claimer_config = crate::account::claimer::ClaimerConfig {
             check_interval_secs: 60, // every 60s — fast recycle for balance recovery
             min_claim_size: rust_decimal::Decimal::ONE,
             auto_claim: private_key.is_some(),
@@ -6765,7 +6765,7 @@ pub async fn start_platform(
         };
 
         let claimer =
-            crate::strategy::impls::AutoClaimer::new(claimer_pm_client.clone(), claimer_config);
+            crate::account::claimer::AutoClaimer::new(claimer_pm_client.clone(), claimer_config);
 
         let jh = tokio::spawn(async move {
             if let Err(e) = claimer.start().await {

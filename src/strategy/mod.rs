@@ -46,8 +46,6 @@ pub mod backtest_feed;
 pub mod backtest_recorder;
 pub mod backtest_report;
 pub mod calculations;
-#[cfg(feature = "claimer_daemon")]
-pub mod claimer;
 pub mod crypto;
 pub mod deribit_probability_arb;
 pub mod directional_backtest;

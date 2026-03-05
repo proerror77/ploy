@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 pub async fn run_claimer(check_only: bool, min_size: f64, interval: u64) -> Result<()> {
     use ploy::adapters::polymarket_clob::POLYGON_CHAIN_ID;
     use ploy::signing::Wallet;
-    use ploy::strategy::{AutoClaimer, ClaimerConfig};
+    use ploy::account::claimer::{AutoClaimer, ClaimerConfig};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 

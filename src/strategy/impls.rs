@@ -4,7 +4,7 @@
 //! `strategy` root module.
 
 #[cfg(feature = "claimer_daemon")]
-pub use super::claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
+pub use crate::account::claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
 pub use super::core::{
     ArbSide as CoreArbSide, ArbStats as CoreArbStats, BinaryMarket,
     HedgedPosition as CoreHedgedPosition, MarketDiscovery, MarketType,
