@@ -51,7 +51,6 @@ pub mod claimer;
 pub mod crypto;
 pub mod deribit_probability_arb;
 pub mod directional_backtest;
-pub mod dump_hedge;
 pub mod event_edge;
 pub mod execution_sim;
 pub mod fee_model;

@@ -31,10 +31,6 @@ pub use super::deribit_probability_arb::{
 pub use super::directional_backtest::{
     DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
 };
-pub use super::dump_hedge::{
-    DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
-    PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
-};
 pub use super::event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 pub use super::event_edge::{run_event_edge, EventEdgeConfig};
 pub use super::execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};

@@ -26,7 +26,6 @@ use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::CryptoDataPlaneHandle;
-use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::execution::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::probability;
@@ -1764,8 +1763,6 @@ pub struct MomentumEngine {
     lob_cache: Option<Arc<crate::collector::LobCache>>,
     // K-line client for historical volatility
     kline_client: Option<Arc<crate::collector::BinanceKlineClient>>,
-    // Dump & Hedge strategy engine
-    dump_hedge: Option<Arc<DumpHedgeEngine>>,
     // Serialize entry path to avoid duplicate orders for the same event under concurrent updates.
     entry_mutex: Arc<Mutex<()>>,
     // === Directional prediction infrastructure ===
@@ -1823,7 +1820,6 @@ impl MomentumEngine {
             window_tracker: Arc::new(RwLock::new(WindowRiskTracker::default())),
             lob_cache: None,
             kline_client: None,
-            dump_hedge: None,
             entry_mutex: Arc::new(Mutex::new(())),
             fee_model: FeeModel::crypto(),
             chainlink_cache: None,
@@ -1840,12 +1836,6 @@ impl MomentumEngine {
     /// Set K-line client for historical volatility
     pub fn with_kline_client(mut self, client: crate::collector::BinanceKlineClient) -> Self {
         self.kline_client = Some(Arc::new(client));
-        self
-    }
-
-    /// Enable Dump & Hedge strategy
-    pub fn with_dump_hedge(mut self, config: DumpHedgeConfig) -> Self {
-        self.dump_hedge = Some(Arc::new(DumpHedgeEngine::new(config)));
         self
     }
 
@@ -2882,15 +2872,6 @@ impl MomentumEngine {
 
     /// Handle Polymarket quote update - check exit conditions and dump signals
     async fn on_pm_update(&self, update: &QuoteUpdate) -> Result<()> {
-        // Update dump hedge price tracker if enabled
-        if let Some(ref dump_hedge) = self.dump_hedge {
-            if let Some(ask) = update.quote.best_ask {
-                dump_hedge
-                    .on_simple_price_update(&update.token_id, ask)
-                    .await;
-            }
-        }
-
         // Probability-driven exit check for directional mode positions
         if let Some(ref cl_cache) = self.chainlink_cache {
             let positions = self.positions.read().await;
