@@ -1,17 +1,19 @@
-/// Legacy live execution escape hatches are permanently disabled.
+/// Live execution defaults to the Coordinator/Gateway path (`ploy platform start`).
 ///
-/// Live execution must go through the Coordinator/Gateway path (`ploy platform start`).
-/// These helpers remain so older call sites can compile without silently enabling
-/// a bypass.
+/// For strategies not yet wired into the Coordinator (e.g. staggered_arb),
+/// set `PLOY_ALLOW_DIRECT_LIVE=1` to enable the legacy `ploy strategy start` path.
+/// The env var must be explicitly set — default is disabled.
 #[inline]
 pub fn direct_live_allowed() -> bool {
-    false
+    std::env::var("PLOY_ALLOW_DIRECT_LIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
-/// Legacy `ploy strategy start` live override is also permanently disabled.
+/// Strategy-specific direct live override — follows the same env gate.
 #[inline]
 pub fn strategy_direct_live_allowed() -> bool {
-    false
+    direct_live_allowed()
 }
 
 /// Single enforcement gate for all legacy live entry points.
@@ -33,23 +35,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_live_allowed_is_always_false() {
-        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "true") };
+    fn direct_live_disabled_by_default() {
+        unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
         assert!(!direct_live_allowed());
-        unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
     }
 
     #[test]
-    fn strategy_direct_live_allowed_is_always_false() {
+    fn direct_live_enabled_by_env() {
+        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "1") };
+        assert!(direct_live_allowed());
         unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "true") };
-        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_STRATEGY_LIVE", "true") };
-        assert!(!strategy_direct_live_allowed());
+        assert!(direct_live_allowed());
         unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
-        unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_STRATEGY_LIVE") };
     }
 
     #[test]
-    fn enforce_live_gate_blocks_all_commands() {
+    fn strategy_direct_live_follows_env() {
+        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "1") };
+        assert!(strategy_direct_live_allowed());
+        unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
+        assert!(!strategy_direct_live_allowed());
+    }
+
+    #[test]
+    fn enforce_live_gate_blocks_without_env() {
+        unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
         for cmd in [
             "ploy strategy start",
             "ploy crypto split-arb",
@@ -67,9 +77,9 @@ mod tests {
     }
 
     #[test]
-    fn enforce_live_gate_ignores_env_override() {
-        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "true") };
-        assert!(enforce_live_gate("test-cmd").is_err());
+    fn enforce_live_gate_allows_with_env() {
+        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "1") };
+        assert!(enforce_live_gate("test-cmd").is_ok());
         unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
     }
 }

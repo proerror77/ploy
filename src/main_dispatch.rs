@@ -95,6 +95,30 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             )
             .await?;
         }
+        Some(Commands::DeribitIvBackfill {
+            currencies,
+            start,
+            end,
+            lookback_days,
+            resolution_secs,
+            sleep_ms,
+            base_url,
+            dry_run,
+        }) => {
+            crate::main_runtime::init_logging();
+            crate::main_modes::run_deribit_iv_backfill_mode(
+                &cli.config,
+                currencies,
+                start.as_deref(),
+                end.as_deref(),
+                *lookback_days,
+                *resolution_secs,
+                *sleep_ms,
+                base_url,
+                *dry_run,
+            )
+            .await?;
+        }
         Some(Commands::Crypto(crypto_cmd)) => {
             crate::main_runtime::init_logging();
             crate::main_commands::crypto::run_crypto_command(crypto_cmd).await?;

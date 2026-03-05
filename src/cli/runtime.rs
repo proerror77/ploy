@@ -139,6 +139,41 @@ pub enum Commands {
         resume_from_db: bool,
     },
 
+    /// Backfill Deribit volatility index (DVOL) history into Postgres
+    DeribitIvBackfill {
+        /// Currencies to backfill (comma-separated: BTC,ETH)
+        #[arg(long, default_value = "BTC,ETH")]
+        currencies: String,
+
+        /// Start timestamp (RFC3339). If omitted, uses now - lookback_days.
+        #[arg(long)]
+        start: Option<String>,
+
+        /// End timestamp (RFC3339). If omitted, uses now.
+        #[arg(long)]
+        end: Option<String>,
+
+        /// Lookback window (days) when start is omitted.
+        #[arg(long, default_value = "30")]
+        lookback_days: u64,
+
+        /// Bar resolution in seconds (Deribit TradingView resolution).
+        #[arg(long, default_value = "60")]
+        resolution_secs: u32,
+
+        /// Sleep between API pages (milliseconds).
+        #[arg(long, default_value = "200")]
+        sleep_ms: u64,
+
+        /// Override Deribit public API base URL
+        #[arg(long, default_value = "https://www.deribit.com/api/v2/public")]
+        base_url: String,
+
+        /// Fetch only; don't write to DB
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Crypto market strategies (BTC, ETH, SOL UP/DOWN)
     #[command(subcommand)]
     Crypto(CryptoCommands),

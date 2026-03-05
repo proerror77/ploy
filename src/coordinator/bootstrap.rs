@@ -63,162 +63,19 @@ const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
 const PM_COLLECTOR_REFRESH_SECS: u64 = 300;
 
 async fn ensure_clob_quote_ticks_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS clob_quote_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            token_id TEXT NOT NULL,
-            side TEXT NOT NULL CHECK (side IN ('UP', 'DOWN')),
-            best_bid NUMERIC(10,6),
-            best_ask NUMERIC(10,6),
-            bid_size NUMERIC(18,8),
-            ask_size NUMERIC(18,8),
-            source TEXT NOT NULL DEFAULT 'polymarket_ws',
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // Add domain column if it doesn't exist (backcompat with existing tables).
-    sqlx::query("ALTER TABLE clob_quote_ticks ADD COLUMN IF NOT EXISTS domain TEXT")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_token_time ON clob_quote_ticks(token_id, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_time ON clob_quote_ticks(received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_domain_time ON clob_quote_ticks(domain, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    crate::platform::persistence_schema::ensure_clob_quote_ticks_table(pool).await
 }
 
 async fn ensure_binance_price_ticks_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS binance_price_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            price NUMERIC(20,10) NOT NULL,
-            quantity NUMERIC(20,10),
-            trade_time TIMESTAMPTZ NOT NULL,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_price_ticks_symbol_time ON binance_price_ticks(symbol, trade_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_price_ticks_time ON binance_price_ticks(trade_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    crate::platform::persistence_schema::ensure_binance_price_ticks_table(pool).await
 }
 
 async fn ensure_binance_lob_ticks_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS binance_lob_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            update_id BIGINT,
-            best_bid NUMERIC(20,10) NOT NULL,
-            best_ask NUMERIC(20,10) NOT NULL,
-            mid_price NUMERIC(20,10) NOT NULL,
-            spread_bps NUMERIC(12,6) NOT NULL,
-            obi_5 NUMERIC(12,8) NOT NULL,
-            obi_10 NUMERIC(12,8) NOT NULL,
-            bid_volume_5 NUMERIC(20,10) NOT NULL,
-            ask_volume_5 NUMERIC(20,10) NOT NULL,
-            bids JSONB,
-            asks JSONB,
-            event_time TIMESTAMPTZ NOT NULL,
-            source TEXT NOT NULL DEFAULT 'binance_depth_ws',
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_lob_ticks_symbol_time ON binance_lob_ticks(symbol, event_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_lob_ticks_time ON binance_lob_ticks(event_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    crate::platform::persistence_schema::ensure_binance_lob_ticks_table(pool).await
 }
 
 pub(crate) async fn ensure_clob_orderbook_snapshots_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS clob_orderbook_snapshots (
-            id BIGSERIAL PRIMARY KEY,
-            domain TEXT,
-            token_id TEXT NOT NULL,
-            market TEXT,
-            bids JSONB NOT NULL,
-            asks JSONB NOT NULL,
-            book_timestamp TIMESTAMPTZ,
-            hash TEXT,
-            source TEXT NOT NULL DEFAULT 'polymarket_ws',
-            context JSONB,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_token_time ON clob_orderbook_snapshots(token_id, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_time ON clob_orderbook_snapshots(received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_domain_time ON clob_orderbook_snapshots(domain, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    crate::platform::persistence_schema::ensure_clob_orderbook_snapshots_table(pool).await
 }
 
 async fn ensure_accounts_table(pool: &PgPool) -> Result<()> {
@@ -4200,6 +4057,54 @@ async fn persist_split_arb_signal_history(
     }
 }
 
+async fn persist_live_order_signal_history(
+    pool: &PgPool,
+    account_id: &str,
+    strategy_label: &str,
+    strategy_id: &str,
+    signal_type: &str,
+    token_id: Option<&str>,
+    side: Option<&str>,
+    order_price: Option<Decimal>,
+    fill_price: Option<Decimal>,
+    context: serde_json::Value,
+) {
+    let agent_id = format!("{}_runtime", strategy_label);
+    let result = sqlx::query(
+        r#"
+        INSERT INTO signal_history (
+            account_id, intent_id, agent_id, strategy_id, domain, signal_type,
+            market_slug, token_id, symbol, side, confidence, fair_value, market_price, edge, config_hash, context
+        )
+        VALUES (
+            $1, NULL, $2, $3, 'strategy_runtime', $4,
+            NULL, $5, NULL, $6, NULL, $7, $8, NULL, NULL, $9
+        )
+        "#,
+    )
+    .bind(account_id)
+    .bind(agent_id)
+    .bind(strategy_id)
+    .bind(signal_type)
+    .bind(token_id)
+    .bind(side)
+    .bind(order_price)
+    .bind(fill_price)
+    .bind(sqlx::types::Json(context))
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(
+            strategy = strategy_label,
+            strategy_id = strategy_id,
+            signal_type = signal_type,
+            error = %e,
+            "failed to persist live order signal_history observation"
+        );
+    }
+}
+
 async fn handle_strategy_actions_runtime(
     strategy_label: &str,
     manager: Arc<StrategyManager>,
@@ -4235,6 +4140,31 @@ async fn handle_strategy_actions_runtime(
                         error: Some("strategy paused by coordinator".to_string()),
                     };
                     manager.send_order_update(update.clone());
+                    if let Some(pool) = observability_pool.as_ref() {
+                        let context = json!({
+                            "source": "managed_runtime",
+                            "phase": "submit_paused",
+                            "order_id": update.order_id,
+                            "client_order_id": client_order_id.clone(),
+                            "status": format!("{:?}", update.status),
+                            "filled_qty": update.filled_qty,
+                            "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                            "error": update.error,
+                        });
+                        persist_live_order_signal_history(
+                            pool,
+                            &observability_account_id,
+                            strategy_label,
+                            &strategy_id,
+                            "live_order_rejected",
+                            Some(order.token_id.as_str()),
+                            Some(order.market_side.as_str()),
+                            Some(order.limit_price),
+                            update.avg_fill_price,
+                            context,
+                        )
+                        .await;
+                    }
                     if split_arb_managed {
                         if let Some(pool) = observability_pool.as_ref() {
                             let (leg, mode) = split_arb_leg_and_mode(&client_order_id);
@@ -4284,6 +4214,30 @@ async fn handle_strategy_actions_runtime(
                             error: None,
                         };
                         manager.send_order_update(update.clone());
+                        if let Some(pool) = observability_pool.as_ref() {
+                            let context = json!({
+                                "source": "managed_runtime",
+                                "phase": "submit_result",
+                                "order_id": update.order_id,
+                                "client_order_id": client_order_id.clone(),
+                                "status": format!("{:?}", update.status),
+                                "filled_qty": update.filled_qty,
+                                "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                            });
+                            persist_live_order_signal_history(
+                                pool,
+                                &observability_account_id,
+                                strategy_label,
+                                &strategy_id,
+                                "live_order_submit_result",
+                                Some(order.token_id.as_str()),
+                                Some(order.market_side.as_str()),
+                                Some(order.limit_price),
+                                update.avg_fill_price,
+                                context,
+                            )
+                            .await;
+                        }
 
                         if split_arb_managed {
                             if let Some(pool) = observability_pool.as_ref() {
@@ -4398,6 +4352,31 @@ async fn handle_strategy_actions_runtime(
                                     manager_for_poll.send_order_update(update.clone());
 
                                     if let Some(pool) = observability_pool_for_poll.as_ref() {
+                                        let context = json!({
+                                            "source": "managed_runtime",
+                                            "phase": "poll",
+                                            "order_id": update.order_id,
+                                            "client_order_id": client_order_id_for_poll.clone(),
+                                            "status": format!("{:?}", update.status),
+                                            "filled_qty": update.filled_qty,
+                                            "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                                        });
+                                        persist_live_order_signal_history(
+                                            pool,
+                                            &observability_account_for_poll,
+                                            strategy_label_owned.as_str(),
+                                            &strategy_id_for_poll,
+                                            "live_order_poll_update",
+                                            Some(order_for_poll.token_id.as_str()),
+                                            Some(order_for_poll.market_side.as_str()),
+                                            Some(order_for_poll.limit_price),
+                                            update.avg_fill_price,
+                                            context,
+                                        )
+                                        .await;
+                                    }
+
+                                    if let Some(pool) = observability_pool_for_poll.as_ref() {
                                         let (leg, mode) = split_arb_leg_and_mode(
                                             client_order_id_for_poll.as_str(),
                                         );
@@ -4458,6 +4437,31 @@ async fn handle_strategy_actions_runtime(
                             error: Some(e.to_string()),
                         };
                         manager.send_order_update(update.clone());
+                        if let Some(pool) = observability_pool.as_ref() {
+                            let context = json!({
+                                "source": "managed_runtime",
+                                "phase": "submit_error",
+                                "order_id": update.order_id,
+                                "client_order_id": client_order_id.clone(),
+                                "status": format!("{:?}", update.status),
+                                "filled_qty": update.filled_qty,
+                                "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                                "error": update.error,
+                            });
+                            persist_live_order_signal_history(
+                                pool,
+                                &observability_account_id,
+                                strategy_label,
+                                &strategy_id,
+                                "live_order_submit_error",
+                                Some(order.token_id.as_str()),
+                                Some(order.market_side.as_str()),
+                                Some(order.limit_price),
+                                update.avg_fill_price,
+                                context,
+                            )
+                            .await;
+                        }
                         if split_arb_managed {
                             if let Some(pool) = observability_pool.as_ref() {
                                 let (leg, mode) = split_arb_leg_and_mode(&client_order_id);
@@ -4727,6 +4731,19 @@ async fn run_managed_strategy_runtime(
     };
 
     manager.start_strategy(strategy, None).await?;
+
+    #[cfg(feature = "claimer_daemon")]
+    if !dry_run {
+        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
+            warn!(
+                strategy = strategy_label,
+                agent_id = agent_id,
+                error = %e,
+                "failed to start account-level auto-claimer daemon"
+            );
+        }
+    }
+
     feed_manager.start().await?;
     let subscribed_tokens = feed_manager.start_for_feeds(required_feeds).await?;
 
@@ -6750,29 +6767,15 @@ pub async fn start_platform(
     }
 
     // ── Auto-claimer background task ──
-    // Automatically claims resolved positions every 5 minutes.
+    // Ensure single account-level daemon (deduped) and avoid spawning a second
+    // direct AutoClaimer loop in platform bootstrap.
     #[cfg(feature = "claimer_daemon")]
-    if let Some(ref claimer_pm_client) = pm_client {
-        let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
-            .or_else(|_| std::env::var("PRIVATE_KEY"))
-            .ok();
-
-        let claimer_config = crate::strategy::ClaimerConfig {
-            check_interval_secs: 60, // every 60s — fast recycle for balance recovery
-            min_claim_size: rust_decimal::Decimal::ONE,
-            auto_claim: private_key.is_some(),
-            private_key,
-        };
-
-        let claimer = crate::strategy::AutoClaimer::new(claimer_pm_client.clone(), claimer_config);
-
-        let jh = tokio::spawn(async move {
-            if let Err(e) = claimer.start().await {
-                tracing::error!(error = %e, "auto-claimer exited with error");
-            }
-        });
-        agent_handles.push(jh);
-        info!("auto-claimer background task spawned (interval=60s)");
+    if !config.dry_run && pm_client.is_some() {
+        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
+            warn!(error = %e, "failed to ensure account-level auto-claimer daemon");
+        } else {
+            info!("auto-claimer background task ensured (account-level)");
+        }
     }
 
     #[cfg(not(feature = "claimer_daemon"))]

@@ -20,6 +20,7 @@ use sqlx::PgPool;
 use tracing::{debug, info};
 
 use crate::adapters::SpotPrice;
+use crate::domain::Side;
 use crate::strategy::backtest::BacktestResults;
 use crate::strategy::backtest_feed::{MarketFeed, UpdateType};
 use crate::strategy::execution_sim::ExecutionSimulator;
@@ -154,8 +155,8 @@ impl MomentumBacktestEngine {
                 UpdateType::SpotTrade { price, quantity } => {
                     self.handle_spot_trade(&update.symbol, *price, *quantity, update.timestamp);
                 }
-                UpdateType::PmQuote { up_ask, down_ask } => {
-                    self.handle_pm_quote(&update.symbol, *up_ask, *down_ask, update.timestamp);
+                UpdateType::PmQuote { side, best_ask, .. } => {
+                    self.handle_pm_quote(&update.symbol, *side, *best_ask, update.timestamp);
                 }
                 UpdateType::EventState {
                     outcome: Some(won), ..
@@ -193,8 +194,8 @@ impl MomentumBacktestEngine {
     fn handle_pm_quote(
         &mut self,
         symbol: &str,
-        up_ask: Option<Decimal>,
-        down_ask: Option<Decimal>,
+        quote_side: Side,
+        best_ask: Option<Decimal>,
         ts: DateTime<Utc>,
     ) {
         // Update latest asks
@@ -202,11 +203,17 @@ impl MomentumBacktestEngine {
             .pm_asks
             .entry(symbol.to_string())
             .or_insert((None, None));
-        if up_ask.is_some() {
-            entry.0 = up_ask;
-        }
-        if down_ask.is_some() {
-            entry.1 = down_ask;
+        match quote_side {
+            Side::Up => {
+                if best_ask.is_some() {
+                    entry.0 = best_ask;
+                }
+            }
+            Side::Down => {
+                if best_ask.is_some() {
+                    entry.1 = best_ask;
+                }
+            }
         }
 
         // Update position mark-to-market
@@ -214,13 +221,17 @@ impl MomentumBacktestEngine {
             if pos.symbol == symbol {
                 match pos.direction {
                     Direction::Up => {
-                        if let Some(ask) = up_ask {
-                            pos.latest_pm_price = ask;
+                        if quote_side == Side::Up {
+                            if let Some(ask) = best_ask {
+                                pos.latest_pm_price = ask;
+                            }
                         }
                     }
                     Direction::Down => {
-                        if let Some(ask) = down_ask {
-                            pos.latest_pm_price = ask;
+                        if quote_side == Side::Down {
+                            if let Some(ask) = best_ask {
+                                pos.latest_pm_price = ask;
+                            }
                         }
                     }
                 }
@@ -532,7 +543,7 @@ impl MomentumBacktestEngine {
 
 impl fmt::Display for BacktestResults {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Momentum Backtest Results ===")?;
+        writeln!(f, "=== Backtest Results ===")?;
         writeln!(
             f,
             "Period:        {} to {}",

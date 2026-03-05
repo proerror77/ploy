@@ -150,7 +150,14 @@ impl StrategyManager {
 
             // Process shutdown actions
             for action in actions {
-                let _ = self.action_tx.send((strategy_id.to_string(), action)).await;
+                if let Err(err) = self.action_tx.send((strategy_id.to_string(), action)).await {
+                    return Err(anyhow!(
+                        "Failed to send shutdown action for strategy {}: {}",
+                        strategy_id,
+                        err
+                    )
+                    .into());
+                }
             }
         }
 
@@ -291,8 +298,19 @@ impl StrategyManager {
                             }
                         };
 
+                        let mut dispatch_failed = false;
                         for action in actions {
-                            let _ = action_tx.send((strategy_id.clone(), action)).await;
+                            if let Err(err) = action_tx.send((strategy_id.clone(), action)).await {
+                                error!(
+                                    "Strategy {} failed to dispatch market action (executor channel closed): {}",
+                                    strategy_id, err
+                                );
+                                dispatch_failed = true;
+                                break;
+                            }
+                        }
+                        if dispatch_failed {
+                            break;
                         }
                     }
 
@@ -309,8 +327,19 @@ impl StrategyManager {
                             }
                         };
 
+                        let mut dispatch_failed = false;
                         for action in actions {
-                            let _ = action_tx.send((strategy_id.clone(), action)).await;
+                            if let Err(err) = action_tx.send((strategy_id.clone(), action)).await {
+                                error!(
+                                    "Strategy {} failed to dispatch order action (executor channel closed): {}",
+                                    strategy_id, err
+                                );
+                                dispatch_failed = true;
+                                break;
+                            }
+                        }
+                        if dispatch_failed {
+                            break;
                         }
                     }
 
@@ -327,8 +356,19 @@ impl StrategyManager {
                             }
                         };
 
+                        let mut dispatch_failed = false;
                         for action in actions {
-                            let _ = action_tx.send((strategy_id.clone(), action)).await;
+                            if let Err(err) = action_tx.send((strategy_id.clone(), action)).await {
+                                error!(
+                                    "Strategy {} failed to dispatch tick action (executor channel closed): {}",
+                                    strategy_id, err
+                                );
+                                dispatch_failed = true;
+                                break;
+                            }
+                        }
+                        if dispatch_failed {
+                            break;
                         }
                     }
 
@@ -433,7 +473,7 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strat))
             }
-            "staggered_arb" => {
+            "staggered_arb" | "gamma_scalping" => {
                 let adapter = super::staggered_arb_live::StaggeredArbAdapter::from_toml(
                     strategy_id,
                     config_content,
@@ -465,7 +505,7 @@ impl StrategyFactory {
             },
             StrategyInfo {
                 name: "staggered_arb".to_string(),
-                description: "Time-staggered two-leg arb on crypto UP/DOWN binary options"
+                description: "Time-staggered two-leg arb on crypto UP/DOWN binary options; aliases: gamma_scalping, staggered-arb"
                     .to_string(),
                 config_template: "staggered_arb.toml".to_string(),
             },
@@ -503,6 +543,7 @@ mod tests {
     struct TestStrategy {
         id: String,
         name: String,
+        shutdown_actions: Vec<StrategyAction>,
     }
 
     impl TestStrategy {
@@ -510,6 +551,18 @@ mod tests {
             Self {
                 id: id.to_string(),
                 name: "test_strategy".to_string(),
+                shutdown_actions: Vec::new(),
+            }
+        }
+
+        fn with_shutdown_action(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                name: "test_strategy".to_string(),
+                shutdown_actions: vec![StrategyAction::Alert {
+                    level: AlertLevel::Warning,
+                    message: "shutdown".to_string(),
+                }],
             }
         }
     }
@@ -578,7 +631,7 @@ mod tests {
         }
 
         async fn shutdown(&mut self) -> crate::error::Result<Vec<StrategyAction>> {
-            Ok(Vec::new())
+            Ok(self.shutdown_actions.clone())
         }
 
         fn reset(&mut self) {}
@@ -659,5 +712,31 @@ mod tests {
             StrategyAction::Alert { message, .. } => assert_eq!(message, "order_update"),
             other => panic!("unexpected action: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_graceful_stop_reports_closed_action_channel() {
+        let manager = StrategyManager::new(60_000);
+        let action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+        drop(action_rx);
+
+        manager
+            .start_strategy(Box::new(TestStrategy::with_shutdown_action("s-stop")), None)
+            .await
+            .expect("start strategy");
+
+        let err = manager
+            .stop_strategy("s-stop", true)
+            .await
+            .expect_err("closed action channel should be surfaced");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to send shutdown action"),
+            "unexpected error message: {}",
+            msg
+        );
     }
 }

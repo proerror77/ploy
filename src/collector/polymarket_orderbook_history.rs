@@ -28,6 +28,7 @@ pub struct OrderbookHistoryCollectorConfig {
     pub page_limit: usize,
     pub max_pages: usize,
     pub source: String,
+    pub mirror_to_canonical_orderbook_snapshots: bool,
 }
 
 impl Default for OrderbookHistoryCollectorConfig {
@@ -39,6 +40,7 @@ impl Default for OrderbookHistoryCollectorConfig {
             page_limit: 500,
             max_pages: 50,
             source: "polymarket_orderbook_history".to_string(),
+            mirror_to_canonical_orderbook_snapshots: true,
         }
     }
 }
@@ -189,6 +191,62 @@ impl OrderbookHistoryCollector {
         .execute(&self.pool)
         .await?;
 
+        // Canonical unified PM orderbook table (shared with WS pipeline).
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS clob_orderbook_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                domain TEXT,
+                token_id TEXT NOT NULL,
+                market TEXT,
+                bids JSONB NOT NULL,
+                asks JSONB NOT NULL,
+                book_timestamp TIMESTAMPTZ,
+                hash TEXT,
+                source TEXT NOT NULL DEFAULT 'polymarket_ws',
+                context JSONB,
+                received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Back-compat safety for older schemas.
+        sqlx::query("ALTER TABLE clob_orderbook_snapshots ADD COLUMN IF NOT EXISTS domain TEXT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE clob_orderbook_snapshots ADD COLUMN IF NOT EXISTS context JSONB")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_token_time
+              ON clob_orderbook_snapshots(token_id, received_at DESC)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_time
+              ON clob_orderbook_snapshots(received_at DESC)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_domain_time
+              ON clob_orderbook_snapshots(domain, received_at DESC)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -277,8 +335,64 @@ impl OrderbookHistoryCollector {
             " ON CONFLICT (token_id, book_ts_ms, hash) DO UPDATE SET condition_id = EXCLUDED.condition_id",
         );
 
-        let result = qb.build().execute(&self.pool).await?;
-        Ok(result.rows_affected())
+        let history_rows = qb.build().execute(&self.pool).await?.rows_affected();
+
+        if self.cfg.mirror_to_canonical_orderbook_snapshots {
+            let mut canonical_rows: u64 = 0;
+            for row in rows {
+                let context = serde_json::json!({
+                    "collector": "orderbook_history",
+                    "condition_id": row.1,
+                    "book_ts_ms": row.2,
+                });
+
+                let result = sqlx::query(
+                    r#"
+                    INSERT INTO clob_orderbook_snapshots (
+                        domain,
+                        token_id,
+                        market,
+                        bids,
+                        asks,
+                        book_timestamp,
+                        hash,
+                        source,
+                        context
+                    )
+                    SELECT
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM clob_orderbook_snapshots
+                        WHERE token_id = $2
+                          AND book_timestamp = $6
+                          AND hash = $7
+                          AND source = $8
+                    )
+                    "#,
+                )
+                .bind(None::<String>)
+                .bind(&row.0)
+                .bind(Some(row.1.as_str()))
+                .bind(sqlx::types::Json(&row.5))
+                .bind(sqlx::types::Json(&row.6))
+                .bind(row.3)
+                .bind(&row.4)
+                .bind(&self.cfg.source)
+                .bind(sqlx::types::Json(context))
+                .execute(&self.pool)
+                .await?;
+                canonical_rows += result.rows_affected();
+            }
+
+            debug!(
+                history_rows,
+                canonical_rows,
+                "persisted orderbook-history batch"
+            );
+        }
+
+        Ok(history_rows)
     }
 
     /// Backfill a single asset over a time range.

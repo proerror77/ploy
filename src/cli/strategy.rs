@@ -35,6 +35,13 @@ pub enum StrategyBacktestMode {
     Settlement,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiquidityVacuumProfile {
+    Prod,
+    Research,
+    ResearchV2,
+}
+
 impl Default for CryptoLobDatasetFormat {
     fn default() -> Self {
         #[cfg(feature = "analysis")]
@@ -445,9 +452,9 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
-    /// Run a strategy backtest against the integrated DB pipeline
-    Backtest {
-        /// Strategy name (momentum, directional)
+/// Run a strategy backtest against the integrated DB pipeline
+Backtest {
+        /// Strategy name (momentum, directional, prob-garch/prob_garch, liquidity-vacuum/liquidity_vacuum, staggered-arb/staggered_arb/gamma_scalping)
         name: String,
 
         /// Backtest mode: replay historical feed, or score directional signals by settlement
@@ -510,9 +517,72 @@ pub enum StrategyCommands {
         #[arg(long)]
         verify_run: Option<String>,
 
+        /// Print a database data-availability summary for this backtest and exit
+        #[arg(long)]
+        diagnose_db: bool,
+
         /// Database URL (uses DATABASE_URL env var if omitted)
         #[arg(long)]
         database_url: Option<String>,
+
+        /// Liquidity-vacuum profile preset.
+        ///
+        /// `prod` keeps strict thresholds; `research` is exploratory;
+        /// `research-v2` is a higher-quality research baseline.
+        #[arg(long, value_enum, default_value_t = LiquidityVacuumProfile::Prod)]
+        lv_profile: LiquidityVacuumProfile,
+
+        /// Override liquidity-vacuum price move threshold (fraction, e.g. 0.02 = 2%)
+        #[arg(long)]
+        lv_price_move_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum volume multiplier threshold (e.g. 3.0)
+        #[arg(long)]
+        lv_volume_multiplier_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum order concentration threshold (e.g. 0.7)
+        #[arg(long)]
+        lv_order_concentration_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum entry deviation threshold (fraction)
+        #[arg(long)]
+        lv_entry_deviation_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum entry z-score threshold (0 disables z-score entry gate)
+        #[arg(long)]
+        lv_entry_zscore_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum take-profit z-score threshold (0 disables z-score TP)
+        #[arg(long)]
+        lv_take_profit_zscore_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum stop-loss z-score threshold (0 disables z-score SL)
+        #[arg(long)]
+        lv_stop_loss_zscore_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum EMA-band take-profit threshold (fraction, e.g. 0.03)
+        #[arg(long)]
+        lv_take_profit_ema_band_pct: Option<f64>,
+
+        /// Override liquidity-vacuum stop-loss threshold (fraction, e.g. 0.25)
+        #[arg(long)]
+        lv_stop_loss_pct: Option<f64>,
+
+        /// Override liquidity-vacuum minimum edge buffer above fees (fraction)
+        #[arg(long)]
+        lv_min_edge_buffer: Option<f64>,
+
+        /// Override liquidity-vacuum z-score lookback sample size
+        #[arg(long)]
+        lv_zscore_lookback_samples: Option<usize>,
+
+        /// Override liquidity-vacuum max holding seconds (0 disables max-hold exit)
+        #[arg(long)]
+        lv_max_holding_secs: Option<u64>,
+
+        /// Override staggered-arb entry window (seconds after event start; 0 disables)
+        #[arg(long)]
+        sa_entry_after_start_max_secs: Option<u64>,
     },
 
     /// List historical backtest runs
@@ -527,6 +597,28 @@ pub enum StrategyCommands {
     BacktestDiff {
         run1: String,
         run2: String,
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
+    /// Compare one backtest run against recent live order outcomes
+    LiveBacktestCompare {
+        /// Backtest run UUID
+        run_id: String,
+
+        /// Lookback window in hours for live order observations
+        #[arg(long, default_value = "72")]
+        lookback_hours: u64,
+
+        /// Filter by account_id (defaults to all)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Filter by strategy_id (defaults to all)
+        #[arg(long)]
+        strategy_id: Option<String>,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
         #[arg(long)]
         database_url: Option<String>,
     },
@@ -548,6 +640,52 @@ pub enum StrategyCommands {
         /// Kline interval (default: 1m)
         #[arg(long, default_value = "1m")]
         interval: String,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
+    /// Backfill PM replay tables from sync_records for backtesting
+    BackfillPmReplayTables {
+        /// Start date (ISO 8601)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (ISO 8601)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Symbols filter (comma-separated)
+        #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
+        symbols: String,
+
+        /// Synthetic orderbook depth per snapshot side (shares)
+        #[arg(long, default_value = "1000")]
+        synthetic_depth: u64,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
+    /// Backfill official Polymarket token settlements into pm_token_settlements
+    BackfillPmTokenSettlements {
+        /// Start date (ISO 8601)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (ISO 8601)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Symbols filter (comma-separated)
+        #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
+        symbols: String,
+
+        /// Max distinct token_ids to refresh from sync_records
+        #[arg(long, default_value = "5000")]
+        limit: usize,
 
         /// Database URL (uses DATABASE_URL env var if omitted)
         #[arg(long)]
@@ -622,7 +760,22 @@ impl StrategyCommands {
                     no_refresh,
                     false,
                     None,
+                    false,
                     database_url,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await
             }
@@ -670,7 +823,22 @@ impl StrategyCommands {
                 no_refresh,
                 skip_gamma,
                 verify_run,
+                diagnose_db,
                 database_url,
+                lv_profile,
+                lv_price_move_threshold,
+                lv_volume_multiplier_threshold,
+                lv_order_concentration_threshold,
+                lv_entry_deviation_threshold,
+                lv_entry_zscore_threshold,
+                lv_take_profit_zscore_threshold,
+                lv_stop_loss_zscore_threshold,
+                lv_take_profit_ema_band_pct,
+                lv_stop_loss_pct,
+                lv_min_edge_buffer,
+                lv_zscore_lookback_samples,
+                lv_max_holding_secs,
+                sa_entry_after_start_max_secs,
             } => {
                 run_backtest(
                     &name,
@@ -689,7 +857,22 @@ impl StrategyCommands {
                     no_refresh,
                     skip_gamma,
                     verify_run,
+                    diagnose_db,
                     database_url,
+                    Some(lv_profile),
+                    lv_price_move_threshold,
+                    lv_volume_multiplier_threshold,
+                    lv_order_concentration_threshold,
+                    lv_entry_deviation_threshold,
+                    lv_entry_zscore_threshold,
+                    lv_take_profit_zscore_threshold,
+                    lv_stop_loss_zscore_threshold,
+                    lv_take_profit_ema_band_pct,
+                    lv_stop_loss_pct,
+                    lv_min_edge_buffer,
+                    lv_zscore_lookback_samples,
+                    lv_max_holding_secs,
+                    sa_entry_after_start_max_secs,
                 )
                 .await
             }
@@ -702,6 +885,22 @@ impl StrategyCommands {
                 run2,
                 database_url,
             } => run_backtest_diff(&run1, &run2, database_url).await,
+            Self::LiveBacktestCompare {
+                run_id,
+                lookback_hours,
+                account_id,
+                strategy_id,
+                database_url,
+            } => {
+                run_live_backtest_compare(
+                    &run_id,
+                    lookback_hours,
+                    account_id,
+                    strategy_id,
+                    database_url,
+                )
+                .await
+            }
             Self::BackfillKlines {
                 symbols,
                 from,
@@ -709,6 +908,38 @@ impl StrategyCommands {
                 interval,
                 database_url,
             } => backfill_klines(&symbols, &from, &to, &interval, database_url).await,
+            Self::BackfillPmReplayTables {
+                from,
+                to,
+                symbols,
+                synthetic_depth,
+                database_url,
+            } => {
+                backfill_pm_replay_tables(
+                    from,
+                    to,
+                    &symbols,
+                    synthetic_depth,
+                    database_url,
+                )
+                .await
+            }
+            Self::BackfillPmTokenSettlements {
+                from,
+                to,
+                symbols,
+                limit,
+                database_url,
+            } => {
+                backfill_pm_token_settlements(
+                    from,
+                    to,
+                    &symbols,
+                    limit,
+                    database_url,
+                )
+                .await
+            }
         }
     }
 }
@@ -920,13 +1151,25 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
         match Wallet::from_env(POLYGON_CHAIN_ID) {
             Ok(wallet) => {
                 println!("  \x1b[32m✓ Wallet loaded: {:?}\x1b[0m", wallet.address());
-                match PolymarketClient::new_authenticated(
-                    "https://clob.polymarket.com",
-                    wallet,
-                    false, // neg_risk: use standard risk settings
-                )
-                .await
-                {
+                let funder = std::env::var("POLYMARKET_FUNDER").ok();
+                let auth_result = if let Some(ref funder_addr) = funder {
+                    println!("  Using proxy wallet, funder: {}", funder_addr);
+                    PolymarketClient::new_authenticated_proxy(
+                        "https://clob.polymarket.com",
+                        wallet,
+                        funder_addr,
+                        true, // neg_risk: crypto binary options use NegRisk exchange
+                    )
+                    .await
+                } else {
+                    PolymarketClient::new_authenticated(
+                        "https://clob.polymarket.com",
+                        wallet,
+                        true, // neg_risk: crypto binary options use NegRisk exchange
+                    )
+                    .await
+                };
+                match auth_result {
                     Ok(client) => {
                         println!("  \x1b[32m✓ Authenticated with Polymarket CLOB\x1b[0m");
                         Some(Arc::new(OrderExecutor::new(
@@ -1050,6 +1293,13 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
         .context("Failed to start strategy")?;
 
     println!("\x1b[32m✓ Strategy started\x1b[0m");
+
+    #[cfg(feature = "claimer_daemon")]
+    if !dry_run {
+        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
+            warn!("Failed to start account-level auto-claimer daemon: {}", e);
+        }
+    }
 
     // Start data feeds
     println!("  \x1b[36mStarting data feeds...\x1b[0m");
@@ -3442,10 +3692,26 @@ async fn run_backtest(
     no_refresh: bool,
     skip_gamma: bool,
     verify_run: Option<String>,
+    diagnose_db: bool,
     database_url: Option<String>,
+    lv_profile: Option<LiquidityVacuumProfile>,
+    lv_price_move_threshold: Option<f64>,
+    lv_volume_multiplier_threshold: Option<f64>,
+    lv_order_concentration_threshold: Option<f64>,
+    lv_entry_deviation_threshold: Option<f64>,
+    lv_entry_zscore_threshold: Option<f64>,
+    lv_take_profit_zscore_threshold: Option<f64>,
+    lv_stop_loss_zscore_threshold: Option<f64>,
+    lv_take_profit_ema_band_pct: Option<f64>,
+    lv_stop_loss_pct: Option<f64>,
+    lv_min_edge_buffer: Option<f64>,
+    lv_zscore_lookback_samples: Option<usize>,
+    lv_max_holding_secs: Option<u64>,
+    sa_entry_after_start_max_secs: Option<u64>,
 ) -> Result<()> {
     use chrono::DateTime;
     use rust_decimal::prelude::*;
+    use rust_decimal_macros::dec;
 
     use crate::adapters::PostgresStore;
     use crate::strategy::backtest_feed::HistoricalFeed;
@@ -3454,12 +3720,27 @@ async fn run_backtest(
     use crate::strategy::directional_backtest::{
         DirectionalBacktestConfig, DirectionalBacktestEngine,
     };
+    use crate::strategy::garch_probability_backtest::{
+        GarchProbabilityBacktestConfig, GarchProbabilityBacktestEngine,
+    };
+    use crate::strategy::liquidity_vacuum_backtest::{
+        LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine,
+    };
     use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
 
-    match name {
-        "momentum" | "directional" | "staggered-arb" => {}
-        other => anyhow::bail!(
-            "Unknown backtest strategy: '{}'. Supported: momentum, directional, staggered-arb",
+        match name {
+            "momentum"
+            | "directional"
+            | "prob-garch"
+            | "prob_garch"
+            | "liquidity-vacuum"
+            | "liquidity_vacuum"
+            | "staggered-arb"
+            | "staggered_arb"
+            | "gamma_scalping"
+            | "gamma-scalping" => {}
+            other => anyhow::bail!(
+            "Unknown backtest strategy: '{}'. Supported: momentum, directional, prob-garch (alias: prob_garch), liquidity-vacuum (alias: liquidity_vacuum), staggered-arb (aliases: staggered_arb, gamma_scalping, gamma-scalping)",
             other
         ),
     }
@@ -3527,6 +3808,10 @@ async fn run_backtest(
 
     // Unified backtest feed path: database only.
     let store = PostgresStore::new(&db_url, 5).await?;
+    if diagnose_db {
+        print_backtest_db_diagnostics(store.pool(), &symbol_list, from_dt, to_dt).await?;
+        return Ok(());
+    }
     info!("Loading historical data from database");
     let mut feed =
         HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
@@ -3602,13 +3887,222 @@ async fn run_backtest(
 
             results
         }
-        "staggered-arb" => {
+        "prob-garch" | "prob_garch" => {
+            let mut config = GarchProbabilityBacktestConfig::with_symbols(symbol_list.clone());
+            config.initial_capital = initial_capital;
+            // PM BTC up/down 5m events only by default
+            config.allowed_window_durations = vec![300];
+
+            let mut saved_run_id: Option<uuid::Uuid> = None;
+            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
+                let config_json = serde_json::to_value(&config).unwrap_or_default();
+                let pg_recorder = PgBacktestRecorder::new(
+                    store.pool().clone(),
+                    "prob_garch",
+                    "replay",
+                    &config_json,
+                    &symbol_list,
+                )
+                .await?;
+                saved_run_id = Some(pg_recorder.run_id());
+                info!(run_id = %pg_recorder.run_id(), "Recording prob_garch backtest signals to DB");
+                Box::new(pg_recorder)
+            } else {
+                Box::new(NullRecorder)
+            };
+
+            let mut engine = GarchProbabilityBacktestEngine::new(config, recorder);
+            let results = engine.run(&mut feed);
+
+            if save {
+                let mut recorder = engine.take_recorder();
+                if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
+                    pg.finalize(
+                        Some(results.start_time),
+                        Some(results.end_time),
+                        results.total_trades as i32,
+                        results.win_rate,
+                        results.total_pnl,
+                        results.sharpe_ratio,
+                        results.max_drawdown,
+                        results.profit_factor,
+                    )
+                    .await?;
+                }
+
+                let run_id = saved_run_id.expect("run_id should be set when --save is used");
+
+                if !skip_gamma {
+                    if let Err(e) = verify_backtest_trades_gamma(store.pool(), run_id).await {
+                        warn!("Gamma verification failed: {e:#}");
+                    }
+                }
+
+                let report = backtest_report::load_report(store.pool(), run_id).await?;
+                if json_output {
+                    println!("{}", report.to_json()?);
+                } else {
+                    println!("{}", report.print_report());
+                }
+            }
+
+            results
+        }
+        "liquidity-vacuum" | "liquidity_vacuum" => {
+            let mut config = LiquidityVacuumBacktestConfig::with_symbols(symbol_list.clone());
+            config.initial_capital = initial_capital;
+
+            match lv_profile.unwrap_or(LiquidityVacuumProfile::Prod) {
+                LiquidityVacuumProfile::Prod => {}
+                LiquidityVacuumProfile::Research => {
+                    // Looser exploratory thresholds to discover candidate regimes quickly.
+                    config.price_move_threshold = dec!(0.003);
+                    config.volume_multiplier_threshold = dec!(1.2);
+                    config.order_concentration_threshold = dec!(0.15);
+                    // Deviation gate uses z-score in research mode.
+                    config.entry_deviation_threshold = Decimal::ZERO;
+                    config.entry_zscore_threshold = dec!(1.2);
+                    config.take_profit_zscore_threshold = dec!(0.3);
+                    config.stop_loss_zscore_threshold = dec!(2.5);
+                    config.zscore_lookback_samples = 180;
+                    config.max_holding_secs = 900;
+                    config.max_spread_bps = 3000;
+                }
+                LiquidityVacuumProfile::ResearchV2 => {
+                    // Research preset tuned for better trade quality / count balance
+                    // on short-dated binary contracts.
+                    config.price_move_threshold = dec!(0.0015);
+                    config.volume_multiplier_threshold = dec!(0.9);
+                    config.order_concentration_threshold = dec!(0.10);
+                    config.entry_deviation_threshold = Decimal::ZERO;
+                    config.entry_zscore_threshold = dec!(0.40);
+                    config.take_profit_zscore_threshold = Decimal::ZERO;
+                    config.stop_loss_zscore_threshold = Decimal::ZERO;
+                    config.take_profit_ema_band_pct = dec!(0.10);
+                    config.stop_loss_pct = dec!(0.35);
+                    config.min_edge_buffer = dec!(0.018);
+                    config.zscore_lookback_samples = 180;
+                    config.max_holding_secs = 7200;
+                    config.max_spread_bps = 3000;
+                }
+            }
+
+            if let Some(v) = lv_price_move_threshold {
+                config.price_move_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-price-move-threshold value")?;
+            }
+            if let Some(v) = lv_volume_multiplier_threshold {
+                config.volume_multiplier_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-volume-multiplier-threshold value")?;
+            }
+            if let Some(v) = lv_order_concentration_threshold {
+                config.order_concentration_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-order-concentration-threshold value")?;
+            }
+            if let Some(v) = lv_entry_deviation_threshold {
+                config.entry_deviation_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-entry-deviation-threshold value")?;
+            }
+            if let Some(v) = lv_entry_zscore_threshold {
+                config.entry_zscore_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-entry-zscore-threshold value")?;
+            }
+            if let Some(v) = lv_take_profit_zscore_threshold {
+                config.take_profit_zscore_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-take-profit-zscore-threshold value")?;
+            }
+            if let Some(v) = lv_stop_loss_zscore_threshold {
+                config.stop_loss_zscore_threshold = Decimal::from_f64(v)
+                    .context("Invalid --lv-stop-loss-zscore-threshold value")?;
+            }
+            if let Some(v) = lv_take_profit_ema_band_pct {
+                config.take_profit_ema_band_pct = Decimal::from_f64(v)
+                    .context("Invalid --lv-take-profit-ema-band-pct value")?;
+            }
+            if let Some(v) = lv_stop_loss_pct {
+                config.stop_loss_pct =
+                    Decimal::from_f64(v).context("Invalid --lv-stop-loss-pct value")?;
+            }
+            if let Some(v) = lv_min_edge_buffer {
+                config.min_edge_buffer =
+                    Decimal::from_f64(v).context("Invalid --lv-min-edge-buffer value")?;
+            }
+            if let Some(v) = lv_zscore_lookback_samples {
+                config.zscore_lookback_samples = v.max(2);
+            }
+            if let Some(v) = lv_max_holding_secs {
+                config.max_holding_secs = v;
+            }
+
+            let mut saved_run_id: Option<uuid::Uuid> = None;
+            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
+                let config_json = serde_json::to_value(&config).unwrap_or_default();
+                let pg_recorder = PgBacktestRecorder::new(
+                    store.pool().clone(),
+                    "liquidity_vacuum",
+                    "replay",
+                    &config_json,
+                    &symbol_list,
+                )
+                .await?;
+                saved_run_id = Some(pg_recorder.run_id());
+                info!(run_id = %pg_recorder.run_id(), "Recording liquidity-vacuum backtest signals to DB");
+                Box::new(pg_recorder)
+            } else {
+                Box::new(NullRecorder)
+            };
+
+            let mut engine = LiquidityVacuumBacktestEngine::new(config, recorder);
+            let results = engine.run(&mut feed);
+
+            if !json_output {
+                engine.print_liquidity_vacuum_summary();
+            }
+
+            if save {
+                let mut recorder = engine.take_recorder();
+                if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
+                    pg.finalize(
+                        Some(results.start_time),
+                        Some(results.end_time),
+                        results.total_trades as i32,
+                        results.win_rate,
+                        results.total_pnl,
+                        results.sharpe_ratio,
+                        results.max_drawdown,
+                        results.profit_factor,
+                    )
+                    .await?;
+                }
+
+                let run_id = saved_run_id.expect("run_id should be set when --save is used");
+
+                if !skip_gamma {
+                    if let Err(e) = verify_backtest_trades_gamma(store.pool(), run_id).await {
+                        warn!("Gamma verification failed: {e:#}");
+                    }
+                }
+
+                let report = backtest_report::load_report(store.pool(), run_id).await?;
+                if json_output {
+                    println!("{}", report.to_json()?);
+                } else {
+                    println!("{}", report.print_report());
+                }
+            }
+
+            results
+        }
+        "staggered-arb" | "staggered_arb" => {
             use crate::strategy::staggered_arb_backtest::{
                 StaggeredArbBacktestConfig, StaggeredArbBacktestEngine,
             };
 
             let mut config = StaggeredArbBacktestConfig::with_symbols(symbol_list.clone());
             config.initial_capital = initial_capital;
+            if let Some(v) = sa_entry_after_start_max_secs {
+                config.entry_after_start_max_secs = v;
+            }
 
             let mut saved_run_id: Option<uuid::Uuid> = None;
             let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
@@ -3633,6 +4127,78 @@ async fn run_backtest(
 
             if !json_output {
                 engine.print_staggered_summary();
+            }
+
+            if save {
+                let mut recorder = engine.take_recorder();
+                if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
+                    pg.finalize(
+                        Some(results.start_time),
+                        Some(results.end_time),
+                        results.total_trades as i32,
+                        results.win_rate,
+                        results.total_pnl,
+                        results.sharpe_ratio,
+                        results.max_drawdown,
+                        results.profit_factor,
+                    )
+                    .await?;
+                }
+
+                let run_id = saved_run_id.expect("run_id should be set when --save is used");
+
+                if !skip_gamma {
+                    if let Err(e) = verify_backtest_trades_gamma(store.pool(), run_id).await {
+                        warn!("Gamma verification failed: {e:#}");
+                    }
+                }
+
+                let report = backtest_report::load_report(store.pool(), run_id).await?;
+                if json_output {
+                    println!("{}", report.to_json()?);
+                } else {
+                    println!("{}", report.print_report());
+                }
+            }
+
+            results
+        }
+        "gamma_scalping" | "gamma-scalping" => {
+            use crate::strategy::staggered_arb_backtest::{
+                StaggeredArbBacktestConfig, StaggeredArbBacktestEngine,
+            };
+
+            let mut config = StaggeredArbBacktestConfig::with_symbols(symbol_list.clone());
+            config.initial_capital = initial_capital;
+            // PM 5m events only
+            config.allowed_window_durations = vec![300];
+            if let Some(v) = sa_entry_after_start_max_secs {
+                config.entry_after_start_max_secs = v;
+            }
+
+            let mut saved_run_id: Option<uuid::Uuid> = None;
+            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
+                let config_json = serde_json::to_value(&config).unwrap_or_default();
+                let pg_recorder = PgBacktestRecorder::new(
+                    store.pool().clone(),
+                    "gamma_scalping",
+                    "replay",
+                    &config_json,
+                    &symbol_list,
+                )
+                .await?;
+                saved_run_id = Some(pg_recorder.run_id());
+                info!(run_id = %pg_recorder.run_id(), "Recording gamma_scalping backtest signals to DB");
+                Box::new(pg_recorder)
+            } else {
+                Box::new(NullRecorder)
+            };
+
+            let mut engine = StaggeredArbBacktestEngine::new(config, recorder);
+            let results = engine.run(&mut feed);
+
+            if !json_output {
+                engine.print_summary("Gamma Scalping (PM 5m)");
             }
 
             if save {
@@ -3695,6 +4261,331 @@ async fn run_backtest(
     } else if !json_output && !save {
         println!("{}", results);
     }
+
+    Ok(())
+}
+
+async fn print_backtest_db_diagnostics(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<chrono::DateTime<chrono::Utc>>,
+    to: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
+    use chrono::{DateTime, Utc};
+
+    fn fmt_ts(ts: Option<DateTime<Utc>>) -> String {
+        ts.map(|t| t.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+    }
+
+    async fn table_exists(pool: &sqlx::PgPool, table: &str) -> Result<bool> {
+        let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(format!("public.{table}"))
+            .fetch_one(pool)
+            .await?;
+        Ok(reg.is_some())
+    }
+
+    println!("\n=== Backtest DB diagnostics ===");
+    println!("symbols: {}", symbols.join(", "));
+    println!("from: {}", fmt_ts(from));
+    println!("to:   {}", fmt_ts(to));
+
+    let symbol_list = if symbols.is_empty() {
+        None::<Vec<String>>
+    } else {
+        Some(symbols.to_vec())
+    };
+
+    // ── sync_records (best: integrated BN+PM view) ───────────
+    if !table_exists(pool, "sync_records").await? {
+        println!("\n[sync_records] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(timestamp),
+              MAX(timestamp),
+              COUNT(DISTINCT pm_market_slug)::bigint
+            FROM sync_records
+            WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR timestamp <= $3)
+            "#,
+        )
+        .bind(symbol_list.clone())
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, slugs)) => {
+                println!("\n[sync_records]");
+                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!("distinct pm_market_slug: {slugs}");
+            }
+            Err(e) => {
+                println!("\n[sync_records] query failed: {e}");
+            }
+        }
+    }
+
+    // ── binance_price_ticks (fallback spot) ──────────────────
+    if !table_exists(pool, "binance_price_ticks").await? {
+        println!("\n[binance_price_ticks] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT COUNT(*)::bigint, MIN(trade_time), MAX(trade_time)
+            FROM binance_price_ticks
+            WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR trade_time >= $2)
+              AND ($3::timestamptz IS NULL OR trade_time <= $3)
+            "#,
+        )
+        .bind(symbol_list.clone())
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts)) => {
+                println!("\n[binance_price_ticks]");
+                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+            }
+            Err(e) => {
+                println!("\n[binance_price_ticks] query failed: {e}");
+            }
+        }
+    }
+
+    // ── binance_klines (supplement spot) ─────────────────────
+    if !table_exists(pool, "binance_klines").await? {
+        println!("\n[binance_klines] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(open_time),
+              MAX(close_time),
+              COUNT(DISTINCT interval)::bigint
+            FROM binance_klines
+            WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR close_time >= $2)
+              AND ($3::timestamptz IS NULL OR open_time <= $3)
+            "#,
+        )
+        .bind(symbol_list.clone())
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, intervals)) => {
+                println!("\n[binance_klines]");
+                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!("distinct intervals: {intervals}");
+            }
+            Err(e) => {
+                println!("\n[binance_klines] query failed: {e}");
+            }
+        }
+    }
+
+    // ── clob_quote_ticks (PM quotes) ─────────────────────────
+    if !table_exists(pool, "clob_quote_ticks").await? {
+        println!("\n[clob_quote_ticks] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(received_at),
+              MAX(received_at),
+              COUNT(DISTINCT token_id)::bigint
+            FROM clob_quote_ticks
+            WHERE ($1::timestamptz IS NULL OR received_at >= $1)
+              AND ($2::timestamptz IS NULL OR received_at <= $2)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, tokens)) => {
+                println!("\n[clob_quote_ticks]");
+                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!("distinct token_id: {tokens}");
+            }
+            Err(e) => {
+                println!("\n[clob_quote_ticks] query failed: {e}");
+            }
+        }
+    }
+
+    // ── clob_orderbook_snapshots (PM depth) ──────────────────
+    if !table_exists(pool, "clob_orderbook_snapshots").await? {
+        println!("\n[clob_orderbook_snapshots] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(received_at),
+              MAX(received_at),
+              COUNT(DISTINCT token_id)::bigint
+            FROM clob_orderbook_snapshots
+            WHERE ($1::timestamptz IS NULL OR received_at >= $1)
+              AND ($2::timestamptz IS NULL OR received_at <= $2)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, tokens)) => {
+                println!("\n[clob_orderbook_snapshots]");
+                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!("distinct token_id: {tokens}");
+            }
+            Err(e) => {
+                println!("\n[clob_orderbook_snapshots] query failed: {e}");
+            }
+        }
+    }
+
+    // ── pm_market_metadata (event windows) ───────────────────
+    if !table_exists(pool, "pm_market_metadata").await? {
+        println!("\n[pm_market_metadata] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              COUNT(*) FILTER (WHERE start_time IS NOT NULL AND end_time IS NOT NULL)::bigint,
+              COUNT(*) FILTER (WHERE price_to_beat IS NOT NULL AND price_to_beat > 0)::bigint,
+              MIN(start_time),
+              MAX(end_time)
+            FROM pm_market_metadata
+            WHERE ($1::timestamptz IS NULL OR end_time >= $1)
+              AND ($2::timestamptz IS NULL OR start_time <= $2)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, windows, with_s0, min_ts, max_ts)) => {
+                println!("\n[pm_market_metadata]");
+                println!("rows: {count}, window_rows: {windows}, with price_to_beat>0: {with_s0}");
+                println!("ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+            }
+            Err(e) => {
+                println!("\n[pm_market_metadata] query failed: {e}");
+            }
+        }
+    }
+
+    // ── pm_token_settlements (token→slug mapping + outcomes) ─
+    if !table_exists(pool, "pm_token_settlements").await? {
+        println!("\n[pm_token_settlements] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              COUNT(DISTINCT market_slug)::bigint,
+              COUNT(*) FILTER (WHERE resolved = true)::bigint,
+              MIN(resolved_at),
+              MAX(resolved_at)
+            FROM pm_token_settlements
+            WHERE ($1::timestamptz IS NULL OR resolved_at >= $1 OR resolved_at IS NULL)
+              AND ($2::timestamptz IS NULL OR resolved_at <= $2 OR resolved_at IS NULL)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, slugs, resolved, min_ts, max_ts)) => {
+                println!("\n[pm_token_settlements]");
+                println!("rows: {count}, distinct market_slug: {slugs}, resolved_rows: {resolved}");
+                println!("resolved_at range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+            }
+            Err(e) => {
+                println!("\n[pm_token_settlements] query failed: {e}");
+            }
+        }
+    }
+
+    // ── deribit_iv_ticks (Deribit IV baseline) ──────────────
+    if !table_exists(pool, "deribit_iv_ticks").await? {
+        println!("\n[deribit_iv_ticks] MISSING");
+    } else {
+        let mut printed = false;
+
+        if let Ok((count, min_ts, max_ts, ccy)) =
+            sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+                r#"
+                SELECT
+                  COUNT(*)::bigint,
+                  MIN(timestamp),
+                  MAX(timestamp),
+                  COUNT(DISTINCT currency)::bigint
+                FROM deribit_iv_ticks
+                WHERE ($1::timestamptz IS NULL OR timestamp >= $1)
+                  AND ($2::timestamptz IS NULL OR timestamp <= $2)
+                "#,
+            )
+            .bind(from)
+            .bind(to)
+            .fetch_one(pool)
+            .await
+        {
+            printed = true;
+            println!("\n[deribit_iv_ticks]");
+            println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+            println!("distinct currency: {ccy}");
+        }
+
+        if !printed {
+            match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+                r#"
+                SELECT
+                  COUNT(*)::bigint,
+                  MIN(ts),
+                  MAX(ts),
+                  COUNT(DISTINCT symbol)::bigint
+                FROM deribit_iv_ticks
+                WHERE ($1::timestamptz IS NULL OR ts >= $1)
+                  AND ($2::timestamptz IS NULL OR ts <= $2)
+                "#,
+            )
+            .bind(from)
+            .bind(to)
+            .fetch_one(pool)
+            .await
+            {
+                Ok((count, min_ts, max_ts, symbols)) => {
+                    println!("\n[deribit_iv_ticks]");
+                    println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                    println!("distinct symbol: {symbols}");
+                }
+                Err(e) => {
+                    println!("\n[deribit_iv_ticks] query failed: {e}");
+                }
+            }
+        }
+    }
+
+    println!("\nHint:");
+    println!("- PM 5m backtest needs: clob_quote_ticks + pm_market_metadata (or pm_token_settlements.raw_market) + spot (sync_records or binance_price_ticks/klines).");
+    println!("- Deribit IV (optional): populate deribit_iv_ticks (e.g. `ploy deribit-iv-backfill`) to enable IV-aware research/backtests.");
 
     Ok(())
 }
@@ -4218,6 +5109,226 @@ async fn run_backtest_diff(run1: &str, run2: &str, database_url: Option<String>)
     Ok(())
 }
 
+async fn run_live_backtest_compare(
+    run_id: &str,
+    lookback_hours: u64,
+    account_id: Option<String>,
+    strategy_id: Option<String>,
+    database_url: Option<String>,
+) -> Result<()> {
+    use crate::adapters::PostgresStore;
+    use crate::strategy::backtest_report;
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+    use sqlx::Row;
+    use std::collections::HashSet;
+
+    let db_url = database_url.unwrap_or_else(|| {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
+    });
+    let store = PostgresStore::new(&db_url, 5).await?;
+    crate::coordinator::bootstrap::ensure_strategy_observability_tables(store.pool())
+        .await
+        .context("Failed to ensure strategy observability tables")?;
+
+    let bt_run_id: uuid::Uuid = run_id.parse().context("Invalid run UUID")?;
+    let report = backtest_report::load_report(store.pool(), bt_run_id).await?;
+
+    let signal_types = vec![
+        "live_order_submit_result".to_string(),
+        "live_order_poll_update".to_string(),
+        "live_order_rejected".to_string(),
+        "live_order_submit_error".to_string(),
+    ];
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            signal_type,
+            side,
+            fair_value,
+            market_price,
+            context
+        FROM signal_history
+        WHERE recorded_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
+          AND signal_type = ANY($2)
+          AND ($3::text IS NULL OR account_id = $3)
+          AND ($4::text IS NULL OR strategy_id = $4)
+        ORDER BY recorded_at DESC
+        "#,
+    )
+    .bind(lookback_hours as i64)
+    .bind(&signal_types)
+    .bind(account_id.as_deref())
+    .bind(strategy_id.as_deref())
+    .fetch_all(store.pool())
+    .await
+    .context("Failed to query live order observations from signal_history")?;
+
+    let mut submitted: HashSet<String> = HashSet::new();
+    let mut rejected: HashSet<String> = HashSet::new();
+    let mut failed: HashSet<String> = HashSet::new();
+    let mut touched_fill: HashSet<String> = HashSet::new();
+    let mut full_fill: HashSet<String> = HashSet::new();
+    let mut slippage_bps_weighted_sum = 0.0f64;
+    let mut slippage_weight = 0.0f64;
+
+    for row in rows {
+        let signal_type: String = row.get("signal_type");
+        let side: Option<String> = row.get("side");
+        let limit_price: Option<Decimal> = row.get("fair_value");
+        let fill_price: Option<Decimal> = row.get("market_price");
+        let context: serde_json::Value = row.get("context");
+
+        let order_key = context
+            .get("client_order_id")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                context
+                    .get("order_id")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned)
+            });
+
+        let Some(order_key) = order_key else { continue };
+        let status = context
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let filled_qty = context
+            .get("filled_qty")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        match signal_type.as_str() {
+            "live_order_submit_result" => {
+                submitted.insert(order_key.clone());
+            }
+            "live_order_rejected" => {
+                submitted.insert(order_key.clone());
+                rejected.insert(order_key.clone());
+            }
+            "live_order_submit_error" => {
+                submitted.insert(order_key.clone());
+                failed.insert(order_key.clone());
+            }
+            _ => {}
+        }
+
+        if filled_qty > 0
+            || status.eq_ignore_ascii_case("filled")
+            || status.eq_ignore_ascii_case("partiallyfilled")
+        {
+            touched_fill.insert(order_key.clone());
+        }
+        if status.eq_ignore_ascii_case("filled") {
+            full_fill.insert(order_key.clone());
+        }
+
+        if filled_qty > 0 {
+            if let (Some(limit_px), Some(fill_px)) = (limit_price, fill_price) {
+                if limit_px > Decimal::ZERO {
+                    if let (Some(limit_f64), Some(fill_f64)) =
+                        (limit_px.to_f64(), fill_px.to_f64())
+                    {
+                        let side_lower = side.unwrap_or_else(|| "buy".to_string()).to_lowercase();
+                        let slip_bps = if side_lower == "sell" {
+                            (limit_f64 - fill_f64) / limit_f64 * 10_000.0
+                        } else {
+                            (fill_f64 - limit_f64) / limit_f64 * 10_000.0
+                        };
+                        let weight = filled_qty as f64;
+                        slippage_bps_weighted_sum += slip_bps * weight;
+                        slippage_weight += weight;
+                    }
+                }
+            }
+        }
+    }
+
+    let submitted_n = submitted.len();
+    let rejected_n = rejected.len();
+    let failed_n = failed.len();
+    let touched_fill_n = touched_fill.len();
+    let full_fill_n = full_fill.len();
+
+    let live_fill_rate = if submitted_n > 0 {
+        touched_fill_n as f64 / submitted_n as f64
+    } else {
+        0.0
+    };
+    let live_full_fill_rate = if submitted_n > 0 {
+        full_fill_n as f64 / submitted_n as f64
+    } else {
+        0.0
+    };
+    let live_reject_rate = if submitted_n > 0 {
+        rejected_n as f64 / submitted_n as f64
+    } else {
+        0.0
+    };
+    let live_failed_rate = if submitted_n > 0 {
+        failed_n as f64 / submitted_n as f64
+    } else {
+        0.0
+    };
+    let avg_slippage_bps = if slippage_weight > 0.0 {
+        slippage_bps_weighted_sum / slippage_weight
+    } else {
+        0.0
+    };
+
+    let bt_trades = report.run.total_trades.max(0) as usize;
+    let live_vs_bt_trade_ratio = if bt_trades > 0 {
+        touched_fill_n as f64 / bt_trades as f64
+    } else {
+        0.0
+    };
+
+    println!("\n{}", "=".repeat(78));
+    println!("  LIVE VS BACKTEST");
+    println!("{}", "=".repeat(78));
+    println!(
+        "  backtest_run={}  lookback_hours={}  account_id={}  strategy_id={}",
+        report.run.run_id,
+        lookback_hours,
+        account_id.as_deref().unwrap_or("all"),
+        strategy_id.as_deref().unwrap_or("all")
+    );
+    println!();
+    println!("  Backtest:");
+    println!(
+        "    strategy={} mode={} trades={} win_rate={:.1}% pnl=${:.2} sharpe={:.2}",
+        report.run.strategy,
+        report.run.mode,
+        report.run.total_trades,
+        report.run.win_rate * 100.0,
+        report.run.total_pnl,
+        report.run.sharpe_ratio
+    );
+    println!("  Live:");
+    println!(
+        "    submitted={} touched_fill={} full_fill={} rejected={} failed={}",
+        submitted_n, touched_fill_n, full_fill_n, rejected_n, failed_n
+    );
+    println!(
+        "    fill_rate={:.1}% full_fill_rate={:.1}% reject_rate={:.1}% failed_rate={:.1}% avg_slippage_bps={:.2}",
+        live_fill_rate * 100.0,
+        live_full_fill_rate * 100.0,
+        live_reject_rate * 100.0,
+        live_failed_rate * 100.0,
+        avg_slippage_bps
+    );
+    println!(
+        "  Coverage (live_filled_orders / backtest_trades): {:.2}x",
+        live_vs_bt_trade_ratio
+    );
+    println!();
+
+    Ok(())
+}
+
 /// Backfill Binance klines into the database for historical backtesting.
 async fn backfill_klines(
     symbols: &str,
@@ -4310,5 +5421,824 @@ async fn backfill_klines(
     }
 
     println!("\nDone. {} new klines inserted total.\n", grand_total);
+    Ok(())
+}
+
+/// Backfill PM replay tables from sync_records:
+/// - clob_quote_ticks
+/// - clob_orderbook_snapshots (synthetic depth from prices)
+/// - pm_market_metadata
+async fn backfill_pm_replay_tables(
+    from: Option<String>,
+    to: Option<String>,
+    symbols: &str,
+    synthetic_depth: u64,
+    database_url: Option<String>,
+) -> Result<()> {
+    use chrono::DateTime;
+
+    let from_dt = from
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+        })
+        .transpose()
+        .context("Invalid --from date (use ISO 8601 format)")?
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let to_dt = to
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+        })
+        .transpose()
+        .context("Invalid --to date (use ISO 8601 format)")?
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    if let (Some(f), Some(t)) = (from_dt, to_dt) {
+        if t <= f {
+            anyhow::bail!("--to must be after --from");
+        }
+    }
+
+    let symbol_list: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let symbols_param = if symbol_list.is_empty() {
+        None::<Vec<String>>
+    } else {
+        Some(symbol_list.clone())
+    };
+
+    let db_url = database_url.unwrap_or_else(|| {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
+    });
+    let store = PostgresStore::new(&db_url, 5).await?;
+    let pool = store.pool();
+
+    // Ensure required tables exist (idempotent), centralized with runtime path.
+    crate::platform::persistence_schema::ensure_clob_quote_ticks_table(pool)
+        .await
+        .context("Failed to ensure clob_quote_ticks table")?;
+    crate::platform::persistence_schema::ensure_clob_orderbook_snapshots_table(pool)
+        .await
+        .context("Failed to ensure clob_orderbook_snapshots table")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS pm_market_metadata (
+            market_slug TEXT PRIMARY KEY,
+            price_to_beat NUMERIC(20,8) NOT NULL,
+            start_time TIMESTAMPTZ,
+            end_time TIMESTAMPTZ,
+            horizon TEXT,
+            symbol TEXT,
+            raw_market JSONB,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to ensure pm_market_metadata table")?;
+
+    println!("\nBackfilling PM replay tables from sync_records...");
+    println!("  symbols: {}", if symbol_list.is_empty() { "(all)".to_string() } else { symbol_list.join(",") });
+    println!(
+        "  from: {}",
+        from_dt
+            .map(|v| v.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "  to:   {}",
+        to_dt.map(|v| v.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+    );
+
+    let quote_up = sqlx::query(
+        r#"
+        WITH src AS (
+            SELECT DISTINCT ON (sr.timestamp, sr.pm_yes_token_id)
+                sr.timestamp AS received_at,
+                sr.pm_yes_token_id AS token_id,
+                sr.pm_yes_price AS best_ask
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND sr.pm_yes_token_id IS NOT NULL
+              AND sr.pm_yes_price IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+            ORDER BY sr.timestamp, sr.pm_yes_token_id
+        )
+        INSERT INTO clob_quote_ticks (
+            token_id, side, best_bid, best_ask, bid_size, ask_size, source, received_at, domain
+        )
+        SELECT
+            src.token_id,
+            'UP',
+            GREATEST(src.best_ask - 0.01, 0.0001)::NUMERIC(10,6),
+            src.best_ask::NUMERIC(10,6),
+            NULL,
+            NULL,
+            'sync_backfill',
+            src.received_at,
+            'crypto'
+        FROM src
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM clob_quote_ticks q
+            WHERE q.token_id = src.token_id
+              AND q.side = 'UP'
+              AND q.received_at = src.received_at
+              AND q.source = 'sync_backfill'
+        )
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .execute(pool)
+    .await
+    .context("Failed to backfill clob_quote_ticks UP rows")?
+    .rows_affected();
+
+    let quote_down = sqlx::query(
+        r#"
+        WITH src AS (
+            SELECT DISTINCT ON (sr.timestamp, sr.pm_no_token_id)
+                sr.timestamp AS received_at,
+                sr.pm_no_token_id AS token_id,
+                sr.pm_no_price AS best_ask
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND sr.pm_no_token_id IS NOT NULL
+              AND sr.pm_no_price IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+            ORDER BY sr.timestamp, sr.pm_no_token_id
+        )
+        INSERT INTO clob_quote_ticks (
+            token_id, side, best_bid, best_ask, bid_size, ask_size, source, received_at, domain
+        )
+        SELECT
+            src.token_id,
+            'DOWN',
+            GREATEST(src.best_ask - 0.01, 0.0001)::NUMERIC(10,6),
+            src.best_ask::NUMERIC(10,6),
+            NULL,
+            NULL,
+            'sync_backfill',
+            src.received_at,
+            'crypto'
+        FROM src
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM clob_quote_ticks q
+            WHERE q.token_id = src.token_id
+              AND q.side = 'DOWN'
+              AND q.received_at = src.received_at
+              AND q.source = 'sync_backfill'
+        )
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .execute(pool)
+    .await
+    .context("Failed to backfill clob_quote_ticks DOWN rows")?
+    .rows_affected();
+
+    let md_rows = sqlx::query(
+        r#"
+        WITH agg AS (
+            SELECT
+                sr.pm_market_slug AS market_slug,
+                (array_agg(sr.symbol ORDER BY sr.timestamp ASC))[1] AS symbol,
+                MIN(sr.timestamp) AS start_time,
+                MAX(sr.timestamp) AS observed_end_time,
+                (array_agg(sr.bn_mid_price ORDER BY sr.timestamp ASC))[1] AS price_to_beat
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+            GROUP BY sr.pm_market_slug
+        )
+        INSERT INTO pm_market_metadata (
+            market_slug, price_to_beat, start_time, end_time, horizon, symbol, raw_market, updated_at
+        )
+        SELECT
+            market_slug,
+            COALESCE(price_to_beat, 0),
+            start_time,
+            CASE
+                WHEN market_slug LIKE '%-5m-%' THEN start_time + INTERVAL '5 minutes'
+                WHEN market_slug LIKE '%-15m-%' THEN start_time + INTERVAL '15 minutes'
+                WHEN market_slug LIKE '%-60m-%' THEN start_time + INTERVAL '60 minutes'
+                ELSE observed_end_time
+            END AS end_time,
+            CASE
+                WHEN market_slug LIKE '%-5m-%' THEN '5m'
+                WHEN market_slug LIKE '%-15m-%' THEN '15m'
+                WHEN market_slug LIKE '%-60m-%' THEN '60m'
+                ELSE NULL
+            END AS horizon,
+            symbol,
+            jsonb_build_object(
+                'source', 'sync_backfill',
+                'derived_from', 'sync_records',
+                'market_slug', market_slug,
+                'symbol', symbol
+            ),
+            NOW()
+        FROM agg
+        ON CONFLICT (market_slug) DO UPDATE SET
+            price_to_beat = CASE
+                WHEN EXCLUDED.price_to_beat > 0 THEN EXCLUDED.price_to_beat
+                ELSE pm_market_metadata.price_to_beat
+            END,
+            start_time = COALESCE(pm_market_metadata.start_time, EXCLUDED.start_time),
+            end_time = COALESCE(pm_market_metadata.end_time, EXCLUDED.end_time),
+            horizon = COALESCE(pm_market_metadata.horizon, EXCLUDED.horizon),
+            symbol = COALESCE(pm_market_metadata.symbol, EXCLUDED.symbol),
+            raw_market = COALESCE(pm_market_metadata.raw_market, EXCLUDED.raw_market),
+            updated_at = NOW()
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .execute(pool)
+    .await
+    .context("Failed to backfill pm_market_metadata")?
+    .rows_affected();
+
+    let ob_up = sqlx::query(
+        r#"
+        WITH src AS (
+            SELECT DISTINCT ON (sr.timestamp, sr.pm_yes_token_id)
+                sr.timestamp AS received_at,
+                sr.pm_market_slug AS market_slug,
+                sr.pm_yes_token_id AS token_id,
+                sr.pm_yes_price AS best_ask
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND sr.pm_yes_token_id IS NOT NULL
+              AND sr.pm_yes_price IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+            ORDER BY sr.timestamp, sr.pm_yes_token_id
+        )
+        INSERT INTO clob_orderbook_snapshots (
+            domain, token_id, market, bids, asks, book_timestamp, hash, source, context, received_at
+        )
+        SELECT
+            'crypto',
+            src.token_id,
+            src.market_slug,
+            jsonb_build_array(
+                jsonb_build_object(
+                    'price', GREATEST((1 - src.best_ask), 0.0001)::text,
+                    'size', $4::text
+                )
+            ),
+            jsonb_build_array(
+                jsonb_build_object(
+                    'price', src.best_ask::text,
+                    'size', $4::text
+                )
+            ),
+            src.received_at,
+            NULL,
+            'sync_backfill',
+            jsonb_build_object('synthetic', true, 'side', 'UP', 'source', 'sync_records'),
+            src.received_at
+        FROM src
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM clob_orderbook_snapshots s
+            WHERE s.token_id = src.token_id
+              AND s.received_at = src.received_at
+              AND s.source = 'sync_backfill'
+        )
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .bind(synthetic_depth as i64)
+    .execute(pool)
+    .await
+    .context("Failed to backfill clob_orderbook_snapshots UP rows")?
+    .rows_affected();
+
+    let ob_down = sqlx::query(
+        r#"
+        WITH src AS (
+            SELECT DISTINCT ON (sr.timestamp, sr.pm_no_token_id)
+                sr.timestamp AS received_at,
+                sr.pm_market_slug AS market_slug,
+                sr.pm_no_token_id AS token_id,
+                sr.pm_no_price AS best_ask
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND sr.pm_no_token_id IS NOT NULL
+              AND sr.pm_no_price IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+            ORDER BY sr.timestamp, sr.pm_no_token_id
+        )
+        INSERT INTO clob_orderbook_snapshots (
+            domain, token_id, market, bids, asks, book_timestamp, hash, source, context, received_at
+        )
+        SELECT
+            'crypto',
+            src.token_id,
+            src.market_slug,
+            jsonb_build_array(
+                jsonb_build_object(
+                    'price', GREATEST((1 - src.best_ask), 0.0001)::text,
+                    'size', $4::text
+                )
+            ),
+            jsonb_build_array(
+                jsonb_build_object(
+                    'price', src.best_ask::text,
+                    'size', $4::text
+                )
+            ),
+            src.received_at,
+            NULL,
+            'sync_backfill',
+            jsonb_build_object('synthetic', true, 'side', 'DOWN', 'source', 'sync_records'),
+            src.received_at
+        FROM src
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM clob_orderbook_snapshots s
+            WHERE s.token_id = src.token_id
+              AND s.received_at = src.received_at
+              AND s.source = 'sync_backfill'
+        )
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .bind(synthetic_depth as i64)
+    .execute(pool)
+    .await
+    .context("Failed to backfill clob_orderbook_snapshots DOWN rows")?
+    .rows_affected();
+
+    let quote_total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM clob_quote_ticks
+        WHERE source = 'sync_backfill'
+          AND ($1::timestamptz IS NULL OR received_at >= $1)
+          AND ($2::timestamptz IS NULL OR received_at <= $2)
+        "#,
+    )
+    .bind(from_dt)
+    .bind(to_dt)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let ob_total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM clob_orderbook_snapshots
+        WHERE source = 'sync_backfill'
+          AND ($1::timestamptz IS NULL OR received_at >= $1)
+          AND ($2::timestamptz IS NULL OR received_at <= $2)
+        "#,
+    )
+    .bind(from_dt)
+    .bind(to_dt)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let md_total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM pm_market_metadata
+        WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+          AND ($2::timestamptz IS NULL OR end_time >= $2)
+          AND ($3::timestamptz IS NULL OR start_time <= $3)
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    println!("\nBackfill complete:");
+    println!(
+        "  clob_quote_ticks inserted: {} (UP {}) + (DOWN {})",
+        quote_up + quote_down,
+        quote_up,
+        quote_down
+    );
+    println!(
+        "  clob_orderbook_snapshots inserted: {} (UP {}) + (DOWN {})",
+        ob_up + ob_down,
+        ob_up,
+        ob_down
+    );
+    println!("  pm_market_metadata upsert affected rows: {}", md_rows);
+    println!("\nCurrent totals in selected window:");
+    println!("  clob_quote_ticks (sync_backfill): {}", quote_total);
+    println!("  clob_orderbook_snapshots (sync_backfill): {}", ob_total);
+    println!("  pm_market_metadata: {}", md_total);
+    println!();
+
+    Ok(())
+}
+
+/// Backfill official Polymarket token settlements into pm_token_settlements.
+///
+/// Source of token universe:
+/// - Distinct pm_yes_token_id / pm_no_token_id from sync_records in selected window.
+///
+/// Source of official settlement state:
+/// - Gamma market lookup by token_id via Polymarket API.
+async fn backfill_pm_token_settlements(
+    from: Option<String>,
+    to: Option<String>,
+    symbols: &str,
+    limit: usize,
+    database_url: Option<String>,
+) -> Result<()> {
+    use chrono::{DateTime, Utc};
+    use rust_decimal::Decimal;
+    use sqlx::Row;
+    use std::collections::{HashMap, HashSet};
+
+    use crate::adapters::PolymarketClient;
+
+    let from_dt = from
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+        })
+        .transpose()
+        .context("Invalid --from date (use ISO 8601 format)")?
+        .map(|dt| dt.with_timezone(&Utc));
+
+    let to_dt = to
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
+        })
+        .transpose()
+        .context("Invalid --to date (use ISO 8601 format)")?
+        .map(|dt| dt.with_timezone(&Utc));
+
+    if let (Some(f), Some(t)) = (from_dt, to_dt) {
+        if t <= f {
+            anyhow::bail!("--to must be after --from");
+        }
+    }
+
+    let symbol_list: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let symbols_param = if symbol_list.is_empty() {
+        None::<Vec<String>>
+    } else {
+        Some(symbol_list.clone())
+    };
+
+    let db_url = database_url.unwrap_or_else(|| {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
+    });
+    let store = PostgresStore::new(&db_url, 5).await?;
+    let pool = store.pool();
+
+    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(pool)
+        .await
+        .context("Failed to ensure pm_token_settlements table")?;
+
+    println!("\nBackfilling pm_token_settlements from Gamma...");
+    println!(
+        "  symbols: {}",
+        if symbol_list.is_empty() {
+            "(all)".to_string()
+        } else {
+            symbol_list.join(",")
+        }
+    );
+    println!(
+        "  from: {}",
+        from_dt
+            .map(|v| v.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "  to:   {}",
+        to_dt.map(|v| v.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+    );
+    println!("  token limit: {}", limit);
+
+    // Candidate token universe from sync_records.
+    let token_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        WITH tokens AS (
+            SELECT sr.pm_yes_token_id AS token_id
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND sr.pm_yes_token_id IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+            UNION
+            SELECT sr.pm_no_token_id AS token_id
+            FROM sync_records sr
+            WHERE sr.pm_market_slug IS NOT NULL
+              AND sr.pm_no_token_id IS NOT NULL
+              AND ($1::text[] IS NULL OR sr.symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR sr.timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR sr.timestamp <= $3)
+        )
+        SELECT token_id
+        FROM tokens
+        ORDER BY token_id
+        LIMIT $4
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query token_ids from sync_records")?;
+
+    if token_ids.is_empty() {
+        println!("  No token_ids found in sync_records for selected window.\n");
+        return Ok(());
+    }
+
+    // token_id -> market_slug fallback mapping from sync_records
+    let token_slug_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT pm_market_slug, pm_yes_token_id, pm_no_token_id
+        FROM sync_records
+        WHERE pm_market_slug IS NOT NULL
+          AND ($1::text[] IS NULL OR symbol = ANY($1))
+          AND ($2::timestamptz IS NULL OR timestamp >= $2)
+          AND ($3::timestamptz IS NULL OR timestamp <= $3)
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query token↔slug map from sync_records")?;
+
+    let mut token_to_slug: HashMap<String, String> = HashMap::new();
+    for row in &token_slug_rows {
+        let slug: Option<String> = row.try_get("pm_market_slug").ok();
+        let yes: Option<String> = row.try_get("pm_yes_token_id").ok();
+        let no: Option<String> = row.try_get("pm_no_token_id").ok();
+        let Some(slug) = slug else { continue };
+        if let Some(t) = yes {
+            token_to_slug.entry(t).or_insert_with(|| slug.clone());
+        }
+        if let Some(t) = no {
+            token_to_slug.entry(t).or_insert_with(|| slug.clone());
+        }
+    }
+
+    // slug -> event end_time fallback for resolved_at (chronologically better than Utc::now()).
+    let md_rows = sqlx::query(
+        r#"
+        SELECT market_slug, end_time
+        FROM pm_market_metadata
+        WHERE end_time IS NOT NULL
+          AND ($1::text[] IS NULL OR symbol = ANY($1))
+          AND ($2::timestamptz IS NULL OR end_time >= $2)
+          AND ($3::timestamptz IS NULL OR end_time <= $3 + INTERVAL '1 day')
+        "#,
+    )
+    .bind(symbols_param.clone())
+    .bind(from_dt)
+    .bind(to_dt)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query pm_market_metadata end_time map")?;
+
+    let mut slug_to_end: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for row in &md_rows {
+        let slug: String = row.get("market_slug");
+        let end_time: DateTime<Utc> = row.get("end_time");
+        slug_to_end.entry(slug).or_insert(end_time);
+    }
+
+    let existing_rows = sqlx::query(
+        r#"
+        SELECT token_id, resolved
+        FROM pm_token_settlements
+        WHERE token_id = ANY($1)
+        "#,
+    )
+    .bind(&token_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query existing pm_token_settlements rows")?;
+
+    let mut resolved_map: HashMap<String, bool> = HashMap::new();
+    for row in existing_rows {
+        let token_id: String = row.get("token_id");
+        let resolved: bool = row.get("resolved");
+        resolved_map.insert(token_id, resolved);
+    }
+
+    let mut to_refresh: Vec<String> = token_ids
+        .iter()
+        .filter(|t| !resolved_map.get(*t).copied().unwrap_or(false))
+        .cloned()
+        .collect();
+    to_refresh.sort();
+    to_refresh.dedup();
+
+    if to_refresh.is_empty() {
+        println!("  All candidate tokens already marked resolved.\n");
+        return Ok(());
+    }
+
+    println!("  refreshing {} token(s) via Gamma...", to_refresh.len());
+
+    let pm = PolymarketClient::new("https://clob.polymarket.com", true)
+        .context("Failed to create Polymarket client")?;
+
+    let mut seen_conditions: HashSet<String> = HashSet::new();
+    let mut refreshed_markets = 0usize;
+    let mut upserted_rows = 0usize;
+    let mut resolved_rows = 0usize;
+
+    for token_id in to_refresh {
+        let market = match pm.get_gamma_market_by_token_id(&token_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(token_id = %token_id, error = %e, "Gamma fetch failed for token");
+                continue;
+            }
+        };
+
+        if let Some(ref cond) = market.condition_id {
+            let cond_str = cond.to_string();
+            if !seen_conditions.insert(cond_str) {
+                continue;
+            }
+        }
+
+        let clob_ids: Vec<String> = market
+            .clob_token_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| id.to_string()).collect())
+            .unwrap_or_default();
+        let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
+        let price_strs: Vec<String> = market
+            .outcome_prices
+            .as_ref()
+            .map(|ps| ps.iter().map(|d| d.to_string()).collect())
+            .unwrap_or_default();
+
+        if clob_ids.is_empty() || price_strs.is_empty() {
+            continue;
+        }
+
+        let mut prices: Vec<Decimal> = Vec::new();
+        for s in &price_strs {
+            if let Ok(p) = s.parse::<Decimal>() {
+                prices.push(p);
+            }
+        }
+
+        let resolved = market.closed.unwrap_or(false) && is_market_resolved(&prices);
+        let condition_id = market.condition_id.map(|b| b.to_string());
+
+        for (i, tid) in clob_ids.iter().enumerate() {
+            let outcome = outcomes.get(i).cloned();
+            let settled_price = price_strs.get(i).and_then(|s| s.parse::<Decimal>().ok());
+
+            let slug_fallback = token_to_slug.get(tid).cloned();
+            let market_slug = market.slug.clone().or(slug_fallback);
+            let resolved_at = if resolved {
+                market_slug
+                    .as_ref()
+                    .and_then(|slug| slug_to_end.get(slug).cloned())
+                    .or_else(|| Some(Utc::now()))
+            } else {
+                None
+            };
+
+            let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
+
+            sqlx::query(
+                r#"
+                INSERT INTO pm_token_settlements (
+                    token_id,
+                    condition_id,
+                    market_id,
+                    market_slug,
+                    outcome,
+                    settled_price,
+                    resolved,
+                    resolved_at,
+                    fetched_at,
+                    raw_market
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
+                ON CONFLICT (token_id) DO UPDATE SET
+                    condition_id = EXCLUDED.condition_id,
+                    market_id = EXCLUDED.market_id,
+                    market_slug = EXCLUDED.market_slug,
+                    outcome = EXCLUDED.outcome,
+                    settled_price = EXCLUDED.settled_price,
+                    resolved = EXCLUDED.resolved,
+                    resolved_at = COALESCE(pm_token_settlements.resolved_at, EXCLUDED.resolved_at),
+                    fetched_at = NOW(),
+                    raw_market = EXCLUDED.raw_market
+                "#,
+            )
+            .bind(tid)
+            .bind(condition_id.as_deref())
+            .bind(&market.id)
+            .bind(market_slug.as_deref())
+            .bind(outcome.as_deref())
+            .bind(settled_price)
+            .bind(resolved)
+            .bind(resolved_at)
+            .bind(sqlx::types::Json(raw_market.clone()))
+            .execute(pool)
+            .await
+            .context("Failed to upsert pm_token_settlements row")?;
+
+            upserted_rows += 1;
+            if resolved {
+                resolved_rows += 1;
+            }
+        }
+
+        refreshed_markets += 1;
+    }
+
+    let summary = sqlx::query(
+        r#"
+        SELECT
+          COUNT(*)::bigint AS total_rows,
+          COUNT(*) FILTER (WHERE resolved)::bigint AS resolved_rows,
+          MIN(resolved_at) AS min_resolved_at,
+          MAX(resolved_at) AS max_resolved_at
+        FROM pm_token_settlements
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to query settlement summary")?;
+
+    let total_rows: i64 = summary.get("total_rows");
+    let total_resolved: i64 = summary.get("resolved_rows");
+    let min_resolved: Option<DateTime<Utc>> = summary.try_get("min_resolved_at").ok();
+    let max_resolved: Option<DateTime<Utc>> = summary.try_get("max_resolved_at").ok();
+
+    println!("\nBackfill complete:");
+    println!("  refreshed markets: {}", refreshed_markets);
+    println!("  upserted token rows: {}", upserted_rows);
+    println!("  upserted resolved rows: {}", resolved_rows);
+    println!("  table total rows: {}", total_rows);
+    println!("  table total resolved rows: {}", total_resolved);
+    println!(
+        "  resolved_at range: {} .. {}",
+        min_resolved
+            .map(|v| v.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string()),
+        max_resolved
+            .map(|v| v.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!();
+
     Ok(())
 }

@@ -19,6 +19,10 @@ pub struct DataCollector {
     tick_buffer: Arc<RwLock<Vec<Tick>>>,
     /// Buffer flush interval in seconds
     flush_interval_secs: u64,
+    /// Legacy round-based ticks table sink (deprecated).
+    persist_legacy_ticks: bool,
+    /// Canonical quote sink.
+    persist_canonical_quotes: bool,
 }
 
 impl DataCollector {
@@ -29,6 +33,15 @@ impl DataCollector {
         ws: Arc<PolymarketWebSocket>,
         market_slug: &str,
     ) -> Self {
+        let persist_legacy_ticks = std::env::var("PLOY_LEGACY_TICKS_ENABLED")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
         Self {
             client,
             store,
@@ -37,6 +50,8 @@ impl DataCollector {
             current_round: Arc::new(RwLock::new(None)),
             tick_buffer: Arc::new(RwLock::new(Vec::new())),
             flush_interval_secs: 5,
+            persist_legacy_ticks,
+            persist_canonical_quotes: true,
         }
     }
 
@@ -48,6 +63,16 @@ impl DataCollector {
     /// Start the data collector background tasks
     pub async fn start(&self) -> Result<()> {
         info!("Starting data collector for {}", self.market_slug);
+        if self.persist_legacy_ticks {
+            warn!("Legacy ticks sink enabled (PLOY_LEGACY_TICKS_ENABLED=true)");
+        } else {
+            info!("Legacy ticks sink disabled; using canonical clob_quote_ticks");
+        }
+
+        if self.persist_canonical_quotes {
+            crate::platform::persistence_schema::ensure_clob_quote_ticks_table(self.store.pool())
+                .await?;
+        }
 
         // Spawn round discovery task
         let round_task = self.spawn_round_discovery();
@@ -210,6 +235,9 @@ impl DataCollector {
         let ws = Arc::clone(&self.ws);
         let current_round = Arc::clone(&self.current_round);
         let tick_buffer = Arc::clone(&self.tick_buffer);
+        let persist_legacy_ticks = self.persist_legacy_ticks;
+        let persist_canonical_quotes = self.persist_canonical_quotes;
+        let pool = self.store.pool().clone();
 
         tokio::spawn(async move {
             let mut updates = ws.subscribe_updates();
@@ -224,6 +252,34 @@ impl DataCollector {
                         };
 
                         if let Some(round_id) = round_id {
+                            if persist_canonical_quotes {
+                                let side = match update.side {
+                                    crate::domain::Side::Up => "UP",
+                                    crate::domain::Side::Down => "DOWN",
+                                };
+                                if let Err(e) = sqlx::query(
+                                    r#"
+                                    INSERT INTO clob_quote_ticks (
+                                        token_id, side, best_bid, best_ask, bid_size, ask_size, source, received_at, domain
+                                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                                    "#,
+                                )
+                                .bind(update.token_id.clone())
+                                .bind(side)
+                                .bind(update.quote.best_bid)
+                                .bind(update.quote.best_ask)
+                                .bind(update.quote.bid_size)
+                                .bind(update.quote.ask_size)
+                                .bind("legacy_data_collector")
+                                .bind(update.quote.timestamp)
+                                .bind("legacy")
+                                .execute(&pool)
+                                .await
+                                {
+                                    debug!("failed to persist canonical quote tick: {}", e);
+                                }
+                            }
+
                             // Create tick from quote
                             let tick = Tick {
                                 id: None,
@@ -236,8 +292,10 @@ impl DataCollector {
                                 ask_size: update.quote.ask_size,
                             };
 
-                            // Add to buffer
-                            tick_buffer.write().await.push(tick);
+                            if persist_legacy_ticks {
+                                // Deprecated sink.
+                                tick_buffer.write().await.push(tick);
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

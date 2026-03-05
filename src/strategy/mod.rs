@@ -68,7 +68,10 @@ pub mod dump_hedge;
 pub mod execution;
 pub mod execution_sim;
 pub mod fee_model;
+pub mod gamma_scalping;
+pub mod garch_probability_backtest;
 pub mod integrity;
+pub mod liquidity_vacuum_backtest;
 pub mod momentum;
 pub mod momentum_backtest;
 pub mod multi_event;
@@ -92,7 +95,9 @@ pub mod volatility_arb;
 
 // Runtime re-exports
 #[cfg(feature = "claimer_daemon")]
-pub use claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
+pub use claimer::{
+    ensure_account_claimer_daemon, AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition,
+};
 pub use execution::engine::StrategyEngine;
 pub use execution::engine_store;
 pub use execution::executor::OrderExecutor;
@@ -152,6 +157,9 @@ pub use deribit_probability_arb::{
 pub use directional_backtest::{
     DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
 };
+pub use liquidity_vacuum_backtest::{
+    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
+};
 pub use dump_hedge::{
     DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
     PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
@@ -160,6 +168,13 @@ pub use event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 pub use event_edge::{run_event_edge, EventEdgeConfig};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
+pub use gamma_scalping::{
+    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer,
+    Straddle,
+};
+pub use garch_probability_backtest::{
+    GarchProbabilityBacktestConfig, GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade,
+};
 pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
     MomentumDetector, MomentumEngine, MomentumSignal, Position,

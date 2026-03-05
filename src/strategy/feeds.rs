@@ -18,11 +18,23 @@ use super::traits::{DataFeed, KlineBar, MarketUpdate};
 use crate::adapters::{
     BinanceKlineWebSocket, BinanceWebSocket, PolymarketClient, PolymarketWebSocket,
 };
-use crate::collector::BinanceKlineClient;
+use crate::collector::{BinanceDepthStream, BinanceKlineClient};
 use crate::error::Result;
 
 const MAX_EVENTS_PER_SERIES: usize = 6;
 const POLYMARKET_REFRESH_SECS: u64 = 30;
+
+fn l2_feed_enabled() -> bool {
+    std::env::var("PLOY_BINANCE_L2_FEED_ENABLED")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
 
 fn infer_symbol_from_text(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
@@ -215,6 +227,8 @@ pub struct DataFeedManager {
     series_events: Arc<RwLock<HashMap<String, HashMap<String, DiscoveredEvent>>>>,
     /// Optional DB pool used to persist normalized market metadata for model training.
     metadata_pool: Option<Arc<PgPool>>,
+    /// Guard to avoid starting Binance L2 feed more than once per manager.
+    binance_l2_started: Arc<RwLock<bool>>,
 }
 
 /// Mapping from token to event info
@@ -266,6 +280,7 @@ impl DataFeedManager {
             active_feeds: Arc::new(RwLock::new(Vec::new())),
             series_events: Arc::new(RwLock::new(HashMap::new())),
             metadata_pool,
+            binance_l2_started: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -311,6 +326,7 @@ impl DataFeedManager {
             active_feeds: Arc::new(RwLock::new(Vec::new())),
             series_events: Arc::new(RwLock::new(HashMap::new())),
             metadata_pool,
+            binance_l2_started: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -901,6 +917,7 @@ impl DataFeedManager {
     pub async fn start_for_feeds(&self, feeds: Vec<DataFeed>) -> Result<Vec<String>> {
         let mut all_tokens = Vec::new();
         let mut series_ids_to_refresh: Vec<String> = Vec::new();
+        let mut binance_l2_symbols: Vec<String> = Vec::new();
 
         for feed in feeds {
             match feed {
@@ -909,6 +926,7 @@ impl DataFeedManager {
                         info!("Starting Binance feed for: {:?}", symbols);
                         // Binance WS is already configured with symbols in constructor
                     }
+                    binance_l2_symbols.extend(symbols);
                 }
                 DataFeed::BinanceKlines {
                     symbols,
@@ -940,6 +958,8 @@ impl DataFeedManager {
             }
         }
 
+        self.ensure_binance_l2_feed_started(binance_l2_symbols).await;
+
         // Subscribe to Polymarket tokens.
         //
         // IMPORTANT: for rotating series feeds, we pass an empty seed list and rely on the ws'
@@ -961,6 +981,68 @@ impl DataFeedManager {
         }
 
         Ok(all_tokens)
+    }
+
+    async fn ensure_binance_l2_feed_started(&self, mut symbols: Vec<String>) {
+        if !l2_feed_enabled() {
+            return;
+        }
+
+        symbols.retain(|s| !s.trim().is_empty());
+        symbols.sort();
+        symbols.dedup();
+        if symbols.is_empty() {
+            return;
+        }
+
+        {
+            let mut started = self.binance_l2_started.write().await;
+            if *started {
+                return;
+            }
+            *started = true;
+        }
+
+        let manager = self.manager.clone();
+        let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
+        let depth_ws = Arc::new(BinanceDepthStream::new(symbols.clone()));
+        let mut rx = depth_ws.subscribe();
+
+        tokio::spawn(async move {
+            info!("Binance L2 depth feed started for {:?}", symbols);
+            loop {
+                match rx.recv().await {
+                    Ok(update) => {
+                        let market_update = MarketUpdate::BinanceL2 {
+                            symbol: update.symbol,
+                            obi_5: update.snapshot.obi_5,
+                            obi_10: update.snapshot.obi_10,
+                            bid_volume_5: update.snapshot.bid_volume_5,
+                            ask_volume_5: update.snapshot.ask_volume_5,
+                            spread_bps: update.snapshot.spread_bps,
+                            timestamp: update.snapshot.timestamp,
+                        };
+                        manager.send_market_update(market_update);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Binance L2 depth feed lagged by {} messages", n);
+                        if let Some(ref f) = freshness {
+                            f.record_broadcast_lag(n as u64);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        warn!("Binance L2 depth feed ended");
+                        break;
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            if let Err(e) = depth_ws.run().await {
+                error!("Binance L2 depth WebSocket error: {}", e);
+            }
+        });
     }
 
     async fn spawn_polymarket_refresh(&self, series_ids: Vec<String>) {
@@ -1298,6 +1380,7 @@ mod tests {
             let tag = match update {
                 MarketUpdate::PolymarketQuote { .. } => "polymarket_quote",
                 MarketUpdate::BinancePrice { .. } => "binance_price",
+                MarketUpdate::BinanceL2 { .. } => "binance_l2",
                 MarketUpdate::BinanceKline { .. } => "binance_kline",
                 MarketUpdate::EventDiscovered { .. } => "event_discovered",
                 MarketUpdate::EventExpired { .. } => "event_expired",

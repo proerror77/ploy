@@ -31,7 +31,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::sync::Arc;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -39,6 +41,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::PolymarketClient;
 use crate::error::Result;
+use crate::signing::Wallet;
 
 // CTF contracts on Polygon
 const CONDITIONAL_TOKENS_POLYGON: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
@@ -58,6 +61,8 @@ const RELAYER_PROXY_INIT_CODE_HASH: &str =
 const RELAYER_DEFAULT_GAS_LIMIT: u64 = 10_000_000;
 const RELAYER_DEFAULT_MAX_POLLS: u64 = 100;
 const RELAYER_DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
+
+static ACCOUNT_CLAIMER_DAEMON_STARTED: OnceLock<AtomicBool> = OnceLock::new();
 
 // Generate contract bindings for ConditionalTokens
 sol! {
@@ -99,6 +104,47 @@ fn json_value_to_boolish(value: &serde_json::Value) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+fn extra_truthy_flag(
+    extra: &std::collections::HashMap<String, serde_json::Value>,
+    keys: &[&str],
+) -> bool {
+    keys.iter().any(|key| {
+        extra
+            .get(*key)
+            .and_then(json_value_to_boolish)
+            .unwrap_or(false)
+    })
+}
+
+fn extra_status_settled(extra: &std::collections::HashMap<String, serde_json::Value>) -> bool {
+    const STATUS_KEYS: [&str; 5] = [
+        "status",
+        "marketStatus",
+        "conditionStatus",
+        "resolutionStatus",
+        "state",
+    ];
+
+    STATUS_KEYS.iter().any(|key| {
+        extra
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                matches!(
+                    s.trim().to_ascii_lowercase().as_str(),
+                    "resolved"
+                        | "settled"
+                        | "finalized"
+                        | "closed"
+                        | "redeemable"
+                        | "claimable"
+                        | "payout_ready"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -255,6 +301,107 @@ fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
         secret,
         passphrase,
     })
+}
+
+/// Start one global account-level auto-claimer daemon (process-wide).
+///
+/// This is intentionally strategy-agnostic: it scans the account for redeemable
+/// positions every minute (configurable), independent of any strategy lifecycle.
+pub async fn ensure_account_claimer_daemon() -> Result<()> {
+    if !env_flag("CLAIMER_DAEMON_ENABLED", true) {
+        return Ok(());
+    }
+
+    let gate = ACCOUNT_CLAIMER_DAEMON_STARTED.get_or_init(|| AtomicBool::new(false));
+    if gate
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
+        .or_else(|_| std::env::var("PRIVATE_KEY"))
+        .ok();
+    let Some(private_key) = private_key else {
+        warn!("Auto-claimer daemon disabled: no POLYMARKET_PRIVATE_KEY/PRIVATE_KEY");
+        gate.store(false, Ordering::SeqCst);
+        return Ok(());
+    };
+
+    let wallet = match Wallet::from_env(POLYGON_CHAIN_ID) {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("Auto-claimer daemon wallet init failed: {}", e);
+            gate.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+    };
+
+    let funder = std::env::var("POLYMARKET_FUNDER")
+        .or_else(|_| std::env::var("POLYMARKET_FUNDER_ADDRESS"))
+        .ok();
+    let client = if let Some(ref funder_addr) = funder {
+        match PolymarketClient::new_authenticated_proxy(
+            "https://clob.polymarket.com",
+            wallet,
+            funder_addr,
+            true,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                gate.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+    } else {
+        match PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                gate.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+    };
+
+    let interval_secs = env_u64_any(&["CLAIMER_CHECK_INTERVAL_SECS", "CLAIMER_INTERVAL_SECS"])
+        .unwrap_or(60)
+        .max(10);
+    let min_claim_size = env_string_any(&["CLAIMER_MIN_CLAIM_SIZE", "CLAIMER_MIN_SIZE_USDC"])
+        .and_then(|v| Decimal::from_str(v.trim()).ok())
+        .unwrap_or(Decimal::ONE);
+
+    let claimer = AutoClaimer::new(
+        client,
+        ClaimerConfig {
+            check_interval_secs: interval_secs,
+            min_claim_size,
+            auto_claim: true,
+            private_key: Some(private_key),
+        },
+    );
+
+    let gate_ref = ACCOUNT_CLAIMER_DAEMON_STARTED
+        .get()
+        .expect("claimer gate should be initialized");
+    tokio::spawn(async move {
+        if let Err(e) = claimer.start().await {
+            error!("Auto-claimer daemon stopped with error: {}", e);
+            gate_ref.store(false, Ordering::SeqCst);
+        }
+    });
+
+    info!(
+        interval_secs,
+        min_claim_size = %min_claim_size,
+        "Auto-claimer daemon started (account-level)"
+    );
+
+    Ok(())
 }
 
 fn relayer_base_url() -> String {
@@ -701,7 +848,7 @@ impl AutoClaimer {
     async fn get_redeemable_positions(&self) -> Result<Vec<RedeemablePosition>> {
         // Use the Data API to get positions
         let positions = self.client.get_positions().await?;
-        let allow_price_fallback = env_flag("CLAIMER_ALLOW_PRICE_FALLBACK", false);
+        let allow_price_fallback = env_flag("CLAIMER_ALLOW_PRICE_FALLBACK", true);
         let ignored_patterns = ignored_condition_patterns();
 
         let mut redeemable = Vec::new();
@@ -722,16 +869,45 @@ impl AutoClaimer {
                 .map(|price| price > 0.99) // Winner = price ~1.0
                 .unwrap_or(false);
 
-            // Also check the redeemable flag if available
-            let api_says_redeemable = p.is_redeemable();
+            // Also check common redeem/claim flags if available
+            let api_says_redeemable = p.is_redeemable()
+                || extra_truthy_flag(
+                    &p.extra,
+                    &[
+                        "redeemable",
+                        "isRedeemable",
+                        "claimable",
+                        "isClaimable",
+                        "canRedeem",
+                        "can_redeem",
+                        "readyToClaim",
+                        "ready_to_claim",
+                    ],
+                );
 
-            if !api_says_redeemable && !(allow_price_fallback && is_winner) {
+            // Settlement hints to avoid claiming too early when fallback is used.
+            let settled_hint = extra_truthy_flag(
+                &p.extra,
+                &[
+                    "resolved",
+                    "isResolved",
+                    "settled",
+                    "isSettled",
+                    "finalized",
+                    "isFinalized",
+                    "marketResolved",
+                    "marketFinalized",
+                ],
+            ) || extra_status_settled(&p.extra);
+
+            if !api_says_redeemable && !(allow_price_fallback && is_winner && settled_hint) {
                 continue;
             }
-            if !api_says_redeemable && allow_price_fallback && is_winner {
+            if !api_says_redeemable && allow_price_fallback && is_winner && settled_hint {
                 debug!(
-                    "Using price-based fallback for condition {:?} (cur_price={:?})",
-                    p.condition_id, p.cur_price
+                    "Using settlement fallback for condition {:?} (cur_price={:?})",
+                    p.condition_id,
+                    p.cur_price
                 );
             }
 

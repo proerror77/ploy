@@ -5,8 +5,8 @@
 //!
 //! The core idea: buy the side predicted to get expensive first (Leg1), then buy
 //! the opposite side after price movement (Leg2). When both legs are filled,
-//! merge for $1.00 per share. If Leg2 doesn't fill profitably, force-complete
-//! to bound losses.
+//! the cycle is considered complete and new cycles can start. If Leg2 doesn't
+//! fill profitably, force-complete to bound losses.
 //!
 //! Usage:
 //!   ploy strategy start staggered_arb --config config/strategies/staggered_arb.toml
@@ -70,6 +70,7 @@ struct LiveWindow {
     symbol: String,
     up_token: String,
     down_token: String,
+    condition_id: Option<String>,
     end_time: DateTime<Utc>,
     open_price: Option<Decimal>,
     window_secs: u64,
@@ -88,6 +89,7 @@ enum PaperPositionState {
 struct PaperPosition {
     symbol: String,
     event_id: String,
+    condition_id: Option<String>,
     up_token: String,
     down_token: String,
     leg1_direction: Direction,
@@ -130,6 +132,7 @@ struct PaperTrade {
 #[derive(Debug, Clone)]
 struct LiveOrderTrack {
     event_id: String,
+    condition_id: Option<String>,
     symbol: String,
     up_token: String,
     down_token: String,
@@ -142,6 +145,10 @@ struct LiveOrderTrack {
     position_idx: Option<usize>,
     /// How Leg2 was triggered: merge vs forced_*
     close_reason: Option<String>,
+    /// When this order was submitted (for stale order detection)
+    submitted_at: DateTime<Utc>,
+    /// When we sent a cancel request (None = not yet requested)
+    cancel_requested_at: Option<DateTime<Utc>>,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -155,6 +162,10 @@ pub struct StaggeredArbAdapter {
 
     // ── Market state ──
     spot_prices: HashMap<String, SpotPrice>,
+    /// symbol -> latest Binance L2 OBI(top-5)
+    binance_l2_obi_5: HashMap<String, Decimal>,
+    /// symbol -> timestamp for latest Binance L2 OBI update
+    binance_l2_obi_ts: HashMap<String, DateTime<Utc>>,
     /// symbol → (up_ask, down_ask)
     pm_asks: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
     /// token_id → (symbol, Direction)
@@ -197,6 +208,10 @@ pub struct StaggeredArbAdapter {
     consecutive_balance_failures: u32,
     /// Pause new entries until this time (waiting for claimer to free funds)
     balance_pause_until: Option<DateTime<Utc>>,
+    /// Entry gate reject counters (why Leg1 was skipped)
+    entry_reject_counts: HashMap<String, u64>,
+    /// Leg2 skip counters (why close was skipped/deferred)
+    leg2_skip_counts: HashMap<String, u64>,
 }
 
 impl StaggeredArbAdapter {
@@ -207,6 +222,8 @@ impl StaggeredArbAdapter {
             config,
             dry_run,
             spot_prices: HashMap::new(),
+            binance_l2_obi_5: HashMap::new(),
+            binance_l2_obi_ts: HashMap::new(),
             pm_asks: HashMap::new(),
             token_to_symbol: HashMap::new(),
             active_windows: HashMap::new(),
@@ -226,7 +243,17 @@ impl StaggeredArbAdapter {
             fixed_amount_overage_warned: false,
             consecutive_balance_failures: 0,
             balance_pause_until: None,
+            entry_reject_counts: HashMap::new(),
+            leg2_skip_counts: HashMap::new(),
         }
+    }
+
+    fn bump_entry_reject(&mut self, reason: &str) {
+        *self.entry_reject_counts.entry(reason.to_string()).or_default() += 1;
+    }
+
+    fn bump_leg2_skip(&mut self, reason: &str) {
+        *self.leg2_skip_counts.entry(reason.to_string()).or_default() += 1;
     }
 
     /// Create from TOML configuration string.
@@ -275,24 +302,50 @@ impl StaggeredArbAdapter {
                 .get("direction_threshold")
                 .and_then(|v| v.as_float())
                 .unwrap_or(0.03),
+            reverse_signal: entry
+                .get("reverse_signal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             max_initial_sum: Decimal::try_from(
                 entry
                     .get("max_initial_sum")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(1.10),
+                    .unwrap_or(1.20),
             )
-            .unwrap_or(dec!(1.10)),
+            .unwrap_or(dec!(1.20)),
+            max_leg1_price: Decimal::try_from(
+                entry
+                    .get("max_leg1_price")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.80),
+            )
+            .unwrap_or(dec!(0.80)),
+            merge_target_sum: Decimal::try_from(
+                entry
+                    .get("merge_target_sum")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.95),
+            )
+            .unwrap_or(dec!(0.95)),
             min_profit_target: Decimal::try_from(
                 entry
                     .get("min_profit_target")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(0.005),
+                    .unwrap_or(0.02),
             )
-            .unwrap_or(dec!(0.005)),
+            .unwrap_or(dec!(0.02)),
             max_wait_secs: timing
                 .get("max_wait_secs")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(180) as u64,
+            entry_after_start_max_secs: timing
+                .get("entry_after_start_max_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(120) as u64,
+            no_trade_last_secs: timing
+                .get("no_trade_last_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(60) as u64,
             max_wait_pct: timing
                 .get("max_wait_pct")
                 .and_then(|v| v.as_float())
@@ -361,6 +414,23 @@ impl StaggeredArbAdapter {
                 .get("cooldown_secs")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(5) as u64,
+            // Greeks integration — read from TOML [model] section
+            use_greeks: model
+                .get("use_greeks")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            min_gamma: model
+                .get("min_gamma")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.0),
+            max_theta_cost: model
+                .get("max_theta_cost")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.0),
+            delta_weighted_sizing: model
+                .get("delta_weighted_sizing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         };
 
         let fee_rate = Decimal::try_from(
@@ -454,6 +524,25 @@ impl StaggeredArbAdapter {
         }
     }
 
+    /// Count currently active cycles (open Leg1 positions + pending Leg1 orders).
+    fn active_cycle_count(&self) -> usize {
+        let open_positions = self
+            .positions
+            .iter()
+            .filter(|p| p.state == PaperPositionState::Leg1Filled)
+            .count();
+        let pending_leg1 = self.pending_leg1_events.len();
+        open_positions + pending_leg1
+    }
+
+    /// Check if a specific event already has an active cycle (open or pending).
+    fn has_active_cycle_for_event(&self, event_id: &str) -> bool {
+        self.positions
+            .iter()
+            .any(|p| p.event_id == event_id && p.state == PaperPositionState::Leg1Filled)
+            || self.pending_leg1_events.contains(event_id)
+    }
+
     // ─── Entry logic (ported from backtest engine) ──────────
 
     fn try_entry(&mut self, symbol: &str, ts: DateTime<Utc>) -> Vec<StrategyAction> {
@@ -499,12 +588,13 @@ impl StaggeredArbAdapter {
         up_ask: Option<Decimal>,
         down_ask: Option<Decimal>,
     ) -> Option<StrategyAction> {
-        let bc = &self.config.backtest_config;
+        let bc = self.config.backtest_config.clone();
 
         // 0. Balance pause — skip entries while waiting for claimer to free funds
         if !self.dry_run {
             if let Some(pause_until) = self.balance_pause_until {
                 if ts < pause_until {
+                    self.bump_entry_reject("balance_pause_active");
                     return None;
                 }
                 // Pause expired, reset
@@ -514,31 +604,63 @@ impl StaggeredArbAdapter {
             }
         }
 
+        // Per-event cycle lock: each event can only have one active cycle.
+        if self.has_active_cycle_for_event(&window.event_id) {
+            self.bump_entry_reject("event_cycle_active");
+            return None;
+        }
+
+        // Global concurrency cap: max N cycles across all events.
+        if self.active_cycle_count() >= bc.max_concurrent_positions {
+            self.bump_entry_reject("max_concurrent_reached");
+            return None;
+        }
+
         // 1. Time remaining
         let time_remaining = (window.end_time - ts).num_seconds() as f64;
         if time_remaining <= 0.0 || time_remaining < bc.min_time_remaining_secs as f64 {
+            self.bump_entry_reject("time_remaining_too_low");
+            return None;
+        }
+        // Entry timing gate: prefer entering soon after event starts.
+        let window_start = window.end_time - chrono::Duration::seconds(window.window_secs as i64);
+        let elapsed_since_start = (ts - window_start).num_seconds();
+        if elapsed_since_start < 0 {
+            self.bump_entry_reject("before_event_start");
+            return None;
+        }
+        if bc.entry_after_start_max_secs > 0
+            && elapsed_since_start > bc.entry_after_start_max_secs as i64
+        {
+            self.bump_entry_reject("entry_window_expired");
             return None;
         }
 
         // 2. Need both asks
         let (ua, da) = match (up_ask, down_ask) {
             (Some(u), Some(d)) => (u, d),
-            _ => return None,
+            _ => {
+                self.bump_entry_reject("missing_pm_quotes");
+                return None;
+            }
         };
 
         // 3. Min ask price filter
         if ua < bc.min_ask_price || da < bc.min_ask_price {
+            self.bump_entry_reject("ask_below_min");
             return None;
         }
 
         // 4. Min entry sum filter
         let current_sum = ua + da;
         if current_sum < bc.min_entry_sum {
+            self.bump_entry_reject("sum_below_min_entry_sum");
             return None;
         }
 
-        // 5. Max initial sum
-        if current_sum > bc.max_initial_sum {
+        // 5. Max entry sum filter (strict): require current_sum < max_initial_sum
+        if current_sum >= bc.max_initial_sum {
+            self.bump_entry_reject("sum_above_max_initial_sum");
             return None;
         }
 
@@ -555,55 +677,146 @@ impl StaggeredArbAdapter {
         };
 
         // 7. Estimate probability
-        let s0 = window.open_price.unwrap_or(st);
+        // Require a concrete event anchor (window open) to avoid false threshold events.
+        let s0 = match window.open_price {
+            Some(v) if v > Decimal::ZERO => v,
+            _ => {
+                self.bump_entry_reject("missing_window_open_anchor");
+                return None;
+            }
+        };
         let p_hat = estimate_probability(s0, st, sigma, time_remaining, bc.mu);
+
+        // 7b. Compute Greeks (optional)
+        let greeks = if bc.use_greeks {
+            super::gamma_scalping::greeks::binary_greeks(
+                st.to_f64().unwrap_or(0.0),
+                s0.to_f64().unwrap_or(0.0),
+                sigma,
+                time_remaining,
+                window.window_secs as f64,
+            )
+        } else {
+            None
+        };
+
+        // 7c. Greeks-based filters
+        if let Some(ref g) = greeks {
+            if bc.min_gamma > 0.0 && g.gamma.abs() < bc.min_gamma {
+                self.bump_entry_reject("greeks_gamma_below_min");
+                return None;
+            }
+            if bc.max_theta_cost > 0.0 && g.theta.abs() > bc.max_theta_cost {
+                self.bump_entry_reject("greeks_theta_above_max");
+                return None;
+            }
+        }
 
         // 8. Direction threshold
         if (p_hat - 0.5).abs() < bc.direction_threshold {
+            self.bump_entry_reject("direction_strength_below_threshold");
+            return None;
+        }
+
+        // 8b. Price displacement force from event open anchor.
+        // Require meaningful move and direction agreement to avoid noisy fake thresholds.
+        const MIN_PRICE_DISPLACEMENT: f64 = 0.0003; // 3 bps
+        let displacement = ((st - s0) / s0).to_f64().unwrap_or(0.0);
+        if displacement.abs() < MIN_PRICE_DISPLACEMENT {
+            self.bump_entry_reject("price_displacement_too_small");
             return None;
         }
 
         // 9. Direction: p_hat > 0.5 → buy UP first
-        let (leg1_dir, leg1_ask) = if p_hat > 0.5 {
+        let predicted_up = if bc.reverse_signal { p_hat < 0.5 } else { p_hat > 0.5 };
+
+        if predicted_up && displacement <= 0.0 {
+            self.bump_entry_reject("direction_displacement_mismatch");
+            return None;
+        }
+        if !predicted_up && displacement >= 0.0 {
+            self.bump_entry_reject("direction_displacement_mismatch");
+            return None;
+        }
+
+        // 9a. Greeks directional confirmation.
+        if let Some(ref g) = greeks {
+            const MIN_DELTA_ABS: f64 = 0.02;
+            const MIN_VEGA_ABS: f64 = 0.0001;
+            const MIN_D2_STRENGTH: f64 = 0.05;
+            if g.delta.abs() < MIN_DELTA_ABS || g.vega.abs() < MIN_VEGA_ABS {
+                self.bump_entry_reject("greeks_strength_too_low");
+                return None;
+            }
+            if predicted_up {
+                if g.d2 < MIN_D2_STRENGTH || g.fair_value <= 0.5 {
+                    self.bump_entry_reject("greeks_direction_mismatch");
+                    return None;
+                }
+            } else if g.d2 > -MIN_D2_STRENGTH || g.fair_value >= 0.5 {
+                self.bump_entry_reject("greeks_direction_mismatch");
+                return None;
+            }
+        }
+
+        // 9b. Binance L2 OI confirmation gate (feed -> market update -> entry filter).
+        const OI_CONFIRM_THRESHOLD: f64 = 0.005;
+        const OI_MAX_STALE_SECS: i64 = 60;
+        let obi_ts = match self.binance_l2_obi_ts.get(symbol) {
+            Some(v) => *v,
+            None => {
+                self.bump_entry_reject("obi_missing");
+                return None;
+            }
+        };
+        if (ts - obi_ts).num_seconds().abs() > OI_MAX_STALE_SECS {
+            self.bump_entry_reject("obi_stale");
+            return None;
+        }
+        let obi = match self.binance_l2_obi_5.get(symbol) {
+            Some(v) => v.to_f64().unwrap_or(0.0),
+            None => {
+                self.bump_entry_reject("obi_missing");
+                return None;
+            }
+        };
+        if predicted_up && obi < OI_CONFIRM_THRESHOLD {
+            self.bump_entry_reject("obi_not_confirmed");
+            return None;
+        }
+        if !predicted_up && obi > -OI_CONFIRM_THRESHOLD {
+            self.bump_entry_reject("obi_not_confirmed");
+            return None;
+        }
+
+        let (leg1_dir, leg1_ask) = if predicted_up {
             (Direction::Up, ua)
         } else {
             (Direction::Down, da)
         };
 
-        // 10. Target Leg2 feasibility
-        let target_leg2 = Decimal::ONE - leg1_ask - bc.min_profit_target;
+        // 9b. Leg1 price cap
+        if leg1_ask > bc.max_leg1_price {
+            self.bump_entry_reject("leg1_price_above_cap");
+            return None;
+        }
+
+        // 10. Target Leg2 feasibility: need leg1 + leg2 < merge_target_sum
+        let target_leg2 = bc.merge_target_sum - leg1_ask;
         if target_leg2 <= Decimal::ZERO {
+            self.bump_entry_reject("target_leg2_non_positive");
             return None;
         }
 
         // 11. Cooldown
         if let Some(last) = self.cooldowns.get(symbol) {
             if (ts - *last).num_seconds() < bc.cooldown_secs as i64 {
+                self.bump_entry_reject("cooldown_active");
                 return None;
             }
         }
 
-        // 12. Max concurrent positions
-        let active_count = self
-            .positions
-            .iter()
-            .filter(|p| p.state == PaperPositionState::Leg1Filled)
-            .count();
-        if active_count >= bc.max_concurrent_positions {
-            return None;
-        }
-
-        // 13. No duplicate event entry (check both filled positions and pending orders)
-        if self
-            .positions
-            .iter()
-            .any(|p| p.event_id == window.event_id && p.state == PaperPositionState::Leg1Filled)
-        {
-            return None;
-        }
-        if self.pending_leg1_events.contains(&window.event_id) {
-            return None;
-        }
+        // 12–13. (Moved to top of function: per-event cycle lock + global concurrency cap)
 
         // 14. Max trades per event
         if bc.max_trades_per_event > 0 {
@@ -613,11 +826,14 @@ impl StaggeredArbAdapter {
                 .copied()
                 .unwrap_or(0);
             if count >= bc.max_trades_per_event {
+                self.bump_entry_reject("max_trades_per_event_reached");
                 return None;
             }
         }
 
-        // 15. Calculate shares — Polymarket minimum is 5 shares
+        // 15. Calculate shares with venue minimums:
+        // - At least 5 shares
+        // - At least $1 notional for marketable BUY orders
         let mut fixed_amount_target: Option<Decimal> = None;
         let mut min_share_bump = false;
         let shares = if let Some(amount_usd) = self.fixed_amount_usd {
@@ -626,16 +842,29 @@ impl StaggeredArbAdapter {
                 .map(|d| d.max(Decimal::ZERO));
             let price_f64 = leg1_ask.to_f64().unwrap_or(0.5);
             if price_f64 > 0.0 {
-                let calc = (amount_usd / price_f64).floor() as u64;
-                min_share_bump = calc < 5;
-                calc.max(5) // Polymarket enforces minimum 5 shares
+                let calc_from_target = (amount_usd / price_f64).ceil() as u64;
+                let min_shares_for_notional = (1.0_f64 / price_f64).ceil() as u64;
+                let adjusted = calc_from_target.max(min_shares_for_notional).max(5);
+                min_share_bump = adjusted > calc_from_target;
+                adjusted
             } else {
                 bc.shares_per_trade.max(5)
             }
         } else {
-            bc.shares_per_trade.max(5)
+            let base_shares = bc.shares_per_trade.max(5);
+            if bc.delta_weighted_sizing {
+                if let Some(ref g) = greeks {
+                    let scale = (g.delta.abs() * 2.0).clamp(0.5, 2.0);
+                    ((base_shares as f64 * scale).round() as u64).max(5)
+                } else {
+                    base_shares
+                }
+            } else {
+                base_shares
+            }
         };
         if shares == 0 {
+            self.bump_entry_reject("zero_share_sizing");
             return None;
         }
 
@@ -649,7 +878,7 @@ impl StaggeredArbAdapter {
                 if leg1_notional > target * dec!(1.20) && !self.fixed_amount_overage_warned {
                     let over_pct = ((leg1_notional - target) / target) * dec!(100);
                     warn!(
-                        "[STAG-ARB] fixed_amount_usd=${:.4} inflated to actual_leg_notional=${:.4} (+{:.1}%) because minimum shares=5",
+                        "[STAG-ARB] fixed_amount_usd=${:.4} inflated to actual_leg_notional=${:.4} (+{:.1}%) because venue minimums apply ($1 notional / 5 shares)",
                         target, leg1_notional, over_pct
                     );
                     self.fixed_amount_overage_warned = true;
@@ -662,6 +891,7 @@ impl StaggeredArbAdapter {
         let available_before = self.available_balance_for_leg1();
         let remaining_after = available_before - total_cost;
         if total_cost > available_before || remaining_after < self.min_balance_usd {
+            self.bump_entry_reject("reserve_guard");
             info!(
                 "[STAG-ARB] SKIP ENTRY {} reserve_guard available=${:.4} cost=${:.4} min_balance=${:.4}",
                 symbol, available_before, total_cost, self.min_balance_usd
@@ -691,6 +921,7 @@ impl StaggeredArbAdapter {
             self.positions.push(PaperPosition {
                 symbol: symbol.to_string(),
                 event_id: window.event_id.clone(),
+                condition_id: window.condition_id.clone(),
                 up_token: window.up_token.clone(),
                 down_token: window.down_token.clone(),
                 leg1_direction: leg1_dir.clone(),
@@ -717,6 +948,7 @@ impl StaggeredArbAdapter {
                 symbol, leg1_dir, leg1_ask, current_sum, p_hat, sigma,
             );
             info!("{}", msg);
+            self.bump_entry_reject("entry_accepted");
 
             Some(StrategyAction::LogEvent {
                 event: StrategyEvent::new(StrategyEventType::EntryTriggered, msg),
@@ -736,6 +968,7 @@ impl StaggeredArbAdapter {
                 client_order_id.clone(),
                 LiveOrderTrack {
                     event_id: window.event_id.clone(),
+                    condition_id: window.condition_id.clone(),
                     symbol: symbol.to_string(),
                     up_token: window.up_token.clone(),
                     down_token: window.down_token.clone(),
@@ -746,6 +979,8 @@ impl StaggeredArbAdapter {
                     shares,
                     position_idx: None,
                     close_reason: None,
+                    submitted_at: ts,
+                    cancel_requested_at: None,
                 },
             );
             self.pending_leg1_events.insert(window.event_id.clone());
@@ -762,6 +997,7 @@ impl StaggeredArbAdapter {
                 sigma,
             );
             info!("{}", msg);
+            self.bump_entry_reject("entry_accepted");
 
             Some(StrategyAction::SubmitOrder {
                 client_order_id,
@@ -775,11 +1011,15 @@ impl StaggeredArbAdapter {
 
     fn check_leg2_opportunities(&mut self, symbol: &str, ts: DateTime<Utc>) -> Vec<StrategyAction> {
         let mut actions = Vec::new();
-        let bc = &self.config.backtest_config;
+        let bc = self.config.backtest_config.clone();
+        let mut leg2_skip_batch: HashMap<&'static str, u64> = HashMap::new();
 
         let pm_asks = match self.pm_asks.get(symbol) {
             Some(a) => *a,
-            None => return actions,
+            None => {
+                self.bump_leg2_skip("missing_pm_quotes");
+                return actions;
+            }
         };
 
         // Collect indices + actions (can't mutate while iterating)
@@ -792,73 +1032,10 @@ impl StaggeredArbAdapter {
 
             // Skip positions with in-flight Leg2 orders
             if self.pending_leg2_positions.contains(&i) {
+                *leg2_skip_batch.entry("leg2_order_pending").or_default() += 1;
                 continue;
             }
 
-            let other_ask = match pos.leg1_direction {
-                Direction::Up => pm_asks.1,
-                Direction::Down => pm_asks.0,
-            };
-            let other_ask = match other_ask {
-                Some(a) if a >= bc.min_ask_price => a,
-                _ => continue,
-            };
-
-            let current_sum = pos.leg1_price + other_ask;
-            let all_in_sum = (pos.leg1_price + other_ask) * (Decimal::ONE + self.config.fee_rate);
-            let net_profit_per_share = Decimal::ONE - all_in_sum;
-            let secs_since_leg1 = (ts - pos.leg1_time).num_seconds();
-            let leg2_ready = secs_since_leg1 >= bc.min_leg2_delay_secs as i64;
-            let threshold_crossed = current_sum >= bc.force_complete_threshold;
-
-            // A. Profitable merge after fees
-            if net_profit_per_share >= bc.min_profit_target && leg2_ready {
-                leg2_fills.push((i, other_ask, "merge".to_string()));
-                continue;
-            }
-
-            // B. Lock any net profit after fees
-            if net_profit_per_share > Decimal::ZERO && leg2_ready {
-                leg2_fills.push((i, other_ask, "merge".to_string()));
-                continue;
-            }
-
-            // C. Leg1 loss guard (if configured)
-            if bc.max_leg1_loss > Decimal::ZERO && leg2_ready {
-                let leg1_mark = match pos.leg1_direction {
-                    Direction::Up => pm_asks.0,
-                    Direction::Down => pm_asks.1,
-                };
-                if let Some(mark) = leg1_mark {
-                    let leg1_loss = (pos.leg1_price - mark).max(Decimal::ZERO);
-                    if leg1_loss >= bc.max_leg1_loss {
-                        if threshold_crossed {
-                            leg2_fills.push((i, other_ask, "forced_stop_loss".to_string()));
-                        } else {
-                            debug!(
-                                "[STAG-ARB] force stop-loss blocked by threshold symbol={} sum={:.4} threshold={:.4}",
-                                symbol, current_sum, bc.force_complete_threshold
-                            );
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            // D. Timeout — force-complete
-            if ts >= pos.wait_deadline && leg2_ready {
-                if threshold_crossed {
-                    leg2_fills.push((i, other_ask, "forced_timeout".to_string()));
-                } else {
-                    debug!(
-                        "[STAG-ARB] force timeout blocked by threshold symbol={} sum={:.4} threshold={:.4}",
-                        symbol, current_sum, bc.force_complete_threshold
-                    );
-                }
-                continue;
-            }
-
-            // E. Time safety — not enough time left
             let time_remaining = match self.active_windows.get(symbol) {
                 Some(windows) => windows
                     .iter()
@@ -867,14 +1044,161 @@ impl StaggeredArbAdapter {
                     .unwrap_or(f64::MAX),
                 None => f64::MAX,
             };
+            let in_final_window = bc.no_trade_last_secs > 0
+                && time_remaining <= bc.no_trade_last_secs as f64
+                && time_remaining > 0.0;
+
+            let other_ask = match pos.leg1_direction {
+                Direction::Up => pm_asks.1,
+                Direction::Down => pm_asks.0,
+            };
+            let other_ask = match other_ask {
+                Some(a) if a >= bc.min_ask_price => a,
+                Some(_) => {
+                    *leg2_skip_batch.entry("other_ask_below_min").or_default() += 1;
+                    continue;
+                }
+                None => {
+                    *leg2_skip_batch.entry("missing_other_ask").or_default() += 1;
+                    continue;
+                }
+            };
+
+            let current_sum = pos.leg1_price + other_ask;
+            let all_in_sum = (pos.leg1_price + other_ask) * (Decimal::ONE + self.config.fee_rate);
+            let net_profit_per_share = Decimal::ONE - all_in_sum;
+            let secs_since_leg1 = (ts - pos.leg1_time).num_seconds();
+            let leg2_ready = secs_since_leg1 >= bc.min_leg2_delay_secs as i64;
+            if !leg2_ready {
+                *leg2_skip_batch.entry("min_leg2_delay").or_default() += 1;
+                continue;
+            }
+            // "Forced" paths (timeout / time-safety / stop-loss / final-window) should not be
+            // blocked by the final_minute_block, otherwise positions can
+            // remain open until settlement in low-liquidity windows.
+
+            // A. Merge target reached (primary close condition) — blocked in final window
+            if !in_final_window && current_sum <= bc.merge_target_sum && leg2_ready {
+                leg2_fills.push((i, other_ask, "merge".to_string()));
+                continue;
+            }
+
+            // B. Profitable merge after fees — blocked in final window
+            if !in_final_window && net_profit_per_share >= bc.min_profit_target && leg2_ready {
+                leg2_fills.push((i, other_ask, "merge".to_string()));
+                continue;
+            }
+
+            // C. Lock any net profit after fees — blocked in final window
+            if !in_final_window && net_profit_per_share > Decimal::ZERO && leg2_ready {
+                leg2_fills.push((i, other_ask, "merge".to_string()));
+                continue;
+            }
+
+            // D. Leg1 loss guard (if configured) — always allowed
+            if bc.max_leg1_loss > Decimal::ZERO && leg2_ready {
+                let leg1_mark = match pos.leg1_direction {
+                    Direction::Up => pm_asks.0,
+                    Direction::Down => pm_asks.1,
+                };
+                if let Some(mark) = leg1_mark {
+                    let leg1_loss = (pos.leg1_price - mark).max(Decimal::ZERO);
+                    if leg1_loss >= bc.max_leg1_loss {
+                        leg2_fills.push((i, other_ask, "forced_stop_loss".to_string()));
+                        continue;
+                    }
+                }
+            }
+
+            // E. Timeout — force-complete — always allowed
+            if ts >= pos.wait_deadline && leg2_ready {
+                leg2_fills.push((i, other_ask, "forced_timeout".to_string()));
+                continue;
+            }
+
+            // F. Time safety — not enough time left — always allowed
             if time_remaining < bc.min_time_remaining_secs as f64 && leg2_ready {
-                if threshold_crossed {
-                    leg2_fills.push((i, other_ask, "forced_time_safety".to_string()));
-                } else {
-                    debug!(
-                        "[STAG-ARB] force time-safety blocked by threshold symbol={} sum={:.4} threshold={:.4}",
-                        symbol, current_sum, bc.force_complete_threshold
-                    );
+                leg2_fills.push((i, other_ask, "forced_time_safety".to_string()));
+                continue;
+            }
+
+            // G. Final window smart close — use probability to decide.
+            //
+            // In the last no_trade_last_secs (30s), compute p_hat to assess
+            // whether our Leg1 direction is likely to win at settlement:
+            //
+            //   p_win HIGH (>0.80): our side is strongly favored → let it settle
+            //     single-leg. EV of settlement > cost of buying expensive Leg2.
+            //   p_win LOW (<0.80) or uncertain: directional risk too high →
+            //     force buy Leg2 to lock in a known (possibly negative) outcome.
+            //
+            // This avoids the worst case: holding a losing single-leg to $0.
+            if in_final_window && leg2_ready {
+                // Compute p_hat for this position's window
+                let window_info = self.active_windows.get(symbol).and_then(|ws| {
+                    ws.iter().find(|w| w.event_id == pos.event_id)
+                });
+                let s0 = window_info.and_then(|w| w.open_price);
+                let window_secs = window_info.map(|w| w.window_secs).unwrap_or(300);
+                let st = self.spot_prices.get(symbol).map(|s| s.price);
+                let sigma = self.spot_prices.get(symbol)
+                    .and_then(|s| s.volatility(bc.vol_lookback_secs))
+                    .and_then(|v| v.to_f64())
+                    .map(|tick_vol| {
+                        let n = self.spot_prices.get(symbol)
+                            .map(|s| s.history_len().min(5000) as f64)
+                            .unwrap_or(100.0);
+                        (tick_vol * n.sqrt()).max(bc.vol_floor)
+                    })
+                    .unwrap_or(bc.vol_floor);
+
+                let should_force_close = match (s0, st) {
+                    (Some(s0_val), Some(st_val)) if s0_val > Decimal::ZERO => {
+                        let p_hat = estimate_probability(
+                            s0_val, st_val, sigma, time_remaining, bc.mu,
+                        );
+                        // p_win = probability that OUR Leg1 direction wins
+                        let p_win = match pos.leg1_direction {
+                            Direction::Up => p_hat,
+                            Direction::Down => 1.0 - p_hat,
+                        };
+
+                        // Also check: is price near the strike? (high uncertainty zone)
+                        let displacement = ((st_val - s0_val) / s0_val)
+                            .to_f64().unwrap_or(0.0).abs();
+                        let near_strike = displacement < 0.001; // within 10 bps
+
+                        // Also check: is vol high relative to time left?
+                        // High vol + little time = anything can happen
+                        let vol_time_ratio = sigma / (time_remaining / window_secs as f64).max(0.01);
+                        let high_vol_regime = vol_time_ratio > 0.05;
+
+                        if p_win >= 0.80 && !near_strike {
+                            // Strongly in our favor AND price has moved away from strike
+                            // → let it settle single-leg for higher EV
+                            info!(
+                                "[STAG-ARB] FINAL WINDOW HOLD {} {} p_win={:.3} disp={:.4} vol_ratio={:.4} — letting settle",
+                                symbol, pos.leg1_direction, p_win, displacement, vol_time_ratio,
+                            );
+                            false
+                        } else {
+                            // Uncertain or against us → force close
+                            info!(
+                                "[STAG-ARB] FINAL WINDOW CLOSE {} {} p_win={:.3} disp={:.4} near_strike={} high_vol={} — buying Leg2",
+                                symbol, pos.leg1_direction, p_win, displacement, near_strike, high_vol_regime,
+                            );
+                            true
+                        }
+                    }
+                    _ => {
+                        // No price data → can't assess risk → force close to be safe
+                        true
+                    }
+                };
+
+                if should_force_close {
+                    leg2_fills.push((i, other_ask, "forced_final_window".to_string()));
+                    continue;
                 }
             }
         }
@@ -885,6 +1209,9 @@ impl StaggeredArbAdapter {
             if let Some(action) = self.fill_leg2(idx, other_ask, &reason, ts) {
                 actions.push(action);
             }
+        }
+        for (reason, count) in leg2_skip_batch {
+            *self.leg2_skip_counts.entry(reason.to_string()).or_default() += count;
         }
         actions
     }
@@ -950,7 +1277,7 @@ impl StaggeredArbAdapter {
                 closed_at: ts,
             });
 
-            let tag = if reason == "merge" { "MERGE" } else { "FORCED" };
+            let tag = if reason == "merge" { "COMPLETE" } else { "FORCED" };
             let msg =
                 format!(
                 "[STAG-ARB] {} {} cost=${:.4} payout=${:.4} pnl={}{:.4} wait={}s reason={} (paper)",
@@ -999,6 +1326,7 @@ impl StaggeredArbAdapter {
                 client_order_id.clone(),
                 LiveOrderTrack {
                     event_id: event_id.clone(),
+                    condition_id: pos.condition_id.clone(),
                     symbol: symbol.clone(),
                     up_token,
                     down_token,
@@ -1009,11 +1337,13 @@ impl StaggeredArbAdapter {
                     shares,
                     position_idx: Some(idx),
                     close_reason: Some(reason.to_string()),
+                    submitted_at: ts,
+                    cancel_requested_at: None,
                 },
             );
             self.pending_leg2_positions.insert(idx);
 
-            let tag = if reason == "merge" { "MERGE" } else { "FORCED" };
+            let tag = if reason == "merge" { "COMPLETE" } else { "FORCED" };
             let msg = format!(
                 "[STAG-ARB] LEG2 {} SUBMIT {} @ {:.2}¢ ({} shares, ${:.2}) reason={}",
                 tag,
@@ -1115,6 +1445,16 @@ impl Strategy for StaggeredArbAdapter {
                 }
             }
 
+            MarketUpdate::BinanceL2 {
+                symbol,
+                obi_5,
+                timestamp,
+                ..
+            } => {
+                self.binance_l2_obi_5.insert(symbol.clone(), *obi_5);
+                self.binance_l2_obi_ts.insert(symbol.clone(), *timestamp);
+            }
+
             MarketUpdate::PolymarketQuote {
                 token_id, quote, ..
             } => {
@@ -1145,6 +1485,7 @@ impl Strategy for StaggeredArbAdapter {
                 up_token,
                 down_token,
                 end_time,
+                condition_id,
                 ..
             } => {
                 let Some((symbol, window_secs)) = Self::series_to_symbol(series_id) else {
@@ -1190,6 +1531,7 @@ impl Strategy for StaggeredArbAdapter {
                         symbol: symbol.to_string(),
                         up_token: up_token.clone(),
                         down_token: down_token.clone(),
+                        condition_id: condition_id.clone(),
                         end_time: *end_time,
                         open_price,
                         window_secs,
@@ -1262,6 +1604,7 @@ impl Strategy for StaggeredArbAdapter {
                     self.positions.push(PaperPosition {
                         symbol: track.symbol.clone(),
                         event_id: track.event_id.clone(),
+                        condition_id: track.condition_id.clone(),
                         up_token: track.up_token.clone(),
                         down_token: track.down_token.clone(),
                         leg1_direction: track.direction.clone(),
@@ -1319,7 +1662,7 @@ impl Strategy for StaggeredArbAdapter {
                             let close_reason =
                                 track.close_reason.as_deref().unwrap_or("merge").to_string();
                             let exit_reason = if close_reason == "merge" {
-                                "live_merge".to_string()
+                                "live_leg2_complete".to_string()
                             } else {
                                 "live_forced".to_string()
                             };
@@ -1353,7 +1696,7 @@ impl Strategy for StaggeredArbAdapter {
                             });
 
                             let tag = if close_reason == "merge" {
-                                "MERGE"
+                                "COMPLETE"
                             } else {
                                 "FORCED"
                             };
@@ -1379,6 +1722,7 @@ impl Strategy for StaggeredArbAdapter {
                                     ),
                                 ),
                             });
+
                         }
                     }
                 }
@@ -1471,6 +1815,71 @@ impl Strategy for StaggeredArbAdapter {
     async fn on_tick(&mut self, now: DateTime<Utc>) -> Result<Vec<StrategyAction>> {
         let mut actions = Vec::new();
 
+        // 0. Cancel stale orders — two-phase approach to avoid race conditions.
+        //
+        // Phase 1: Order unfilled for >30s → send CancelOrder, mark cancel_requested_at.
+        //          Do NOT remove from live_orders yet — let on_order_update handle cleanup
+        //          when the exchange confirms Cancelled or Filled.
+        //
+        // Phase 2: Cancel was requested >60s ago but no callback arrived (lost message) →
+        //          hard cleanup as last resort.
+        const STALE_ORDER_SECS: i64 = 30;
+        const HARD_CLEANUP_SECS: i64 = 90;
+
+        // Phase 1: request cancel for stale orders
+        let cancel_ids: Vec<String> = self
+            .live_orders
+            .iter()
+            .filter(|(_, track)| {
+                track.cancel_requested_at.is_none()
+                    && (now - track.submitted_at).num_seconds() > STALE_ORDER_SECS
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for client_id in &cancel_ids {
+            if let Some(track) = self.live_orders.get_mut(client_id) {
+                info!(
+                    "[STAG-ARB] STALE ORDER CANCEL leg={} {} {} age={}s price={:.2}¢",
+                    track.leg,
+                    track.symbol,
+                    track.event_id,
+                    (now - track.submitted_at).num_seconds(),
+                    track.price * dec!(100),
+                );
+                track.cancel_requested_at = Some(now);
+                actions.push(StrategyAction::CancelOrder {
+                    order_id: client_id.clone(),
+                });
+            }
+        }
+
+        // Phase 2: hard cleanup — cancel was sent but no callback after 90s total
+        let orphan_ids: Vec<String> = self
+            .live_orders
+            .iter()
+            .filter(|(_, track)| {
+                track.cancel_requested_at.is_some()
+                    && (now - track.submitted_at).num_seconds() > HARD_CLEANUP_SECS
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for client_id in orphan_ids {
+            if let Some(track) = self.live_orders.remove(&client_id) {
+                warn!(
+                    "[STAG-ARB] ORPHAN ORDER HARD CLEANUP leg={} {} {} age={}s — no callback received",
+                    track.leg,
+                    track.symbol,
+                    track.event_id,
+                    (now - track.submitted_at).num_seconds(),
+                );
+                if track.leg == 1 {
+                    self.pending_leg1_events.remove(&track.event_id);
+                } else if let Some(idx) = track.position_idx {
+                    self.pending_leg2_positions.remove(&idx);
+                }
+            }
+        }
+
         // 1. Clean expired windows
         for windows in self.active_windows.values_mut() {
             windows.retain(|w| w.end_time > now);
@@ -1536,6 +1945,12 @@ impl Strategy for StaggeredArbAdapter {
         metrics.insert("merge_count".to_string(), merges.to_string());
         metrics.insert("forced_count".to_string(), forced.to_string());
         metrics.insert("dry_run".to_string(), self.dry_run.to_string());
+        for (k, v) in self.entry_reject_counts.iter() {
+            metrics.insert(format!("entry_gate_{}", k), v.to_string());
+        }
+        for (k, v) in self.leg2_skip_counts.iter() {
+            metrics.insert(format!("leg2_gate_{}", k), v.to_string());
+        }
 
         StrategyStateInfo {
             strategy_id: self.id.clone(),
@@ -1654,8 +2069,10 @@ symbols = ["BTCUSDT"]
 shares_per_trade = 20
 max_concurrent = 3
 direction_threshold = 0.03
-max_initial_sum = 1.10
-min_profit_target = 0.005
+max_initial_sum = 1.20
+max_leg1_price = 0.80
+merge_target_sum = 0.95
+min_profit_target = 0.02
 min_ask_price = 0.05
 min_entry_sum = 0.70
 
@@ -1729,6 +2146,7 @@ series_ids = ["10684", "10192", "10684"]
         adapter.positions.push(PaperPosition {
             symbol: "BTCUSDT".into(),
             event_id: "evt".into(),
+            condition_id: None,
             up_token: "up".into(),
             down_token: "down".into(),
             leg1_direction: Direction::Up,
@@ -1771,6 +2189,7 @@ min_balance_usd = 9.0
             symbol: "BTCUSDT".into(),
             up_token: "up-token".into(),
             down_token: "down-token".into(),
+            condition_id: None,
             end_time: now + chrono::Duration::seconds(300),
             open_price: Some(dec!(100)),
             window_secs: 300,
@@ -1808,6 +2227,7 @@ min_balance_usd = 9.0
         adapter.positions.push(PaperPosition {
             symbol: "BTCUSDT".into(),
             event_id: "evt".into(),
+            condition_id: None,
             up_token: "up".into(),
             down_token: "down".into(),
             leg1_direction: Direction::Up,
@@ -1838,6 +2258,7 @@ min_balance_usd = 9.0
         adapter.positions.push(PaperPosition {
             symbol: "BTCUSDT".into(),
             event_id: "evt".into(),
+            condition_id: None,
             up_token: "up-token".into(),
             down_token: "down-token".into(),
             leg1_direction: Direction::Up,

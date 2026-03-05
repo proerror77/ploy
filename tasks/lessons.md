@@ -30,9 +30,24 @@
   - `cargo zigbuild --release --target x86_64-unknown-linux-gnu --features "claimer_daemon,api,pm_ctf"`
   - `file target/x86_64-unknown-linux-gnu/release/ploy` must contain `ELF 64-bit LSB`.
 
+- Pattern: 在共享工作目录直接改代码时，可能混入其他会话/任务生成的意外文件（例如未跟踪目录），导致变更污染与流程中断。
+- Rule: 非 trivial 开发任务开始前，默认先创建并切换到独立 `git worktree` + 独立分支；不得在主工作目录直接实施多文件改动。
+- Preflight checklist:
+  - `git fetch origin`
+  - `git worktree add ../<repo>-<task> -b session/<task> origin/main`
+  - `cd ../<repo>-<task>`
+  - `git status --short && git branch --show-current && git diff --name-only`
+
 - Pattern: User prefers no confirmation prompts before commit/push for completed requested work.
 - Rule: When requested outputs are complete and scoped changes are clear, commit and push directly without asking "要不要 commit" first.
 - Commit hygiene:
   - Stage only files related to current request.
   - Keep commits atomic and avoid including unrelated local changes.
   - Report commit SHA and push result in final response.
+
+- Pattern: User strategy operations run on remote host (`tango-1-1`), not local workstation.
+- Rule: For strategy/environment checks, deployment, startup validation, and runtime diagnostics, default to remote execution on `tango-1-1`. Use local checks only when explicitly requested.
+- Remote-first checklist:
+  - Verify target context first: `ssh tango-1-1 'hostname; pwd'`.
+  - Read env/config on remote paths before concluding readiness.
+  - Run strategy/platform start/health checks on `tango-1-1` and report remote results as source of truth.

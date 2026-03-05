@@ -60,6 +60,9 @@ struct CycleContext {
     cycle_version: i32,
 }
 
+/// `cycles.version` starts at 1 in the database migration.
+const INITIAL_CYCLE_DB_VERSION: i32 = 1;
+
 impl Default for EngineState {
     fn default() -> Self {
         Self {
@@ -492,7 +495,7 @@ impl StrategyEngine {
         request.time_in_force = TimeInForce::IOC;
 
         // Create cycle + move to LEG1_PENDING under state lock to prevent cross-round contamination.
-        let (cycle_id, expected_version) = {
+        let (cycle_id, expected_version, cycle_version) = {
             let mut state = self.state.write().await;
 
             // Re-validate state/round (they can change while we were doing async checks).
@@ -527,6 +530,7 @@ impl StrategyEngine {
                 .await?;
 
             let expected_version = state.version;
+            let cycle_version = INITIAL_CYCLE_DB_VERSION;
             state.strategy_state = StrategyState::Leg1Pending;
             state.current_cycle = Some(CycleContext {
                 cycle_id,
@@ -537,11 +541,11 @@ impl StrategyEngine {
                 leg1_order_id: request.client_order_id.clone(),
                 leg2_order_id: None,
                 force_leg2_attempted: false,
-                cycle_version: 0,
+                cycle_version,
             });
             state.version += 1;
 
-            (cycle_id, expected_version)
+            (cycle_id, expected_version, cycle_version)
         };
 
         // Persist state transition (best effort).
@@ -651,12 +655,28 @@ impl StrategyEngine {
         if result.filled_shares > 0 {
             let fill_price = result.avg_fill_price.unwrap_or(order_price);
 
-            // Update database with optimistic locking
-            if let Err(err) = self
+            // Update database with optimistic locking.
+            // `Ok(false)` is a version conflict and must be handled as a hard failure.
+            let leg1_update_error = match self
                 .store
-                .update_cycle_leg1(cycle_id, side, fill_price, result.filled_shares, 0)
+                .update_cycle_leg1(
+                    cycle_id,
+                    side,
+                    fill_price,
+                    result.filled_shares,
+                    cycle_version,
+                )
                 .await
             {
+                Ok(true) => None,
+                Ok(false) => Some(PloyError::InvalidState(format!(
+                    "Cycle {} version conflict while persisting Leg1 fill",
+                    cycle_id
+                ))),
+                Err(err) => Some(err),
+            };
+
+            if let Some(err) = leg1_update_error {
                 error!(
                     "Failed to update cycle {} after Leg1 fill (exposure exists): {}",
                     cycle_id, err
@@ -670,7 +690,7 @@ impl StrategyEngine {
                     leg1_order_id: result.order_id.clone(),
                     leg2_order_id: None,
                     force_leg2_attempted: false,
-                    cycle_version: 0,
+                    cycle_version,
                 };
 
                 let unwind_summary = match self
@@ -747,8 +767,8 @@ impl StrategyEngine {
                     leg1_order_id: result.order_id,
                     leg2_order_id: None,
                     force_leg2_attempted: false,
-                    // version 0 → +1 after leg1 update = 1
-                    cycle_version: 1,
+                    // `INITIAL_CYCLE_DB_VERSION` -> +1 after Leg1 fill.
+                    cycle_version: cycle_version + 1,
                 });
 
                 state.strategy_state = StrategyState::Leg1Filled;
@@ -953,7 +973,7 @@ impl StrategyEngine {
         );
 
         // Move to LEG2_PENDING under the state lock (re-validate first).
-        let expected_version = {
+        let (expected_version, cycle_state_expected_version, leg2_fill_expected_version) = {
             let mut state = self.state.write().await;
             if state.strategy_state != StrategyState::Leg1Filled {
                 return Err(PloyError::InvalidStateTransition {
@@ -973,12 +993,20 @@ impl StrategyEngine {
 
             let expected_version = state.version;
             state.strategy_state = StrategyState::Leg2Pending;
-            if let Some(active) = state.current_cycle.as_mut() {
-                active.leg2_order_id = Some(request.client_order_id.clone());
-                active.cycle_version += 1;
-            }
+            let active = state
+                .current_cycle
+                .as_mut()
+                .ok_or_else(|| PloyError::Internal("No active cycle".to_string()))?;
+            let cycle_state_expected_version = active.cycle_version;
+            active.leg2_order_id = Some(request.client_order_id.clone());
+            active.cycle_version += 1;
+            let leg2_fill_expected_version = active.cycle_version;
             state.version += 1;
-            expected_version
+            (
+                expected_version,
+                cycle_state_expected_version,
+                leg2_fill_expected_version,
+            )
         };
 
         // Persist state transition (best effort).
@@ -990,10 +1018,69 @@ impl StrategyEngine {
         .await;
 
         // Persist cycle state for crash recovery.
-        let _ = self
+        // `Ok(false)` is a version conflict and must be handled as a hard failure.
+        let cycle_state_update_error = match self
             .store
-            .update_cycle_state(ctx.cycle_id, StrategyState::Leg2Pending, ctx.cycle_version)
-            .await;
+            .update_cycle_state(
+                ctx.cycle_id,
+                StrategyState::Leg2Pending,
+                cycle_state_expected_version,
+            )
+            .await
+        {
+            Ok(true) => None,
+            Ok(false) => Some(PloyError::InvalidState(format!(
+                "Cycle {} version conflict while moving to LEG2_PENDING",
+                ctx.cycle_id
+            ))),
+            Err(err) => Some(err),
+        };
+
+        if let Some(err) = cycle_state_update_error {
+            let unwind_summary = match self
+                .unwind_leg1_exposure(&ctx, &round, ctx.leg1_shares)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => format!("unwind failed: {}", e),
+            };
+
+            let reason = format!(
+                "Failed to persist LEG2_PENDING (expected version {}): {}; {}",
+                cycle_state_expected_version, err, unwind_summary
+            );
+            if let Err(e) = self.store.abort_cycle(ctx.cycle_id, &reason).await {
+                error!("Failed to abort cycle {} in DB: {}", ctx.cycle_id, e);
+            }
+            self.risk_manager
+                .record_failure("Failed to persist LEG2_PENDING state")
+                .await;
+            self.persist_halt_if_needed().await;
+
+            let today = Utc::now().date_naive();
+            if let Err(e) = self.store.record_cycle_abort(today).await {
+                error!("Failed to record cycle abort: {}", e);
+            }
+
+            let halt_reason = "Failed to persist LEG2_PENDING state - open exposure";
+            self.risk_manager.trigger_circuit_breaker(halt_reason).await;
+            if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                error!("Failed to persist halt_trading: {}", e);
+            }
+            self.persist_halt_if_needed().await;
+
+            {
+                let mut state = self.state.write().await;
+                state.strategy_state = StrategyState::Abort;
+                state.current_cycle = None;
+                state.version += 1;
+            }
+
+            self.persist_strategy_state_best_effort(StrategyState::Abort, round.id, None)
+                .await;
+
+            return Err(err);
+        }
 
         // Persist the intent before submitting to the exchange (best effort).
         let client_order_id = request.client_order_id.clone();
@@ -1153,24 +1240,66 @@ impl StrategyEngine {
                 self.calculator
                     .expected_pnl(result.filled_shares, ctx.leg1_price, fill_price);
 
-            // Update database with optimistic locking
-            let mut cycle_update_error: Option<PloyError> = None;
-            if let Err(err) = self
+            // Update database with optimistic locking.
+            // `Ok(false)` is a version conflict and must be handled as a hard failure.
+            let cycle_update_error = match self
                 .store
                 .update_cycle_leg2(
                     ctx.cycle_id,
                     fill_price,
                     result.filled_shares,
                     net_pnl,
-                    ctx.cycle_version,
+                    leg2_fill_expected_version,
                 )
                 .await
             {
+                Ok(true) => None,
+                Ok(false) => Some(PloyError::InvalidState(format!(
+                    "Cycle {} version conflict while persisting Leg2 fill",
+                    ctx.cycle_id
+                ))),
+                Err(err) => Some(err),
+            };
+
+            if let Some(err) = cycle_update_error {
                 error!(
                     "Failed to update cycle {} after Leg2 fill: {}",
                     ctx.cycle_id, err
                 );
-                cycle_update_error = Some(err);
+
+                let today = Utc::now().date_naive();
+                if let Err(e) = self
+                    .store
+                    .abort_cycle(ctx.cycle_id, &format!("DB update failed after Leg2 fill: {}", err))
+                    .await
+                {
+                    error!("Failed to abort cycle {} in DB: {}", ctx.cycle_id, e);
+                }
+                self.risk_manager
+                    .record_failure("DB update failed after Leg2 fill")
+                    .await;
+                if let Err(e) = self.store.record_cycle_abort(today).await {
+                    error!("Failed to record cycle abort: {}", e);
+                }
+
+                let halt_reason = "DB update failed after Leg2 fill";
+                self.risk_manager.trigger_circuit_breaker(halt_reason).await;
+                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
+                    error!("Failed to persist halt_trading: {}", e);
+                }
+                self.persist_halt_if_needed().await;
+
+                {
+                    let mut state = self.state.write().await;
+                    state.strategy_state = StrategyState::Abort;
+                    state.current_cycle = None;
+                    state.version += 1;
+                }
+
+                self.persist_strategy_state_best_effort(StrategyState::Abort, round.id, None)
+                    .await;
+
+                return Err(err);
             }
 
             // Record success
@@ -1181,15 +1310,6 @@ impl StrategyEngine {
             let today = Utc::now().date_naive();
             if let Err(e) = self.store.record_cycle_completion(today, net_pnl).await {
                 error!("Failed to record cycle completion: {}", e);
-            }
-
-            if cycle_update_error.is_some() {
-                let halt_reason = "DB update failed after Leg2 fill";
-                self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                if let Err(e) = self.store.halt_trading(today, halt_reason).await {
-                    error!("Failed to persist halt_trading: {}", e);
-                }
-                self.persist_halt_if_needed().await;
             }
 
             {
@@ -1238,10 +1358,6 @@ impl StrategyEngine {
                 "Leg2 filled: {} shares @ {}. Cycle PnL: {}",
                 result.filled_shares, fill_price, net_pnl
             );
-
-            if let Some(err) = cycle_update_error {
-                return Err(err);
-            }
         } else {
             // Leg2 failed (or only partially filled) - this is bad, we have open exposure.
             error!(
@@ -1702,8 +1818,10 @@ mod tests {
     use crate::exchange::{ExchangeClient, ExchangeKind};
     use crate::strategy::execution::engine_store::mock::MockStore;
     use async_trait::async_trait;
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, NaiveDate, Utc};
     use rust_decimal_macros::dec;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::Mutex;
 
     // ───────────────────── Mock Exchange Client ─────────────────────
 
@@ -1857,6 +1975,226 @@ mod tests {
         StrategyEngine::new(config, MockStore::new(), executor, quote_cache)
             .await
             .expect("engine should construct")
+    }
+
+    async fn test_engine_with_store(store: impl EngineStore + 'static) -> StrategyEngine {
+        let config = test_config();
+        let executor = OrderExecutor::new_with_exchange(
+            Arc::new(MockExchangeClient),
+            config.execution.clone(),
+        );
+        let quote_cache = QuoteCache::new();
+        StrategyEngine::new(config, store, executor, quote_cache)
+            .await
+            .expect("engine should construct")
+    }
+
+    fn seed_quote(cache: &QuoteCache, token_id: &str, side: Side) {
+        cache.update(
+            token_id,
+            side,
+            Some(dec!(0.49)),
+            Some(dec!(0.51)),
+            Some(dec!(1000)),
+            Some(dec!(1000)),
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingStore {
+        inner: Arc<RecordingStoreInner>,
+    }
+
+    #[derive(Default)]
+    struct RecordingStoreInner {
+        next_id: AtomicI32,
+        fail_cycle_state: AtomicBool,
+        fail_leg1: AtomicBool,
+        fail_leg2: AtomicBool,
+        cycle_state_expected_versions: Mutex<Vec<i32>>,
+        leg1_expected_versions: Mutex<Vec<i32>>,
+        leg2_expected_versions: Mutex<Vec<i32>>,
+        abort_reasons: Mutex<Vec<String>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(RecordingStoreInner {
+                    next_id: AtomicI32::new(1),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn with_cycle_state_conflict(self) -> Self {
+            self.inner.fail_cycle_state.store(true, Ordering::SeqCst);
+            self
+        }
+
+        fn with_leg1_conflict(self) -> Self {
+            self.inner.fail_leg1.store(true, Ordering::SeqCst);
+            self
+        }
+
+        fn with_leg2_conflict(self) -> Self {
+            self.inner.fail_leg2.store(true, Ordering::SeqCst);
+            self
+        }
+
+        fn next_id(&self) -> i32 {
+            self.inner.next_id.fetch_add(1, Ordering::SeqCst)
+        }
+
+        fn cycle_state_expected_versions(&self) -> Vec<i32> {
+            self.inner
+                .cycle_state_expected_versions
+                .lock()
+                .expect("cycle_state_expected_versions lock poisoned")
+                .clone()
+        }
+
+        fn leg1_expected_versions(&self) -> Vec<i32> {
+            self.inner
+                .leg1_expected_versions
+                .lock()
+                .expect("leg1_expected_versions lock poisoned")
+                .clone()
+        }
+
+        fn leg2_expected_versions(&self) -> Vec<i32> {
+            self.inner
+                .leg2_expected_versions
+                .lock()
+                .expect("leg2_expected_versions lock poisoned")
+                .clone()
+        }
+
+        fn abort_reasons(&self) -> Vec<String> {
+            self.inner
+                .abort_reasons
+                .lock()
+                .expect("abort_reasons lock poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl EngineStore for RecordingStore {
+        async fn upsert_round(&self, _round: &Round) -> Result<i32> {
+            Ok(self.next_id())
+        }
+
+        async fn create_cycle(&self, _round_id: i32, _state: StrategyState) -> Result<i32> {
+            Ok(self.next_id())
+        }
+
+        async fn update_cycle_state(
+            &self,
+            _cycle_id: i32,
+            _state: StrategyState,
+            expected_version: i32,
+        ) -> Result<bool> {
+            self.inner
+                .cycle_state_expected_versions
+                .lock()
+                .expect("cycle_state_expected_versions lock poisoned")
+                .push(expected_version);
+            Ok(!self.inner.fail_cycle_state.load(Ordering::SeqCst))
+        }
+
+        async fn update_cycle_leg1(
+            &self,
+            _cycle_id: i32,
+            _side: Side,
+            _entry_price: Decimal,
+            _shares: u64,
+            expected_version: i32,
+        ) -> Result<bool> {
+            self.inner
+                .leg1_expected_versions
+                .lock()
+                .expect("leg1_expected_versions lock poisoned")
+                .push(expected_version);
+            Ok(!self.inner.fail_leg1.load(Ordering::SeqCst))
+        }
+
+        async fn update_cycle_leg2(
+            &self,
+            _cycle_id: i32,
+            _entry_price: Decimal,
+            _shares: u64,
+            _pnl: Decimal,
+            expected_version: i32,
+        ) -> Result<bool> {
+            self.inner
+                .leg2_expected_versions
+                .lock()
+                .expect("leg2_expected_versions lock poisoned")
+                .push(expected_version);
+            Ok(!self.inner.fail_leg2.load(Ordering::SeqCst))
+        }
+
+        async fn abort_cycle(&self, _cycle_id: i32, reason: &str) -> Result<()> {
+            self.inner
+                .abort_reasons
+                .lock()
+                .expect("abort_reasons lock poisoned")
+                .push(reason.to_string());
+            Ok(())
+        }
+
+        async fn insert_order(&self, _order: &Order) -> Result<i32> {
+            Ok(self.next_id())
+        }
+
+        async fn update_order_status(
+            &self,
+            _client_order_id: &str,
+            _status: OrderStatus,
+            _exchange_order_id: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn update_order_fill(
+            &self,
+            _client_order_id: &str,
+            _filled_shares: u64,
+            _avg_fill_price: Decimal,
+            _status: OrderStatus,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn update_strategy_state(
+            &self,
+            _state: StrategyState,
+            _round_id: Option<i32>,
+            _cycle_id: Option<i32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn increment_cycle_count(&self, _date: NaiveDate) -> Result<()> {
+            Ok(())
+        }
+
+        async fn record_cycle_completion(&self, _date: NaiveDate, _pnl: Decimal) -> Result<()> {
+            Ok(())
+        }
+
+        async fn record_cycle_abort(&self, _date: NaiveDate) -> Result<()> {
+            Ok(())
+        }
+
+        async fn record_cycle_abort_neutral(&self, _date: NaiveDate) -> Result<()> {
+            Ok(())
+        }
+
+        async fn halt_trading(&self, _date: NaiveDate, _reason: &str) -> Result<()> {
+            Ok(())
+        }
     }
 
     // ───────────────────── Tests ─────────────────────
@@ -2034,6 +2372,110 @@ mod tests {
         assert!(
             result.is_err(),
             "should reject live mode without confirm_fills"
+        );
+    }
+
+    #[tokio::test]
+    async fn leg_updates_should_use_incrementing_cycle_versions() {
+        let store = RecordingStore::new();
+        let engine = test_engine_with_store(store.clone()).await;
+
+        let round = test_round(15);
+        let up_token = round.up_token_id.clone();
+        let down_token = round.down_token_id.clone();
+        engine.set_round(round).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &up_token, Side::Up);
+        engine.enter_leg1(Side::Up, dec!(0.50)).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &down_token, Side::Down);
+        engine.enter_leg2(Side::Down, dec!(0.50)).await.unwrap();
+
+        assert_eq!(
+            store.leg1_expected_versions(),
+            vec![1],
+            "Leg1 update must use initial DB version"
+        );
+        assert_eq!(
+            store.cycle_state_expected_versions(),
+            vec![2],
+            "LEG2_PENDING transition must use post-Leg1 version"
+        );
+        assert_eq!(
+            store.leg2_expected_versions(),
+            vec![3],
+            "Leg2 fill update must use post-LEG2_PENDING version"
+        );
+    }
+
+    #[tokio::test]
+    async fn leg1_cycle_version_conflict_should_abort_and_error() {
+        let store = RecordingStore::new().with_leg1_conflict();
+        let engine = test_engine_with_store(store.clone()).await;
+
+        let round = test_round(15);
+        let up_token = round.up_token_id.clone();
+        engine.set_round(round).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &up_token, Side::Up);
+        let result = engine.enter_leg1(Side::Up, dec!(0.50)).await;
+
+        assert!(result.is_err(), "Leg1 version conflict must fail the cycle");
+        assert_eq!(engine.state().await, StrategyState::Abort);
+        assert!(
+            !store.abort_reasons().is_empty(),
+            "Leg1 version conflict should persist abort reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn leg2_pending_cycle_version_conflict_should_abort_and_error() {
+        let store = RecordingStore::new().with_cycle_state_conflict();
+        let engine = test_engine_with_store(store.clone()).await;
+
+        let round = test_round(15);
+        let up_token = round.up_token_id.clone();
+        let down_token = round.down_token_id.clone();
+        engine.set_round(round).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &up_token, Side::Up);
+        engine.enter_leg1(Side::Up, dec!(0.50)).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &down_token, Side::Down);
+        let result = engine.enter_leg2(Side::Down, dec!(0.50)).await;
+
+        assert!(
+            result.is_err(),
+            "LEG2_PENDING version conflict must fail the cycle"
+        );
+        assert_eq!(engine.state().await, StrategyState::Abort);
+        assert!(
+            !store.abort_reasons().is_empty(),
+            "LEG2_PENDING version conflict should persist abort reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn leg2_cycle_version_conflict_should_abort_and_error() {
+        let store = RecordingStore::new().with_leg2_conflict();
+        let engine = test_engine_with_store(store.clone()).await;
+
+        let round = test_round(15);
+        let up_token = round.up_token_id.clone();
+        let down_token = round.down_token_id.clone();
+        engine.set_round(round).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &up_token, Side::Up);
+        engine.enter_leg1(Side::Up, dec!(0.50)).await.unwrap();
+
+        seed_quote(&engine.quote_cache, &down_token, Side::Down);
+        let result = engine.enter_leg2(Side::Down, dec!(0.50)).await;
+
+        assert!(result.is_err(), "Leg2 version conflict must fail the cycle");
+        assert_eq!(engine.state().await, StrategyState::Abort);
+        assert!(
+            !store.abort_reasons().is_empty(),
+            "Leg2 version conflict should persist abort reason"
         );
     }
 }

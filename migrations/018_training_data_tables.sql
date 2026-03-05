@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS sync_records (
     pm_yes_price DECIMAL(10, 4),
     pm_no_price DECIMAL(10, 4),
     pm_market_slug VARCHAR(100),
+    pm_yes_token_id TEXT,
+    pm_no_token_id TEXT,
     bn_price_change_1s DECIMAL(10, 6),
     bn_price_change_5s DECIMAL(10, 6),
     bn_momentum DECIMAL(10, 6),
@@ -156,6 +158,8 @@ CREATE INDEX IF NOT EXISTS idx_sync_records_symbol
     ON sync_records(symbol);
 CREATE INDEX IF NOT EXISTS idx_sync_records_symbol_ts
     ON sync_records(symbol, timestamp);
+CREATE INDEX IF NOT EXISTS idx_sync_records_pm_market_slug
+    ON sync_records(pm_market_slug);
 
 -- ============================================================
 -- 7. pm_market_metadata — Market slug -> threshold/horizon/time

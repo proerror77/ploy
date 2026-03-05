@@ -21,7 +21,7 @@ pub enum WalletCommands {
 
 pub async fn run(cmd: WalletCommands, auth: &PmAuth, mode: OutputMode) -> anyhow::Result<()> {
     use polymarket_client_sdk::clob::types::request::*;
-    use polymarket_client_sdk::clob::types::AssetType;
+    use polymarket_client_sdk::clob::types::{AssetType, SignatureType};
     use polymarket_client_sdk::clob::Client as ClobClient;
 
     let signer = auth.require_signer()?;
@@ -36,13 +36,19 @@ pub async fn run(cmd: WalletCommands, auth: &PmAuth, mode: OutputMode) -> anyhow
             }
         }
         WalletCommands::Balance => {
-            let client = ClobClient::new(
+            let mut auth_builder = ClobClient::new(
                 config.clob_base_url(),
                 polymarket_client_sdk::clob::Config::default(),
             )?
-            .authentication_builder(signer)
-            .authenticate()
-            .await?;
+            .authentication_builder(signer);
+
+            if let Some(funder) = auth.funder {
+                auth_builder = auth_builder
+                    .funder(funder)
+                    .signature_type(SignatureType::Proxy);
+            }
+
+            let client = auth_builder.authenticate().await?;
 
             let req = BalanceAllowanceRequest::builder()
                 .asset_type(AssetType::Collateral)
@@ -51,13 +57,19 @@ pub async fn run(cmd: WalletCommands, auth: &PmAuth, mode: OutputMode) -> anyhow
             output::print_debug(&bal, mode)?;
         }
         WalletCommands::ApiKeys => {
-            let client = ClobClient::new(
+            let mut auth_builder = ClobClient::new(
                 config.clob_base_url(),
                 polymarket_client_sdk::clob::Config::default(),
             )?
-            .authentication_builder(signer)
-            .authenticate()
-            .await?;
+            .authentication_builder(signer);
+
+            if let Some(funder) = auth.funder {
+                auth_builder = auth_builder
+                    .funder(funder)
+                    .signature_type(SignatureType::Proxy);
+            }
+
+            let client = auth_builder.authenticate().await?;
 
             let keys = client.api_keys().await?;
             output::print_debug(&keys, mode)?;
@@ -78,13 +90,19 @@ pub async fn run(cmd: WalletCommands, auth: &PmAuth, mode: OutputMode) -> anyhow
             );
         }
         WalletCommands::Notifications => {
-            let client = ClobClient::new(
+            let mut auth_builder = ClobClient::new(
                 config.clob_base_url(),
                 polymarket_client_sdk::clob::Config::default(),
             )?
-            .authentication_builder(signer)
-            .authenticate()
-            .await?;
+            .authentication_builder(signer);
+
+            if let Some(funder) = auth.funder {
+                auth_builder = auth_builder
+                    .funder(funder)
+                    .signature_type(SignatureType::Proxy);
+            }
+
+            let client = auth_builder.authenticate().await?;
 
             let notifs = client.notifications().await?;
             output::print_debug_items(&notifs, mode)?;

@@ -1470,7 +1470,9 @@ impl PolymarketClient {
             asset_id: Some(request.token_id.clone()),
             side: Some(format!("{:?}", request.order_side)),
             original_size: Some(request.shares.to_string()),
-            size_matched: Some("0".to_string()),
+            // Preserve immediate fill information from submit response.
+            // This lets executor/strategy correctly classify synchronous matches.
+            size_matched: Some(resp.taking_amount.to_string()),
             price: Some(request.limit_price.to_string()),
             associate_trades: None,
             created_at: Some(Utc::now().to_rfc3339()),

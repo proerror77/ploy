@@ -8,6 +8,7 @@ mod contracts;
 pub mod data_plane;
 pub mod freshness;
 pub mod persistence_pipeline;
+pub mod persistence_schema;
 mod platform;
 mod position;
 mod queue;

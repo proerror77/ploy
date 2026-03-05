@@ -79,7 +79,7 @@ impl RiskManager {
         }
 
         // Check time remaining
-        let remaining = round.seconds_remaining() as u64;
+        let remaining = u64::try_from(round.seconds_remaining()).unwrap_or(0);
         if remaining < self.config.min_remaining_seconds {
             return Err(RiskError::InsufficientTime {
                 remaining_secs: remaining,
@@ -105,7 +105,7 @@ impl RiskManager {
 
     /// Check if Leg2 must be forced (approaching round end)
     pub fn must_force_leg2(&self, round: &Round) -> bool {
-        let remaining = round.seconds_remaining() as u64;
+        let remaining = u64::try_from(round.seconds_remaining()).unwrap_or(0);
         remaining <= self.config.leg2_force_close_seconds
     }
 
@@ -333,5 +333,17 @@ mod tests {
         // Force when time is running out
         let round = test_round(15);
         assert!(risk.must_force_leg2(&round));
+    }
+
+    #[tokio::test]
+    async fn test_expired_round_treated_as_zero_remaining() {
+        let risk = RiskManager::new(test_config());
+        let round = test_round(-5);
+
+        // Expired round should not wrap to a huge positive value.
+        assert!(risk.must_force_leg2(&round));
+
+        let result = risk.check_leg1_entry(10, dec!(0.50), &round).await;
+        assert!(result.is_err());
     }
 }

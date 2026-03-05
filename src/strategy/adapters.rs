@@ -1298,6 +1298,8 @@ impl Strategy for MomentumStrategyAdapter {
                 }
             }
 
+            MarketUpdate::BinanceL2 { .. } => {}
+
             MarketUpdate::PolymarketQuote {
                 token_id,
                 quote,
