@@ -2627,27 +2627,51 @@ fn normalize_strategy_key(strategy: &str) -> String {
     strategy.to_ascii_lowercase().replace(['-', '_', ' '], "")
 }
 
-fn strategy_is_momentum(strategy_key: &str) -> bool {
-    strategy_key.contains("momentum") || strategy_key.contains("mom")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CryptoStrategyKind {
+    Momentum,
+    PatternMemory,
+    SplitArb,
+    LobMl,
+    #[cfg(feature = "rl")]
+    RlPolicy,
+    Unknown,
 }
 
-fn strategy_is_pattern_memory(strategy_key: &str) -> bool {
-    strategy_key.contains("pattern")
-        || strategy_key.contains("memory")
-        || strategy_key.contains("pattenmem")
-}
+fn classify_crypto_strategy(strategy: &str) -> CryptoStrategyKind {
+    let key = normalize_strategy_key(strategy);
 
-fn strategy_is_split_arb(strategy_key: &str) -> bool {
-    strategy_key.contains("splitarb")
-        || (strategy_key.contains("split") && strategy_key.contains("arb"))
-}
+    if key.contains("momentum")
+        || key == "mom"
+        || key == "directional"
+        || key == "directionalmomentum"
+    {
+        return CryptoStrategyKind::Momentum;
+    }
+    if key.contains("pattern") || key.contains("memory") || key.contains("pattenmem") {
+        return CryptoStrategyKind::PatternMemory;
+    }
+    if key.contains("splitarb")
+        || (key.contains("split") && key.contains("arb"))
+        || key.contains("staggeredarb")
+        || key.contains("gammascalping")
+    {
+        return CryptoStrategyKind::SplitArb;
+    }
+    if key.contains("lob")
+        || key.contains("ml")
+        || key.contains("dl")
+        || key.contains("deep")
+        || key.contains("learning")
+    {
+        return CryptoStrategyKind::LobMl;
+    }
+    #[cfg(feature = "rl")]
+    if key.contains("rl") || key.contains("policy") {
+        return CryptoStrategyKind::RlPolicy;
+    }
 
-fn strategy_is_lob_ml(strategy_key: &str) -> bool {
-    strategy_key.contains("lob")
-        || strategy_key.contains("ml")
-        || strategy_key.contains("dl")
-        || strategy_key.contains("deep")
-        || strategy_key.contains("learning")
+    CryptoStrategyKind::Unknown
 }
 
 fn normalize_horizon(value: &str) -> Option<&'static str> {
@@ -2718,15 +2742,17 @@ fn collect_runtime_crypto_strategy_targets(
             continue;
         }
 
-        let strategy_key = normalize_strategy_key(&dep.strategy);
-        if strategy_is_pattern_memory(&strategy_key) {
-            add_coins_from_selector(&dep.market_selector, &mut out.pattern_memory_coins);
-        }
-        if strategy_is_split_arb(&strategy_key) {
-            add_coins_from_selector(&dep.market_selector, &mut out.split_arb_coins);
-            if let Some(h) = normalize_horizon(dep.timeframe.as_str()) {
-                out.split_arb_horizons.insert(h.to_string());
+        match classify_crypto_strategy(&dep.strategy) {
+            CryptoStrategyKind::PatternMemory => {
+                add_coins_from_selector(&dep.market_selector, &mut out.pattern_memory_coins);
             }
+            CryptoStrategyKind::SplitArb => {
+                add_coins_from_selector(&dep.market_selector, &mut out.split_arb_coins);
+                if let Some(h) = normalize_horizon(dep.timeframe.as_str()) {
+                    out.split_arb_horizons.insert(h.to_string());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2900,36 +2926,42 @@ fn apply_strategy_deployments(
 
         match dep.domain {
             Domain::Crypto => {
-                cfg.enable_crypto = true;
-                let strategy_key = normalize_strategy_key(&dep.strategy);
+                let mapped = match classify_crypto_strategy(&dep.strategy) {
+                    CryptoStrategyKind::Momentum => {
+                        cfg.enable_crypto_momentum = true;
+                        true
+                    }
+                    CryptoStrategyKind::PatternMemory => {
+                        cfg.enable_crypto_pattern_memory = true;
+                        true
+                    }
+                    CryptoStrategyKind::SplitArb => {
+                        cfg.enable_crypto_split_arb = true;
+                        true
+                    }
+                    CryptoStrategyKind::LobMl => {
+                        cfg.enable_crypto_lob_ml = true;
+                        true
+                    }
+                    #[cfg(feature = "rl")]
+                    CryptoStrategyKind::RlPolicy => {
+                        cfg.enable_crypto_rl_policy = true;
+                        true
+                    }
+                    CryptoStrategyKind::Unknown => {
+                        warn!(
+                            deployment_id = %dep.id,
+                            strategy = %dep.strategy,
+                            "unknown crypto strategy in deployment matrix; skipping built-in mapping"
+                        );
+                        false
+                    }
+                };
 
-                let mut matched = false;
-                if strategy_is_momentum(&strategy_key) {
-                    cfg.enable_crypto_momentum = true;
-                    matched = true;
+                if mapped {
+                    cfg.enable_crypto = true;
+                    add_coins_from_selector(&dep.market_selector, &mut coins);
                 }
-                if strategy_is_pattern_memory(&strategy_key) {
-                    cfg.enable_crypto_pattern_memory = true;
-                    matched = true;
-                }
-                if strategy_is_split_arb(&strategy_key) {
-                    cfg.enable_crypto_split_arb = true;
-                    matched = true;
-                }
-                if strategy_is_lob_ml(&strategy_key) {
-                    cfg.enable_crypto_lob_ml = true;
-                    matched = true;
-                }
-                #[cfg(feature = "rl")]
-                if strategy_key.contains("rl") || strategy_key.contains("policy") {
-                    cfg.enable_crypto_rl_policy = true;
-                    matched = true;
-                }
-                if !matched {
-                    cfg.enable_crypto_momentum = true;
-                }
-
-                add_coins_from_selector(&dep.market_selector, &mut coins);
             }
             Domain::Sports => cfg.enable_sports = true,
             Domain::Politics => cfg.enable_politics = true,
@@ -2938,25 +2970,6 @@ fn apply_strategy_deployments(
                 custom_domains.insert(format!("custom:{}", custom_domain));
             }
         }
-    }
-
-    if cfg.enable_crypto
-        && !cfg.enable_crypto_momentum
-        && !cfg.enable_crypto_pattern_memory
-        && !cfg.enable_crypto_split_arb
-        && !cfg.enable_crypto_lob_ml
-        && {
-            #[cfg(feature = "rl")]
-            {
-                !cfg.enable_crypto_rl_policy
-            }
-            #[cfg(not(feature = "rl"))]
-            {
-                true
-            }
-        }
-    {
-        cfg.enable_crypto_momentum = true;
     }
 
     if !coins.is_empty() {
@@ -6914,6 +6927,32 @@ mod tests {
         }
     }
 
+    fn crypto_deployment(strategy: &str, enabled: bool) -> StrategyDeployment {
+        StrategyDeployment {
+            id: format!("deploy.crypto.{strategy}.5m"),
+            strategy: strategy.to_string(),
+            strategy_version: "v1".to_string(),
+            domain: Domain::Crypto,
+            market_selector: MarketSelector::Static {
+                symbol: Some("BTCUSDT".to_string()),
+                series_id: None,
+                market_slug: None,
+            },
+            timeframe: Timeframe::M5,
+            enabled,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 0,
+            cooldown_secs: 60,
+            account_ids: Vec::new(),
+            execution_mode: DeploymentExecutionMode::Any,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        }
+    }
+
     #[test]
     fn apply_strategy_deployments_enables_economics_domain() {
         let mut cfg = PlatformBootstrapConfig::default();
@@ -6935,6 +6974,38 @@ mod tests {
         apply_strategy_deployments(&mut cfg, &deployments, "default", false);
 
         assert!(!cfg.enable_economics);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("totally_new_crypto_strategy", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(
+            !cfg.enable_crypto,
+            "unknown crypto strategy should not auto-enable crypto domain"
+        );
+        assert!(
+            !cfg.enable_crypto_momentum,
+            "unknown crypto strategy must not auto-route to momentum"
+        );
+        assert!(!cfg.enable_crypto_pattern_memory);
+        assert!(!cfg.enable_crypto_split_arb);
+        assert!(!cfg.enable_crypto_lob_ml);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_maps_gamma_scalping_alias_to_split_arb() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("gamma_scalping", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(cfg.enable_crypto);
+        assert!(cfg.enable_crypto_split_arb);
+        assert!(!cfg.enable_crypto_momentum);
     }
 
     #[test]
