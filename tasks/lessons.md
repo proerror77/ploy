@@ -51,3 +51,18 @@
   - Verify target context first: `ssh tango-1-1 'hostname; pwd'`.
   - Read env/config on remote paths before concluding readiness.
   - Run strategy/platform start/health checks on `tango-1-1` and report remote results as source of truth.
+
+## 2026-03-05
+
+- Pattern: User terminology correction (`ripple` -> `repo`) can change task interpretation immediately.
+- Rule: When user corrects a key noun or scope term, restate the corrected scope and continue execution using that corrected term only.
+- Quick check:
+  - Re-anchor analysis/search to the corrected term.
+  - Avoid carrying forward assumptions from the wrong term.
+
+- Pattern: Multi-file fixes often happen in dirty worktrees.
+- Rule: In dirty worktree sessions, keep progressing after explicit user approval, and isolate commits by staging only request-related files/hunks.
+- Commit safety:
+  - Capture preflight (`git status --short`, `git diff --name-only`) before staging.
+  - Use partial staging for mixed files; do not revert unrelated edits.
+  - Report remaining unstaged files after commit.
