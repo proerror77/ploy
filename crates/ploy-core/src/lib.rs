@@ -4,3 +4,5 @@
 //! that are shared across all ploy workspace crates.
 
 pub mod error;
+
+pub use error::{CoreError, CoreResult};

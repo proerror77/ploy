@@ -110,6 +110,10 @@ pub enum PloyError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    // Core errors (from ploy-core)
+    #[error(transparent)]
+    Core(#[from] ploy_core::CoreError),
+
     // Generic errors
     #[error("Internal error: {0}")]
     Internal(String),
