@@ -31,3 +31,41 @@ Reduce duplicated market-data collection paths and converge on canonical raw tab
 - 2026-03-04: `SyncCollector` now persists canonical raw tables (`binance_lob_ticks`, `clob_quote_ticks`) and creates `sync_records_derived` view; legacy `sync_records` writes are compatibility-only behind `PLOY_COLLECTOR_PERSIST_SYNC_RECORDS`.
 - 2026-03-04: Legacy `services/data_collector` now defaults to canonical `clob_quote_ticks`; legacy `ticks` writes require `PLOY_LEGACY_TICKS_ENABLED=true`.
 - 2026-03-04: `backtest_collector` CSV sink is now compatibility-only (`persist_csv=false` by default), so primary collector pipeline is DB-first.
+
+---
+
+# Strategy Deployment Control Plane Stabilization TODO (2026-03-05)
+
+## Goal
+Reduce strategy "listing/deployment" chaos by enforcing one control semantics across API surfaces and removing unsafe strategy fallback behavior in platform bootstrap.
+
+## Tasks
+
+- [x] Create implementation plan doc under `docs/plans/` for this stabilization work.
+- [x] Align enable/disable governance between `/api/deployments` and `/api/strategies/control/:id`.
+- [x] Ensure enabling via `/api/strategies/control/:id` enforces the same evidence gate rules as `/api/deployments`.
+- [x] Remove implicit unknown-strategy -> momentum fallback in deployment matrix application.
+- [x] Add/adjust tests for deployment strategy mapping and API enable gate behavior.
+- [x] Reconcile direct-live gate tests with current documented behavior (blocked by default, env override explicit).
+- [x] Run targeted tests and capture results.
+- [x] Commit atomic changes with clear scope messages.
+
+## Review
+
+- [x] Verified no unrelated dirty changes were reverted.
+- [x] Verified control plane behavior is consistent across endpoints.
+- [x] Verified strategy mapping no longer silently routes unknown strategy keys to momentum.
+ 
+## Progress notes
+
+- [x] Create implementation plan doc under `docs/plans/` for this stabilization work.
+- [x] Align enable/disable governance between `/api/deployments` and `/api/strategies/control/:id`.
+- [x] Ensure enabling via `/api/strategies/control/:id` enforces the same evidence gate rules as `/api/deployments`.
+- [x] Remove implicit unknown-strategy -> momentum fallback in deployment matrix application.
+- [x] Add/adjust tests for deployment strategy mapping and API enable gate behavior.
+- [x] Reconcile direct-live gate tests with current documented behavior (blocked by default, env override explicit).
+- [x] Run targeted tests and capture results.
+- [x] Commit atomic changes with clear scope messages.
+- [x] Verified no unrelated dirty changes were reverted.
+- [x] Verified control plane behavior is consistent across endpoints.
+- [x] Verified strategy mapping no longer silently routes unknown strategy keys to momentum.
