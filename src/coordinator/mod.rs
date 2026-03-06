@@ -9,6 +9,7 @@ pub mod command;
 pub mod config;
 pub mod coordinator;
 pub mod state;
+pub(crate) mod runtime_specs;
 pub(crate) mod strategy_runtime;
 
 pub use bootstrap::{start_platform, PlatformBootstrapConfig, PlatformStartControl};

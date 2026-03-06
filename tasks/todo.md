@@ -808,6 +808,29 @@ Retire the surviving Grok-enabled `nba_comeback` legacy sports runtime from the 
 
 ---
 
+# Layered Live Runtime Task 9L: Extract Managed Runtime Spec Builders (2026-03-06)
+
+## Goal
+Move strategy-specific managed runtime TOML/spec construction out of `src/coordinator/bootstrap.rs` so bootstrap keeps path selection and assembly, while a dedicated module owns config/spec projection.
+
+## Tasks
+
+- [x] Add `src/coordinator/runtime_specs.rs` for managed runtime spec builders.
+- [x] Move momentum, pattern-memory, split-arb, event-edge, and nba-comeback runtime config/spec builders into that module.
+- [x] Keep bootstrap tests green by importing the extracted builders back into the bootstrap test surface.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `bootstrap.rs` no longer owns the concrete TOML/spec rendering logic for the canonical managed strategy runtime paths.
+- [x] `src/coordinator/runtime_specs.rs` now owns the deployment/config -> runtime TOML projection for momentum, pattern-memory, split-arb, event-edge, and nba-comeback.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
