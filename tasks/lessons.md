@@ -66,3 +66,24 @@
   - Capture preflight (`git status --short`, `git diff --name-only`) before staging.
   - Use partial staging for mixed files; do not revert unrelated edits.
   - Report remaining unstaged files after commit.
+
+## 2026-03-06
+
+- Pattern: Managed strategy bootstrap can silently drift from the checked-in live strategy template and override production sizing without touching host config files.
+- Rule: Managed `staggered_arb` runtime config must derive from the canonical `config/strategies/staggered_arb.toml` template and only override runtime-scoped fields like `symbols` and `series_ids`.
+- Guardrail:
+  - Add a regression test that asserts managed runtime config still contains `shares_per_trade = 20`.
+  - Add a regression test that asserts managed runtime config does not inject `fixed_amount_usd` unless explicitly configured.
+
+- Pattern: A release workflow can partially deploy to production and then fail late because the remote shell script is too clever.
+- Rule: Keep remote deploy scripts explicit and small; prefer fixed service lists over dynamic shell pipelines for `systemctl` restarts, and syntax-check the extracted remote script before rerunning a production release.
+
+- Pattern: In live trading flows, a partially-filled closing leg can be cancelled or fail after filling some shares; if the strategy does not accumulate those fills, the next retry can incorrectly submit the full original size again.
+- Rule: For multi-step live orders, always treat partial fills as state transitions that mutate remaining exposure immediately. Retry logic must submit only residual shares and finalize the position from cumulative fills, not from the last order attempt alone.
+- Verification checklist:
+  - Persist cumulative filled shares/avg price/fees on every `Filled`, `Cancelled`, and `Failed` update that carries fills.
+  - Clear in-flight markers after a partial close so the residual can retry cleanly.
+  - Log `filled/target` progress on retries so live acceptance can prove the fix.
+
+- Pattern: A release workflow can partially deploy the new binary and still fail availability because installed but inactive services are not explicitly started.
+- Rule: Remote deploy steps must treat installed `ploy` services as start/restart targets, wait for `active`, and only then declare rollout success.

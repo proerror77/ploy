@@ -116,3 +116,93 @@ Deploy the staggered-arb LEG2 partial-fill hotfix, restart the live platform, an
 - [x] BTC feed/runtime coverage confirmed after restart; absence of BTC trades so far is lack of qualifying fills/signals in the observed window, not missing subscription.
 - [x] No post-restart `orderbook ... does not exist` execution errors were observed in the acceptance window.
 - [ ] Fresh post-restart order-path acceptance still pending a real `LEG1` fill that advances into `LEG2`.
+
+---
+
+# STAG-ARB Live Quote Scoping And Forced-Close Hardening (2026-03-06)
+
+## Goal
+Stop live staggered-arb from mixing quotes across event windows, make forced-close price guards real, and ensure runtime config injection does not silently drop BTC.
+
+## Tasks
+
+- [x] Stop live `ploy-platform.service` on `tango-1-1` before local strategy changes.
+- [x] Add targeted tests that prove live quotes must be scoped by `event_id`, not only symbol.
+- [x] Add targeted tests for `force_complete_threshold` guarding forced Leg2 closes above threshold.
+- [x] Change `staggered_arb_live` quote routing/storage from symbol-scoped to event-scoped.
+- [x] Wire `force_complete_threshold` into live forced-close paths only.
+- [x] Align backtest forced-close threshold semantics with live behavior.
+- [x] Fix bootstrap staggered-arb runtime rendering so deployment-scoped `symbols` and `series_ids` override the canonical template without silently dropping BTC.
+- [x] Run targeted strategy/bootstrap tests and capture results.
+
+## Review
+
+- [x] Confirmed `ploy-platform.service` on `tango-1-1` is stopped before implementation.
+- [x] Verified live staggered-arb no longer reuses quotes across different windows for the same symbol.
+- [x] Verified forced close does not buy Leg2 above configured threshold.
+- [x] Verified runtime-rendered staggered-arb config injects both symbols and series IDs.
+
+## Progress notes
+
+- 2026-03-06: `tango-1-1` `ploy-platform.service` stopped successfully; host reported `inactive (dead)` immediately after manual stop.
+- 2026-03-06: Added live regression test `test_try_entry_uses_event_scoped_quotes` and switched live PM quote storage/routing to `event_id` scope.
+- 2026-03-06: Added live/backtest threshold tests so forced timeout paths are blocked when `force_complete_threshold=1.00` and combined sum exceeds $1.
+- 2026-03-06: Added live event-expiry settlement path so single-leg `FINAL WINDOW HOLD` positions and threshold-blocked positions do not remain stuck open forever.
+- 2026-03-06: Fixed bootstrap staggered-arb runtime rendering so managed config derives from the canonical template while overriding both deployment-scoped symbols and series IDs.
+- 2026-03-06: Verified with targeted tests:
+  - `cargo test test_try_entry_uses_event_scoped_quotes -- --nocapture`
+  - `cargo test test_force_threshold_blocks_forced_timeout_above_cap -- --nocapture`
+  - `cargo test test_force_complete_threshold_blocks_backtest_timeout_above_cap -- --nocapture`
+  - `cargo test build_split_arb_runtime_config_overrides_template_symbols_and_series_ids -- --nocapture`
+  - `cargo test staggered_arb_live::tests -- --nocapture`
+
+---
+
+# Managed Staggered Arb Runtime And Release Workflow Merge (2026-03-06)
+
+## Goal
+Fold the separate hotfix worktree back into this strategy branch without regressing the live quote-scoping fixes: keep share-based managed runtime generation, preserve partial-fill retry behavior, and make the Aliyun release workflow explicitly start inactive ploy services.
+
+## Tasks
+
+- [x] Compare the current worktree against `hotfix/leg2-reconcile-20260306` and identify overlapping files.
+- [x] Keep the live `staggered_arb` partial-fill reconciliation logic while verifying it does not conflict with event-scoped quote routing.
+- [x] Reconcile managed runtime generation in `bootstrap.rs` so it derives from the canonical `staggered_arb.toml` template instead of hardcoded fallback defaults.
+- [x] Bring over the release workflow changes that package/install `staggered_arb.toml` and explicitly `start` or `restart` installed ploy services.
+- [x] Merge both sessions' `tasks/todo.md` and `tasks/lessons.md` records instead of dropping one side's incident history.
+- [x] Run targeted validation on merged bootstrap/workflow changes and capture the result.
+
+## Review
+
+- [x] Confirmed the only real semantic conflict was managed runtime generation in `bootstrap.rs`; `staggered_arb_live.rs` changes were additive.
+- [x] Kept `force_complete_threshold = 1.00` in the checked-in strategy template to preserve the bad-price forced-close guard.
+- [x] Preserved the hotfix-side partial-fill retry logic and exchange-order reconciliation already present in the current worktree.
+
+## Progress notes
+
+- 2026-03-06: Compared this worktree with `hotfix/leg2-reconcile-20260306` and found overlap in `bootstrap.rs`, `staggered_arb.toml`, `staggered_arb_live.rs`, `tasks/todo.md`, `tasks/lessons.md`, plus the uncommitted `release-aliyun.yml` follow-up.
+- 2026-03-06: Resolved bootstrap by keeping template-derived managed runtime rendering and deployment-scoped overrides for `symbols` and `series_ids`.
+- 2026-03-06: Resolved workflow merge by keeping packaged `staggered_arb.toml`, explicit ploy unit handling, and `wait_for_unit_active` for both `start` and `restart` paths.
+- 2026-03-06: Revalidated merged state with `cargo test bootstrap -- --nocapture`, `cargo test build_split_arb_runtime_config_ -- --nocapture`, `cargo test staggered_arb_live::tests -- --nocapture`, and a YAML parse check for `.github/workflows/release-aliyun.yml`.
+
+---
+
+# Managed Staggered Arb Runtime And Release Workflow Closure (2026-03-06)
+
+## Goal
+Keep managed `staggered_arb` on share-based sizing, ship the canonical strategy template in release bundles, and make the Aliyun rollout path recover installed inactive services automatically.
+
+## Tasks
+
+- [x] Confirm managed runtime sizing drift came from bootstrap rendering, not host config drift.
+- [x] Render managed split-arb runtime from the canonical `staggered_arb.toml` template while keeping runtime symbol/series overrides.
+- [x] Include `staggered_arb.toml` in the release bundle and install it on the host during rollout.
+- [x] Update the release restart step so installed inactive `ploy` services are started and waited to `active`.
+- [x] Extend the release restart step to include installed `ploy-deribit-*` collectors.
+
+## Review
+
+- [x] Managed runtime rendering now preserves `shares_per_trade = 20` and does not inject `fixed_amount_usd`.
+- [x] Release workflow now deploys `staggered_arb.toml` alongside `momentum.toml`.
+- [x] Release workflow restart logic now handles both `restart` and `start`, with an explicit `active` wait loop.
+- [x] Release workflow now discovers and restarts installed `ploy-deribit-*` collector units on the trading host.
