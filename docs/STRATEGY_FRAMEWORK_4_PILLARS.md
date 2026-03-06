@@ -6,7 +6,13 @@
 
 ## 0) TL;DR
 
-- 你列的四大策略 **在 repo 內都有對應落地**，但目前不是以「四類策略」作為最高層架構；而是以 **多個執行框架並存**（Legacy bot loop / StrategyManager / Multi-agent platform）。
+- 你列的四大策略 **在 repo 內都有對應落地**，而且 live runtime 現在已經明確朝 **四層分工** 收斂：
+  - Strategy Plane
+  - Capital Governance Plane
+  - Execution Plane
+  - Control Plane
+- `src/strategy/*` 已是 canonical live strategy path；`TradingAgent` / `DomainAgent` 只剩 compatibility surface。
+- 預設平台啟動面已不再自動拉起 compatibility crypto/sports live runtimes；它們需要顯式 env gate 才會啟動。
 - 本文件的目標是把「策略分類」變成可追蹤的工程邊界：每一類策略要能回答：
   - 入口在哪（CLI / service / agent）
   - 核心邏輯在哪（module）
@@ -105,15 +111,22 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
 
 ---
 
-## 2) 執行框架現況（為什麼策略分散）
+## 2) 執行框架現況（目前的穩態）
 
-目前 repo 同時存在 3 套「跑策略」的方式：
+目前 repo 的穩態目標已經不是「3 套框架並存」，而是：
 
-1. Legacy bot loop（`ploy run` / `src/main.rs`，live 已封鎖）
-2. StrategyManager（`src/strategy/traits.rs` + `src/strategy/manager.rs` + `src/strategy/feeds.rs`）
-3. Multi-agent platform（`src/agents/*` + `src/coordinator/*` + `src/platform/*`）
+1. `src/strategy/*` + coordinator managed runtime = 正式 live path
+2. `src/agents/*` / `src/platform/agents/*` = compatibility / governance surface
+3. legacy 或 compatibility live runtimes 預設不再自動啟動
 
-這導致「同一個策略概念」可能有多份實作（例如 Momentum：legacy 高級版 vs StrategyManager 版）。
+具體來說：
+
+- `TradingAgent` / `DomainAgent` 不再是新 live 策略入口
+- `crypto_lob_ml` / `crypto_rl_policy` 只有在 `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true` 時才允許暫時啟動
+- Grok-enabled legacy `nba_comeback` fallback 只有在 `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true` 時才允許暫時啟動
+
+所以今天最大的架構現實，不是「策略分散在三套正式 runtime」，而是：
+canonical runtime 已經確立，剩下的是少量 compatibility path 尚未刪除。
 
 ---
 

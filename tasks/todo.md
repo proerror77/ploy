@@ -855,6 +855,26 @@ Shrink `start_platform()` down to assembly flow by moving the remaining crypto, 
 
 ---
 
+# Layered Live Runtime Task 10A: Align Docs With Canonical Runtime Steady State (2026-03-06)
+
+## Goal
+Update the top-level architecture docs so they describe the current four-plane live runtime and the new compatibility-runtime gating behavior instead of the older multi-runtime steady-state language.
+
+## Tasks
+
+- [x] Update `README.md` architecture section to describe the four-plane runtime.
+- [x] Document the compatibility runtime env gates for crypto and sports fallback paths.
+- [x] Update `docs/STRATEGY_FRAMEWORK_4_PILLARS.md` to reflect that canonical `Strategy` is now the formal live path and compatibility runtimes are opt-in only.
+- [x] Review the staged doc diff for scope.
+
+## Review
+
+- [x] `README.md` now describes the current Strategy / Capital Governance / Execution / Control split instead of the older 3-plane wording.
+- [x] The docs now explicitly call out `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES` and `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES` as temporary compatibility gates.
+- [x] `docs/STRATEGY_FRAMEWORK_4_PILLARS.md` now treats `TradingAgent` / `DomainAgent` as compatibility surfaces rather than steady-state live runtime choices.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal

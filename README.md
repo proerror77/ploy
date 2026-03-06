@@ -14,15 +14,23 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 - **Persistence** -- PostgreSQL event store, checkpoints, dead-letter queue, and crash recovery
 - **Risk management** -- Position limits, circuit breaker, daily loss limit, slippage protection, emergency stop
 
-## Architecture (Agent-Based)
+## Architecture (Layered Live Runtime)
 
-Production runtime uses a 3-plane model:
+Production runtime is converging on a 4-plane model:
 
-- **Strategy Plane (Poly Agents)**: direction/timing/pricing decisions and intent generation.
-- **Execution Plane (Ploy Coordinator)**: single live ingestion path (`OrderIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail.
-- **Control Plane (OpenClaw / AI Scheduler)**: global capital policy, deployment enable/disable, pause/halt/force-close.
+- **Strategy Plane**: canonical `Strategy` implementations decide direction, timing, sizing, and state transitions.
+- **Capital Governance Plane**: OpenClaw-style governance agents manage budget, pause/resume, throttle, and deployment-scoped policy.
+- **Execution Plane**: the coordinator is the only live order ingress (`StrategyIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail and recovery.
+- **Control Plane**: deployment/config projection, lifecycle control, health, observability, and rollout/shutdown wiring.
 
-Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; agents decide entries/exits inside those boundaries.
+Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; strategies decide entries/exits inside those boundaries.
+
+Compatibility live runtimes are now opt-in only:
+
+- `crypto_lob_ml` / `crypto_rl_policy` require `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true`
+- Grok-enabled legacy `nba_comeback` fallback requires `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true`
+
+New live strategies should implement the canonical `Strategy` contract, not `TradingAgent` or `DomainAgent`.
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
 For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
 For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
