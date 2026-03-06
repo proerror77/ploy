@@ -5594,6 +5594,52 @@ fn spawn_openclaw_agent(
     );
 }
 
+fn spawn_compat_crypto_lob_ml_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    lob_cfg: CryptoLobMlConfig,
+    crypto_market_data: CryptoDataPlaneHandle,
+    event_matcher: Arc<EventMatcher>,
+    lob_cache: crate::collector::LobCache,
+) -> Result<()> {
+    let risk_params = lob_cfg.risk_params.clone();
+    let agent = CryptoLobMlAgent::new(lob_cfg, crypto_market_data, event_matcher, lob_cache)?;
+    spawn_compat_trading_agent_task(
+        agent_handles,
+        coordinator,
+        handle,
+        agent,
+        risk_params,
+        "crypto_lob_ml",
+    );
+    info!("crypto lob-ml agent spawned");
+    Ok(())
+}
+
+#[cfg(feature = "rl")]
+fn spawn_compat_crypto_rl_policy_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    rl_cfg: CryptoRlPolicyConfig,
+    crypto_market_data: CryptoDataPlaneHandle,
+    event_matcher: Arc<EventMatcher>,
+    lob_cache: crate::collector::LobCache,
+) {
+    let risk_params = rl_cfg.risk_params.clone();
+    let agent = CryptoRlPolicyAgent::new(rl_cfg, crypto_market_data, event_matcher, lob_cache);
+    spawn_compat_trading_agent_task(
+        agent_handles,
+        coordinator,
+        handle,
+        agent,
+        risk_params,
+        "crypto_rl_policy",
+    );
+    info!("crypto RL policy agent spawned");
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -6965,22 +7011,15 @@ pub async fn start_platform(
                 );
             } else {
                 if let Some(lob_cache) = lob_cache_opt.clone() {
-                    let risk_params = lob_cfg.risk_params.clone();
-                    let agent = CryptoLobMlAgent::new(
+                    spawn_compat_crypto_lob_ml_agent(
+                        &mut agent_handles,
+                        &mut coordinator,
+                        &handle,
                         lob_cfg.clone(),
                         crypto_market_data.clone(),
                         event_matcher.clone(),
                         lob_cache,
                     )?;
-                    spawn_compat_trading_agent_task(
-                        &mut agent_handles,
-                        &mut coordinator,
-                        &handle,
-                        agent,
-                        risk_params,
-                        "crypto_lob_ml",
-                    );
-                    info!("crypto lob-ml agent spawned");
                 } else {
                     warn!(
                         agent = lob_cfg.agent_id,
@@ -6994,22 +7033,15 @@ pub async fn start_platform(
         #[cfg(feature = "rl")]
         if rl_agent_enabled {
             if let Some(lob_cache) = lob_cache_opt.clone() {
-                let risk_params = rl_cfg.risk_params.clone();
-                let agent = CryptoRlPolicyAgent::new(
+                spawn_compat_crypto_rl_policy_agent(
+                    &mut agent_handles,
+                    &mut coordinator,
+                    &handle,
                     rl_cfg.clone(),
                     crypto_market_data.clone(),
                     event_matcher.clone(),
                     lob_cache,
                 );
-                spawn_compat_trading_agent_task(
-                    &mut agent_handles,
-                    &mut coordinator,
-                    &handle,
-                    agent,
-                    risk_params,
-                    "crypto_rl_policy",
-                );
-                info!("crypto RL policy agent spawned");
             } else {
                 warn!(
                     agent = rl_cfg.agent_id,

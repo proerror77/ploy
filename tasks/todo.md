@@ -689,6 +689,30 @@ Stop presenting the remaining pull-based compatibility agent structs as root-lev
 
 ---
 
+# Layered Live Runtime Task 9J: Extract Compatibility Crypto Agent Spawn Helpers (2026-03-06)
+
+## Goal
+Reduce bootstrap assembly noise for the two remaining crypto pull-based compatibility runtimes by moving their agent construction and spawn wiring into dedicated helpers.
+
+## Tasks
+
+- [x] Add `spawn_compat_crypto_lob_ml_agent(...)` in `src/coordinator/bootstrap.rs`.
+- [x] Add `spawn_compat_crypto_rl_policy_agent(...)` in `src/coordinator/bootstrap.rs` behind `#[cfg(feature = "rl")]`.
+- [x] Replace the inline `lob_ml` and `rl_policy` construction/spawn blocks in `start_platform()` with those helpers.
+- [x] Keep all compatibility gating semantics unchanged in this slice.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `start_platform()` no longer inlines the compatibility crypto agent construction and spawn logic for `lob_ml` and `rl_policy`; it now reads closer to “check prerequisites -> call helper”.
+- [x] This slice does not retire those runtimes yet; it only pushes their remaining bootstrap assembly into dedicated compatibility helpers.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --features rl --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
