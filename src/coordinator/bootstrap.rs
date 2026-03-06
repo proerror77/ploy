@@ -13,20 +13,18 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agents::crypto::CryptoEntryMode;
-use crate::agents::crypto_lob_ml::CryptoLobMlAgent;
-#[cfg(feature = "rl")]
-use crate::agents::crypto_rl_policy::CryptoRlPolicyAgent;
-use crate::agents::context::AgentContext;
-use crate::agents::governance_context::GovernanceContext;
-use crate::agents::sports::SportsTradingAgent;
-use crate::agents::traits::{GovernanceAgent, TradingAgent};
-use crate::agents::{
-    CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode, CryptoTradingConfig,
-    OpenClawAgent, OpenClawConfig, PoliticsTradingConfig, SportsTradingConfig,
+use crate::agents::crypto::{CryptoEntryMode, CryptoTradingConfig};
+use crate::agents::crypto_lob_ml::{
+    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 #[cfg(feature = "rl")]
-use crate::agents::CryptoRlPolicyConfig;
+use crate::agents::crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agents::context::AgentContext;
+use crate::agents::governance_context::GovernanceContext;
+use crate::agents::openclaw::{OpenClawAgent, OpenClawConfig};
+use crate::agents::politics::PoliticsTradingConfig;
+use crate::agents::sports::{SportsTradingAgent, SportsTradingConfig};
+use crate::agents::traits::{GovernanceAgent, TradingAgent};
 use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;

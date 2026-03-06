@@ -737,6 +737,29 @@ Finish reducing bootstrap noise for the remaining crypto pull-based compatibilit
 
 ---
 
+# Layered Live Runtime Task 8H: Remove Remaining Agents Root Re-Exports (2026-03-06)
+
+## Goal
+Finish shrinking `agents/mod.rs` down to a pure module namespace so bootstrap and other callers must name the explicit compatibility module they depend on.
+
+## Tasks
+
+- [x] Remove the remaining config/agent `pub use` entries from `src/agents/mod.rs`.
+- [x] Update `src/coordinator/bootstrap.rs` to import crypto, sports, politics, and openclaw types from explicit submodules.
+- [x] Keep runtime behavior unchanged in this slice.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `crate::agents` no longer re-exports compatibility runtime types or configs; callers now opt into explicit modules such as `agents::crypto`, `agents::sports`, and `agents::openclaw`.
+- [x] This slice does not change runtime behavior; it only removes the last root-level convenience exports from the compatibility agent namespace.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --features rl --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
