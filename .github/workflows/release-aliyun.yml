@@ -257,7 +257,6 @@ jobs:
           username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
-          script_stop: true
           envs: DEPLOY_ROOT,PLOY_SYSTEMD_MEMORY_HIGH,PLOY_SYSTEMD_MEMORY_MAX,PLOY_SYSTEMD_RESTART_SEC
           script: |
             bash <<'PLOY_DEPLOY'
