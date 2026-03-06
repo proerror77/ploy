@@ -210,10 +210,9 @@ pub struct OrderUpdate {
 
 /// Actions a strategy can request.
 ///
-/// Note: `UpdateRisk`, `SubscribeFeed`, and `UnsubscribeFeed` are transitional
-/// compatibility variants and are scheduled to move out of the Strategy Plane
-/// as the layered live runtime refactor converges on pure decision-layer
-/// semantics.
+/// This enum is intentionally limited to decision-layer outcomes. Feed wiring
+/// and governance mutations are owned by the runtime / governance planes, not
+/// by individual strategies.
 #[derive(Debug, Clone)]
 pub enum StrategyAction {
     /// Submit a new order
@@ -236,20 +235,11 @@ pub enum StrategyAction {
         new_size: Option<u64>,
     },
 
-    /// Update risk state
-    UpdateRisk { level: RiskLevel, reason: String },
-
     /// Log a strategy event
     LogEvent { event: StrategyEvent },
 
     /// Send an alert
     Alert { level: AlertLevel, message: String },
-
-    /// Request data feed subscription change
-    SubscribeFeed { feed: DataFeed },
-
-    /// Request data feed unsubscription
-    UnsubscribeFeed { feed: DataFeed },
 }
 
 // ============================================================================

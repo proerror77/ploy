@@ -13,7 +13,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::Result;
 
-use super::core::{ExecutionConfig, OrderExecutor, PositionManager, RiskCheck, RiskConfig, RiskManager};
+use super::core::{
+    ExecutionConfig, OrderExecutor, PositionManager, RiskCheck, RiskConfig, RiskManager,
+};
 use super::multi_event::MultiEventMonitor;
 use super::reconciliation::ReconciliationService;
 use super::traits::{
@@ -263,25 +265,19 @@ impl StrategyOrchestrator {
                     priority,
                 } => {
                     // Check risk before submitting
-                    let check = self.risk_manager
-                        .check_new_position(
-                            strategy_id,
-                            order.shares,
-                            order.limit_price,
-                            None,
-                        )
+                    let check = self
+                        .risk_manager
+                        .check_new_position(strategy_id, order.shares, order.limit_price, None)
                         .await;
 
                     if !check.passed {
-                        warn!(
-                            "Order rejected by risk manager: {:?}",
-                            check.reason
-                        );
+                        warn!("Order rejected by risk manager: {:?}", check.reason);
                         continue;
                     }
 
                     // Execute order
-                    match self.executor
+                    match self
+                        .executor
                         .execute(&order, Some(client_order_id), strategy_id)
                         .await
                     {
@@ -301,8 +297,15 @@ impl StrategyOrchestrator {
                         warn!("Failed to cancel order {}: {}", order_id, e);
                     }
                 }
-                StrategyAction::ModifyOrder { order_id, new_price, new_size } => {
-                    info!("Modifying order {}: price={:?}, size={:?}", order_id, new_price, new_size);
+                StrategyAction::ModifyOrder {
+                    order_id,
+                    new_price,
+                    new_size,
+                } => {
+                    info!(
+                        "Modifying order {}: price={:?}, size={:?}",
+                        order_id, new_price, new_size
+                    );
                     // Cancel existing order first
                     match self.executor.cancel(&order_id).await {
                         Ok(_) => {
@@ -312,13 +315,12 @@ impl StrategyOrchestrator {
                             // The strategy should detect the cancellation and resubmit if needed.
                         }
                         Err(e) => {
-                            warn!("Failed to cancel order {} for modification: {}", order_id, e);
+                            warn!(
+                                "Failed to cancel order {} for modification: {}",
+                                order_id, e
+                            );
                         }
                     }
-                }
-                StrategyAction::UpdateRisk { level, reason } => {
-                    info!("Strategy {} risk update: {:?} - {}", strategy_id, level, reason);
-                    // Could trigger circuit breaker based on level
                 }
                 StrategyAction::LogEvent { event } => {
                     info!(
@@ -326,29 +328,20 @@ impl StrategyOrchestrator {
                         strategy_id, event.event_type, event.message
                     );
                 }
-                StrategyAction::Alert { level, message } => {
-                    match level {
-                        super::traits::AlertLevel::Info => info!("[ALERT] {}: {}", strategy_id, message),
-                        super::traits::AlertLevel::Warning => warn!("[ALERT] {}: {}", strategy_id, message),
-                        super::traits::AlertLevel::Error => error!("[ALERT] {}: {}", strategy_id, message),
-                        super::traits::AlertLevel::Critical => error!("[CRITICAL] {}: {}", strategy_id, message),
+                StrategyAction::Alert { level, message } => match level {
+                    super::traits::AlertLevel::Info => {
+                        info!("[ALERT] {}: {}", strategy_id, message)
                     }
-                }
-                StrategyAction::SubscribeFeed { feed } => {
-                    let mut active_feeds = self.active_feeds.write().await;
-                    active_feeds
-                        .entry(feed.clone())
-                        .or_default()
-                        .push(strategy_id.to_string());
-                    debug!("Strategy {} subscribed to {:?}", strategy_id, feed);
-                }
-                StrategyAction::UnsubscribeFeed { feed } => {
-                    let mut active_feeds = self.active_feeds.write().await;
-                    if let Some(subscribers) = active_feeds.get_mut(&feed) {
-                        subscribers.retain(|id| id != strategy_id);
+                    super::traits::AlertLevel::Warning => {
+                        warn!("[ALERT] {}: {}", strategy_id, message)
                     }
-                    debug!("Strategy {} unsubscribed from {:?}", strategy_id, feed);
-                }
+                    super::traits::AlertLevel::Error => {
+                        error!("[ALERT] {}: {}", strategy_id, message)
+                    }
+                    super::traits::AlertLevel::Critical => {
+                        error!("[CRITICAL] {}: {}", strategy_id, message)
+                    }
+                },
             }
         }
 

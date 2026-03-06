@@ -17,10 +17,12 @@ use tracing::{debug, error, info, warn};
 use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
 use crate::error::Result;
 
-use crate::strategy::detectors::{MomentumDetector, MomentumDetectorConfig, MomentumSignal, TrendDirection};
+use crate::strategy::detectors::{
+    MomentumDetector, MomentumDetectorConfig, MomentumSignal, TrendDirection,
+};
 use crate::strategy::traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyEvent, StrategyEventType, StrategyStateInfo,
 };
 
 /// Momentum strategy configuration
@@ -66,14 +68,14 @@ impl Default for MomentumConfig {
             id: "momentum".to_string(),
             enabled: true,
             // === AGGRESSIVE ENTRY (CRYINGLITTLEBABY style) ===
-            min_move_pct: dec!(0.003),      // 0.3% minimum move (was 0.5%)
-            max_entry_price: dec!(0.40),    // Max 40¢ entry (was 55¢)
-            min_edge: dec!(0.03),           // 3% minimum edge (was 5%)
+            min_move_pct: dec!(0.003),   // 0.3% minimum move (was 0.5%)
+            max_entry_price: dec!(0.40), // Max 40¢ entry (was 55¢)
+            min_edge: dec!(0.03),        // 3% minimum edge (was 5%)
             shares_per_trade: 100,
             // === ANTI-OVERTRADING CONTROLS ===
-            max_positions: 3,               // Max 3 concurrent (was 5)
-            cooldown_secs: 60,              // 60s between same symbol (was 30)
-            max_daily_trades: 20,           // Max 20 trades/day
+            max_positions: 3,     // Max 3 concurrent (was 5)
+            cooldown_secs: 60,    // 60s between same symbol (was 30)
+            max_daily_trades: 20, // Max 20 trades/day
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
             take_profit_pct: dec!(0.20),
             stop_loss_pct: dec!(0.15),
@@ -316,7 +318,12 @@ impl MomentumStrategy {
     }
 
     /// Process Binance price update
-    fn on_binance_price(&mut self, symbol: &str, price: Decimal, timestamp: DateTime<Utc>) -> Vec<StrategyAction> {
+    fn on_binance_price(
+        &mut self,
+        symbol: &str,
+        price: Decimal,
+        timestamp: DateTime<Utc>,
+    ) -> Vec<StrategyAction> {
         let mut actions = Vec::new();
 
         if !self.config.symbols.contains(&symbol.to_string()) {
@@ -331,14 +338,19 @@ impl MomentumStrategy {
         let cutoff = timestamp - chrono::Duration::seconds(300);
         history.retain(|(ts, _)| *ts > cutoff);
 
-        self.last_binance_prices.insert(symbol.to_string(), (price, timestamp));
+        self.last_binance_prices
+            .insert(symbol.to_string(), (price, timestamp));
 
         // Check for momentum signal
         if let Some(momentum) = self.calculate_momentum(symbol) {
             if momentum.abs() >= self.config.min_move_pct {
                 // Find matching event
                 if let Some(event) = self.find_event_for_symbol(symbol) {
-                    let side = if momentum > Decimal::ZERO { Side::Up } else { Side::Down };
+                    let side = if momentum > Decimal::ZERO {
+                        Side::Up
+                    } else {
+                        Side::Down
+                    };
 
                     // Check entry conditions
                     if self.can_enter(symbol, side, &event) {
@@ -361,7 +373,12 @@ impl MomentumStrategy {
                         actions.push(StrategyAction::LogEvent {
                             event: StrategyEvent::new(
                                 StrategyEventType::SignalDetected,
-                                format!("Momentum signal: {} {:?} ({:.2}%)", symbol, side, momentum * dec!(100)),
+                                format!(
+                                    "Momentum signal: {} {:?} ({:.2}%)",
+                                    symbol,
+                                    side,
+                                    momentum * dec!(100)
+                                ),
                             ),
                         });
                     }
@@ -460,7 +477,12 @@ impl MomentumStrategy {
     }
 
     /// Create exit order
-    fn create_exit_order(&mut self, symbol: &str, price: Decimal, reason: ExitReason) -> Vec<StrategyAction> {
+    fn create_exit_order(
+        &mut self,
+        symbol: &str,
+        price: Decimal,
+        reason: ExitReason,
+    ) -> Vec<StrategyAction> {
         let mut actions = Vec::new();
 
         let pos = match self.positions.get(symbol) {
@@ -481,12 +503,7 @@ impl MomentumStrategy {
 
         let client_order_id = format!("{}-exit-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::sell_limit(
-            pos.token_id.clone(),
-            pos.side,
-            pos.shares,
-            price,
-        );
+        let order = OrderRequest::sell_limit(pos.token_id.clone(), pos.side, pos.shares, price);
 
         self.pending_orders.insert(
             client_order_id.clone(),
@@ -565,7 +582,8 @@ impl Strategy for MomentumStrategy {
                     if let Some(pos) = self.positions.get_mut(token_id) {
                         if let Some(bid) = quote.best_bid {
                             pos.update_high(bid);
-                            self.check_exit(pos, bid).map(|reason| (pos.symbol.clone(), bid, reason))
+                            self.check_exit(pos, bid)
+                                .map(|reason| (pos.symbol.clone(), bid, reason))
                         } else {
                             None
                         }
@@ -593,7 +611,8 @@ impl Strategy for MomentumStrategy {
                 }
 
                 // Check for entry confirmation - collect signals first
-                let signals_to_process: Vec<EntrySignal> = self.pending_orders
+                let signals_to_process: Vec<EntrySignal> = self
+                    .pending_orders
                     .values()
                     .filter_map(|pending| {
                         if pending.is_entry {
@@ -602,7 +621,8 @@ impl Strategy for MomentumStrategy {
                                     if let Some(ask) = quote.best_ask {
                                         let mut updated_signal = signal.clone();
                                         updated_signal.pm_price = ask;
-                                        updated_signal.edge = self.estimate_fair_value(signal.cex_move_pct) - ask;
+                                        updated_signal.edge =
+                                            self.estimate_fair_value(signal.cex_move_pct) - ask;
                                         return Some(updated_signal);
                                     }
                                 }
@@ -640,13 +660,6 @@ impl Strategy for MomentumStrategy {
 
                         self.active_events.insert(event_id.clone(), event);
 
-                        // Subscribe to token quotes
-                        actions.push(StrategyAction::SubscribeFeed {
-                            feed: DataFeed::PolymarketQuotes {
-                                tokens: vec![up_token.clone(), down_token.clone()],
-                            },
-                        });
-
                         info!("Discovered event for {}: {}", mapping.symbol, event_id);
                         break;
                     }
@@ -664,11 +677,10 @@ impl Strategy for MomentumStrategy {
     async fn on_order_update(&mut self, update: &OrderUpdate) -> Result<Vec<StrategyAction>> {
         let mut actions = Vec::new();
 
-        let pending = self.pending_orders
+        let pending = self
+            .pending_orders
             .iter()
-            .find(|(_, p)| {
-                p.client_order_id == update.client_order_id.as_deref().unwrap_or("")
-            })
+            .find(|(_, p)| p.client_order_id == update.client_order_id.as_deref().unwrap_or(""))
             .map(|(k, v)| (k.clone(), v.clone()));
 
         let Some((client_id, pending)) = pending else {
@@ -695,17 +707,24 @@ impl Strategy for MomentumStrategy {
                         };
 
                         self.positions.insert(pending.symbol.clone(), position);
-                        self.last_trade_time.insert(pending.symbol.clone(), Utc::now());
+                        self.last_trade_time
+                            .insert(pending.symbol.clone(), Utc::now());
 
                         info!(
                             "Entry filled: {} {:?} {} shares @ {:.2}¢",
-                            pending.symbol, pending.side, update.filled_qty, fill_price * dec!(100)
+                            pending.symbol,
+                            pending.side,
+                            update.filled_qty,
+                            fill_price * dec!(100)
                         );
 
                         actions.push(StrategyAction::LogEvent {
-                            event: StrategyEvent::new(StrategyEventType::OrderFilled, "Entry filled")
-                                .with_data("symbol", pending.symbol.clone())
-                                .with_data("price", fill_price.to_string()),
+                            event: StrategyEvent::new(
+                                StrategyEventType::OrderFilled,
+                                "Entry filled",
+                            )
+                            .with_data("symbol", pending.symbol.clone())
+                            .with_data("price", fill_price.to_string()),
                         });
                     }
                 } else {
@@ -716,13 +735,19 @@ impl Strategy for MomentumStrategy {
 
                         info!(
                             "Exit filled: {} {} shares @ {:.2}¢ (P&L: ${:.2})",
-                            pending.symbol, update.filled_qty, fill_price * dec!(100), pnl
+                            pending.symbol,
+                            update.filled_qty,
+                            fill_price * dec!(100),
+                            pnl
                         );
 
                         actions.push(StrategyAction::LogEvent {
-                            event: StrategyEvent::new(StrategyEventType::ExitTriggered, "Exit filled")
-                                .with_data("symbol", pending.symbol.clone())
-                                .with_data("pnl", pnl.to_string()),
+                            event: StrategyEvent::new(
+                                StrategyEventType::ExitTriggered,
+                                "Exit filled",
+                            )
+                            .with_data("symbol", pending.symbol.clone())
+                            .with_data("pnl", pnl.to_string()),
                         });
                     }
                 }
@@ -732,7 +757,10 @@ impl Strategy for MomentumStrategy {
             OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
                 if !pending.is_entry {
                     // Exit failed - critical
-                    error!("Exit order failed for {}: {:?}", pending.symbol, update.status);
+                    error!(
+                        "Exit order failed for {}: {:?}",
+                        pending.symbol, update.status
+                    );
                     actions.push(StrategyAction::Alert {
                         level: AlertLevel::Critical,
                         message: format!("Exit order failed for {}", pending.symbol),
@@ -750,7 +778,8 @@ impl Strategy for MomentumStrategy {
         let mut actions = Vec::new();
 
         // Check for time-based exits
-        let positions_to_exit: Vec<(String, Decimal)> = self.positions
+        let positions_to_exit: Vec<(String, Decimal)> = self
+            .positions
             .iter()
             .filter_map(|(symbol, pos)| {
                 if pos.time_remaining() < self.config.exit_before_resolution_secs as i64 {
@@ -769,12 +798,14 @@ impl Strategy for MomentumStrategy {
     }
 
     fn state(&self) -> StrategyStateInfo {
-        let exposure = self.positions
+        let exposure = self
+            .positions
             .values()
             .map(|p| p.entry_price * Decimal::from(p.shares))
             .sum();
 
-        let unrealized_pnl = self.positions
+        let unrealized_pnl = self
+            .positions
             .values()
             .map(|p| {
                 let current = p.highest_price;
@@ -783,12 +814,20 @@ impl Strategy for MomentumStrategy {
             .sum();
 
         let mut metrics = HashMap::new();
-        metrics.insert("active_events".to_string(), self.active_events.len().to_string());
+        metrics.insert(
+            "active_events".to_string(),
+            self.active_events.len().to_string(),
+        );
         metrics.insert("symbols".to_string(), self.config.symbols.join(","));
 
         StrategyStateInfo {
             strategy_id: self.config.id.clone(),
-            phase: if self.positions.is_empty() { "waiting" } else { "in_position" }.to_string(),
+            phase: if self.positions.is_empty() {
+                "waiting"
+            } else {
+                "in_position"
+            }
+            .to_string(),
             enabled: self.config.enabled,
             active: !self.positions.is_empty() || !self.pending_orders.is_empty(),
             position_count: self.positions.len(),
@@ -802,19 +841,22 @@ impl Strategy for MomentumStrategy {
     }
 
     fn positions(&self) -> Vec<PositionInfo> {
-        self.positions.values().map(|p| {
-            let mut info = PositionInfo::new(
-                p.token_id.clone(),
-                p.side,
-                p.shares,
-                p.entry_price,
-                self.config.id.clone(),
-            );
-            info.current_price = Some(p.highest_price);
-            info.unrealized_pnl = (p.highest_price - p.entry_price) * Decimal::from(p.shares);
-            info.metadata.insert("symbol".to_string(), p.symbol.clone());
-            info
-        }).collect()
+        self.positions
+            .values()
+            .map(|p| {
+                let mut info = PositionInfo::new(
+                    p.token_id.clone(),
+                    p.side,
+                    p.shares,
+                    p.entry_price,
+                    self.config.id.clone(),
+                );
+                info.current_price = Some(p.highest_price);
+                info.unrealized_pnl = (p.highest_price - p.entry_price) * Decimal::from(p.shares);
+                info.metadata.insert("symbol".to_string(), p.symbol.clone());
+                info
+            })
+            .collect()
     }
 
     fn is_active(&self) -> bool {
@@ -832,7 +874,8 @@ impl Strategy for MomentumStrategy {
         }
 
         // Collect position info first to avoid borrow conflict
-        let positions_to_exit: Vec<(String, Decimal)> = self.positions
+        let positions_to_exit: Vec<(String, Decimal)> = self
+            .positions
             .iter()
             .map(|(symbol, pos)| (symbol.clone(), pos.highest_price))
             .collect();
@@ -860,6 +903,7 @@ impl Strategy for MomentumStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn test_config_default() {
@@ -875,5 +919,33 @@ mod tests {
 
         let btc = mappings.iter().find(|m| m.symbol == "BTCUSDT").unwrap();
         assert!(btc.series_ids.contains(&"41".to_string()));
+    }
+
+    #[tokio::test]
+    async fn event_discovery_updates_state_without_requesting_feed_rewire() {
+        let mut strategy = MomentumStrategy::new(MomentumConfig::default());
+        let update = MarketUpdate::EventDiscovered {
+            event_id: "evt-1".to_string(),
+            series_id: "41".to_string(),
+            up_token: "up-token".to_string(),
+            down_token: "down-token".to_string(),
+            end_time: Utc::now() + Duration::minutes(5),
+            price_to_beat: None,
+            title: None,
+            condition_id: None,
+        };
+
+        let actions = strategy
+            .on_market_update(&update)
+            .await
+            .expect("event discovery should succeed");
+
+        assert!(actions.is_empty(), "feed lifecycle is runtime-owned");
+        let event = strategy
+            .active_events
+            .get("evt-1")
+            .expect("event should be tracked after discovery");
+        assert_eq!(event.up_token_id, "up-token");
+        assert_eq!(event.down_token_id, "down-token");
     }
 }

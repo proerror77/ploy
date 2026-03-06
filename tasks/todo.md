@@ -261,6 +261,34 @@ Make the canonical live runtime ownership explicit in source comments before any
 
 ---
 
+# Layered Live Runtime Task 2: Shrink Strategy Contract (2026-03-06)
+
+## Goal
+Remove governance/feed-lifecycle mutations from the canonical `StrategyAction` contract and keep live strategy outputs decision-only.
+
+## Tasks
+
+- [x] Remove `UpdateRisk`, `SubscribeFeed`, and `UnsubscribeFeed` from `src/strategy/traits.rs`.
+- [x] Delete obsolete consumer branches in `src/strategy/orchestrator.rs`, `src/coordinator/bootstrap.rs`, and `src/cli/strategy.rs`.
+- [x] Convert compiled strategy/runtime code to static feed ownership, including `src/strategy/gamma_scalping/strategy.rs`.
+- [x] Synchronize legacy `src/strategy/strategies/*` implementations with the new contract so they no longer rely on runtime-owned actions.
+- [x] Add focused regression tests for static feed declarations and event-handling behavior where compiled coverage exists.
+- [x] Run focused validation and capture the results.
+- [x] Commit the Task 2 contract shrink atomically.
+
+## Review
+
+- [x] Confirmed `DataFeedManager::start_for_feeds()` already owns Polymarket series discovery and token-quote subscription for the compiled runtime path.
+- [x] Confirmed `gamma_scalping` now keeps `required_feeds()` static and no longer requests dynamic quote subscriptions on event discovery.
+- [x] Confirmed canonical runtime consumers no longer accept strategy-originated governance mutations or feed rewiring requests.
+- [x] Focused validation passed:
+  - `cargo test strategy::manager --lib -- --nocapture`
+  - `cargo test strategy::gamma_scalping::strategy --lib -- --nocapture`
+- [x] Validation still shows only the same pre-existing warnings in unrelated backtest files (`liquidity_vacuum_backtest.rs`, `garch_probability_backtest.rs`).
+- [x] `src/strategy/strategies/momentum_strat.rs` and `src/strategy/strategies/two_leg.rs` were synchronized to the new contract, but they are not currently reachable from `src/strategy/mod.rs`, so the runtime validation for this task remains centered on the compiled canonical path.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

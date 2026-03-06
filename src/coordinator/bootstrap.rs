@@ -2855,7 +2855,13 @@ fn render_split_arb_runtime_config(
         .expect("[markets] must be a table");
     markets.insert(
         "series_ids".to_string(),
-        toml::Value::Array(series_ids.iter().cloned().map(toml::Value::String).collect()),
+        toml::Value::Array(
+            series_ids
+                .iter()
+                .cloned()
+                .map(toml::Value::String)
+                .collect(),
+        ),
     );
 
     format!(
@@ -2895,10 +2901,9 @@ fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[String]) -> 
         return cfg;
     }
 
-    let config: toml::Value = toml::from_str(include_str!(
-        "../../config/strategies/staggered_arb.toml"
-    ))
-    .expect("embedded staggered_arb runtime config must stay valid TOML");
+    let config: toml::Value =
+        toml::from_str(include_str!("../../config/strategies/staggered_arb.toml"))
+            .expect("embedded staggered_arb runtime config must stay valid TOML");
     render_split_arb_runtime_config(config, symbols, series_ids)
 }
 
@@ -4646,31 +4651,6 @@ async fn handle_strategy_actions_runtime(
                         .await;
                     }
                 }
-            }
-            StrategyAction::UpdateRisk { level, reason } => {
-                info!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    risk_level = ?level,
-                    reason = reason,
-                    "strategy risk update"
-                );
-            }
-            StrategyAction::SubscribeFeed { feed } => {
-                warn!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    feed = ?feed,
-                    "dynamic subscribe-feed action is not implemented in platform mode"
-                );
-            }
-            StrategyAction::UnsubscribeFeed { feed } => {
-                warn!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    feed = ?feed,
-                    "dynamic unsubscribe-feed action is not implemented in platform mode"
-                );
             }
         }
     }
