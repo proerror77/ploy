@@ -303,6 +303,9 @@ impl DirectionalBacktestEngine {
                 UpdateType::LobSnapshot { .. } => {
                     // LOB depth not used by directional backtest
                 }
+                UpdateType::BinanceL2 { .. } => {
+                    // Binance L2 features are ignored by the directional backtest.
+                }
             }
         }
 

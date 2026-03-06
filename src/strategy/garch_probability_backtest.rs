@@ -374,6 +374,9 @@ impl GarchProbabilityBacktestEngine {
                 UpdateType::LobSnapshot { .. } => {
                     // Depth snapshots are optional; this engine uses a fixed depth for sim.
                 }
+                UpdateType::BinanceL2 { .. } => {
+                    // Binance L2 features are ignored by this backtest.
+                }
             }
         }
 

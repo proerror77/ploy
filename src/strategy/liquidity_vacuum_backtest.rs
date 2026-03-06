@@ -509,6 +509,9 @@ impl LiquidityVacuumBacktestEngine {
                     }
                     self.maybe_run_symbol_logic(&update.symbol, update.timestamp);
                 }
+                UpdateType::BinanceL2 { .. } => {
+                    self.maybe_run_symbol_logic(&update.symbol, update.timestamp);
+                }
             }
         }
 

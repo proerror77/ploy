@@ -169,6 +169,9 @@ impl MomentumBacktestEngine {
                 UpdateType::LobSnapshot { .. } => {
                     // LOB depth not used by momentum backtest
                 }
+                UpdateType::BinanceL2 { .. } => {
+                    // Binance L2 features are ignored by momentum backtest.
+                }
             }
         }
 
