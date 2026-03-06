@@ -5116,6 +5116,300 @@ fn compat_sports_runtimes_enabled() -> bool {
     env_bool("PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES", false)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn spawn_canonical_crypto_strategy_runtimes(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    pm_client: Option<PolymarketClient>,
+    pm_ws_url: &str,
+    data_plane: Option<Arc<PlatformDataPlane>>,
+    shared_pool: Option<PgPool>,
+    account_id: &str,
+    dry_run: bool,
+    crypto_cfg: &CryptoTradingConfig,
+    runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
+    momentum_enabled: bool,
+    momentum_symbols: &[String],
+    pattern_memory_enabled: bool,
+    split_arb_enabled: bool,
+) {
+    if momentum_enabled {
+        if momentum_symbols.is_empty() {
+            warn!(
+                agent = crypto_cfg.agent_id,
+                "crypto momentum enabled but no recognized symbols were resolved"
+            );
+        } else {
+            let strategy_agent_id = crypto_cfg.agent_id.clone();
+            let runtime_spec = build_momentum_managed_runtime_spec(momentum_symbols, crypto_cfg);
+            if let Err(e) = spawn_managed_strategy_runtime_spec(
+                agent_handles,
+                coordinator,
+                shutdown_tx,
+                runtime_spec,
+                crypto_cfg.risk_params.clone(),
+                dry_run,
+                pm_client.clone(),
+                pm_ws_url,
+                data_plane.clone(),
+                shared_pool.clone(),
+                account_id,
+            ) {
+                warn!(
+                    agent = crypto_cfg.agent_id,
+                    error = %e,
+                    "crypto momentum enabled but canonical runtime could not be spawned; skipping"
+                );
+            } else {
+                info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
+            }
+        }
+    } else {
+        info!(
+            agent = crypto_cfg.agent_id,
+            "crypto momentum strategy runtime disabled"
+        );
+    }
+
+    if pattern_memory_enabled {
+        if let Some(ref pool) = shared_pool {
+            if let Err(e) = crate::strategy::pattern_memory::persistence::ensure_table(pool).await {
+                warn!(error = %e, "failed to create pattern_memory_samples table");
+            }
+        }
+
+        let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .pattern_memory_coins
+                .iter()
+                .cloned()
+                .collect()
+        };
+        coins.sort();
+        coins.dedup();
+
+        match build_pattern_memory_managed_runtime_spec(&coins) {
+            Ok(runtime_spec) => {
+                if let Err(e) = spawn_managed_strategy_runtime_spec(
+                    agent_handles,
+                    coordinator,
+                    shutdown_tx,
+                    runtime_spec,
+                    crypto_cfg.risk_params.clone(),
+                    dry_run,
+                    pm_client.clone(),
+                    pm_ws_url,
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    account_id,
+                ) {
+                    warn!(
+                        agent = "pattern_memory",
+                        error = %e,
+                        "pattern_memory enabled but canonical runtime could not be spawned"
+                    );
+                } else {
+                    info!("pattern_memory strategy runtime spawned");
+                }
+            }
+            Err(e) => {
+                warn!(
+                    agent = "pattern_memory",
+                    error = %e,
+                    "pattern_memory enabled but no valid runtime spec could be built"
+                );
+            }
+        }
+    }
+
+    if split_arb_enabled {
+        let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .split_arb_coins
+                .iter()
+                .cloned()
+                .collect()
+        };
+        coins.sort();
+        coins.dedup();
+
+        let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty() {
+            vec!["5m".to_string(), "15m".to_string()]
+        } else {
+            runtime_crypto_targets
+                .split_arb_horizons
+                .iter()
+                .cloned()
+                .collect()
+        };
+        horizons.sort();
+        horizons.dedup();
+
+        let mut series_set: HashSet<String> = HashSet::new();
+        for coin in &coins {
+            let normalized = coin.trim_end_matches("USDT");
+            for horizon in &horizons {
+                if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
+                    series_set.insert(series_id.to_string());
+                }
+            }
+        }
+        let mut series_ids: Vec<String> = series_set.into_iter().collect();
+        series_ids.sort();
+
+        let mut symbols: Vec<String> = coins
+            .iter()
+            .filter_map(|coin| {
+                let normalized = coin.trim_end_matches("USDT");
+                coin_symbol_for(normalized)
+            })
+            .collect();
+        symbols.sort();
+        symbols.dedup();
+        if symbols.is_empty() {
+            symbols = series_ids
+                .iter()
+                .filter_map(|series_id| symbol_for_crypto_series_id(series_id).map(str::to_string))
+                .collect();
+            symbols.sort();
+            symbols.dedup();
+        }
+
+        if series_ids.is_empty() {
+            warn!(
+                agent = "split_arb",
+                "split_arb enabled but no recognized coin/horizon series ids were resolved"
+            );
+        } else {
+            let runtime_spec = build_split_arb_managed_runtime_spec(&symbols, &series_ids);
+            if let Err(e) = spawn_managed_strategy_runtime_spec(
+                agent_handles,
+                coordinator,
+                shutdown_tx,
+                runtime_spec,
+                crypto_cfg.risk_params.clone(),
+                dry_run,
+                pm_client,
+                pm_ws_url,
+                data_plane,
+                shared_pool,
+                account_id,
+            ) {
+                warn!(
+                    agent = "split_arb",
+                    error = %e,
+                    "split_arb enabled but canonical runtime could not be spawned"
+                );
+            } else {
+                info!("split_arb strategy runtime spawned");
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_sports_strategy_runtime(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    handle: &CoordinatorHandle,
+    app_config: &AppConfig,
+    shared_pool: Option<PgPool>,
+    freshness: Arc<crate::platform::DataPlaneFreshness>,
+    pm_client: Option<PolymarketClient>,
+    account_id: &str,
+    dry_run: bool,
+    sports_cfg: SportsTradingConfig,
+    nba_cfg: &crate::config::NbaComebackConfig,
+    compat_sports_runtimes_enabled: bool,
+) -> Result<()> {
+    let managed_runtime_spec =
+        build_nba_comeback_managed_runtime_spec(&app_config.database.url, &sports_cfg, nba_cfg);
+
+    if managed_runtime_spec.is_some() || compat_sports_runtimes_enabled {
+        let pool = start_sports_market_data_support(
+            shared_pool,
+            app_config,
+            freshness,
+            &sports_cfg,
+        )
+        .await?;
+
+        if let Some(runtime_spec) = managed_runtime_spec {
+            spawn_managed_strategy_runtime_spec(
+                agent_handles,
+                coordinator,
+                shutdown_tx,
+                runtime_spec,
+                sports_cfg.risk_params.clone(),
+                dry_run,
+                pm_client,
+                &app_config.market.ws_url,
+                None,
+                Some(pool.clone()),
+                account_id,
+            )?;
+            info!(
+                agent = %sports_cfg.agent_id,
+                "sports nba_comeback strategy runtime spawned"
+            );
+        } else {
+            spawn_legacy_nba_comeback_agent(
+                agent_handles,
+                coordinator,
+                handle,
+                sports_cfg.clone(),
+                nba_cfg.clone(),
+                pool,
+            );
+        }
+    } else {
+        warn!(
+            agent = %sports_cfg.agent_id,
+            "grok-enabled nba_comeback compatibility runtime disabled; set PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true to allow temporary startup or disable grok_enabled for canonical runtime"
+        );
+    }
+
+    Ok(())
+}
+
+fn spawn_politics_strategy_runtime(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    pm_client: Option<PolymarketClient>,
+    app_config: &AppConfig,
+    shared_pool: Option<PgPool>,
+    account_id: &str,
+    dry_run: bool,
+    politics_cfg: PoliticsTradingConfig,
+    ee_cfg: &crate::config::EventEdgeAgentConfig,
+) -> Result<()> {
+    let strategy_agent_id = politics_cfg.agent_id.clone();
+    let runtime_spec =
+        build_event_edge_managed_runtime_spec(&app_config.market.rest_url, &politics_cfg, ee_cfg);
+    spawn_managed_strategy_runtime_spec(
+        agent_handles,
+        coordinator,
+        shutdown_tx,
+        runtime_spec,
+        politics_cfg.risk_params.clone(),
+        dry_run,
+        pm_client,
+        &app_config.market.ws_url,
+        None,
+        shared_pool,
+        account_id,
+    )?;
+    info!(agent = %strategy_agent_id, "politics event_edge strategy runtime spawned");
+    Ok(())
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -6280,189 +6574,24 @@ pub async fn start_platform(
             });
         }
 
-        if momentum_enabled {
-            if momentum_symbols.is_empty() {
-                warn!(
-                    agent = crypto_cfg.agent_id,
-                    "crypto momentum enabled but no recognized symbols were resolved"
-                );
-            } else {
-                let strategy_agent_id = crypto_cfg.agent_id.clone();
-                let runtime_spec =
-                    build_momentum_managed_runtime_spec(&momentum_symbols, &crypto_cfg);
-                if let Err(e) = spawn_managed_strategy_runtime_spec(
-                    &mut agent_handles,
-                    &mut coordinator,
-                    &shutdown_tx,
-                    runtime_spec,
-                    crypto_cfg.risk_params.clone(),
-                    config.dry_run,
-                    pm_client.clone(),
-                    &app_config.market.ws_url,
-                    data_plane.clone(),
-                    shared_pool.clone(),
-                    &account_id,
-                ) {
-                    warn!(
-                        agent = crypto_cfg.agent_id,
-                        error = %e,
-                        "crypto momentum enabled but canonical runtime could not be spawned; skipping"
-                    );
-                } else {
-                    info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
-                }
-            }
-        } else {
-            info!(
-                agent = crypto_cfg.agent_id,
-                "crypto momentum strategy runtime disabled"
-            );
-        }
-
-        if pattern_memory_enabled {
-            // Ensure persistence table exists
-            if let Some(ref pool) = shared_pool {
-                if let Err(e) =
-                    crate::strategy::pattern_memory::persistence::ensure_table(pool).await
-                {
-                    warn!(error = %e, "failed to create pattern_memory_samples table");
-                }
-            }
-
-            let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
-                crypto_cfg.coins.clone()
-            } else {
-                runtime_crypto_targets
-                    .pattern_memory_coins
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            coins.sort();
-            coins.dedup();
-
-            match build_pattern_memory_managed_runtime_spec(&coins) {
-                Ok(runtime_spec) => {
-                    if let Err(e) = spawn_managed_strategy_runtime_spec(
-                        &mut agent_handles,
-                        &mut coordinator,
-                        &shutdown_tx,
-                        runtime_spec,
-                        crypto_cfg.risk_params.clone(),
-                        config.dry_run,
-                        pm_client.clone(),
-                        &app_config.market.ws_url,
-                        data_plane.clone(),
-                        shared_pool.clone(),
-                        &account_id,
-                    ) {
-                        warn!(
-                            agent = "pattern_memory",
-                            error = %e,
-                            "pattern_memory enabled but canonical runtime could not be spawned"
-                        );
-                    } else {
-                        info!("pattern_memory strategy runtime spawned");
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        agent = "pattern_memory",
-                        error = %e,
-                        "pattern_memory enabled but no valid runtime spec could be built"
-                    );
-                }
-            }
-        }
-
-        if split_arb_enabled {
-            let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
-                crypto_cfg.coins.clone()
-            } else {
-                runtime_crypto_targets
-                    .split_arb_coins
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            coins.sort();
-            coins.dedup();
-
-            let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty()
-            {
-                vec!["5m".to_string(), "15m".to_string()]
-            } else {
-                runtime_crypto_targets
-                    .split_arb_horizons
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            horizons.sort();
-            horizons.dedup();
-
-            let mut series_set: HashSet<String> = HashSet::new();
-            for coin in &coins {
-                let normalized = coin.trim_end_matches("USDT");
-                for horizon in &horizons {
-                    if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
-                        series_set.insert(series_id.to_string());
-                    }
-                }
-            }
-            let mut series_ids: Vec<String> = series_set.into_iter().collect();
-            series_ids.sort();
-
-            let mut symbols: Vec<String> = coins
-                .iter()
-                .filter_map(|coin| {
-                    let normalized = coin.trim_end_matches("USDT");
-                    coin_symbol_for(normalized)
-                })
-                .collect();
-            symbols.sort();
-            symbols.dedup();
-            if symbols.is_empty() {
-                symbols = series_ids
-                    .iter()
-                    .filter_map(|series_id| {
-                        symbol_for_crypto_series_id(series_id).map(str::to_string)
-                    })
-                    .collect();
-                symbols.sort();
-                symbols.dedup();
-            }
-
-            if series_ids.is_empty() {
-                warn!(
-                    agent = "split_arb",
-                    "split_arb enabled but no recognized coin/horizon series ids were resolved"
-                );
-            } else {
-                let runtime_spec = build_split_arb_managed_runtime_spec(&symbols, &series_ids);
-                if let Err(e) = spawn_managed_strategy_runtime_spec(
-                    &mut agent_handles,
-                    &mut coordinator,
-                    &shutdown_tx,
-                    runtime_spec,
-                    crypto_cfg.risk_params.clone(),
-                    config.dry_run,
-                    pm_client.clone(),
-                    &app_config.market.ws_url,
-                    data_plane.clone(),
-                    shared_pool.clone(),
-                    &account_id,
-                ) {
-                    warn!(
-                        agent = "split_arb",
-                        error = %e,
-                        "split_arb enabled but canonical runtime could not be spawned"
-                    );
-                } else {
-                    info!("split_arb strategy runtime spawned");
-                }
-            }
-        }
+        spawn_canonical_crypto_strategy_runtimes(
+            &mut agent_handles,
+            &mut coordinator,
+            &shutdown_tx,
+            pm_client.clone(),
+            &app_config.market.ws_url,
+            data_plane.clone(),
+            shared_pool.clone(),
+            &account_id,
+            config.dry_run,
+            &crypto_cfg,
+            &runtime_crypto_targets,
+            momentum_enabled,
+            &momentum_symbols,
+            pattern_memory_enabled,
+            split_arb_enabled,
+        )
+        .await;
 
         if lob_agent_enabled {
             if compat_crypto_runtimes_enabled {
@@ -6507,79 +6636,39 @@ pub async fn start_platform(
 
     if config.enable_sports {
         if let Some(ref nba_cfg) = app_config.nba_comeback {
-            let sports_cfg = config.sports.clone();
-            let managed_runtime_spec = build_nba_comeback_managed_runtime_spec(
-                &app_config.database.url,
-                &sports_cfg,
+            start_sports_strategy_runtime(
+                &mut agent_handles,
+                &mut coordinator,
+                &shutdown_tx,
+                &handle,
+                app_config,
+                shared_pool.clone(),
+                Arc::clone(&freshness),
+                pm_client.clone(),
+                &account_id,
+                config.dry_run,
+                config.sports.clone(),
                 nba_cfg,
-            );
-
-            if managed_runtime_spec.is_some() || compat_sports_runtimes_enabled {
-                let pool = start_sports_market_data_support(
-                    shared_pool.clone(),
-                    app_config,
-                    Arc::clone(&freshness),
-                    &sports_cfg,
-                )
-                .await?;
-
-                if let Some(runtime_spec) = managed_runtime_spec {
-                    spawn_managed_strategy_runtime_spec(
-                        &mut agent_handles,
-                        &mut coordinator,
-                        &shutdown_tx,
-                        runtime_spec,
-                        sports_cfg.risk_params.clone(),
-                        config.dry_run,
-                        pm_client.clone(),
-                        &app_config.market.ws_url,
-                        None,
-                        Some(pool.clone()),
-                        &account_id,
-                    )?;
-                    info!(
-                        agent = %sports_cfg.agent_id,
-                        "sports nba_comeback strategy runtime spawned"
-                    );
-                } else {
-                    spawn_legacy_nba_comeback_agent(
-                        &mut agent_handles,
-                        &mut coordinator,
-                        &handle,
-                        sports_cfg.clone(),
-                        nba_cfg.clone(),
-                        pool,
-                    );
-                }
-            } else {
-                warn!(
-                    agent = %sports_cfg.agent_id,
-                    "grok-enabled nba_comeback compatibility runtime disabled; set PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true to allow temporary startup or disable grok_enabled for canonical runtime"
-                );
-            }
+                compat_sports_runtimes_enabled,
+            )
+            .await?;
         }
     }
 
     if config.enable_politics {
         if let Some(ref ee_cfg) = app_config.event_edge_agent {
-            let politics_cfg = config.politics.clone();
-            let strategy_agent_id = politics_cfg.agent_id.clone();
-            let runtime_spec =
-                build_event_edge_managed_runtime_spec(&app_config.market.rest_url, &politics_cfg, ee_cfg);
-            spawn_managed_strategy_runtime_spec(
+            spawn_politics_strategy_runtime(
                 &mut agent_handles,
                 &mut coordinator,
                 &shutdown_tx,
-                runtime_spec,
-                politics_cfg.risk_params.clone(),
-                config.dry_run,
                 pm_client.clone(),
-                &app_config.market.ws_url,
-                None,
+                app_config,
                 shared_pool.clone(),
                 &account_id,
+                config.dry_run,
+                config.politics.clone(),
+                ee_cfg,
             )?;
-            info!(agent = %strategy_agent_id, "politics event_edge strategy runtime spawned");
         }
     }
 

@@ -831,6 +831,30 @@ Move strategy-specific managed runtime TOML/spec construction out of `src/coordi
 
 ---
 
+# Layered Live Runtime Task 9M: Extract Domain Startup Helpers (2026-03-06)
+
+## Goal
+Shrink `start_platform()` down to assembly flow by moving the remaining crypto, sports, and politics startup branches into dedicated helper functions without changing runtime behavior.
+
+## Tasks
+
+- [x] Extract canonical crypto strategy startup into a dedicated helper.
+- [x] Extract sports `nba_comeback` startup selection into a dedicated helper.
+- [x] Extract politics `event_edge` startup into a dedicated helper.
+- [x] Keep behavior and logging semantics intact while reducing inline branch volume in `start_platform()`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `start_platform()` now delegates crypto, sports, and politics live startup selection to dedicated helpers instead of embedding those branches inline.
+- [x] Canonical runtime selection, compatibility gates, and legacy fallback behavior stayed unchanged; this slice only moved ownership of the startup branches.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
