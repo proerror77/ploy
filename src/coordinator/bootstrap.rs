@@ -14,11 +14,14 @@ use tracing::{debug, error, info, trace, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agents::crypto::CryptoEntryMode;
+use crate::agents::context::AgentContext;
+use crate::agents::governance_context::GovernanceContext;
 use crate::agents::sports::SportsTradingAgent;
+use crate::agents::traits::{GovernanceAgent, TradingAgent};
 use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingConfig, GovernanceAgent, GovernanceContext,
-    OpenClawAgent, OpenClawConfig, PoliticsTradingConfig, SportsTradingConfig, TradingAgent,
+    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
+    CryptoTradingConfig, OpenClawAgent, OpenClawConfig, PoliticsTradingConfig,
+    SportsTradingConfig,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};

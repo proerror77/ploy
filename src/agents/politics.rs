@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::agents::{AgentContext, TradingAgent};
+use crate::agents::context::AgentContext;
+use crate::agents::traits::TradingAgent;
 use crate::coordinator::CoordinatorCommand;
 use crate::error::Result;
 use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};

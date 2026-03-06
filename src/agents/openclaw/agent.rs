@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+use crate::agents::governance_context::GovernanceContext;
 use crate::agents::traits::GovernanceAgent;
-use crate::agents::GovernanceContext;
 use crate::coordinator::CoordinatorCommand;
 use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
 

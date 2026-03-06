@@ -576,6 +576,30 @@ Stop presenting the push-based compatibility trait path as part of the top-level
 
 ---
 
+# Layered Live Runtime Task 8C: Narrow Agents Trait And Context Re-Exports (2026-03-06)
+
+## Goal
+Stop presenting pull-based compatibility traits and contexts as part of the `agents` root API. Legacy runtime code should opt into explicit `agents::traits`, `agents::context`, or `agents::governance_context` paths.
+
+## Tasks
+
+- [x] Stop re-exporting `AgentContext`, `GovernanceContext`, `TradingAgent`, and `GovernanceAgent` from `src/agents/mod.rs`.
+- [x] Update the remaining pull-based compatibility agents to import `AgentContext` and `TradingAgent` from explicit submodules.
+- [x] Update OpenClaw to import `GovernanceContext` from `agents::governance_context`.
+- [x] Update bootstrap to import compatibility traits/contexts from explicit submodule paths.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `crate::agents::TradingAgent`, `crate::agents::GovernanceAgent`, `crate::agents::AgentContext`, and `crate::agents::GovernanceContext` are no longer convenience APIs from the `agents` root.
+- [x] This slice does not change runtime behavior; it only narrows another misleading compatibility surface so later removal of pull-based runtime paths is mechanically smaller.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal

@@ -14,14 +14,11 @@ pub mod politics;
 pub mod sports;
 pub mod traits;
 
-pub use context::AgentContext;
 pub use crypto::CryptoTradingConfig;
 pub use crypto_lob_ml::{
     CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
-pub use governance_context::GovernanceContext;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
 pub use politics::PoliticsTradingConfig;
 pub use sports::SportsTradingConfig;
-pub use traits::{AgentConfig, GovernanceAgent, TradingAgent};

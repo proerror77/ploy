@@ -14,7 +14,8 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::agents::{AgentContext, TradingAgent};
+use crate::agents::context::AgentContext;
+use crate::agents::traits::TradingAgent;
 use crate::ai_clients::grok::GrokClient;
 use crate::ai_clients::polymarket_sports::{
     OrderBookLevel as SportsOrderBookLevel, SportsOrderBook,

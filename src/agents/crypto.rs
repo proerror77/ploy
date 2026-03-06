@@ -21,7 +21,8 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::adapters::{PriceUpdate, QuoteUpdate};
-use crate::agents::{AgentContext, TradingAgent};
+use crate::agents::context::AgentContext;
+use crate::agents::traits::TradingAgent;
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::Result;

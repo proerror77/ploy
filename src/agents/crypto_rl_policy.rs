@@ -60,7 +60,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use crate::agents::{AgentContext, TradingAgent};
+use crate::agents::context::AgentContext;
+use crate::agents::traits::TradingAgent;
 use crate::collector::LobCache;
 #[cfg(feature = "onnx")]
 use crate::collector::LobSnapshot;
