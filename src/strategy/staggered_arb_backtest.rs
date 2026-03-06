@@ -47,15 +47,23 @@ pub struct StaggeredArbBacktestConfig {
     pub initial_capital: Decimal,
     /// Position size in shares per trade
     pub shares_per_trade: u64,
-    /// Maximum concurrent Leg1 positions
+    /// Maximum concurrent Leg1 positions. 0 disables the cap.
     pub max_concurrent_positions: usize,
     // ── Signal thresholds ──
     /// Minimum |p_hat - 0.5| to trigger entry
     pub direction_threshold: f64,
+    /// Only apply premium-entry strengthening above this sum threshold.
+    pub premium_sum_threshold: Decimal,
+    /// Extra direction-strength required per 1.0 sum above `premium_sum_threshold`.
+    pub premium_sum_direction_slope: f64,
+    /// Extra OBI confirmation required per 1.0 sum above `premium_sum_threshold`.
+    /// Live-only today; kept in shared config so live/backtest profiles stay aligned.
+    pub premium_sum_obi_slope: f64,
     /// Reverse the direction signal: if true, buy the OPPOSITE of what the model predicts.
     /// Useful when the model is consistently wrong (accuracy < 50%).
     pub reverse_signal: bool,
-    /// Maximum up_ask + down_ask to consider entry (legacy; prefer max_leg1_price)
+    /// Maximum up_ask + down_ask to consider entry (legacy; prefer max_leg1_price).
+    /// 0 disables the hard cap so OBI/direction can decide entry.
     pub max_initial_sum: Decimal,
     /// Maximum Leg1 ask price — don't buy if the predicted side is too expensive
     /// (leaves no room for the other side to drop enough for profit)
@@ -67,6 +75,8 @@ pub struct StaggeredArbBacktestConfig {
     // ── Time control ──
     /// Maximum seconds to wait for Leg2 after Leg1 fill
     pub max_wait_secs: u64,
+    /// Minimum seconds after event start before opening Leg1. 0 disables this delay.
+    pub entry_after_start_min_secs: u64,
     /// Prefer entering soon after event start. 0 disables this gate.
     pub entry_after_start_max_secs: u64,
     /// In the final N seconds, do not place hedge/exit trades. 0 disables this gate.
@@ -76,10 +86,12 @@ pub struct StaggeredArbBacktestConfig {
     /// Minimum time remaining in window to enter
     pub min_time_remaining_secs: u64,
     // ── Risk control ──
-    /// Maximum unrealized loss on Leg1 before aborting
+    /// Maximum unrealized loss on Leg1 before buying Leg2 to cap the trade
     pub max_leg1_loss: Decimal,
-    /// If sum < this value, force-complete Leg2 even at timeout
+    /// If sum <= this value, allow generic forced Leg2 closes (timeout / time-safety / final window)
     pub force_complete_threshold: Decimal,
+    /// Maximum sum allowed for protective Leg2 closes (stop-loss / theta urgency)
+    pub protective_close_threshold: Decimal,
     /// Minimum ask price to consider (filters out illiquid extreme prices)
     pub min_ask_price: Decimal,
     /// Minimum up_ask + down_ask to enter (filters out illiquid extreme-price pairs)
@@ -102,6 +114,10 @@ pub struct StaggeredArbBacktestConfig {
     pub vol_lookback_secs: u64,
     /// Volatility floor to prevent overconfidence
     pub vol_floor: f64,
+    /// Minimum realized sigma required to enter the long-gamma regime
+    pub min_entry_sigma: f64,
+    /// Maximum realized sigma allowed to enter the long-gamma regime. 0 disables the cap.
+    pub max_entry_sigma: f64,
     /// Cooldown between entries on same symbol (seconds)
     pub cooldown_secs: u64,
     // ── Greeks integration ──
@@ -111,6 +127,8 @@ pub struct StaggeredArbBacktestConfig {
     pub min_gamma: f64,
     /// Maximum theta decay cost (per share, per second) to hold position
     pub max_theta_cost: f64,
+    /// Require fair value to remain within 0.5 +/- this distance for long-gamma entries.
+    pub max_fair_value_distance: f64,
     /// Delta-weighted sizing: scale shares by |delta| relative to ATM delta
     pub delta_weighted_sizing: bool,
 }
@@ -121,33 +139,41 @@ impl Default for StaggeredArbBacktestConfig {
             symbols: vec!["BTCUSDT".to_string()],
             initial_capital: dec!(10000),
             shares_per_trade: 50,
-            max_concurrent_positions: 5,
-            direction_threshold: 0.04,
+            max_concurrent_positions: 0,
+            direction_threshold: 0.05,
+            premium_sum_threshold: Decimal::ONE,
+            premium_sum_direction_slope: 1.25,
+            premium_sum_obi_slope: 0.25,
             reverse_signal: false,
-            max_initial_sum: dec!(1.10),
-            max_leg1_price: dec!(0.65),
+            max_initial_sum: Decimal::ZERO,
+            max_leg1_price: dec!(0.58),
             merge_target_sum: dec!(0.95),
             min_profit_target: dec!(0.02),
             max_wait_secs: 120,
-            entry_after_start_max_secs: 30,
+            entry_after_start_min_secs: 30,
+            entry_after_start_max_secs: 0,
             no_trade_last_secs: 30,
             max_wait_pct: 0.30,
             min_time_remaining_secs: 45,
-            max_leg1_loss: dec!(0),
-            force_complete_threshold: dec!(0.00),
+            max_leg1_loss: dec!(0.05),
+            force_complete_threshold: dec!(1.20),
+            protective_close_threshold: dec!(1.20),
             min_ask_price: dec!(0.05),
-            min_entry_sum: dec!(0.70),
+            min_entry_sum: dec!(0.30),
             allowed_window_durations: vec![300, 900],
             window_duration_tolerance: 30,
             min_leg2_delay_secs: 3,
-            max_trades_per_event: 3,
+            max_trades_per_event: 0,
             mu: 0.0,
             vol_lookback_secs: 600,
             vol_floor: 0.003,
+            min_entry_sigma: 0.003,
+            max_entry_sigma: 0.0,
             cooldown_secs: 5,
             use_greeks: true,
             min_gamma: 0.0,
             max_theta_cost: 0.0,
+            max_fair_value_distance: 0.15,
             delta_weighted_sizing: false,
         }
     }
@@ -158,6 +184,17 @@ impl StaggeredArbBacktestConfig {
         Self {
             symbols,
             ..Default::default()
+        }
+    }
+
+    fn premium_sum_excess(&self, current_sum: Decimal) -> f64 {
+        if current_sum <= self.premium_sum_threshold {
+            0.0
+        } else {
+            (current_sum - self.premium_sum_threshold)
+                .to_f64()
+                .unwrap_or(0.0)
+                .max(0.0)
         }
     }
 }
@@ -294,6 +331,9 @@ pub struct StaggeredArbBacktestEngine {
     event_trade_count: HashMap<String, usize>,
     /// Track ask-side depth per symbol (from LOB snapshots)
     lob_depth: HashMap<String, u64>,
+    /// Latest Binance L2 OBI per symbol for live-parity replay filtering.
+    binance_l2_obi_5: HashMap<String, Decimal>,
+    binance_l2_obi_ts: HashMap<String, DateTime<Utc>>,
     // Data range
     data_range_start: Option<DateTime<Utc>>,
     data_range_end: Option<DateTime<Utc>>,
@@ -319,6 +359,8 @@ impl StaggeredArbBacktestEngine {
             last_entry_time: HashMap::new(),
             event_trade_count: HashMap::new(),
             lob_depth: HashMap::new(),
+            binance_l2_obi_5: HashMap::new(),
+            binance_l2_obi_ts: HashMap::new(),
             data_range_start: None,
             data_range_end: None,
         }
@@ -427,6 +469,11 @@ impl StaggeredArbBacktestEngine {
                     // Update LOB depth cache for this symbol
                     self.lob_depth
                         .insert(update.symbol.clone(), *ask_depth_shares);
+                }
+                UpdateType::BinanceL2 { obi_5, .. } => {
+                    self.binance_l2_obi_5.insert(update.symbol.clone(), *obi_5);
+                    self.binance_l2_obi_ts
+                        .insert(update.symbol.clone(), update.timestamp);
                 }
             }
         }
@@ -571,6 +618,11 @@ impl StaggeredArbBacktestEngine {
         if elapsed_since_start < 0 {
             return;
         }
+        if self.config.entry_after_start_min_secs > 0
+            && elapsed_since_start < self.config.entry_after_start_min_secs as i64
+        {
+            return;
+        }
         if self.config.entry_after_start_max_secs > 0
             && elapsed_since_start > self.config.entry_after_start_max_secs as i64
         {
@@ -595,7 +647,9 @@ impl StaggeredArbBacktestEngine {
 
         // 3. Current sum — only enter when sum shows a discount (market inefficiency)
         let current_sum = ua + da;
-        if current_sum > self.config.max_initial_sum {
+        if self.config.max_initial_sum > Decimal::ZERO
+            && current_sum > self.config.max_initial_sum
+        {
             return;
         }
 
@@ -611,6 +665,23 @@ impl StaggeredArbBacktestEngine {
                 _ => floor,
             }
         };
+
+        if sigma < self.config.min_entry_sigma {
+            trace!(
+                "Skipping: sigma {:.6} < min_entry_sigma {:.6}",
+                sigma,
+                self.config.min_entry_sigma
+            );
+            return;
+        }
+        if self.config.max_entry_sigma > 0.0 && sigma > self.config.max_entry_sigma {
+            trace!(
+                "Skipping: sigma {:.6} > max_entry_sigma {:.6}",
+                sigma,
+                self.config.max_entry_sigma
+            );
+            return;
+        }
 
         // 5. Estimate probability
         let p_hat = estimate_probability(window.s0, st, sigma, time_remaining, self.config.mu);
@@ -649,11 +720,31 @@ impl StaggeredArbBacktestEngine {
                 );
                 return;
             }
+
+            if self.config.max_fair_value_distance < 0.5
+                && (g.fair_value - 0.5).abs() > self.config.max_fair_value_distance
+            {
+                trace!(
+                    "Skipping: fair_value {:.4} outside long-gamma band 0.5 +/- {:.4}",
+                    g.fair_value,
+                    self.config.max_fair_value_distance
+                );
+                return;
+            }
         }
 
         // 6. Direction threshold: |p_hat - 0.5| >= direction_threshold
         let direction_strength = (p_hat - 0.5).abs();
-        if direction_strength < self.config.direction_threshold {
+        let premium_sum_excess = self.config.premium_sum_excess(current_sum);
+        let required_direction_strength = self.config.direction_threshold
+            + premium_sum_excess * self.config.premium_sum_direction_slope;
+        if direction_strength < required_direction_strength {
+            trace!(
+                "Skipping: direction_strength {:.4} < required {:.4} (premium_sum_excess {:.4})",
+                direction_strength,
+                required_direction_strength,
+                premium_sum_excess
+            );
             return;
         }
 
@@ -664,6 +755,46 @@ impl StaggeredArbBacktestEngine {
         } else {
             p_hat > 0.5
         };
+
+        const OI_CONFIRM_THRESHOLD: f64 = 0.005;
+        const OI_MAX_STALE_SECS: i64 = 60;
+        if let Some(obi_ts) = self.binance_l2_obi_ts.get(symbol).copied() {
+            if (ts - obi_ts).num_seconds().abs() <= OI_MAX_STALE_SECS {
+                if let Some(obi_value) = self.binance_l2_obi_5.get(symbol) {
+                    let obi = obi_value.to_f64().unwrap_or(0.0);
+                    let required_obi_strength =
+                        OI_CONFIRM_THRESHOLD + premium_sum_excess * self.config.premium_sum_obi_slope;
+                    if predicted_up && obi < required_obi_strength {
+                        trace!(
+                            "Skipping: OBI {:.4} < required {:.4} for long entry",
+                            obi,
+                            required_obi_strength
+                        );
+                        return;
+                    }
+                    if !predicted_up && obi > -required_obi_strength {
+                        trace!(
+                            "Skipping: OBI {:.4} > required {:.4} for short entry",
+                            obi,
+                            -required_obi_strength
+                        );
+                        return;
+                    }
+                }
+            } else {
+                trace!(
+                    "No fresh Binance L2 OBI for {} ({}s stale); falling back to price/Greeks entry gates",
+                    symbol,
+                    (ts - obi_ts).num_seconds().abs()
+                );
+            }
+        } else {
+            trace!(
+                "No Binance L2 OBI history for {}; falling back to price/Greeks entry gates",
+                symbol
+            );
+        }
+
         let (leg1_dir, leg1_ask) = if predicted_up {
             (Direction::Up, ua)
         } else {
@@ -695,7 +826,9 @@ impl StaggeredArbBacktestEngine {
             .iter()
             .filter(|p| p.state == ArbPositionState::Leg1Filled)
             .count();
-        if active_count >= self.config.max_concurrent_positions {
+        if self.config.max_concurrent_positions > 0
+            && active_count >= self.config.max_concurrent_positions
+        {
             return;
         }
 
@@ -829,7 +962,7 @@ impl StaggeredArbBacktestEngine {
         // Collect actions to take (can't mutate positions while iterating)
         let mut actions: Vec<(usize, Leg2Action)> = Vec::new();
         let force_threshold = self.config.force_complete_threshold;
-
+        let protective_threshold = self.config.protective_close_threshold;
         for (i, pos) in self.positions.iter_mut().enumerate() {
             if pos.symbol != symbol || pos.state != ArbPositionState::Leg1Filled {
                 continue;
@@ -864,11 +997,9 @@ impl StaggeredArbBacktestEngine {
             }
 
             let time_remaining = (pos.event_end_time - ts).num_seconds() as f64;
-            if self.config.no_trade_last_secs > 0
+            let in_final_window = self.config.no_trade_last_secs > 0
                 && time_remaining <= self.config.no_trade_last_secs as f64
-            {
-                continue;
-            }
+                && time_remaining > 0.0;
             let min_time = self.config.min_time_remaining_secs as f64;
 
             // Compute current Greeks for this position (if enabled)
@@ -899,8 +1030,8 @@ impl StaggeredArbBacktestEngine {
             let leg2_ready = secs_since_leg1 >= self.config.min_leg2_delay_secs as i64;
 
             // A. Profitable merge: sum < merge_target_sum
-            if current_sum < self.config.merge_target_sum && leg2_ready {
-                actions.push((i, Leg2Action::Fill(other_ask)));
+            if !in_final_window && current_sum < self.config.merge_target_sum && leg2_ready {
+                actions.push((i, Leg2Action::Fill(other_ask, "merge".to_string())));
                 continue;
             }
 
@@ -908,7 +1039,7 @@ impl StaggeredArbBacktestEngine {
             //     the opposite token price is volatile — merge sooner to lock profit.
             //     Accept a tighter profit margin when gamma is elevated.
             if let Some(ref g) = current_greeks {
-                if leg2_ready && current_sum < Decimal::ONE {
+                if !in_final_window && leg2_ready && current_sum < Decimal::ONE {
                     // High gamma → price can swing either way fast → lock it in
                     let gamma_urgency = g.gamma.abs().min(1.0);
                     let adjusted_target = self.config.min_profit_target
@@ -920,7 +1051,7 @@ impl StaggeredArbBacktestEngine {
                             adjusted_target,
                             current_sum
                         );
-                        actions.push((i, Leg2Action::Fill(other_ask)));
+                        actions.push((i, Leg2Action::Fill(other_ask, "merge".to_string())));
                         continue;
                     }
                 }
@@ -929,24 +1060,33 @@ impl StaggeredArbBacktestEngine {
                 //     (approaching expiry), merge even at breakeven to avoid decay.
                 if leg2_ready && self.config.max_theta_cost > 0.0 {
                     let theta_cost_remaining = g.theta.abs() * time_remaining;
-                    if theta_cost_remaining > self.config.max_theta_cost
-                        && current_sum <= Decimal::ONE
-                    {
+                    if theta_cost_remaining > self.config.max_theta_cost {
                         trace!(
                             "Theta urgency: theta={:.6} cost_remaining={:.4} sum={:.4}",
                             g.theta,
                             theta_cost_remaining,
                             current_sum
                         );
-                        actions.push((i, Leg2Action::Fill(other_ask)));
-                        continue;
+                        if current_sum <= Decimal::ONE {
+                            actions.push((i, Leg2Action::Fill(other_ask, "merge".to_string())));
+                            continue;
+                        }
+                        if protective_threshold <= Decimal::ZERO
+                            || current_sum <= protective_threshold
+                        {
+                            actions.push((
+                                i,
+                                Leg2Action::Fill(other_ask, "protective_theta".to_string()),
+                            ));
+                            continue;
+                        }
                     }
                 }
             }
 
             // B. Lock profit: sum < 1.0 (any profit is good)
-            if current_sum < Decimal::ONE && leg2_ready {
-                actions.push((i, Leg2Action::Fill(other_ask)));
+            if !in_final_window && current_sum < Decimal::ONE && leg2_ready {
+                actions.push((i, Leg2Action::Fill(other_ask, "merge".to_string())));
                 continue;
             }
 
@@ -955,7 +1095,7 @@ impl StaggeredArbBacktestEngine {
             //    Much better than risking full Leg1 cost at settlement
             if ts >= pos.wait_deadline && leg2_ready {
                 if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
-                    actions.push((i, Leg2Action::Fill(other_ask)));
+                    actions.push((i, Leg2Action::Fill(other_ask, "forced_timeout".to_string())));
                 }
                 continue;
             }
@@ -968,10 +1108,14 @@ impl StaggeredArbBacktestEngine {
                     Direction::Down => pm_asks.1.unwrap_or(pos.leg1_price),
                 };
                 let leg1_loss = pos.leg1_price - leg1_current_value;
-                if leg1_loss > self.config.max_leg1_loss && leg2_ready {
-                    // Force buy Leg2 to lock in bounded loss instead of aborting
-                    if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
-                        actions.push((i, Leg2Action::Fill(other_ask)));
+                if leg1_loss >= self.config.max_leg1_loss && leg2_ready {
+                    if protective_threshold <= Decimal::ZERO
+                        || current_sum <= protective_threshold
+                    {
+                        actions.push((
+                            i,
+                            Leg2Action::Fill(other_ask, "protective_stop_loss".to_string()),
+                        ));
                     }
                     continue;
                 }
@@ -980,7 +1124,10 @@ impl StaggeredArbBacktestEngine {
             // E. Time safety: not enough time left — force-complete the arb
             if time_remaining < min_time && leg2_ready {
                 if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
-                    actions.push((i, Leg2Action::Fill(other_ask)));
+                    actions.push((
+                        i,
+                        Leg2Action::Fill(other_ask, "forced_time_safety".to_string()),
+                    ));
                 }
             }
         }
@@ -989,8 +1136,8 @@ impl StaggeredArbBacktestEngine {
         actions.sort_by(|a, b| b.0.cmp(&a.0));
         for (idx, action) in actions {
             match action {
-                Leg2Action::Fill(other_ask) => {
-                    self.fill_leg2(idx, other_ask, ts);
+                Leg2Action::Fill(other_ask, reason) => {
+                    self.fill_leg2(idx, other_ask, &reason, ts);
                 }
                 Leg2Action::Abort(reason) => {
                     self.abort_position(idx, &reason, ts);
@@ -1000,7 +1147,7 @@ impl StaggeredArbBacktestEngine {
     }
 
     /// Fill Leg2 and immediately merge for $1.00 per share.
-    fn fill_leg2(&mut self, idx: usize, other_ask: Decimal, ts: DateTime<Utc>) {
+    fn fill_leg2(&mut self, idx: usize, other_ask: Decimal, reason: &str, ts: DateTime<Utc>) {
         let pos = &self.positions[idx];
         let leg2_dir = match pos.leg1_direction {
             Direction::Up => Direction::Down,
@@ -1052,7 +1199,7 @@ impl StaggeredArbBacktestEngine {
         pos.leg2_time = Some(ts);
         pos.leg2_fee = Some(leg2_fee);
         pos.state = ArbPositionState::Settled;
-        pos.exit_reason = Some("merge".to_string());
+        pos.exit_reason = Some(reason.to_string());
         pos.pnl = Some(pnl);
 
         self.closed_trades.push(StaggeredArbClosedTrade {
@@ -1066,7 +1213,7 @@ impl StaggeredArbBacktestEngine {
             pnl,
             won: pnl > Decimal::ZERO,
             holding_secs,
-            exit_reason: "merge".to_string(),
+            exit_reason: reason.to_string(),
             initial_sum: pos.initial_sum,
             final_sum: Some(final_sum),
             entry_p_hat: pos.entry_p_hat,
@@ -1093,7 +1240,7 @@ impl StaggeredArbBacktestEngine {
             s0: Some(pos.s0),
             time_remaining_secs: None,
             filter_reason: None,
-            exit_reason: Some("merge".to_string()),
+            exit_reason: Some(reason.to_string()),
             exit_price: Some(sim_result.fill_price),
         });
 
@@ -1108,7 +1255,7 @@ impl StaggeredArbBacktestEngine {
             pnl,
             won: pnl > Decimal::ZERO,
             holding_secs,
-            exit_reason: "merge".to_string(),
+            exit_reason: reason.to_string(),
             entry_p_hat: Some(pos.entry_p_hat),
             entry_ev_net: Some(pnl.to_f64().unwrap_or(0.0)),
             entry_sigma: Some(pos.entry_sigma),
@@ -1254,7 +1401,7 @@ impl StaggeredArbBacktestEngine {
             match other_ask {
                 Some(ask) => {
                     // Force buy Leg2 and merge — bounded loss
-                    self.fill_leg2(idx, ask, ts);
+                    self.fill_leg2(idx, ask, "forced_settlement", ts);
                 }
                 None => {
                     // No quote data at all — last resort: abort (sell Leg1 at market)
@@ -1345,7 +1492,7 @@ impl StaggeredArbBacktestEngine {
                 Direction::Down => a.0,
             });
             match other_ask {
-                Some(ask) => self.fill_leg2(idx, ask, ts),
+                Some(ask) => self.fill_leg2(idx, ask, "data_exhausted", ts),
                 None => self.abort_position(idx, "data_exhausted", ts),
             }
         }
@@ -1765,7 +1912,7 @@ impl StaggeredArbBacktestEngine {
 
 #[derive(Debug)]
 enum Leg2Action {
-    Fill(Decimal),
+    Fill(Decimal, String),
     #[allow(dead_code)]
     Abort(String),
 }
@@ -1790,6 +1937,22 @@ mod tests {
             update_type: UpdateType::SpotTrade {
                 price,
                 quantity: None,
+            },
+        }
+    }
+
+    fn make_binance_l2(ts: &str, symbol: &str, obi_5: Decimal) -> MarketUpdate {
+        MarketUpdate {
+            timestamp: DateTime::parse_from_rfc3339(ts)
+                .unwrap()
+                .with_timezone(&Utc),
+            symbol: symbol.to_string(),
+            update_type: UpdateType::BinanceL2 {
+                obi_5,
+                obi_10: obi_5,
+                bid_volume_5: dec!(1000),
+                ask_volume_5: dec!(900),
+                spread_bps: dec!(1),
             },
         }
     }
@@ -1874,18 +2037,28 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = StaggeredArbBacktestConfig::default();
-        assert_eq!(config.direction_threshold, 0.04);
-        assert_eq!(config.max_initial_sum, dec!(1.10));
-        assert_eq!(config.max_leg1_price, dec!(0.65));
+        assert_eq!(config.direction_threshold, 0.05);
+        assert_eq!(config.premium_sum_threshold, Decimal::ONE);
+        assert_eq!(config.premium_sum_direction_slope, 1.25);
+        assert_eq!(config.premium_sum_obi_slope, 0.25);
+        assert_eq!(config.max_concurrent_positions, 0);
+        assert_eq!(config.max_initial_sum, Decimal::ZERO);
+        assert_eq!(config.max_leg1_price, dec!(0.58));
         assert_eq!(config.merge_target_sum, dec!(0.95));
         assert_eq!(config.min_profit_target, dec!(0.02));
         assert_eq!(config.max_wait_secs, 120);
-        assert_eq!(config.entry_after_start_max_secs, 30);
+        assert_eq!(config.entry_after_start_min_secs, 30);
+        assert_eq!(config.entry_after_start_max_secs, 0);
         assert_eq!(config.min_leg2_delay_secs, 3);
-        assert_eq!(config.max_trades_per_event, 3);
+        assert_eq!(config.max_trades_per_event, 0);
         assert_eq!(config.cooldown_secs, 5);
         assert_eq!(config.min_ask_price, dec!(0.05));
-        assert_eq!(config.min_entry_sum, dec!(0.70));
+        assert_eq!(config.min_entry_sum, dec!(0.30));
+        assert_eq!(config.force_complete_threshold, dec!(1.20));
+        assert_eq!(config.protective_close_threshold, dec!(1.20));
+        assert_eq!(config.min_entry_sigma, 0.003);
+        assert_eq!(config.max_entry_sigma, 0.0);
+        assert_eq!(config.max_fair_value_distance, 0.15);
     }
 
     #[test]
@@ -1930,6 +2103,7 @@ mod tests {
             let price = dec!(100000) + Decimal::from(i * 10);
             updates.push(make_spot(&ts, "BTCUSDT", price));
         }
+        updates.push(make_binance_l2("2026-01-01T00:00:59Z", "BTCUSDT", dec!(0.02)));
 
         // Initial quotes: sum = 1.05 (spread)
         updates.extend(make_quotes(
@@ -1994,6 +2168,7 @@ mod tests {
             let price = dec!(100000) + Decimal::from(i * 10);
             updates.push(make_spot(&ts, "BTCUSDT", price));
         }
+        updates.push(make_binance_l2("2026-01-01T00:00:59Z", "BTCUSDT", dec!(0.02)));
 
         // Quotes with sum > 1 throughout (no Leg2 opportunity)
         updates.extend(make_quotes(
@@ -2033,6 +2208,125 @@ mod tests {
             }
         }
         let _ = results; // use results to avoid warning
+    }
+
+    #[test]
+    fn test_entry_skips_sigma_above_max_entry_sigma() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.direction_threshold = 0.0;
+        config.use_greeks = false;
+        config.max_initial_sum = dec!(1.20);
+        config.max_entry_sigma = 0.01;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+
+        let now = Utc::now();
+        engine.active_events.insert(
+            "BTCUSDT".into(),
+            vec![ActiveWindowInfo {
+                event_slug: "evt".into(),
+                s0: dec!(100),
+                end_time: now + chrono::Duration::seconds(280),
+                window_duration_secs: 300,
+            }],
+        );
+        engine.pm_asks_by_event.insert("evt".into(), (Some(dec!(0.55)), Some(dec!(0.45))));
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.02));
+        engine.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+        engine.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &ActiveWindowInfo {
+                event_slug: "evt".into(),
+                s0: dec!(100),
+                end_time: now + chrono::Duration::seconds(280),
+                window_duration_secs: 300,
+            },
+            dec!(101),
+            (Some(0.02), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+
+        assert!(
+            engine.positions.is_empty(),
+            "entry should be rejected when realized sigma exceeds the configured regime cap"
+        );
+    }
+
+    #[test]
+    fn test_entry_requires_more_direction_strength_for_premium_sum() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.direction_threshold = 0.0;
+        config.use_greeks = false;
+        config.max_initial_sum = dec!(1.04);
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+
+        let now = Utc::now();
+        let window = ActiveWindowInfo {
+            event_slug: "evt".into(),
+            s0: dec!(100),
+            end_time: now + chrono::Duration::seconds(280),
+            window_duration_secs: 300,
+        };
+
+        engine.active_events.insert("BTCUSDT".into(), vec![window.clone()]);
+        engine
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.55)), Some(dec!(0.48))));
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.02));
+        engine.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+        engine.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &window,
+            dec!(100.04),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.48)),
+        );
+
+        assert!(
+            engine.positions.is_empty(),
+            "premium-sum entries should require stronger direction strength than at-par entries"
+        );
+    }
+
+    #[test]
+    fn test_entry_can_fallback_without_binance_l2_history() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.direction_threshold = 0.0;
+        config.use_greeks = false;
+        config.max_initial_sum = dec!(1.20);
+        config.entry_after_start_min_secs = 0;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+
+        let now = Utc::now();
+        let window = ActiveWindowInfo {
+            event_slug: "evt".into(),
+            s0: dec!(100),
+            end_time: now + chrono::Duration::seconds(280),
+            window_duration_secs: 300,
+        };
+
+        engine.active_events.insert("BTCUSDT".into(), vec![window.clone()]);
+        engine
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.55)), Some(dec!(0.45))));
+        engine.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &window,
+            dec!(101),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+
+        assert_eq!(
+            engine.positions.len(),
+            1,
+            "backtest should fall back to price/Greeks-only entry gates when no Binance L2 history exists for the replay window"
+        );
     }
 
     #[test]
@@ -2078,6 +2372,53 @@ mod tests {
 
         assert_eq!(engine.closed_trades.len(), 0);
         assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+    }
+
+    #[test]
+    fn test_stop_loss_uses_protective_close_threshold() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.force_complete_threshold = Decimal::ONE;
+        config.protective_close_threshold = dec!(1.03);
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+        config.max_leg1_loss = dec!(0.05);
+
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.48))));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(0.0825),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.03),
+            initial_sum: dec!(1.03),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(engine.closed_trades[0].exit_reason, "protective_stop_loss");
     }
 
     #[test]
@@ -2142,4 +2483,5 @@ mod tests {
         // May or may not trigger depending on execution sim, but engine shouldn't panic
         let _ = stop_losses;
     }
+
 }

@@ -90,3 +90,36 @@
 
 - Pattern: A live trading template can drift from the operator's intended strategy style even when the code path is unchanged, especially when timing gates are disabled and sum caps are tuned for a different regime.
 - Rule: When a user describes intended entry behavior ("opening-window directional leg1" vs "strict sum-based arb"), verify both the checked-in TOML and the strategy defaults before diagnosing production inactivity.
+
+- Pattern: Aggregate entry reject counters can be dominated by structural timing reasons and hide the actual signal path, making live strategy diagnosis look like a pricing problem when the runtime is not even reaching signal evaluation.
+- Rule: For live/dry-run diagnostics, separate `entry_timing_gates` from `entry_signal_gates` and sample across a real event boundary before concluding that `sum`, `OBI`, or model thresholds are the blocker.
+
+- Pattern: Opening-window strategies can silently miss valid entries when evaluation is only triggered by quote callbacks and the venue does not emit a fresh quote inside the narrow entry window.
+- Rule: If a strategy has a short timing window, the live runtime must re-evaluate on periodic ticks using the latest cached market state, not only on event-driven quote deltas.
+
+- Pattern: A directional `LEG1 -> LEG2` strategy needs two different price caps: one for generic forced cleanup and another for protective stop-loss merges. Reusing one threshold for both either disables stops or allows bad timeout fills.
+- Rule: Keep `force_complete_threshold` for timeout/time-safety/final-window cleanup, and use a separate `protective_close_threshold` for stop-loss / theta-driven capped-loss merges.
+
+- Pattern: When adding volatility regime filters, old entry tests can start failing for the wrong reason because their synthetic sigma is far outside the new allowed band.
+- Rule: Tests that are validating timing or quote scoping must explicitly widen `max_entry_sigma` or shrink synthetic vol so they only exercise the intended gate.
+
+- Pattern: Protective `LEG2` stop-loss logic can cap downside, but it does not create edge if `LEG1` is opened too far from ATM or too expensively.
+- Rule: For OBI-triggered long-gamma profiles, keep the entry band explicitly tight enough to preserve convexity. If replay flips from positive to negative after enabling capped-loss stops, tighten `max_leg1_price`, `max_initial_sum`, `max_trades_per_event`, and the fair-value band before touching exit logic again.
+
+- Pattern: Once the long-gamma entry band is reasonably tight, the next failure mode is still overpaying for entries just above parity without enough directional edge.
+- Rule: Treat `sum > 1.00` as premium inventory. Require stronger direction strength and stronger OBI confirmation as `sum` rises above parity, instead of only clipping with a hard `max_initial_sum`.
+
+- Pattern: Enforcing historical Binance L2 / OBI gates in replay without checking data coverage can make a healthy strategy look broken by collapsing valid windows to zero trades.
+- Rule: Before requiring replay-time OBI history, measure `binance_lob_ticks` coverage for the requested window. If fresh L2 history is absent, fall back to price/Greeks-only entry and log that fallback explicitly.
+
+- Pattern: Validating a replay parity gate on a window without overlapping PM replay and Binance L2 history gives a false negative and wastes time.
+- Rule: Use one window with current production replay behavior for regression checks, and a separate overlap window where PM replay plus `binance_lob_ticks` both exist to prove the new gate actually changes trade selection.
+
+- Pattern: Changing a strategy profile in the checked-in TOML is not enough if the live parser defaults and replay defaults still point at the old regime.
+- Rule: Whenever a strategy's intended defaults change, update all three layers together: checked-in TOML, `from_toml` parser fallbacks, and `BacktestConfig::default()`. Add a regression test for missing-field TOML parsing so old defaults cannot silently leak back in.
+
+- Pattern: When delayed-entry logic becomes part of the core profile, legacy tests can fail for timing reasons instead of the behavior they were supposed to cover.
+- Rule: Tests that are not explicitly about post-open observation delay must either set `entry_after_start_min_secs = 0` or choose timestamps safely past the minimum delay, so failures keep pointing at the intended gate.
+
+- Pattern: Removing hard entry caps and per-event trade limits can dramatically increase turnover; a profile can stay strongly positive on long / L2-rich windows while degrading to near-flat on a noisy short window.
+- Rule: For aggressive OBI long-gamma profiles, always validate at least one short production-like March window and one L2-overlap window before calling the change an improvement. Report turnover alongside PnL so overtrading is visible.
