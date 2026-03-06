@@ -64,6 +64,14 @@ pub enum UpdateType {
         /// Best ask price
         best_ask: Option<Decimal>,
     },
+    /// Binance L2 depth-derived features, downsampled for historical replay.
+    BinanceL2 {
+        obi_5: Decimal,
+        obi_10: Decimal,
+        bid_volume_5: Decimal,
+        ask_volume_5: Decimal,
+        spread_bps: Decimal,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -160,6 +168,14 @@ impl HistoricalFeed {
 
         let lob_snaps_exists: bool = sqlx::query_scalar::<_, Option<String>>(
             "SELECT to_regclass('public.clob_orderbook_snapshots')::text",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(None)
+        .is_some();
+
+        let binance_lob_ticks_exists: bool = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.binance_lob_ticks')::text",
         )
         .fetch_one(pool)
         .await
@@ -315,6 +331,67 @@ impl HistoricalFeed {
             );
         }
 
+        // 1c. Supplement with Binance L2 microstructure features for replay parity with live OBI gating.
+        let binance_l2_rows: Vec<(
+            DateTime<Utc>,
+            String,
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+        )> = if binance_lob_ticks_exists {
+            sqlx::query_as(
+                r#"
+                SELECT DISTINCT ON (date_trunc('second', event_time), symbol)
+                    event_time,
+                    symbol,
+                    obi_5,
+                    obi_10,
+                    bid_volume_5,
+                    ask_volume_5,
+                    spread_bps
+                FROM binance_lob_ticks
+                WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+                  AND ($2::timestamptz IS NULL OR event_time >= $2)
+                  AND ($3::timestamptz IS NULL OR event_time <= $3)
+                ORDER BY date_trunc('second', event_time), symbol, event_time DESC
+                "#,
+            )
+            .bind(if symbols.is_empty() {
+                None::<Vec<String>>
+            } else {
+                Some(symbols.to_vec())
+            })
+            .bind(from)
+            .bind(to)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        for (ts, sym, obi_5, obi_10, bid_volume_5, ask_volume_5, spread_bps) in &binance_l2_rows {
+            updates.push(MarketUpdate {
+                timestamp: *ts,
+                symbol: sym.clone(),
+                update_type: UpdateType::BinanceL2 {
+                    obi_5: *obi_5,
+                    obi_10: *obi_10,
+                    bid_volume_5: *bid_volume_5,
+                    ask_volume_5: *ask_volume_5,
+                    spread_bps: *spread_bps,
+                },
+            });
+        }
+        if !binance_l2_rows.is_empty() {
+            info!(
+                "Loaded {} Binance L2 feature rows from binance_lob_ticks",
+                binance_l2_rows.len()
+            );
+        }
+
         // Sort spot series for point-in-time lookup (for s0/price_to_beat inference).
         for series in spot_series.values_mut() {
             series.sort_by_key(|(ts, _)| *ts);
@@ -363,7 +440,10 @@ impl HistoricalFeed {
             U256::from_str_radix(s, 16).ok().map(|u| u.to_string())
         }
 
-        fn spot_at_or_before(series: &[(DateTime<Utc>, Decimal)], ts: DateTime<Utc>) -> Option<Decimal> {
+        fn spot_at_or_before(
+            series: &[(DateTime<Utc>, Decimal)],
+            ts: DateTime<Utc>,
+        ) -> Option<Decimal> {
             if series.is_empty() {
                 return None;
             }
@@ -435,25 +515,32 @@ impl HistoricalFeed {
 
         // 2b. Fill missing token→slug using pm_token_settlements (token-level truth).
         if pm_token_settlements_exists {
-            let settlement_map_rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-                r#"
+            let settlement_map_rows: Vec<(String, Option<String>, Option<String>)> =
+                sqlx::query_as(
+                    r#"
                 SELECT token_id, market_slug, outcome
                 FROM pm_token_settlements
                 WHERE market_slug IS NOT NULL AND market_slug != ''
                   AND ($1::timestamptz IS NULL OR fetched_at >= $1)
                   AND ($2::timestamptz IS NULL OR fetched_at <= $2)
                 "#,
-            )
-            .bind(from)
-            .bind(to)
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+                )
+                .bind(from)
+                .bind(to)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
 
             for (token_id, market_slug, outcome) in settlement_map_rows {
                 let Some(slug) = market_slug else { continue };
-                token_to_slug.entry(token_id.clone()).or_insert_with(|| slug.clone());
-                if let Some(sym) = slug_to_symbol.get(&slug).cloned().or_else(|| infer_symbol_from_slug(&slug)) {
+                token_to_slug
+                    .entry(token_id.clone())
+                    .or_insert_with(|| slug.clone());
+                if let Some(sym) = slug_to_symbol
+                    .get(&slug)
+                    .cloned()
+                    .or_else(|| infer_symbol_from_slug(&slug))
+                {
                     token_to_symbol.entry(token_id).or_insert(sym);
                 }
                 // Also seed slug_to_symbol from slug inference when metadata is missing.
@@ -543,10 +630,15 @@ impl HistoricalFeed {
         //    Downsample to 1-second granularity: take the last quote per (second, token, side).
         //    Filter by known token_ids at SQL level to avoid loading millions of unmapped rows.
         let known_token_ids: Vec<String> = token_to_slug.keys().cloned().collect();
-        let quote_rows: Vec<(DateTime<Utc>, String, String, Option<Decimal>, Option<Decimal>)> =
-            if quote_ticks_exists && !known_token_ids.is_empty() {
-                sqlx::query_as(
-                    r#"
+        let quote_rows: Vec<(
+            DateTime<Utc>,
+            String,
+            String,
+            Option<Decimal>,
+            Option<Decimal>,
+        )> = if quote_ticks_exists && !known_token_ids.is_empty() {
+            sqlx::query_as(
+                r#"
                     SELECT DISTINCT ON (date_trunc('second', received_at), token_id, side)
                            received_at, token_id, side, best_bid, best_ask
                     FROM clob_quote_ticks
@@ -555,16 +647,16 @@ impl HistoricalFeed {
                       AND token_id = ANY($3)
                     ORDER BY date_trunc('second', received_at), token_id, side, received_at DESC
                     "#,
-                )
-                .bind(from)
-                .bind(to)
-                .bind(&known_token_ids)
-                .fetch_all(pool)
-                .await
-                .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            )
+            .bind(from)
+            .bind(to)
+            .bind(&known_token_ids)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         for (ts, token_id, side, best_bid, best_ask) in &quote_rows {
             let event_slug = match token_to_slug.get(token_id.as_str()) {
@@ -781,7 +873,11 @@ impl HistoricalFeed {
                             .and_then(|s| s.parse::<Decimal>().ok())
                             .unwrap_or(Decimal::ZERO);
                         let mid = (upper + lower) / Decimal::from(2);
-                        if mid > Decimal::ZERO { Some(mid) } else { None }
+                        if mid > Decimal::ZERO {
+                            Some(mid)
+                        } else {
+                            None
+                        }
                     });
 
                 let symbol = infer_symbol_from_slug(&slug);
@@ -988,9 +1084,10 @@ impl HistoricalFeed {
         // 5. LOB snapshots from clob_orderbook_snapshots
         //    Aggregate ask-side depth per token snapshot, map to symbol.
         //    Downsample: one snapshot per (5-second bucket, token_id) to keep volume manageable.
-        let lob_rows: Vec<(DateTime<Utc>, String, Option<serde_json::Value>)> =
-            if lob_snaps_exists && !known_token_ids.is_empty() {
-                sqlx::query_as(
+        let lob_rows: Vec<(DateTime<Utc>, String, Option<serde_json::Value>)> = if lob_snaps_exists
+            && !known_token_ids.is_empty()
+        {
+            sqlx::query_as(
                     r#"
                     SELECT DISTINCT ON (
                         (EXTRACT(EPOCH FROM received_at)::bigint / 5),
@@ -1011,9 +1108,9 @@ impl HistoricalFeed {
                 .fetch_all(pool)
                 .await
                 .unwrap_or_default() // non-fatal: LOB data is optional
-            } else {
-                Vec::new()
-            };
+        } else {
+            Vec::new()
+        };
 
         let mut lob_count = 0u64;
         for (ts, token_id, asks_json) in &lob_rows {

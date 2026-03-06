@@ -127,6 +127,9 @@
 - Pattern: Even if parser defaults are aligned, replay can still drift from live when the CLI constructs a config directly instead of loading the canonical strategy template.
 - Rule: For deployment decisions, the staggered-arb replay entrypoint must load `config/strategies/staggered_arb.toml` and only override explicit CLI-scoped inputs like symbols, capital, or one-off timing flags.
 
+- Pattern: A green local test run can still hide an undeclared dependency on dirty worktree files; CI then fails because the pushed branch does not contain the supporting feed/schema changes.
+- Rule: Before triggering a production release from a dirty worktree, inspect compile dependencies for every touched module and verify the release branch itself builds from committed files only. If a strategy change consumes a new feed enum/field, commit the feed change in the same release stack.
+
 - Pattern: When delayed-entry logic becomes part of the core profile, legacy tests can fail for timing reasons instead of the behavior they were supposed to cover.
 - Rule: Tests that are not explicitly about post-open observation delay must either set `entry_after_start_min_secs = 0` or choose timestamps safely past the minimum delay, so failures keep pointing at the intended gate.
 
