@@ -5742,6 +5742,7 @@ dependencies = [
  "nix",
  "ordered-float",
  "ploy-core",
+ "ploy-polymarket",
  "polymarket-client-sdk",
  "rand 0.8.5",
  "ratatui",
@@ -5780,6 +5781,30 @@ dependencies = [
  "rust_decimal",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ploy-polymarket"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "base64 0.22.1",
+ "config",
+ "hex",
+ "hmac",
+ "ploy-core",
+ "rand 0.8.5",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]

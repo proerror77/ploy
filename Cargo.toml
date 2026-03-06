@@ -9,6 +9,7 @@ authors = ["Your Name"]
 members = [
     ".",
     "crates/ploy-core",
+    "crates/ploy-polymarket",
     "tools/sdk_auth_check",
 ]
 resolver = "2"
@@ -16,6 +17,7 @@ resolver = "2"
 [dependencies]
 # Workspace crates
 ploy-core = { path = "crates/ploy-core" }
+ploy-polymarket = { path = "crates/ploy-polymarket" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "process"] }

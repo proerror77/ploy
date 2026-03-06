@@ -114,6 +114,10 @@ pub enum PloyError {
     #[error(transparent)]
     Core(#[from] ploy_core::CoreError),
 
+    // Polymarket errors (from ploy-polymarket)
+    #[error(transparent)]
+    Polymarket(#[from] ploy_polymarket::error::PolymarketError),
+
     // Generic errors
     #[error("Internal error: {0}")]
     Internal(String),

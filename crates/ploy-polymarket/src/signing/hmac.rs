@@ -1,4 +1,4 @@
-use crate::error::{PloyError, Result};
+use crate::error::{PolymarketError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -27,13 +27,13 @@ impl ApiCredentials {
     /// Load from environment variables
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("POLYMARKET_API_KEY").map_err(|_| {
-            PloyError::Config(config::ConfigError::NotFound("POLYMARKET_API_KEY".into()))
+            PolymarketError::Config(config::ConfigError::NotFound("POLYMARKET_API_KEY".into()))
         })?;
         let secret = std::env::var("POLYMARKET_SECRET").map_err(|_| {
-            PloyError::Config(config::ConfigError::NotFound("POLYMARKET_SECRET".into()))
+            PolymarketError::Config(config::ConfigError::NotFound("POLYMARKET_SECRET".into()))
         })?;
         let passphrase = std::env::var("POLYMARKET_PASSPHRASE").map_err(|_| {
-            PloyError::Config(config::ConfigError::NotFound(
+            PolymarketError::Config(config::ConfigError::NotFound(
                 "POLYMARKET_PASSPHRASE".into(),
             ))
         })?;
@@ -69,10 +69,10 @@ impl HmacAuth {
     fn sign(&self, message: &str) -> Result<String> {
         let secret_bytes = BASE64
             .decode(&self.credentials.secret)
-            .map_err(|e| PloyError::Signature(format!("Invalid secret encoding: {}", e)))?;
+            .map_err(|e| PolymarketError::Signature(format!("Invalid secret encoding: {}", e)))?;
 
         let mut mac = HmacSha256::new_from_slice(&secret_bytes)
-            .map_err(|e| PloyError::Signature(format!("HMAC init failed: {}", e)))?;
+            .map_err(|e| PolymarketError::Signature(format!("HMAC init failed: {}", e)))?;
 
         mac.update(message.as_bytes());
         let result = mac.finalize();
@@ -117,27 +117,27 @@ impl HmacAuth {
         headers.insert(
             "POLY_ADDRESS",
             HeaderValue::from_str(&self.address)
-                .map_err(|e| PloyError::Internal(format!("Invalid address header: {}", e)))?,
+                .map_err(|e| PolymarketError::Internal(format!("Invalid address header: {}", e)))?,
         );
         headers.insert(
             "POLY_SIGNATURE",
             HeaderValue::from_str(&signature)
-                .map_err(|e| PloyError::Internal(format!("Invalid signature header: {}", e)))?,
+                .map_err(|e| PolymarketError::Internal(format!("Invalid signature header: {}", e)))?,
         );
         headers.insert(
             "POLY_TIMESTAMP",
             HeaderValue::from_str(&timestamp.to_string())
-                .map_err(|e| PloyError::Internal(format!("Invalid timestamp header: {}", e)))?,
+                .map_err(|e| PolymarketError::Internal(format!("Invalid timestamp header: {}", e)))?,
         );
         headers.insert(
             "POLY_API_KEY",
             HeaderValue::from_str(&self.credentials.api_key)
-                .map_err(|e| PloyError::Internal(format!("Invalid API key header: {}", e)))?,
+                .map_err(|e| PolymarketError::Internal(format!("Invalid API key header: {}", e)))?,
         );
         headers.insert(
             "POLY_PASSPHRASE",
             HeaderValue::from_str(&self.credentials.passphrase)
-                .map_err(|e| PloyError::Internal(format!("Invalid passphrase header: {}", e)))?,
+                .map_err(|e| PolymarketError::Internal(format!("Invalid passphrase header: {}", e)))?,
         );
 
         Ok(headers)

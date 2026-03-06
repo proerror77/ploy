@@ -1,5 +1,5 @@
-use crate::adapters::postgres::PostgresStore;
 use crate::error::Result;
+use sqlx::postgres::PgPool;
 use sqlx::Row;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 ///
 /// # Example
 /// ```rust,ignore
-/// let nonce_mgr = NonceManager::new(store, wallet_address);
+/// let nonce_mgr = NonceManager::new(pool, wallet_address);
 ///
 /// // Allocate nonce
 /// let nonce = nonce_mgr.allocate().await?;
@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 /// nonce_mgr.release(nonce, "Order rejected").await?;
 /// ```
 pub struct NonceManager {
-    store: PostgresStore,
+    pool: PgPool,
     wallet_address: String,
     /// In-memory cache for fast allocation (synced with DB)
     cached_nonce: Arc<Mutex<Option<u64>>>,
@@ -43,11 +43,11 @@ impl NonceManager {
     /// Create a new nonce manager
     ///
     /// # Arguments
-    /// * `store` - Database store for persistence
+    /// * `pool` - PostgreSQL connection pool
     /// * `wallet_address` - Wallet address to track nonces for
-    pub fn new(store: PostgresStore, wallet_address: String) -> Self {
+    pub fn new(pool: PgPool, wallet_address: String) -> Self {
         Self {
-            store,
+            pool,
             wallet_address,
             cached_nonce: Arc::new(Mutex::new(None)),
         }
@@ -64,7 +64,7 @@ impl NonceManager {
         // Call database function for atomic allocation
         let nonce: i64 = sqlx::query_scalar("SELECT get_next_nonce($1)")
             .bind(&self.wallet_address)
-            .fetch_one(self.store.pool())
+            .fetch_one(&self.pool)
             .await?;
 
         let nonce = nonce as u64;
@@ -89,7 +89,7 @@ impl NonceManager {
             .bind(&self.wallet_address)
             .bind(nonce as i64)
             .bind(order_id)
-            .execute(self.store.pool())
+            .execute(&self.pool)
             .await?;
 
         debug!("Marked nonce {} as used (order: {})", nonce, order_id);
@@ -109,7 +109,7 @@ impl NonceManager {
             .bind(&self.wallet_address)
             .bind(nonce as i64)
             .bind(error_message)
-            .execute(self.store.pool())
+            .execute(&self.pool)
             .await?;
 
         warn!("Released nonce {} due to: {}", nonce, error_message);
@@ -122,7 +122,7 @@ impl NonceManager {
     pub async fn get_current(&self) -> Result<u64> {
         let nonce: Option<i64> = sqlx::query_scalar("SELECT get_current_nonce($1)")
             .bind(&self.wallet_address)
-            .fetch_one(self.store.pool())
+            .fetch_one(&self.pool)
             .await?;
 
         Ok(nonce.unwrap_or(0) as u64)
@@ -145,7 +145,7 @@ impl NonceManager {
             "#,
         )
         .bind(&self.wallet_address)
-        .fetch_one(self.store.pool())
+        .fetch_one(&self.pool)
         .await?;
 
         Ok(NonceStats {
@@ -178,7 +178,7 @@ impl NonceManager {
         )
         .bind(&self.wallet_address)
         .bind(days_to_keep)
-        .execute(self.store.pool())
+        .execute(&self.pool)
         .await?;
 
         let deleted = result.rows_affected();

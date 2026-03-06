@@ -1,0 +1,53 @@
+[package]
+name = "ploy-polymarket"
+version = "0.1.0"
+edition = "2021"
+description = "Polymarket execution layer — signing, HMAC auth, nonce management"
+
+[dependencies]
+# Workspace crates
+ploy-core = { path = "../ploy-core" }
+
+# Crypto / signing
+alloy = { version = "1", default-features = false, features = ["signer-local", "sol-types"] }
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+# HMAC authentication
+hmac = "0.12"
+sha2 = "0.10"
+
+# Encoding
+hex = "0.4"
+base64 = "0.22"
+
+# HTTP (for HeaderMap in HMAC auth)
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Numeric types
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1"
+
+# Logging
+tracing = "0.1"
+
+# Random
+rand = "0.8"
+
+# Async
+tokio = { version = "1", features = ["sync", "time"] }
+
+# Database (for nonce manager)
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres"] }
+
+# Error handling
+thiserror = "1"
+
+# Config crate (for ConfigError in hmac auth)
+config = { version = "0.14", default-features = false, features = ["toml"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

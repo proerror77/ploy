@@ -1,4 +1,4 @@
-use crate::error::{PloyError, Result};
+use crate::error::{PolymarketError, Result};
 use crate::signing::Wallet;
 use alloy::primitives::{keccak256, Address, B256, U256};
 use rust_decimal::prelude::ToPrimitive;
@@ -70,7 +70,7 @@ pub enum OrderSide {
 
 fn scale_price_to_u128(price: Decimal) -> Result<u128> {
     if price.is_sign_negative() {
-        return Err(PloyError::OrderSubmission(format!(
+        return Err(PolymarketError::OrderSubmission(format!(
             "Invalid price: {}",
             price
         )));
@@ -81,7 +81,7 @@ fn scale_price_to_u128(price: Decimal) -> Result<u128> {
 
     scaled
         .to_u128()
-        .ok_or_else(|| PloyError::OrderSubmission(format!("Invalid price: {}", price)))
+        .ok_or_else(|| PolymarketError::OrderSubmission(format!("Invalid price: {}", price)))
 }
 
 /// Order data structure for EIP-712 signing
@@ -125,7 +125,7 @@ impl OrderData {
         nonce: u64,
     ) -> Result<Self> {
         let token_id = U256::from_str_radix(token_id, 10)
-            .map_err(|e| PloyError::OrderSubmission(format!("Invalid token ID: {}", e)))?;
+            .map_err(|e| PolymarketError::OrderSubmission(format!("Invalid token ID: {}", e)))?;
 
         // For buys: maker provides USDC, receives tokens
         // maker_amount = price * size (in USDC with 6 decimals)
@@ -162,7 +162,7 @@ impl OrderData {
         nonce: u64,
     ) -> Result<Self> {
         let token_id = U256::from_str_radix(token_id, 10)
-            .map_err(|e| PloyError::OrderSubmission(format!("Invalid token ID: {}", e)))?;
+            .map_err(|e| PolymarketError::OrderSubmission(format!("Invalid token ID: {}", e)))?;
 
         // For sells: maker provides tokens, receives USDC
         // maker_amount = size (in tokens with 6 decimals)
@@ -307,7 +307,7 @@ impl SignedOrder {
             }
         });
 
-        serde_json::to_string(&json).map_err(|e| PloyError::Json(e))
+        serde_json::to_string(&json).map_err(|e| PolymarketError::Json(e))
     }
 }
 

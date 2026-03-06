@@ -19,13 +19,17 @@ pub mod persistence;
 pub mod platform;
 pub mod safety;
 pub mod services;
-pub mod signing;
 pub mod strategy;
 pub mod supervisor;
 pub mod tui;
 // Reinforcement Learning module (optional, enabled with "rl" feature)
 #[cfg(feature = "rl")]
 pub mod rl;
+
+// Re-export signing module from ploy-polymarket for backward compatibility
+pub mod signing {
+    pub use ploy_polymarket::signing::*;
+}
 
 pub use ai_clients::{AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
 pub use collector::{

@@ -1,4 +1,4 @@
-use crate::error::{PloyError, Result};
+use crate::error::{PolymarketError, Result};
 use alloy::primitives::{Address, Signature, B256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer as AlloySigner;
@@ -32,7 +32,7 @@ impl Wallet {
 
         let wallet = secure_key
             .parse::<PrivateKeySigner>()
-            .map_err(|e| PloyError::Wallet(format!("Invalid private key: {}", e)))?
+            .map_err(|e| PolymarketError::Wallet(format!("Invalid private key: {}", e)))?
             .with_chain_id(Some(chain_id));
 
         // Zeroize the key from memory
@@ -57,7 +57,7 @@ impl Wallet {
         let mut private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
             .or_else(|_| std::env::var("PRIVATE_KEY"))
             .map_err(|_| {
-                PloyError::Wallet(
+                PolymarketError::Wallet(
                     "POLYMARKET_PRIVATE_KEY or PRIVATE_KEY environment variable not set"
                         .to_string(),
                 )
@@ -102,7 +102,7 @@ impl Wallet {
         self.inner
             .sign_hash(&hash)
             .await
-            .map_err(|e| PloyError::Signature(format!("Failed to sign hash: {}", e)))
+            .map_err(|e| PolymarketError::Signature(format!("Failed to sign hash: {}", e)))
     }
 
     /// Sign a message (will be prefixed with Ethereum signed message)
@@ -113,7 +113,7 @@ impl Wallet {
         self.inner
             .sign_message(message.as_ref())
             .await
-            .map_err(|e| PloyError::Signature(format!("Failed to sign message: {}", e)))
+            .map_err(|e| PolymarketError::Signature(format!("Failed to sign message: {}", e)))
     }
 
     /// Get the underlying local signer.
