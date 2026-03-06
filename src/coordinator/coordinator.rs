@@ -5283,6 +5283,67 @@ mod tests {
         (handle, coordinator)
     }
 
+    #[tokio::test]
+    async fn test_handle_pause_and_resume_agent_enqueue_control_commands() {
+        let (handle, mut coordinator) = make_test_handle();
+
+        handle
+            .pause_agent("openclaw")
+            .await
+            .expect("pause agent command accepted");
+        assert!(matches!(
+            coordinator.control_rx.try_recv(),
+            Ok(CoordinatorControlCommand::PauseAgent(agent_id)) if agent_id == "openclaw"
+        ));
+
+        handle
+            .resume_agent("openclaw")
+            .await
+            .expect("resume agent command accepted");
+        assert!(matches!(
+            coordinator.control_rx.try_recv(),
+            Ok(CoordinatorControlCommand::ResumeAgent(agent_id)) if agent_id == "openclaw"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handle_read_state_and_governance_policy_round_trip() {
+        let (handle, _coordinator) = make_test_handle();
+
+        let state = handle.read_state().await;
+        assert_eq!(state.active_agent_count(), 0);
+
+        let snapshot = handle
+            .update_governance_policy(GovernancePolicyUpdate {
+                block_new_intents: true,
+                blocked_domains: vec!["sports".to_string()],
+                max_intent_notional_usd: Some(dec!(5)),
+                max_total_notional_usd: Some(dec!(25)),
+                updated_by: "openclaw".to_string(),
+                reason: Some("risk_off".to_string()),
+                metadata: HashMap::from([("mode".to_string(), "risk_off".to_string())]),
+            })
+            .await
+            .expect("update governance policy");
+
+        assert!(snapshot.block_new_intents);
+        assert_eq!(snapshot.updated_by, "openclaw");
+        assert_eq!(snapshot.blocked_domains, vec!["sports".to_string()]);
+        assert_eq!(snapshot.max_intent_notional_usd, Some(dec!(5)));
+        assert_eq!(
+            snapshot.metadata.get("mode").map(String::as_str),
+            Some("risk_off")
+        );
+
+        let readback = handle.governance_policy().await;
+        assert!(readback.block_new_intents);
+        assert_eq!(readback.max_total_notional_usd, Some(dec!(25)));
+        assert_eq!(
+            readback.metadata.get("mode").map(String::as_str),
+            Some("risk_off")
+        );
+    }
+
     #[test]
     fn test_global_state_defaults() {
         let state = GlobalState::new();

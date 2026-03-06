@@ -314,6 +314,33 @@ Move the managed strategy runtime loop out of `src/coordinator/bootstrap.rs` int
 
 ---
 
+# Layered Live Runtime Task 4: Governance-Only OpenClaw Context (2026-03-06)
+
+## Goal
+Split governance-only coordinator access from trading access so OpenClaw can manage policy and strategy state without retaining direct order-ingress capability.
+
+## Tasks
+
+- [x] Create `src/agents/governance_context.rs` with policy/state/command access only.
+- [x] Remove governance-policy and pause/resume helpers from `src/agents/context.rs` so the trading context stays order-focused.
+- [x] Re-export the narrowed governance context from `src/agents/mod.rs`.
+- [x] Convert `src/agents/openclaw/agent.rs` to narrow `AgentContext` into `GovernanceContext` at runtime.
+- [x] Update OpenClaw module docs to reflect its governance-only role.
+- [x] Add focused regression tests for governance policy round-trips, command receipt, and agent pause/resume control commands.
+- [x] Run focused validation and capture the results.
+- [x] Commit the Task 4 context split atomically.
+
+## Review
+
+- [x] OpenClaw still uses the compatibility `TradingAgent` trait for bootstrap registration, but it now converts immediately into `GovernanceContext` and no longer has access to `submit_order`.
+- [x] `AgentContext` is now the order-submitting compatibility surface only; governance pause/resume and policy mutation moved behind the narrowed context.
+- [x] Focused validation passed:
+  - `cargo test coordinator --lib -- --nocapture`
+  - `cargo test governance_context --lib -- --nocapture`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `liquidity_vacuum_backtest.rs` and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

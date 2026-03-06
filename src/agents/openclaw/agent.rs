@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::agents::context::AgentContext;
 use crate::agents::traits::TradingAgent;
+use crate::agents::{AgentContext, GovernanceContext};
 use crate::coordinator::CoordinatorCommand;
 use crate::platform::{AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, Domain};
 
@@ -65,7 +65,9 @@ impl TradingAgent for OpenClawAgent {
         }
     }
 
-    async fn run(self, mut ctx: AgentContext) -> crate::error::Result<()> {
+    async fn run(self, ctx: AgentContext) -> crate::error::Result<()> {
+        let mut ctx: GovernanceContext = ctx.into();
+
         info!(
             agent_id = %self.config.agent_id,
             regime_tick = self.config.regime_tick_secs,

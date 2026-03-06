@@ -1,26 +1,24 @@
-//! AgentContext — the agent's interface to the coordinator
+//! AgentContext — trading agent access to the coordinator
 //!
-//! Wraps a `CoordinatorHandle` + command receiver, providing a clean API
-//! for agents to submit orders, report state, and receive commands.
+//! Wraps a `CoordinatorHandle` + command receiver for order-submitting
+//! compatibility agents. Governance-only agents should narrow this into
+//! `GovernanceContext` and must not keep direct order ingress access.
 
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-use crate::coordinator::{
-    AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState, GovernancePolicySnapshot,
-    GovernancePolicyUpdate,
-};
+use crate::coordinator::{AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState};
 use crate::error::Result;
 use crate::platform::{AgentStatus, Domain, OrderIntent};
 
 /// Context given to each agent when spawned — not Clone (owns command receiver)
 pub struct AgentContext {
-    pub agent_id: String,
-    pub domain: Domain,
-    handle: CoordinatorHandle,
-    commands: mpsc::Receiver<CoordinatorCommand>,
+    pub(crate) agent_id: String,
+    pub(crate) domain: Domain,
+    pub(crate) handle: CoordinatorHandle,
+    pub(crate) commands: mpsc::Receiver<CoordinatorCommand>,
 }
 
 impl AgentContext {
@@ -113,30 +111,5 @@ impl AgentContext {
     /// Mutable access to the command receiver (for use in select! macros)
     pub fn command_rx(&mut self) -> &mut mpsc::Receiver<CoordinatorCommand> {
         &mut self.commands
-    }
-
-    // --- OpenClaw meta-agent governance methods ---
-
-    /// Pause a single agent by ID (proxies to CoordinatorHandle)
-    pub async fn submit_pause_agent(&self, agent_id: &str) -> Result<()> {
-        self.handle.pause_agent(agent_id).await
-    }
-
-    /// Resume a single agent by ID (proxies to CoordinatorHandle)
-    pub async fn submit_resume_agent(&self, agent_id: &str) -> Result<()> {
-        self.handle.resume_agent(agent_id).await
-    }
-
-    /// Read the current governance policy snapshot
-    pub async fn read_governance_policy(&self) -> GovernancePolicySnapshot {
-        self.handle.governance_policy().await
-    }
-
-    /// Update the governance policy (full replacement)
-    pub async fn update_governance_policy(
-        &self,
-        update: GovernancePolicyUpdate,
-    ) -> Result<GovernancePolicySnapshot> {
-        self.handle.update_governance_policy(update).await
     }
 }

@@ -1,9 +1,9 @@
 //! OpenClaw meta-agent — Layer 3 orchestrator for capital allocation,
 //! regime detection, conflict resolution, and temporal straddle coordination.
 //!
-//! OpenClaw implements `TradingAgent` and plugs into the existing coordinator
-//! bootstrap. It never trades directly — only observes and controls via
-//! the `CoordinatorHandle` API.
+//! OpenClaw still implements `TradingAgent` for compatibility bootstrap, but
+//! immediately narrows into a governance-only coordinator context at runtime.
+//! It never trades directly — only observes and controls via governance APIs.
 
 pub mod agent;
 pub mod allocator;
