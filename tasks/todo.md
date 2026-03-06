@@ -181,6 +181,26 @@
 
 ---
 
+## 2026-03-06 Workspace Restructure Slice (Phase 6.4 momentum window risk split)
+
+- [x] Extract `DailyTradeCounter`, `PendingSignal`, and `WindowRiskTracker` into `src/strategy/momentum/window_risk.rs`
+- [x] Keep `MomentumEngine` call sites unchanged except for module imports
+- [x] Add direct tests for window rounding and ready/best-edge signal selection
+- [x] Re-run build plus momentum regressions after the split
+
+## Review (2026-03-06, momentum window risk split)
+
+- Delivered in this slice:
+  - Moved window-exposure and pending-signal state from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/window_risk.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/window_risk.rs).
+  - Kept the engine-facing API stable by importing the extracted private types back into `mod.rs`.
+  - Added direct tests for 15-minute window rounding and delayed best-edge selection in the new module.
+- Validation executed:
+  - `cargo build`
+  - `cargo test strategy::momentum::window_risk::tests -- --nocapture`
+  - `cargo test strategy::momentum::tests -- --nocapture`
+
+---
+
 ## 2026-03-06 Workspace Restructure Slice (Phase 5.2 momentum backtest bridge)
 
 - [x] Add the first concrete strategy bridge under `crates/ploy-backtest/src/strategies/`
