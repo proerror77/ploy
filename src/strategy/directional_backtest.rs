@@ -14,89 +14,21 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use ploy_backtest::{
+    strategies::{
+        adjust_fair_value_for_price_to_beat, build_directional_results, estimate_fair_value,
+    },
     BacktestRecorder, BacktestResults, BacktestSignal, ExecutionSimulator, MarketFeed,
     NullRecorder, PendingTrade, SignalType, UpdateType,
 };
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
 use tracing::{debug, info, trace};
 
 use crate::adapters::SpotPrice;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::momentum::Direction;
-
-// ─────────────────────────────────────────────────────────────
-// Config
-// ─────────────────────────────────────────────────────────────
-
-/// Configuration for a directional backtest run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectionalBacktestConfig {
-    /// Symbols to backtest (e.g. ["BTCUSDT", "ETHUSDT"])
-    pub symbols: Vec<String>,
-    /// Starting equity in USD
-    pub initial_capital: Decimal,
-    /// Position size in shares per trade
-    pub shares_per_trade: u64,
-    /// Maximum concurrent positions per symbol
-    pub max_concurrent_positions: usize,
-    /// Minimum edge to enter (fair_value - pm_ask - fees), e.g. 0.05 = 5%
-    pub entry_threshold: f64,
-    /// Don't buy YES above this price (e.g. 0.85)
-    pub max_entry_price: Decimal,
-    /// Don't buy YES below this price (e.g. 0.15)
-    pub min_entry_price: Decimal,
-    /// Minimum absolute momentum to trigger signal (e.g. 0.003 = 0.3%)
-    pub min_momentum: Decimal,
-    /// Time stop: exit if <N secs remaining AND position is underwater (e.g. 30)
-    pub time_stop_secs: u64,
-    /// Maximum loss per position in USD
-    pub hard_stop_usd: Decimal,
-    /// Hold winners to settlement (default true — let them run)
-    pub hold_to_settlement: bool,
-    /// Cooldown between entries on same symbol (seconds)
-    pub cooldown_secs: u64,
-    /// Minimum time remaining to enter a position (seconds).
-    pub min_time_remaining_secs: u64,
-    /// Maximum time remaining to enter (seconds).
-    /// Only enter when outcome is becoming clearer.
-    pub max_time_remaining_secs: u64,
-    /// Use price_to_beat in fair value calculation
-    pub use_price_to_beat: bool,
-}
-
-impl Default for DirectionalBacktestConfig {
-    fn default() -> Self {
-        Self {
-            symbols: vec!["BTCUSDT".to_string()],
-            initial_capital: dec!(10000),
-            shares_per_trade: 100,
-            max_concurrent_positions: 3,
-            entry_threshold: 0.05,
-            max_entry_price: dec!(0.85),
-            min_entry_price: dec!(0.15),
-            min_momentum: dec!(0.003), // 0.3% minimum move
-            time_stop_secs: 30,
-            hard_stop_usd: dec!(5),
-            hold_to_settlement: true,
-            cooldown_secs: 60,
-            min_time_remaining_secs: 60,
-            max_time_remaining_secs: 300,
-            use_price_to_beat: true,
-        }
-    }
-}
-
-impl DirectionalBacktestConfig {
-    pub fn with_symbols(symbols: Vec<String>) -> Self {
-        Self {
-            symbols,
-            ..Default::default()
-        }
-    }
-}
+pub use ploy_backtest::strategies::{DirectionalBacktestConfig, DirectionalClosedTrade};
 
 // ─────────────────────────────────────────────────────────────
 // Position tracking
@@ -123,27 +55,6 @@ struct DirectionalPosition {
     entry_sigma: f64,
     /// Latest PM price for mark-to-market
     latest_pm_price: Decimal,
-}
-
-/// A closed trade with directional-specific diagnostics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectionalClosedTrade {
-    pub symbol: String,
-    pub direction: String,
-    pub entry_time: DateTime<Utc>,
-    pub exit_time: DateTime<Utc>,
-    pub entry_price: Decimal,
-    pub exit_price: Decimal,
-    pub shares: u64,
-    pub pnl: Decimal,
-    pub won: bool,
-    pub holding_secs: i64,
-    pub exit_reason: String,
-    // Directional-specific fields
-    pub entry_p_hat: f64,
-    pub entry_ev_net: f64,
-    pub s0: Decimal,
-    pub entry_sigma: f64,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -528,18 +439,17 @@ impl DirectionalBacktestEngine {
         };
 
         // 6. Fair value estimation (sigmoid mapping, same as live engine)
-        let mut fair_value = Self::estimate_fair_value(momentum);
+        let mut fair_value = estimate_fair_value(momentum);
 
         // 6b. Adjust for price_to_beat if enabled
         if self.config.use_price_to_beat {
             let time_remaining_secs = time_remaining as i64;
-            fair_value = Self::adjust_fair_value_for_price_to_beat(
+            fair_value = adjust_fair_value_for_price_to_beat(
                 fair_value,
                 momentum,
                 st,
                 window.s0,
                 time_remaining_secs,
-                window.end_time,
             );
         }
 
@@ -751,58 +661,6 @@ impl DirectionalBacktestEngine {
         );
     }
 
-    // ─── Fair value estimation (from live MomentumDetector) ───
-
-    /// Sigmoid-like mapping from momentum to fair value.
-    /// Mirrors `MomentumDetector::estimate_fair_value()` in momentum.rs.
-    fn estimate_fair_value(momentum: Decimal) -> Decimal {
-        let abs_momentum = momentum.abs();
-        let momentum_factor = if abs_momentum < dec!(0.001) {
-            // Very small moves: linear scaling (0.1% → 5%)
-            abs_momentum * dec!(50)
-        } else if abs_momentum < dec!(0.005) {
-            // Medium moves: moderate scaling (0.5% → ~21%)
-            dec!(0.05) + (abs_momentum - dec!(0.001)) * dec!(40)
-        } else {
-            // Large moves: diminishing returns (1% → ~36%)
-            dec!(0.21) + (abs_momentum - dec!(0.005)) * dec!(30)
-        };
-        // Cap at 90%
-        (dec!(0.50) + momentum_factor).min(dec!(0.90))
-    }
-
-    /// Adjust fair value based on distance to price_to_beat and time remaining.
-    /// Mirrors `MomentumDetector::estimate_fair_value_with_price_to_beat()`.
-    fn adjust_fair_value_for_price_to_beat(
-        base_fv: Decimal,
-        momentum: Decimal,
-        current_price: Decimal,
-        price_to_beat: Decimal,
-        time_remaining_secs: i64,
-        _end_time: DateTime<Utc>,
-    ) -> Decimal {
-        if price_to_beat <= Decimal::ZERO {
-            return base_fv;
-        }
-
-        let distance_pct = (current_price - price_to_beat) / price_to_beat;
-
-        // time_factor: fraction of time elapsed. Near expiry → time_factor → 1.0
-        let time_factor = (Decimal::ONE - Decimal::from(time_remaining_secs.max(0)) / dec!(900))
-            .max(Decimal::ZERO);
-
-        let direction_matches = (momentum > Decimal::ZERO && distance_pct > Decimal::ZERO)
-            || (momentum < Decimal::ZERO && distance_pct < Decimal::ZERO);
-
-        if direction_matches {
-            let boost = distance_pct.abs() * time_factor * dec!(0.5);
-            (base_fv + boost).min(dec!(0.95))
-        } else {
-            let reduction = distance_pct.abs() * dec!(0.3);
-            (base_fv - reduction).max(dec!(0.35))
-        }
-    }
-
     // ─── Exit logic (directional, NOT arb) ───────────────────
 
     fn check_exits(&mut self, ts: DateTime<Utc>) {
@@ -1005,128 +863,13 @@ impl DirectionalBacktestEngine {
     // ─── Results ─────────────────────────────────────────────
 
     fn build_results(&self) -> BacktestResults {
-        let total = self.closed_trades.len() as u64;
-        let winning = self.closed_trades.iter().filter(|t| t.won).count() as u64;
-        let losing = total - winning;
-        let total_pnl: Decimal = self.closed_trades.iter().map(|t| t.pnl).sum();
-
-        let win_rate = if total > 0 {
-            winning as f64 / total as f64
-        } else {
-            0.0
-        };
-
-        let avg_pnl = if total > 0 {
-            total_pnl / Decimal::from(total)
-        } else {
-            Decimal::ZERO
-        };
-
-        let wins: Vec<Decimal> = self
-            .closed_trades
-            .iter()
-            .filter(|t| t.won)
-            .map(|t| t.pnl)
-            .collect();
-        let losses: Vec<Decimal> = self
-            .closed_trades
-            .iter()
-            .filter(|t| !t.won)
-            .map(|t| t.pnl)
-            .collect();
-
-        let avg_win = if wins.is_empty() {
-            Decimal::ZERO
-        } else {
-            wins.iter().sum::<Decimal>() / Decimal::from(wins.len() as u64)
-        };
-        let avg_loss = if losses.is_empty() {
-            Decimal::ZERO
-        } else {
-            losses.iter().sum::<Decimal>() / Decimal::from(losses.len() as u64)
-        };
-
-        let largest_win = wins.iter().max().copied().unwrap_or(Decimal::ZERO);
-        let largest_loss = losses.iter().min().copied().unwrap_or(Decimal::ZERO);
-
-        let total_wins: Decimal = wins.iter().sum();
-        let total_losses_abs: Decimal = losses.iter().map(|l| l.abs()).sum();
-        let profit_factor = if total_losses_abs > Decimal::ZERO {
-            (total_wins / total_losses_abs).to_f64().unwrap_or(0.0)
-        } else if total_wins > Decimal::ZERO {
-            f64::INFINITY
-        } else {
-            0.0
-        };
-
-        let avg_holding = if total > 0 {
-            self.closed_trades
-                .iter()
-                .map(|t| t.holding_secs as f64)
-                .sum::<f64>()
-                / total as f64
-        } else {
-            0.0
-        };
-
-        let sharpe = self.calculate_sharpe();
-
-        let total_volume: Decimal = self
-            .closed_trades
-            .iter()
-            .map(|t| Decimal::from(t.shares) * t.entry_price)
-            .sum();
-
-        let start_time = self.data_range_start.unwrap_or(Utc::now());
-        let end_time = self.data_range_end.unwrap_or(Utc::now());
-
-        BacktestResults {
-            start_time,
-            end_time,
-            total_trades: total,
-            winning_trades: winning,
-            losing_trades: losing,
-            win_rate,
-            total_pnl,
-            total_volume,
-            avg_pnl_per_trade: avg_pnl,
-            max_drawdown: self.max_drawdown,
-            sharpe_ratio: sharpe,
-            profit_factor,
-            avg_win,
-            avg_loss,
-            largest_win,
-            largest_loss,
-            avg_holding_time_secs: avg_holding,
-            trades_by_symbol: HashMap::new(),
-            trades: Vec::new(),
-            equity_curve: self.equity_curve.clone(),
-        }
-    }
-
-    fn calculate_sharpe(&self) -> f64 {
-        if self.closed_trades.len() < 2 {
-            return 0.0;
-        }
-
-        let pnls: Vec<f64> = self
-            .closed_trades
-            .iter()
-            .map(|t| t.pnl.to_f64().unwrap_or(0.0))
-            .collect();
-
-        let n = pnls.len() as f64;
-        let mean = pnls.iter().sum::<f64>() / n;
-        let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        let std_dev = variance.sqrt();
-
-        if std_dev < 1e-10 {
-            return 0.0;
-        }
-
-        // Annualize: assume ~24 trades/day for 15-min markets
-        let trades_per_year: f64 = 24.0 * 365.0;
-        (mean / std_dev) * trades_per_year.sqrt()
+        build_directional_results(
+            &self.closed_trades,
+            &self.equity_curve,
+            self.max_drawdown,
+            self.data_range_start,
+            self.data_range_end,
+        )
     }
 
     /// Print directional-specific summary stats beyond BacktestResults.
