@@ -5617,6 +5617,61 @@ fn spawn_compat_crypto_lob_ml_agent(
     Ok(())
 }
 
+fn maybe_spawn_compat_crypto_lob_ml_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    lob_cfg: &CryptoLobMlConfig,
+    shared_pool: &Option<PgPool>,
+    crypto_market_data: CryptoDataPlaneHandle,
+    event_matcher: Arc<EventMatcher>,
+    lob_cache_opt: &Option<crate::collector::LobCache>,
+) -> Result<()> {
+    let model_type = lob_cfg.model_type.trim().to_ascii_lowercase();
+    let model_is_tcn = matches!(
+        model_type.as_str(),
+        "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
+    );
+
+    if model_is_tcn && !cfg!(feature = "onnx") {
+        warn!(
+            agent = lob_cfg.agent_id,
+            model_type = %model_type,
+            "crypto lob-ml agent model_type=onnx_tcn requires --features onnx; skipping agent spawn"
+        );
+    } else if model_is_tcn && shared_pool.is_none() {
+        warn!(
+            agent = lob_cfg.agent_id,
+            model_type = %model_type,
+            "crypto lob-ml agent model_type=onnx_tcn requires DB for feature parity with training; skipping agent spawn"
+        );
+    } else if !model_is_tcn && lob_cache_opt.is_none() {
+        warn!(
+            agent = lob_cfg.agent_id,
+            model_type = %model_type,
+            "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
+        );
+    } else if let Some(lob_cache) = lob_cache_opt.clone() {
+        spawn_compat_crypto_lob_ml_agent(
+            agent_handles,
+            coordinator,
+            handle,
+            lob_cfg.clone(),
+            crypto_market_data,
+            event_matcher,
+            lob_cache,
+        )?;
+    } else {
+        warn!(
+            agent = lob_cfg.agent_id,
+            model_type = %model_type,
+            "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(feature = "rl")]
 fn spawn_compat_crypto_rl_policy_agent(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
@@ -5638,6 +5693,34 @@ fn spawn_compat_crypto_rl_policy_agent(
         "crypto_rl_policy",
     );
     info!("crypto RL policy agent spawned");
+}
+
+#[cfg(feature = "rl")]
+fn maybe_spawn_compat_crypto_rl_policy_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    rl_cfg: &CryptoRlPolicyConfig,
+    crypto_market_data: CryptoDataPlaneHandle,
+    event_matcher: Arc<EventMatcher>,
+    lob_cache_opt: &Option<crate::collector::LobCache>,
+) {
+    if let Some(lob_cache) = lob_cache_opt.clone() {
+        spawn_compat_crypto_rl_policy_agent(
+            agent_handles,
+            coordinator,
+            handle,
+            rl_cfg.clone(),
+            crypto_market_data,
+            event_matcher,
+            lob_cache,
+        );
+    } else {
+        warn!(
+            agent = rl_cfg.agent_id,
+            "RL policy agent enabled but binance depth stream is disabled; skipping agent spawn"
+        );
+    }
 }
 
 /// Start the multi-agent platform
@@ -6985,69 +7068,29 @@ pub async fn start_platform(
         }
 
         if lob_agent_enabled {
-            let model_type = lob_cfg.model_type.trim().to_ascii_lowercase();
-            let model_is_tcn = matches!(
-                model_type.as_str(),
-                "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
-            );
-
-            if model_is_tcn && !cfg!(feature = "onnx") {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    model_type = %model_type,
-                    "crypto lob-ml agent model_type=onnx_tcn requires --features onnx; skipping agent spawn"
-                );
-            } else if model_is_tcn && shared_pool.is_none() {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    model_type = %model_type,
-                    "crypto lob-ml agent model_type=onnx_tcn requires DB for feature parity with training; skipping agent spawn"
-                );
-            } else if !model_is_tcn && lob_cache_opt.is_none() {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    model_type = %model_type,
-                    "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
-                );
-            } else {
-                if let Some(lob_cache) = lob_cache_opt.clone() {
-                    spawn_compat_crypto_lob_ml_agent(
-                        &mut agent_handles,
-                        &mut coordinator,
-                        &handle,
-                        lob_cfg.clone(),
-                        crypto_market_data.clone(),
-                        event_matcher.clone(),
-                        lob_cache,
-                    )?;
-                } else {
-                    warn!(
-                        agent = lob_cfg.agent_id,
-                        model_type = %model_type,
-                        "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
-                    );
-                }
-            }
+            maybe_spawn_compat_crypto_lob_ml_agent(
+                &mut agent_handles,
+                &mut coordinator,
+                &handle,
+                &lob_cfg,
+                &shared_pool,
+                crypto_market_data.clone(),
+                event_matcher.clone(),
+                &lob_cache_opt,
+            )?;
         }
 
         #[cfg(feature = "rl")]
         if rl_agent_enabled {
-            if let Some(lob_cache) = lob_cache_opt.clone() {
-                spawn_compat_crypto_rl_policy_agent(
-                    &mut agent_handles,
-                    &mut coordinator,
-                    &handle,
-                    rl_cfg.clone(),
-                    crypto_market_data.clone(),
-                    event_matcher.clone(),
-                    lob_cache,
-                );
-            } else {
-                warn!(
-                    agent = rl_cfg.agent_id,
-                    "RL policy agent enabled but binance depth stream is disabled; skipping agent spawn"
-                );
-            }
+            maybe_spawn_compat_crypto_rl_policy_agent(
+                &mut agent_handles,
+                &mut coordinator,
+                &handle,
+                &rl_cfg,
+                crypto_market_data.clone(),
+                event_matcher.clone(),
+                &lob_cache_opt,
+            );
         }
     }
 

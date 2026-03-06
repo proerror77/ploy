@@ -713,6 +713,30 @@ Reduce bootstrap assembly noise for the two remaining crypto pull-based compatib
 
 ---
 
+# Layered Live Runtime Task 9K: Extract Compatibility Crypto Spawn Gating Helpers (2026-03-06)
+
+## Goal
+Finish reducing bootstrap noise for the remaining crypto pull-based compatibility paths by moving their prerequisite checks and skip warnings into dedicated helpers as well.
+
+## Tasks
+
+- [x] Add `maybe_spawn_compat_crypto_lob_ml_agent(...)` in `src/coordinator/bootstrap.rs`.
+- [x] Add `maybe_spawn_compat_crypto_rl_policy_agent(...)` in `src/coordinator/bootstrap.rs` behind `#[cfg(feature = "rl")]`.
+- [x] Replace the inline gating/warning logic in `start_platform()` with those helpers.
+- [x] Keep all launch semantics and warning messages unchanged in this slice.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The crypto branch in `start_platform()` now reads closer to canonical assembly: enablement checks, then one helper call per surviving compatibility path.
+- [x] This slice does not retire `lob_ml` or `rl_policy`; it only moves their remaining prerequisite logic out of the main bootstrap flow.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --features rl --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
