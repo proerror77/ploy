@@ -201,6 +201,30 @@
 
 ---
 
+## 2026-03-06 Workspace Restructure Slice (Phase 6.4 momentum event/signal split)
+
+- [x] Extract `EventInfo` and `EventMatcher` into `src/strategy/momentum/event_matcher.rs`
+- [x] Extract `Direction`, `MomentumSignal`, and `MomentumDetector` into `src/strategy/momentum/signal.rs`
+- [x] Keep `crate::strategy::momentum::*` stable with `mod.rs` re-exports
+- [x] Add direct default-value tests for `MomentumConfig` and `ExitConfig`
+- [x] Re-run momentum regression tests after the split
+
+## Review (2026-03-06, momentum event/signal split)
+
+- Delivered in this slice:
+  - Moved event discovery and Polymarket series mapping from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/event_matcher.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/event_matcher.rs).
+  - Moved signal-direction, signal payload, and momentum detection logic into [`src/strategy/momentum/signal.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/signal.rs).
+  - Preserved the existing external import surface by re-exporting those types from `mod.rs`.
+  - Added direct default regression coverage in [`src/strategy/momentum/config.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/config.rs).
+- Validation executed:
+  - `cargo build`
+  - `cargo test strategy::momentum::config::tests -- --nocapture`
+  - `cargo test strategy::momentum::tests -- --nocapture`
+- Residual risk:
+  - `momentum/mod.rs` still contains the main `MomentumEngine` runtime and its helper methods; the directory split is structurally close to complete, but the engine body is still the remaining god-file segment.
+
+---
+
 ## 2026-03-06 Workspace Restructure Slice (Phase 5.2 momentum backtest bridge)
 
 - [x] Add the first concrete strategy bridge under `crates/ploy-backtest/src/strategies/`
