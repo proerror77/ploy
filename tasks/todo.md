@@ -240,6 +240,24 @@ Shift staggered-arb from mixed "old arb threshold + opening-window directional e
 
 ---
 
+# ETH Up/Down Missing Settlement Investigation On tango-1-1 (2026-03-07)
+
+## Goal
+Find why the ETH 5-minute Up/Down order pair appears to have been bought but is no longer visible with no obvious settlement result.
+
+## Tasks
+
+- [ ] Confirm live host services and identify the components responsible for order tracking and claim/settlement.
+- [ ] Collect host evidence for the 2026-03-07 01:05-01:10 CST window (ETH Up/Down 2026-03-06 12:05PM-12:10PM ET).
+- [ ] Determine whether the order disappeared because of fill/cancel behavior, event-expiry handling, local state loss, or unresolved claim processing.
+- [ ] Summarize root cause and required fix or operational follow-up.
+
+## Review
+
+- [ ] Root cause is supported by host evidence, not inference alone.
+
+---
+
 # Staggered Arb Delayed-Entry OBI And Real-Time Partial-Fill Refactor (2026-03-06)
 
 ## Goal
@@ -367,6 +385,27 @@ Restore `staggered_arb` to the intended live behavior: directional `LEG1` entrie
 
 ---
 
+# Live Order Reconciliation And Binance L2 Persistence Fix (2026-03-07)
+
+## Goal
+Fix the post-deploy live issues where managed `staggered_arb` orders showed wrong immediate fill prices, new orders appeared in `signal_history` but not `orders`, and Binance L2 sockets could stay connected while `binance_lob_ticks` stopped advancing.
+
+## Tasks
+
+- [x] Reconcile terminal submit responses by querying the exchange once before trusting the immediate fill price.
+- [x] Wire managed strategy runtime order submissions and poll updates into `orders` persistence using the action `client_order_id`.
+- [x] Make zero-row `orders` updates fail loudly instead of succeeding silently.
+- [x] Replace the fragile Binance diff-depth collector path with a combined partial-depth snapshot stream and freshness tracking.
+
+## Review
+
+- [x] `OrderExecutor` now re-queries terminal immediate fills that arrive without associated trade details, so live records use the exchange-confirmed fill price instead of the submitted limit price.
+- [x] Coordinator-managed `split_arb` / `staggered_arb` orders now insert into `orders` before execution and update status/fills on submit and poll transitions.
+- [x] `PostgresStore::update_order_status` and `update_order_fill` now error when no `orders` row matches, which exposes persistence regressions immediately.
+- [x] `BinanceDepthStream` now uses the combined `@depth20@100ms` snapshot stream, records `BinanceLob` freshness, and rebuilds each snapshot from the message itself instead of accumulating unsynchronized deltas.
+
+---
+
 # Staggered Arb Dry-Run Gate Diagnostics (2026-03-06)
 
 ## Goal
@@ -386,3 +425,17 @@ Use the uploaded Linux binary on `tango-1-1` to observe real-time `LEG1` / `LEG2
 - 2026-03-06: Dry-run on `tango-1-1` with the uploaded Linux binary showed `entry_timing_gates` dominating while `entry_signal_gates` stayed `none`; no `LEG1` / `LEG2` actions fired during the sampled windows.
 - 2026-03-06: Root cause was live entry evaluation depending on Polymarket quote callbacks; opening windows without a fresh quote update could miss `LEG1` entirely.
 - 2026-03-06: Added tick-driven entry rechecks for symbols with a live opening-window candidate and verified on `tango-1-1` dry-run that `SOLUSDT` entered at `06:55:05Z`, merged at `06:55:12Z`, re-entered, and merged again at `06:55:50Z`.
+
+---
+
+# Trading Host Claim And Settlement Investigation (2026-03-07)
+
+## Goal
+Find the exact `tango-1-1` trading-host service names, log locations, and the repo docs/code paths that explain how Polymarket position claiming or settlement should behave when a bought order seems to disappear without visible settlement.
+
+## Tasks
+
+- [ ] Locate exact `systemd` service names and any host/logging paths referenced for `tango-1-1`.
+- [ ] Search docs, tasks, and scripts for Polymarket claim/settlement and host-debug guidance.
+- [ ] Search runtime code for claimers, expiry settlement, reconciliation, and order/archive flows relevant to disappearing positions.
+- [ ] Summarize concise debug-oriented findings with exact file references.

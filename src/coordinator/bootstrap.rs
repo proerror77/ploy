@@ -3,6 +3,7 @@
 //! Entry point for `ploy platform start`. Creates shared infrastructure,
 //! registers agents based on config flags, and runs the coordinator loop.
 
+use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
@@ -2855,7 +2856,13 @@ fn render_split_arb_runtime_config(
         .expect("[markets] must be a table");
     markets.insert(
         "series_ids".to_string(),
-        toml::Value::Array(series_ids.iter().cloned().map(toml::Value::String).collect()),
+        toml::Value::Array(
+            series_ids
+                .iter()
+                .cloned()
+                .map(toml::Value::String)
+                .collect(),
+        ),
     );
 
     format!(
@@ -2895,10 +2902,9 @@ fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[String]) -> 
         return cfg;
     }
 
-    let config: toml::Value = toml::from_str(include_str!(
-        "../../config/strategies/staggered_arb.toml"
-    ))
-    .expect("embedded staggered_arb runtime config must stay valid TOML");
+    let config: toml::Value =
+        toml::from_str(include_str!("../../config/strategies/staggered_arb.toml"))
+            .expect("embedded staggered_arb runtime config must stay valid TOML");
     render_split_arb_runtime_config(config, symbols, series_ids)
 }
 
@@ -4139,6 +4145,124 @@ async fn persist_live_order_signal_history(
     }
 }
 
+#[async_trait]
+trait RuntimeOrderStore: Send + Sync {
+    async fn insert_order(&self, order: &crate::domain::Order) -> Result<()>;
+    async fn update_order_status(
+        &self,
+        client_order_id: &str,
+        status: OrderStatus,
+        exchange_order_id: Option<&str>,
+    ) -> Result<()>;
+    async fn update_order_fill(
+        &self,
+        client_order_id: &str,
+        filled_shares: u64,
+        avg_fill_price: Decimal,
+        status: OrderStatus,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl RuntimeOrderStore for PostgresStore {
+    async fn insert_order(&self, order: &crate::domain::Order) -> Result<()> {
+        PostgresStore::insert_order(self, order).await.map(|_| ())
+    }
+
+    async fn update_order_status(
+        &self,
+        client_order_id: &str,
+        status: OrderStatus,
+        exchange_order_id: Option<&str>,
+    ) -> Result<()> {
+        PostgresStore::update_order_status(self, client_order_id, status, exchange_order_id).await
+    }
+
+    async fn update_order_fill(
+        &self,
+        client_order_id: &str,
+        filled_shares: u64,
+        avg_fill_price: Decimal,
+        status: OrderStatus,
+    ) -> Result<()> {
+        PostgresStore::update_order_fill(
+            self,
+            client_order_id,
+            filled_shares,
+            avg_fill_price,
+            status,
+        )
+        .await
+    }
+}
+
+fn normalize_runtime_order_request(client_order_id: &str, order: &mut crate::domain::OrderRequest) {
+    if order.client_order_id != client_order_id {
+        warn!(
+            "Mismatched order IDs in managed runtime action: action={}, request={}; using action ID",
+            client_order_id, order.client_order_id
+        );
+        order.client_order_id = client_order_id.to_string();
+    }
+}
+
+fn runtime_order_leg(client_order_id: &str) -> u8 {
+    if client_order_id.contains("leg2") {
+        2
+    } else {
+        1
+    }
+}
+
+async fn persist_runtime_order_insert(
+    store: &dyn RuntimeOrderStore,
+    strategy_id: &str,
+    order: &crate::domain::OrderRequest,
+) -> Result<()> {
+    let db_order = crate::domain::Order::from_request(
+        order,
+        None,
+        runtime_order_leg(&order.client_order_id),
+        Some(strategy_id.to_string()),
+    );
+    store.insert_order(&db_order).await
+}
+
+async fn persist_runtime_order_result(
+    store: &dyn RuntimeOrderStore,
+    client_order_id: &str,
+    exchange_order_id: &str,
+    status: OrderStatus,
+    filled_shares: u64,
+    avg_fill_price: Option<Decimal>,
+    fallback_price: Decimal,
+) -> Result<()> {
+    store
+        .update_order_status(
+            client_order_id,
+            OrderStatus::Submitted,
+            Some(exchange_order_id),
+        )
+        .await?;
+
+    if filled_shares > 0 {
+        store
+            .update_order_fill(
+                client_order_id,
+                filled_shares,
+                avg_fill_price.unwrap_or(fallback_price),
+                status,
+            )
+            .await?;
+    } else if status != OrderStatus::Submitted {
+        store
+            .update_order_status(client_order_id, status, Some(exchange_order_id))
+            .await?;
+    }
+
+    Ok(())
+}
+
 async fn handle_strategy_actions_runtime(
     strategy_label: &str,
     manager: Arc<StrategyManager>,
@@ -4150,14 +4274,20 @@ async fn handle_strategy_actions_runtime(
     observability_pool: Option<PgPool>,
     observability_account_id: String,
 ) {
+    let runtime_order_store: Option<Arc<dyn RuntimeOrderStore>> = observability_pool
+        .as_ref()
+        .map(|pool| Arc::new(PostgresStore::from_pool(pool.clone())) as Arc<dyn RuntimeOrderStore>);
+
     while let Some((strategy_id, action)) = rx.recv().await {
         let split_arb_managed = strategy_label == "split_arb";
         match action {
             StrategyAction::SubmitOrder {
                 client_order_id,
-                order,
+                mut order,
                 priority: _,
             } => {
+                normalize_runtime_order_request(&client_order_id, &mut order);
+
                 if paused.load(Ordering::Relaxed) {
                     warn!(
                         strategy = strategy_label,
@@ -4233,8 +4363,43 @@ async fn handle_strategy_actions_runtime(
                 }
 
                 orders_submitted.fetch_add(1, Ordering::Relaxed);
+                if let Some(store) = runtime_order_store.as_ref() {
+                    if let Err(e) =
+                        persist_runtime_order_insert(store.as_ref(), &strategy_id, &order).await
+                    {
+                        warn!(
+                            strategy = strategy_label,
+                            strategy_id = %strategy_id,
+                            client_order_id = %client_order_id,
+                            error = %e,
+                            "failed to persist managed runtime order insert"
+                        );
+                    }
+                }
                 match executor.execute(&order).await {
                     Ok(result) => {
+                        if let Some(store) = runtime_order_store.as_ref() {
+                            if let Err(e) = persist_runtime_order_result(
+                                store.as_ref(),
+                                &client_order_id,
+                                &result.order_id,
+                                result.status,
+                                result.filled_shares,
+                                result.avg_fill_price,
+                                order.limit_price,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    strategy = strategy_label,
+                                    strategy_id = %strategy_id,
+                                    client_order_id = %client_order_id,
+                                    exchange_order_id = %result.order_id,
+                                    error = %e,
+                                    "failed to persist managed runtime order result"
+                                );
+                            }
+                        }
                         if matches!(result.status, OrderStatus::Filled) {
                             orders_filled.fetch_add(1, Ordering::Relaxed);
                         }
@@ -4319,6 +4484,7 @@ async fn handle_strategy_actions_runtime(
                             let orders_filled_for_poll = orders_filled.clone();
                             let observability_pool_for_poll = observability_pool.clone();
                             let observability_account_for_poll = observability_account_id.clone();
+                            let runtime_order_store_for_poll = runtime_order_store.clone();
                             let strategy_id_for_poll = strategy_id.clone();
                             let client_order_id_for_poll = client_order_id.clone();
                             let exchange_order_id_for_poll = update.order_id.clone();
@@ -4384,6 +4550,29 @@ async fn handle_strategy_actions_runtime(
                                         error: None,
                                     };
                                     manager_for_poll.send_order_update(update.clone());
+
+                                    if let Some(store) = runtime_order_store_for_poll.as_ref() {
+                                        if let Err(e) = persist_runtime_order_result(
+                                            store.as_ref(),
+                                            &client_order_id_for_poll,
+                                            &update.order_id,
+                                            update.status,
+                                            update.filled_qty,
+                                            update.avg_fill_price,
+                                            order_for_poll.limit_price,
+                                        )
+                                        .await
+                                        {
+                                            warn!(
+                                                strategy = strategy_label_owned.as_str(),
+                                                strategy_id = %strategy_id_for_poll,
+                                                client_order_id = %client_order_id_for_poll,
+                                                exchange_order_id = %update.order_id,
+                                                error = %e,
+                                                "failed to persist managed runtime poll update"
+                                            );
+                                        }
+                                    }
 
                                     if let Some(pool) = observability_pool_for_poll.as_ref() {
                                         let context = json!({
@@ -4471,6 +4660,20 @@ async fn handle_strategy_actions_runtime(
                             error: Some(e.to_string()),
                         };
                         manager.send_order_update(update.clone());
+                        if let Some(store) = runtime_order_store.as_ref() {
+                            if let Err(err) = store
+                                .update_order_status(&client_order_id, OrderStatus::Failed, None)
+                                .await
+                            {
+                                warn!(
+                                    strategy = strategy_label,
+                                    strategy_id = %strategy_id,
+                                    client_order_id = %client_order_id,
+                                    error = %err,
+                                    "failed to persist managed runtime order failure"
+                                );
+                            }
+                        }
                         if let Some(pool) = observability_pool.as_ref() {
                             let context = json!({
                                 "source": "managed_runtime",
@@ -6012,7 +6215,10 @@ pub async fn start_platform(
                 Err(_) => all_coins.iter().map(|c| format!("{}USDT", c)).collect(),
             };
 
-            let depth_stream = Arc::new(crate::collector::BinanceDepthStream::new(depth_symbols));
+            let depth_stream = Arc::new(
+                crate::collector::BinanceDepthStream::new(depth_symbols)
+                    .with_freshness(Arc::clone(&freshness)),
+            );
             let lob_cache = depth_stream.cache().clone();
             lob_cache_opt = Some(lob_cache.clone());
 
@@ -6928,10 +7134,14 @@ pub fn print_platform_status(state: &GlobalState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{OrderRequest, OrderStatus, Side};
     use crate::platform::{
         DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
     };
+    use async_trait::async_trait;
+    use rust_decimal_macros::dec;
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -7113,6 +7323,118 @@ symbols = ["SOLUSDT"]
 
         assert!(rendered.contains("[entry]\nsymbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
         assert!(rendered.contains("[markets]\nseries_ids = [\"10192\", \"10684\"]"));
+    }
+
+    #[derive(Default)]
+    struct MockRuntimeOrderStore {
+        inserted: Mutex<Vec<crate::domain::Order>>,
+        status_updates: Mutex<Vec<(String, OrderStatus, Option<String>)>>,
+        fill_updates: Mutex<Vec<(String, u64, rust_decimal::Decimal, OrderStatus)>>,
+    }
+
+    #[async_trait]
+    impl RuntimeOrderStore for MockRuntimeOrderStore {
+        async fn insert_order(&self, order: &crate::domain::Order) -> Result<()> {
+            self.inserted
+                .lock()
+                .expect("inserted lock")
+                .push(order.clone());
+            Ok(())
+        }
+
+        async fn update_order_status(
+            &self,
+            client_order_id: &str,
+            status: OrderStatus,
+            exchange_order_id: Option<&str>,
+        ) -> Result<()> {
+            self.status_updates
+                .lock()
+                .expect("status_updates lock")
+                .push((
+                    client_order_id.to_string(),
+                    status,
+                    exchange_order_id.map(str::to_string),
+                ));
+            Ok(())
+        }
+
+        async fn update_order_fill(
+            &self,
+            client_order_id: &str,
+            filled_shares: u64,
+            avg_fill_price: rust_decimal::Decimal,
+            status: OrderStatus,
+        ) -> Result<()> {
+            self.fill_updates.lock().expect("fill_updates lock").push((
+                client_order_id.to_string(),
+                filled_shares,
+                avg_fill_price,
+                status,
+            ));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_runtime_order_insert_uses_action_order_id_and_leg() {
+        let store = Arc::new(MockRuntimeOrderStore::default());
+        let mut order = OrderRequest::buy_limit("token-1".to_string(), Side::Down, 20, dec!(0.55));
+
+        normalize_runtime_order_request("stag_leg2_merge_123", &mut order);
+        persist_runtime_order_insert(store.as_ref(), "staggered_arb_strategy", &order)
+            .await
+            .expect("insert should succeed");
+
+        let inserted = store.inserted.lock().expect("inserted lock");
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].client_order_id, "stag_leg2_merge_123");
+        assert_eq!(inserted[0].leg, 2);
+        assert_eq!(
+            inserted[0].strategy_id.as_deref(),
+            Some("staggered_arb_strategy")
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_runtime_order_result_records_submission_and_fill() {
+        let store = Arc::new(MockRuntimeOrderStore::default());
+
+        persist_runtime_order_result(
+            store.as_ref(),
+            "stag_leg1_123",
+            "exchange-123",
+            OrderStatus::Filled,
+            20,
+            Some(dec!(0.34)),
+            dec!(0.40),
+        )
+        .await
+        .expect("persist result should succeed");
+
+        let status_updates = store.status_updates.lock().expect("status_updates lock");
+        assert_eq!(status_updates.len(), 1);
+        assert_eq!(
+            status_updates[0],
+            (
+                "stag_leg1_123".to_string(),
+                OrderStatus::Submitted,
+                Some("exchange-123".to_string())
+            )
+        );
+        drop(status_updates);
+
+        let fill_updates = store.fill_updates.lock().expect("fill_updates lock");
+        assert_eq!(fill_updates.len(), 1);
+        assert_eq!(
+            fill_updates[0],
+            (
+                "stag_leg1_123".to_string(),
+                20,
+                dec!(0.34),
+                OrderStatus::Filled
+            )
+        );
     }
 
     #[tokio::test]

@@ -4,9 +4,11 @@
 //! for lead-lag analysis with Polymarket.
 
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
@@ -15,28 +17,33 @@ use tracing::{debug, error, info};
 use url::Url;
 
 use crate::error::{PloyError, Result};
+use crate::platform::{DataPlaneFreshness, DataSource};
 
-const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
+const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/stream?streams=";
 const PING_INTERVAL_SECS: u64 = 30;
 const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 const CHANNEL_CAPACITY: usize = 10000;
 const MAX_DEPTH_LEVELS: usize = 20;
 
-/// Binance depth update message
+/// Binance partial-depth snapshot payload.
 #[derive(Debug, Deserialize)]
-pub struct DepthUpdate {
-    #[serde(rename = "e")]
-    pub event_type: String,
+pub struct DepthSnapshotPayload {
+    #[serde(rename = "lastUpdateId", alias = "u")]
+    pub update_id: i64,
     #[serde(rename = "E")]
-    pub event_time: i64,
+    pub event_time: Option<i64>,
     #[serde(rename = "s")]
-    pub symbol: String,
-    #[serde(rename = "u")]
-    pub final_update_id: i64,
-    #[serde(rename = "b")]
+    pub symbol: Option<String>,
+    #[serde(rename = "bids", alias = "b")]
     pub bids: Vec<(String, String)>,
-    #[serde(rename = "a")]
+    #[serde(rename = "asks", alias = "a")]
     pub asks: Vec<(String, String)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CombinedDepthMessage {
+    stream: String,
+    data: DepthSnapshotPayload,
 }
 
 /// Order book state for a symbol
@@ -178,36 +185,37 @@ impl LobCache {
         })
     }
 
-    /// Update order book from depth update
-    async fn apply_depth_update(&self, update: &DepthUpdate) -> Option<LobSnapshot> {
+    /// Replace order book from a partial depth snapshot.
+    async fn apply_depth_snapshot(
+        &self,
+        symbol: &str,
+        update_id: i64,
+        event_time_ms: Option<i64>,
+        bids: &[(String, String)],
+        asks: &[(String, String)],
+    ) -> Option<LobSnapshot> {
         let mut books = self.books.write().await;
-        let book = books.entry(update.symbol.clone()).or_default();
+        let book = books.entry(symbol.to_string()).or_default();
 
-        let ts = DateTime::from_timestamp_millis(update.event_time).unwrap_or_else(Utc::now);
+        let ts = event_time_ms
+            .and_then(DateTime::from_timestamp_millis)
+            .unwrap_or_else(Utc::now);
+        book.bids.clear();
+        book.asks.clear();
 
         // Apply bid updates
-        for (price_str, qty_str) in &update.bids {
-            if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
-                let price_cents = (price * 100.0).round() as i64;
-                let qty_dec = Decimal::try_from(qty).unwrap_or_default();
-
-                if qty == 0.0 {
-                    book.bids.remove(&price_cents);
-                } else {
+        for (price_str, qty_str) in bids {
+            if let Some((price_cents, qty_dec)) = parse_depth_level(price_str, qty_str) {
+                if !qty_dec.is_zero() {
                     book.bids.insert(price_cents, qty_dec);
                 }
             }
         }
 
         // Apply ask updates
-        for (price_str, qty_str) in &update.asks {
-            if let (Ok(price), Ok(qty)) = (price_str.parse::<f64>(), qty_str.parse::<f64>()) {
-                let price_cents = (price * 100.0).round() as i64;
-                let qty_dec = Decimal::try_from(qty).unwrap_or_default();
-
-                if qty == 0.0 {
-                    book.asks.remove(&price_cents);
-                } else {
+        for (price_str, qty_str) in asks {
+            if let Some((price_cents, qty_dec)) = parse_depth_level(price_str, qty_str) {
+                if !qty_dec.is_zero() {
                     book.asks.insert(price_cents, qty_dec);
                 }
             }
@@ -225,7 +233,7 @@ impl LobCache {
             }
         }
 
-        book.last_update_id = update.final_update_id;
+        book.last_update_id = update_id;
         book.last_update_time = Some(ts);
 
         // Generate snapshot
@@ -241,7 +249,7 @@ impl LobCache {
 
         Some(LobSnapshot {
             timestamp: ts,
-            symbol: update.symbol.clone(),
+            symbol: symbol.to_string(),
             best_bid,
             best_ask,
             mid_price,
@@ -250,8 +258,24 @@ impl LobCache {
             obi_10,
             bid_volume_5,
             ask_volume_5,
-            update_id: update.final_update_id,
+            update_id,
         })
+    }
+}
+
+fn parse_depth_level(price_str: &str, qty_str: &str) -> Option<(i64, Decimal)> {
+    let price = Decimal::from_str(price_str).ok()?;
+    let qty = Decimal::from_str(qty_str).ok()?;
+    let price_cents = (price * Decimal::from(100)).round().to_i64()?;
+    Some((price_cents, qty))
+}
+
+fn symbol_from_stream_name(stream: &str) -> Option<String> {
+    let symbol = stream.split('@').next()?.trim();
+    if symbol.is_empty() {
+        None
+    } else {
+        Some(symbol.to_ascii_uppercase())
     }
 }
 
@@ -260,6 +284,7 @@ pub struct BinanceDepthStream {
     symbols: Vec<String>,
     cache: LobCache,
     update_tx: broadcast::Sender<LobUpdate>,
+    freshness: Option<Arc<DataPlaneFreshness>>,
 }
 
 impl BinanceDepthStream {
@@ -271,7 +296,13 @@ impl BinanceDepthStream {
             symbols,
             cache: LobCache::new(),
             update_tx,
+            freshness: None,
         }
+    }
+
+    pub fn with_freshness(mut self, freshness: Arc<DataPlaneFreshness>) -> Self {
+        self.freshness = Some(freshness);
+        self
     }
 
     /// Get reference to LOB cache
@@ -289,10 +320,10 @@ impl BinanceDepthStream {
         let streams: Vec<String> = self
             .symbols
             .iter()
-            .map(|s| format!("{}@depth@100ms", s.to_lowercase()))
+            .map(|s| format!("{}@depth{}@100ms", s.to_lowercase(), MAX_DEPTH_LEVELS))
             .collect();
 
-        format!("{}/{}", BINANCE_WS_URL, streams.join("/"))
+        format!("{}{}", BINANCE_WS_URL, streams.join("/"))
     }
 
     /// Run the WebSocket connection with auto-reconnect
@@ -339,6 +370,10 @@ impl BinanceDepthStream {
                 .map_err(PloyError::WebSocket)?;
 
         info!("Connected to Binance depth stream");
+        if let Some(freshness) = &self.freshness {
+            freshness.set_source_connected(DataSource::BinanceLob, true);
+            freshness.set_subscription_count(DataSource::BinanceLob, self.symbols.len() as u64);
+        }
 
         let (mut write, mut read) = ws_stream.split();
         let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
@@ -359,13 +394,22 @@ impl BinanceDepthStream {
                         }
                         Some(Ok(Message::Close(_))) => {
                             info!("Received close frame");
+                            if let Some(freshness) = &self.freshness {
+                                freshness.set_source_connected(DataSource::BinanceLob, false);
+                            }
                             break;
                         }
                         Some(Err(e)) => {
+                            if let Some(freshness) = &self.freshness {
+                                freshness.set_source_connected(DataSource::BinanceLob, false);
+                            }
                             return Err(PloyError::WebSocket(e));
                         }
                         None => {
                             info!("Stream ended");
+                            if let Some(freshness) = &self.freshness {
+                                freshness.set_source_connected(DataSource::BinanceLob, false);
+                            }
                             break;
                         }
                         _ => {}
@@ -381,29 +425,70 @@ impl BinanceDepthStream {
             }
         }
 
+        if let Some(freshness) = &self.freshness {
+            freshness.set_source_connected(DataSource::BinanceLob, false);
+        }
+
         Ok(())
     }
 
     /// Handle incoming WebSocket message
     async fn handle_message(&self, text: &str) {
-        // Parse wrapper format: { "stream": "...", "data": {...} }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-            let payload = value.get("data").cloned().unwrap_or(value);
-
-            if let Ok(update) = serde_json::from_value::<DepthUpdate>(payload) {
-                if update.event_type == "depthUpdate" {
-                    if let Some(snapshot) = self.cache.apply_depth_update(&update).await {
-                        let lob_update = LobUpdate {
-                            symbol: update.symbol.clone(),
-                            snapshot,
-                            raw_state: self.cache.get(&update.symbol).await.unwrap_or_default(),
-                        };
-
-                        // Broadcast to subscribers
-                        let _ = self.update_tx.send(lob_update);
-                    }
-                }
+        if let Ok(message) = serde_json::from_str::<CombinedDepthMessage>(text) {
+            let symbol = message
+                .data
+                .symbol
+                .clone()
+                .or_else(|| symbol_from_stream_name(&message.stream));
+            if let Some(symbol) = symbol {
+                self.process_snapshot(
+                    &symbol,
+                    message.data.update_id,
+                    message.data.event_time,
+                    &message.data.bids,
+                    &message.data.asks,
+                )
+                .await;
             }
+            return;
+        }
+
+        if let Ok(payload) = serde_json::from_str::<DepthSnapshotPayload>(text) {
+            if let Some(symbol) = payload.symbol.clone() {
+                self.process_snapshot(
+                    &symbol,
+                    payload.update_id,
+                    payload.event_time,
+                    &payload.bids,
+                    &payload.asks,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn process_snapshot(
+        &self,
+        symbol: &str,
+        update_id: i64,
+        event_time: Option<i64>,
+        bids: &[(String, String)],
+        asks: &[(String, String)],
+    ) {
+        if let Some(snapshot) = self
+            .cache
+            .apply_depth_snapshot(symbol, update_id, event_time, bids, asks)
+            .await
+        {
+            if let Some(freshness) = &self.freshness {
+                freshness.record_update(DataSource::BinanceLob, symbol);
+            }
+            let lob_update = LobUpdate {
+                symbol: symbol.to_string(),
+                snapshot,
+                raw_state: self.cache.get(symbol).await.unwrap_or_default(),
+            };
+            let _ = self.update_tx.send(lob_update);
         }
     }
 }
@@ -438,5 +523,53 @@ mod tests {
 
         let mid = book.mid_price().unwrap();
         assert_eq!(mid, dec!(100.05));
+    }
+
+    #[test]
+    fn test_build_url_uses_combined_partial_depth_streams() {
+        let stream = BinanceDepthStream::new(vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        assert_eq!(
+            stream.build_url(),
+            "wss://stream.binance.com:9443/stream?streams=btcusdt@depth20@100ms/ethusdt@depth20@100ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_depth_snapshot_replaces_book_state() {
+        let cache = LobCache::new();
+
+        cache
+            .apply_depth_snapshot(
+                "BTCUSDT",
+                10,
+                None,
+                &[
+                    ("100.00".to_string(), "2.0".to_string()),
+                    ("99.90".to_string(), "1.0".to_string()),
+                ],
+                &[
+                    ("100.10".to_string(), "3.0".to_string()),
+                    ("100.20".to_string(), "1.0".to_string()),
+                ],
+            )
+            .await
+            .expect("first snapshot should build");
+
+        let snapshot = cache
+            .apply_depth_snapshot(
+                "BTCUSDT",
+                11,
+                None,
+                &[("101.00".to_string(), "4.0".to_string())],
+                &[("101.10".to_string(), "5.0".to_string())],
+            )
+            .await
+            .expect("replacement snapshot should build");
+
+        assert_eq!(snapshot.best_bid, dec!(101));
+        assert_eq!(snapshot.best_ask, dec!(101.1));
+        let state = cache.get("BTCUSDT").await.expect("book state");
+        assert_eq!(state.bids.len(), 1);
+        assert_eq!(state.asks.len(), 1);
     }
 }

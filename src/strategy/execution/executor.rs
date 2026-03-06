@@ -349,6 +349,25 @@ impl OrderExecutor {
             immediate_status = OrderStatus::PartiallyFilled;
         }
         if immediate_status != OrderStatus::Submitted {
+            if should_reconcile_immediate_fill(&order_resp, immediate_status, immediate_filled) {
+                if let Ok(reconciled) = self.reconcile_immediate_fill(&order_id).await {
+                    if reconciled.status != OrderStatus::Submitted
+                        && reconciled.filled_shares >= immediate_filled
+                    {
+                        return Ok(ExecutionResult {
+                            order_id,
+                            status: reconciled.status,
+                            filled_shares: reconciled.filled_shares,
+                            avg_fill_price: reconciled
+                                .avg_fill_price
+                                .or(immediate_price)
+                                .or(Some(request.limit_price)),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                        });
+                    }
+                }
+            }
+
             return Ok(ExecutionResult {
                 order_id,
                 status: immediate_status,
@@ -454,6 +473,19 @@ impl OrderExecutor {
         })
     }
 
+    async fn reconcile_immediate_fill(&self, order_id: &str) -> Result<ExecutionResult> {
+        let order = self.client.get_order(order_id).await?;
+        let status = self.client.infer_order_status(&order);
+        let (filled_u64, avg_fill_price) = self.client.calculate_fill(&order);
+        Ok(ExecutionResult {
+            order_id: order_id.to_string(),
+            status,
+            filled_shares: filled_u64,
+            avg_fill_price,
+            elapsed_ms: 0,
+        })
+    }
+
     /// Get current best prices for a token
     pub async fn get_prices(&self, token_id: &str) -> Result<(Option<Decimal>, Option<Decimal>)> {
         self.client.get_best_prices(token_id).await
@@ -541,10 +573,32 @@ impl ExecutionParams {
     }
 }
 
+fn should_reconcile_immediate_fill(
+    order_resp: &crate::adapters::OrderResponse,
+    status: OrderStatus,
+    filled_shares: u64,
+) -> bool {
+    filled_shares > 0
+        && matches!(
+            status,
+            OrderStatus::Filled
+                | OrderStatus::PartiallyFilled
+                | OrderStatus::Cancelled
+                | OrderStatus::Expired
+        )
+        && order_resp.associate_trades.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::OrderResponse;
+    use crate::config::ExecutionConfig;
+    use crate::exchange::{ExchangeClient, ExchangeKind};
+    use async_trait::async_trait;
     use rust_decimal_macros::dec;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_execution_params() {
@@ -552,5 +606,140 @@ mod tests {
 
         // 0.50 * 1.02 = 0.51
         assert_eq!(params.effective_max_price(), dec!(0.51));
+    }
+
+    #[derive(Default)]
+    struct MockExchangeClient {
+        submit_responses: Mutex<VecDeque<OrderResponse>>,
+        get_order_responses: Mutex<VecDeque<OrderResponse>>,
+        get_order_calls: Mutex<Vec<String>>,
+    }
+
+    impl MockExchangeClient {
+        fn with_submit_response(self, response: OrderResponse) -> Self {
+            self.submit_responses
+                .lock()
+                .expect("submit_responses lock")
+                .push_back(response);
+            self
+        }
+
+        fn with_get_order_response(self, response: OrderResponse) -> Self {
+            self.get_order_responses
+                .lock()
+                .expect("get_order_responses lock")
+                .push_back(response);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl ExchangeClient for MockExchangeClient {
+        fn kind(&self) -> ExchangeKind {
+            ExchangeKind::Polymarket
+        }
+
+        fn is_dry_run(&self) -> bool {
+            false
+        }
+
+        async fn submit_order_gateway(&self, _request: &OrderRequest) -> Result<OrderResponse> {
+            self.submit_responses
+                .lock()
+                .expect("submit_responses lock")
+                .pop_front()
+                .ok_or_else(|| {
+                    crate::error::PloyError::Internal("missing submit response".to_string())
+                })
+        }
+
+        async fn get_order(&self, order_id: &str) -> Result<OrderResponse> {
+            self.get_order_calls
+                .lock()
+                .expect("get_order_calls lock")
+                .push(order_id.to_string());
+            self.get_order_responses
+                .lock()
+                .expect("get_order_responses lock")
+                .pop_front()
+                .ok_or_else(|| {
+                    crate::error::PloyError::Internal("missing get_order response".to_string())
+                })
+        }
+
+        async fn cancel_order(&self, _order_id: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn get_best_prices(
+            &self,
+            _token_id: &str,
+        ) -> Result<(Option<Decimal>, Option<Decimal>)> {
+            Ok((None, None))
+        }
+
+        fn infer_order_status(&self, order: &OrderResponse) -> OrderStatus {
+            crate::adapters::PolymarketClient::infer_order_status(order)
+        }
+
+        fn calculate_fill(&self, order: &OrderResponse) -> (u64, Option<Decimal>) {
+            let (filled, price) = crate::adapters::PolymarketClient::calculate_fill(order);
+            (filled.to_u64().unwrap_or(0), Some(price))
+        }
+    }
+
+    fn make_order_response(
+        id: &str,
+        status: &str,
+        matched: &str,
+        original: &str,
+        price: &str,
+    ) -> OrderResponse {
+        OrderResponse {
+            id: id.to_string(),
+            status: status.to_string(),
+            owner: None,
+            market: None,
+            asset_id: None,
+            side: None,
+            original_size: Some(original.to_string()),
+            size_matched: Some(matched.to_string()),
+            price: Some(price.to_string()),
+            associate_trades: None,
+            created_at: None,
+            expiration: None,
+            order_type: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reconciles_immediate_fill_with_order_query() {
+        let client = MockExchangeClient::default()
+            .with_submit_response(make_order_response(
+                "exchange-1",
+                "FILLED",
+                "20",
+                "20",
+                "0.40",
+            ))
+            .with_get_order_response(make_order_response(
+                "exchange-1",
+                "FILLED",
+                "20",
+                "20",
+                "0.34",
+            ));
+        let executor =
+            OrderExecutor::new_with_exchange(Arc::new(client), ExecutionConfig::default());
+        let request = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+
+        let result = executor
+            .execute(&request)
+            .await
+            .expect("execution should succeed");
+
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert_eq!(result.filled_shares, 20);
+        assert_eq!(result.avg_fill_price, Some(dec!(0.34)));
     }
 }

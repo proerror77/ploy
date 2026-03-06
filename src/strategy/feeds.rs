@@ -958,7 +958,8 @@ impl DataFeedManager {
             }
         }
 
-        self.ensure_binance_l2_feed_started(binance_l2_symbols).await;
+        self.ensure_binance_l2_feed_started(binance_l2_symbols)
+            .await;
 
         // Subscribe to Polymarket tokens.
         //
@@ -1005,7 +1006,10 @@ impl DataFeedManager {
 
         let manager = self.manager.clone();
         let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
-        let depth_ws = Arc::new(BinanceDepthStream::new(symbols.clone()));
+        let depth_ws = Arc::new(match freshness.clone() {
+            Some(f) => BinanceDepthStream::new(symbols.clone()).with_freshness(f),
+            None => BinanceDepthStream::new(symbols.clone()),
+        });
         let mut rx = depth_ws.subscribe();
 
         tokio::spawn(async move {

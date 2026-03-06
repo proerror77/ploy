@@ -135,3 +135,12 @@
 
 - Pattern: Removing hard entry caps and per-event trade limits can dramatically increase turnover; a profile can stay strongly positive on long / L2-rich windows while degrading to near-flat on a noisy short window.
 - Rule: For aggressive OBI long-gamma profiles, always validate at least one short production-like March window and one L2-overlap window before calling the change an improvement. Report turnover alongside PnL so overtrading is visible.
+
+- Pattern: Polymarket submit responses can already be terminal while still omitting associated trades, which makes the raw response price look like the real fill price when it is only the submitted limit.
+- Rule: When a live submit returns `Filled` / partial terminal state without trade details, query the order once before persisting `avg_fill_price`; otherwise signal history and local PnL will diverge from the venue UI.
+
+- Pattern: The coordinator-managed strategy runtime can look healthy because it writes `signal_history`, while silently skipping `orders` persistence if it does not reuse the CLI order-store path.
+- Rule: Any managed runtime that submits orders directly must normalize `client_order_id`, insert an `orders` row before execution, and update that row on both submit and poll transitions. Also treat zero-row DB updates as errors, not success.
+
+- Pattern: A Binance depth socket can remain connected while top-of-book persistence goes stale if the collector tries to reconstruct a book from unsynchronized diff updates.
+- Rule: For spot L2 features that only need top levels, prefer the combined partial-depth snapshot stream (or do full snapshot+sequence sync). Do not build a production book from raw diffs without explicit synchronization and liveness tracking.

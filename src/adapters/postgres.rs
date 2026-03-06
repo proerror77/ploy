@@ -463,7 +463,7 @@ impl PostgresStore {
         status: OrderStatus,
         exchange_order_id: Option<&str>,
     ) -> Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE orders SET
                 status = $1,
@@ -485,6 +485,12 @@ impl PostgresStore {
         .bind(client_order_id)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(PloyError::Validation(format!(
+                "order not found for status update: {}",
+                client_order_id
+            )));
+        }
         Ok(())
     }
 
@@ -496,7 +502,7 @@ impl PostgresStore {
         avg_fill_price: Decimal,
         status: OrderStatus,
     ) -> Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE orders SET
                 filled_shares = $1,
@@ -520,6 +526,12 @@ impl PostgresStore {
         .bind(client_order_id)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(PloyError::Validation(format!(
+                "order not found for fill update: {}",
+                client_order_id
+            )));
+        }
         Ok(())
     }
 
