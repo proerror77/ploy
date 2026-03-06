@@ -551,6 +551,30 @@ Shrink the public entry surface for legacy live runtimes so compatibility agents
 
 ---
 
+# Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
+
+## Goal
+Reduce `bootstrap.rs` special-case assembly by extracting the repeated managed-runtime registration and spawn boilerplate into one helper used by the canonical strategy paths.
+
+## Tasks
+
+- [x] Add a shared `spawn_managed_strategy_runtime_task(...)` helper in `src/coordinator/bootstrap.rs`.
+- [x] Move the repeated register-agent + shutdown subscription + `tokio::spawn` pattern for `momentum`, `pattern_memory`, `split_arb`, `event_edge`, and canonical `nba_comeback` into that helper.
+- [x] Keep strategy-specific TOML/config builders untouched in this slice; only remove duplicated startup assembly.
+- [x] Preserve the Grok-enabled sports fallback path outside the helper.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Canonical runtime startup is now assembled through one bootstrap helper instead of five near-identical inline branches.
+- [x] This slice does not change strategy selection or execution semantics; it only reduces bootstrap duplication before larger Task 9 cleanup.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

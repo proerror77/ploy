@@ -5119,6 +5119,54 @@ async fn run_managed_strategy_runtime(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_managed_strategy_runtime_task(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    strategy_label: &'static str,
+    agent_id: String,
+    domain: Domain,
+    risk_params: AgentRiskParams,
+    strategy_config_toml: String,
+    dry_run: bool,
+    pm_client: PolymarketClient,
+    pm_ws_url: String,
+    data_plane: Option<Arc<PlatformDataPlane>>,
+    observability_pool: Option<PgPool>,
+    observability_account_id: String,
+) {
+    let strategy_cmd_rx = coordinator.register_agent(agent_id.clone(), domain.clone(), risk_params);
+    let strategy_shutdown_rx = shutdown_tx.subscribe();
+    let strategy_agent_id_for_runtime = agent_id.clone();
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = run_managed_strategy_runtime(
+            strategy_label,
+            &strategy_agent_id_for_runtime,
+            domain,
+            strategy_config_toml,
+            dry_run,
+            pm_client,
+            pm_ws_url,
+            data_plane,
+            observability_pool,
+            observability_account_id,
+            strategy_cmd_rx,
+            strategy_shutdown_rx,
+        )
+        .await
+        {
+            error!(
+                agent = strategy_label,
+                error = %e,
+                "managed strategy runtime exited with error"
+            );
+        }
+    });
+    agent_handles.push(jh);
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -6287,40 +6335,22 @@ pub async fn start_platform(
                 );
             } else if let Some(strategy_pm_client) = pm_client.clone() {
                 let strategy_agent_id = crypto_cfg.agent_id.clone();
-                let strategy_cmd_rx = coordinator.register_agent(
+                spawn_managed_strategy_runtime_task(
+                    &mut agent_handles,
+                    &mut coordinator,
+                    &shutdown_tx,
+                    "momentum",
                     strategy_agent_id.clone(),
                     Domain::Crypto,
                     crypto_cfg.risk_params.clone(),
+                    build_momentum_runtime_config(&momentum_symbols, &crypto_cfg),
+                    config.dry_run,
+                    strategy_pm_client,
+                    app_config.market.ws_url.clone(),
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    account_id.clone(),
                 );
-                let toml_cfg = build_momentum_runtime_config(&momentum_symbols, &crypto_cfg);
-                let strategy_ws_url = app_config.market.ws_url.clone();
-                let strategy_data_plane = data_plane.clone();
-                let strategy_shutdown_rx = shutdown_tx.subscribe();
-                let strategy_dry_run = config.dry_run;
-                let strategy_observability_pool = shared_pool.clone();
-                let strategy_account_id = account_id.clone();
-                let strategy_agent_id_for_runtime = strategy_agent_id.clone();
-                let jh = tokio::spawn(async move {
-                    if let Err(e) = run_managed_strategy_runtime(
-                        "momentum",
-                        &strategy_agent_id_for_runtime,
-                        Domain::Crypto,
-                        toml_cfg,
-                        strategy_dry_run,
-                        strategy_pm_client,
-                        strategy_ws_url,
-                        strategy_data_plane,
-                        strategy_observability_pool,
-                        strategy_account_id,
-                        strategy_cmd_rx,
-                        strategy_shutdown_rx,
-                    )
-                    .await
-                    {
-                        error!(agent = "momentum", error = %e, "managed strategy runtime exited with error");
-                    }
-                });
-                agent_handles.push(jh);
                 info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
             } else {
                 warn!(
@@ -6361,38 +6391,22 @@ pub async fn start_platform(
                 Ok(toml_cfg) => {
                     if let Some(strategy_pm_client) = pm_client.clone() {
                         let strategy_agent_id = "pattern_memory".to_string();
-                        let strategy_cmd_rx = coordinator.register_agent(
+                        spawn_managed_strategy_runtime_task(
+                            &mut agent_handles,
+                            &mut coordinator,
+                            &shutdown_tx,
+                            "pattern_memory",
                             strategy_agent_id.clone(),
                             Domain::Crypto,
                             crypto_cfg.risk_params.clone(),
+                            toml_cfg,
+                            config.dry_run,
+                            strategy_pm_client,
+                            app_config.market.ws_url.clone(),
+                            data_plane.clone(),
+                            shared_pool.clone(),
+                            account_id.clone(),
                         );
-                        let strategy_ws_url = app_config.market.ws_url.clone();
-                        let strategy_data_plane = data_plane.clone();
-                        let strategy_shutdown_rx = shutdown_tx.subscribe();
-                        let strategy_dry_run = config.dry_run;
-                        let strategy_observability_pool = shared_pool.clone();
-                        let strategy_account_id = account_id.clone();
-                        let jh = tokio::spawn(async move {
-                            if let Err(e) = run_managed_strategy_runtime(
-                                "pattern_memory",
-                                &strategy_agent_id,
-                                Domain::Crypto,
-                                toml_cfg,
-                                strategy_dry_run,
-                                strategy_pm_client,
-                                strategy_ws_url,
-                                strategy_data_plane,
-                                strategy_observability_pool,
-                                strategy_account_id,
-                                strategy_cmd_rx,
-                                strategy_shutdown_rx,
-                            )
-                            .await
-                            {
-                                error!(agent = "pattern_memory", error = %e, "managed strategy runtime exited with error");
-                            }
-                        });
-                        agent_handles.push(jh);
                         info!("pattern_memory strategy runtime spawned");
                     } else {
                         warn!(
@@ -6478,38 +6492,22 @@ pub async fn start_platform(
                 let toml_cfg = build_split_arb_runtime_config(&symbols, &series_ids);
                 let strategy_agent_id = "split_arb".to_string();
                 if let Some(strategy_pm_client) = pm_client.clone() {
-                    let strategy_cmd_rx = coordinator.register_agent(
+                    spawn_managed_strategy_runtime_task(
+                        &mut agent_handles,
+                        &mut coordinator,
+                        &shutdown_tx,
+                        "split_arb",
                         strategy_agent_id.clone(),
                         Domain::Crypto,
                         crypto_cfg.risk_params.clone(),
+                        toml_cfg,
+                        config.dry_run,
+                        strategy_pm_client,
+                        app_config.market.ws_url.clone(),
+                        data_plane.clone(),
+                        shared_pool.clone(),
+                        account_id.clone(),
                     );
-                    let strategy_ws_url = app_config.market.ws_url.clone();
-                    let strategy_data_plane = data_plane.clone();
-                    let strategy_shutdown_rx = shutdown_tx.subscribe();
-                    let strategy_dry_run = config.dry_run;
-                    let strategy_observability_pool = shared_pool.clone();
-                    let strategy_account_id = account_id.clone();
-                    let jh = tokio::spawn(async move {
-                        if let Err(e) = run_managed_strategy_runtime(
-                            "split_arb",
-                            &strategy_agent_id,
-                            Domain::Crypto,
-                            toml_cfg,
-                            strategy_dry_run,
-                            strategy_pm_client,
-                            strategy_ws_url,
-                            strategy_data_plane,
-                            strategy_observability_pool,
-                            strategy_account_id,
-                            strategy_cmd_rx,
-                            strategy_shutdown_rx,
-                        )
-                        .await
-                        {
-                            error!(agent = "split_arb", error = %e, "managed strategy runtime exited with error");
-                        }
-                    });
-                    agent_handles.push(jh);
                     info!("split_arb strategy runtime spawned");
                 } else {
                     warn!(
@@ -6629,12 +6627,6 @@ pub async fn start_platform(
                 &app_config.database.url,
                 &sports_cfg,
                 nba_cfg,
-            );
-            let risk_params = sports_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-                risk_params,
             );
 
             let pool = match shared_pool.as_ref() {
@@ -6881,41 +6873,22 @@ pub async fn start_platform(
                             .to_string(),
                     )
                 })?;
-                let strategy_ws_url = app_config.market.ws_url.clone();
-                let strategy_shutdown_rx = shutdown_tx.subscribe();
-                let strategy_dry_run = config.dry_run;
-                let strategy_observability_pool = Some(pool.clone());
-                let strategy_account_id = account_id.clone();
-                let strategy_agent_id_for_runtime = runtime_spec.agent_id.clone();
-                let strategy_label = runtime_spec.strategy_label;
-                let strategy_domain = runtime_spec.domain;
-                let strategy_toml_cfg = runtime_spec.strategy_config_toml;
-
-                let jh = tokio::spawn(async move {
-                    if let Err(e) = run_managed_strategy_runtime(
-                        strategy_label,
-                        &strategy_agent_id_for_runtime,
-                        strategy_domain,
-                        strategy_toml_cfg,
-                        strategy_dry_run,
-                        strategy_pm_client,
-                        strategy_ws_url,
-                        None,
-                        strategy_observability_pool,
-                        strategy_account_id,
-                        cmd_rx,
-                        strategy_shutdown_rx,
-                    )
-                    .await
-                    {
-                        error!(
-                            agent = strategy_label,
-                            error = %e,
-                            "managed strategy runtime exited with error"
-                        );
-                    }
-                });
-                agent_handles.push(jh);
+                spawn_managed_strategy_runtime_task(
+                    &mut agent_handles,
+                    &mut coordinator,
+                    &shutdown_tx,
+                    runtime_spec.strategy_label,
+                    runtime_spec.agent_id.clone(),
+                    runtime_spec.domain,
+                    sports_cfg.risk_params.clone(),
+                    runtime_spec.strategy_config_toml,
+                    config.dry_run,
+                    strategy_pm_client,
+                    app_config.market.ws_url.clone(),
+                    None,
+                    Some(pool.clone()),
+                    account_id.clone(),
+                );
                 info!(
                     agent = %sports_cfg.agent_id,
                     "sports nba_comeback strategy runtime spawned"
@@ -6924,6 +6897,11 @@ pub async fn start_platform(
                 warn!(
                     agent = %sports_cfg.agent_id,
                     "grok-enabled nba_comeback deployment remains on the legacy sports agent path until canonical strategy runtime absorbs Grok behavior"
+                );
+                let cmd_rx = coordinator.register_agent(
+                    sports_cfg.agent_id.clone(),
+                    Domain::Sports,
+                    sports_cfg.risk_params.clone(),
                 );
 
                 let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
@@ -6996,45 +6974,28 @@ pub async fn start_platform(
         if let Some(ref ee_cfg) = app_config.event_edge_agent {
             let politics_cfg = config.politics.clone();
             let strategy_agent_id = politics_cfg.agent_id.clone();
-            let strategy_cmd_rx = coordinator.register_agent(
-                strategy_agent_id.clone(),
-                Domain::Politics,
-                politics_cfg.risk_params.clone(),
-            );
             let strategy_pm_client = pm_client.clone().ok_or_else(|| {
                 crate::error::PloyError::Validation(
                     "politics domain requires a Polymarket client, but none was initialized"
                         .to_string(),
                 )
             })?;
-            let toml_cfg = build_event_edge_runtime_config(&app_config.market.rest_url, ee_cfg);
-            let strategy_ws_url = app_config.market.ws_url.clone();
-            let strategy_shutdown_rx = shutdown_tx.subscribe();
-            let strategy_dry_run = config.dry_run;
-            let strategy_observability_pool = shared_pool.clone();
-            let strategy_account_id = account_id.clone();
-            let strategy_agent_id_for_runtime = strategy_agent_id.clone();
-            let jh = tokio::spawn(async move {
-                if let Err(e) = run_managed_strategy_runtime(
-                    "event_edge",
-                    &strategy_agent_id_for_runtime,
-                    Domain::Politics,
-                    toml_cfg,
-                    strategy_dry_run,
-                    strategy_pm_client,
-                    strategy_ws_url,
-                    None,
-                    strategy_observability_pool,
-                    strategy_account_id,
-                    strategy_cmd_rx,
-                    strategy_shutdown_rx,
-                )
-                .await
-                {
-                    error!(agent = "event_edge", error = %e, "managed strategy runtime exited with error");
-                }
-            });
-            agent_handles.push(jh);
+            spawn_managed_strategy_runtime_task(
+                &mut agent_handles,
+                &mut coordinator,
+                &shutdown_tx,
+                "event_edge",
+                strategy_agent_id.clone(),
+                Domain::Politics,
+                politics_cfg.risk_params.clone(),
+                build_event_edge_runtime_config(&app_config.market.rest_url, ee_cfg),
+                config.dry_run,
+                strategy_pm_client,
+                app_config.market.ws_url.clone(),
+                None,
+                shared_pool.clone(),
+                account_id.clone(),
+            );
             info!(agent = %strategy_agent_id, "politics event_edge strategy runtime spawned");
         }
     }
