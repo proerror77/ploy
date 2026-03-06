@@ -575,6 +575,29 @@ Reduce `bootstrap.rs` special-case assembly by extracting the repeated managed-r
 
 ---
 
+# Layered Live Runtime Task 9B: TradingAgent Spawn Helper (2026-03-06)
+
+## Goal
+Further reduce bootstrap churn by extracting the repeated registration and `AgentContext` spawn boilerplate for the remaining compatibility `TradingAgent` paths.
+
+## Tasks
+
+- [x] Add a shared `spawn_trading_agent_task(...)` helper in `src/coordinator/bootstrap.rs`.
+- [x] Move the repeated compatibility-loop startup code for the Grok-enabled sports fallback, `crypto_lob_ml`, and `crypto_rl_policy` into that helper.
+- [x] Keep OpenClaw untouched in this slice because it uses `GovernanceContext`, not `AgentContext`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Remaining compatibility TradingAgent paths now share one bootstrap launcher instead of repeating `register_agent -> AgentContext::new -> tokio::spawn`.
+- [x] This slice does not retire those runtimes yet; it only shrinks bootstrap duplication ahead of deeper runtime removal work.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
