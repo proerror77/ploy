@@ -784,6 +784,30 @@ Retire the surviving pull-based crypto live runtimes from the default platform s
 
 ---
 
+# Layered Live Runtime Task 8J: Gate Compatibility Sports Live Runtime (2026-03-06)
+
+## Goal
+Retire the surviving Grok-enabled `nba_comeback` legacy sports runtime from the default platform startup path without deleting it yet. It should require an explicit env gate for temporary compatibility use.
+
+## Tasks
+
+- [x] Add a `compat_sports_runtimes_enabled()` helper in `src/coordinator/bootstrap.rs`.
+- [x] Gate the Grok-enabled `nba_comeback` fallback behind `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES`.
+- [x] Avoid starting sports market-data support when no sports runtime will actually launch.
+- [x] Add focused tests proving the gate defaults off and honors explicit env overrides.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Grok-enabled `nba_comeback` deployments no longer fall back to the legacy sports agent by default; they now require `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true`.
+- [x] Canonical `nba_comeback` startup is unchanged for non-Grok configs; only the legacy compatibility runtime was gated.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal

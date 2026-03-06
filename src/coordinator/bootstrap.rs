@@ -5725,6 +5725,10 @@ fn compat_crypto_runtimes_enabled() -> bool {
     env_bool("PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES", false)
 }
 
+fn compat_sports_runtimes_enabled() -> bool {
+    env_bool("PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES", false)
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -5785,6 +5789,7 @@ pub async fn start_platform(
     let runtime_crypto_targets =
         collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
     let compat_crypto_runtimes_enabled = compat_crypto_runtimes_enabled();
+    let compat_sports_runtimes_enabled = compat_sports_runtimes_enabled();
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
@@ -5799,6 +5804,7 @@ pub async fn start_platform(
         crypto_lob_ml = config.enable_crypto_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         compat_crypto_runtimes = compat_crypto_runtimes_enabled,
+        compat_sports_runtimes = compat_sports_runtimes_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
@@ -7121,40 +7127,47 @@ pub async fn start_platform(
                 nba_cfg,
             );
 
-            let pool = start_sports_market_data_support(
-                shared_pool.clone(),
-                app_config,
-                Arc::clone(&freshness),
-                &sports_cfg,
-            )
-            .await?;
+            if managed_runtime_spec.is_some() || compat_sports_runtimes_enabled {
+                let pool = start_sports_market_data_support(
+                    shared_pool.clone(),
+                    app_config,
+                    Arc::clone(&freshness),
+                    &sports_cfg,
+                )
+                .await?;
 
-            if let Some(runtime_spec) = managed_runtime_spec {
-                spawn_managed_strategy_runtime_spec(
-                    &mut agent_handles,
-                    &mut coordinator,
-                    &shutdown_tx,
-                    runtime_spec,
-                    sports_cfg.risk_params.clone(),
-                    config.dry_run,
-                    pm_client.clone(),
-                    &app_config.market.ws_url,
-                    None,
-                    Some(pool.clone()),
-                    &account_id,
-                )?;
-                info!(
-                    agent = %sports_cfg.agent_id,
-                    "sports nba_comeback strategy runtime spawned"
-                );
+                if let Some(runtime_spec) = managed_runtime_spec {
+                    spawn_managed_strategy_runtime_spec(
+                        &mut agent_handles,
+                        &mut coordinator,
+                        &shutdown_tx,
+                        runtime_spec,
+                        sports_cfg.risk_params.clone(),
+                        config.dry_run,
+                        pm_client.clone(),
+                        &app_config.market.ws_url,
+                        None,
+                        Some(pool.clone()),
+                        &account_id,
+                    )?;
+                    info!(
+                        agent = %sports_cfg.agent_id,
+                        "sports nba_comeback strategy runtime spawned"
+                    );
+                } else {
+                    spawn_legacy_nba_comeback_agent(
+                        &mut agent_handles,
+                        &mut coordinator,
+                        &handle,
+                        sports_cfg.clone(),
+                        nba_cfg.clone(),
+                        pool,
+                    );
+                }
             } else {
-                spawn_legacy_nba_comeback_agent(
-                    &mut agent_handles,
-                    &mut coordinator,
-                    &handle,
-                    sports_cfg.clone(),
-                    nba_cfg.clone(),
-                    pool,
+                warn!(
+                    agent = %sports_cfg.agent_id,
+                    "grok-enabled nba_comeback compatibility runtime disabled; set PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true to allow temporary startup or disable grok_enabled for canonical runtime"
                 );
             }
         }
@@ -8098,6 +8111,38 @@ symbols = ["SOLUSDT"]
         assert!(compat_crypto_runtimes_enabled());
         set_env(key, Some("false"));
         assert!(!compat_crypto_runtimes_enabled());
+
+        match prev.as_deref() {
+            Some(v) => set_env(key, Some(v)),
+            None => set_env(key, None),
+        }
+    }
+
+    #[test]
+    fn compat_sports_runtimes_default_to_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES";
+        let prev = std::env::var(key).ok();
+
+        set_env(key, None);
+        assert!(!compat_sports_runtimes_enabled());
+
+        match prev.as_deref() {
+            Some(v) => set_env(key, Some(v)),
+            None => set_env(key, None),
+        }
+    }
+
+    #[test]
+    fn compat_sports_runtimes_can_be_enabled_explicitly() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES";
+        let prev = std::env::var(key).ok();
+
+        set_env(key, Some("true"));
+        assert!(compat_sports_runtimes_enabled());
+        set_env(key, Some("false"));
+        assert!(!compat_sports_runtimes_enabled());
 
         match prev.as_deref() {
             Some(v) => set_env(key, Some(v)),
