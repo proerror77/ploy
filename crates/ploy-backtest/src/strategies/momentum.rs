@@ -143,3 +143,87 @@ pub fn build_results(
         equity_curve: equity_curve.to_vec(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use rust_decimal_macros::dec;
+
+    fn sample_trade(
+        entry_time: i64,
+        exit_time: i64,
+        entry_price: Decimal,
+        shares: u64,
+        pnl: Decimal,
+        won: bool,
+    ) -> MomentumClosedTrade {
+        MomentumClosedTrade {
+            symbol: "BTCUSDT".into(),
+            direction: "Up".into(),
+            entry_time: Utc.timestamp_opt(entry_time, 0).unwrap(),
+            exit_time: Utc.timestamp_opt(exit_time, 0).unwrap(),
+            entry_price,
+            exit_price: if won { Decimal::ONE } else { Decimal::ZERO },
+            shares,
+            pnl,
+            won,
+            holding_secs: exit_time - entry_time,
+        }
+    }
+
+    #[test]
+    fn sharpe_is_zero_for_empty_trades() {
+        assert_eq!(calculate_sharpe(&[]), 0.0);
+    }
+
+    #[test]
+    fn build_results_preserves_trade_aggregates() {
+        let trades = vec![
+            sample_trade(
+                1_700_000_000,
+                1_700_000_060,
+                dec!(0.40),
+                10,
+                dec!(6.0),
+                true,
+            ),
+            sample_trade(
+                1_700_000_120,
+                1_700_000_180,
+                dec!(0.30),
+                20,
+                dec!(-2.0),
+                false,
+            ),
+        ];
+        let equity_curve = vec![
+            (Utc.timestamp_opt(1_700_000_000, 0).unwrap(), dec!(100)),
+            (Utc.timestamp_opt(1_700_000_180, 0).unwrap(), dec!(104)),
+        ];
+
+        let results = build_results(
+            &trades,
+            &equity_curve,
+            dec!(0.08),
+            Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+            Some(Utc.timestamp_opt(1_700_000_180, 0).unwrap()),
+        );
+
+        assert_eq!(results.total_trades, 2);
+        assert_eq!(results.winning_trades, 1);
+        assert_eq!(results.losing_trades, 1);
+        assert!((results.win_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(results.total_pnl, dec!(4.0));
+        assert_eq!(results.total_volume, dec!(10.0));
+        assert_eq!(results.avg_pnl_per_trade, dec!(2.0));
+        assert_eq!(results.max_drawdown, dec!(0.08));
+        assert_eq!(results.avg_win, dec!(6.0));
+        assert_eq!(results.avg_loss, dec!(-2.0));
+        assert_eq!(results.largest_win, dec!(6.0));
+        assert_eq!(results.largest_loss, dec!(-2.0));
+        assert_eq!(results.avg_holding_time_secs, 60.0);
+        assert_eq!(results.equity_curve, equity_curve);
+        assert!((results.sharpe_ratio - calculate_sharpe(&trades)).abs() < f64::EPSILON);
+    }
+}

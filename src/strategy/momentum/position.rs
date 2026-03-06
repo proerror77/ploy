@@ -149,3 +149,64 @@ impl ExitManager {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use rust_decimal_macros::dec;
+
+    fn sample_position() -> Position {
+        Position {
+            token_id: "token".into(),
+            symbol: "BTCUSDT".into(),
+            direction: Direction::Up,
+            entry_price: dec!(0.50),
+            entry_notional: dec!(50.0),
+            shares: 100,
+            entry_time: Utc::now(),
+            highest_price: dec!(0.70),
+            event_end_time: Utc::now() + ChronoDuration::seconds(120),
+            event_slug: "btc-above".into(),
+            condition_id: "cond".into(),
+            entry_p_hat: None,
+            window_open_price: None,
+        }
+    }
+
+    #[test]
+    fn check_exit_triggers_trailing_stop() {
+        let manager = ExitManager::new(ExitConfig {
+            take_profit_pct: dec!(0.50),
+            stop_loss_pct: dec!(0.50),
+            trailing_stop_pct: dec!(0.10),
+            exit_before_resolution_secs: 10,
+        });
+        let position = sample_position();
+
+        let reason = manager.check_exit(&position, dec!(0.60)).unwrap();
+        assert!(matches!(
+            reason,
+            ExitReason::TrailingStop {
+                high,
+                current
+            } if high == dec!(0.70) && current == dec!(0.60)
+        ));
+    }
+
+    #[test]
+    fn check_exit_triggers_time_exit() {
+        let manager = ExitManager::new(ExitConfig {
+            take_profit_pct: dec!(0.50),
+            stop_loss_pct: dec!(0.50),
+            trailing_stop_pct: dec!(0.50),
+            exit_before_resolution_secs: 30,
+        });
+        let mut position = sample_position();
+        position.highest_price = position.entry_price;
+        position.event_end_time = Utc::now() + ChronoDuration::seconds(5);
+
+        let reason = manager.check_exit(&position, dec!(0.50)).unwrap();
+        assert!(matches!(reason, ExitReason::TimeExit));
+    }
+}
