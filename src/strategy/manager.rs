@@ -473,6 +473,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strat))
             }
+            "event_edge" => {
+                let strat = super::event_edge::strategy::EventEdgeStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
+            }
             "staggered_arb" | "gamma_scalping" => {
                 let adapter = super::staggered_arb_live::StaggeredArbAdapter::from_toml(
                     strategy_id,
@@ -502,6 +510,12 @@ impl StrategyFactory {
                 name: "pattern_memory".to_string(),
                 description: "Associative memory on Binance klines for 5m UP/DOWN".to_string(),
                 config_template: "pattern_memory_default.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "event_edge".to_string(),
+                description: "External-data event mispricing scanner for politics/event markets"
+                    .to_string(),
+                config_template: "event_edge.toml".to_string(),
             },
             StrategyInfo {
                 name: "staggered_arb".to_string(),
@@ -648,6 +662,7 @@ mod tests {
         let strategies = StrategyFactory::available_strategies();
         assert!(!strategies.is_empty());
         assert!(strategies.iter().any(|s| s.name == "momentum"));
+        assert!(strategies.iter().any(|s| s.name == "event_edge"));
     }
 
     #[tokio::test]

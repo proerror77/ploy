@@ -396,6 +396,35 @@ Make managed crypto momentum and split-arb/staggered-arb deployments start throu
 
 ---
 
+# Layered Live Runtime Task 7A: Canonical EventEdge Strategy Bridge (2026-03-06)
+
+## Goal
+Move the politics/event-edge live path onto the canonical managed strategy runtime before tackling the larger NBA/sports migration surface.
+
+## Tasks
+
+- [x] Add `src/strategy/event_edge/strategy.rs` as a canonical `Strategy` wrapper around `EventEdgeCore`.
+- [x] Register `event_edge` in `StrategyFactory` and expose it through the event-edge module.
+- [x] Build bootstrap-generated TOML for `event_edge` from `EventEdgeAgentConfig`.
+- [x] Replace the politics bootstrap branch that spawned `PoliticsTradingAgent` with managed strategy runtime startup.
+- [x] Add focused tests for `event_edge` TOML parsing, decision normalization, and filled-order state updates.
+- [x] Run focused validation and capture the results.
+- [ ] Migrate `nba_comeback` / sports live runtime onto the same canonical path.
+- [ ] Commit the full Task 7 migration once sports/NBA is moved as well.
+
+## Review
+
+- [x] `event_edge` can now run through the canonical `Strategy` contract with a tick-driven scan loop.
+- [x] Politics bootstrap now assembles a managed-runtime config instead of spawning `PoliticsTradingAgent`.
+- [x] This slice intentionally leaves NBA/sports migration for the next atomic cut because that path still owns ESPN/PolymarketSports/Grok observation logic not yet bridged into the strategy plane.
+- [x] Focused validation passed:
+  - `cargo test strategy::event_edge --lib -- --nocapture`
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo test strategy::manager --lib -- --nocapture`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `liquidity_vacuum_backtest.rs` and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
