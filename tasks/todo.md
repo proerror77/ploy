@@ -760,6 +760,30 @@ Finish shrinking `agents/mod.rs` down to a pure module namespace so bootstrap an
 
 ---
 
+# Layered Live Runtime Task 8I: Gate Compatibility Crypto Live Runtimes (2026-03-06)
+
+## Goal
+Retire the surviving pull-based crypto live runtimes from the default platform startup path without deleting their code yet. They should require an explicit env gate for temporary compatibility use.
+
+## Tasks
+
+- [x] Add a `compat_crypto_runtimes_enabled()` helper in `src/coordinator/bootstrap.rs`.
+- [x] Gate `lob_ml` and `rl_policy` startup behind `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES`.
+- [x] Keep the compatibility code paths intact for explicit opt-in use.
+- [x] Add focused tests proving the gate defaults off and honors explicit env overrides.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `crypto_lob_ml` and `crypto_rl_policy` no longer start by default even if their enable flags are set; they now require `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true`.
+- [x] This slice keeps the compatibility runtimes available for temporary fallback, but removes them from the default live startup surface.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --features rl --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal

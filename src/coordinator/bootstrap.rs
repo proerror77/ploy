@@ -5721,6 +5721,10 @@ fn maybe_spawn_compat_crypto_rl_policy_agent(
     }
 }
 
+fn compat_crypto_runtimes_enabled() -> bool {
+    env_bool("PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES", false)
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -5780,6 +5784,7 @@ pub async fn start_platform(
     };
     let runtime_crypto_targets =
         collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
+    let compat_crypto_runtimes_enabled = compat_crypto_runtimes_enabled();
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
@@ -5793,6 +5798,7 @@ pub async fn start_platform(
         crypto_split_arb = config.enable_crypto_split_arb,
         crypto_lob_ml = config.enable_crypto_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
+        compat_crypto_runtimes = compat_crypto_runtimes_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
@@ -7066,29 +7072,43 @@ pub async fn start_platform(
         }
 
         if lob_agent_enabled {
-            maybe_spawn_compat_crypto_lob_ml_agent(
-                &mut agent_handles,
-                &mut coordinator,
-                &handle,
-                &lob_cfg,
-                &shared_pool,
-                crypto_market_data.clone(),
-                event_matcher.clone(),
-                &lob_cache_opt,
-            )?;
+            if compat_crypto_runtimes_enabled {
+                maybe_spawn_compat_crypto_lob_ml_agent(
+                    &mut agent_handles,
+                    &mut coordinator,
+                    &handle,
+                    &lob_cfg,
+                    &shared_pool,
+                    crypto_market_data.clone(),
+                    event_matcher.clone(),
+                    &lob_cache_opt,
+                )?;
+            } else {
+                warn!(
+                    agent = lob_cfg.agent_id,
+                    "crypto lob-ml compatibility runtime disabled; set PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true to allow temporary startup"
+                );
+            }
         }
 
         #[cfg(feature = "rl")]
         if rl_agent_enabled {
-            maybe_spawn_compat_crypto_rl_policy_agent(
-                &mut agent_handles,
-                &mut coordinator,
-                &handle,
-                &rl_cfg,
-                crypto_market_data.clone(),
-                event_matcher.clone(),
-                &lob_cache_opt,
-            );
+            if compat_crypto_runtimes_enabled {
+                maybe_spawn_compat_crypto_rl_policy_agent(
+                    &mut agent_handles,
+                    &mut coordinator,
+                    &handle,
+                    &rl_cfg,
+                    crypto_market_data.clone(),
+                    event_matcher.clone(),
+                    &lob_cache_opt,
+                );
+            } else {
+                warn!(
+                    agent = rl_cfg.agent_id,
+                    "crypto rl-policy compatibility runtime disabled; set PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true to allow temporary startup"
+                );
+            }
         }
     }
 
@@ -8050,6 +8070,38 @@ symbols = ["SOLUSDT"]
         match prev_legacy_price_exits.as_deref() {
             Some(v) => set_env(legacy_price_exits_key, Some(v)),
             None => set_env(legacy_price_exits_key, None),
+        }
+    }
+
+    #[test]
+    fn compat_crypto_runtimes_default_to_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES";
+        let prev = std::env::var(key).ok();
+
+        set_env(key, None);
+        assert!(!compat_crypto_runtimes_enabled());
+
+        match prev.as_deref() {
+            Some(v) => set_env(key, Some(v)),
+            None => set_env(key, None),
+        }
+    }
+
+    #[test]
+    fn compat_crypto_runtimes_can_be_enabled_explicitly() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES";
+        let prev = std::env::var(key).ok();
+
+        set_env(key, Some("true"));
+        assert!(compat_crypto_runtimes_enabled());
+        set_env(key, Some("false"));
+        assert!(!compat_crypto_runtimes_enabled());
+
+        match prev.as_deref() {
+            Some(v) => set_env(key, Some(v)),
+            None => set_env(key, None),
         }
     }
 }
