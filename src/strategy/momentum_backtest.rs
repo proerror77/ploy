@@ -7,9 +7,6 @@
 //! Usage:
 //!   ploy strategy backtest momentum --symbols BTCUSDT --save --json
 
-use std::collections::HashMap;
-use std::fmt;
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
@@ -17,6 +14,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::adapters::SpotPrice;
@@ -527,38 +525,6 @@ impl MomentumBacktestEngine {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Display for BacktestResults
-// ─────────────────────────────────────────────────────────────
-
-impl fmt::Display for BacktestResults {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Momentum Backtest Results ===")?;
-        writeln!(
-            f,
-            "Period:        {} to {}",
-            self.start_time.format("%Y-%m-%d %H:%M"),
-            self.end_time.format("%Y-%m-%d %H:%M")
-        )?;
-        writeln!(f, "Total trades:  {}", self.total_trades)?;
-        writeln!(
-            f,
-            "Win/Loss:      {} / {}",
-            self.winning_trades, self.losing_trades
-        )?;
-        writeln!(f, "Win rate:      {:.1}%", self.win_rate * 100.0)?;
-        writeln!(f, "Total PnL:     ${:.2}", self.total_pnl)?;
-        writeln!(f, "Avg PnL/trade: ${:.4}", self.avg_pnl_per_trade)?;
-        writeln!(f, "Sharpe ratio:  {:.2}", self.sharpe_ratio)?;
-        writeln!(f, "Profit factor: {:.2}", self.profit_factor)?;
-        writeln!(f, "Max drawdown:  {:.2}%", self.max_drawdown * dec!(100))?;
-        writeln!(f, "Avg hold time: {:.0}s", self.avg_holding_time_secs)?;
-        writeln!(f, "Largest win:   ${:.4}", self.largest_win)?;
-        writeln!(f, "Largest loss:  ${:.4}", self.largest_loss)?;
-        Ok(())
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
 // Result persistence (Step 9)
 // ─────────────────────────────────────────────────────────────
 
@@ -660,13 +626,10 @@ pub async fn save_backtest_results(
 mod tests {
     use super::*;
     use crate::strategy::backtest_feed::{HistoricalFeed, MarketUpdate};
-    use std::collections::VecDeque;
 
     /// Build a simple mock feed for testing
     fn mock_feed(updates: Vec<MarketUpdate>) -> HistoricalFeed {
-        HistoricalFeed {
-            updates: VecDeque::from(updates),
-        }
+        HistoricalFeed::new(updates)
     }
 
     #[test]

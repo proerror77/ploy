@@ -5741,6 +5741,7 @@ dependencies = [
  "mockall",
  "nix",
  "ordered-float",
+ "ploy-backtest",
  "ploy-core",
  "ploy-data",
  "ploy-polymarket",
@@ -5773,6 +5774,25 @@ dependencies = [
  "urlencoding",
  "uuid 1.21.0",
  "zeroize",
+]
+
+[[package]]
+name = "ploy-backtest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "csv",
+ "ploy-core",
+ "ploy-data",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid 1.21.0",
 ]
 
 [[package]]

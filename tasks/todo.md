@@ -53,3 +53,29 @@
 - Runbook now documents both:
   - production 24h capture on live metrics endpoint
   - accelerated seed baseline path for immediate verification/comparison.
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.1 / 5.3 bridge)
+
+- [x] Add `crates/ploy-backtest` to the workspace and keep it building independently
+- [x] Move shared backtest infrastructure into `ploy-backtest` (`engine`, `feed`, `recorder`, `report`, `execution_sim`)
+- [x] Restore root-crate compatibility modules under `src/strategy/` so existing strategy code still compiles
+- [x] Keep legacy volatility-arb `BacktestEngine` and `PaperTrader` in the app layer while shared types live in `ploy-backtest`
+- [x] Add `HistoricalFeed::new(...)` in `ploy-backtest` and switch root tests off private-field construction
+- [x] Update CLI backtest output path to use shared `BacktestResults::report()`
+- [x] Run formatting and validation for the migrated slice
+
+## Review (2026-03-06)
+
+- Delivered in this slice:
+  - Created the standalone `ploy-backtest` crate and wired it into the workspace.
+  - Moved generic backtest infrastructure into the new crate.
+  - Added thin compatibility modules at `src/strategy/backtest*.rs` and `src/strategy/execution_sim.rs` so the main app can keep compiling during the larger migration.
+  - Kept legacy volatility-arb-only helpers in [`src/strategy/backtest.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/backtest.rs) because they still depend on app-local `volatility_arb` logic.
+  - Added a public `HistoricalFeed::new` constructor in [`crates/ploy-backtest/src/feed.rs`](/Users/proerror/Documents/ploy-refactor/crates/ploy-backtest/src/feed.rs) to preserve test ergonomics without exposing internals.
+- Validation executed:
+  - `cargo build -p ploy-backtest`
+  - `cargo test -p ploy-backtest`
+  - `cargo build`
+  - `cargo test test_engine_empty_feed -- --nocapture`

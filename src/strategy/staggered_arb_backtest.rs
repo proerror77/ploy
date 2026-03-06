@@ -1468,7 +1468,6 @@ mod tests {
     use super::*;
     use crate::strategy::backtest_feed::{HistoricalFeed, MarketUpdate, UpdateType};
     use rust_decimal_macros::dec;
-    use std::collections::VecDeque;
 
     fn make_spot(ts: &str, symbol: &str, price: Decimal) -> MarketUpdate {
         MarketUpdate {
@@ -1609,9 +1608,7 @@ mod tests {
             dec!(0.38),
         ));
 
-        let mut feed = HistoricalFeed {
-            updates: VecDeque::from(updates),
-        };
+        let mut feed = HistoricalFeed::new(updates);
 
         let results = engine.run(&mut feed);
 
@@ -1677,9 +1674,7 @@ mod tests {
             true,
         ));
 
-        let mut feed = HistoricalFeed {
-            updates: VecDeque::from(updates),
-        };
+        let mut feed = HistoricalFeed::new(updates);
 
         let results = engine.run(&mut feed);
 
@@ -1738,9 +1733,7 @@ mod tests {
             dec!(0.65),
         ));
 
-        let mut feed = HistoricalFeed {
-            updates: VecDeque::from(updates),
-        };
+        let mut feed = HistoricalFeed::new(updates);
 
         let _results = engine.run(&mut feed);
 

@@ -1357,12 +1357,9 @@ impl fmt::Display for DirectionalBacktestEngine {
 mod tests {
     use super::*;
     use crate::strategy::backtest_feed::{HistoricalFeed, MarketUpdate};
-    use std::collections::VecDeque;
 
     fn mock_feed(updates: Vec<MarketUpdate>) -> HistoricalFeed {
-        HistoricalFeed {
-            updates: VecDeque::from(updates),
-        }
+        HistoricalFeed::new(updates)
     }
 
     fn ts(secs: i64) -> DateTime<Utc> {

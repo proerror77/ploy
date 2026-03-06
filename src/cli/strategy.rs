@@ -3265,7 +3265,9 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
 
 /// Run the NBA comeback agent standalone
 async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
-    anyhow::bail!("NbaComebackAgent (push-based) has been removed. Use the pull-based agent system instead.")
+    anyhow::bail!(
+        "NbaComebackAgent (push-based) has been removed. Use the pull-based agent system instead."
+    )
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3570,7 +3572,7 @@ async fn run_backtest(
         // Only print raw JSON if we didn't already print a report above
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else if !json_output && !save {
-        println!("{}", results);
+        println!("{}", results.report());
     }
 
     Ok(())
