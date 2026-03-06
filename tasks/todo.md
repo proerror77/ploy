@@ -117,3 +117,22 @@
 - Validation executed:
   - `cargo build`
   - `cargo test paper_runner -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6 remove obsolete shims)
+
+- [x] Remove obsolete `strategy` backtest shim modules that no longer have internal callers
+- [x] Trim `src/strategy/mod.rs` to stop exposing deleted shim modules
+- [x] Confirm no internal references remain to the removed shim paths
+- [x] Re-run compile checks after the module surface cleanup
+
+## Review (2026-03-06, remove obsolete shims)
+
+- Delivered in this slice:
+  - Removed `src/strategy/backtest_feed.rs`, `src/strategy/backtest_recorder.rs`, `src/strategy/backtest_report.rs`, and `src/strategy/execution_sim.rs`.
+  - Updated [`src/strategy/mod.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/mod.rs) so those shim modules are no longer part of the `strategy` public surface.
+  - Kept [`src/strategy/backtest.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/backtest.rs) because it still owns the volatility-arb compatibility helpers used by paper trading.
+- Validation executed:
+  - `cargo build`
+  - `cargo test paper_runner -- --nocapture`

@@ -34,23 +34,19 @@ pub use manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus
 
 pub mod core;
 pub mod execution;
-pub mod risk;
 pub mod impls;
+pub mod risk;
 
 // =============================================================================
 // Strategy implementations and runtime modules
 // =============================================================================
 
 pub mod backtest;
-pub mod backtest_feed;
-pub mod backtest_recorder;
-pub mod backtest_report;
 pub mod calculations;
 pub mod crypto;
 pub mod deribit_probability_arb;
 pub mod directional_backtest;
 pub mod event_edge;
-pub mod execution_sim;
 pub mod fee_model;
 pub mod integrity;
 pub mod momentum;
