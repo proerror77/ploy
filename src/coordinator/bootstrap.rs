@@ -5230,7 +5230,7 @@ fn spawn_managed_strategy_runtime_spec(
     Ok(())
 }
 
-fn spawn_trading_agent_task<A: TradingAgent>(
+fn spawn_compat_trading_agent_task<A: TradingAgent>(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     coordinator: &mut Coordinator,
     handle: &CoordinatorHandle,
@@ -5543,7 +5543,7 @@ fn spawn_legacy_nba_comeback_agent(
         }
     }
 
-    spawn_trading_agent_task(
+    spawn_compat_trading_agent_task(
         agent_handles,
         coordinator,
         handle,
@@ -6970,7 +6970,7 @@ pub async fn start_platform(
                         event_matcher.clone(),
                         lob_cache,
                     )?;
-                    spawn_trading_agent_task(
+                    spawn_compat_trading_agent_task(
                         &mut agent_handles,
                         &mut coordinator,
                         &handle,
@@ -6999,7 +6999,7 @@ pub async fn start_platform(
                     event_matcher.clone(),
                     lob_cache,
                 );
-                spawn_trading_agent_task(
+                spawn_compat_trading_agent_task(
                     &mut agent_handles,
                     &mut coordinator,
                     &handle,

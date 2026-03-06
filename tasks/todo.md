@@ -644,6 +644,28 @@ Remove the feature-gated RL agent convenience path from the `platform` root as w
 
 ---
 
+# Layered Live Runtime Task 8F: Mark TradingAgent Spawn Path As Compatibility-Only (2026-03-06)
+
+## Goal
+Make the remaining pull-based runtime path read as an explicit compatibility path in bootstrap, not a neutral peer to the canonical managed strategy runtime.
+
+## Tasks
+
+- [x] Rename `spawn_trading_agent_task(...)` to `spawn_compat_trading_agent_task(...)` in `src/coordinator/bootstrap.rs`.
+- [x] Update the remaining sports/lob-ml/rl-policy compatibility branches to call the explicit compatibility helper name.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `bootstrap.rs` now labels the remaining pull-based runtime path as compatibility-only at the callsite and helper level.
+- [x] This slice does not change runtime behavior; it only makes the surviving legacy path harder to mistake for a canonical extension point.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
