@@ -7,7 +7,7 @@ name = "staggered_arb"
 
 [entry]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-shares_per_trade = 50
+shares_per_trade = 20
 max_concurrent = 5
 direction_threshold = 0.04
 max_initial_sum = 0.92
