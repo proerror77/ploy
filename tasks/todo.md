@@ -347,6 +347,25 @@
   - `cargo test strategy::staggered_arb_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 staggered-arb backtest state split)
+
+- [x] Move `ArbPositionState`, `StaggeredArbPosition`, and `ActiveWindowInfo` into `src/strategy/staggered_arb_backtest/state.rs`
+- [x] Keep `crate::strategy::staggered_arb_backtest::ArbPositionState` stable via `mod.rs` re-export
+- [x] Preserve existing staggered-arb tests at the module root
+- [x] Re-run build plus focused staggered-arb-backtest validation
+
+## Review (2026-03-06, staggered-arb backtest state split)
+
+- Delivered in this slice:
+  - Moved the position-state enum and engine-local supporting structs from [`src/strategy/staggered_arb_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/mod.rs) into [`src/strategy/staggered_arb_backtest/state.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/state.rs).
+  - Re-exported `ArbPositionState` from `mod.rs` so external references remain stable.
+  - Kept the engine behavior unchanged by importing the extracted private structs back into `mod.rs`.
+- Validation executed:
+  - `cargo test strategy::staggered_arb_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
