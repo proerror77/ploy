@@ -3070,6 +3070,42 @@ struct ManagedStrategyBootstrapSpec {
     strategy_config_toml: String,
 }
 
+fn build_momentum_managed_runtime_spec(
+    symbols: &[String],
+    crypto_cfg: &CryptoTradingConfig,
+) -> ManagedStrategyBootstrapSpec {
+    ManagedStrategyBootstrapSpec {
+        strategy_label: "momentum",
+        agent_id: crypto_cfg.agent_id.clone(),
+        domain: Domain::Crypto,
+        strategy_config_toml: build_momentum_runtime_config(symbols, crypto_cfg),
+    }
+}
+
+fn build_pattern_memory_managed_runtime_spec(
+    coins: &[String],
+) -> Result<ManagedStrategyBootstrapSpec> {
+    Ok(ManagedStrategyBootstrapSpec {
+        strategy_label: "pattern_memory",
+        agent_id: "pattern_memory".to_string(),
+        domain: Domain::Crypto,
+        strategy_config_toml: build_pattern_memory_runtime_config(coins)?,
+    })
+}
+
+fn build_event_edge_managed_runtime_spec(
+    rest_url: &str,
+    politics_cfg: &PoliticsTradingConfig,
+    ee_cfg: &crate::config::EventEdgeAgentConfig,
+) -> ManagedStrategyBootstrapSpec {
+    ManagedStrategyBootstrapSpec {
+        strategy_label: "event_edge",
+        agent_id: politics_cfg.agent_id.clone(),
+        domain: Domain::Politics,
+        strategy_config_toml: build_event_edge_runtime_config(rest_url, ee_cfg),
+    }
+}
+
 #[allow(dead_code)]
 fn build_nba_comeback_runtime_config(
     database_url: &str,
@@ -3338,6 +3374,18 @@ fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[String]) -> 
         toml::from_str(include_str!("../../config/strategies/staggered_arb.toml"))
             .expect("embedded staggered_arb runtime config must stay valid TOML");
     render_split_arb_runtime_config(config, symbols, series_ids)
+}
+
+fn build_split_arb_managed_runtime_spec(
+    symbols: &[String],
+    series_ids: &[String],
+) -> ManagedStrategyBootstrapSpec {
+    ManagedStrategyBootstrapSpec {
+        strategy_label: "split_arb",
+        agent_id: "split_arb".to_string(),
+        domain: Domain::Crypto,
+        strategy_config_toml: build_split_arb_runtime_config(symbols, series_ids),
+    }
 }
 
 fn apply_strategy_deployments(
@@ -6650,15 +6698,8 @@ pub async fn start_platform(
                 );
             } else {
                 let strategy_agent_id = crypto_cfg.agent_id.clone();
-                let runtime_spec = ManagedStrategyBootstrapSpec {
-                    strategy_label: "momentum",
-                    agent_id: strategy_agent_id.clone(),
-                    domain: Domain::Crypto,
-                    strategy_config_toml: build_momentum_runtime_config(
-                        &momentum_symbols,
-                        &crypto_cfg,
-                    ),
-                };
+                let runtime_spec =
+                    build_momentum_managed_runtime_spec(&momentum_symbols, &crypto_cfg);
                 if let Err(e) = spawn_managed_strategy_runtime_spec(
                     &mut agent_handles,
                     &mut coordinator,
@@ -6710,15 +6751,8 @@ pub async fn start_platform(
             coins.sort();
             coins.dedup();
 
-            match build_pattern_memory_runtime_config(&coins) {
-                Ok(toml_cfg) => {
-                    let strategy_agent_id = "pattern_memory".to_string();
-                    let runtime_spec = ManagedStrategyBootstrapSpec {
-                        strategy_label: "pattern_memory",
-                        agent_id: strategy_agent_id.clone(),
-                        domain: Domain::Crypto,
-                        strategy_config_toml: toml_cfg,
-                    };
+            match build_pattern_memory_managed_runtime_spec(&coins) {
+                Ok(runtime_spec) => {
                     if let Err(e) = spawn_managed_strategy_runtime_spec(
                         &mut agent_handles,
                         &mut coordinator,
@@ -6745,7 +6779,7 @@ pub async fn start_platform(
                     warn!(
                         agent = "pattern_memory",
                         error = %e,
-                        "pattern_memory enabled but no valid runtime config could be built"
+                        "pattern_memory enabled but no valid runtime spec could be built"
                     );
                 }
             }
@@ -6815,13 +6849,7 @@ pub async fn start_platform(
                     "split_arb enabled but no recognized coin/horizon series ids were resolved"
                 );
             } else {
-                let strategy_agent_id = "split_arb".to_string();
-                let runtime_spec = ManagedStrategyBootstrapSpec {
-                    strategy_label: "split_arb",
-                    agent_id: strategy_agent_id.clone(),
-                    domain: Domain::Crypto,
-                    strategy_config_toml: build_split_arb_runtime_config(&symbols, &series_ids),
-                };
+                let runtime_spec = build_split_arb_managed_runtime_spec(&symbols, &series_ids);
                 if let Err(e) = spawn_managed_strategy_runtime_spec(
                     &mut agent_handles,
                     &mut coordinator,
@@ -6979,15 +7007,8 @@ pub async fn start_platform(
         if let Some(ref ee_cfg) = app_config.event_edge_agent {
             let politics_cfg = config.politics.clone();
             let strategy_agent_id = politics_cfg.agent_id.clone();
-            let runtime_spec = ManagedStrategyBootstrapSpec {
-                strategy_label: "event_edge",
-                agent_id: strategy_agent_id.clone(),
-                domain: Domain::Politics,
-                strategy_config_toml: build_event_edge_runtime_config(
-                    &app_config.market.rest_url,
-                    ee_cfg,
-                ),
-            };
+            let runtime_spec =
+                build_event_edge_managed_runtime_spec(&app_config.market.rest_url, &politics_cfg, ee_cfg);
             spawn_managed_strategy_runtime_spec(
                 &mut agent_handles,
                 &mut coordinator,
@@ -7335,6 +7356,19 @@ mod tests {
     }
 
     #[test]
+    fn build_momentum_managed_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+
+        let spec = build_momentum_managed_runtime_spec(&symbols, &crypto_cfg);
+
+        assert_eq!(spec.strategy_label, "momentum");
+        assert_eq!(spec.agent_id, crypto_cfg.agent_id);
+        assert_eq!(spec.domain, Domain::Crypto);
+        assert!(spec.strategy_config_toml.contains("name = \"momentum\""));
+    }
+
+    #[test]
     fn build_event_edge_runtime_config_projects_targets_and_limits() {
         let cfg = crate::config::EventEdgeAgentConfig {
             enabled: true,
@@ -7361,6 +7395,40 @@ mod tests {
         assert!(rendered.contains("cooldown_secs = 120"));
         assert!(rendered.contains("max_daily_spend_usd = 55.0"));
         assert!(rendered.contains("rest_url = \"https://clob.polymarket.com\""));
+    }
+
+    #[test]
+    fn build_event_edge_managed_runtime_spec_projects_canonical_launch() {
+        let politics_cfg = PoliticsTradingConfig::default();
+        let cfg = crate::config::EventEdgeAgentConfig {
+            enabled: true,
+            framework: "deterministic".to_string(),
+            event_ids: vec!["evt-1".to_string()],
+            titles: vec!["Best AI model".to_string()],
+            interval_secs: 180,
+            min_edge: Decimal::new(8, 2),
+            max_entry: Decimal::new(70, 2),
+            shares: 25,
+            trade: true,
+            cooldown_secs: 120,
+            max_daily_spend_usd: Decimal::from(55),
+            model: None,
+            claude_max_turns: 0,
+        };
+
+        let spec = build_event_edge_managed_runtime_spec(
+            "https://clob.polymarket.com",
+            &politics_cfg,
+            &cfg,
+        );
+
+        assert_eq!(spec.strategy_label, "event_edge");
+        assert_eq!(spec.agent_id, politics_cfg.agent_id);
+        assert_eq!(spec.domain, Domain::Politics);
+        assert!(spec.strategy_config_toml.contains("name = \"event_edge\""));
+        assert!(spec
+            .strategy_config_toml
+            .contains("rest_url = \"https://clob.polymarket.com\""));
     }
 
     #[test]
@@ -7571,6 +7639,22 @@ symbols = ["SOLUSDT"]
 
         assert!(rendered.contains("[entry]\nsymbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
         assert!(rendered.contains("[markets]\nseries_ids = [\"10192\", \"10684\"]"));
+    }
+
+    #[test]
+    fn build_split_arb_managed_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let series_ids = vec!["10192".to_string(), "10684".to_string()];
+
+        let spec = build_split_arb_managed_runtime_spec(&symbols, &series_ids);
+
+        assert_eq!(spec.strategy_label, "split_arb");
+        assert_eq!(spec.agent_id, "split_arb");
+        assert_eq!(spec.domain, Domain::Crypto);
+        assert!(spec.strategy_config_toml.contains("enabled = true"));
+        assert!(spec
+            .strategy_config_toml
+            .contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
     }
 
     #[tokio::test]

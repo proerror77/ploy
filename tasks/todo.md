@@ -713,6 +713,30 @@ Move the `nba_comeback` legacy sports fallback assembly out of the main sports b
 
 ---
 
+# Layered Live Runtime Task 9H: Promote Runtime Config Builders To Spec Builders (2026-03-06)
+
+## Goal
+Move one more layer of strategy-specific assembly out of `start_platform()` by promoting canonical runtime config builders into `ManagedStrategyBootstrapSpec` builders for the remaining crypto and politics managed paths.
+
+## Tasks
+
+- [x] Add managed-runtime spec builders for `momentum`, `pattern_memory`, `split_arb`, and `event_edge`.
+- [x] Update the corresponding `start_platform()` branches to consume those builders instead of hand-assembling `ManagedStrategyBootstrapSpec` inline.
+- [x] Add focused unit tests covering the new momentum/event-edge/split-arb spec builders.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `start_platform()` no longer hand-writes canonical runtime specs for momentum, pattern-memory, split-arb, or event-edge; it now asks dedicated builders for those specs.
+- [x] This slice does not change strategy routing semantics; it only pushes strategy-specific spec assembly out of the main bootstrap flow.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Bootstrap-focused unit coverage increased from 18 to 21 tests via direct canonical-launch assertions for new spec builders.
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
