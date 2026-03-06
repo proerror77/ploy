@@ -404,6 +404,25 @@
   - `cargo test strategy::staggered_arb_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 directional backtest display split)
+
+- [x] Convert `src/strategy/directional_backtest.rs` to directory form
+- [x] Move `print_directional_summary()` reporting logic into `src/strategy/directional_backtest/display.rs`
+- [x] Keep `DirectionalBacktestEngine::print_directional_summary()` as the stable caller-facing method
+- [x] Re-run build plus focused directional-backtest validation
+
+## Review (2026-03-06, directional backtest display split)
+
+- Delivered in this slice:
+  - Renamed [`src/strategy/directional_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest.rs) into directory form at [`src/strategy/directional_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest/mod.rs).
+  - Moved summary/report-printing logic into [`src/strategy/directional_backtest/display.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest/display.rs).
+  - Kept `DirectionalBacktestEngine::print_directional_summary()` as a thin wrapper so CLI and callers remain unchanged.
+- Validation executed:
+  - `cargo test strategy::directional_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
