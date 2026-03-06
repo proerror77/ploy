@@ -531,7 +531,9 @@ impl StaggeredArbBacktestEngine {
             if up_ask.is_none() || down_ask.is_none() {
                 trace!(
                     "try_entry: {} missing quotes (up={:?} down={:?})",
-                    window.event_slug, up_ask, down_ask
+                    window.event_slug,
+                    up_ask,
+                    down_ask
                 );
             }
             self.try_entry_for_window(
@@ -563,7 +565,8 @@ impl StaggeredArbBacktestEngine {
         }
         // Entry timing gate: prefer opening soon after the event starts.
         // start = end - window_duration
-        let window_start = window.end_time - chrono::Duration::seconds(window.window_duration_secs as i64);
+        let window_start =
+            window.end_time - chrono::Duration::seconds(window.window_duration_secs as i64);
         let elapsed_since_start = (ts - window_start).num_seconds();
         if elapsed_since_start < 0 {
             return;
@@ -656,7 +659,11 @@ impl StaggeredArbBacktestEngine {
 
         // 7. Direction: p_hat > 0.5 → buy UP first (it's about to get expensive)
         //    If reverse_signal is true, flip: buy the opposite of what the model says
-        let predicted_up = if self.config.reverse_signal { p_hat < 0.5 } else { p_hat > 0.5 };
+        let predicted_up = if self.config.reverse_signal {
+            p_hat < 0.5
+        } else {
+            p_hat > 0.5
+        };
         let (leg1_dir, leg1_ask) = if predicted_up {
             (Direction::Up, ua)
         } else {
@@ -730,9 +737,7 @@ impl StaggeredArbBacktestEngine {
         };
 
         let depth = self.market_depth(symbol);
-        let sim_result =
-            self.execution_sim
-                .simulate_buy(leg1_ask, ts, shares, depth);
+        let sim_result = self.execution_sim.simulate_buy(leg1_ask, ts, shares, depth);
 
         let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
         let entry_fee = self.fee_model.fee_shares(
@@ -823,6 +828,7 @@ impl StaggeredArbBacktestEngine {
     fn check_leg2_opportunities(&mut self, symbol: &str, ts: DateTime<Utc>) {
         // Collect actions to take (can't mutate positions while iterating)
         let mut actions: Vec<(usize, Leg2Action)> = Vec::new();
+        let force_threshold = self.config.force_complete_threshold;
 
         for (i, pos) in self.positions.iter_mut().enumerate() {
             if pos.symbol != symbol || pos.state != ArbPositionState::Leg1Filled {
@@ -867,7 +873,9 @@ impl StaggeredArbBacktestEngine {
 
             // Compute current Greeks for this position (if enabled)
             let current_greeks = if self.config.use_greeks {
-                let spot = self.spot_prices.get(&pos.symbol)
+                let spot = self
+                    .spot_prices
+                    .get(&pos.symbol)
                     .map(|sp| sp.price.to_f64().unwrap_or(0.0))
                     .unwrap_or(0.0);
                 let strike = pos.s0.to_f64().unwrap_or(0.0);
@@ -908,7 +916,9 @@ impl StaggeredArbBacktestEngine {
                     if current_sum < self.config.merge_target_sum + adjusted_target {
                         trace!(
                             "Greeks merge: gamma={:.4} adjusted_target={:.4} sum={:.4}",
-                            g.gamma, adjusted_target, current_sum
+                            g.gamma,
+                            adjusted_target,
+                            current_sum
                         );
                         actions.push((i, Leg2Action::Fill(other_ask)));
                         continue;
@@ -924,7 +934,9 @@ impl StaggeredArbBacktestEngine {
                     {
                         trace!(
                             "Theta urgency: theta={:.6} cost_remaining={:.4} sum={:.4}",
-                            g.theta, theta_cost_remaining, current_sum
+                            g.theta,
+                            theta_cost_remaining,
+                            current_sum
                         );
                         actions.push((i, Leg2Action::Fill(other_ask)));
                         continue;
@@ -942,7 +954,9 @@ impl StaggeredArbBacktestEngine {
             //    Even if sum > 1.0, the loss is bounded: (sum - 1.0) × shares
             //    Much better than risking full Leg1 cost at settlement
             if ts >= pos.wait_deadline && leg2_ready {
-                actions.push((i, Leg2Action::Fill(other_ask)));
+                if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
+                    actions.push((i, Leg2Action::Fill(other_ask)));
+                }
                 continue;
             }
 
@@ -956,14 +970,18 @@ impl StaggeredArbBacktestEngine {
                 let leg1_loss = pos.leg1_price - leg1_current_value;
                 if leg1_loss > self.config.max_leg1_loss && leg2_ready {
                     // Force buy Leg2 to lock in bounded loss instead of aborting
-                    actions.push((i, Leg2Action::Fill(other_ask)));
+                    if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
+                        actions.push((i, Leg2Action::Fill(other_ask)));
+                    }
                     continue;
                 }
             }
 
             // E. Time safety: not enough time left — force-complete the arb
             if time_remaining < min_time && leg2_ready {
-                actions.push((i, Leg2Action::Fill(other_ask)));
+                if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
+                    actions.push((i, Leg2Action::Fill(other_ask)));
+                }
             }
         }
 
@@ -2014,6 +2032,51 @@ mod tests {
             }
         }
         let _ = results; // use results to avoid warning
+    }
+
+    #[test]
+    fn test_force_complete_threshold_blocks_backtest_timeout_above_cap() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.force_complete_threshold = Decimal::ONE;
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.75)), Some(dec!(0.27))));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.75),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(0.1125),
+            wait_deadline: now - chrono::Duration::seconds(1),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.02),
+            initial_sum: dec!(1.02),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 0);
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
     }
 
     #[test]

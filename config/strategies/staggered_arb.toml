@@ -7,7 +7,7 @@ name = "staggered_arb"
 
 [entry]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-shares_per_trade = 50
+shares_per_trade = 20
 max_concurrent = 5
 direction_threshold = 0.04
 max_initial_sum = 0.92
@@ -34,7 +34,7 @@ min_balance_usd = 5.0           # Keep $5 reserve
 
 # === STAGGERED ARB SPECIFIC ===
 max_leg1_loss = 0.0             # Never accept leg1 loss
-force_complete_threshold = 0.00 # Apply forced-close only on timeout/time-safety/risk and sum >= threshold
+force_complete_threshold = 1.00 # Force-close cap for timeout/time-safety/risk; 0 disables the cap
 
 [model]
 mu = 0.0
