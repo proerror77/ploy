@@ -120,6 +120,7 @@
   - Use `exec_command` for reads, validation, git, and shell-native tasks only.
   - Use `apply_patch` for every manual tracked-file edit.
   - Split read/validate steps from edit steps instead of combining them in one shell command.
+<<<<<<< HEAD
 
 - Pattern: Aggregate entry reject counters can be dominated by structural timing reasons and hide the actual signal path, making live strategy diagnosis look like a pricing problem when the runtime is not even reaching signal evaluation.
 - Rule: For live/dry-run diagnostics, separate `entry_timing_gates` from `entry_signal_gates` and sample across a real event boundary before concluding that `sum`, `OBI`, or model thresholds are the blocker.
@@ -236,3 +237,5 @@
 - Pattern: `release-aliyun.yml` can silently brick `tango-1-1` if its hardcoded Rust target does not match the host `uname -m`; the symptom is `Exec format error`, `ploy-platform.service` restart loops, and immediate gaps in PM collection tables.
 - Rule: Production deploy and rollback paths must validate both the artifact file type and the remote host architecture before swapping `/root/ploy/bin/ploy`. For `tango-1-1`, default the release target to `x86_64-unknown-linux-gnu` and reject any artifact whose `file` output does not match the host architecture.
 
+=======
+>>>>>>> 2183130 (architecture: sync compatibility runtime status)
