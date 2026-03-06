@@ -366,6 +366,25 @@
   - `cargo test strategy::staggered_arb_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 staggered-arb backtest engine split)
+
+- [x] Move the runtime-heavy `StaggeredArbBacktestEngine` implementation into `src/strategy/staggered_arb_backtest/engine.rs`
+- [x] Reduce `mod.rs` to module wiring and public re-exports
+- [x] Keep existing staggered-arb tests compiling after the move
+- [x] Re-run build plus focused staggered-arb-backtest validation
+
+## Review (2026-03-06, staggered-arb backtest engine split)
+
+- Delivered in this slice:
+  - Moved the main engine implementation from [`src/strategy/staggered_arb_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/mod.rs) into [`src/strategy/staggered_arb_backtest/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/engine.rs).
+  - Reduced `mod.rs` to module declarations plus re-exports for `StaggeredArbBacktestConfig`, `StaggeredArbBacktestEngine`, `StaggeredArbClosedTrade`, and `ArbPositionState`.
+  - Left the existing tests in `engine.rs`, so behavior coverage still runs against the extracted implementation.
+- Validation executed:
+  - `cargo test strategy::staggered_arb_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
