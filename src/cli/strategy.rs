@@ -3324,12 +3324,11 @@ async fn run_backtest(
     database_url: Option<String>,
 ) -> Result<()> {
     use chrono::DateTime;
+    use ploy_backtest::report as backtest_report;
+    use ploy_backtest::{BacktestRecorder, HistoricalFeed, NullRecorder, PgBacktestRecorder};
     use rust_decimal::prelude::*;
 
     use crate::adapters::PostgresStore;
-    use crate::strategy::backtest_feed::HistoricalFeed;
-    use crate::strategy::backtest_recorder::{NullRecorder, PgBacktestRecorder};
-    use crate::strategy::backtest_report;
     use crate::strategy::directional_backtest::{
         DirectionalBacktestConfig, DirectionalBacktestEngine,
     };
@@ -3419,7 +3418,7 @@ async fn run_backtest(
 
             // Create recorder: PgBacktestRecorder if --save, else NullRecorder
             let mut saved_run_id: Option<uuid::Uuid> = None;
-            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
+            let recorder: Box<dyn BacktestRecorder> = if save {
                 let config_json = serde_json::to_value(&config).unwrap_or_default();
                 let pg_recorder = PgBacktestRecorder::new(
                     store.pool().clone(),
@@ -3490,7 +3489,7 @@ async fn run_backtest(
             config.initial_capital = initial_capital;
 
             let mut saved_run_id: Option<uuid::Uuid> = None;
-            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
+            let recorder: Box<dyn BacktestRecorder> = if save {
                 let config_json = serde_json::to_value(&config).unwrap_or_default();
                 let pg_recorder = PgBacktestRecorder::new(
                     store.pool().clone(),
@@ -4007,7 +4006,7 @@ async fn run_backtest_list(database_url: Option<String>, limit: usize) -> Result
 
 async fn run_backtest_diff(run1: &str, run2: &str, database_url: Option<String>) -> Result<()> {
     use crate::adapters::PostgresStore;
-    use crate::strategy::backtest_report;
+    use ploy_backtest::report as backtest_report;
 
     let db_url = database_url.unwrap_or_else(|| {
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())

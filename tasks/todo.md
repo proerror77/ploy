@@ -98,3 +98,22 @@
 - Validation executed:
   - `cargo build`
   - `cargo test paper_runner -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6 direct ploy-backtest imports)
+
+- [x] Point strategy backtest engines at `ploy-backtest` instead of `strategy::backtest_*` wrappers
+- [x] Point strategy CLI backtest runtime at `ploy-backtest` recorder/feed/report modules
+- [x] Keep the legacy `strategy::backtest` compatibility module only for vol-arb paper trading
+- [x] Re-run compile checks after the import boundary cleanup
+
+## Review (2026-03-06, direct imports)
+
+- Delivered in this slice:
+  - Updated [`src/strategy/directional_backtest.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/directional_backtest.rs), [`src/strategy/momentum_backtest.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/momentum_backtest.rs), and [`src/strategy/staggered_arb_backtest.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/staggered_arb_backtest.rs) to import shared backtest types directly from `ploy_backtest`.
+  - Updated [`src/cli/strategy.rs`](/Users/proerror/Documents/ploy-refactor/src/cli/strategy.rs) to use `ploy_backtest` feed/recorder/report types directly in the backtest CLI path.
+  - Left `src/strategy/backtest_feed.rs`, `src/strategy/backtest_recorder.rs`, `src/strategy/backtest_report.rs`, and `src/strategy/execution_sim.rs` in place as compatibility shims for now.
+- Validation executed:
+  - `cargo build`
+  - `cargo test paper_runner -- --nocapture`

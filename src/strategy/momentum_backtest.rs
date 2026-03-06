@@ -9,6 +9,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ploy_backtest::{BacktestResults, ExecutionSimulator, MarketFeed, UpdateType};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -18,9 +19,6 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::adapters::SpotPrice;
-use crate::strategy::backtest::BacktestResults;
-use crate::strategy::backtest_feed::{MarketFeed, UpdateType};
-use crate::strategy::execution_sim::ExecutionSimulator;
 use crate::strategy::momentum::{Direction, MomentumConfig, MomentumDetector, MomentumSignal};
 
 // ─────────────────────────────────────────────────────────────
@@ -625,7 +623,7 @@ pub async fn save_backtest_results(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::backtest_feed::{HistoricalFeed, MarketUpdate};
+    use ploy_backtest::{HistoricalFeed, MarketUpdate};
 
     /// Build a simple mock feed for testing
     fn mock_feed(updates: Vec<MarketUpdate>) -> HistoricalFeed {

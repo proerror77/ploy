@@ -15,6 +15,10 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use ploy_backtest::{
+    BacktestRecorder, BacktestResults, BacktestSignal, ExecutionSimulator, MarketFeed,
+    NullRecorder, PendingTrade, SignalType, UpdateType,
+};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -22,12 +26,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 
 use crate::adapters::SpotPrice;
-use crate::strategy::backtest::BacktestResults;
-use crate::strategy::backtest_feed::{MarketFeed, UpdateType};
-use crate::strategy::backtest_recorder::{
-    BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, SignalType,
-};
-use crate::strategy::execution_sim::ExecutionSimulator;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::momentum::Direction;
 use crate::strategy::probability::estimate_probability;
@@ -1466,7 +1464,7 @@ enum Leg2Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::backtest_feed::{HistoricalFeed, MarketUpdate, UpdateType};
+    use ploy_backtest::{HistoricalFeed, MarketUpdate};
     use rust_decimal_macros::dec;
 
     fn make_spot(ts: &str, symbol: &str, price: Decimal) -> MarketUpdate {
