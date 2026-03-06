@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ploy::adapters::PostgresStore;
 use ploy::config::AppConfig;
 use ploy::error::{PloyError, Result};
@@ -19,6 +19,70 @@ const CRYPTO_SERIES_IDS: &[&str] = &[
 
 const PM_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const PM_REST_URL: &str = "https://clob.polymarket.com";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshnessState {
+    Fresh,
+    Stale,
+    Missing,
+}
+
+#[derive(Debug, Clone)]
+struct DataQualityTableReport {
+    table_name: &'static str,
+    latest_timestamp: Option<DateTime<Utc>>,
+    recent_rows: i64,
+    distinct_rows: i64,
+}
+
+impl DataQualityTableReport {
+    fn new(
+        table_name: &'static str,
+        latest_timestamp: Option<DateTime<Utc>>,
+        recent_rows: i64,
+        distinct_rows: i64,
+    ) -> Self {
+        Self {
+            table_name,
+            latest_timestamp,
+            recent_rows,
+            distinct_rows,
+        }
+    }
+
+    fn duplicate_rows(&self) -> i64 {
+        (self.recent_rows - self.distinct_rows).max(0)
+    }
+
+    fn duplicate_ratio_pct(&self) -> f64 {
+        if self.recent_rows <= 0 {
+            0.0
+        } else {
+            (self.duplicate_rows() as f64 / self.recent_rows as f64) * 100.0
+        }
+    }
+
+    fn freshness_state(&self, now: DateTime<Utc>, freshness_warn_secs: u64) -> FreshnessState {
+        let Some(latest_timestamp) = self.latest_timestamp else {
+            return FreshnessState::Missing;
+        };
+
+        let age_secs = now
+            .signed_duration_since(latest_timestamp)
+            .num_seconds()
+            .max(0) as u64;
+        if age_secs > freshness_warn_secs {
+            FreshnessState::Stale
+        } else {
+            FreshnessState::Fresh
+        }
+    }
+
+    fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.latest_timestamp
+            .map(|latest| now.signed_duration_since(latest).num_seconds().max(0))
+    }
+}
 
 fn infer_symbol_from_slug(slug: &str) -> Option<&'static str> {
     let lower = slug.to_ascii_lowercase();
@@ -141,6 +205,194 @@ pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u6
     Ok(())
 }
 
+pub async fn run_collect_quality_check(
+    config_path: &str,
+    lookback_minutes: u64,
+    freshness_warn_secs: u64,
+) -> Result<()> {
+    let cfg = AppConfig::load_from(config_path).or_else(|_| AppConfig::load())?;
+    let store = PostgresStore::new(&cfg.database.url, 5).await?;
+    let pool = store.pool();
+
+    let now = Utc::now();
+    let reports = vec![
+        fetch_table_quality_report(
+            pool,
+            "clob_quote_ticks",
+            "SELECT MAX(received_at) FROM clob_quote_ticks",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    token_id,
+                    side,
+                    COALESCE(best_bid::text, '') AS best_bid_txt,
+                    COALESCE(best_ask::text, '') AS best_ask_txt,
+                    COALESCE(bid_size::text, '') AS bid_size_txt,
+                    COALESCE(ask_size::text, '') AS ask_size_txt,
+                    source
+                FROM clob_quote_ticks
+                WHERE received_at >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (token_id, side, best_bid_txt, best_ask_txt, bid_size_txt, ask_size_txt, source))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+        fetch_table_quality_report(
+            pool,
+            "binance_lob_ticks",
+            "SELECT MAX(event_time) FROM binance_lob_ticks",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    symbol,
+                    COALESCE(update_id, -1) AS update_id_norm,
+                    event_time,
+                    source
+                FROM binance_lob_ticks
+                WHERE event_time >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (symbol, update_id_norm, event_time, source))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+        fetch_table_quality_report(
+            pool,
+            "clob_orderbook_snapshots",
+            "SELECT MAX(COALESCE(book_timestamp, received_at)) FROM clob_orderbook_snapshots",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    token_id,
+                    COALESCE(book_timestamp, received_at) AS snapshot_ts,
+                    COALESCE(hash, '') AS hash_norm,
+                    source
+                FROM clob_orderbook_snapshots
+                WHERE COALESCE(book_timestamp, received_at) >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (token_id, snapshot_ts, hash_norm, source))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+        fetch_table_quality_report(
+            pool,
+            "sync_records_derived",
+            "SELECT MAX(timestamp) FROM sync_records_derived",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    symbol,
+                    timestamp,
+                    COALESCE(pm_market_slug, '') AS market_slug_norm,
+                    COALESCE(pm_yes_token_id, '') AS yes_token_norm,
+                    COALESCE(pm_no_token_id, '') AS no_token_norm
+                FROM sync_records_derived
+                WHERE timestamp >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (symbol, timestamp, market_slug_norm, yes_token_norm, no_token_norm))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+    ];
+
+    print_collect_quality_report(&reports, now, lookback_minutes, freshness_warn_secs);
+    Ok(())
+}
+
+async fn fetch_table_quality_report(
+    pool: &sqlx::PgPool,
+    table_name: &'static str,
+    freshness_sql: &str,
+    duplicate_sql: &str,
+    lookback_minutes: u64,
+) -> Result<DataQualityTableReport> {
+    if !relation_exists(pool, &format!("public.{table_name}")).await? {
+        return Ok(DataQualityTableReport::new(table_name, None, 0, 0));
+    }
+
+    let latest_timestamp = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(freshness_sql)
+        .fetch_one(pool)
+        .await?;
+    let lookback_minutes = i32::try_from(lookback_minutes).map_err(|_| {
+        PloyError::Validation(format!(
+            "lookback_minutes too large for collector data-quality check: {lookback_minutes}"
+        ))
+    })?;
+    let (recent_rows, distinct_rows) = sqlx::query_as::<_, (i64, i64)>(duplicate_sql)
+        .bind(lookback_minutes)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(DataQualityTableReport::new(
+        table_name,
+        latest_timestamp,
+        recent_rows,
+        distinct_rows,
+    ))
+}
+
+async fn relation_exists(pool: &sqlx::PgPool, relation_name: &str) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+        .bind(relation_name)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists.is_some())
+}
+
+fn print_collect_quality_report(
+    reports: &[DataQualityTableReport],
+    now: DateTime<Utc>,
+    lookback_minutes: u64,
+    freshness_warn_secs: u64,
+) {
+    println!("\nCollector Data Quality");
+    println!(
+        "lookback={}m freshness_warn={}s generated_at={}",
+        lookback_minutes,
+        freshness_warn_secs,
+        now.to_rfc3339()
+    );
+
+    for report in reports {
+        let freshness = match report.freshness_state(now, freshness_warn_secs) {
+            FreshnessState::Fresh => "fresh",
+            FreshnessState::Stale => "stale",
+            FreshnessState::Missing => "missing",
+        };
+        let latest = report
+            .latest_timestamp
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string());
+        let age = report
+            .age_secs(now)
+            .map(|secs| format!("{secs}s"))
+            .unwrap_or_else(|| "-".to_string());
+
+        println!(
+            "- {table}: freshness={freshness} latest={latest} age={age} recent_rows={recent_rows} duplicate_rows={duplicate_rows} duplicate_ratio={duplicate_ratio:.2}%",
+            table = report.table_name,
+            recent_rows = report.recent_rows,
+            duplicate_rows = report.duplicate_rows(),
+            duplicate_ratio = report.duplicate_ratio_pct(),
+        );
+    }
+}
+
 /// Discover active PM tokens for crypto series and spawn a WebSocket bridge
 /// that feeds real-time PM prices into the collector.
 async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
@@ -191,7 +443,9 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
                             .as_deref()
                             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                             .map(|dt| dt.with_timezone(&Utc))
-                            .is_some_and(|end| end <= soon_cutoff && end >= now - chrono::Duration::minutes(15))
+                            .is_some_and(|end| {
+                                end <= soon_cutoff && end >= now - chrono::Duration::minutes(15)
+                            })
                     })
                     .take(4)
                     .collect();
@@ -503,4 +757,33 @@ pub async fn run_orderbook_history_mode(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DataQualityTableReport, FreshnessState};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn data_quality_report_marks_stale_and_computes_duplicate_ratio() {
+        let now = Utc::now();
+        let report = DataQualityTableReport::new(
+            "clob_quote_ticks",
+            Some(now - Duration::seconds(181)),
+            100,
+            80,
+        );
+
+        assert_eq!(report.duplicate_ratio_pct(), 20.0);
+        assert_eq!(report.freshness_state(now, 180), FreshnessState::Stale);
+    }
+
+    #[test]
+    fn data_quality_report_marks_missing_when_no_timestamp_exists() {
+        let now = Utc::now();
+        let report = DataQualityTableReport::new("sync_records_derived", None, 0, 0);
+
+        assert_eq!(report.duplicate_ratio_pct(), 0.0);
+        assert_eq!(report.freshness_state(now, 180), FreshnessState::Missing);
+    }
 }

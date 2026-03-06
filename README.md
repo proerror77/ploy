@@ -171,6 +171,7 @@ ploy ev --price 95 --probability 97            # Calculate expected value for ne
 Use the right command for the right data job:
 
 - `ploy collect` for continuous live/raw synchronized capture
+- `ploy collect --check-only` for a lightweight freshness / duplicate report
 - `ploy orderbook-history` for historical PM L2 snapshots by token ID
 - `ploy deribit-iv-backfill` for historical Deribit IV bars
 - `ploy strategy backfill-*` for offline replay / settlement / kline prep

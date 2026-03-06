@@ -20,7 +20,7 @@ Reduce duplicated market-data collection paths and converge on canonical raw tab
 
 - [x] Remove or archive `backtest_collector` CSV-only flow from primary data pipeline
 - [x] Add one unified collector docs page (what to run for live vs backfill vs research)
-- [ ] Add lightweight data-quality checks (freshness + dedup ratios)
+- [x] Add lightweight data-quality checks (freshness + dedup ratios)
 
 ## Progress notes
 
@@ -31,6 +31,7 @@ Reduce duplicated market-data collection paths and converge on canonical raw tab
 - 2026-03-04: `SyncCollector` now persists canonical raw tables (`binance_lob_ticks`, `clob_quote_ticks`) and creates `sync_records_derived` view; legacy `sync_records` writes are compatibility-only behind `PLOY_COLLECTOR_PERSIST_SYNC_RECORDS`.
 - 2026-03-04: Legacy `services/data_collector` now defaults to canonical `clob_quote_ticks`; legacy `ticks` writes require `PLOY_LEGACY_TICKS_ENABLED=true`.
 - 2026-03-04: `backtest_collector` CSV sink is now compatibility-only (`persist_csv=false` by default), so primary collector pipeline is DB-first.
+- 2026-03-07: Added `ploy collect --check-only` to report lightweight freshness and duplicate ratios for canonical collector tables.
 
 ---
 

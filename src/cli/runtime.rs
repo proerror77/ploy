@@ -94,6 +94,15 @@ pub enum Commands {
         /// Duration to collect in minutes (0 = indefinite)
         #[arg(short, long, default_value = "0")]
         duration: u64,
+        /// Print a lightweight collector data-quality report and exit
+        #[arg(long)]
+        check_only: bool,
+        /// Lookback window in minutes for duplicate-ratio checks
+        #[arg(long, default_value = "60")]
+        lookback_minutes: u64,
+        /// Mark a table stale when its latest timestamp is older than this threshold
+        #[arg(long, default_value = "120")]
+        freshness_warn_secs: u64,
     },
 
     /// Backfill Polymarket L2 orderbook history via `clob.polymarket.com/orderbook-history`
@@ -645,4 +654,42 @@ pub enum RlCommands {
         #[arg(long)]
         policy_version: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn collect_check_only_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "ploy",
+            "collect",
+            "--symbols",
+            "BTCUSDT,ETHUSDT",
+            "--check-only",
+            "--lookback-minutes",
+            "45",
+            "--freshness-warn-secs",
+            "90",
+        ])
+        .expect("collect check-only args should parse");
+
+        match cli.command.expect("command should parse") {
+            Commands::Collect {
+                symbols,
+                check_only,
+                lookback_minutes,
+                freshness_warn_secs,
+                ..
+            } => {
+                assert_eq!(symbols, "BTCUSDT,ETHUSDT");
+                assert!(check_only);
+                assert_eq!(lookback_minutes, 45);
+                assert_eq!(freshness_warn_secs, 90);
+            }
+            other => panic!("expected Collect command, got {other:?}"),
+        }
+    }
 }

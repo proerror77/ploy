@@ -63,9 +63,21 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             symbols,
             markets,
             duration,
+            check_only,
+            lookback_minutes,
+            freshness_warn_secs,
         }) => {
             crate::main_runtime::init_logging();
-            crate::main_modes::run_collect_mode(symbols, markets.as_deref(), *duration).await?;
+            if *check_only {
+                crate::main_modes::run_collect_quality_check(
+                    &cli.config,
+                    *lookback_minutes,
+                    *freshness_warn_secs,
+                )
+                .await?;
+            } else {
+                crate::main_modes::run_collect_mode(symbols, markets.as_deref(), *duration).await?;
+            }
         }
         Some(Commands::OrderbookHistory {
             asset_ids,

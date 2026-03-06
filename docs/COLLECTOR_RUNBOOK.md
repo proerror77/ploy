@@ -172,7 +172,44 @@ Use this when you want official Polymarket settlement state in `pm_token_settlem
 3. Backfill settlements with `ploy strategy backfill-pm-token-settlements`.
 4. Optionally backfill Deribit IV with `ploy deribit-iv-backfill`.
 
-## 6. Sanity Checks
+## 6. Lightweight Data-Quality Check
+
+Use this when you want a quick health read on collector tables without starting a collector:
+
+```bash
+ploy collect --check-only
+```
+
+Tune the window and stale threshold if needed:
+
+```bash
+ploy collect --check-only \
+  --lookback-minutes 30 \
+  --freshness-warn-secs 90
+```
+
+The report prints, for each core collector relation:
+
+- latest timestamp
+- age in seconds
+- recent row count
+- duplicate row count
+- duplicate ratio over the selected lookback window
+
+Current coverage includes:
+
+- `clob_quote_ticks`
+- `binance_lob_ticks`
+- `clob_orderbook_snapshots`
+- `sync_records_derived`
+
+Use it when the question is:
+
+- "Is the collector fresh?"
+- "Am I writing lots of duplicate snapshots?"
+- "Did the raw pipeline stop moving?"
+
+## 7. Sanity Checks
 
 After dataset prep, useful follow-up commands are:
 
