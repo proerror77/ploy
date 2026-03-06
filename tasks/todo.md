@@ -385,6 +385,25 @@
   - `cargo test strategy::staggered_arb_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 staggered-arb backtest display split)
+
+- [x] Move `print_staggered_summary()` reporting logic into `src/strategy/staggered_arb_backtest/display.rs`
+- [x] Keep `StaggeredArbBacktestEngine::print_staggered_summary()` as the stable caller-facing method
+- [x] Avoid touching trading logic, results aggregation, or leg-management paths
+- [x] Re-run build plus focused staggered-arb-backtest validation
+
+## Review (2026-03-06, staggered-arb backtest display split)
+
+- Delivered in this slice:
+  - Moved summary/report-printing logic from [`src/strategy/staggered_arb_backtest/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/engine.rs) into [`src/strategy/staggered_arb_backtest/display.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/display.rs).
+  - Kept `print_staggered_summary()` as an engine method by making it a thin wrapper that delegates to the new display helper.
+  - Left all trading, settlement, and results-building code untouched.
+- Validation executed:
+  - `cargo test strategy::staggered_arb_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
