@@ -12,6 +12,7 @@
 //!   ploy strategy backtest staggered-arb --symbols BTCUSDT --save --json
 
 mod config;
+mod display;
 mod engine;
 mod state;
 
