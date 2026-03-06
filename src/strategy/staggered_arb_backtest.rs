@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
@@ -138,9 +139,9 @@ impl Default for StaggeredArbBacktestConfig {
         Self {
             symbols: vec!["BTCUSDT".to_string()],
             initial_capital: dec!(10000),
-            shares_per_trade: 50,
+            shares_per_trade: 20,
             max_concurrent_positions: 0,
-            direction_threshold: 0.05,
+            direction_threshold: 0.04,
             premium_sum_threshold: Decimal::ONE,
             premium_sum_direction_slope: 1.25,
             premium_sum_obi_slope: 0.25,
@@ -185,6 +186,224 @@ impl StaggeredArbBacktestConfig {
             symbols,
             ..Default::default()
         }
+    }
+
+    pub fn from_toml_str(config_str: &str) -> Result<Self> {
+        Self::from_toml_str_with_default_symbols(config_str, Self::default().symbols)
+    }
+
+    pub fn from_toml_str_with_default_symbols(
+        config_str: &str,
+        default_symbols: Vec<String>,
+    ) -> Result<Self> {
+        use toml::Value;
+
+        let config: Value = toml::from_str(config_str)
+            .map_err(|e| anyhow!("Invalid staggered_arb TOML: {}", e))?;
+        let empty = Value::Table(Default::default());
+        let entry = config.get("entry").unwrap_or(&empty);
+        let timing = config.get("timing").unwrap_or(&empty);
+        let risk = config.get("risk").unwrap_or(&empty);
+        let model = config.get("model").unwrap_or(&empty);
+        let filter = config.get("filter").unwrap_or(&empty);
+
+        let symbols = entry
+            .get("symbols")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or(default_symbols);
+
+        Ok(Self {
+            symbols,
+            initial_capital: Decimal::try_from(
+                entry
+                    .get("initial_capital")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(10000.0),
+            )
+            .unwrap_or(dec!(10000)),
+            shares_per_trade: entry
+                .get("shares_per_trade")
+                .and_then(|v| v.as_integer().or_else(|| v.as_float().map(|f| f as i64)))
+                .unwrap_or(20) as u64,
+            max_concurrent_positions: entry
+                .get("max_concurrent")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as usize,
+            direction_threshold: entry
+                .get("direction_threshold")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.04),
+            premium_sum_threshold: Decimal::try_from(
+                entry
+                    .get("premium_sum_threshold")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(1.0),
+            )
+            .unwrap_or(Decimal::ONE),
+            premium_sum_direction_slope: entry
+                .get("premium_sum_direction_slope")
+                .and_then(|v| v.as_float())
+                .unwrap_or(1.25),
+            premium_sum_obi_slope: entry
+                .get("premium_sum_obi_slope")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.25),
+            reverse_signal: entry
+                .get("reverse_signal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            max_initial_sum: Decimal::try_from(
+                entry
+                    .get("max_initial_sum")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.0),
+            )
+            .unwrap_or(Decimal::ZERO),
+            max_leg1_price: Decimal::try_from(
+                entry
+                    .get("max_leg1_price")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.58),
+            )
+            .unwrap_or(dec!(0.58)),
+            merge_target_sum: Decimal::try_from(
+                entry
+                    .get("merge_target_sum")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.95),
+            )
+            .unwrap_or(dec!(0.95)),
+            min_profit_target: Decimal::try_from(
+                entry
+                    .get("min_profit_target")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.02),
+            )
+            .unwrap_or(dec!(0.02)),
+            max_wait_secs: timing
+                .get("max_wait_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(120) as u64,
+            entry_after_start_min_secs: timing
+                .get("entry_after_start_min_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(30) as u64,
+            entry_after_start_max_secs: timing
+                .get("entry_after_start_max_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as u64,
+            no_trade_last_secs: timing
+                .get("no_trade_last_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(30) as u64,
+            max_wait_pct: timing
+                .get("max_wait_pct")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.30),
+            min_time_remaining_secs: timing
+                .get("min_time_remaining")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(45) as u64,
+            max_leg1_loss: Decimal::try_from(
+                risk.get("max_leg1_loss")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.05),
+            )
+            .unwrap_or(dec!(0.05)),
+            force_complete_threshold: Decimal::try_from(
+                risk.get("force_complete_threshold")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(1.20),
+            )
+            .unwrap_or(dec!(1.20)),
+            protective_close_threshold: Decimal::try_from(
+                risk.get("protective_close_threshold")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(1.20),
+            )
+            .unwrap_or(dec!(1.20)),
+            min_ask_price: Decimal::try_from(
+                entry
+                    .get("min_ask_price")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.05),
+            )
+            .unwrap_or(dec!(0.05)),
+            min_entry_sum: Decimal::try_from(
+                entry
+                    .get("min_entry_sum")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.30),
+            )
+            .unwrap_or(dec!(0.30)),
+            allowed_window_durations: filter
+                .get("allowed_windows")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_integer().map(|i| i as u64))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![300, 900]),
+            window_duration_tolerance: filter
+                .get("window_tolerance")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(30) as u64,
+            min_leg2_delay_secs: timing
+                .get("min_leg2_delay_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(3) as u64,
+            max_trades_per_event: timing
+                .get("max_trades_per_event")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as usize,
+            mu: model.get("mu").and_then(|v| v.as_float()).unwrap_or(0.0),
+            vol_lookback_secs: model
+                .get("vol_lookback_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(600) as u64,
+            vol_floor: model
+                .get("vol_floor")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.003),
+            min_entry_sigma: model
+                .get("min_entry_sigma")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.003),
+            max_entry_sigma: model
+                .get("max_entry_sigma")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.0),
+            cooldown_secs: timing
+                .get("cooldown_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(5) as u64,
+            use_greeks: model
+                .get("use_greeks")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            min_gamma: model
+                .get("min_gamma")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.0),
+            max_theta_cost: model
+                .get("max_theta_cost")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.0),
+            max_fair_value_distance: model
+                .get("max_fair_value_distance")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.15),
+            delta_weighted_sizing: model
+                .get("delta_weighted_sizing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
     }
 
     fn premium_sum_excess(&self, current_sum: Decimal) -> f64 {
@@ -758,41 +977,40 @@ impl StaggeredArbBacktestEngine {
 
         const OI_CONFIRM_THRESHOLD: f64 = 0.005;
         const OI_MAX_STALE_SECS: i64 = 60;
-        if let Some(obi_ts) = self.binance_l2_obi_ts.get(symbol).copied() {
-            if (ts - obi_ts).num_seconds().abs() <= OI_MAX_STALE_SECS {
-                if let Some(obi_value) = self.binance_l2_obi_5.get(symbol) {
-                    let obi = obi_value.to_f64().unwrap_or(0.0);
-                    let required_obi_strength =
-                        OI_CONFIRM_THRESHOLD + premium_sum_excess * self.config.premium_sum_obi_slope;
-                    if predicted_up && obi < required_obi_strength {
-                        trace!(
-                            "Skipping: OBI {:.4} < required {:.4} for long entry",
-                            obi,
-                            required_obi_strength
-                        );
-                        return;
-                    }
-                    if !predicted_up && obi > -required_obi_strength {
-                        trace!(
-                            "Skipping: OBI {:.4} > required {:.4} for short entry",
-                            obi,
-                            -required_obi_strength
-                        );
-                        return;
-                    }
-                }
-            } else {
-                trace!(
-                    "No fresh Binance L2 OBI for {} ({}s stale); falling back to price/Greeks entry gates",
-                    symbol,
-                    (ts - obi_ts).num_seconds().abs()
-                );
-            }
-        } else {
+        let Some(obi_ts) = self.binance_l2_obi_ts.get(symbol).copied() else {
+            trace!("Skipping: no Binance L2 OBI history for {}", symbol);
+            return;
+        };
+        if (ts - obi_ts).num_seconds().abs() > OI_MAX_STALE_SECS {
             trace!(
-                "No Binance L2 OBI history for {}; falling back to price/Greeks entry gates",
-                symbol
+                "Skipping: Binance L2 OBI for {} is stale by {}s",
+                symbol,
+                (ts - obi_ts).num_seconds().abs()
             );
+            return;
+        }
+        let Some(obi_value) = self.binance_l2_obi_5.get(symbol) else {
+            trace!("Skipping: missing Binance L2 OBI value for {}", symbol);
+            return;
+        };
+        let obi = obi_value.to_f64().unwrap_or(0.0);
+        let required_obi_strength =
+            OI_CONFIRM_THRESHOLD + premium_sum_excess * self.config.premium_sum_obi_slope;
+        if predicted_up && obi < required_obi_strength {
+            trace!(
+                "Skipping: OBI {:.4} < required {:.4} for long entry",
+                obi,
+                required_obi_strength
+            );
+            return;
+        }
+        if !predicted_up && obi > -required_obi_strength {
+            trace!(
+                "Skipping: OBI {:.4} > required {:.4} for short entry",
+                obi,
+                -required_obi_strength
+            );
+            return;
         }
 
         let (leg1_dir, leg1_ask) = if predicted_up {
@@ -890,11 +1108,13 @@ impl StaggeredArbBacktestEngine {
 
         self.equity -= total_cost;
 
-        // Calculate wait deadline
-        let window_duration = (window.end_time - ts).num_seconds() as f64;
+        let leg1_fill_time = sim_result.fill_time;
+
+        // Calculate wait deadline from the modeled fill time, not the signal time.
+        let window_duration = (window.end_time - leg1_fill_time).num_seconds() as f64;
         let max_wait_by_pct = (window_duration * self.config.max_wait_pct) as i64;
         let max_wait = (self.config.max_wait_secs as i64).min(max_wait_by_pct);
-        let wait_deadline = ts + chrono::Duration::seconds(max_wait);
+        let wait_deadline = leg1_fill_time + chrono::Duration::seconds(max_wait.max(0));
 
         self.positions.push(StaggeredArbPosition {
             symbol: symbol.to_string(),
@@ -902,7 +1122,7 @@ impl StaggeredArbBacktestEngine {
             leg1_direction: leg1_dir,
             leg1_price: sim_result.fill_price,
             leg1_shares: sim_result.filled_shares,
-            leg1_time: ts,
+            leg1_time: leg1_fill_time,
             leg1_fee: entry_fee,
             wait_deadline,
             s0: window.s0,
@@ -937,7 +1157,7 @@ impl StaggeredArbBacktestEngine {
             signal_type: SignalType::Entry,
             symbol: symbol.to_string(),
             direction: format!("{}", leg1_dir),
-            timestamp: ts,
+            timestamp: leg1_fill_time,
             p_hat: Some(p_hat),
             ev_net: None,
             sigma: Some(sigma),
@@ -1148,19 +1368,32 @@ impl StaggeredArbBacktestEngine {
 
     /// Fill Leg2 and immediately merge for $1.00 per share.
     fn fill_leg2(&mut self, idx: usize, other_ask: Decimal, reason: &str, ts: DateTime<Utc>) {
+        if idx >= self.positions.len() || self.positions[idx].state != ArbPositionState::Leg1Filled {
+            return;
+        }
+
         let pos = &self.positions[idx];
         let leg2_dir = match pos.leg1_direction {
             Direction::Up => Direction::Down,
             Direction::Down => Direction::Up,
         };
+        let remaining_shares = pos
+            .leg1_shares
+            .saturating_sub(pos.leg2_shares.unwrap_or(0));
+        if remaining_shares == 0 {
+            return;
+        }
 
         let depth = self.market_depth(&pos.symbol);
         let sim_result = self.execution_sim.simulate_buy(
             other_ask,
             ts,
-            pos.leg1_shares, // match Leg1 size
+            remaining_shares,
             depth,
         );
+        if sim_result.filled_shares == 0 {
+            return;
+        }
 
         let leg2_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
         let leg2_fee = self.fee_model.fee_shares(
@@ -1175,96 +1408,156 @@ impl StaggeredArbBacktestEngine {
         }
 
         self.equity -= total_leg2_cost;
+        let fill_time = sim_result.fill_time;
 
-        // Immediate merge: min(leg1_shares, leg2_shares) × $1.00
-        let mergeable = pos.leg1_shares.min(sim_result.filled_shares);
-        let payout = Decimal::from(mergeable) * Decimal::ONE;
-        let total_cost =
-            Decimal::from(pos.leg1_shares) * pos.leg1_price + pos.leg1_fee + leg2_cost + leg2_fee;
+        let (
+            symbol,
+            event_slug,
+            leg1_direction,
+            leg1_price,
+            leg1_shares,
+            leg1_time,
+            entry_p_hat,
+            entry_sigma,
+            initial_sum,
+            best_sum_seen,
+            s0,
+            window_duration_secs,
+            entry_greeks,
+            total_leg2_shares,
+            total_leg2_price,
+            total_leg2_fee,
+        ) = {
+            let pos = &mut self.positions[idx];
+            let prev_leg2_shares = pos.leg2_shares.unwrap_or(0);
+            let prev_leg2_price = pos.leg2_price.unwrap_or(Decimal::ZERO);
+            let prev_leg2_fee = pos.leg2_fee.unwrap_or(Decimal::ZERO);
+
+            let prev_notional = prev_leg2_price * Decimal::from(prev_leg2_shares);
+            let add_notional =
+                sim_result.fill_price * Decimal::from(sim_result.filled_shares);
+            let total_leg2_shares = prev_leg2_shares + sim_result.filled_shares;
+            let total_notional = prev_notional + add_notional;
+            let total_leg2_price = total_notional / Decimal::from(total_leg2_shares);
+            let total_leg2_fee = prev_leg2_fee + leg2_fee;
+
+            pos.leg2_direction = Some(leg2_dir);
+            pos.leg2_price = Some(total_leg2_price);
+            pos.leg2_shares = Some(total_leg2_shares);
+            pos.leg2_time = Some(fill_time);
+            pos.leg2_fee = Some(total_leg2_fee);
+
+            (
+                pos.symbol.clone(),
+                pos.event_slug.clone(),
+                pos.leg1_direction,
+                pos.leg1_price,
+                pos.leg1_shares,
+                pos.leg1_time,
+                pos.entry_p_hat,
+                pos.entry_sigma,
+                pos.initial_sum,
+                pos.best_sum_seen,
+                pos.s0,
+                pos.window_duration_secs,
+                pos.entry_greeks,
+                total_leg2_shares,
+                total_leg2_price,
+                total_leg2_fee,
+            )
+        };
+
+        if total_leg2_shares < leg1_shares {
+            debug!(
+                "LEG2 PARTIAL {} | {}/{} filled avg={:.4}",
+                event_slug,
+                total_leg2_shares,
+                leg1_shares,
+                total_leg2_price
+            );
+            return;
+        }
+
+        let payout = Decimal::from(leg1_shares);
+        let total_cost = Decimal::from(leg1_shares) * leg1_price
+            + self.positions[idx].leg1_fee
+            + Decimal::from(total_leg2_shares) * total_leg2_price
+            + total_leg2_fee;
         let pnl = payout - total_cost;
 
         self.equity += payout;
 
-        let holding_secs = (ts - pos.leg1_time).num_seconds();
-        let final_sum = pos.leg1_price + sim_result.fill_price;
+        let holding_secs = (fill_time - leg1_time).num_seconds();
+        let final_sum = leg1_price + total_leg2_price;
 
-        let symbol = pos.symbol.clone();
-        let event_slug = pos.event_slug.clone();
-
-        // Update position
         let pos = &mut self.positions[idx];
-        pos.leg2_direction = Some(leg2_dir);
-        pos.leg2_price = Some(sim_result.fill_price);
-        pos.leg2_shares = Some(sim_result.filled_shares);
-        pos.leg2_time = Some(ts);
-        pos.leg2_fee = Some(leg2_fee);
         pos.state = ArbPositionState::Settled;
         pos.exit_reason = Some(reason.to_string());
         pos.pnl = Some(pnl);
 
         self.closed_trades.push(StaggeredArbClosedTrade {
             symbol: symbol.clone(),
-            leg1_direction: format!("{}", pos.leg1_direction),
-            leg1_price: pos.leg1_price,
-            leg1_time: pos.leg1_time,
-            leg2_price: Some(sim_result.fill_price),
-            leg2_time: Some(ts),
-            shares: mergeable,
+            leg1_direction: format!("{}", leg1_direction),
+            leg1_price,
+            leg1_time,
+            leg2_price: Some(total_leg2_price),
+            leg2_time: Some(fill_time),
+            shares: leg1_shares,
             pnl,
             won: pnl > Decimal::ZERO,
             holding_secs,
             exit_reason: reason.to_string(),
-            initial_sum: pos.initial_sum,
+            initial_sum,
             final_sum: Some(final_sum),
-            entry_p_hat: pos.entry_p_hat,
-            entry_sigma: pos.entry_sigma,
-            best_sum_seen: pos.best_sum_seen,
-            s0: pos.s0,
-            window_duration_secs: pos.window_duration_secs,
-            entry_delta: pos.entry_greeks.map(|g| g.delta),
-            entry_gamma: pos.entry_greeks.map(|g| g.gamma),
-            entry_theta: pos.entry_greeks.map(|g| g.theta),
-            entry_fair_value: pos.entry_greeks.map(|g| g.fair_value),
+            entry_p_hat,
+            entry_sigma,
+            best_sum_seen,
+            s0,
+            window_duration_secs,
+            entry_delta: entry_greeks.map(|g| g.delta),
+            entry_gamma: entry_greeks.map(|g| g.gamma),
+            entry_theta: entry_greeks.map(|g| g.theta),
+            entry_fair_value: entry_greeks.map(|g| g.fair_value),
         });
 
         self.recorder.record_exit(&BacktestSignal {
             signal_type: SignalType::Exit,
             symbol: symbol.clone(),
-            direction: format!("{}", pos.leg1_direction),
-            timestamp: ts,
-            p_hat: Some(pos.entry_p_hat),
+            direction: format!("{}", leg1_direction),
+            timestamp: fill_time,
+            p_hat: Some(entry_p_hat),
             ev_net: Some(pnl.to_f64().unwrap_or(0.0)),
-            sigma: Some(pos.entry_sigma),
-            market_price: Some(sim_result.fill_price),
+            sigma: Some(entry_sigma),
+            market_price: Some(total_leg2_price),
             spot_price: None,
-            s0: Some(pos.s0),
+            s0: Some(s0),
             time_remaining_secs: None,
             filter_reason: None,
             exit_reason: Some(reason.to_string()),
-            exit_price: Some(sim_result.fill_price),
+            exit_price: Some(total_leg2_price),
         });
 
         self.recorder.record_trade(&PendingTrade {
             symbol,
-            direction: format!("{}", pos.leg1_direction),
-            entry_time: pos.leg1_time,
-            exit_time: ts,
-            entry_price: pos.leg1_price,
-            exit_price: sim_result.fill_price,
-            shares: mergeable as i32,
+            direction: format!("{}", leg1_direction),
+            entry_time: leg1_time,
+            exit_time: fill_time,
+            entry_price: leg1_price,
+            exit_price: total_leg2_price,
+            shares: leg1_shares as i32,
             pnl,
             won: pnl > Decimal::ZERO,
             holding_secs,
             exit_reason: reason.to_string(),
-            entry_p_hat: Some(pos.entry_p_hat),
+            entry_p_hat: Some(entry_p_hat),
             entry_ev_net: Some(pnl.to_f64().unwrap_or(0.0)),
-            entry_sigma: Some(pos.entry_sigma),
-            s0: Some(pos.s0),
+            entry_sigma: Some(entry_sigma),
+            s0: Some(s0),
         });
 
         debug!(
             "MERGE {} | leg1={:.4} leg2={:.4} sum={:.4} pnl={:.4}",
-            event_slug, pos.leg1_price, sim_result.fill_price, final_sum, pnl
+            event_slug, leg1_price, total_leg2_price, final_sum, pnl
         );
     }
 
@@ -1372,7 +1665,7 @@ impl StaggeredArbBacktestEngine {
         &mut self,
         symbol: &str,
         event_slug: &str,
-        _up_won: bool,
+        up_won: bool,
         ts: DateTime<Utc>,
     ) {
         // At settlement, force-complete any remaining Leg1 positions by buying Leg2.
@@ -1402,13 +1695,82 @@ impl StaggeredArbBacktestEngine {
                 Some(ask) => {
                     // Force buy Leg2 and merge — bounded loss
                     self.fill_leg2(idx, ask, "forced_settlement", ts);
+                    if idx < self.positions.len()
+                        && self.positions[idx].state == ArbPositionState::Leg1Filled
+                    {
+                        self.settle_position_with_outcome(idx, up_won, ts, "settlement");
+                    }
                 }
                 None => {
-                    // No quote data at all — last resort: abort (sell Leg1 at market)
-                    self.abort_position(idx, "no_quote_at_settlement", ts);
+                    self.settle_position_with_outcome(idx, up_won, ts, "settlement");
                 }
             }
         }
+    }
+
+    fn settle_position_with_outcome(
+        &mut self,
+        idx: usize,
+        up_won: bool,
+        ts: DateTime<Utc>,
+        reason: &str,
+    ) {
+        if idx >= self.positions.len() || self.positions[idx].state != ArbPositionState::Leg1Filled {
+            return;
+        }
+
+        let pos = &self.positions[idx];
+        let leg2_shares = pos.leg2_shares.unwrap_or(0);
+        let leg2_price = pos.leg2_price.unwrap_or(Decimal::ZERO);
+        let leg2_fee = pos.leg2_fee.unwrap_or(Decimal::ZERO);
+        let winner_matches_leg1 = matches!(pos.leg1_direction, Direction::Up) == up_won;
+        let payout = if winner_matches_leg1 {
+            Decimal::from(pos.leg1_shares)
+        } else {
+            Decimal::from(leg2_shares)
+        };
+        let total_cost = Decimal::from(pos.leg1_shares) * pos.leg1_price
+            + pos.leg1_fee
+            + Decimal::from(leg2_shares) * leg2_price
+            + leg2_fee;
+        self.equity += payout;
+        let pnl = payout - total_cost;
+        let holding_secs = (ts - pos.leg1_time).num_seconds();
+        let symbol = pos.symbol.clone();
+
+        let pos = &mut self.positions[idx];
+        pos.state = ArbPositionState::Settled;
+        pos.exit_reason = Some(reason.to_string());
+        pos.pnl = Some(pnl);
+
+        self.closed_trades.push(StaggeredArbClosedTrade {
+            symbol: symbol.clone(),
+            leg1_direction: format!("{}", pos.leg1_direction),
+            leg1_price: pos.leg1_price,
+            leg1_time: pos.leg1_time,
+            leg2_price: if leg2_shares > 0 { Some(leg2_price) } else { None },
+            leg2_time: pos.leg2_time,
+            shares: pos.leg1_shares,
+            pnl,
+            won: pnl > Decimal::ZERO,
+            holding_secs,
+            exit_reason: reason.to_string(),
+            initial_sum: pos.initial_sum,
+            final_sum: if leg2_shares > 0 {
+                Some(pos.leg1_price + leg2_price)
+            } else {
+                None
+            },
+            entry_p_hat: pos.entry_p_hat,
+            entry_sigma: pos.entry_sigma,
+            best_sum_seen: pos.best_sum_seen,
+            s0: pos.s0,
+            window_duration_secs: pos.window_duration_secs,
+            entry_delta: pos.entry_greeks.map(|g| g.delta),
+            entry_gamma: pos.entry_greeks.map(|g| g.gamma),
+            entry_theta: pos.entry_greeks.map(|g| g.theta),
+            entry_fair_value: pos.entry_greeks.map(|g| g.fair_value),
+        });
     }
 
     #[allow(dead_code)]
@@ -2037,7 +2399,8 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = StaggeredArbBacktestConfig::default();
-        assert_eq!(config.direction_threshold, 0.05);
+        assert_eq!(config.direction_threshold, 0.04);
+        assert_eq!(config.shares_per_trade, 20);
         assert_eq!(config.premium_sum_threshold, Decimal::ONE);
         assert_eq!(config.premium_sum_direction_slope, 1.25);
         assert_eq!(config.premium_sum_obi_slope, 0.25);
@@ -2059,6 +2422,31 @@ mod tests {
         assert_eq!(config.min_entry_sigma, 0.003);
         assert_eq!(config.max_entry_sigma, 0.0);
         assert_eq!(config.max_fair_value_distance, 0.15);
+    }
+
+    #[test]
+    fn test_config_from_toml_matches_checked_in_template() {
+        let config = StaggeredArbBacktestConfig::from_toml_str(include_str!(
+            "../../config/strategies/staggered_arb.toml"
+        ))
+        .unwrap();
+
+        assert_eq!(
+            config.symbols,
+            vec![
+                "BTCUSDT".to_string(),
+                "ETHUSDT".to_string(),
+                "SOLUSDT".to_string()
+            ]
+        );
+        assert_eq!(config.shares_per_trade, 20);
+        assert_eq!(config.direction_threshold, 0.04);
+        assert_eq!(config.max_initial_sum, Decimal::ZERO);
+        assert_eq!(config.max_leg1_price, dec!(0.58));
+        assert_eq!(config.entry_after_start_min_secs, 30);
+        assert_eq!(config.entry_after_start_max_secs, 0);
+        assert_eq!(config.force_complete_threshold, dec!(1.20));
+        assert_eq!(config.protective_close_threshold, dec!(1.20));
     }
 
     #[test]
@@ -2292,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_can_fallback_without_binance_l2_history() {
+    fn test_entry_requires_fresh_binance_l2_history() {
         let mut config = StaggeredArbBacktestConfig::default();
         config.direction_threshold = 0.0;
         config.use_greeks = false;
@@ -2324,8 +2712,8 @@ mod tests {
 
         assert_eq!(
             engine.positions.len(),
-            1,
-            "backtest should fall back to price/Greeks-only entry gates when no Binance L2 history exists for the replay window"
+            0,
+            "backtest should match live and reject entries when no fresh Binance L2 history exists for the replay window"
         );
     }
 
@@ -2419,6 +2807,154 @@ mod tests {
 
         assert_eq!(engine.closed_trades.len(), 1);
         assert_eq!(engine.closed_trades[0].exit_reason, "protective_stop_loss");
+    }
+
+    #[test]
+    fn test_fill_leg2_partial_keeps_position_open_until_remaining_shares_fill() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine.lob_depth.insert("BTCUSDT".into(), 100);
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 200,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(1.65),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(0.95),
+            initial_sum: dec!(0.95),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.fill_leg2(0, dec!(0.40), "merge", now);
+
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+        assert_eq!(engine.positions[0].leg2_shares, Some(100));
+        assert_eq!(engine.closed_trades.len(), 0);
+
+        engine.fill_leg2(0, dec!(0.39), "merge", now + chrono::Duration::seconds(15));
+
+        assert_eq!(engine.positions[0].state, ArbPositionState::Settled);
+        assert_eq!(engine.positions[0].leg2_shares, Some(200));
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(engine.closed_trades[0].shares, 200);
+    }
+
+    #[test]
+    fn test_resolve_positions_settles_residual_after_partial_leg2_fill() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine.lob_depth.insert("BTCUSDT".into(), 0);
+        engine.pm_asks_by_event.insert(
+            "test-event".into(),
+            (Some(dec!(0.60)), Some(dec!(0.40))),
+        );
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 200,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(1.65),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(0.95),
+            initial_sum: dec!(0.95),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: Some(Direction::Down),
+            leg2_price: Some(dec!(0.40)),
+            leg2_shares: Some(100),
+            leg2_time: Some(now - chrono::Duration::seconds(10)),
+            leg2_fee: Some(dec!(0.60)),
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.resolve_positions("BTCUSDT", "test-event", false, now);
+
+        assert_eq!(engine.positions[0].state, ArbPositionState::Settled);
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(
+            engine.closed_trades[0].pnl,
+            dec!(100) - (dec!(110) + dec!(1.65) + dec!(40) + dec!(0.60))
+        );
+    }
+
+    #[test]
+    fn test_entry_uses_simulated_fill_time_for_leg1_clock() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.direction_threshold = 0.0;
+        config.use_greeks = false;
+        config.entry_after_start_min_secs = 0;
+        config.max_initial_sum = dec!(1.20);
+        config.min_leg2_delay_secs = 0;
+        config.cooldown_secs = 0;
+        config.max_trades_per_event = 0;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+
+        let now = Utc::now();
+        let window = ActiveWindowInfo {
+            event_slug: "evt".into(),
+            s0: dec!(100),
+            end_time: now + chrono::Duration::seconds(280),
+            window_duration_secs: 300,
+        };
+        engine.active_events.insert("BTCUSDT".into(), vec![window.clone()]);
+        engine
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.55)), Some(dec!(0.45))));
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.02));
+        engine.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+
+        let expected_fill = engine
+            .execution_sim
+            .simulate_buy(dec!(0.55), now, engine.config.shares_per_trade, engine.market_depth("BTCUSDT"))
+            .fill_time;
+        let remaining_after_fill = (window.end_time - expected_fill).num_seconds() as f64;
+        let expected_wait = expected_fill
+            + chrono::Duration::seconds(
+                (engine.config.max_wait_secs as i64)
+                    .min((remaining_after_fill * engine.config.max_wait_pct) as i64),
+            );
+
+        engine.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &window,
+            dec!(101),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+
+        assert_eq!(engine.positions.len(), 1);
+        assert_eq!(engine.positions[0].leg1_time, expected_fill);
+        assert_eq!(engine.positions[0].wait_deadline, expected_wait);
     }
 
     #[test]

@@ -85,6 +85,9 @@
   - Clear in-flight markers after a partial close so the residual can retry cleanly.
   - Log `filled/target` progress on retries so live acceptance can prove the fix.
 
+- Pattern: A partially-hedged cycle can expire or settle before the venue sends the final `LEG2` callback; if expiry logic ignores already-filled hedge shares, replay/live PnL can be overstated or a late callback can close the same cycle twice.
+- Rule: Expiry / settlement paths must account for actual cumulative `LEG2` shares, price, and fees. After expiry settlement, retire all order tracking for that event and ignore later callbacks for positions that are no longer in `Leg1Filled`.
+
 - Pattern: A release workflow can partially deploy the new binary and still fail availability because installed but inactive services are not explicitly started.
 - Rule: Remote deploy steps must treat installed `ploy` services as start/restart targets, wait for `active`, and only then declare rollout success.
 
@@ -96,6 +99,9 @@
 
 - Pattern: Opening-window strategies can silently miss valid entries when evaluation is only triggered by quote callbacks and the venue does not emit a fresh quote inside the narrow entry window.
 - Rule: If a strategy has a short timing window, the live runtime must re-evaluate on periodic ticks using the latest cached market state, not only on event-driven quote deltas.
+
+- Pattern: Hard-cleaning a stale live order by simply deleting its tracking entry can reopen same-event entries or duplicate hedges while the venue still has a pending or recently-filled order.
+- Rule: For stale live orders, archive reconciliation metadata and keep same-event / same-position locks until a terminal callback or explicit event cleanup clears them.
 
 - Pattern: A directional `LEG1 -> LEG2` strategy needs two different price caps: one for generic forced cleanup and another for protective stop-loss merges. Reusing one threshold for both either disables stops or allows bad timeout fills.
 - Rule: Keep `force_complete_threshold` for timeout/time-safety/final-window cleanup, and use a separate `protective_close_threshold` for stop-loss / theta-driven capped-loss merges.
@@ -109,14 +115,17 @@
 - Pattern: Once the long-gamma entry band is reasonably tight, the next failure mode is still overpaying for entries just above parity without enough directional edge.
 - Rule: Treat `sum > 1.00` as premium inventory. Require stronger direction strength and stronger OBI confirmation as `sum` rises above parity, instead of only clipping with a hard `max_initial_sum`.
 
-- Pattern: Enforcing historical Binance L2 / OBI gates in replay without checking data coverage can make a healthy strategy look broken by collapsing valid windows to zero trades.
-- Rule: Before requiring replay-time OBI history, measure `binance_lob_ticks` coverage for the requested window. If fresh L2 history is absent, fall back to price/Greeks-only entry and log that fallback explicitly.
+- Pattern: Enforcing historical Binance L2 / OBI gates in replay without checking data coverage can make a healthy strategy look broken by collapsing a window to zero trades.
+- Rule: Before using a replay window as live evidence, measure `binance_lob_ticks` coverage for that window. If fresh L2 history is absent while live requires OBI, mark that window as non-parity / non-actionable instead of silently falling back to easier entry logic.
 
 - Pattern: Validating a replay parity gate on a window without overlapping PM replay and Binance L2 history gives a false negative and wastes time.
 - Rule: Use one window with current production replay behavior for regression checks, and a separate overlap window where PM replay plus `binance_lob_ticks` both exist to prove the new gate actually changes trade selection.
 
 - Pattern: Changing a strategy profile in the checked-in TOML is not enough if the live parser defaults and replay defaults still point at the old regime.
 - Rule: Whenever a strategy's intended defaults change, update all three layers together: checked-in TOML, `from_toml` parser fallbacks, and `BacktestConfig::default()`. Add a regression test for missing-field TOML parsing so old defaults cannot silently leak back in.
+
+- Pattern: Even if parser defaults are aligned, replay can still drift from live when the CLI constructs a config directly instead of loading the canonical strategy template.
+- Rule: For deployment decisions, the staggered-arb replay entrypoint must load `config/strategies/staggered_arb.toml` and only override explicit CLI-scoped inputs like symbols, capital, or one-off timing flags.
 
 - Pattern: When delayed-entry logic becomes part of the core profile, legacy tests can fail for timing reasons instead of the behavior they were supposed to cover.
 - Rule: Tests that are not explicitly about post-open observation delay must either set `entry_after_start_min_secs = 0` or choose timestamps safely past the minimum delay, so failures keep pointing at the intended gate.

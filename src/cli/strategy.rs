@@ -4098,8 +4098,18 @@ async fn run_backtest(
                 StaggeredArbBacktestConfig, StaggeredArbBacktestEngine,
             };
 
-            let mut config = StaggeredArbBacktestConfig::with_symbols(symbol_list.clone());
+            let config_path = PathBuf::from("config/strategies/staggered_arb.toml");
+            let config_content = fs::read_to_string(&config_path).with_context(|| {
+                format!(
+                    "Failed to read staggered-arb backtest config from {}",
+                    config_path.display()
+                )
+            })?;
+            let mut config = StaggeredArbBacktestConfig::from_toml_str(&config_content)?;
             config.initial_capital = initial_capital;
+            if !symbol_list.is_empty() {
+                config.symbols = symbol_list.clone();
+            }
             if let Some(v) = sa_entry_after_start_max_secs {
                 config.entry_after_start_max_secs = v;
             }

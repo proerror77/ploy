@@ -204,6 +204,8 @@ pub struct StaggeredArbAdapter {
     // ── Live order tracking (used when dry_run = false) ──
     /// client_order_id → order tracking info
     live_orders: HashMap<String, LiveOrderTrack>,
+    /// Stale orders moved out of active cancellation loops but still eligible for late reconciliation.
+    archived_live_orders: HashMap<String, LiveOrderTrack>,
     /// Events with in-flight Leg1 orders (prevents duplicate entries)
     pending_leg1_events: HashSet<String>,
     /// Position indices with in-flight Leg2 orders (prevents duplicate Leg2)
@@ -248,6 +250,7 @@ impl StaggeredArbAdapter {
             event_trade_counts: HashMap::new(),
             last_summary: None,
             live_orders: HashMap::new(),
+            archived_live_orders: HashMap::new(),
             pending_leg1_events: HashSet::new(),
             pending_leg2_positions: HashSet::new(),
             fixed_amount_usd: None,
@@ -279,211 +282,13 @@ impl StaggeredArbAdapter {
             toml::from_str(config_str).map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
 
         let empty = Value::Table(Default::default());
-        let entry = config.get("entry").unwrap_or(&empty);
-        let timing = config.get("timing").unwrap_or(&empty);
         let risk = config.get("risk").unwrap_or(&empty);
-        let model = config.get("model").unwrap_or(&empty);
-        let filter = config.get("filter").unwrap_or(&empty);
+        let entry = config.get("entry").unwrap_or(&empty);
         let markets = config.get("markets").unwrap_or(&empty);
-
-        let symbols: Vec<String> = entry
-            .get("symbols")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["BTCUSDT".into(), "ETHUSDT".into()]);
-
-        let bc = StaggeredArbBacktestConfig {
-            symbols,
-            initial_capital: Decimal::try_from(
-                entry
-                    .get("initial_capital")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(10000.0),
-            )
-            .unwrap_or(dec!(10000)),
-            shares_per_trade: entry
-                .get("shares_per_trade")
-                .and_then(|v| v.as_integer().or_else(|| v.as_float().map(|f| f as i64)))
-                .unwrap_or(20) as u64,
-            max_concurrent_positions: entry
-                .get("max_concurrent")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as usize,
-            direction_threshold: entry
-                .get("direction_threshold")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.05),
-            premium_sum_threshold: Decimal::try_from(
-                entry
-                    .get("premium_sum_threshold")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(1.0),
-            )
-            .unwrap_or(Decimal::ONE),
-            premium_sum_direction_slope: entry
-                .get("premium_sum_direction_slope")
-                .and_then(|v| v.as_float())
-                .unwrap_or(1.25),
-            premium_sum_obi_slope: entry
-                .get("premium_sum_obi_slope")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.25),
-            reverse_signal: entry
-                .get("reverse_signal")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            max_initial_sum: Decimal::try_from(
-                entry
-                    .get("max_initial_sum")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.0),
-            )
-            .unwrap_or(Decimal::ZERO),
-            max_leg1_price: Decimal::try_from(
-                entry
-                    .get("max_leg1_price")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.58),
-            )
-            .unwrap_or(dec!(0.58)),
-            merge_target_sum: Decimal::try_from(
-                entry
-                    .get("merge_target_sum")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.95),
-            )
-            .unwrap_or(dec!(0.95)),
-            min_profit_target: Decimal::try_from(
-                entry
-                    .get("min_profit_target")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.02),
-            )
-            .unwrap_or(dec!(0.02)),
-            max_wait_secs: timing
-                .get("max_wait_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(120) as u64,
-            entry_after_start_min_secs: timing
-                .get("entry_after_start_min_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(30) as u64,
-            entry_after_start_max_secs: timing
-                .get("entry_after_start_max_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as u64,
-            no_trade_last_secs: timing
-                .get("no_trade_last_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(30) as u64,
-            max_wait_pct: timing
-                .get("max_wait_pct")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.30),
-            min_time_remaining_secs: timing
-                .get("min_time_remaining")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(45) as u64,
-            max_leg1_loss: Decimal::try_from(
-                risk.get("max_leg1_loss")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.05),
-            )
-            .unwrap_or(dec!(0.05)),
-            force_complete_threshold: Decimal::try_from(
-                risk.get("force_complete_threshold")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(1.20),
-            )
-            .unwrap_or(dec!(1.20)),
-            protective_close_threshold: Decimal::try_from(
-                risk.get("protective_close_threshold")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(1.20),
-            )
-            .unwrap_or(dec!(1.20)),
-            min_ask_price: Decimal::try_from(
-                entry
-                    .get("min_ask_price")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.05),
-            )
-            .unwrap_or(dec!(0.05)),
-            min_entry_sum: Decimal::try_from(
-                entry
-                    .get("min_entry_sum")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.30),
-            )
-            .unwrap_or(dec!(0.30)),
-            allowed_window_durations: filter
-                .get("allowed_windows")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_integer().map(|i| i as u64))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![300, 900]),
-            window_duration_tolerance: filter
-                .get("window_tolerance")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(30) as u64,
-            min_leg2_delay_secs: timing
-                .get("min_leg2_delay_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(3) as u64,
-            max_trades_per_event: timing
-                .get("max_trades_per_event")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as usize,
-            mu: model.get("mu").and_then(|v| v.as_float()).unwrap_or(0.0),
-            vol_lookback_secs: model
-                .get("vol_lookback_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(600) as u64,
-            vol_floor: model
-                .get("vol_floor")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.003),
-            min_entry_sigma: model
-                .get("min_entry_sigma")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.003),
-            max_entry_sigma: model
-                .get("max_entry_sigma")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.0),
-            cooldown_secs: timing
-                .get("cooldown_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(5) as u64,
-            // Greeks integration — read from TOML [model] section
-            use_greeks: model
-                .get("use_greeks")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            min_gamma: model
-                .get("min_gamma")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.0),
-            max_theta_cost: model
-                .get("max_theta_cost")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.0),
-            max_fair_value_distance: model
-                .get("max_fair_value_distance")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.15),
-            delta_weighted_sizing: model
-                .get("delta_weighted_sizing")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        };
+        let bc = StaggeredArbBacktestConfig::from_toml_str_with_default_symbols(
+            config_str,
+            vec!["BTCUSDT".into(), "ETHUSDT".into()],
+        )?;
 
         let fee_rate = Decimal::try_from(
             entry
@@ -669,6 +474,52 @@ impl StaggeredArbAdapter {
                 cumulative_filled_qty.min(track.shares).max(track.acknowledged_filled_qty);
             if let Some(idx) = position_idx {
                 track.position_idx = Some(idx);
+            }
+        } else if let Some(track) = self.archived_live_orders.get_mut(client_id) {
+            track.acknowledged_filled_qty =
+                cumulative_filled_qty.min(track.shares).max(track.acknowledged_filled_qty);
+            if let Some(idx) = position_idx {
+                track.position_idx = Some(idx);
+            }
+        }
+    }
+
+    fn remove_order_tracking(&mut self, client_id: &str) -> Option<LiveOrderTrack> {
+        self.live_orders
+            .remove(client_id)
+            .or_else(|| self.archived_live_orders.remove(client_id))
+    }
+
+    fn clear_order_tracking_for_event(&mut self, event_id: &str) {
+        let live_ids: Vec<String> = self
+            .live_orders
+            .iter()
+            .filter(|(_, track)| track.event_id == event_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for client_id in live_ids {
+            if let Some(track) = self.live_orders.remove(&client_id) {
+                if track.leg == 1 {
+                    self.pending_leg1_events.remove(&track.event_id);
+                } else if let Some(idx) = track.position_idx {
+                    self.pending_leg2_positions.remove(&idx);
+                }
+            }
+        }
+
+        let archived_ids: Vec<String> = self
+            .archived_live_orders
+            .iter()
+            .filter(|(_, track)| track.event_id == event_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for client_id in archived_ids {
+            if let Some(track) = self.archived_live_orders.remove(&client_id) {
+                if track.leg == 1 {
+                    self.pending_leg1_events.remove(&track.event_id);
+                } else if let Some(idx) = track.position_idx {
+                    self.pending_leg2_positions.remove(&idx);
+                }
             }
         }
     }
@@ -867,11 +718,13 @@ impl StaggeredArbAdapter {
         to_settle.sort_by(|a, b| b.cmp(a));
 
         for idx in to_settle {
-            self.settle_single_leg_position(idx, up_won, settle_spot, ts, actions);
+            self.settle_expired_position(idx, up_won, settle_spot, ts, actions);
         }
+
+        self.clear_order_tracking_for_event(&window.event_id);
     }
 
-    fn settle_single_leg_position(
+    fn settle_expired_position(
         &mut self,
         idx: usize,
         up_won: bool,
@@ -891,10 +744,13 @@ impl StaggeredArbAdapter {
             leg1_shares,
             leg1_fee,
             leg1_time,
-            won,
+            leg2_price,
+            leg2_shares,
+            leg2_fee,
+            winner_matches_leg1,
         ) = {
             let pos = &self.positions[idx];
-            let won = matches!(pos.leg1_direction, Direction::Up) == up_won;
+            let winner_matches_leg1 = matches!(pos.leg1_direction, Direction::Up) == up_won;
             (
                 pos.symbol.clone(),
                 pos.event_id.clone(),
@@ -903,29 +759,36 @@ impl StaggeredArbAdapter {
                 pos.leg1_shares,
                 pos.leg1_fee,
                 pos.leg1_time,
-                won,
+                pos.leg2_price.unwrap_or(Decimal::ZERO),
+                pos.leg2_shares.unwrap_or(0),
+                pos.leg2_fee.unwrap_or(Decimal::ZERO),
+                winner_matches_leg1,
             )
         };
 
-        let payout = if won {
+        let payout = if winner_matches_leg1 {
             Decimal::from(leg1_shares)
         } else {
-            Decimal::ZERO
+            Decimal::from(leg2_shares)
         };
-        let total_cost = Decimal::from(leg1_shares) * leg1_price + leg1_fee;
+        let total_cost = Decimal::from(leg1_shares) * leg1_price
+            + leg1_fee
+            + Decimal::from(leg2_shares) * leg2_price
+            + leg2_fee;
         let pnl = payout - total_cost;
         let duration_secs = (ts - leg1_time).num_seconds();
 
+        self.pending_leg2_positions.remove(&idx);
         let pos = &mut self.positions[idx];
         pos.state = PaperPositionState::Settled;
-        pos.leg2_time = Some(ts);
+        pos.leg2_time = Some(pos.leg2_time.unwrap_or(ts));
 
         self.closed_trades.push(PaperTrade {
             symbol: symbol.clone(),
             event_id,
             direction,
             leg1_price,
-            leg2_price: Decimal::ZERO,
+            leg2_price,
             total_cost,
             payout,
             pnl,
@@ -936,24 +799,28 @@ impl StaggeredArbAdapter {
         });
 
         info!(
-            "[STAG-ARB] SETTLED {} spot={} payout=${:.4} pnl={}{:.4} wait={}s",
+            "[STAG-ARB] SETTLED {} spot={} payout=${:.4} pnl={}{:.4} wait={}s hedge={}/{}",
             symbol,
             settle_spot,
             payout,
             if pnl >= Decimal::ZERO { "+" } else { "" },
             pnl,
             duration_secs,
+            leg2_shares,
+            leg1_shares,
         );
         actions.push(StrategyAction::LogEvent {
             event: StrategyEvent::new(
                 StrategyEventType::CycleCompleted,
                 format!(
-                    "[STAG-ARB] SETTLED {} payout=${:.4} pnl={}{:.4} wait={}s",
+                    "[STAG-ARB] SETTLED {} payout=${:.4} pnl={}{:.4} wait={}s hedge={}/{}",
                     symbol,
                     payout,
                     if pnl >= Decimal::ZERO { "+" } else { "" },
                     pnl,
-                    duration_secs
+                    duration_secs,
+                    leg2_shares,
+                    leg1_shares,
                 ),
             ),
         });
@@ -2389,6 +2256,7 @@ impl Strategy for StaggeredArbAdapter {
                 match self
                     .live_orders
                     .iter()
+                    .chain(self.archived_live_orders.iter())
                     .find(|(_, t)| t.exchange_order_id.as_deref() == Some(&update.order_id))
                     .map(|(k, _)| k.clone())
                 {
@@ -2403,9 +2271,17 @@ impl Strategy for StaggeredArbAdapter {
             if track.exchange_order_id.is_none() && !update.order_id.is_empty() {
                 track.exchange_order_id = Some(update.order_id.clone());
             }
+        } else if let Some(track) = self.archived_live_orders.get_mut(&client_id) {
+            if track.exchange_order_id.is_none() && !update.order_id.is_empty() {
+                track.exchange_order_id = Some(update.order_id.clone());
+            }
         }
 
-        let track = match self.live_orders.get(&client_id) {
+        let track = match self
+            .live_orders
+            .get(&client_id)
+            .or_else(|| self.archived_live_orders.get(&client_id))
+        {
             Some(t) => t.clone(),
             None => return Ok(Vec::new()),
         };
@@ -2429,6 +2305,10 @@ impl Strategy for StaggeredArbAdapter {
                         self.pending_leg2_positions.remove(&idx);
 
                         if idx < self.positions.len() {
+                            if self.positions[idx].state != PaperPositionState::Leg1Filled {
+                                self.remove_order_tracking(&client_id);
+                                return Ok(actions);
+                            }
                             let close_reason =
                                 track.close_reason.as_deref().unwrap_or("merge").to_string();
                             let total_filled = if filled_delta > 0 {
@@ -2461,7 +2341,7 @@ impl Strategy for StaggeredArbAdapter {
                     }
                 }
 
-                self.live_orders.remove(&client_id);
+                self.remove_order_tracking(&client_id);
             }
 
             OrderStatus::Cancelled | OrderStatus::Failed => {
@@ -2545,6 +2425,12 @@ impl Strategy for StaggeredArbAdapter {
                     }
                 } else if let Some(idx) = position_idx {
                     self.pending_leg2_positions.remove(&idx);
+                    if idx < self.positions.len()
+                        && self.positions[idx].state != PaperPositionState::Leg1Filled
+                    {
+                        self.remove_order_tracking(&client_id);
+                        return Ok(actions);
+                    }
                     if filled_delta > 0 {
                         let total_filled =
                             self.record_leg2_fill(idx, filled_delta, fill_price, ts);
@@ -2592,7 +2478,7 @@ impl Strategy for StaggeredArbAdapter {
                         ),
                     });
                 }
-                self.live_orders.remove(&client_id);
+                self.remove_order_tracking(&client_id);
             }
 
             OrderStatus::PartiallyFilled => {
@@ -2632,6 +2518,12 @@ impl Strategy for StaggeredArbAdapter {
                         }
                     }
                 } else if let Some(idx) = track.position_idx {
+                    if idx < self.positions.len()
+                        && self.positions[idx].state != PaperPositionState::Leg1Filled
+                    {
+                        self.remove_order_tracking(&client_id);
+                        return Ok(actions);
+                    }
                     if filled_delta > 0 {
                         let total_filled =
                             self.record_leg2_fill(idx, filled_delta, fill_price, ts);
@@ -2732,7 +2624,10 @@ impl Strategy for StaggeredArbAdapter {
             }
         }
 
-        // Phase 2: hard cleanup — cancel was sent but no callback after 90s total
+        // Phase 2: move orphaned orders out of the active cancellation loop, but keep
+        // reconciliation metadata and event/position locks intact. Clearing the locks here
+        // can reopen the same event or submit duplicate hedges while the venue still has a
+        // live or recently-filled order we have not heard back about yet.
         let orphan_ids: Vec<String> = self
             .live_orders
             .iter()
@@ -2745,17 +2640,13 @@ impl Strategy for StaggeredArbAdapter {
         for client_id in orphan_ids {
             if let Some(track) = self.live_orders.remove(&client_id) {
                 warn!(
-                    "[STAG-ARB] ORPHAN ORDER HARD CLEANUP leg={} {} {} age={}s — no callback received",
+                    "[STAG-ARB] ORPHAN ORDER ARCHIVE leg={} {} {} age={}s — no callback received, keeping lock for reconciliation",
                     track.leg,
                     track.symbol,
                     track.event_id,
                     (now - track.submitted_at).num_seconds(),
                 );
-                if track.leg == 1 {
-                    self.pending_leg1_events.remove(&track.event_id);
-                } else if let Some(idx) = track.position_idx {
-                    self.pending_leg2_positions.remove(&idx);
-                }
+                self.archived_live_orders.insert(client_id, track);
             }
         }
 
@@ -3838,6 +3729,86 @@ min_balance_usd = 9.0
         assert_eq!(adapter.closed_trades[0].payout, dec!(10));
     }
 
+    #[tokio::test]
+    async fn test_event_expired_settles_partial_leg2_without_double_close() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), false);
+        let now = Utc::now();
+        adapter
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(99), None, now));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now,
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.0825),
+            leg1_time: now - chrono::Duration::seconds(60),
+            wait_deadline: now - chrono::Duration::seconds(1),
+            leg2_price: Some(dec!(0.40)),
+            leg2_shares: Some(4),
+            leg2_fee: Some(dec!(0.024)),
+            leg2_time: Some(now - chrono::Duration::seconds(5)),
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let client_id = "cid-expiry-leg2".to_string();
+        let mut track = sample_leg2_track(now - chrono::Duration::seconds(10), 6, 0);
+        track.event_id = "evt".to_string();
+        track.symbol = "BTCUSDT".to_string();
+        adapter.live_orders.insert(client_id.clone(), track);
+        adapter.pending_leg2_positions.insert(0);
+
+        let _actions = adapter
+            .on_market_update(&MarketUpdate::EventExpired {
+                event_id: "evt".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(adapter.closed_trades.len(), 1);
+        assert_eq!(adapter.positions[0].state, PaperPositionState::Settled);
+        assert_eq!(adapter.closed_trades[0].payout, dec!(4));
+        assert!(
+            !adapter.pending_leg2_positions.contains(&0),
+            "expiry settlement should clear pending leg2 markers for the event"
+        );
+        assert!(
+            !adapter.live_orders.contains_key(&client_id),
+            "expiry settlement should retire outstanding leg2 tracking for the event"
+        );
+
+        let late_update = OrderUpdate {
+            order_id: "0xleg2fill".to_string(),
+            client_order_id: Some(client_id),
+            status: OrderStatus::Filled,
+            filled_qty: 6,
+            avg_fill_price: Some(dec!(0.39)),
+            timestamp: now + chrono::Duration::seconds(1),
+            error: None,
+        };
+        let late_actions = adapter.on_order_update(&late_update).await.unwrap();
+
+        assert!(late_actions.is_empty());
+        assert_eq!(adapter.closed_trades.len(), 1, "late leg2 updates after settlement must not close the same cycle twice");
+    }
+
     #[test]
     fn test_live_leg2_uses_position_tokens_even_without_active_window() {
         let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), false);
@@ -4092,6 +4063,55 @@ min_balance_usd = 9.0
         assert!(
             adapter.pending_leg2_positions.contains(&0),
             "leg2 should remain marked in-flight until the terminal update arrives"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_orphan_leg1_cleanup_keeps_lock_and_allows_late_reconciliation() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), false);
+        let now = Utc::now();
+        let client_id = "cid-orphan-leg1".to_string();
+        let mut track = sample_leg1_track(now - chrono::Duration::seconds(100));
+        track.cancel_requested_at = Some(now - chrono::Duration::seconds(70));
+        adapter.live_orders.insert(client_id.clone(), track);
+        adapter.pending_leg1_events.insert("evt-1".to_string());
+
+        let _actions = adapter.on_tick(now).await.unwrap();
+
+        assert!(
+            !adapter.live_orders.contains_key(&client_id),
+            "hard cleanup should move the stale order out of active tracking"
+        );
+        assert!(
+            adapter.archived_live_orders.contains_key(&client_id),
+            "stale order should stay archived for later reconciliation"
+        );
+        assert!(
+            adapter.pending_leg1_events.contains("evt-1"),
+            "same-event lock must remain until reconciliation or expiry"
+        );
+
+        let update = OrderUpdate {
+            order_id: "0xabc".to_string(),
+            client_order_id: Some(client_id.clone()),
+            status: OrderStatus::Filled,
+            filled_qty: 7,
+            avg_fill_price: Some(dec!(0.52)),
+            timestamp: now,
+            error: None,
+        };
+
+        let _actions = adapter.on_order_update(&update).await.unwrap();
+
+        assert_eq!(adapter.positions.len(), 1, "late fill should still reconcile into a real position");
+        assert_eq!(adapter.positions[0].leg1_shares, 7);
+        assert!(
+            !adapter.pending_leg1_events.contains("evt-1"),
+            "late reconciliation should finally release the event lock"
+        );
+        assert!(
+            !adapter.archived_live_orders.contains_key(&client_id),
+            "terminal reconciliation should retire the archived track"
         );
     }
 
