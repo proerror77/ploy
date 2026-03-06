@@ -26,7 +26,7 @@ use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{
-    Coordinator, CoordinatorCommand, CoordinatorConfig, CoordinatorHandle, GlobalState,
+    Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState,
 };
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
@@ -5090,37 +5090,6 @@ async fn handle_strategy_actions_runtime(
     }
 }
 
-async fn run_managed_strategy_runtime(
-    strategy_label: &str,
-    agent_id: &str,
-    domain: Domain,
-    strategy_config_toml: String,
-    dry_run: bool,
-    pm_client: PolymarketClient,
-    pm_ws_url: String,
-    data_plane: Option<Arc<PlatformDataPlane>>,
-    observability_pool: Option<PgPool>,
-    observability_account_id: String,
-    cmd_rx: mpsc::Receiver<CoordinatorCommand>,
-    shutdown_rx: broadcast::Receiver<()>,
-) -> Result<()> {
-    run_managed_strategy_runtime_module(ManagedStrategyRuntimeConfig {
-        strategy_label: strategy_label.to_string(),
-        agent_id: agent_id.to_string(),
-        domain,
-        strategy_config_toml,
-        dry_run,
-        pm_client,
-        pm_ws_url,
-        data_plane,
-        observability_pool,
-        observability_account_id,
-        cmd_rx,
-        shutdown_rx,
-    })
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 fn spawn_managed_strategy_runtime_task(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
@@ -5143,9 +5112,9 @@ fn spawn_managed_strategy_runtime_task(
     let strategy_agent_id_for_runtime = agent_id.clone();
 
     let jh = tokio::spawn(async move {
-        if let Err(e) = run_managed_strategy_runtime(
-            strategy_label,
-            &strategy_agent_id_for_runtime,
+        if let Err(e) = run_managed_strategy_runtime_module(ManagedStrategyRuntimeConfig {
+            strategy_label: strategy_label.to_string(),
+            agent_id: strategy_agent_id_for_runtime,
             domain,
             strategy_config_toml,
             dry_run,
@@ -5154,9 +5123,9 @@ fn spawn_managed_strategy_runtime_task(
             data_plane,
             observability_pool,
             observability_account_id,
-            strategy_cmd_rx,
-            strategy_shutdown_rx,
-        )
+            cmd_rx: strategy_cmd_rx,
+            shutdown_rx: strategy_shutdown_rx,
+        })
         .await
         {
             error!(

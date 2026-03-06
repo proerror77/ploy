@@ -643,6 +643,29 @@ Remove the last hand-written `TradingAgent` startup template from `bootstrap.rs`
 
 ---
 
+# Layered Live Runtime Task 9E: Remove Bootstrap Runtime Wrapper (2026-03-06)
+
+## Goal
+Drop the extra `bootstrap.rs` wrapper around `run_managed_strategy_runtime_module(...)` so bootstrap constructs `ManagedStrategyRuntimeConfig` directly and stays one layer thinner.
+
+## Tasks
+
+- [x] Delete the local `run_managed_strategy_runtime(...)` wrapper from `src/coordinator/bootstrap.rs`.
+- [x] Update `spawn_managed_strategy_runtime_task(...)` to call `run_managed_strategy_runtime_module(...)` with `ManagedStrategyRuntimeConfig` directly.
+- [x] Remove any now-unused imports introduced by deleting the wrapper.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `bootstrap.rs` no longer contains an unnecessary async pass-through around the strategy-runtime module.
+- [x] This slice does not change runtime behavior; it only reduces one more layer of bootstrap indirection.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
