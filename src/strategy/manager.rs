@@ -481,6 +481,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strat))
             }
+            "nba_comeback" => {
+                let strat = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
+            }
             "staggered_arb" | "gamma_scalping" => {
                 let adapter = super::staggered_arb_live::StaggeredArbAdapter::from_toml(
                     strategy_id,
@@ -516,6 +524,11 @@ impl StrategyFactory {
                 description: "External-data event mispricing scanner for politics/event markets"
                     .to_string(),
                 config_template: "event_edge.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "nba_comeback".to_string(),
+                description: "Q3-to-Q4 NBA comeback scanner on sports markets".to_string(),
+                config_template: "nba_comeback.toml".to_string(),
             },
             StrategyInfo {
                 name: "staggered_arb".to_string(),
@@ -663,6 +676,7 @@ mod tests {
         assert!(!strategies.is_empty());
         assert!(strategies.iter().any(|s| s.name == "momentum"));
         assert!(strategies.iter().any(|s| s.name == "event_edge"));
+        assert!(strategies.iter().any(|s| s.name == "nba_comeback"));
     }
 
     #[tokio::test]

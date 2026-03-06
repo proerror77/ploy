@@ -421,6 +421,33 @@ Move the politics/event-edge live path onto the canonical managed strategy runti
   - `cargo test strategy::event_edge --lib -- --nocapture`
   - `cargo test coordinator::bootstrap --lib -- --nocapture`
   - `cargo test strategy::manager --lib -- --nocapture`
+
+---
+
+# Layered Live Runtime Task 7B: Canonical NBA Comeback Strategy Bridge (2026-03-06)
+
+## Goal
+Add the first canonical `nba_comeback` strategy wrapper so NBA logic can enter the `Strategy` plane before the larger sports bootstrap/runtime migration.
+
+## Tasks
+
+- [x] Add `src/strategy/nba_comeback/strategy.rs` as a canonical `Strategy` wrapper around `NbaComebackCore`.
+- [x] Expose the wrapper through `src/strategy/nba_comeback/mod.rs`.
+- [x] Register `nba_comeback` in `StrategyFactory` and list it in `available_strategies()`.
+- [x] Keep sports bootstrap on the legacy agent path for now; do not mix the wrapper cut with the larger ESPN/PM sports runtime migration.
+- [x] Add focused tests for TOML parsing, trailing-market resolution, and filled-order position tracking.
+- [x] Run focused validation and capture the results.
+- [ ] Switch sports live bootstrap from `SportsTradingAgent` to the canonical managed strategy runtime.
+
+## Review
+
+- [x] `nba_comeback` now has a canonical `Strategy`-plane wrapper that produces normalized `SubmitOrder` actions.
+- [x] The wrapper currently covers deterministic ESPN + PolymarketSports entry logic and execution callbacks; it intentionally does not absorb the legacy sports agent's DB persistence, Grok, or collector responsibilities yet.
+- [x] The sports bootstrap path remains unchanged in this slice to avoid mixing the bridge with a higher-risk live-runtime cut.
+- [x] Focused validation passed:
+  - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
+  - `cargo test strategy::manager --lib -- --nocapture`
+  - `cargo check --lib`
 - [x] Validation still shows only the same pre-existing unrelated warnings in `liquidity_vacuum_backtest.rs` and `garch_probability_backtest.rs`.
 
 ---
