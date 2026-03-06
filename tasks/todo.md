@@ -409,14 +409,15 @@ Move the politics/event-edge live path onto the canonical managed strategy runti
 - [x] Replace the politics bootstrap branch that spawned `PoliticsTradingAgent` with managed strategy runtime startup.
 - [x] Add focused tests for `event_edge` TOML parsing, decision normalization, and filled-order state updates.
 - [x] Run focused validation and capture the results.
-- [ ] Migrate `nba_comeback` / sports live runtime onto the same canonical path.
-- [ ] Commit the full Task 7 migration once sports/NBA is moved as well.
+- [x] Migrate `nba_comeback` / sports live runtime onto the same canonical path.
+- [x] Commit the full Task 7 migration once sports/NBA is moved as well.
 
 ## Review
 
 - [x] `event_edge` can now run through the canonical `Strategy` contract with a tick-driven scan loop.
 - [x] Politics bootstrap now assembles a managed-runtime config instead of spawning `PoliticsTradingAgent`.
 - [x] This slice intentionally leaves NBA/sports migration for the next atomic cut because that path still owns ESPN/PolymarketSports/Grok observation logic not yet bridged into the strategy plane.
+- [x] Follow-up slices completed the sports migration: `nba_comeback` now defaults to the canonical managed runtime, while the Grok-enabled legacy sports runtime remains as an explicit compatibility-only fallback behind `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true`.
 - [x] Focused validation passed:
   - `cargo test strategy::event_edge --lib -- --nocapture`
   - `cargo test coordinator::bootstrap --lib -- --nocapture`
@@ -437,13 +438,13 @@ Add the first canonical `nba_comeback` strategy wrapper so NBA logic can enter t
 - [x] Keep sports bootstrap on the legacy agent path for now; do not mix the wrapper cut with the larger ESPN/PM sports runtime migration.
 - [x] Add focused tests for TOML parsing, trailing-market resolution, and filled-order position tracking.
 - [x] Run focused validation and capture the results.
-- [ ] Switch sports live bootstrap from `SportsTradingAgent` to the canonical managed strategy runtime.
+- [x] Switch sports live bootstrap from `SportsTradingAgent` to the canonical managed strategy runtime.
 
 ## Review
 
 - [x] `nba_comeback` now has a canonical `Strategy`-plane wrapper that produces normalized `SubmitOrder` actions.
 - [x] The wrapper currently covers deterministic ESPN + PolymarketSports entry logic and execution callbacks; it intentionally does not absorb the legacy sports agent's DB persistence, Grok, or collector responsibilities yet.
-- [x] The sports bootstrap path remains unchanged in this slice to avoid mixing the bridge with a higher-risk live-runtime cut.
+- [x] The later live-runtime cut moved the default sports bootstrap path to the canonical managed strategy runtime and kept the Grok-enabled legacy agent path as an explicit compatibility fallback only.
 - [x] Focused validation passed:
   - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
   - `cargo test strategy::manager --lib -- --nocapture`

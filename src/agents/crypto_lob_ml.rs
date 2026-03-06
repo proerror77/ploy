@@ -1,11 +1,16 @@
-//! CryptoLobMlAgent — pull-based agent that uses Binance LOB features to estimate
-//! a short-horizon UP probability across crypto 5m/15m markets and trade Polymarket
-//! UP/DOWN markets accordingly.
+//! CryptoLobMlAgent — pull-based compatibility runtime that uses Binance LOB
+//! features to estimate a short-horizon UP probability across crypto 5m/15m
+//! markets and trade Polymarket UP/DOWN markets accordingly.
 //!
 //! This is intentionally lightweight: it provides a deployable baseline for
 //! collecting training data and running a probabilistic strategy *without*
 //! requiring the optional `rl` feature gate. RL integration can replace the
 //! `estimate_p_up()` function later.
+//!
+//! It is no longer part of the default live startup surface. Startup now
+//! requires `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true` and exists only as a
+//! compatibility path while the canonical strategy runtime continues to absorb
+//! legacy crypto agents.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

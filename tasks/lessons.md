@@ -90,3 +90,12 @@
 
 - Pattern: A live trading template can drift from the operator's intended strategy style even when the code path is unchanged, especially when timing gates are disabled and sum caps are tuned for a different regime.
 - Rule: When a user describes intended entry behavior ("opening-window directional leg1" vs "strict sum-based arb"), verify both the checked-in TOML and the strategy defaults before diagnosing production inactivity.
+
+## 2026-03-07
+
+- Pattern: A manual file edit was attempted by shelling out to `apply_patch` through `exec_command`, and the user explicitly flagged that tool path as incorrect.
+- Rule: When changing tracked files, always call the `apply_patch` tool directly instead of wrapping patch application in `exec_command`.
+- Tooling checklist:
+  - Use `exec_command` for reads, validation, git, and shell-native tasks only.
+  - Use `apply_patch` for every manual tracked-file edit.
+  - Split read/validate steps from edit steps instead of combining them in one shell command.

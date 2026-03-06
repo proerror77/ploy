@@ -1,10 +1,16 @@
-//! CryptoRlPolicyAgent — pull-based RL policy agent for crypto UP/DOWN markets
+//! CryptoRlPolicyAgent — pull-based compatibility RL runtime for crypto
+//! UP/DOWN markets.
 //!
 //! This agent is designed for 24/7 deployment:
 //! - Pull-based loop with fixed decision cadence
 //! - Uses Binance LOB (depth) features + Polymarket quotes
 //! - Runs an ONNX policy model (preferred) to output actions:
 //!   buy/sell/hold + position size
+//!
+//! It is no longer part of the default live startup surface. Startup now
+//! requires `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true` and exists only as a
+//! compatibility path until the canonical managed strategy runtime fully
+//! subsumes this workflow.
 //!
 //! ## Observation Schema (v1)
 //! The default observation vector length is 25 and is intentionally stable.

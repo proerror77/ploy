@@ -1,7 +1,11 @@
-//! SportsTradingAgent — pull-based agent for NBA comeback strategy
+//! SportsTradingAgent — pull-based compatibility runtime for NBA comeback strategy.
 //!
-//! Polls ESPN on a 30s interval, runs NbaComebackCore logic,
-//! and submits OrderIntents via the coordinator.
+//! The canonical live path for `nba_comeback` is the managed `Strategy` runtime.
+//! This module remains only as an opt-in compatibility fallback for Grok-enabled
+//! deployments behind `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true`.
+//!
+//! When enabled, it polls ESPN on a 30s interval, runs `NbaComebackCore` logic,
+//! and submits `OrderIntent`s via the coordinator.
 
 use async_trait::async_trait;
 use chrono::Utc;
