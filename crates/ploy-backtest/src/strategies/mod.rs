@@ -5,6 +5,7 @@
 
 pub mod directional;
 pub mod momentum;
+pub mod staggered_arb;
 
 pub use directional::{
     adjust_fair_value_for_price_to_beat, build_results as build_directional_results,
@@ -14,4 +15,8 @@ pub use directional::{
 pub use momentum::{
     build_results as build_momentum_results, calculate_sharpe as calculate_momentum_sharpe,
     MomentumClosedTrade,
+};
+pub use staggered_arb::{
+    build_results as build_staggered_arb_results,
+    calculate_sharpe as calculate_staggered_arb_sharpe, StaggeredArbClosedTrade,
 };
