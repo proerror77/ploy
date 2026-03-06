@@ -307,6 +307,25 @@
   - `cargo test strategy::momentum_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 momentum backtest engine split)
+
+- [x] Move `MomentumBacktestEngine` and its private position-tracking helpers into `src/strategy/momentum_backtest/engine.rs`
+- [x] Keep `crate::strategy::momentum_backtest::*` stable via `mod.rs` re-export
+- [x] Leave tests at the module root so external call paths remain the exercised surface
+- [x] Re-run build plus focused momentum-backtest validation
+
+## Review (2026-03-06, momentum backtest engine split)
+
+- Delivered in this slice:
+  - Moved the runtime-heavy engine body from [`src/strategy/momentum_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest/mod.rs) into [`src/strategy/momentum_backtest/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest/engine.rs).
+  - Reduced `mod.rs` to module wiring, public re-exports, and the focused root-level tests.
+  - Kept the public import surface unchanged for callers such as [`src/cli/strategy/backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy/backtest.rs).
+- Validation executed:
+  - `cargo test strategy::momentum_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
