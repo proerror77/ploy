@@ -1,4 +1,9 @@
-//! Core traits for the Order Platform
+//! Core traits for the Order Platform.
+//!
+//! `DomainAgent` remains here as a transitional compatibility surface while the
+//! repo converges on one canonical live strategy runtime. New live strategies
+//! must not be added on this path; they should implement
+//! `crate::strategy::traits::Strategy` instead.
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -116,6 +121,11 @@ impl AgentRiskParams {
 /// - 接收並處理領域事件
 /// - 產生下單意圖
 /// - 處理執行結果回調
+///
+/// Transitional status:
+/// This trait is being retired as a first-class live strategy entry point.
+/// New live strategy work must go through the canonical Strategy Plane
+/// contract and coordinator-managed runtime path.
 #[async_trait]
 pub trait DomainAgent: Send + Sync {
     /// Agent 唯一 ID

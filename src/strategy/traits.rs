@@ -1,6 +1,12 @@
-//! Core strategy traits and types
+//! Core strategy traits and types.
 //!
-//! Defines the common interface that all trading strategies must implement.
+//! This module is the canonical Strategy Plane contract for live trading.
+//! New live strategies must implement [`Strategy`] and integrate through the
+//! canonical strategy runtime / coordinator execution path.
+//!
+//! Transitional interfaces under `src/agents/*` and `src/platform/*` still
+//! exist for compatibility during migration, but they are not the approved
+//! extension points for new live strategy work.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,7 +21,10 @@ use crate::error::Result;
 // Strategy Trait
 // ============================================================================
 
-/// Core trait that all trading strategies must implement
+/// Canonical live strategy contract.
+///
+/// New live strategy implementations should enter the system through this
+/// interface instead of `TradingAgent` or `DomainAgent`.
 #[async_trait]
 pub trait Strategy: Send + Sync {
     /// Unique strategy identifier
@@ -199,7 +208,12 @@ pub struct OrderUpdate {
 // Strategy Actions
 // ============================================================================
 
-/// Actions a strategy can request
+/// Actions a strategy can request.
+///
+/// Note: `UpdateRisk`, `SubscribeFeed`, and `UnsubscribeFeed` are transitional
+/// compatibility variants and are scheduled to move out of the Strategy Plane
+/// as the layered live runtime refactor converges on pure decision-layer
+/// semantics.
 #[derive(Debug, Clone)]
 pub enum StrategyAction {
     /// Submit a new order

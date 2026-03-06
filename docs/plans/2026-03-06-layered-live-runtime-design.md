@@ -38,6 +38,13 @@ Date: 2026-03-06
 - 策略不得直接擁有全局資金治理權
 - bootstrap 不再知道單個策略的特殊啟動語義
 
+Immediate freeze rule during migration:
+
+- 新的 live strategy 一律只准掛在 `src/strategy/traits.rs` 的
+  canonical `Strategy` contract 上。
+- `TradingAgent` 與 `DomainAgent` 從此視為過渡接口，不再接受新 live
+  strategy 掛載。
+
 ## Current-State Review
 
 ### 1) Strategy Plane 不唯一

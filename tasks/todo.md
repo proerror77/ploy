@@ -238,6 +238,29 @@ Define the target four-layer live trading architecture and write a concrete impl
 
 ---
 
+# Layered Live Runtime Task 1: Canonical Ownership Freeze (2026-03-06)
+
+## Goal
+Make the canonical live runtime ownership explicit in source comments before any behavioral migration work starts.
+
+## Tasks
+
+- [x] Mark `src/strategy/traits.rs` as the only canonical live strategy contract.
+- [x] Mark `src/agents/traits.rs` as a transitional compatibility surface.
+- [x] Mark `src/platform/traits.rs` / `DomainAgent` as transitional compatibility only.
+- [x] Add a short architecture note to `src/strategy/mod.rs` directing new live strategy work to the canonical path.
+- [x] Record the immediate freeze rule in `docs/plans/2026-03-06-layered-live-runtime-design.md`.
+- [x] Validate with `cargo check --lib`.
+- [x] Commit the Task 1 boundary freeze atomically.
+
+## Review
+
+- [x] No runtime logic changed in this step.
+- [x] The change is limited to ownership comments and migration guidance.
+- [x] `cargo check --lib` passed; only pre-existing warnings remained in unrelated backtest files.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

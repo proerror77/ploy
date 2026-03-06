@@ -4,6 +4,14 @@
 //!
 //! ## Architecture
 //!
+//! Canonical live strategy ownership:
+//! - New live strategy implementations belong on the `Strategy` contract in
+//!   [`crate::strategy::traits`].
+//! - New live strategy runtime work should plug into the canonical
+//!   coordinator-managed strategy runtime path.
+//! - `TradingAgent` / `DomainAgent` paths are transitional compatibility
+//!   surfaces and are not approved entry points for new live strategies.
+//!
 //! Strategies are organized by market type:
 //! - `core/` - Shared abstractions and generic split arbitrage engine
 //! - `crypto/` - Crypto UP/DOWN markets (BTC, ETH, SOL)

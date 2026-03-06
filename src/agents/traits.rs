@@ -3,6 +3,12 @@
 //! Unlike the existing `DomainAgent` (push-based, router calls `on_event()`),
 //! `TradingAgent` is pull-based: the agent owns its main loop via `run()`.
 //! This gives each agent full control over its data sources and concurrency.
+//!
+//! Transitional status:
+//! This is a compatibility surface during the layered live runtime migration.
+//! New live strategies must not implement `TradingAgent`; they should implement
+//! `crate::strategy::traits::Strategy` and run through the canonical strategy
+//! runtime instead.
 
 use async_trait::async_trait;
 
@@ -27,6 +33,10 @@ pub struct AgentConfig {
 /// communicates with agents via `AgentContext` (orders out, commands in).
 ///
 /// `run()` consumes `self` — an agent is a one-shot task spawned as a tokio task.
+///
+/// This trait is transitional and should only be used for compatibility while
+/// existing pull-based runtimes are migrated or reduced to governance-only
+/// roles.
 #[async_trait]
 pub trait TradingAgent: Send + Sync + 'static {
     /// Unique identifier for this agent instance
