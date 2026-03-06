@@ -14,17 +14,19 @@ use tracing::{debug, error, info, trace, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agents::crypto::CryptoEntryMode;
+use crate::agents::crypto_lob_ml::CryptoLobMlAgent;
+#[cfg(feature = "rl")]
+use crate::agents::crypto_rl_policy::CryptoRlPolicyAgent;
 use crate::agents::context::AgentContext;
 use crate::agents::governance_context::GovernanceContext;
 use crate::agents::sports::SportsTradingAgent;
 use crate::agents::traits::{GovernanceAgent, TradingAgent};
 use crate::agents::{
-    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
-    CryptoTradingConfig, OpenClawAgent, OpenClawConfig, PoliticsTradingConfig,
-    SportsTradingConfig,
+    CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode, CryptoTradingConfig,
+    OpenClawAgent, OpenClawConfig, PoliticsTradingConfig, SportsTradingConfig,
 };
 #[cfg(feature = "rl")]
-use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agents::CryptoRlPolicyConfig;
 use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;

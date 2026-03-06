@@ -15,10 +15,8 @@ pub mod sports;
 pub mod traits;
 
 pub use crypto::CryptoTradingConfig;
-pub use crypto_lob_ml::{
-    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
-};
-pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+pub use crypto_lob_ml::{CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode};
+pub use crypto_rl_policy::CryptoRlPolicyConfig;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
 pub use politics::PoliticsTradingConfig;
 pub use sports::SportsTradingConfig;

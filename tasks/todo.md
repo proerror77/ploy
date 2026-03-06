@@ -666,6 +666,29 @@ Make the remaining pull-based runtime path read as an explicit compatibility pat
 
 ---
 
+# Layered Live Runtime Task 8G: Narrow Compatibility Agent Struct Re-Exports (2026-03-06)
+
+## Goal
+Stop presenting the remaining pull-based compatibility agent structs as root-level `agents` exports. Bootstrap should depend on their explicit compatibility modules.
+
+## Tasks
+
+- [x] Stop re-exporting `CryptoLobMlAgent` and `CryptoRlPolicyAgent` from `src/agents/mod.rs`.
+- [x] Update `src/coordinator/bootstrap.rs` to import those agent structs from `agents::crypto_lob_ml` and `agents::crypto_rl_policy`.
+- [x] Keep the corresponding config types re-exported from `agents` for now.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `crate::agents::CryptoLobMlAgent` and `crate::agents::CryptoRlPolicyAgent` are no longer convenience APIs from the `agents` root.
+- [x] This slice does not change runtime behavior; it only narrows another compatibility export layer around the remaining pull-based crypto agent implementations.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
