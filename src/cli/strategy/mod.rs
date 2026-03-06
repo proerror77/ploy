@@ -16,9 +16,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use super::strategy_backtest::{
-    backfill_klines, run_backtest, run_backtest_diff, run_backtest_list,
-};
+mod backtest;
+
+use self::backtest::{backfill_klines, run_backtest, run_backtest_diff, run_backtest_list};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{PolymarketClient, PostgresStore};
 use crate::config::ExecutionConfig;
@@ -1709,9 +1709,9 @@ fn systemd_strategy_status(name: &str) -> Option<StrategyStatus> {
 
 fn create_default_config(name: &str, path: &PathBuf) -> Result<()> {
     let config = match name {
-        "momentum" => include_str!("../../config/strategies/momentum_default.toml"),
-        "split_arb" => include_str!("../../config/strategies/split_arb_default.toml"),
-        "pattern_memory" => include_str!("../../config/strategies/pattern_memory_default.toml"),
+        "momentum" => include_str!("../../../config/strategies/momentum_default.toml"),
+        "split_arb" => include_str!("../../../config/strategies/split_arb_default.toml"),
+        "pattern_memory" => include_str!("../../../config/strategies/pattern_memory_default.toml"),
         _ => return Ok(()), // No default for unknown strategies
     };
 

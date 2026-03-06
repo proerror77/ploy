@@ -7,7 +7,6 @@ pub mod rpc;
 pub mod runtime;
 pub mod service;
 pub mod strategy;
-mod strategy_backtest;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
