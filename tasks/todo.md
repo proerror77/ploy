@@ -246,3 +246,25 @@
 - Agent review:
   - `No findings` from reviewer.
   - Residual risk was reduced with follow-up direct tests for non-empty trade aggregation and zero-trade Sharpe.
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6.4 momentum engine split)
+
+- [x] Move the remaining `MomentumEngine` runtime and helper methods out of `src/strategy/momentum/mod.rs`
+- [x] Keep `crate::strategy::momentum::*` stable with `mod.rs` as a thin assembly and re-export layer
+- [x] Preserve the existing focused module tests after the move
+- [x] Re-run build plus focused momentum validation after the split
+
+## Review (2026-03-06, momentum engine split)
+
+- Delivered in this slice:
+  - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
+  - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
+  - Kept private `window_risk` internals scoped to the engine module instead of re-exporting them from the public module surface.
+  - Preserved the existing focused test modules by moving them with the engine implementation.
+- Validation executed:
+  - `cargo build`
+  - `cargo test strategy::momentum::config::tests -- --nocapture`
+  - `cargo test strategy::momentum::window_risk::tests -- --nocapture`
+  - `cargo test strategy::momentum::tests -- --nocapture`
