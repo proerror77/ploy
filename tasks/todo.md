@@ -598,6 +598,29 @@ Further reduce bootstrap churn by extracting the repeated registration and `Agen
 
 ---
 
+# Layered Live Runtime Task 9C: Sports Data Support Helper (2026-03-06)
+
+## Goal
+Pull the sports-specific market-data/persistence assembly out of `start_platform()` so the sports branch focuses on runtime selection instead of inlining collector-target, WS, and persistence bridge setup.
+
+## Tasks
+
+- [x] Add `load_sports_collector_targets(...)` and `start_sports_market_data_support(...)` helpers in `src/coordinator/bootstrap.rs`.
+- [x] Move the sports collector-target query, PM WS seeding/refresh, and quote/orderbook persistence bridge setup into those helpers.
+- [x] Leave runtime selection unchanged in this slice: canonical `nba_comeback` and Grok-enabled fallback still behave the same after support setup completes.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The sports branch in `start_platform()` is materially shorter and now reads as: build runtime spec, start sports market-data support, then choose canonical runtime or fallback.
+- [x] This slice does not change sports execution semantics; it only removes a large domain-specific assembly blob from the main bootstrap flow.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
