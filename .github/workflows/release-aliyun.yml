@@ -346,7 +346,10 @@ jobs:
 
             unit_exists() {
               local unit="$1"
-              $SUDO systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "${unit}.service"
+              local unit_name="${unit}.service"
+              $SUDO systemctl list-unit-files --type=service --no-legend "$unit_name" 2>/dev/null \
+                | awk '{print $1}' \
+                | grep -qx "$unit_name"
             }
 
             write_guardrail_dropin() {
