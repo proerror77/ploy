@@ -2,6 +2,11 @@
 //!
 //! Owns Binance + Polymarket WebSocket feeds. Reuses signal logic from
 //! the existing CryptoAgent (sum_of_asks threshold + momentum direction).
+//!
+//! Transitional status:
+//! Live bootstrap now routes momentum through the canonical managed strategy
+//! runtime. This agent remains only as compatibility scaffolding while legacy
+//! pull-based paths are retired.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

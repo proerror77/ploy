@@ -13,11 +13,11 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
+use crate::agents::crypto::CryptoEntryMode;
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
-    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
-    TradingAgent,
+    CryptoLobMlExitMode, CryptoTradingConfig, OpenClawAgent, OpenClawConfig, PoliticsTradingAgent,
+    PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig, TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -2720,6 +2720,7 @@ fn symbol_for_crypto_series_id(series_id: &str) -> Option<&'static str> {
 
 #[derive(Debug, Default)]
 struct RuntimeCryptoStrategyTargets {
+    momentum_coins: HashSet<String>,
     pattern_memory_coins: HashSet<String>,
     split_arb_coins: HashSet<String>,
     split_arb_horizons: HashSet<String>,
@@ -2743,6 +2744,9 @@ fn collect_runtime_crypto_strategy_targets(
         }
 
         match classify_crypto_strategy(&dep.strategy) {
+            CryptoStrategyKind::Momentum => {
+                add_coins_from_selector(&dep.market_selector, &mut out.momentum_coins);
+            }
             CryptoStrategyKind::PatternMemory => {
                 add_coins_from_selector(&dep.market_selector, &mut out.pattern_memory_coins);
             }
@@ -2821,6 +2825,171 @@ cooldown_secs = 30
 "#,
         markets = markets_block
     ))
+}
+
+fn insert_toml_float(table: &mut toml::value::Table, key: &str, value: f64) {
+    table.insert(key.to_string(), toml::Value::Float(value));
+}
+
+fn insert_toml_int(table: &mut toml::value::Table, key: &str, value: i64) {
+    table.insert(key.to_string(), toml::Value::Integer(value));
+}
+
+fn insert_toml_bool(table: &mut toml::value::Table, key: &str, value: bool) {
+    table.insert(key.to_string(), toml::Value::Boolean(value));
+}
+
+fn render_momentum_runtime_config(
+    mut config: toml::Value,
+    symbols: &[String],
+    crypto_cfg: &CryptoTradingConfig,
+) -> String {
+    let root = config
+        .as_table_mut()
+        .expect("momentum runtime config must be a table");
+    let strategy = root
+        .entry("strategy")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .expect("[strategy] must be a table");
+    insert_toml_bool(strategy, "enabled", true);
+
+    let entry = root
+        .entry("entry")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .expect("[entry] must be a table");
+    entry.insert(
+        "symbols".to_string(),
+        toml::Value::Array(symbols.iter().cloned().map(toml::Value::String).collect()),
+    );
+    insert_toml_float(
+        entry,
+        "min_move",
+        (crypto_cfg.min_momentum_1s * 100.0).max(0.0),
+    );
+    insert_toml_float(
+        entry,
+        "min_edge",
+        (crypto_cfg.min_edge * Decimal::from(100))
+            .to_f64()
+            .unwrap_or(2.0),
+    );
+    insert_toml_bool(
+        entry,
+        "require_mtf_agreement",
+        crypto_cfg.require_mtf_agreement,
+    );
+    insert_toml_bool(
+        entry,
+        "directional_mode",
+        matches!(crypto_cfg.entry_mode, CryptoEntryMode::Directional),
+    );
+    insert_toml_float(
+        entry,
+        "directional_entry_threshold",
+        (crypto_cfg.min_edge * Decimal::from(100))
+            .to_f64()
+            .unwrap_or(2.0),
+    );
+
+    let timing = root
+        .entry("timing")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .expect("[timing] must be a table");
+    insert_toml_int(
+        timing,
+        "min_time_remaining",
+        crypto_cfg.min_time_remaining_secs as i64,
+    );
+    insert_toml_int(
+        timing,
+        "max_time_remaining",
+        crypto_cfg.max_time_remaining_secs as i64,
+    );
+    insert_toml_int(
+        timing,
+        "cooldown_secs",
+        crypto_cfg.entry_cooldown_secs as i64,
+    );
+
+    let risk = root
+        .entry("risk")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .expect("[risk] must be a table");
+    insert_toml_int(risk, "shares", crypto_cfg.default_shares as i64);
+    insert_toml_int(
+        risk,
+        "max_positions",
+        crypto_cfg.risk_params.max_unhedged_positions as i64,
+    );
+    insert_toml_float(
+        risk,
+        "max_window_exposure",
+        crypto_cfg
+            .risk_params
+            .max_total_exposure
+            .to_f64()
+            .unwrap_or(25.0),
+    );
+
+    let exit = root
+        .entry("exit")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .expect("[exit] must be a table");
+    insert_toml_float(
+        exit,
+        "exit_edge_floor_pct",
+        (crypto_cfg.exit_edge_floor * Decimal::from(100))
+            .to_f64()
+            .unwrap_or(20.0),
+    );
+    insert_toml_float(
+        exit,
+        "exit_price_band_pct",
+        (crypto_cfg.exit_price_band * Decimal::from(100))
+            .to_f64()
+            .unwrap_or(12.0),
+    );
+
+    format!(
+        "# Auto-generated by platform bootstrap — momentum\n{}",
+        toml::to_string(&config).expect("runtime config must serialize to TOML")
+    )
+}
+
+fn load_momentum_config_file(symbols: &[String], crypto_cfg: &CryptoTradingConfig) -> Option<String> {
+    let candidates = [
+        std::env::var("PLOY_MOMENTUM_CONFIG").ok(),
+        Some("config/strategies/momentum.toml".to_string()),
+        Some("/root/ploy/config/strategies/momentum.toml".to_string()),
+        Some("/opt/ploy/config/strategies/momentum.toml".to_string()),
+    ];
+    for candidate in candidates.iter().flatten() {
+        if let Ok(contents) = std::fs::read_to_string(candidate) {
+            if let Ok(val) = toml::from_str::<toml::Value>(&contents) {
+                if val.get("strategy").is_some() {
+                    info!(path = %candidate, "loaded momentum config from external file");
+                    return Some(render_momentum_runtime_config(val, symbols, crypto_cfg));
+                }
+            }
+            warn!(path = %candidate, "momentum config file found but invalid TOML");
+        }
+    }
+    None
+}
+
+fn build_momentum_runtime_config(symbols: &[String], crypto_cfg: &CryptoTradingConfig) -> String {
+    if let Some(cfg) = load_momentum_config_file(symbols, crypto_cfg) {
+        return cfg;
+    }
+
+    let config: toml::Value = toml::from_str(include_str!("../../config/strategies/momentum.toml"))
+        .expect("embedded momentum runtime config must stay valid TOML");
+    render_momentum_runtime_config(config, symbols, crypto_cfg)
 }
 
 fn render_split_arb_runtime_config(
@@ -5153,17 +5322,6 @@ pub async fn start_platform(
         #[cfg(not(feature = "rl"))]
         let rl_agent_enabled = false;
 
-        let cmd_rx_opt = if momentum_enabled {
-            let risk_params = crypto_cfg.risk_params.clone();
-            Some(coordinator.register_agent(
-                crypto_cfg.agent_id.clone(),
-                Domain::Crypto,
-                risk_params,
-            ))
-        } else {
-            None
-        };
-
         // Discover active crypto events and token IDs (Gamma API) via EventMatcher
         let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
             crate::error::PloyError::Validation(
@@ -5180,18 +5338,30 @@ pub async fn start_platform(
         let mut all_coins: Vec<String> = Vec::new();
         let mut planner_requirements: Vec<(crate::platform::ConsumerId, Domain, Vec<DataFeed>)> =
             Vec::new();
-        if momentum_enabled {
-            let symbols: Vec<String> = crypto_cfg
-                .coins
+        let mut momentum_coins: Vec<String> = if runtime_crypto_targets.momentum_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .momentum_coins
                 .iter()
-                .map(|c| format!("{}USDT", c))
-                .collect();
+                .cloned()
+                .collect()
+        };
+        momentum_coins.sort();
+        momentum_coins.dedup();
+        let momentum_symbols: Vec<String> = momentum_coins
+            .iter()
+            .filter_map(|coin| coin_symbol_for(coin.trim_end_matches("USDT")))
+            .collect();
+        if momentum_enabled {
             planner_requirements.push((
                 crate::platform::ConsumerId::from(format!("momentum-{}", crypto_cfg.agent_id)),
                 Domain::Crypto,
-                vec![DataFeed::BinanceSpot { symbols }],
+                vec![DataFeed::BinanceSpot {
+                    symbols: momentum_symbols.clone(),
+                }],
             ));
-            for coin in &crypto_cfg.coins {
+            for coin in &momentum_coins {
                 if !all_coins.contains(coin) {
                     all_coins.push(coin.clone());
                 }
@@ -5846,36 +6016,57 @@ pub async fn start_platform(
         }
 
         if momentum_enabled {
-            if let Some(cmd_rx) = cmd_rx_opt {
-                let agent = CryptoTradingAgent::new(
-                    crypto_cfg.clone(),
-                    crypto_market_data.clone(),
-                    event_matcher.clone(),
+            if momentum_symbols.is_empty() {
+                warn!(
+                    agent = crypto_cfg.agent_id,
+                    "crypto momentum enabled but no recognized symbols were resolved"
                 );
-                let ctx = AgentContext::new(
-                    crypto_cfg.agent_id.clone(),
+            } else if let Some(strategy_pm_client) = pm_client.clone() {
+                let strategy_agent_id = crypto_cfg.agent_id.clone();
+                let strategy_cmd_rx = coordinator.register_agent(
+                    strategy_agent_id.clone(),
                     Domain::Crypto,
-                    handle.clone(),
-                    cmd_rx,
+                    crypto_cfg.risk_params.clone(),
                 );
-
+                let toml_cfg = build_momentum_runtime_config(&momentum_symbols, &crypto_cfg);
+                let strategy_ws_url = app_config.market.ws_url.clone();
+                let strategy_data_plane = data_plane.clone();
+                let strategy_shutdown_rx = shutdown_tx.subscribe();
+                let strategy_dry_run = config.dry_run;
+                let strategy_observability_pool = shared_pool.clone();
+                let strategy_account_id = account_id.clone();
+                let strategy_agent_id_for_runtime = strategy_agent_id.clone();
                 let jh = tokio::spawn(async move {
-                    if let Err(e) = agent.run(ctx).await {
-                        error!(agent = "crypto", error = %e, "agent exited with error");
+                    if let Err(e) = run_managed_strategy_runtime(
+                        "momentum",
+                        &strategy_agent_id_for_runtime,
+                        toml_cfg,
+                        strategy_dry_run,
+                        strategy_pm_client,
+                        strategy_ws_url,
+                        strategy_data_plane,
+                        strategy_observability_pool,
+                        strategy_account_id,
+                        strategy_cmd_rx,
+                        strategy_shutdown_rx,
+                    )
+                    .await
+                    {
+                        error!(agent = "momentum", error = %e, "managed strategy runtime exited with error");
                     }
                 });
                 agent_handles.push(jh);
-                info!("crypto momentum agent spawned");
+                info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
             } else {
                 warn!(
                     agent = crypto_cfg.agent_id,
-                    "crypto momentum agent enabled but coordinator cmd_rx is missing"
+                    "crypto momentum enabled but pm client not configured; skipping"
                 );
             }
         } else {
             info!(
                 agent = crypto_cfg.agent_id,
-                "crypto momentum agent disabled"
+                "crypto momentum strategy runtime disabled"
             );
         }
 
@@ -6793,7 +6984,62 @@ mod tests {
     }
 
     #[test]
+    fn apply_strategy_deployments_enables_crypto_momentum_domain() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("momentum", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(cfg.enable_crypto);
+        assert!(cfg.enable_crypto_momentum);
+        assert!(!cfg.enable_crypto_split_arb);
+    }
+
+    #[test]
+    fn build_momentum_runtime_config_overrides_template_symbols() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let rendered = build_momentum_runtime_config(&symbols, &CryptoTradingConfig::default());
+
+        assert!(rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
+        assert!(
+            !rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\", \"SOLUSDT\", \"XRPUSDT\"]"),
+            "managed momentum runtime should replace template symbols with deployment-scoped symbols"
+        );
+        assert!(rendered.contains("name = \"momentum\""));
+    }
+
+    #[test]
+    fn build_momentum_runtime_config_projects_legacy_crypto_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let rendered = build_momentum_runtime_config(&symbols, &CryptoTradingConfig::default());
+
+        assert!(rendered.contains("min_move = 0.1"));
+        assert!(rendered.contains("min_edge = 2.0"));
+        assert!(rendered.contains("min_time_remaining = 60"));
+        assert!(rendered.contains("max_time_remaining = 300"));
+        assert!(rendered.contains("cooldown_secs = 0"));
+        assert!(rendered.contains("shares = 100"));
+        assert!(rendered.contains("max_positions = 2"));
+        assert!(rendered.contains("max_window_exposure = 100.0"));
+        assert!(rendered.contains("exit_edge_floor_pct = 2.0"));
+        assert!(rendered.contains("exit_price_band_pct = 5.0"));
+        assert!(rendered.contains("require_mtf_agreement = true"));
+        assert!(rendered.contains("directional_mode = true"));
+        assert!(rendered.contains("directional_entry_threshold = 2.0"));
+        assert!(
+            !rendered.contains("min_time_remaining = 300.0"),
+            "legacy crypto timing should override template defaults"
+        );
+    }
+
+    #[test]
     fn build_split_arb_runtime_config_renders_symbols_and_series_ids() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
         let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         let series_ids = vec!["10192".to_string(), "10684".to_string()];
         let rendered = build_split_arb_runtime_config(&symbols, &series_ids);
@@ -6809,6 +7055,8 @@ mod tests {
 
     #[test]
     fn build_split_arb_runtime_config_overrides_template_symbols_and_series_ids() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
         let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         let series_ids = vec!["10192".to_string(), "10684".to_string()];
         let rendered = build_split_arb_runtime_config(&symbols, &series_ids);

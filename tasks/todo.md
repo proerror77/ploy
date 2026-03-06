@@ -367,6 +367,35 @@ Stop treating runtime traits as the canonical owner of `AgentRiskParams` so live
 
 ---
 
+# Layered Live Runtime Task 6: Move Momentum And Split-Arb To Canonical Runtime Startup (2026-03-06)
+
+## Goal
+Make managed crypto momentum and split-arb/staggered-arb deployments start through the canonical managed strategy runtime, with momentum runtime config projected from legacy live settings instead of template-only defaults.
+
+## Tasks
+
+- [x] Remove the bootstrap momentum live branch that spawned `CryptoTradingAgent`.
+- [x] Route managed momentum startup through `run_managed_strategy_runtime(...)` using the coordinator registration path.
+- [x] Keep `src/agents/crypto.rs` as a transitional compatibility surface only and mark that status in module docs.
+- [x] Project legacy `CryptoTradingConfig` timing / sizing / edge / exit settings into the generated momentum TOML so canonical runtime startup does not silently fall back to unrelated template defaults.
+- [x] Add focused bootstrap tests covering momentum deployment enablement, momentum config projection, and split-arb config rendering stability.
+- [x] Fix the split-arb config tests to serialize access to `PLOY_STAGGERED_ARB_CONFIG` so bootstrap config tests no longer race each other.
+- [x] Run focused validation and capture the results.
+- [x] Commit the Task 6 runtime migration atomically.
+
+## Review
+
+- [x] Managed momentum bootstrap now registers with coordinator and launches via the canonical managed strategy runtime instead of the pull-based `CryptoTradingAgent` path.
+- [x] `build_momentum_runtime_config(...)` now overrides template symbols and also projects legacy crypto live defaults such as timing window, cooldown, share sizing, directional mode, and exit thresholds.
+- [x] Split-arb/staggered-arb remains on the canonical managed runtime path; this slice only stabilized its bootstrap config tests.
+- [x] Focused validation passed:
+  - `cargo test build_momentum_runtime_config_ --lib -- --nocapture`
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo test strategy::adapters --lib -- --nocapture`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `liquidity_vacuum_backtest.rs` and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
