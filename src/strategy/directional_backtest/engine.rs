@@ -1,0 +1,1193 @@
+use std::collections::HashMap;
+use std::fmt;
+
+use chrono::{DateTime, Utc};
+use ploy_backtest::{
+    strategies::{
+        adjust_fair_value_for_price_to_beat, build_directional_results, estimate_fair_value,
+    },
+    BacktestRecorder, BacktestResults, BacktestSignal, ExecutionSimulator, MarketFeed,
+    NullRecorder, PendingTrade, SignalType, UpdateType,
+};
+use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use tracing::{debug, info, trace};
+
+use crate::adapters::SpotPrice;
+use crate::strategy::fee_model::FeeModel;
+use crate::strategy::momentum::Direction;
+use ploy_backtest::strategies::{DirectionalBacktestConfig, DirectionalClosedTrade};
+
+use super::display::print_directional_summary as render_directional_summary;
+use super::state::{ActiveWindowInfo, DirectionalPosition};
+
+// ─────────────────────────────────────────────────────────────
+// Engine
+// ─────────────────────────────────────────────────────────────
+
+pub struct DirectionalBacktestEngine {
+    config: DirectionalBacktestConfig,
+    fee_model: FeeModel,
+    execution_sim: ExecutionSimulator,
+    recorder: Box<dyn BacktestRecorder>,
+    // Market state
+    spot_prices: HashMap<String, SpotPrice>,
+    pm_asks: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    // Active events: symbol -> concurrent windows (5m + 15m can overlap)
+    active_events: HashMap<String, Vec<ActiveWindowInfo>>,
+    // Positions & trades
+    positions: Vec<DirectionalPosition>,
+    closed_trades: Vec<DirectionalClosedTrade>,
+    // Accounting
+    equity: Decimal,
+    peak_equity: Decimal,
+    max_drawdown: Decimal,
+    equity_curve: Vec<(DateTime<Utc>, Decimal)>,
+    last_entry_time: HashMap<String, DateTime<Utc>>,
+    // Data range
+    data_range_start: Option<DateTime<Utc>>,
+    data_range_end: Option<DateTime<Utc>>,
+    // Throttle: last timestamp we ran entry/exit logic per symbol
+    last_logic_ts: HashMap<String, DateTime<Utc>>,
+}
+
+impl DirectionalBacktestEngine {
+    pub fn new(config: DirectionalBacktestConfig, recorder: Box<dyn BacktestRecorder>) -> Self {
+        let equity = config.initial_capital;
+        Self {
+            config,
+            fee_model: FeeModel::crypto(),
+            execution_sim: ExecutionSimulator::new(),
+            recorder,
+            spot_prices: HashMap::new(),
+            pm_asks: HashMap::new(),
+            active_events: HashMap::new(),
+            positions: Vec::new(),
+            closed_trades: Vec::new(),
+            equity,
+            peak_equity: equity,
+            max_drawdown: Decimal::ZERO,
+            equity_curve: Vec::new(),
+            last_entry_time: HashMap::new(),
+            data_range_start: None,
+            data_range_end: None,
+            last_logic_ts: HashMap::new(),
+        }
+    }
+
+    pub fn new_without_recorder(config: DirectionalBacktestConfig) -> Self {
+        Self::new(config, Box::new(NullRecorder))
+    }
+
+    pub fn config(&self) -> &DirectionalBacktestConfig {
+        &self.config
+    }
+
+    pub fn closed_trades(&self) -> &[DirectionalClosedTrade] {
+        &self.closed_trades
+    }
+
+    /// Take ownership of the recorder back from the engine.
+    /// Useful for calling async methods (like `flush_async`/`finalize`) after `run()`.
+    pub fn take_recorder(&mut self) -> Box<dyn BacktestRecorder> {
+        std::mem::replace(&mut self.recorder, Box::new(NullRecorder))
+    }
+
+    // ─── Main loop ──────────────────────────────────────────
+
+    /// Consume the feed and return aggregate results.
+    pub fn run<F: MarketFeed>(&mut self, feed: &mut F) -> BacktestResults {
+        while let Some(update) = feed.next_update() {
+            // Track data range
+            if self.data_range_start.is_none() {
+                self.data_range_start = Some(update.timestamp);
+            }
+            self.data_range_end = Some(update.timestamp);
+
+            // Prune expired events (end_time has passed without settlement)
+            for events in self.active_events.values_mut() {
+                events.retain(|e| e.end_time > update.timestamp);
+            }
+
+            match &update.update_type {
+                UpdateType::SpotTrade { price, quantity } => {
+                    self.handle_spot_trade(&update.symbol, *price, *quantity, update.timestamp);
+                }
+                UpdateType::PmQuote { up_ask, down_ask } => {
+                    self.handle_pm_quote(&update.symbol, *up_ask, *down_ask, update.timestamp);
+                }
+                UpdateType::EventState {
+                    event_slug,
+                    end_time,
+                    price_to_beat,
+                    outcome,
+                } => {
+                    // Binary settlement — only close positions matching this event
+                    if let Some(won) = outcome {
+                        self.resolve_positions(&update.symbol, event_slug, *won, update.timestamp);
+                        // Remove only the settled event, not all events for the symbol
+                        if let Some(events) = self.active_events.get_mut(&update.symbol) {
+                            events.retain(|e| e.event_slug != *event_slug);
+                        }
+                    }
+
+                    // Track active window: store S0 (price_to_beat) for probability calc
+                    // Multiple events per symbol are allowed (5m + 15m overlap)
+                    if outcome.is_none() {
+                        if let (Some(end), Some(s0)) = (end_time, price_to_beat) {
+                            let events =
+                                self.active_events.entry(update.symbol.clone()).or_default();
+                            // Don't add duplicate events
+                            if !events.iter().any(|e| e.event_slug == *event_slug) {
+                                events.push(ActiveWindowInfo {
+                                    event_slug: event_slug.clone(),
+                                    s0: *s0,
+                                    end_time: *end,
+                                });
+                            }
+                        }
+                    }
+                }
+                UpdateType::LobSnapshot { .. } => {
+                    // LOB depth not used by directional backtest
+                }
+            }
+        }
+
+        // Force-close any remaining positions at latest PM price (data exhausted)
+        self.close_remaining_positions();
+        let _ = self.recorder.flush();
+        self.build_results()
+    }
+
+    // ─── Event handlers ──────────────────────────────────────
+
+    fn handle_spot_trade(
+        &mut self,
+        symbol: &str,
+        price: Decimal,
+        quantity: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) {
+        self.spot_prices
+            .entry(symbol.to_string())
+            .and_modify(|sp| sp.update(price, quantity, ts))
+            .or_insert_with(|| SpotPrice::new(price, quantity, ts));
+    }
+
+    fn handle_pm_quote(
+        &mut self,
+        symbol: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) {
+        // Update latest asks
+        let entry = self
+            .pm_asks
+            .entry(symbol.to_string())
+            .or_insert((None, None));
+        if up_ask.is_some() {
+            entry.0 = up_ask;
+        }
+        if down_ask.is_some() {
+            entry.1 = down_ask;
+        }
+
+        // Update position mark-to-market (cheap — just price assignment)
+        for pos in &mut self.positions {
+            if pos.symbol == symbol {
+                match pos.direction {
+                    Direction::Up => {
+                        if let Some(ask) = up_ask {
+                            pos.latest_pm_price = ask;
+                        }
+                    }
+                    Direction::Down => {
+                        if let Some(ask) = down_ask {
+                            pos.latest_pm_price = ask;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Throttle entry/exit logic to once per second per symbol.
+        // PM quotes arrive ~30-40/sec — running probability model on every tick is wasteful.
+        let should_run_logic = match self.last_logic_ts.get(symbol) {
+            Some(last) => (ts - *last).num_seconds() >= 1,
+            None => true,
+        };
+        if !should_run_logic {
+            return;
+        }
+        self.last_logic_ts.insert(symbol.to_string(), ts);
+
+        // Try directional entry
+        self.try_directional_entry(symbol, ts);
+
+        // Check exits for existing positions
+        self.check_exits(ts);
+
+        // Record equity curve
+        self.record_equity(ts);
+    }
+
+    // ─── Entry logic (momentum + fair value + edge) ─────────
+
+    fn try_directional_entry(&mut self, symbol: &str, ts: DateTime<Utc>) {
+        // 1. Need: active events with S0, spot price history, PM asks
+        let windows: Vec<ActiveWindowInfo> = match self.active_events.get(symbol) {
+            Some(w) if !w.is_empty() => w.clone(),
+            _ => {
+                self.recorder.record_filtered(
+                    &BacktestSignal {
+                        signal_type: SignalType::Filtered,
+                        symbol: symbol.to_string(),
+                        direction: String::new(),
+                        timestamp: ts,
+                        p_hat: None,
+                        ev_net: None,
+                        sigma: None,
+                        market_price: None,
+                        spot_price: None,
+                        s0: None,
+                        time_remaining_secs: None,
+                        filter_reason: Some("no_active_event".to_string()),
+                        exit_reason: None,
+                        exit_price: None,
+                    },
+                    "no_active_event",
+                );
+                return;
+            }
+        };
+
+        // Shared preconditions: spot price with momentum, PM quotes
+        let (spot_price, momentum) = match self.spot_prices.get(symbol) {
+            Some(s) => {
+                // Use weighted momentum (10s/30s/60s) like live engine,
+                // fall back to 30s single-timeframe
+                let mom = s.weighted_momentum().or_else(|| s.momentum(30));
+                (s.price, mom)
+            }
+            None => {
+                self.recorder.record_filtered(
+                    &BacktestSignal {
+                        signal_type: SignalType::Filtered,
+                        symbol: symbol.to_string(),
+                        direction: String::new(),
+                        timestamp: ts,
+                        p_hat: None,
+                        ev_net: None,
+                        sigma: None,
+                        market_price: None,
+                        spot_price: None,
+                        s0: None,
+                        time_remaining_secs: None,
+                        filter_reason: Some("no_spot_data".to_string()),
+                        exit_reason: None,
+                        exit_price: None,
+                    },
+                    "no_spot_data",
+                );
+                return;
+            }
+        };
+        let (up_ask, down_ask) = match self.pm_asks.get(symbol) {
+            Some(asks) => *asks,
+            None => {
+                self.recorder.record_filtered(
+                    &BacktestSignal {
+                        signal_type: SignalType::Filtered,
+                        symbol: symbol.to_string(),
+                        direction: String::new(),
+                        timestamp: ts,
+                        p_hat: None,
+                        ev_net: None,
+                        sigma: None,
+                        market_price: None,
+                        spot_price: Some(spot_price),
+                        s0: None,
+                        time_remaining_secs: None,
+                        filter_reason: Some("no_pm_quotes".to_string()),
+                        exit_reason: None,
+                        exit_price: None,
+                    },
+                    "no_pm_quotes",
+                );
+                return;
+            }
+        };
+
+        // Try entry on each active event window independently
+        for window in windows {
+            self.try_entry_for_window(symbol, ts, &window, spot_price, momentum, up_ask, down_ask);
+        }
+    }
+
+    /// Attempt entry on a specific event window using momentum-based fair value.
+    /// Mirrors the live MomentumDetector.check() → estimate_fair_value() → edge logic.
+    fn try_entry_for_window(
+        &mut self,
+        symbol: &str,
+        ts: DateTime<Utc>,
+        window: &ActiveWindowInfo,
+        st: Decimal,
+        momentum: Option<Decimal>,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+    ) {
+        // 2. Time remaining — must be within [min, max] window
+        let time_remaining = (window.end_time - ts).num_seconds() as f64;
+        if time_remaining <= 0.0 || time_remaining < self.config.min_time_remaining_secs as f64 {
+            return;
+        }
+        if time_remaining > self.config.max_time_remaining_secs as f64 {
+            return;
+        }
+
+        // 3. Momentum — need sufficient history
+        let momentum = match momentum {
+            Some(m) => m,
+            None => return, // insufficient price history
+        };
+
+        // 4. Minimum momentum threshold
+        if momentum.abs() < self.config.min_momentum {
+            self.recorder.record_filtered(
+                &BacktestSignal {
+                    signal_type: SignalType::Filtered,
+                    symbol: symbol.to_string(),
+                    direction: String::new(),
+                    timestamp: ts,
+                    p_hat: None,
+                    ev_net: None,
+                    sigma: None,
+                    market_price: None,
+                    spot_price: Some(st),
+                    s0: Some(window.s0),
+                    time_remaining_secs: Some(time_remaining),
+                    filter_reason: Some("momentum_below_threshold".to_string()),
+                    exit_reason: None,
+                    exit_price: None,
+                },
+                "momentum_below_threshold",
+            );
+            return;
+        }
+
+        // 5. Direction from momentum sign + select PM price
+        let (direction, market_ask) = if momentum > Decimal::ZERO {
+            match up_ask {
+                Some(ask) => (Direction::Up, ask),
+                None => return,
+            }
+        } else {
+            match down_ask {
+                Some(ask) => (Direction::Down, ask),
+                None => return,
+            }
+        };
+
+        // 6. Fair value estimation (sigmoid mapping, same as live engine)
+        let mut fair_value = estimate_fair_value(momentum);
+
+        // 6b. Adjust for price_to_beat if enabled
+        if self.config.use_price_to_beat {
+            let time_remaining_secs = time_remaining as i64;
+            fair_value = adjust_fair_value_for_price_to_beat(
+                fair_value,
+                momentum,
+                st,
+                window.s0,
+                time_remaining_secs,
+            );
+        }
+
+        // 7. Price bounds check
+        if market_ask > self.config.max_entry_price || market_ask < self.config.min_entry_price {
+            self.recorder.record_filtered(
+                &BacktestSignal {
+                    signal_type: SignalType::Filtered,
+                    symbol: symbol.to_string(),
+                    direction: format!("{}", direction),
+                    timestamp: ts,
+                    p_hat: Some(fair_value.to_f64().unwrap_or(0.5)),
+                    ev_net: None,
+                    sigma: None,
+                    market_price: Some(market_ask),
+                    spot_price: Some(st),
+                    s0: Some(window.s0),
+                    time_remaining_secs: Some(time_remaining),
+                    filter_reason: Some("price_bounds".to_string()),
+                    exit_reason: None,
+                    exit_price: None,
+                },
+                "price_bounds",
+            );
+            return;
+        }
+
+        // 8. Edge = fair_value - pm_ask - fees
+        let best_bid = (market_ask - dec!(0.02)).max(dec!(0.01));
+        let depth_ratio = Decimal::from(self.config.shares_per_trade) / dec!(10000);
+        let cost = self
+            .fee_model
+            .all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
+        let fee_per_share_usd = market_ask * cost.taker_fee;
+        let spread_plus_slip = cost.spread_cost + cost.depth_slippage;
+
+        let fair_value_f = fair_value.to_f64().unwrap_or(0.5);
+        let market_ask_f = market_ask.to_f64().unwrap_or(0.5);
+        let total_cost_f =
+            fee_per_share_usd.to_f64().unwrap_or(0.01) + spread_plus_slip.to_f64().unwrap_or(0.01);
+        let edge = fair_value_f - market_ask_f - total_cost_f;
+
+        if edge < self.config.entry_threshold {
+            self.recorder.record_filtered(
+                &BacktestSignal {
+                    signal_type: SignalType::Filtered,
+                    symbol: symbol.to_string(),
+                    direction: format!("{}", direction),
+                    timestamp: ts,
+                    p_hat: Some(fair_value_f),
+                    ev_net: Some(edge),
+                    sigma: None,
+                    market_price: Some(market_ask),
+                    spot_price: Some(st),
+                    s0: Some(window.s0),
+                    time_remaining_secs: Some(time_remaining),
+                    filter_reason: Some("edge_below_threshold".to_string()),
+                    exit_reason: None,
+                    exit_price: None,
+                },
+                "edge_below_threshold",
+            );
+            return;
+        }
+
+        // 9. Cooldown check
+        if let Some(last) = self.last_entry_time.get(symbol) {
+            let elapsed = (ts - *last).num_seconds();
+            if elapsed < self.config.cooldown_secs as i64 {
+                self.recorder.record_filtered(
+                    &BacktestSignal {
+                        signal_type: SignalType::Filtered,
+                        symbol: symbol.to_string(),
+                        direction: format!("{}", direction),
+                        timestamp: ts,
+                        p_hat: Some(fair_value_f),
+                        ev_net: Some(edge),
+                        sigma: None,
+                        market_price: Some(market_ask),
+                        spot_price: Some(st),
+                        s0: Some(window.s0),
+                        time_remaining_secs: Some(time_remaining),
+                        filter_reason: Some("cooldown".to_string()),
+                        exit_reason: None,
+                        exit_price: None,
+                    },
+                    "cooldown",
+                );
+                return;
+            }
+        }
+
+        // 10. Max positions check
+        if self.positions.len() >= self.config.max_concurrent_positions {
+            self.recorder.record_filtered(
+                &BacktestSignal {
+                    signal_type: SignalType::Filtered,
+                    symbol: symbol.to_string(),
+                    direction: format!("{}", direction),
+                    timestamp: ts,
+                    p_hat: Some(fair_value_f),
+                    ev_net: Some(edge),
+                    sigma: None,
+                    market_price: Some(market_ask),
+                    spot_price: Some(st),
+                    s0: Some(window.s0),
+                    time_remaining_secs: Some(time_remaining),
+                    filter_reason: Some("max_positions".to_string()),
+                    exit_reason: None,
+                    exit_price: None,
+                },
+                "max_positions",
+            );
+            return;
+        }
+
+        // 11. Don't enter if already holding same event+direction
+        let already_holding = self.positions.iter().any(|p| {
+            p.event_slug == window.event_slug
+                && std::mem::discriminant(&p.direction) == std::mem::discriminant(&direction)
+        });
+        if already_holding {
+            self.recorder.record_filtered(
+                &BacktestSignal {
+                    signal_type: SignalType::Filtered,
+                    symbol: symbol.to_string(),
+                    direction: format!("{}", direction),
+                    timestamp: ts,
+                    p_hat: Some(fair_value_f),
+                    ev_net: Some(edge),
+                    sigma: None,
+                    market_price: Some(market_ask),
+                    spot_price: Some(st),
+                    s0: Some(window.s0),
+                    time_remaining_secs: Some(time_remaining),
+                    filter_reason: Some("already_holding".to_string()),
+                    exit_reason: None,
+                    exit_price: None,
+                },
+                "already_holding",
+            );
+            return;
+        }
+
+        // 12. Execute entry via ExecutionSimulator
+        let sim_result =
+            self.execution_sim
+                .simulate_buy(market_ask, ts, self.config.shares_per_trade, 10_000);
+
+        let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
+        let entry_fee = self.fee_model.fee_shares(
+            Decimal::from(sim_result.filled_shares),
+            sim_result.fill_price,
+        ) * sim_result.fill_price;
+        let total_entry_cost = entry_cost + entry_fee;
+        if total_entry_cost > self.equity {
+            trace!(
+                "Skipping entry: insufficient equity ({} < {})",
+                self.equity,
+                total_entry_cost
+            );
+            return;
+        }
+
+        self.equity -= total_entry_cost;
+
+        self.positions.push(DirectionalPosition {
+            symbol: symbol.to_string(),
+            direction,
+            entry_price: sim_result.fill_price,
+            entry_time: ts,
+            shares: sim_result.filled_shares,
+            event_slug: window.event_slug.clone(),
+            s0: window.s0,
+            event_end_time: window.end_time,
+            entry_p_hat: fair_value_f,
+            entry_ev_net: edge,
+            entry_sigma: momentum.to_f64().unwrap_or(0.0), // store momentum in sigma field
+            latest_pm_price: market_ask,
+        });
+
+        self.last_entry_time.insert(symbol.to_string(), ts);
+
+        self.recorder.record_entry(&BacktestSignal {
+            signal_type: SignalType::Entry,
+            symbol: symbol.to_string(),
+            direction: format!("{}", direction),
+            timestamp: ts,
+            p_hat: Some(fair_value_f),
+            ev_net: Some(edge),
+            sigma: Some(momentum.to_f64().unwrap_or(0.0)),
+            market_price: Some(sim_result.fill_price),
+            spot_price: Some(st),
+            s0: Some(window.s0),
+            time_remaining_secs: Some(time_remaining),
+            filter_reason: None,
+            exit_reason: None,
+            exit_price: None,
+        });
+
+        debug!(
+            "ENTRY {} {} @ {:.4} | fv={:.3} edge={:.3} mom={:.4}%",
+            symbol,
+            direction,
+            sim_result.fill_price,
+            fair_value_f,
+            edge,
+            momentum.to_f64().unwrap_or(0.0) * 100.0
+        );
+    }
+
+    // ─── Exit logic (directional, NOT arb) ───────────────────
+
+    fn check_exits(&mut self, ts: DateTime<Utc>) {
+        let mut to_close: Vec<(usize, Decimal, &str)> = Vec::new();
+
+        for (i, pos) in self.positions.iter().enumerate() {
+            let time_remaining = (pos.event_end_time - ts).num_seconds() as f64;
+
+            // A. Hold to settlement — no early exit at all. Binary options settle
+            // at $1.00 or $0.00, so unrealized PnL fluctuations are noise.
+            // The only meaningful exit is settlement itself.
+            // When enabled, skip ALL exit checks (time_stop, hard_stop) and wait
+            // for the EventState settlement event to close the position.
+            if self.config.hold_to_settlement {
+                continue;
+            }
+
+            // B. Time stop: <N secs remaining AND position is underwater.
+            //    Use unrealized PnL (market price vs entry price), NOT the probability model.
+            //    The prob model returns ~0.5 always, which would incorrectly exit winners
+            //    (pm_price > 0.5 → ev_now < 0 → false exit signal).
+            if time_remaining <= self.config.time_stop_secs as f64 && time_remaining > 0.0 {
+                let unrealized_per_share = pos.latest_pm_price - pos.entry_price;
+                if unrealized_per_share < Decimal::ZERO {
+                    to_close.push((i, pos.latest_pm_price, "time_stop"));
+                    continue;
+                }
+            }
+
+            // C. Hard stop: unrealized loss exceeds max
+            let unrealized = (pos.latest_pm_price - pos.entry_price) * Decimal::from(pos.shares);
+            if unrealized < Decimal::ZERO && unrealized.abs() > self.config.hard_stop_usd {
+                to_close.push((i, pos.latest_pm_price, "hard_stop"));
+                continue;
+            }
+        }
+
+        // Close in reverse order to preserve indices
+        to_close.sort_by(|a, b| b.0.cmp(&a.0));
+        for (idx, exit_price, reason) in to_close {
+            self.close_position(idx, exit_price, reason, ts);
+        }
+    }
+
+    // ─── Settlement ──────────────────────────────────────────
+
+    fn resolve_positions(
+        &mut self,
+        symbol: &str,
+        event_slug: &str,
+        up_won: bool,
+        ts: DateTime<Utc>,
+    ) {
+        let mut to_close = Vec::new();
+
+        for (i, pos) in self.positions.iter().enumerate() {
+            if pos.symbol == symbol && pos.event_slug == event_slug {
+                let exit_price = match (&pos.direction, up_won) {
+                    (Direction::Up, true) | (Direction::Down, false) => Decimal::ONE,
+                    _ => Decimal::ZERO,
+                };
+                to_close.push((i, exit_price));
+            }
+        }
+
+        to_close.sort_by(|a, b| b.0.cmp(&a.0));
+        for (idx, exit_price) in to_close {
+            self.close_position(idx, exit_price, "settlement", ts);
+        }
+    }
+
+    // ─── Close position ──────────────────────────────────────
+
+    fn close_position(&mut self, idx: usize, exit_price: Decimal, reason: &str, ts: DateTime<Utc>) {
+        let pos = self.positions.remove(idx);
+
+        // For settlement ($1 or $0), no need to simulate — it's binary payout.
+        // Fee at settlement ($1 or $0): p*(1-p) = 0, so settlement fee = $0.
+        // For early exits, simulate sell via ExecutionSimulator + exit fee.
+        let (final_price, proceeds, _exit_fee) = if reason == "settlement" {
+            let p = exit_price;
+            // At $1.00 or $0.00, the parabolic fee curve = 0 (p*(1-p) = 0)
+            (p, p * Decimal::from(pos.shares), Decimal::ZERO)
+        } else {
+            let sim_result = self
+                .execution_sim
+                .simulate_sell(exit_price, ts, pos.shares, 10_000);
+            let raw_proceeds = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
+            // Taker fee on sell: shares × price × feeRate × (p*(1-p))^exponent
+            let sell_fee = self.fee_model.fee_shares(
+                Decimal::from(sim_result.filled_shares),
+                sim_result.fill_price,
+            ) * sim_result.fill_price;
+            (sim_result.fill_price, raw_proceeds - sell_fee, sell_fee)
+        };
+
+        self.equity += proceeds;
+
+        // Entry fee was already deducted from equity at entry time,
+        // so PnL = proceeds - (shares × entry_price) already reflects the entry fee implicitly.
+        // But we also need to account for exit fee in the PnL.
+        let entry_fee = self
+            .fee_model
+            .fee_shares(Decimal::from(pos.shares), pos.entry_price)
+            * pos.entry_price;
+        let pnl = proceeds - Decimal::from(pos.shares) * pos.entry_price - entry_fee;
+        let holding_secs = (ts - pos.entry_time).num_seconds();
+
+        self.closed_trades.push(DirectionalClosedTrade {
+            symbol: pos.symbol.clone(),
+            direction: format!("{}", pos.direction),
+            entry_time: pos.entry_time,
+            exit_time: ts,
+            entry_price: pos.entry_price,
+            exit_price: final_price,
+            shares: pos.shares,
+            pnl,
+            won: pnl > Decimal::ZERO,
+            holding_secs,
+            exit_reason: reason.to_string(),
+            entry_p_hat: pos.entry_p_hat,
+            entry_ev_net: pos.entry_ev_net,
+            s0: pos.s0,
+            entry_sigma: pos.entry_sigma,
+        });
+
+        // Record exit signal and trade
+        self.recorder.record_exit(&BacktestSignal {
+            signal_type: SignalType::Exit,
+            symbol: pos.symbol.clone(),
+            direction: format!("{}", pos.direction),
+            timestamp: ts,
+            p_hat: Some(pos.entry_p_hat),
+            ev_net: Some(pos.entry_ev_net),
+            sigma: Some(pos.entry_sigma),
+            market_price: Some(final_price),
+            spot_price: None,
+            s0: Some(pos.s0),
+            time_remaining_secs: None,
+            filter_reason: None,
+            exit_reason: Some(reason.to_string()),
+            exit_price: Some(final_price),
+        });
+
+        self.recorder.record_trade(&PendingTrade {
+            symbol: pos.symbol,
+            direction: format!("{}", pos.direction),
+            entry_time: pos.entry_time,
+            exit_time: ts,
+            entry_price: pos.entry_price,
+            exit_price: final_price,
+            shares: pos.shares as i32,
+            pnl,
+            won: pnl > Decimal::ZERO,
+            holding_secs,
+            exit_reason: reason.to_string(),
+            entry_p_hat: Some(pos.entry_p_hat),
+            entry_ev_net: Some(pos.entry_ev_net),
+            entry_sigma: Some(pos.entry_sigma),
+            s0: Some(pos.s0),
+        });
+    }
+
+    /// Force-close remaining positions at latest PM price (data exhausted).
+    fn close_remaining_positions(&mut self) {
+        let ts = self.data_range_end.unwrap_or(Utc::now());
+        let indices: Vec<usize> = (0..self.positions.len()).rev().collect();
+        for idx in indices {
+            let price = self.positions[idx].latest_pm_price;
+            self.close_position(idx, price, "data_exhausted", ts);
+        }
+    }
+
+    // ─── Equity tracking ─────────────────────────────────────
+
+    fn record_equity(&mut self, ts: DateTime<Utc>) {
+        if self.equity > self.peak_equity {
+            self.peak_equity = self.equity;
+        }
+        let drawdown = if self.peak_equity > Decimal::ZERO {
+            (self.peak_equity - self.equity) / self.peak_equity
+        } else {
+            Decimal::ZERO
+        };
+        if drawdown > self.max_drawdown {
+            self.max_drawdown = drawdown;
+        }
+
+        // Sample equity curve (max 1 point per second to avoid bloat)
+        let should_record = self
+            .equity_curve
+            .last()
+            .map(|(last_ts, _)| (ts - *last_ts).num_seconds() >= 1)
+            .unwrap_or(true);
+        if should_record {
+            self.equity_curve.push((ts, self.equity));
+        }
+    }
+
+    // ─── Results ─────────────────────────────────────────────
+
+    fn build_results(&self) -> BacktestResults {
+        build_directional_results(
+            &self.closed_trades,
+            &self.equity_curve,
+            self.max_drawdown,
+            self.data_range_start,
+            self.data_range_end,
+        )
+    }
+
+    /// Print directional-specific summary stats beyond BacktestResults.
+    pub fn print_directional_summary(&self) {
+        if self.closed_trades.is_empty() {
+            info!("No trades to summarize.");
+            return;
+        }
+        render_directional_summary(&self.closed_trades);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Display for directional results
+// ─────────────────────────────────────────────────────────────
+
+impl fmt::Display for DirectionalBacktestEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let results = self.build_results();
+        writeln!(f, "=== Directional Backtest Results ===")?;
+        writeln!(
+            f,
+            "Period:        {} to {}",
+            results.start_time.format("%Y-%m-%d %H:%M"),
+            results.end_time.format("%Y-%m-%d %H:%M")
+        )?;
+        writeln!(f, "Total trades:  {}", results.total_trades)?;
+        writeln!(
+            f,
+            "Win/Loss:      {} / {}",
+            results.winning_trades, results.losing_trades
+        )?;
+        writeln!(f, "Win rate:      {:.1}%", results.win_rate * 100.0)?;
+        writeln!(f, "Total PnL:     ${:.2}", results.total_pnl)?;
+        writeln!(f, "Avg PnL/trade: ${:.4}", results.avg_pnl_per_trade)?;
+        writeln!(f, "Sharpe ratio:  {:.2}", results.sharpe_ratio)?;
+        writeln!(f, "Profit factor: {:.2}", results.profit_factor)?;
+        writeln!(f, "Max drawdown:  {:.2}%", results.max_drawdown * dec!(100))?;
+        writeln!(f, "Avg hold time: {:.0}s", results.avg_holding_time_secs)?;
+        writeln!(f, "Largest win:   ${:.4}", results.largest_win)?;
+        writeln!(f, "Largest loss:  ${:.4}", results.largest_loss)?;
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ploy_backtest::{HistoricalFeed, MarketUpdate};
+
+    fn mock_feed(updates: Vec<MarketUpdate>) -> HistoricalFeed {
+        HistoricalFeed::new(updates)
+    }
+
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn test_empty_feed() {
+        let config = DirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".into()]);
+        let mut engine = DirectionalBacktestEngine::new_without_recorder(config);
+        let mut feed = mock_feed(vec![]);
+        let results = engine.run(&mut feed);
+
+        assert_eq!(results.total_trades, 0);
+        assert_eq!(results.total_pnl, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_settlement_binary_payout() {
+        // Setup: create a position via momentum signal, then settle it.
+        let mut config = DirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".into()]);
+        config.entry_threshold = 0.0; // Accept any positive edge
+        config.min_entry_price = dec!(0.01);
+        config.max_entry_price = dec!(0.99);
+        config.shares_per_trade = 100;
+        config.min_momentum = dec!(0.001); // Low threshold for test
+        config.min_time_remaining_secs = 30;
+        config.max_time_remaining_secs = 600;
+
+        let mut engine = DirectionalBacktestEngine::new_without_recorder(config);
+
+        let base = ts(0);
+        let end_time = ts(300); // 5 min window
+
+        let mut updates = vec![];
+
+        // Event opens: S0 = 100
+        updates.push(MarketUpdate {
+            timestamp: base,
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::EventState {
+                event_slug: "btc-up-100".into(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        });
+
+        // Build spot price history with UPWARD momentum (100.00 → 101.50)
+        // Need enough points spread over 60s for weighted_momentum to work
+        for i in 1..=60 {
+            let price = dec!(100) + Decimal::from(i) * dec!(0.025);
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::SpotTrade {
+                    price,
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        // PM quote with cheap UP ask — momentum is up, so should buy UP
+        updates.push(MarketUpdate {
+            timestamp: ts(61),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.40)),
+                down_ask: Some(dec!(0.65)),
+            },
+        });
+
+        // Settlement: UP wins
+        updates.push(MarketUpdate {
+            timestamp: end_time,
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::EventState {
+                event_slug: "btc-up-100".into(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: Some(true),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let results = engine.run(&mut feed);
+
+        assert!(results.total_trades >= 1, "Expected at least 1 trade");
+
+        let trades = engine.closed_trades();
+        if !trades.is_empty() {
+            let t = &trades[0];
+            assert_eq!(t.exit_reason, "settlement");
+            assert_eq!(t.direction, "UP");
+            assert!(t.won, "UP trade should win when UP settles");
+            assert!(t.pnl > Decimal::ZERO, "PnL should be positive");
+            assert_eq!(t.exit_price, Decimal::ONE, "Settlement pays $1.00");
+        }
+    }
+
+    #[test]
+    fn test_entry_edge_filter() {
+        // High entry threshold should reject entries
+        let mut config = DirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".into()]);
+        config.entry_threshold = 0.99; // Impossibly high edge requirement
+        config.shares_per_trade = 100;
+        config.min_momentum = dec!(0.001);
+        config.min_time_remaining_secs = 30;
+        config.max_time_remaining_secs = 600;
+
+        let mut engine = DirectionalBacktestEngine::new_without_recorder(config);
+
+        let base = ts(0);
+        let end_time = ts(300);
+        let mut updates = vec![];
+
+        updates.push(MarketUpdate {
+            timestamp: base,
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::EventState {
+                event_slug: "btc-up-100".into(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        });
+
+        for i in 1..=60 {
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100) + Decimal::from(i) * dec!(0.02),
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        updates.push(MarketUpdate {
+            timestamp: ts(61),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.50)),
+                down_ask: Some(dec!(0.55)),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let results = engine.run(&mut feed);
+
+        assert_eq!(
+            results.total_trades, 0,
+            "No trades should pass 99% edge threshold"
+        );
+    }
+
+    #[test]
+    fn test_hold_to_settlement() {
+        let mut config = DirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".into()]);
+        config.entry_threshold = 0.0;
+        config.hold_to_settlement = true;
+        config.hard_stop_usd = dec!(999);
+        config.min_entry_price = dec!(0.01);
+        config.max_entry_price = dec!(0.99);
+        config.shares_per_trade = 10;
+        config.min_momentum = dec!(0.001);
+        config.min_time_remaining_secs = 30;
+        config.max_time_remaining_secs = 600;
+
+        let mut engine = DirectionalBacktestEngine::new_without_recorder(config);
+
+        let base = ts(0);
+        let end_time = ts(300);
+        let mut updates = vec![];
+
+        updates.push(MarketUpdate {
+            timestamp: base,
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::EventState {
+                event_slug: "btc-up-100".into(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        });
+
+        // Upward momentum
+        for i in 1..=60 {
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100) + Decimal::from(i) * dec!(0.025),
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        // Entry quote
+        updates.push(MarketUpdate {
+            timestamp: ts(61),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.30)),
+                down_ask: Some(dec!(0.75)),
+            },
+        });
+
+        // Adverse PM quote but NO settlement
+        updates.push(MarketUpdate {
+            timestamp: ts(100),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.20)),
+                down_ask: Some(dec!(0.85)),
+            },
+        });
+
+        updates.push(MarketUpdate {
+            timestamp: ts(200),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.15)),
+                down_ask: Some(dec!(0.90)),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let _results = engine.run(&mut feed);
+
+        let trades = engine.closed_trades();
+        if !trades.is_empty() {
+            assert_eq!(
+                trades[0].exit_reason, "data_exhausted",
+                "Should hold to settlement, closed only because feed ended"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hard_stop() {
+        let mut config = DirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".into()]);
+        config.entry_threshold = 0.0;
+        config.hold_to_settlement = false;
+        config.hard_stop_usd = dec!(1); // Very tight stop: $1
+        config.min_entry_price = dec!(0.01);
+        config.max_entry_price = dec!(0.99);
+        config.shares_per_trade = 100;
+        config.min_momentum = dec!(0.001);
+        config.min_time_remaining_secs = 30;
+        config.max_time_remaining_secs = 600;
+
+        let mut engine = DirectionalBacktestEngine::new_without_recorder(config);
+
+        let base = ts(0);
+        let end_time = ts(300);
+        let mut updates = vec![];
+
+        updates.push(MarketUpdate {
+            timestamp: base,
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::EventState {
+                event_slug: "btc-up-100".into(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        });
+
+        // Upward momentum to trigger entry
+        for i in 1..=60 {
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100) + Decimal::from(i) * dec!(0.025),
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        // Entry at 0.40
+        updates.push(MarketUpdate {
+            timestamp: ts(61),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.40)),
+                down_ask: Some(dec!(0.65)),
+            },
+        });
+
+        // Price crashes to 0.10 — unrealized loss = 100 * (0.10 - ~0.40) ≈ -$30 > $1 stop
+        updates.push(MarketUpdate {
+            timestamp: ts(100),
+            symbol: "BTCUSDT".into(),
+            update_type: UpdateType::PmQuote {
+                up_ask: Some(dec!(0.10)),
+                down_ask: Some(dec!(0.95)),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let _results = engine.run(&mut feed);
+
+        let trades = engine.closed_trades();
+        let hard_stopped = trades.iter().any(|t| t.exit_reason == "hard_stop");
+        assert!(
+            hard_stopped || trades.is_empty(),
+            "Expected hard_stop exit or no entry (if edge filter blocked)"
+        );
+    }
+}
