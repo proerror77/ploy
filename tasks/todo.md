@@ -442,6 +442,25 @@
   - `cargo test strategy::directional_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 directional backtest engine split)
+
+- [x] Move the runtime-heavy `DirectionalBacktestEngine` implementation into `src/strategy/directional_backtest/engine.rs`
+- [x] Reduce `mod.rs` to module wiring and public re-exports
+- [x] Keep existing directional tests compiling after the move
+- [x] Re-run build plus focused directional-backtest validation
+
+## Review (2026-03-06, directional backtest engine split)
+
+- Delivered in this slice:
+  - Moved the main engine implementation from [`src/strategy/directional_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest/mod.rs) into [`src/strategy/directional_backtest/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest/engine.rs).
+  - Reduced `mod.rs` to module declarations plus re-exports for `DirectionalBacktestEngine`, `DirectionalBacktestConfig`, and `DirectionalClosedTrade`.
+  - Left the existing tests and `fmt::Display` implementation in `engine.rs`, so coverage still runs against the extracted implementation.
+- Validation executed:
+  - `cargo test strategy::directional_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
