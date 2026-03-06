@@ -326,6 +326,27 @@
   - `cargo test strategy::momentum_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 staggered-arb backtest config split)
+
+- [x] Convert `src/strategy/staggered_arb_backtest.rs` to directory form
+- [x] Move `StaggeredArbBacktestConfig` into `src/strategy/staggered_arb_backtest/config.rs`
+- [x] Keep `crate::strategy::staggered_arb_backtest::*` stable via `mod.rs` re-export
+- [x] Add a direct config regression test for `with_symbols(...)`
+- [x] Re-run build plus focused staggered-arb-backtest validation
+
+## Review (2026-03-06, staggered-arb backtest config split)
+
+- Delivered in this slice:
+  - Renamed [`src/strategy/staggered_arb_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest.rs) into directory form at [`src/strategy/staggered_arb_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/mod.rs).
+  - Moved config definitions into [`src/strategy/staggered_arb_backtest/config.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest/config.rs).
+  - Preserved the existing caller surface for both [`src/cli/strategy/backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy/backtest.rs) and [`src/strategy/staggered_arb_live.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_live.rs) by re-exporting `StaggeredArbBacktestConfig` from `mod.rs`.
+  - Added a direct regression test that checks `with_symbols(...)` only overrides the symbol list and keeps the expected defaults.
+- Validation executed:
+  - `cargo test strategy::staggered_arb_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
