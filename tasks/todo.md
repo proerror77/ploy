@@ -19,7 +19,7 @@ Reduce duplicated market-data collection paths and converge on canonical raw tab
 ## Phase 3
 
 - [x] Remove or archive `backtest_collector` CSV-only flow from primary data pipeline
-- [ ] Add one unified collector docs page (what to run for live vs backfill vs research)
+- [x] Add one unified collector docs page (what to run for live vs backfill vs research)
 - [ ] Add lightweight data-quality checks (freshness + dedup ratios)
 
 ## Progress notes

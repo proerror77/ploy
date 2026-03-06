@@ -30,6 +30,8 @@ Compatibility live runtimes are now opt-in only:
 - `crypto_lob_ml` / `crypto_rl_policy` require `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true`
 - Grok-enabled legacy `nba_comeback` fallback requires `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true`
 
+Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
+
 New live strategies should implement the canonical `Strategy` contract, not `TradingAgent` or `DomainAgent`.
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
 For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
@@ -163,6 +165,17 @@ ploy claim --check-only                        # Check claimable resolved positi
 ploy history --limit 50                        # View recent trading history
 ploy ev --price 95 --probability 97            # Calculate expected value for near-settlement bets
 ```
+
+### Collector And Backfill
+
+Use the right command for the right data job:
+
+- `ploy collect` for continuous live/raw synchronized capture
+- `ploy orderbook-history` for historical PM L2 snapshots by token ID
+- `ploy deribit-iv-backfill` for historical Deribit IV bars
+- `ploy strategy backfill-*` for offline replay / settlement / kline prep
+
+See [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md) for examples and workflow guidance.
 
 ### Strategies
 
