@@ -288,6 +288,25 @@
   - `cargo test strategy::momentum_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 momentum backtest config split)
+
+- [x] Move `MomentumBacktestConfig` into `src/strategy/momentum_backtest/config.rs`
+- [x] Keep `crate::strategy::momentum_backtest::*` stable via `mod.rs` re-export
+- [x] Add a direct config regression test for symbol propagation/defaults
+- [x] Re-run build plus focused momentum-backtest validation
+
+## Review (2026-03-06, momentum backtest config split)
+
+- Delivered in this slice:
+  - Moved [`src/strategy/momentum_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest/mod.rs) config definitions into [`src/strategy/momentum_backtest/config.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest/config.rs).
+  - Kept the public import surface stable by re-exporting `MomentumBacktestConfig` from `mod.rs`.
+  - Added a direct regression test that checks top-level symbols, nested `momentum_config.symbols`, and default concurrency/cooldown values stay aligned.
+- Validation executed:
+  - `cargo test strategy::momentum_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
