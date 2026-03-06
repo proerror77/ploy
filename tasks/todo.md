@@ -79,3 +79,22 @@
   - `cargo test -p ploy-backtest`
   - `cargo build`
   - `cargo test test_engine_empty_feed -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6 export cleanup)
+
+- [x] Stop re-exporting shared backtest infrastructure from `strategy::impls`
+- [x] Update `paper_runner` to import `PaperTrader` and related types from their owning modules
+- [x] Keep user-facing paper-mode entrypoints stable while shrinking `impls` surface area
+- [x] Re-run compile checks after the export boundary cleanup
+
+## Review (2026-03-06, export cleanup)
+
+- Delivered in this slice:
+  - Removed legacy backtest infrastructure re-exports from [`src/strategy/impls.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/impls.rs).
+  - Moved [`src/strategy/paper_runner.rs`](/Users/proerror/Documents/ploy-refactor/src/strategy/paper_runner.rs) off the `impls` aggregate for `PaperTrader` and `PaperTradingStats`.
+  - Left higher-level paper trading entrypoints (`PaperTradingConfig`, `PaperTradingRunner`, `run_paper_trading`) intact so CLI wiring does not change yet.
+- Validation executed:
+  - `cargo build`
+  - `cargo test paper_runner -- --nocapture`

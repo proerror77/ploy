@@ -3,8 +3,6 @@
 //! Use this module instead of pulling strategy implementation types from the
 //! `strategy` root module.
 
-#[cfg(feature = "claimer_daemon")]
-pub use crate::account::claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
 pub use super::core::{
     ArbSide as CoreArbSide, ArbStats as CoreArbStats, BinaryMarket,
     HedgedPosition as CoreHedgedPosition, MarketDiscovery, MarketType,
@@ -12,17 +10,12 @@ pub use super::core::{
     SplitArbConfig as CoreSplitArbConfig, SplitArbEngine as CoreSplitArbEngine,
 };
 pub use super::crypto::{run_crypto_split_arb, CryptoMarketDiscovery, CryptoSplitArbConfig};
-pub use super::sports::{run_sports_split_arb, SportsLeague, SportsMarketDiscovery, SportsSplitArbConfig};
+pub use super::sports::{
+    run_sports_split_arb, SportsLeague, SportsMarketDiscovery, SportsSplitArbConfig,
+};
+#[cfg(feature = "claimer_daemon")]
+pub use crate::account::claimer::{AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition};
 
-pub use super::backtest::{
-    calculate_kline_volatility, load_klines_from_csv, load_pm_prices_from_csv, BacktestEngine,
-    BacktestResults, BacktestTrade, KlineRecord, MarketSnapshot, PMPriceRecord, PaperSignal,
-    PaperTrader, PaperTradingStats,
-};
-pub use super::backtest_recorder::{
-    BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, PgBacktestRecorder, SignalType,
-};
-pub use super::backtest_report::{load_report, BacktestReport, Suggestion, SuggestionPriority};
 pub use super::deribit_probability_arb::{
     binary_call_prob_forward, interpolate_iv_linear, net_edge, norm_cdf, parse_polymarket_question,
     run_deribit_probability_arb, DeribitProbabilityArbConfig, ParsedPolymarketQuestion,
@@ -33,7 +26,6 @@ pub use super::directional_backtest::{
 };
 pub use super::event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 pub use super::event_edge::{run_event_edge, EventEdgeConfig};
-pub use super::execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use super::fee_model::{AllInCost, FeeModel, FeeRateCache};
 pub use super::momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
@@ -41,25 +33,11 @@ pub use super::momentum::{
 };
 pub use super::multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use super::multi_outcome::{
-    analyze_market_making_opportunity,
-    analyze_near_settlement,
-    detect_split_merge_opportunity,
-    fetch_multi_outcome_event,
-    generate_ev_table,
-    ArbitrageType,
-    ExpectedValue,
-    MarketMakingAction,
-    MarketMakingConfig,
-    MarketMakingOpportunity,
-    MultiOutcomeArbitrage,
-    MultiOutcomeMonitor,
-    NearSettlementAnalysis,
-    Outcome,
-    OutcomeDirection,
-    OutcomeSummary,
-    SplitMergeOpportunity,
-    SplitMergeType,
-    POLYMARKET_FEE_RATE,
+    analyze_market_making_opportunity, analyze_near_settlement, detect_split_merge_opportunity,
+    fetch_multi_outcome_event, generate_ev_table, ArbitrageType, ExpectedValue, MarketMakingAction,
+    MarketMakingConfig, MarketMakingOpportunity, MultiOutcomeArbitrage, MultiOutcomeMonitor,
+    NearSettlementAnalysis, Outcome, OutcomeDirection, OutcomeSummary, SplitMergeOpportunity,
+    SplitMergeType, POLYMARKET_FEE_RATE,
 };
 pub use super::nba_comeback::nba_data_collector::{
     CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,
@@ -71,14 +49,18 @@ pub use super::nba_comeback::nba_entry::{
 pub use super::nba_comeback::nba_exit::{
     ExitConfig as NbaExitConfig, ExitDecision, ExitLogic, ExitUrgency, PositionState,
 };
-pub use super::nba_comeback::nba_filters::{FilterConfig, FilterResult, MarketContext, MarketFilters};
+pub use super::nba_comeback::nba_filters::{
+    FilterConfig, FilterResult, MarketContext, MarketFilters,
+};
 pub use super::nba_comeback::nba_state_machine::{
     StateEvent as NbaStateEvent, StateMachine as NbaStateMachine, StrategyState as NbaStrategyState,
 };
 pub use super::nba_comeback::nba_winprob::{
     GameFeatures, LiveWinProbModel, ModelMetadata, WinProbCoefficients, WinProbPrediction,
 };
-pub use super::paper_runner::{run_paper_trading, PaperTradingConfig, PaperTradingRunner, TrackedMarket};
+pub use super::paper_runner::{
+    run_paper_trading, PaperTradingConfig, PaperTradingRunner, TrackedMarket,
+};
 pub use super::position_manager::{
     Position as PersistedPosition, PositionManager, PositionStatus as PersistedPositionStatus,
     PositionSummary,
