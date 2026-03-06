@@ -30,6 +30,9 @@ env:
   RUST_BACKTRACE: 1
   PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
   DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
+  PLOY_SYSTEMD_MEMORY_HIGH: ${{ vars.PLOY_SYSTEMD_MEMORY_HIGH || '1280M' }}
+  PLOY_SYSTEMD_MEMORY_MAX: ${{ vars.PLOY_SYSTEMD_MEMORY_MAX || '1536M' }}
+  PLOY_SYSTEMD_RESTART_SEC: ${{ vars.PLOY_SYSTEMD_RESTART_SEC || '5' }}
 
 jobs:
   build:
@@ -254,7 +257,7 @@ jobs:
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
           script_stop: true
-          envs: DEPLOY_ROOT
+          envs: DEPLOY_ROOT,PLOY_SYSTEMD_MEMORY_HIGH,PLOY_SYSTEMD_MEMORY_MAX,PLOY_SYSTEMD_RESTART_SEC
           script: |
             set -euo pipefail
 
@@ -268,6 +271,38 @@ jobs:
             if [ "$(id -u)" -ne 0 ]; then
               SUDO="sudo"
             fi
+
+            if ! command -v curl >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                $SUDO apt-get update -qq
+                $SUDO apt-get install -y -qq curl
+              elif command -v dnf >/dev/null 2>&1; then
+                $SUDO dnf install -y curl
+              elif command -v yum >/dev/null 2>&1; then
+                $SUDO yum install -y curl
+              else
+                echo "curl missing and no supported package manager found."
+                exit 1
+              fi
+            fi
+
+            if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            fi
+
+            "$HOME/.cargo/bin/rustup" toolchain install stable --profile minimal >/dev/null
+            "$HOME/.cargo/bin/rustup" default stable >/dev/null
+            $SUDO ln -sf "$HOME/.cargo/bin/rustc" /usr/local/bin/rustc
+            $SUDO ln -sf "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo
+            $SUDO ln -sf "$HOME/.cargo/bin/rustdoc" /usr/local/bin/rustdoc
+            $SUDO ln -sf "$HOME/.cargo/bin/rustfmt" /usr/local/bin/rustfmt
+
+            rustc --version
+            cargo --version
+
+            # Never keep heavy Rust builds on a trading host.
+            pkill -x cargo || true
+            pkill -x rustc || true
 
             [ -f "${BUNDLE}" ]
             rm -rf "${WORKDIR}"
@@ -307,12 +342,69 @@ jobs:
               echo "DATABASE_URL not set; skip migration."
             fi
 
-            if systemctl list-unit-files | grep -q '^ploy\.service'; then
-              $SUDO systemctl restart ploy
-              sleep 3
-              $SUDO systemctl is-active --quiet ploy
-            else
-              echo "ploy.service not found; skip restart."
+            units_to_restart=""
+            add_restart_unit() {
+              local unit="$1"
+              case " ${units_to_restart} " in
+                *" ${unit} "*) ;;
+                *) units_to_restart="${units_to_restart} ${unit}" ;;
+              esac
+            }
+
+            unit_exists() {
+              local unit="$1"
+              systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "${unit}.service"
+            }
+
+            write_guardrail_dropin() {
+              local unit="$1"
+              local dropin_dir="/etc/systemd/system/${unit}.service.d"
+              $SUDO mkdir -p "$dropin_dir"
+              printf '%s\n' \
+                '[Service]' \
+                'Restart=always' \
+                "RestartSec=${PLOY_SYSTEMD_RESTART_SEC}" \
+                "MemoryHigh=${PLOY_SYSTEMD_MEMORY_HIGH}" \
+                "MemoryMax=${PLOY_SYSTEMD_MEMORY_MAX}" \
+                'OOMPolicy=kill' \
+                | $SUDO tee "${dropin_dir}/10-memory-restart.conf" >/dev/null
+            }
+
+            for unit in ploy ploy-platform ploy-platform-live; do
+              if unit_exists "$unit"; then
+                write_guardrail_dropin "$unit"
+                add_restart_unit "$unit"
+              fi
+            done
+
+            for unit in $(systemctl list-units --type=service --state=active --no-legend "ploy*" | awk '{print $1}' | sed 's/\.service$//'); do
+              unit_exists "$unit" || continue
+              current_mem_max="$(systemctl show "$unit" -p MemoryMax --value || echo infinity)"
+              current_restart="$(systemctl show "$unit" -p Restart --value || echo no)"
+              if [ "$current_mem_max" = "infinity" ] || [ "$current_restart" = "no" ]; then
+                write_guardrail_dropin "$unit"
+                add_restart_unit "$unit"
+              fi
+            done
+
+            $SUDO systemctl daemon-reload
+
+            restarted_any=0
+            for unit in $units_to_restart; do
+              unit_exists "$unit" || continue
+              if systemctl is-active --quiet "$unit"; then
+                $SUDO systemctl restart "$unit"
+                sleep 2
+                $SUDO systemctl is-active --quiet "$unit"
+                $SUDO systemctl show "$unit" -p Restart -p RestartUSec -p MemoryHigh -p MemoryMax -p OOMPolicy
+                restarted_any=1
+              else
+                echo "${unit}.service is installed but inactive; skip restart."
+              fi
+            done
+
+            if [ "$restarted_any" -eq 0 ]; then
+              echo "No active ploy service required restart."
             fi
 
             rm -rf "${WORKDIR}" "${BUNDLE}"

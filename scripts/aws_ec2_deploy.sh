@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Build and deploy ploy to an AWS EC2 host.
-# This script uploads source code and builds on EC2 to avoid local/remote arch mismatch.
+# WARNING: Remote source builds are disabled by default to protect trading hosts from OOM.
+# Use ALLOW_REMOTE_BUILD=1 only for non-trading environments.
 
 HOST=""
 USER_NAME="ubuntu"
@@ -10,6 +11,7 @@ SSH_KEY=""
 START_AFTER_DEPLOY="true"
 ENABLE_ON_BOOT="true"
 SERVICES="ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer"
+ALLOW_REMOTE_BUILD="${ALLOW_REMOTE_BUILD:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -40,6 +42,10 @@ What it does:
   4) Install/refresh systemd services (ploy, ploy@, sports, crypto collector)
   5) Install workload config/env templates under /opt/ploy/config and /opt/ploy/env
   6) Enable/start selected services (optional)
+
+Safety:
+  - Remote source build is disabled by default.
+  - To force-enable this legacy path, set ALLOW_REMOTE_BUILD=1 explicitly.
 USAGE
 }
 
@@ -130,6 +136,15 @@ if [[ "$ENABLE_ON_BOOT" != "true" && "$ENABLE_ON_BOOT" != "false" ]]; then
 fi
 
 SERVICES="$(normalize_services_csv "$SERVICES")"
+
+if [[ "$ALLOW_REMOTE_BUILD" != "1" ]]; then
+  cat >&2 <<'MSG'
+Remote source build is disabled by default to protect trading hosts from OOM.
+Use CI artifact deployment instead (for example: .github/workflows/release-aliyun.yml).
+If you really need this legacy script, rerun with ALLOW_REMOTE_BUILD=1.
+MSG
+  exit 3
+fi
 
 SSH_OPTS=(
   -o StrictHostKeyChecking=accept-new
