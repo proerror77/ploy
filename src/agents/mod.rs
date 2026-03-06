@@ -24,4 +24,4 @@ pub use governance_context::GovernanceContext;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
 pub use politics::PoliticsTradingConfig;
 pub use sports::SportsTradingConfig;
-pub use traits::{AgentConfig, TradingAgent};
+pub use traits::{AgentConfig, GovernanceAgent, TradingAgent};

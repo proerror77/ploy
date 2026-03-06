@@ -1,6 +1,6 @@
 //! OpenClaw meta-agent — Layer 3 orchestrator
 //!
-//! Implements `TradingAgent` but never trades directly. Instead, it:
+//! Implements `GovernanceAgent` and never trades directly. Instead, it:
 //! 1. Detects market regime from BinanceWebSocket volatility data
 //! 2. Tracks per-agent performance (Sharpe, win rate, drawdown)
 //! 3. Dynamically adjusts capital allocation via governance policy metadata
@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::agents::traits::TradingAgent;
-use crate::agents::{AgentContext, GovernanceContext};
+use crate::agents::traits::GovernanceAgent;
+use crate::agents::GovernanceContext;
 use crate::coordinator::CoordinatorCommand;
 use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
 
@@ -40,7 +40,7 @@ impl OpenClawAgent {
 }
 
 #[async_trait]
-impl TradingAgent for OpenClawAgent {
+impl GovernanceAgent for OpenClawAgent {
     fn id(&self) -> &str {
         &self.config.agent_id
     }
@@ -53,9 +53,7 @@ impl TradingAgent for OpenClawAgent {
         Domain::Custom(0)
     }
 
-    async fn run(self, ctx: AgentContext) -> crate::error::Result<()> {
-        let mut ctx: GovernanceContext = ctx.into();
-
+    async fn run(self, mut ctx: GovernanceContext) -> crate::error::Result<()> {
         info!(
             agent_id = %self.config.agent_id,
             regime_tick = self.config.regime_tick_secs,

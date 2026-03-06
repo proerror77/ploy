@@ -760,6 +760,31 @@ Move the remaining OpenClaw setup block out of `start_platform()` so bootstrap s
 
 ---
 
+# Layered Live Runtime Task 4A: Introduce GovernanceAgent Contract (2026-03-06)
+
+## Goal
+Stop forcing governance-only logic through the `TradingAgent` interface. OpenClaw should run through a formal governance contract and bootstrap should spawn it with governance-only coordinator access.
+
+## Tasks
+
+- [x] Add a `GovernanceAgent` trait in `src/agents/traits.rs`.
+- [x] Switch `OpenClawAgent` from `TradingAgent` to `GovernanceAgent`.
+- [x] Add `spawn_governance_agent_task(...)` in `src/coordinator/bootstrap.rs` and route OpenClaw through it.
+- [x] Keep compatibility trading agents unchanged in this slice.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] OpenClaw no longer implements the pull-based trading-agent contract; it now runs behind a dedicated governance-agent trait with `GovernanceContext`.
+- [x] `bootstrap.rs` now distinguishes compatibility trading-agent spawning from governance-agent spawning instead of forcing both through the same helper.
+- [x] Focused validation passed:
+  - `cargo test agents::governance_context --lib -- --nocapture`
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

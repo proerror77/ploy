@@ -17,8 +17,8 @@ use crate::agents::crypto::CryptoEntryMode;
 use crate::agents::sports::SportsTradingAgent;
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingConfig, OpenClawAgent, OpenClawConfig, PoliticsTradingConfig,
-    SportsTradingConfig, TradingAgent,
+    CryptoLobMlExitMode, CryptoTradingConfig, GovernanceAgent, GovernanceContext,
+    OpenClawAgent, OpenClawConfig, PoliticsTradingConfig, SportsTradingConfig, TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -5248,6 +5248,28 @@ fn spawn_trading_agent_task<A: TradingAgent>(
     agent_handles.push(jh);
 }
 
+fn spawn_governance_agent_task<A: GovernanceAgent>(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    agent: A,
+    risk_params: AgentRiskParams,
+    error_label: &'static str,
+) {
+    let agent_id = agent.id().to_string();
+    let domain = agent.domain();
+    let cmd_rx = coordinator.register_agent(agent_id.clone(), domain.clone(), risk_params);
+    let trading_ctx = AgentContext::new(agent_id, domain, handle.clone(), cmd_rx);
+    let ctx: GovernanceContext = trading_ctx.into();
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = agent.run(ctx).await {
+            error!(agent = error_label, error = %e, "governance agent exited with error");
+        }
+    });
+    agent_handles.push(jh);
+}
+
 async fn load_sports_collector_targets(pool: &PgPool) -> HashMap<String, Side> {
     let mut desired: HashMap<String, Side> = HashMap::new();
     if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
@@ -5560,7 +5582,7 @@ fn spawn_openclaw_agent(
     let oc_regime_tick_secs = openclaw_cfg.regime_tick_secs;
     let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);
     let agent = OpenClawAgent::new(openclaw_cfg, oc_market_data);
-    spawn_trading_agent_task(
+    spawn_governance_agent_task(
         agent_handles,
         coordinator,
         handle,
