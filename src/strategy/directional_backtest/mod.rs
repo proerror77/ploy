@@ -10,6 +10,7 @@
 //!   ploy strategy backtest directional --symbols BTCUSDT --save --json
 
 mod display;
+mod state;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -33,45 +34,7 @@ use crate::strategy::momentum::Direction;
 pub use ploy_backtest::strategies::{DirectionalBacktestConfig, DirectionalClosedTrade};
 
 use display::print_directional_summary as render_directional_summary;
-
-// ─────────────────────────────────────────────────────────────
-// Position tracking
-// ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct DirectionalPosition {
-    symbol: String,
-    direction: Direction,
-    entry_price: Decimal,
-    entry_time: DateTime<Utc>,
-    shares: u64,
-    #[allow(dead_code)]
-    event_slug: String,
-    /// Window open price (Binance proxy for Chainlink S0)
-    s0: Decimal,
-    /// When the event window settles
-    event_end_time: DateTime<Utc>,
-    /// Model probability at entry
-    entry_p_hat: f64,
-    /// EV_net at entry for diagnostics
-    entry_ev_net: f64,
-    /// Realized vol at entry
-    entry_sigma: f64,
-    /// Latest PM price for mark-to-market
-    latest_pm_price: Decimal,
-}
-
-// ─────────────────────────────────────────────────────────────
-// Active event window info
-// ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct ActiveWindowInfo {
-    event_slug: String,
-    /// S0 = price_to_beat from EventState
-    s0: Decimal,
-    end_time: DateTime<Utc>,
-}
+use state::{ActiveWindowInfo, DirectionalPosition};
 
 // ─────────────────────────────────────────────────────────────
 // Engine
