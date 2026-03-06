@@ -12,11 +12,12 @@
 //!   ploy strategy backtest staggered-arb --symbols BTCUSDT --save --json
 
 mod config;
+mod state;
 
 pub use config::StaggeredArbBacktestConfig;
+pub use state::ArbPositionState;
 
 use std::collections::HashMap;
-use std::fmt;
 
 use chrono::{DateTime, Utc};
 use ploy_backtest::{
@@ -32,80 +33,7 @@ use crate::strategy::fee_model::FeeModel;
 use crate::strategy::momentum::Direction;
 use crate::strategy::probability::estimate_probability;
 pub use ploy_backtest::strategies::StaggeredArbClosedTrade;
-
-// ─────────────────────────────────────────────────────────────
-// Position state machine
-// ─────────────────────────────────────────────────────────────
-
-/// Position lifecycle:
-///   Idle → Leg1Filled → Settled (via merge or single-leg settlement)
-///                     → Aborted (timeout / stop_loss / time_safety)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArbPositionState {
-    Leg1Filled,
-    Settled,
-    Aborted,
-}
-
-impl fmt::Display for ArbPositionState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Leg1Filled => write!(f, "Leg1Filled"),
-            Self::Settled => write!(f, "Settled"),
-            Self::Aborted => write!(f, "Aborted"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct StaggeredArbPosition {
-    symbol: String,
-    event_slug: String,
-    /// Direction of Leg1 (the side we bought first)
-    leg1_direction: Direction,
-    leg1_price: Decimal,
-    leg1_shares: u64,
-    leg1_time: DateTime<Utc>,
-    leg1_fee: Decimal,
-    /// Deadline for Leg2 fill
-    wait_deadline: DateTime<Utc>,
-    /// Window open price (S0)
-    s0: Decimal,
-    /// Event end time
-    event_end_time: DateTime<Utc>,
-    /// Window duration in seconds
-    window_duration_secs: i64,
-    /// Model probability at Leg1 entry
-    entry_p_hat: f64,
-    /// Realized vol at entry
-    entry_sigma: f64,
-    /// Best sum seen during monitoring (for diagnostics)
-    best_sum_seen: Decimal,
-    /// Initial sum at entry (up_ask + down_ask)
-    initial_sum: Decimal,
-    /// Current state
-    state: ArbPositionState,
-    // ── Leg2 (filled after monitoring) ──
-    leg2_direction: Option<Direction>,
-    leg2_price: Option<Decimal>,
-    leg2_shares: Option<u64>,
-    leg2_time: Option<DateTime<Utc>>,
-    leg2_fee: Option<Decimal>,
-    // ── Resolution ──
-    exit_reason: Option<String>,
-    pnl: Option<Decimal>,
-}
-
-// ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct ActiveWindowInfo {
-    event_slug: String,
-    s0: Decimal,
-    end_time: DateTime<Utc>,
-    /// Window duration in seconds (300 = 5m, 900 = 15m)
-    window_duration_secs: i64,
-}
+use state::{ActiveWindowInfo, StaggeredArbPosition};
 
 // ─────────────────────────────────────────────────────────────
 // Engine
