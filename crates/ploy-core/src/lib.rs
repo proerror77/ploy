@@ -5,6 +5,7 @@
 
 pub mod domain;
 pub mod error;
+pub mod strategy;
 
 pub use domain::{
     Domain, OrderSide, OrderStatus, OrderType, RiskState, Side, StrategyState, TimeInForce,
