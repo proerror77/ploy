@@ -551,6 +551,31 @@ Shrink the public entry surface for legacy live runtimes so compatibility agents
 
 ---
 
+# Layered Live Runtime Task 8B: Narrow Platform Trait Re-Exports (2026-03-06)
+
+## Goal
+Stop presenting the push-based compatibility trait path as part of the top-level `platform` API. Legacy runtime callers should import `DomainAgent` explicitly from `platform::traits`.
+
+## Tasks
+
+- [x] Change `src/platform/mod.rs` so `traits` is an explicit public compatibility module.
+- [x] Stop re-exporting `DomainAgent` and `SimpleAgent` from the `platform` root.
+- [x] Stop re-exporting `DomainAgent` from the crate root in `src/lib.rs`.
+- [x] Update the remaining CLI compatibility path to import `DomainAgent` from `crate::platform::traits`.
+- [x] Update compatibility platform-agent modules to import `DomainAgent` from `crate::platform::traits`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `crate::platform::DomainAgent` and `ploy::DomainAgent` are no longer available as convenience APIs; compatibility callers must now opt into `crate::platform::traits::DomainAgent`.
+- [x] This slice does not change runtime behavior; it only narrows a misleading compatibility surface and makes later retirement of push-based runtime paths smaller.
+- [x] Focused validation passed:
+  - `cargo test main_modes::platform_mode --lib -- --nocapture`
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal

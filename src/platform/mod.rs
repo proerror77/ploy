@@ -17,7 +17,7 @@ mod queue;
 mod risk;
 mod router;
 pub mod subscription_planner;
-mod traits;
+pub mod traits;
 mod types;
 
 pub use contracts::{
@@ -46,7 +46,7 @@ pub use router::{AgentSubscription, EventRouter, RouterStats};
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
-pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent, SimpleAgent};
+pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus};
 pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,

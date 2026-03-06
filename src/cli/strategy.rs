@@ -3485,7 +3485,7 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
 
 /// Run the NBA comeback agent standalone
 async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
-    use crate::platform::DomainAgent;
+    use crate::platform::traits::DomainAgent;
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
     println!("\x1b[36m║  NBA Q3→Q4 Comeback Trading Agent                            ║\x1b[0m");
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
@@ -3592,7 +3592,7 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
                 break;
             }
             _ = tokio::time::sleep(interval) => {
-                use crate::platform::DomainAgent;
+                use crate::platform::traits::DomainAgent;
                 let intents = agent.on_event(crate::platform::DomainEvent::Tick(chrono::Utc::now())).await?;
                 if !intents.is_empty() {
                     for intent in &intents {

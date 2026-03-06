@@ -43,7 +43,7 @@ pub use persistence::{
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
 pub use platform::{
-    AgentStatus, Domain, DomainAgent, EventRouter, ExecutionReport, MarketSelector, OrderCommand,
+    AgentStatus, Domain, EventRouter, ExecutionReport, MarketSelector, OrderCommand,
     OrderExecutionReport, OrderIntent, OrderPlatform, PlatformConfig, RiskDecision,
     RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe, TradeIntent,
 };
