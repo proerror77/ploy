@@ -847,10 +847,6 @@ impl DomainAgent for RLCryptoAgent {
         self.status
     }
 
-    fn risk_params(&self) -> &AgentRiskParams {
-        &self.config.risk_params
-    }
-
     async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {
         // Only trade when running
         if !self.status.can_trade() {

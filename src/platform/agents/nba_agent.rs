@@ -15,8 +15,7 @@ use uuid::Uuid;
 use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent,
-    OrderPriority,
+    AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
 };
 use crate::strategy::nba_comeback::core::{ComebackOpportunity, NbaComebackCore};
 
@@ -26,7 +25,6 @@ const DEPLOYMENT_ID_NBA_COMEBACK: &str = "sports.pm.nba.comeback";
 pub struct NbaComebackAgent {
     core: NbaComebackCore,
     status: AgentStatus,
-    risk_params: AgentRiskParams,
     /// Maps intent_id → opportunity for tracking fills
     pending_intents: HashMap<Uuid, ComebackOpportunity>,
     /// Track positions for exposure calculation
@@ -40,19 +38,9 @@ pub struct NbaComebackAgent {
 
 impl NbaComebackAgent {
     pub fn new(core: NbaComebackCore) -> Self {
-        let risk_params = AgentRiskParams {
-            max_order_value: core.cfg.max_daily_spend_usd,
-            max_total_exposure: core.cfg.max_daily_spend_usd * dec!(2),
-            max_unhedged_positions: 5,
-            max_daily_loss: core.cfg.max_daily_spend_usd,
-            allow_overnight: false,
-            allowed_markets: vec![],
-        };
-
         Self {
             core,
             status: AgentStatus::Initializing,
-            risk_params,
             pending_intents: HashMap::new(),
             position_count: 0,
             total_exposure: Decimal::ZERO,
@@ -167,10 +155,6 @@ impl DomainAgent for NbaComebackAgent {
 
     fn status(&self) -> AgentStatus {
         self.status
-    }
-
-    fn risk_params(&self) -> &AgentRiskParams {
-        &self.risk_params
     }
 
     async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {

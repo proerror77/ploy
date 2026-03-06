@@ -413,10 +413,6 @@ impl DomainAgent for CryptoAgent {
         self.status
     }
 
-    fn risk_params(&self) -> &AgentRiskParams {
-        &self.config.risk_params
-    }
-
     async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {
         // 只處理 Running 狀態
         if !self.status.can_trade() {

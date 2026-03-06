@@ -341,6 +341,32 @@ Split governance-only coordinator access from trading access so OpenClaw can man
 
 ---
 
+# Layered Live Runtime Task 5: Externalize Live Risk Ownership (2026-03-06)
+
+## Goal
+Stop treating runtime traits as the canonical owner of `AgentRiskParams` so live risk binding stays in bootstrap/coordinator/platform registration.
+
+## Tasks
+
+- [x] Remove `risk_params()` from `TradingAgent` and `DomainAgent`.
+- [x] Update platform registration to require explicit externally supplied risk params instead of reading them from the runtime trait.
+- [x] Delete now-obsolete `risk_params()` impls across pull-based and platform-agent compatibility runtimes.
+- [x] Trim dead runtime-owned risk fields/imports that only existed to satisfy the old trait.
+- [x] Add a focused risk-gate regression test proving externally bound agent/domain params still drive market allow-list enforcement.
+- [x] Run focused validation and capture the results.
+- [x] Commit the Task 5 risk-ownership move atomically.
+
+## Review
+
+- [x] `AgentRiskParams` remains the runtime risk type, but bootstrap/platform/coordinator registration is now the only canonical binding path.
+- [x] Pull-based `TradingAgent` and transitional `DomainAgent` runtimes no longer claim risk ownership through their trait contracts.
+- [x] `platform::risk` now documents external binding semantics and has a regression test covering externally registered market allow-lists.
+- [x] Focused validation passed:
+  - `cargo test platform::risk --lib -- --nocapture`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `liquidity_vacuum_backtest.rs` and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

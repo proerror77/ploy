@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::agents::traits::TradingAgent;
 use crate::agents::{AgentContext, GovernanceContext};
 use crate::coordinator::CoordinatorCommand;
-use crate::platform::{AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, Domain};
+use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
 use super::config::OpenClawConfig;
@@ -51,18 +51,6 @@ impl TradingAgent for OpenClawAgent {
 
     fn domain(&self) -> Domain {
         Domain::Custom(0)
-    }
-
-    fn risk_params(&self) -> AgentRiskParams {
-        // Meta-agent never trades — zero risk params
-        AgentRiskParams {
-            max_order_value: Decimal::ZERO,
-            max_total_exposure: Decimal::ZERO,
-            max_unhedged_positions: 0,
-            max_daily_loss: Decimal::ZERO,
-            allow_overnight: false,
-            allowed_markets: vec![],
-        }
     }
 
     async fn run(self, ctx: AgentContext) -> crate::error::Result<()> {

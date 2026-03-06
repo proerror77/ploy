@@ -154,10 +154,10 @@ impl OrderPlatform {
         &self,
         agent: Box<dyn DomainAgent>,
         subscription: AgentSubscription,
+        risk_params: AgentRiskParams,
     ) {
         let agent_id = agent.id().to_string();
         let domain = agent.domain();
-        let risk_params = agent.risk_params().clone();
 
         // 註冊到路由器
         self.router.register_agent(agent, subscription).await;
@@ -177,15 +177,7 @@ impl OrderPlatform {
         subscription: AgentSubscription,
         risk_params: AgentRiskParams,
     ) {
-        let agent_id = agent.id().to_string();
-        let domain = agent.domain();
-
-        self.router.register_agent(agent, subscription).await;
-        self.risk_gate
-            .register_agent_with_domain(&agent_id, domain, risk_params)
-            .await;
-
-        info!("Platform registered agent with custom risk: {}", agent_id);
+        self.register_agent(agent, subscription, risk_params).await;
     }
 
     /// 取消註冊 Agent

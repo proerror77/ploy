@@ -12,8 +12,7 @@ use uuid::Uuid;
 use crate::config::EventEdgeAgentConfig;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent,
-    OrderPriority,
+    AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
 };
 use crate::strategy::event_edge::core::{EventEdgeCore, TradeDecision};
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
@@ -28,7 +27,6 @@ pub struct EventEdgePlatformAgent {
     core: EventEdgeCore,
     data_source: Box<dyn EventDataSource>,
     status: AgentStatus,
-    risk_params: AgentRiskParams,
     /// Maps intent_id → TradeDecision for execution callback tracking.
     pending_intents: HashMap<Uuid, TradeDecision>,
     consecutive_failures: u32,
@@ -36,20 +34,10 @@ pub struct EventEdgePlatformAgent {
 
 impl EventEdgePlatformAgent {
     pub fn new(core: EventEdgeCore) -> Self {
-        let risk_params = AgentRiskParams {
-            max_order_value: Decimal::from(core.cfg.shares) * core.cfg.max_entry,
-            max_total_exposure: core.cfg.max_daily_spend_usd,
-            max_unhedged_positions: 10,
-            max_daily_loss: core.cfg.max_daily_spend_usd,
-            allow_overnight: true,
-            allowed_markets: vec![],
-        };
-
         Self {
             core,
             data_source: Box::new(ArenaTextSource::default()),
             status: AgentStatus::Initializing,
-            risk_params,
             pending_intents: HashMap::new(),
             consecutive_failures: 0,
         }
@@ -151,10 +139,6 @@ impl DomainAgent for EventEdgePlatformAgent {
 
     fn status(&self) -> AgentStatus {
         self.status
-    }
-
-    fn risk_params(&self) -> &AgentRiskParams {
-        &self.risk_params
     }
 
     async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {

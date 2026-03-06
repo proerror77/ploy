@@ -56,6 +56,9 @@ impl std::fmt::Display for AgentStatus {
 }
 
 /// Agent 風險參數
+///
+/// 由 bootstrap / deployment / governance 註冊到風控層，不再由
+/// runtime trait 本身作為 canonical owner。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRiskParams {
     /// 單筆最大下單金額 (USD)
@@ -139,9 +142,6 @@ pub trait DomainAgent: Send + Sync {
 
     /// 當前狀態
     fn status(&self) -> AgentStatus;
-
-    /// 風險參數
-    fn risk_params(&self) -> &AgentRiskParams;
 
     /// 處理領域事件
     ///

@@ -23,6 +23,7 @@ pub struct AgentConfig {
     pub agent_id: String,
     pub name: String,
     pub domain: Domain,
+    /// Deployment/bootstrap-projected risk binding for coordinator registration.
     pub risk_params: AgentRiskParams,
     pub dry_run: bool,
 }
@@ -47,9 +48,6 @@ pub trait TradingAgent: Send + Sync + 'static {
 
     /// Trading domain this agent operates in
     fn domain(&self) -> Domain;
-
-    /// Risk parameters for this agent
-    fn risk_params(&self) -> AgentRiskParams;
 
     /// Main agent loop. Owns data feeds, generates orders via ctx.submit_order().
     /// Should handle CoordinatorCommands (Pause/Resume/Shutdown) from ctx.

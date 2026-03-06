@@ -1648,10 +1648,6 @@ impl TradingAgent for SportsTradingAgent {
         Domain::Sports
     }
 
-    fn risk_params(&self) -> AgentRiskParams {
-        self.config.risk_params.clone()
-    }
-
     async fn run(mut self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "sports agent starting");
         let config_hash = {

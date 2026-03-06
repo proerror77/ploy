@@ -690,10 +690,6 @@ impl TradingAgent for CryptoTradingAgent {
         Domain::Crypto
     }
 
-    fn risk_params(&self) -> AgentRiskParams {
-        self.config.risk_params.clone()
-    }
-
     async fn run(self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "crypto agent starting");
         let config_hash = self.config_hash();

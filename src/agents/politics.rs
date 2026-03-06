@@ -143,10 +143,6 @@ impl TradingAgent for PoliticsTradingAgent {
         Domain::Politics
     }
 
-    fn risk_params(&self) -> AgentRiskParams {
-        self.config.risk_params.clone()
-    }
-
     async fn run(mut self, mut ctx: AgentContext) -> Result<()> {
         info!(agent = self.config.agent_id, "politics agent starting");
         let config_hash = {
