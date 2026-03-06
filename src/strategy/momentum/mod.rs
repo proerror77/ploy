@@ -33,9 +33,12 @@ use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDete
 
 mod config;
 mod position;
+mod window_risk;
 
 pub use config::{ExitConfig, MomentumConfig};
 pub use position::{ExitManager, ExitReason, Position};
+
+use window_risk::{DailyTradeCounter, PendingSignal, WindowRiskTracker};
 
 // ============================================================================
 // Event Matcher
@@ -1211,148 +1214,6 @@ impl MomentumDetector {
 // ============================================================================
 // Momentum Engine
 // ============================================================================
-
-/// Daily trade counter for rate limiting
-#[derive(Debug, Default)]
-struct DailyTradeCounter {
-    count: u32,
-    reset_date: Option<chrono::NaiveDate>,
-}
-
-impl DailyTradeCounter {
-    fn increment(&mut self) -> u32 {
-        let today = Utc::now().date_naive();
-        if self.reset_date != Some(today) {
-            self.count = 0;
-            self.reset_date = Some(today);
-        }
-        self.count += 1;
-        self.count
-    }
-
-    fn current(&mut self) -> u32 {
-        let today = Utc::now().date_naive();
-        if self.reset_date != Some(today) {
-            self.count = 0;
-            self.reset_date = Some(today);
-        }
-        self.count
-    }
-}
-
-/// Pending signal for best-edge selection
-#[derive(Debug, Clone)]
-struct PendingSignal {
-    signal: MomentumSignal,
-    event: EventInfo,
-    edge: Decimal,
-    cost_usd: Decimal,
-    timestamp: DateTime<Utc>,
-}
-
-/// Window risk tracker for cross-symbol exposure limits
-/// Tracks exposure per 15-min window (grouped by event end time)
-#[derive(Debug, Default)]
-struct WindowRiskTracker {
-    /// Exposure by window ID (event end time as string)
-    window_exposure: HashMap<String, Decimal>,
-    /// Pending signals per window (for best-edge selection)
-    pending_signals: HashMap<String, Vec<PendingSignal>>,
-    /// Windows that have been executed (to prevent duplicates)
-    executed_windows: HashMap<String, bool>,
-}
-
-impl WindowRiskTracker {
-    /// Get window ID from event end time (rounded to 15-min)
-    fn window_id(event_end: &DateTime<Utc>) -> String {
-        // Format: YYYY-MM-DD HH:MM where MM is rounded to 15-min boundary
-        let ts = event_end.timestamp();
-        let rounded = (ts / 900) * 900; // Round down to 15-min boundary
-        DateTime::from_timestamp(rounded, 0)
-            .unwrap_or(*event_end)
-            .format("%Y-%m-%d %H:%M")
-            .to_string()
-    }
-
-    /// Check if window already has an executed trade
-    fn has_executed(&self, window_id: &str) -> bool {
-        self.executed_windows
-            .get(window_id)
-            .copied()
-            .unwrap_or(false)
-    }
-
-    /// Mark window as executed
-    fn mark_executed(&mut self, window_id: &str) {
-        self.executed_windows.insert(window_id.to_string(), true);
-    }
-
-    /// Get current exposure for a window
-    fn get_exposure(&self, window_id: &str) -> Decimal {
-        self.window_exposure
-            .get(window_id)
-            .copied()
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    /// Add exposure to a window
-    fn add_exposure(&mut self, window_id: &str, amount: Decimal) {
-        let current = self.get_exposure(window_id);
-        self.window_exposure
-            .insert(window_id.to_string(), current + amount);
-    }
-
-    /// Add pending signal for a window
-    fn add_pending_signal(&mut self, window_id: &str, signal: PendingSignal) {
-        self.pending_signals
-            .entry(window_id.to_string())
-            .or_default()
-            .push(signal);
-    }
-
-    /// Get best signal for a window (highest edge)
-    fn get_best_signal(&self, window_id: &str) -> Option<PendingSignal> {
-        self.pending_signals
-            .get(window_id)
-            .and_then(|signals| signals.iter().max_by(|a, b| a.edge.cmp(&b.edge)).cloned())
-    }
-
-    /// Clear pending signals for a window
-    fn clear_pending(&mut self, window_id: &str) {
-        self.pending_signals.remove(window_id);
-    }
-
-    /// Check if there are pending signals ready for execution (past delay threshold)
-    fn get_ready_windows(&self, delay_ms: u64) -> Vec<String> {
-        let now = Utc::now();
-        let threshold = ChronoDuration::milliseconds(delay_ms as i64);
-
-        self.pending_signals
-            .keys()
-            .filter(|window_id| {
-                // Check if window has signals and oldest is past threshold
-                if let Some(signals) = self.pending_signals.get(*window_id) {
-                    if let Some(oldest) = signals.iter().min_by_key(|s| s.timestamp) {
-                        return now.signed_duration_since(oldest.timestamp) >= threshold;
-                    }
-                }
-                false
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Cleanup old windows (older than 30 min)
-    fn cleanup_old(&mut self) {
-        let now = Utc::now();
-        let cutoff = now - ChronoDuration::minutes(30);
-        let cutoff_str = Self::window_id(&cutoff);
-
-        self.window_exposure.retain(|k, _| k >= &cutoff_str);
-        self.executed_windows.retain(|k, _| k >= &cutoff_str);
-        self.pending_signals.retain(|k, _| k >= &cutoff_str);
-    }
-}
 
 /// Main engine orchestrating the momentum strategy
 pub struct MomentumEngine {
