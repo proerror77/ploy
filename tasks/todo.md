@@ -268,3 +268,22 @@
   - `cargo test strategy::momentum::config::tests -- --nocapture`
   - `cargo test strategy::momentum::window_risk::tests -- --nocapture`
   - `cargo test strategy::momentum::tests -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6 CLI backtest runtime split)
+
+- [x] Move strategy CLI backtest runtime helpers out of `src/cli/strategy.rs`
+- [x] Keep the `StrategyCommands` clap surface and dispatch behavior stable
+- [x] Preserve settlement-mode, verify-run, save, and Gamma verification behavior
+- [x] Re-run formatting and compile validation after the extraction
+
+## Review (2026-03-06, CLI backtest runtime split)
+
+- Delivered in this slice:
+  - Added [`src/cli/strategy_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy_backtest.rs) to own the strategy CLI backtest runtime path, including replay execution, saved-run verification, Gamma verification, run diff/list reporting, and kline backfill.
+  - Updated [`src/cli/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/mod.rs) to wire the new sibling module into the CLI namespace.
+  - Reduced [`src/cli/strategy.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy.rs) to clap command definitions, dispatch, and non-backtest helper logic.
+  - Kept `StrategyBacktestMode`, `backtest_directional_signals_pm_settlement`, and `is_market_resolved` in `strategy.rs` so dataset export and settlement scoring do not widen scope in the same commit.
+- Validation executed:
+  - `cargo build`
