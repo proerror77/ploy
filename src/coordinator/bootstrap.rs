@@ -5530,6 +5530,51 @@ fn spawn_legacy_nba_comeback_agent(
     info!("sports agent spawned");
 }
 
+fn spawn_openclaw_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    openclaw_cfg: OpenClawConfig,
+    freshness: Arc<crate::platform::DataPlaneFreshness>,
+) {
+    let oc_symbols = vec![openclaw_cfg.btc_symbol.clone()];
+    let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
+    oc_binance_ws.set_freshness(Arc::clone(&freshness));
+
+    let oc_ws = oc_binance_ws.clone();
+    tokio::spawn(async move {
+        if let Err(e) = oc_ws.run().await {
+            tracing::error!(error = %e, "openclaw binance ws exited");
+        }
+    });
+
+    let oc_risk_params = AgentRiskParams {
+        max_order_value: Decimal::ZERO,
+        max_total_exposure: Decimal::ZERO,
+        max_unhedged_positions: 0,
+        max_daily_loss: Decimal::ZERO,
+        allow_overnight: false,
+        allowed_markets: vec![],
+    };
+    let oc_agent_id = openclaw_cfg.agent_id.clone();
+    let oc_regime_tick_secs = openclaw_cfg.regime_tick_secs;
+    let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);
+    let agent = OpenClawAgent::new(openclaw_cfg, oc_market_data);
+    spawn_trading_agent_task(
+        agent_handles,
+        coordinator,
+        handle,
+        agent,
+        oc_risk_params,
+        "openclaw",
+    );
+    info!(
+        agent_id = %oc_agent_id,
+        regime_tick = oc_regime_tick_secs,
+        "openclaw meta-agent spawned"
+    );
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -7032,44 +7077,12 @@ pub async fn start_platform(
         config.enable_openclaw || config.openclaw.enabled,
     );
     if openclaw_enabled {
-        // OpenClaw needs a BinanceWebSocket for regime detection.
-        // If crypto is enabled, a binance_ws was already created above and lives in a local scope.
-        // We create a dedicated one for OpenClaw using the configured BTC symbol.
-        let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
-        let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
-        oc_binance_ws.set_freshness(Arc::clone(&freshness));
-
-        // Spawn Binance WS feed for OpenClaw
-        let oc_ws = oc_binance_ws.clone();
-        tokio::spawn(async move {
-            if let Err(e) = oc_ws.run().await {
-                tracing::error!(error = %e, "openclaw binance ws exited");
-            }
-        });
-
-        let oc_risk_params = AgentRiskParams {
-            max_order_value: Decimal::ZERO,
-            max_total_exposure: Decimal::ZERO,
-            max_unhedged_positions: 0,
-            max_daily_loss: Decimal::ZERO,
-            allow_overnight: false,
-            allowed_markets: vec![],
-        };
-        let oc_agent_id = config.openclaw.agent_id.clone();
-        let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws.clone());
-        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
-        spawn_trading_agent_task(
+        spawn_openclaw_agent(
             &mut agent_handles,
             &mut coordinator,
             &handle,
-            agent,
-            oc_risk_params,
-            "openclaw",
-        );
-        info!(
-            agent_id = %oc_agent_id,
-            regime_tick = config.openclaw.regime_tick_secs,
-            "openclaw meta-agent spawned"
+            config.openclaw.clone(),
+            Arc::clone(&freshness),
         );
     }
 

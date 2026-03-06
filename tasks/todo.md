@@ -737,6 +737,29 @@ Move one more layer of strategy-specific assembly out of `start_platform()` by p
 
 ---
 
+# Layered Live Runtime Task 9I: Extract OpenClaw Bootstrap Helper (2026-03-06)
+
+## Goal
+Move the remaining OpenClaw setup block out of `start_platform()` so bootstrap stops inlining dedicated regime-feed startup and compatibility-agent wiring for the governance path.
+
+## Tasks
+
+- [x] Add `spawn_openclaw_agent(...)` in `src/coordinator/bootstrap.rs`.
+- [x] Move OpenClaw Binance WS creation, freshness wiring, zero-risk registration defaults, and agent spawn into that helper.
+- [x] Keep OpenClaw behavior unchanged in this slice; it still uses the compatibility trading-agent path under the hood.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The OpenClaw branch in `start_platform()` is now reduced to an enablement check plus one helper call.
+- [x] This slice does not change OpenClaw governance semantics; it only removes another domain-specific startup blob from bootstrap.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
