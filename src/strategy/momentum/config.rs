@@ -186,3 +186,62 @@ impl Default for ExitConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn momentum_config_defaults_match_trading_baseline() {
+        let config = MomentumConfig::default();
+
+        assert_eq!(config.min_move_pct, dec!(0.0005));
+        assert_eq!(config.max_entry_price, dec!(0.35));
+        assert_eq!(config.min_edge, dec!(0.03));
+        assert_eq!(config.lookback_secs, 5);
+        assert_eq!(config.volatility_lookback_secs, 60);
+        assert_eq!(config.shares_per_trade, 100);
+        assert_eq!(config.max_positions, 3);
+        assert_eq!(config.cooldown_secs, 60);
+        assert_eq!(config.max_daily_trades, 20);
+        assert_eq!(
+            config.symbols,
+            vec!["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+        );
+        assert!(config.hold_to_resolution);
+        assert!(config.best_edge_only);
+        assert!(config.require_mtf_agreement);
+        assert!(config.use_kline_volatility);
+        assert!(config.use_price_to_beat);
+        assert!(config.dynamic_position_sizing);
+        assert!(config.use_kelly_sizing);
+        assert!(!config.require_vwap_confirmation);
+        assert!(!config.directional_mode);
+        assert_eq!(
+            config.baseline_volatility.get("BTCUSDT"),
+            Some(&dec!(0.0005))
+        );
+        assert_eq!(
+            config.baseline_volatility.get("ETHUSDT"),
+            Some(&dec!(0.0008))
+        );
+        assert_eq!(
+            config.baseline_volatility.get("SOLUSDT"),
+            Some(&dec!(0.0015))
+        );
+        assert_eq!(
+            config.baseline_volatility.get("XRPUSDT"),
+            Some(&dec!(0.0012))
+        );
+    }
+
+    #[test]
+    fn exit_config_defaults_match_expected_thresholds() {
+        let config = ExitConfig::default();
+
+        assert_eq!(config.take_profit_pct, dec!(0.20));
+        assert_eq!(config.stop_loss_pct, dec!(0.15));
+        assert_eq!(config.trailing_stop_pct, dec!(0.10));
+        assert_eq!(config.exit_before_resolution_secs, 30);
+    }
+}
