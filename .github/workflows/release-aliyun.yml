@@ -116,6 +116,7 @@ jobs:
           mkdir -p dist
           cp target/release/ploy dist/ploy
           cp config/strategies/momentum.toml dist/momentum.toml
+          cp config/strategies/staggered_arb.toml dist/staggered_arb.toml
           cp migrations/022_order_strategy_tracking.sql dist/022_order_strategy_tracking.sql
           sha256sum dist/ploy > dist/ploy.sha256
           cat > dist/RELEASE.txt <<EOF
@@ -125,7 +126,7 @@ jobs:
           Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
           EOF
           tar czf "dist/ploy-release-${{ steps.meta.outputs.release_tag }}.tar.gz" -C dist \
-            ploy ploy.sha256 RELEASE.txt momentum.toml 022_order_strategy_tracking.sql
+            ploy ploy.sha256 RELEASE.txt momentum.toml staggered_arb.toml 022_order_strategy_tracking.sql
 
       - name: Upload release bundle
         uses: actions/upload-artifact@v4
@@ -324,6 +325,7 @@ jobs:
             $SUDO install -m 755 "${WORKDIR}/ploy" "${RELEASE_DIR}/ploy"
             $SUDO install -m 755 "${WORKDIR}/ploy" "${DEPLOY_ROOT}/bin/ploy"
             $SUDO install -m 600 "${WORKDIR}/momentum.toml" "${DEPLOY_ROOT}/config/strategies/momentum.toml"
+            $SUDO install -m 600 "${WORKDIR}/staggered_arb.toml" "${DEPLOY_ROOT}/config/strategies/staggered_arb.toml"
             $SUDO install -m 644 "${WORKDIR}/022_order_strategy_tracking.sql" "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
 
             file "${DEPLOY_ROOT}/bin/ploy" | grep -q "ELF 64-bit LSB"
@@ -341,15 +343,6 @@ jobs:
             else
               echo "DATABASE_URL not set; skip migration."
             fi
-
-            units_to_restart=""
-            add_restart_unit() {
-              local unit="$1"
-              case " ${units_to_restart} " in
-                *" ${unit} "*) ;;
-                *) units_to_restart="${units_to_restart} ${unit}" ;;
-              esac
-            }
 
             unit_exists() {
               local unit="$1"
@@ -373,24 +366,13 @@ jobs:
             for unit in ploy ploy-platform ploy-platform-live; do
               if unit_exists "$unit"; then
                 write_guardrail_dropin "$unit"
-                add_restart_unit "$unit"
-              fi
-            done
-
-            for unit in $(systemctl list-units --type=service --state=active --no-legend "ploy*" | awk '{print $1}' | sed 's/\.service$//'); do
-              unit_exists "$unit" || continue
-              current_mem_max="$(systemctl show "$unit" -p MemoryMax --value || echo infinity)"
-              current_restart="$(systemctl show "$unit" -p Restart --value || echo no)"
-              if [ "$current_mem_max" = "infinity" ] || [ "$current_restart" = "no" ]; then
-                write_guardrail_dropin "$unit"
-                add_restart_unit "$unit"
               fi
             done
 
             $SUDO systemctl daemon-reload
 
             restarted_any=0
-            for unit in $units_to_restart; do
+            for unit in ploy ploy-platform ploy-platform-live; do
               unit_exists "$unit" || continue
               if systemctl is-active --quiet "$unit"; then
                 $SUDO systemctl restart "$unit"
