@@ -5569,14 +5569,7 @@ fn spawn_openclaw_agent(
         }
     });
 
-    let oc_risk_params = AgentRiskParams {
-        max_order_value: Decimal::ZERO,
-        max_total_exposure: Decimal::ZERO,
-        max_unhedged_positions: 0,
-        max_daily_loss: Decimal::ZERO,
-        allow_overnight: false,
-        allowed_markets: vec![],
-    };
+    let oc_risk_params = AgentRiskParams::governance_only();
     let oc_agent_id = openclaw_cfg.agent_id.clone();
     let oc_regime_tick_secs = openclaw_cfg.regime_tick_secs;
     let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);

@@ -89,6 +89,17 @@ impl Default for AgentRiskParams {
 }
 
 impl AgentRiskParams {
+    pub fn governance_only() -> Self {
+        Self {
+            max_order_value: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
+            max_unhedged_positions: 0,
+            max_daily_loss: Decimal::ZERO,
+            allow_overnight: false,
+            allowed_markets: vec![],
+        }
+    }
+
     pub fn conservative() -> Self {
         Self {
             max_order_value: Decimal::from(25),
@@ -235,5 +246,17 @@ mod tests {
         restricted.allowed_markets = vec!["btc-15m".to_string()];
         assert!(restricted.is_market_allowed("btc-15m"));
         assert!(!restricted.is_market_allowed("eth-15m"));
+    }
+
+    #[test]
+    fn test_governance_only_risk_params() {
+        let params = AgentRiskParams::governance_only();
+
+        assert_eq!(params.max_order_value, Decimal::ZERO);
+        assert_eq!(params.max_total_exposure, Decimal::ZERO);
+        assert_eq!(params.max_unhedged_positions, 0);
+        assert_eq!(params.max_daily_loss, Decimal::ZERO);
+        assert!(!params.allow_overnight);
+        assert!(params.allowed_markets.is_empty());
     }
 }

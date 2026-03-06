@@ -810,6 +810,30 @@ Finish separating governance-only bootstrap wiring from trading-agent wiring by 
 
 ---
 
+# Layered Live Runtime Task 5A: Add Governance-Only Risk Defaults (2026-03-06)
+
+## Goal
+Make governance-agent risk binding explicit instead of leaving zero-risk registration values as an inline bootstrap literal.
+
+## Tasks
+
+- [x] Add `AgentRiskParams::governance_only()` in `src/platform/traits.rs`.
+- [x] Route OpenClaw bootstrap registration through that helper.
+- [x] Add a focused unit test covering the governance-only preset.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Governance-only coordinator registration now has an explicit policy preset instead of a bootstrap-local zeroed struct literal.
+- [x] This slice does not change runtime behavior; it only makes governance risk binding explicit and reusable.
+- [x] Focused validation passed:
+  - `cargo test platform::traits --lib -- --nocapture`
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
