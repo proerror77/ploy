@@ -153,3 +153,51 @@
   - `session/momentum-split` at `../ploy-momentum-split/` owns `src/strategy/momentum*`
   - `session/backtest-migrate` at `../ploy-backtest-migrate/` owns `crates/ploy-backtest/src/strategies/*` plus the minimum caller updates for the first migrated strategy
 - Integrator keeps ownership of `tasks/todo.md`, final cherry-picks, and validation on `refactor/workspace-restructure`.
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6.4 momentum split)
+
+- [x] Convert `src/strategy/momentum.rs` to directory form
+- [x] Extract `MomentumConfig` and `ExitConfig` into `src/strategy/momentum/config.rs`
+- [x] Extract `Position`, `ExitReason`, and `ExitManager` into `src/strategy/momentum/position.rs`
+- [x] Preserve `crate::strategy::momentum::*` imports via `mod.rs` re-exports
+- [x] Re-run build and focused momentum tests after the split
+
+## Review (2026-03-06, momentum split)
+
+- Delivered in this slice:
+  - Renamed [`src/strategy/momentum.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum.rs) into directory form at [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs).
+  - Moved config/default definitions into [`src/strategy/momentum/config.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/config.rs).
+  - Moved position/exit logic into [`src/strategy/momentum/position.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/position.rs).
+  - Kept `MomentumEngine`, `EventMatcher`, `MomentumDetector`, and the existing tests in `mod.rs` to avoid changing async/runtime behavior in the same commit.
+- Validation executed:
+  - `cargo build`
+  - `cargo test strategy::momentum::tests -- --nocapture`
+- Agent review:
+  - `No findings` from reviewer.
+  - Residual risk only: no direct regression test yet for full `MomentumConfig` / `ExitConfig` defaults or the `TrailingStop` / `TimeExit` branches.
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 momentum backtest bridge)
+
+- [x] Add the first concrete strategy bridge under `crates/ploy-backtest/src/strategies/`
+- [x] Keep `src/strategy/momentum_backtest.rs` in place while moving pure result-aggregation logic to `ploy-backtest`
+- [x] Re-run `ploy-backtest` tests and focused momentum-backtest validation
+- [x] Avoid introducing an app-to-crate dependency cycle through `MomentumConfig`
+
+## Review (2026-03-06, momentum backtest bridge)
+
+- Delivered in this slice:
+  - Added [`crates/ploy-backtest/src/strategies/momentum.rs`](/Users/proerror/Documents/ploy-refactor-integrate/crates/ploy-backtest/src/strategies/momentum.rs) with momentum-specific closed-trade and result aggregation helpers.
+  - Exported the new bridge from [`crates/ploy-backtest/src/strategies/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/crates/ploy-backtest/src/strategies/mod.rs).
+  - Updated [`src/strategy/momentum_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest.rs) to delegate result-building to the new crate-owned helper while keeping the live detector and execution loop local.
+  - Explicitly did not move `MomentumBacktestConfig` yet because it embeds app-local `MomentumConfig`, which would create a dependency cycle if moved directly.
+- Validation executed:
+  - `cargo build`
+  - `cargo test -p ploy-backtest`
+  - `cargo test test_sharpe_calculation -- --nocapture`
+- Agent review:
+  - `No findings` from reviewer.
+  - Residual risk only: the new helper is covered indirectly; there is still no direct non-empty trade parity test for field-by-field `BacktestResults` construction.
