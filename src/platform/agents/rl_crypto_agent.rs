@@ -17,9 +17,10 @@ use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
 use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainAgent, DomainEvent, ExecutionReport, OrderIntent,
+    AgentRiskParams, AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent,
     OrderPriority,
 };
+use crate::platform::traits::DomainAgent;
 use crate::rl::config::RLConfig;
 #[cfg(feature = "onnx")]
 use crate::rl::core::TOTAL_FEATURES;

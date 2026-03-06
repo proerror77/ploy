@@ -51,7 +51,3 @@ pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
 };
-
-// RL-powered agents (requires 'rl' feature)
-#[cfg(feature = "rl")]
-pub use agents::{RLCryptoAgent, RLCryptoAgentConfig};

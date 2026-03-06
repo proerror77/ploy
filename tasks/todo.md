@@ -622,6 +622,28 @@ Stop presenting legacy platform-agent structs as convenience exports from `platf
 
 ---
 
+# Layered Live Runtime Task 8E: Narrow RL Platform Agent Re-Exports (2026-03-06)
+
+## Goal
+Remove the feature-gated RL agent convenience path from the `platform` root as well, so the RL CLI explicitly depends on the `platform::agents::rl_crypto_agent` compatibility module and `platform::traits::DomainAgent`.
+
+## Tasks
+
+- [x] Stop re-exporting `RLCryptoAgent` and `RLCryptoAgentConfig` from `src/platform/mod.rs`.
+- [x] Make `src/platform/agents/rl_crypto_agent.rs` an explicit public compatibility module.
+- [x] Update `src/main_commands/rl/agent.rs` to import `RLCryptoAgent`, `RLCryptoAgentConfig`, and `DomainAgent` from explicit compatibility paths.
+- [x] Run focused validation and capture the results with `--features rl`.
+
+## Review
+
+- [x] `ploy::platform::RLCryptoAgent` and `ploy::platform::RLCryptoAgentConfig` are no longer convenience APIs from the platform root.
+- [x] This slice does not change RL runtime behavior; it only removes the last root-level platform-agent convenience export and makes the RL CLI name the compatibility surfaces it depends on.
+- [x] Focused validation passed:
+  - `cargo check --features rl --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal

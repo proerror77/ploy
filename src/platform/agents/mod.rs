@@ -8,7 +8,4 @@ pub mod event_edge_agent;
 pub mod nba_agent;
 
 #[cfg(feature = "rl")]
-mod rl_crypto_agent;
-
-#[cfg(feature = "rl")]
-pub use rl_crypto_agent::{RLCryptoAgent, RLCryptoAgentConfig};
+pub mod rl_crypto_agent;
