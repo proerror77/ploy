@@ -666,6 +666,30 @@ Drop the extra `bootstrap.rs` wrapper around `run_managed_strategy_runtime_modul
 
 ---
 
+# Layered Live Runtime Task 9F: Spawn Canonical Runtime From Bootstrap Specs (2026-03-06)
+
+## Goal
+Stop having each canonical strategy branch manually unwrap `pm_client` and re-thread the same spawn arguments. Bootstrap should hand a `ManagedStrategyBootstrapSpec` to one helper and stay closer to pure assembly.
+
+## Tasks
+
+- [x] Add `spawn_managed_strategy_runtime_spec(...)` in `src/coordinator/bootstrap.rs`.
+- [x] Route the managed `momentum`, `pattern_memory`, and `split_arb` crypto branches through the spec helper.
+- [x] Route canonical `nba_comeback` and `event_edge` through the same spec helper.
+- [x] Preserve all existing strategy selection and legacy fallback behavior in this slice.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Canonical strategy startup now has one bootstrap entrypoint for “spec + risk params + wiring” instead of five near-identical inline spawn sequences.
+- [x] This slice does not change which strategies are canonical or when legacy fallbacks still apply; it only reduces more bootstrap-specific assembly duplication.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

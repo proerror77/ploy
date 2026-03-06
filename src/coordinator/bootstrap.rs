@@ -5138,6 +5138,47 @@ fn spawn_managed_strategy_runtime_task(
     agent_handles.push(jh);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_managed_strategy_runtime_spec(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    runtime_spec: ManagedStrategyBootstrapSpec,
+    risk_params: AgentRiskParams,
+    dry_run: bool,
+    pm_client: Option<PolymarketClient>,
+    pm_ws_url: &str,
+    data_plane: Option<Arc<PlatformDataPlane>>,
+    observability_pool: Option<PgPool>,
+    observability_account_id: &str,
+) -> Result<()> {
+    let pm_client = pm_client.ok_or_else(|| {
+        crate::error::PloyError::Validation(format!(
+            "managed strategy runtime '{}' requires a Polymarket client, but none was initialized",
+            runtime_spec.strategy_label
+        ))
+    })?;
+
+    spawn_managed_strategy_runtime_task(
+        agent_handles,
+        coordinator,
+        shutdown_tx,
+        runtime_spec.strategy_label,
+        runtime_spec.agent_id,
+        runtime_spec.domain,
+        risk_params,
+        runtime_spec.strategy_config_toml,
+        dry_run,
+        pm_client,
+        pm_ws_url.to_string(),
+        data_plane,
+        observability_pool,
+        observability_account_id.to_string(),
+    );
+
+    Ok(())
+}
+
 fn spawn_trading_agent_task<A: TradingAgent>(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     coordinator: &mut Coordinator,
@@ -6538,30 +6579,38 @@ pub async fn start_platform(
                     agent = crypto_cfg.agent_id,
                     "crypto momentum enabled but no recognized symbols were resolved"
                 );
-            } else if let Some(strategy_pm_client) = pm_client.clone() {
+            } else {
                 let strategy_agent_id = crypto_cfg.agent_id.clone();
-                spawn_managed_strategy_runtime_task(
+                let runtime_spec = ManagedStrategyBootstrapSpec {
+                    strategy_label: "momentum",
+                    agent_id: strategy_agent_id.clone(),
+                    domain: Domain::Crypto,
+                    strategy_config_toml: build_momentum_runtime_config(
+                        &momentum_symbols,
+                        &crypto_cfg,
+                    ),
+                };
+                if let Err(e) = spawn_managed_strategy_runtime_spec(
                     &mut agent_handles,
                     &mut coordinator,
                     &shutdown_tx,
-                    "momentum",
-                    strategy_agent_id.clone(),
-                    Domain::Crypto,
+                    runtime_spec,
                     crypto_cfg.risk_params.clone(),
-                    build_momentum_runtime_config(&momentum_symbols, &crypto_cfg),
                     config.dry_run,
-                    strategy_pm_client,
-                    app_config.market.ws_url.clone(),
+                    pm_client.clone(),
+                    &app_config.market.ws_url,
                     data_plane.clone(),
                     shared_pool.clone(),
-                    account_id.clone(),
-                );
-                info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
-            } else {
-                warn!(
-                    agent = crypto_cfg.agent_id,
-                    "crypto momentum enabled but pm client not configured; skipping"
-                );
+                    &account_id,
+                ) {
+                    warn!(
+                        agent = crypto_cfg.agent_id,
+                        error = %e,
+                        "crypto momentum enabled but canonical runtime could not be spawned; skipping"
+                    );
+                } else {
+                    info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
+                }
             }
         } else {
             info!(
@@ -6594,30 +6643,33 @@ pub async fn start_platform(
 
             match build_pattern_memory_runtime_config(&coins) {
                 Ok(toml_cfg) => {
-                    if let Some(strategy_pm_client) = pm_client.clone() {
-                        let strategy_agent_id = "pattern_memory".to_string();
-                        spawn_managed_strategy_runtime_task(
-                            &mut agent_handles,
-                            &mut coordinator,
-                            &shutdown_tx,
-                            "pattern_memory",
-                            strategy_agent_id.clone(),
-                            Domain::Crypto,
-                            crypto_cfg.risk_params.clone(),
-                            toml_cfg,
-                            config.dry_run,
-                            strategy_pm_client,
-                            app_config.market.ws_url.clone(),
-                            data_plane.clone(),
-                            shared_pool.clone(),
-                            account_id.clone(),
-                        );
-                        info!("pattern_memory strategy runtime spawned");
-                    } else {
+                    let strategy_agent_id = "pattern_memory".to_string();
+                    let runtime_spec = ManagedStrategyBootstrapSpec {
+                        strategy_label: "pattern_memory",
+                        agent_id: strategy_agent_id.clone(),
+                        domain: Domain::Crypto,
+                        strategy_config_toml: toml_cfg,
+                    };
+                    if let Err(e) = spawn_managed_strategy_runtime_spec(
+                        &mut agent_handles,
+                        &mut coordinator,
+                        &shutdown_tx,
+                        runtime_spec,
+                        crypto_cfg.risk_params.clone(),
+                        config.dry_run,
+                        pm_client.clone(),
+                        &app_config.market.ws_url,
+                        data_plane.clone(),
+                        shared_pool.clone(),
+                        &account_id,
+                    ) {
                         warn!(
                             agent = "pattern_memory",
-                            "pattern_memory enabled but pm client not configured; skipping"
+                            error = %e,
+                            "pattern_memory enabled but canonical runtime could not be spawned"
                         );
+                    } else {
+                        info!("pattern_memory strategy runtime spawned");
                     }
                 }
                 Err(e) => {
@@ -6694,31 +6746,33 @@ pub async fn start_platform(
                     "split_arb enabled but no recognized coin/horizon series ids were resolved"
                 );
             } else {
-                let toml_cfg = build_split_arb_runtime_config(&symbols, &series_ids);
                 let strategy_agent_id = "split_arb".to_string();
-                if let Some(strategy_pm_client) = pm_client.clone() {
-                    spawn_managed_strategy_runtime_task(
-                        &mut agent_handles,
-                        &mut coordinator,
-                        &shutdown_tx,
-                        "split_arb",
-                        strategy_agent_id.clone(),
-                        Domain::Crypto,
-                        crypto_cfg.risk_params.clone(),
-                        toml_cfg,
-                        config.dry_run,
-                        strategy_pm_client,
-                        app_config.market.ws_url.clone(),
-                        data_plane.clone(),
-                        shared_pool.clone(),
-                        account_id.clone(),
-                    );
-                    info!("split_arb strategy runtime spawned");
-                } else {
+                let runtime_spec = ManagedStrategyBootstrapSpec {
+                    strategy_label: "split_arb",
+                    agent_id: strategy_agent_id.clone(),
+                    domain: Domain::Crypto,
+                    strategy_config_toml: build_split_arb_runtime_config(&symbols, &series_ids),
+                };
+                if let Err(e) = spawn_managed_strategy_runtime_spec(
+                    &mut agent_handles,
+                    &mut coordinator,
+                    &shutdown_tx,
+                    runtime_spec,
+                    crypto_cfg.risk_params.clone(),
+                    config.dry_run,
+                    pm_client.clone(),
+                    &app_config.market.ws_url,
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    &account_id,
+                ) {
                     warn!(
                         agent = "split_arb",
-                        "split_arb enabled but pm client not configured; skipping"
+                        error = %e,
+                        "split_arb enabled but canonical runtime could not be spawned"
                     );
+                } else {
+                    info!("split_arb strategy runtime spawned");
                 }
             }
         }
@@ -6822,28 +6876,19 @@ pub async fn start_platform(
             .await?;
 
             if let Some(runtime_spec) = managed_runtime_spec {
-                let strategy_pm_client = pm_client.clone().ok_or_else(|| {
-                    crate::error::PloyError::Validation(
-                        "sports domain requires a Polymarket client, but none was initialized"
-                            .to_string(),
-                    )
-                })?;
-                spawn_managed_strategy_runtime_task(
+                spawn_managed_strategy_runtime_spec(
                     &mut agent_handles,
                     &mut coordinator,
                     &shutdown_tx,
-                    runtime_spec.strategy_label,
-                    runtime_spec.agent_id.clone(),
-                    runtime_spec.domain,
+                    runtime_spec,
                     sports_cfg.risk_params.clone(),
-                    runtime_spec.strategy_config_toml,
                     config.dry_run,
-                    strategy_pm_client,
-                    app_config.market.ws_url.clone(),
+                    pm_client.clone(),
+                    &app_config.market.ws_url,
                     None,
                     Some(pool.clone()),
-                    account_id.clone(),
-                );
+                    &account_id,
+                )?;
                 info!(
                     agent = %sports_cfg.agent_id,
                     "sports nba_comeback strategy runtime spawned"
@@ -6919,28 +6964,28 @@ pub async fn start_platform(
         if let Some(ref ee_cfg) = app_config.event_edge_agent {
             let politics_cfg = config.politics.clone();
             let strategy_agent_id = politics_cfg.agent_id.clone();
-            let strategy_pm_client = pm_client.clone().ok_or_else(|| {
-                crate::error::PloyError::Validation(
-                    "politics domain requires a Polymarket client, but none was initialized"
-                        .to_string(),
-                )
-            })?;
-            spawn_managed_strategy_runtime_task(
+            let runtime_spec = ManagedStrategyBootstrapSpec {
+                strategy_label: "event_edge",
+                agent_id: strategy_agent_id.clone(),
+                domain: Domain::Politics,
+                strategy_config_toml: build_event_edge_runtime_config(
+                    &app_config.market.rest_url,
+                    ee_cfg,
+                ),
+            };
+            spawn_managed_strategy_runtime_spec(
                 &mut agent_handles,
                 &mut coordinator,
                 &shutdown_tx,
-                "event_edge",
-                strategy_agent_id.clone(),
-                Domain::Politics,
+                runtime_spec,
                 politics_cfg.risk_params.clone(),
-                build_event_edge_runtime_config(&app_config.market.rest_url, ee_cfg),
                 config.dry_run,
-                strategy_pm_client,
-                app_config.market.ws_url.clone(),
+                pm_client.clone(),
+                &app_config.market.ws_url,
                 None,
                 shared_pool.clone(),
-                account_id.clone(),
-            );
+                &account_id,
+            )?;
             info!(agent = %strategy_agent_id, "politics event_edge strategy runtime spawned");
         }
     }
