@@ -7,8 +7,10 @@
 //! Usage:
 //!   ploy strategy backtest momentum --symbols BTCUSDT --save --json
 
+mod config;
 mod persistence;
 
+pub use config::MomentumBacktestConfig;
 pub use persistence::save_backtest_results;
 
 use chrono::{DateTime, Utc};
@@ -18,49 +20,11 @@ use ploy_backtest::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::debug;
 
 use crate::adapters::SpotPrice;
-use crate::strategy::momentum::{Direction, MomentumConfig, MomentumDetector, MomentumSignal};
-
-// ─────────────────────────────────────────────────────────────
-// Config
-// ─────────────────────────────────────────────────────────────
-
-/// Configuration for a momentum backtest run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MomentumBacktestConfig {
-    pub momentum_config: MomentumConfig,
-    pub symbols: Vec<String>,
-    pub initial_capital: Decimal,
-    pub max_concurrent_positions: usize,
-    pub cooldown_secs: u64,
-}
-
-impl MomentumBacktestConfig {
-    pub fn default_with_symbols(symbols: Vec<String>, initial_capital: Decimal) -> Self {
-        let mut momentum_config = MomentumConfig::default();
-        momentum_config.symbols = symbols.clone();
-        Self {
-            momentum_config,
-            symbols,
-            initial_capital,
-            max_concurrent_positions: 5,
-            cooldown_secs: 30,
-        }
-    }
-
-    /// SHA-256 hash of the serialized config for deduplication.
-    pub fn config_hash(&self) -> String {
-        use std::hash::{Hash, Hasher};
-        let json = serde_json::to_string(self).unwrap_or_default();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        json.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    }
-}
+use crate::strategy::momentum::{Direction, MomentumDetector, MomentumSignal};
 
 // ─────────────────────────────────────────────────────────────
 // Position tracking
