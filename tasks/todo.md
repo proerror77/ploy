@@ -287,3 +287,23 @@
   - Kept `StrategyBacktestMode`, `backtest_directional_signals_pm_settlement`, and `is_market_resolved` in `strategy.rs` so dataset export and settlement scoring do not widen scope in the same commit.
 - Validation executed:
   - `cargo build`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 6 CLI strategy directory split)
+
+- [x] Convert `src/cli/strategy.rs` into `src/cli/strategy/mod.rs`
+- [x] Move the extracted backtest runtime sibling into `src/cli/strategy/backtest.rs`
+- [x] Keep `crate::cli::strategy::*` imports and clap dispatch stable
+- [x] Fix relative `include_str!` paths after the module move
+- [x] Re-run formatting and compile validation after the directory conversion
+
+## Review (2026-03-06, CLI strategy directory split)
+
+- Delivered in this slice:
+  - Renamed [`src/cli/strategy.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy.rs) into directory form at [`src/cli/strategy/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy/mod.rs).
+  - Renamed [`src/cli/strategy_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy_backtest.rs) to [`src/cli/strategy/backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/strategy/backtest.rs) and made it a proper child module.
+  - Removed the temporary sibling-module wiring from [`src/cli/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/cli/mod.rs).
+  - Fixed the moved module's `include_str!` paths for bundled default strategy configs.
+- Validation executed:
+  - `cargo build`
