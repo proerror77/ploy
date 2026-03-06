@@ -690,6 +690,29 @@ Stop having each canonical strategy branch manually unwrap `pm_client` and re-th
 
 ---
 
+# Layered Live Runtime Task 9G: Extract Sports Legacy Fallback Helper (2026-03-06)
+
+## Goal
+Move the `nba_comeback` legacy sports fallback assembly out of the main sports branch so `start_platform()` mostly selects between canonical runtime and compatibility fallback instead of inlining Grok and PM-observation setup.
+
+## Tasks
+
+- [x] Add `spawn_legacy_nba_comeback_agent(...)` in `src/coordinator/bootstrap.rs`.
+- [x] Move the `SportsTradingAgent` fallback assembly, PM sports client wiring, and optional Grok attachment into that helper.
+- [x] Keep fallback selection semantics unchanged: only the non-canonical `nba_comeback` path uses the helper.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The sports branch in `start_platform()` now reads as: build runtime spec, start sports data support, then choose canonical runtime or a single fallback helper.
+- [x] This slice does not change when the legacy sports agent still runs; it only removes another large domain-specific assembly block from bootstrap.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

@@ -5413,6 +5413,75 @@ async fn start_sports_market_data_support(
     Ok(pool)
 }
 
+fn spawn_legacy_nba_comeback_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    sports_cfg: SportsTradingConfig,
+    nba_cfg: crate::config::NbaComebackConfig,
+    pool: PgPool,
+) {
+    warn!(
+        agent = %sports_cfg.agent_id,
+        "grok-enabled nba_comeback deployment remains on the legacy sports agent path until canonical strategy runtime absorbs Grok behavior"
+    );
+
+    let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
+    let stats =
+        crate::strategy::nba_comeback::ComebackStatsProvider::new(pool.clone(), nba_cfg.season.clone());
+    let core = crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
+    let risk_params = sports_cfg.risk_params.clone();
+    let mut agent = SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
+
+    match PolymarketSportsClient::new() {
+        Ok(pm_sports) => {
+            agent = agent.with_pm_sports(pm_sports);
+        }
+        Err(e) => {
+            warn!(
+                agent = sports_cfg.agent_id,
+                error = %e,
+                "failed to initialize PolymarketSportsClient; continuing without PM market observations"
+            );
+        }
+    }
+
+    if nba_cfg.grok_enabled {
+        match crate::ai_clients::grok::GrokClient::from_env() {
+            Ok(grok) if grok.is_configured() => {
+                info!(
+                    agent = sports_cfg.agent_id,
+                    "grok live search enabled for sports agent"
+                );
+                agent = agent.with_grok(grok);
+            }
+            Ok(_) => {
+                warn!(
+                    agent = sports_cfg.agent_id,
+                    "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    agent = sports_cfg.agent_id,
+                    error = %e,
+                    "failed to initialize GrokClient; continuing without Grok"
+                );
+            }
+        }
+    }
+
+    spawn_trading_agent_task(
+        agent_handles,
+        coordinator,
+        handle,
+        agent,
+        risk_params,
+        "sports",
+    );
+    info!("sports agent spawned");
+}
+
 /// Start the multi-agent platform
 ///
 /// Creates shared infrastructure, registers configured agents,
@@ -6894,68 +6963,14 @@ pub async fn start_platform(
                     "sports nba_comeback strategy runtime spawned"
                 );
             } else {
-                warn!(
-                    agent = %sports_cfg.agent_id,
-                    "grok-enabled nba_comeback deployment remains on the legacy sports agent path until canonical strategy runtime absorbs Grok behavior"
-                );
-
-                let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
-                let stats = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-                    pool.clone(),
-                    nba_cfg.season.clone(),
-                );
-                let core = crate::strategy::nba_comeback::NbaComebackCore::new(
-                    espn,
-                    stats,
-                    nba_cfg.clone(),
-                );
-                let mut agent =
-                    SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
-                match PolymarketSportsClient::new() {
-                    Ok(pm_sports) => {
-                        agent = agent.with_pm_sports(pm_sports);
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to initialize PolymarketSportsClient; continuing without PM market observations"
-                        );
-                    }
-                }
-                if nba_cfg.grok_enabled {
-                    match crate::ai_clients::grok::GrokClient::from_env() {
-                        Ok(grok) if grok.is_configured() => {
-                            info!(
-                                agent = sports_cfg.agent_id,
-                                "grok live search enabled for sports agent"
-                            );
-                            agent = agent.with_grok(grok);
-                        }
-                        Ok(_) => {
-                            warn!(
-                                agent = sports_cfg.agent_id,
-                                "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent = sports_cfg.agent_id,
-                                error = %e,
-                                "failed to initialize GrokClient; continuing without Grok"
-                            );
-                        }
-                    }
-                }
-                spawn_trading_agent_task(
+                spawn_legacy_nba_comeback_agent(
                     &mut agent_handles,
                     &mut coordinator,
                     &handle,
-                    agent,
-                    sports_cfg.risk_params.clone(),
-                    "sports",
+                    sports_cfg.clone(),
+                    nba_cfg.clone(),
+                    pool,
                 );
-                info!("sports agent spawned");
             }
         }
     }
