@@ -260,6 +260,7 @@ jobs:
           script_stop: true
           envs: DEPLOY_ROOT,PLOY_SYSTEMD_MEMORY_HIGH,PLOY_SYSTEMD_MEMORY_MAX,PLOY_SYSTEMD_RESTART_SEC
           script: |
+            bash <<'PLOY_DEPLOY'
             set -euo pipefail
 
             RELEASE_TAG="${{ needs.build.outputs.release_tag }}"
@@ -463,6 +464,7 @@ jobs:
             cleanup_unit_files
             trap - EXIT
             rm -rf "${WORKDIR}" "${BUNDLE}"
+            PLOY_DEPLOY
 
       - name: Deployment summary
         run: |
