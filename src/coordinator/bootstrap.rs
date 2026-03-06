@@ -24,25 +24,20 @@ use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
-use crate::coordinator::{
-    AgentHealthResponse, AgentSnapshot, Coordinator, CoordinatorCommand, CoordinatorConfig,
-    GlobalState,
-};
+use crate::coordinator::{Coordinator, CoordinatorCommand, CoordinatorConfig, GlobalState};
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig,
-    Domain, MarketSelector, PlatformDataPlane, StrategyDeployment,
+    AgentRiskParams, BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, Domain,
+    MarketSelector, PlatformDataPlane, StrategyDeployment,
 };
 use crate::signing::Wallet;
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
-use crate::strategy::{
-    DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,
-};
+use crate::strategy::{DataFeed, StrategyAction, StrategyManager};
 use chrono::Utc;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -57,6 +52,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::instrument;
+
+use super::strategy_runtime::{
+    run_managed_strategy_runtime as run_managed_strategy_runtime_module,
+    ManagedStrategyRuntimeConfig,
+};
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
@@ -1228,7 +1228,7 @@ struct TradeBurstAlert {
     n_trades: usize,
 }
 
-fn env_u64(name: &str, default: u64) -> u64 {
+pub(crate) fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -3989,7 +3989,7 @@ pub struct PlatformStartControl {
     pub resume: Option<String>,
 }
 
-fn split_arb_status_key(status: OrderStatus) -> &'static str {
+pub(crate) fn split_arb_status_key(status: OrderStatus) -> &'static str {
     match status {
         OrderStatus::Pending => "pending",
         OrderStatus::Submitted => "submitted",
@@ -4002,7 +4002,7 @@ fn split_arb_status_key(status: OrderStatus) -> &'static str {
     }
 }
 
-fn split_arb_leg_and_mode(client_order_id: &str) -> (&'static str, &'static str) {
+pub(crate) fn split_arb_leg_and_mode(client_order_id: &str) -> (&'static str, &'static str) {
     if client_order_id.starts_with("stag_leg1_") {
         ("leg1", "entry")
     } else if client_order_id.starts_with("stag_leg2_merge_") {
@@ -4016,7 +4016,7 @@ fn split_arb_leg_and_mode(client_order_id: &str) -> (&'static str, &'static str)
     }
 }
 
-fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String {
+pub(crate) fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String {
     match &event.event_type {
         crate::strategy::StrategyEventType::SignalDetected => {
             "split_arb_signal_detected".to_string()
@@ -4049,7 +4049,7 @@ fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String
     }
 }
 
-async fn persist_split_arb_signal_history(
+pub(crate) async fn persist_split_arb_signal_history(
     pool: &PgPool,
     account_id: &str,
     strategy_id: &str,
@@ -4096,7 +4096,7 @@ async fn persist_split_arb_signal_history(
     }
 }
 
-async fn persist_live_order_signal_history(
+pub(crate) async fn persist_live_order_signal_history(
     pool: &PgPool,
     account_id: &str,
     strategy_label: &str,
@@ -4144,6 +4144,7 @@ async fn persist_live_order_signal_history(
     }
 }
 
+#[allow(dead_code)]
 async fn handle_strategy_actions_runtime(
     strategy_label: &str,
     manager: Arc<StrategyManager>,
@@ -4666,262 +4667,23 @@ async fn run_managed_strategy_runtime(
     data_plane: Option<Arc<PlatformDataPlane>>,
     observability_pool: Option<PgPool>,
     observability_account_id: String,
-    mut cmd_rx: mpsc::Receiver<CoordinatorCommand>,
-    mut shutdown_rx: broadcast::Receiver<()>,
+    cmd_rx: mpsc::Receiver<CoordinatorCommand>,
+    shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
-    let strategy = StrategyFactory::from_toml(&strategy_config_toml, dry_run)?;
-    let strategy_id = strategy.id().to_string();
-    let required_feeds = strategy.required_feeds();
-    let started_at = Utc::now();
-    let paused = Arc::new(AtomicBool::new(false));
-    let orders_submitted = Arc::new(AtomicU64::new(0));
-    let orders_filled = Arc::new(AtomicU64::new(0));
-    let mut status = AgentStatus::Running;
-
-    let manager = Arc::new(StrategyManager::new(1000));
-    let action_rx = manager.take_action_receiver().await.ok_or_else(|| {
-        crate::error::PloyError::Internal(format!(
-            "strategy {} failed to take action receiver",
-            strategy_label
-        ))
-    })?;
-
-    if strategy_label == "split_arb" {
-        if let Some(pool) = observability_pool.as_ref() {
-            if let Err(e) = ensure_strategy_observability_tables(pool).await {
-                warn!(
-                    strategy = strategy_label,
-                    error = %e,
-                    "failed to ensure strategy observability tables for managed runtime"
-                );
-            }
-        }
-    }
-
-    let mut binance_spot_symbols: Vec<String> = Vec::new();
-    let mut binance_kline_symbols: Vec<String> = Vec::new();
-    let mut binance_kline_intervals: Vec<String> = Vec::new();
-    let mut binance_kline_closed_only = true;
-
-    for feed in &required_feeds {
-        match feed {
-            DataFeed::BinanceSpot { symbols } => {
-                binance_spot_symbols.extend(symbols.clone());
-            }
-            DataFeed::BinanceKlines {
-                symbols,
-                intervals,
-                closed_only,
-            } => {
-                binance_kline_symbols.extend(symbols.clone());
-                binance_kline_intervals.extend(intervals.clone());
-                if !*closed_only {
-                    binance_kline_closed_only = false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    binance_spot_symbols.sort();
-    binance_spot_symbols.dedup();
-    binance_kline_symbols.sort();
-    binance_kline_symbols.dedup();
-    binance_kline_intervals.sort();
-    binance_kline_intervals.dedup();
-
-    let feed_manager = if let Some(dp) = data_plane {
-        DataFeedManager::from_data_plane(dp, manager.clone()).with_pm_client(pm_client.clone())
-    } else {
-        let mut feed_manager = DataFeedManager::new(manager.clone());
-        if !binance_spot_symbols.is_empty() {
-            feed_manager = feed_manager.with_binance(binance_spot_symbols.clone());
-        }
-
-        if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
-            let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(300);
-            feed_manager = feed_manager.with_binance_klines(
-                binance_kline_symbols.clone(),
-                binance_kline_intervals.clone(),
-                binance_kline_closed_only,
-                backfill_limit,
-            );
-        }
-
-        let has_polymarket_feed = required_feeds.iter().any(|f| {
-            matches!(
-                f,
-                DataFeed::PolymarketEvents { .. } | DataFeed::PolymarketQuotes { .. }
-            )
-        });
-        if has_polymarket_feed {
-            let pm_ws = PolymarketWebSocket::new(&pm_ws_url);
-            feed_manager = feed_manager.with_polymarket(pm_ws, pm_client.clone());
-        }
-
-        feed_manager
-    };
-
-    manager.start_strategy(strategy, None).await?;
-
-    #[cfg(feature = "claimer_daemon")]
-    if !dry_run {
-        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
-            warn!(
-                strategy = strategy_label,
-                agent_id = agent_id,
-                error = %e,
-                "failed to start account-level auto-claimer daemon"
-            );
-        }
-    }
-
-    feed_manager.start().await?;
-    let subscribed_tokens = feed_manager.start_for_feeds(required_feeds).await?;
-
-    let executor = Arc::new(OrderExecutor::new(
-        pm_client.clone(),
-        crate::config::ExecutionConfig::default(),
-    ));
-    let manager_for_actions = manager.clone();
-    let paused_for_actions = paused.clone();
-    let orders_submitted_for_actions = orders_submitted.clone();
-    let orders_filled_for_actions = orders_filled.clone();
-    let strategy_label_owned = strategy_label.to_string();
-    let observability_pool_for_actions = observability_pool.clone();
-    let observability_account_for_actions = observability_account_id.clone();
-    let action_task = tokio::spawn(async move {
-        handle_strategy_actions_runtime(
-            &strategy_label_owned,
-            manager_for_actions,
-            action_rx,
-            executor,
-            paused_for_actions,
-            orders_submitted_for_actions,
-            orders_filled_for_actions,
-            observability_pool_for_actions,
-            observability_account_for_actions,
-        )
-        .await;
-    });
-
-    info!(
-        strategy = strategy_label,
-        agent_id = agent_id,
-        strategy_id = %strategy_id,
-        subscribed_tokens = subscribed_tokens.len(),
-        dry_run = dry_run,
-        "managed strategy runtime started"
-    );
-
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                info!(
-                    strategy = strategy_label,
-                    agent_id = agent_id,
-                    strategy_id = %strategy_id,
-                    "managed strategy runtime shutdown requested"
-                );
-                break;
-            }
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(CoordinatorCommand::Pause) => {
-                        paused.store(true, Ordering::Relaxed);
-                        status = AgentStatus::Paused;
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime paused"
-                        );
-                    }
-                    Some(CoordinatorCommand::Resume) => {
-                        paused.store(false, Ordering::Relaxed);
-                        status = AgentStatus::Running;
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime resumed"
-                        );
-                    }
-                    Some(CoordinatorCommand::ForceClose) => {
-                        warn!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime force-close requested"
-                        );
-                        break;
-                    }
-                    Some(CoordinatorCommand::Shutdown) => {
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime shutdown command received"
-                        );
-                        break;
-                    }
-                    Some(CoordinatorCommand::HealthCheck(tx)) => {
-                        let position_count = manager
-                            .get_strategy_status(&strategy_id)
-                            .await
-                            .map(|s| s.position_count)
-                            .unwrap_or(0);
-                        let snapshot = AgentSnapshot {
-                            agent_id: agent_id.to_string(),
-                            name: strategy_label.to_string(),
-                            domain: Domain::Crypto,
-                            status,
-                            position_count,
-                            exposure: rust_decimal::Decimal::ZERO,
-                            daily_pnl: rust_decimal::Decimal::ZERO,
-                            unrealized_pnl: rust_decimal::Decimal::ZERO,
-                            metrics: HashMap::new(),
-                            last_heartbeat: Utc::now(),
-                            error_message: None,
-                        };
-                        let uptime_secs = (Utc::now() - started_at).num_seconds().max(0) as u64;
-                        let _ = tx.send(AgentHealthResponse {
-                            snapshot,
-                            is_healthy: matches!(status, AgentStatus::Running | AgentStatus::Paused),
-                            uptime_secs,
-                            orders_submitted: orders_submitted.load(Ordering::Relaxed),
-                            orders_filled: orders_filled.load(Ordering::Relaxed),
-                        });
-                    }
-                    None => {
-                        warn!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime command channel closed"
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if let Err(e) = manager.stop_all(true).await {
-        warn!(
-            strategy = strategy_label,
-            agent_id = agent_id,
-            strategy_id = %strategy_id,
-            error = %e,
-            "managed strategy runtime stop_all failed"
-        );
-    }
-    action_task.abort();
-
-    Ok(())
+    run_managed_strategy_runtime_module(ManagedStrategyRuntimeConfig {
+        strategy_label: strategy_label.to_string(),
+        agent_id: agent_id.to_string(),
+        strategy_config_toml,
+        dry_run,
+        pm_client,
+        pm_ws_url,
+        data_plane,
+        observability_pool,
+        observability_account_id,
+        cmd_rx,
+        shutdown_rx,
+    })
+    .await
 }
 
 /// Start the multi-agent platform

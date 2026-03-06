@@ -289,6 +289,31 @@ Remove governance/feed-lifecycle mutations from the canonical `StrategyAction` c
 
 ---
 
+# Layered Live Runtime Task 3: Extract Managed Strategy Runtime (2026-03-06)
+
+## Goal
+Move the managed strategy runtime loop out of `src/coordinator/bootstrap.rs` into a dedicated coordinator module so bootstrap only assembles runtime inputs.
+
+## Tasks
+
+- [x] Create `src/coordinator/strategy_runtime.rs` and move the managed runtime loop there.
+- [x] Introduce a generic `ManagedStrategyRuntimeConfig` value object for runtime startup inputs.
+- [x] Point bootstrap at the extracted runtime module instead of keeping the main loop inline.
+- [x] Keep shared observability/schema helpers available while avoiding a wider bootstrap churn in this slice.
+- [x] Validate with `cargo test coordinator::bootstrap --lib -- --nocapture`.
+- [x] Commit the Task 3 extraction atomically.
+
+## Review
+
+- [x] Managed strategy startup now routes through `src/coordinator/strategy_runtime.rs`.
+- [x] `bootstrap.rs` no longer owns the runtime loop body; it only assembles runtime inputs and delegates.
+- [x] Shared strategy observability/schema helpers remain in bootstrap for now because they are also used outside the managed runtime path.
+- [x] Validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+- [x] The only remaining warnings are the same pre-existing unrelated ones in `liquidity_vacuum_backtest.rs` and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
