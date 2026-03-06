@@ -621,6 +621,28 @@ Pull the sports-specific market-data/persistence assembly out of `start_platform
 
 ---
 
+# Layered Live Runtime Task 9D: OpenClaw Spawn Unification (2026-03-06)
+
+## Goal
+Remove the last hand-written `TradingAgent` startup template from `bootstrap.rs` by routing OpenClaw through the shared compatibility-agent spawn helper.
+
+## Tasks
+
+- [x] Switch the OpenClaw bootstrap branch to use `spawn_trading_agent_task(...)`.
+- [x] Keep OpenClaw behavior unchanged in this slice; it still converts `AgentContext` into `GovernanceContext` internally.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `bootstrap.rs` no longer hand-writes any `TradingAgent` registration + `AgentContext` + `tokio::spawn` sequence.
+- [x] OpenClaw remains a governance-plane special case semantically, but its startup assembly now matches the other compatibility runtimes.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

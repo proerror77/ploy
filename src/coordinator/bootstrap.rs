@@ -7006,24 +7006,16 @@ pub async fn start_platform(
             allowed_markets: vec![],
         };
         let oc_agent_id = config.openclaw.agent_id.clone();
-        let cmd_rx =
-            coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
-
         let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws.clone());
         let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
-        let ctx = AgentContext::new(
-            oc_agent_id.clone(),
-            Domain::Custom(0),
-            handle.clone(),
-            cmd_rx,
+        spawn_trading_agent_task(
+            &mut agent_handles,
+            &mut coordinator,
+            &handle,
+            agent,
+            oc_risk_params,
+            "openclaw",
         );
-
-        let jh = tokio::spawn(async move {
-            if let Err(e) = agent.run(ctx).await {
-                tracing::error!(agent = "openclaw", error = %e, "openclaw meta-agent exited with error");
-            }
-        });
-        agent_handles.push(jh);
         info!(
             agent_id = %oc_agent_id,
             regime_tick = config.openclaw.regime_tick_secs,
