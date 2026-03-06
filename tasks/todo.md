@@ -176,7 +176,8 @@
   - `cargo test strategy::momentum::tests -- --nocapture`
 - Agent review:
   - `No findings` from reviewer.
-  - Residual risk only: no direct regression test yet for full `MomentumConfig` / `ExitConfig` defaults or the `TrailingStop` / `TimeExit` branches.
+  - Residual risk was reduced with follow-up direct tests for `TrailingStop` / `TimeExit`.
+  - Remaining gap: no direct regression test yet for full `MomentumConfig` / `ExitConfig` defaults.
 
 ---
 
@@ -200,4 +201,4 @@
   - `cargo test test_sharpe_calculation -- --nocapture`
 - Agent review:
   - `No findings` from reviewer.
-  - Residual risk only: the new helper is covered indirectly; there is still no direct non-empty trade parity test for field-by-field `BacktestResults` construction.
+  - Residual risk was reduced with follow-up direct tests for non-empty trade aggregation and zero-trade Sharpe.
