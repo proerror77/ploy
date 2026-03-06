@@ -475,6 +475,30 @@ Remove the remaining `Domain::Crypto` hardcoding from the canonical managed stra
 
 ---
 
+# Layered Live Runtime Task 7D: NBA Runtime Config Builder (2026-03-06)
+
+## Goal
+Prepare the sports bootstrap migration by adding a canonical TOML projection helper for `nba_comeback` without switching the live sports runtime in the same cut.
+
+## Tasks
+
+- [x] Add `build_nba_comeback_runtime_config(...)` to `src/coordinator/bootstrap.rs`.
+- [x] Project the legacy `NbaComebackConfig` fields into canonical runtime sections (`strategy`, `entry`, `timing`, `risk`, `scan`, `database`, `grok`, `performance`, `scaling`, `exit`).
+- [x] Add a focused bootstrap test proving the generated TOML carries the expected strategy/runtime fields.
+- [x] Keep the helper prep-only for now; do not switch the sports live bootstrap path in this slice.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The helper now gives bootstrap a single canonical TOML projection for `nba_comeback`, instead of forcing the future sports migration to hand-roll config inside the larger runtime cut.
+- [x] This slice intentionally does not change live startup behavior; `SportsTradingAgent` still owns the sports path until the next atomic migration.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `liquidity_vacuum_backtest.rs`, `garch_probability_backtest.rs`, and the existing unused import warning in `src/strategy/event_edge/strategy.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

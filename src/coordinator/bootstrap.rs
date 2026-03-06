@@ -3059,6 +3059,175 @@ fn build_event_edge_runtime_config(
     )
 }
 
+#[allow(dead_code)]
+fn build_nba_comeback_runtime_config(
+    database_url: &str,
+    cfg: &crate::config::NbaComebackConfig,
+) -> String {
+    let mut root = toml::value::Table::new();
+
+    let mut strategy = toml::value::Table::new();
+    strategy.insert(
+        "name".to_string(),
+        toml::Value::String("nba_comeback".to_string()),
+    );
+    strategy.insert("enabled".to_string(), toml::Value::Boolean(cfg.enabled));
+    root.insert("strategy".to_string(), toml::Value::Table(strategy));
+
+    let mut entry = toml::value::Table::new();
+    insert_toml_float(&mut entry, "min_edge", cfg.min_edge.to_f64().unwrap_or(0.05));
+    insert_toml_float(
+        &mut entry,
+        "max_entry_price",
+        cfg.max_entry_price.to_f64().unwrap_or(0.75),
+    );
+    insert_toml_int(&mut entry, "shares", cfg.shares as i64);
+    root.insert("entry".to_string(), toml::Value::Table(entry));
+
+    let mut timing = toml::value::Table::new();
+    insert_toml_int(
+        &mut timing,
+        "poll_interval_secs",
+        cfg.espn_poll_interval_secs as i64,
+    );
+    root.insert("timing".to_string(), toml::Value::Table(timing));
+
+    let mut risk = toml::value::Table::new();
+    insert_toml_int(&mut risk, "cooldown_secs", cfg.cooldown_secs as i64);
+    insert_toml_float(
+        &mut risk,
+        "max_daily_spend_usd",
+        cfg.max_daily_spend_usd.to_f64().unwrap_or(100.0),
+    );
+    insert_toml_float(
+        &mut risk,
+        "min_reward_risk_ratio",
+        cfg.min_reward_risk_ratio,
+    );
+    insert_toml_float(&mut risk, "min_expected_value", cfg.min_expected_value);
+    insert_toml_float(&mut risk, "kelly_fraction_cap", cfg.kelly_fraction_cap);
+    root.insert("risk".to_string(), toml::Value::Table(risk));
+
+    let mut scan = toml::value::Table::new();
+    insert_toml_int(&mut scan, "min_deficit", cfg.min_deficit as i64);
+    insert_toml_int(&mut scan, "max_deficit", cfg.max_deficit as i64);
+    insert_toml_int(&mut scan, "target_quarter", cfg.target_quarter as i64);
+    insert_toml_float(&mut scan, "min_comeback_rate", cfg.min_comeback_rate);
+    scan.insert("season".to_string(), toml::Value::String(cfg.season.clone()));
+    root.insert("scan".to_string(), toml::Value::Table(scan));
+
+    let mut database = toml::value::Table::new();
+    database.insert(
+        "url".to_string(),
+        toml::Value::String(database_url.to_string()),
+    );
+    root.insert("database".to_string(), toml::Value::Table(database));
+
+    let mut grok = toml::value::Table::new();
+    grok.insert("enabled".to_string(), toml::Value::Boolean(cfg.grok_enabled));
+    insert_toml_int(&mut grok, "interval_secs", cfg.grok_interval_secs as i64);
+    insert_toml_float(
+        &mut grok,
+        "min_edge",
+        cfg.grok_min_edge.to_f64().unwrap_or(0.08),
+    );
+    insert_toml_float(&mut grok, "min_confidence", cfg.grok_min_confidence);
+    insert_toml_int(
+        &mut grok,
+        "decision_cooldown_secs",
+        cfg.grok_decision_cooldown_secs as i64,
+    );
+    grok.insert(
+        "fallback_enabled".to_string(),
+        toml::Value::Boolean(cfg.grok_fallback_enabled),
+    );
+    root.insert("grok".to_string(), toml::Value::Table(grok));
+
+    let mut performance = toml::value::Table::new();
+    insert_toml_float(
+        &mut performance,
+        "daily_loss_limit_usd",
+        cfg.performance_daily_loss_limit_usd.to_f64().unwrap_or(30.0),
+    );
+    insert_toml_int(
+        &mut performance,
+        "min_settled_trades",
+        cfg.performance_min_settled_trades as i64,
+    );
+    insert_toml_float(
+        &mut performance,
+        "min_win_rate",
+        cfg.performance_min_win_rate,
+    );
+    insert_toml_float(
+        &mut performance,
+        "low_winrate_multiplier",
+        cfg.performance_low_winrate_multiplier,
+    );
+    insert_toml_int(
+        &mut performance,
+        "loss_streak_threshold",
+        cfg.performance_loss_streak_threshold as i64,
+    );
+    insert_toml_float(
+        &mut performance,
+        "loss_streak_multiplier",
+        cfg.performance_loss_streak_multiplier,
+    );
+    root.insert("performance".to_string(), toml::Value::Table(performance));
+
+    let mut scaling = toml::value::Table::new();
+    scaling.insert(
+        "enabled".to_string(),
+        toml::Value::Boolean(cfg.scaling_enabled),
+    );
+    insert_toml_int(&mut scaling, "max_adds", cfg.scaling_max_adds as i64);
+    insert_toml_float(
+        &mut scaling,
+        "min_price_drop_pct",
+        cfg.scaling_min_price_drop_pct,
+    );
+    insert_toml_float(
+        &mut scaling,
+        "max_game_exposure_usd",
+        cfg.scaling_max_game_exposure_usd.to_f64().unwrap_or(50.0),
+    );
+    insert_toml_float(
+        &mut scaling,
+        "min_comeback_retention",
+        cfg.scaling_min_comeback_retention,
+    );
+    insert_toml_float(
+        &mut scaling,
+        "min_time_remaining_mins",
+        cfg.scaling_min_time_remaining_mins,
+    );
+    root.insert("scaling".to_string(), toml::Value::Table(scaling));
+
+    let mut exit = toml::value::Table::new();
+    exit.insert(
+        "enabled".to_string(),
+        toml::Value::Boolean(cfg.early_exit_enabled),
+    );
+    insert_toml_float(
+        &mut exit,
+        "take_profit_pct",
+        cfg.early_exit_take_profit_pct,
+    );
+    insert_toml_float(
+        &mut exit,
+        "stop_loss_pct",
+        cfg.early_exit_stop_loss_pct,
+    );
+    root.insert("exit".to_string(), toml::Value::Table(exit));
+
+    format!(
+        "# Auto-generated by platform bootstrap — nba comeback\n{}",
+        toml::to_string(&toml::Value::Table(root))
+            .expect("nba comeback runtime config must serialize to TOML")
+    )
+}
+
 fn render_split_arb_runtime_config(
     mut config: toml::Value,
     symbols: &[String],
@@ -7147,6 +7316,68 @@ mod tests {
         assert!(rendered.contains("cooldown_secs = 120"));
         assert!(rendered.contains("max_daily_spend_usd = 55.0"));
         assert!(rendered.contains("rest_url = \"https://clob.polymarket.com\""));
+    }
+
+    #[test]
+    fn build_nba_comeback_runtime_config_projects_strategy_fields() {
+        let cfg = crate::config::NbaComebackConfig {
+            enabled: true,
+            min_edge: Decimal::new(7, 2),
+            max_entry_price: Decimal::new(68, 2),
+            shares: 25,
+            cooldown_secs: 180,
+            max_daily_spend_usd: Decimal::from(55),
+            min_deficit: 4,
+            max_deficit: 12,
+            target_quarter: 3,
+            espn_poll_interval_secs: 45,
+            min_comeback_rate: 0.22,
+            season: "2026-27".to_string(),
+            grok_enabled: true,
+            grok_interval_secs: 600,
+            grok_min_edge: Decimal::new(9, 2),
+            grok_min_confidence: 0.72,
+            grok_decision_cooldown_secs: 90,
+            grok_fallback_enabled: false,
+            min_reward_risk_ratio: 5.0,
+            min_expected_value: 0.08,
+            kelly_fraction_cap: 0.20,
+            performance_daily_loss_limit_usd: Decimal::from(25),
+            performance_min_settled_trades: 12,
+            performance_min_win_rate: 0.48,
+            performance_low_winrate_multiplier: 0.55,
+            performance_loss_streak_threshold: 4,
+            performance_loss_streak_multiplier: 0.40,
+            scaling_enabled: true,
+            scaling_max_adds: 2,
+            scaling_min_price_drop_pct: 7.5,
+            scaling_max_game_exposure_usd: Decimal::from(42),
+            scaling_min_comeback_retention: 0.75,
+            scaling_min_time_remaining_mins: 9.5,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 18.0,
+            early_exit_stop_loss_pct: 16.0,
+        };
+
+        let rendered =
+            build_nba_comeback_runtime_config("postgres://db.example.com/ploy", &cfg);
+
+        assert!(rendered.contains("name = \"nba_comeback\""));
+        assert!(rendered.contains("poll_interval_secs = 45"));
+        assert!(rendered.contains("min_edge = 0.07"));
+        assert!(rendered.contains("max_entry_price = 0.68"));
+        assert!(rendered.contains("cooldown_secs = 180"));
+        assert!(rendered.contains("max_daily_spend_usd = 55.0"));
+        assert!(rendered.contains("min_deficit = 4"));
+        assert!(rendered.contains("max_deficit = 12"));
+        assert!(rendered.contains("season = \"2026-27\""));
+        assert!(rendered.contains("url = \"postgres://db.example.com/ploy\""));
+        assert!(rendered.contains("enabled = true"));
+        assert!(rendered.contains("interval_secs = 600"));
+        assert!(rendered.contains("decision_cooldown_secs = 90"));
+        assert!(rendered.contains("max_adds = 2"));
+        assert!(rendered.contains("take_profit_pct = 18.0"));
+        assert!(rendered.contains("stop_loss_pct = 16.0"));
     }
 
     #[test]
