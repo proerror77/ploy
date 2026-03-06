@@ -423,6 +423,25 @@
   - `cargo test strategy::directional_backtest -- --nocapture`
   - `cargo build`
 
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 directional backtest state split)
+
+- [x] Move `DirectionalPosition` and `ActiveWindowInfo` into `src/strategy/directional_backtest/state.rs`
+- [x] Keep engine behavior unchanged by importing the extracted types back into `mod.rs`
+- [x] Preserve the current root module surface without touching callers
+- [x] Re-run build plus focused directional-backtest validation
+
+## Review (2026-03-06, directional backtest state split)
+
+- Delivered in this slice:
+  - Moved engine-local data structures from [`src/strategy/directional_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest/mod.rs) into [`src/strategy/directional_backtest/state.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest/state.rs).
+  - Used `pub(super)` visibility for fields so the parent module can keep using the structs without widening the public API.
+  - Left entry, exit, settlement, recorder, and results logic untouched.
+- Validation executed:
+  - `cargo test strategy::directional_backtest -- --nocapture`
+  - `cargo build`
+
 - Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
