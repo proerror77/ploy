@@ -413,44 +413,52 @@ jobs:
               echo "${unit}.service ${action}ed successfully."
             }
 
-            core_units=()
+            core_units_file="$(mktemp)"
+            deribit_units_file="$(mktemp)"
+            cleanup_unit_files() {
+              rm -f "$core_units_file" "$deribit_units_file"
+            }
+            trap cleanup_unit_files EXIT
+
             for unit in ploy ploy-platform ploy-platform-live; do
               if unit_exists "$unit"; then
-                core_units+=("$unit")
+                printf '%s\n' "$unit" >> "$core_units_file"
               fi
             done
 
-            deribit_units=()
+            deribit_collector_units > "$deribit_units_file"
+
             while IFS= read -r unit; do
               [ -n "$unit" ] || continue
-              deribit_units+=("$unit")
-            done < <(deribit_collector_units)
-
-            for unit in "${core_units[@]}"; do
               write_guardrail_dropin "$unit"
-            done
+            done < "$core_units_file"
 
-            for unit in "${deribit_units[@]}"; do
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
               write_guardrail_dropin "$unit"
-            done
+            done < "$deribit_units_file"
 
             $SUDO systemctl daemon-reload
 
             restarted_any=0
-            for unit in "${core_units[@]}"; do
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
               restart_or_start_unit "$unit"
               restarted_any=1
-            done
+            done < "$core_units_file"
 
-            for unit in "${deribit_units[@]}"; do
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
               restart_or_start_unit "$unit"
               restarted_any=1
-            done
+            done < "$deribit_units_file"
 
             if [ "$restarted_any" -eq 0 ]; then
               echo "No active ploy service required restart."
             fi
 
+            cleanup_unit_files
+            trap - EXIT
             rm -rf "${WORKDIR}" "${BUNDLE}"
 
       - name: Deployment summary
