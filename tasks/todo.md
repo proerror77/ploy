@@ -499,6 +499,32 @@ Prepare the sports bootstrap migration by adding a canonical TOML projection hel
 
 ---
 
+# Layered Live Runtime Task 7E: Sports Runtime Default Cutover (2026-03-06)
+
+## Goal
+Move the default `nba_comeback` sports live bootstrap onto the canonical managed strategy runtime while keeping the Grok-enabled path on the legacy sports agent until the canonical wrapper absorbs that behavior.
+
+## Tasks
+
+- [x] Add `build_nba_comeback_managed_runtime_spec(...)` to describe the canonical launch contract for sports/NBA.
+- [x] Add focused bootstrap tests proving non-Grok NBA configs project into a canonical managed-runtime launch spec.
+- [x] Add a focused bootstrap test proving Grok-enabled NBA configs still defer to the legacy sports agent path.
+- [x] Switch the default sports bootstrap branch to spawn `run_managed_strategy_runtime(...)` for `nba_comeback`.
+- [x] Keep `SportsTradingAgent` as an explicit fallback only for Grok-enabled deployments.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Default `nba_comeback` live startup no longer hard-depends on `SportsTradingAgent`; bootstrap now assembles a canonical managed-runtime launch spec and spawns the strategy plane path directly.
+- [x] The legacy sports agent still exists as a narrow compatibility path for `grok_enabled=true`, which avoids silently dropping Grok behavior before that logic is re-homed into the canonical strategy layer.
+- [x] Focused validation passed:
+  - `cargo test build_nba_comeback_managed_runtime_spec_ --lib -- --nocapture`
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
