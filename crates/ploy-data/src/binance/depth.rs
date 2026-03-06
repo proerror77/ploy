@@ -14,7 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info};
 use url::Url;
 
-use crate::error::{PloyError, Result};
+use crate::error::{DataError, Result};
 
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
 const PING_INTERVAL_SECS: u64 = 30;
@@ -326,7 +326,7 @@ impl BinanceDepthStream {
     async fn connect_and_stream(&self) -> Result<()> {
         let url = self.build_url();
         let url = Url::parse(&url)
-            .map_err(|e| PloyError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
+            .map_err(|e| DataError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
 
         info!("Connecting to Binance depth stream: {}", url);
 
@@ -334,9 +334,9 @@ impl BinanceDepthStream {
             tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
                 .await
                 .map_err(|_| {
-                    PloyError::Internal("Binance WebSocket connection timeout".to_string())
+                    DataError::Internal("Binance WebSocket connection timeout".to_string())
                 })?
-                .map_err(PloyError::WebSocket)?;
+                .map_err(DataError::WebSocket)?;
 
         info!("Connected to Binance depth stream");
 
@@ -362,7 +362,7 @@ impl BinanceDepthStream {
                             break;
                         }
                         Some(Err(e)) => {
-                            return Err(PloyError::WebSocket(e));
+                            return Err(DataError::WebSocket(e));
                         }
                         None => {
                             info!("Stream ended");

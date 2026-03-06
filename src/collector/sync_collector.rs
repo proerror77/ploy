@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
-use super::binance_depth::{BinanceDepthStream, LobUpdate};
+use ploy_data::binance::{BinanceDepthStream, LobUpdate};
 use crate::error::Result;
 
 /// Synchronized price record for lag analysis
@@ -234,7 +234,7 @@ impl SyncCollector {
     }
 
     /// Get LOB cache reference
-    pub fn lob_cache(&self) -> &super::binance_depth::LobCache {
+    pub fn lob_cache(&self) -> &ploy_data::binance::LobCache {
         self.depth_stream.cache()
     }
 

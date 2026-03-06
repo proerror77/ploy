@@ -20,7 +20,8 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-use crate::error::{PloyError, Result};
+use crate::error::{DataError, Result};
+use crate::freshness::{DataSource, FreshnessTracker};
 
 /// Binance host (used for CONNECT + TLS)
 const BINANCE_WS_HOST: &str = "stream.binance.com";
@@ -75,8 +76,8 @@ async fn connect_via_proxy(
     let proxy_addr = format!("{}:{}", proxy_host, proxy_port);
     let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&proxy_addr))
         .await
-        .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
-        .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
+        .map_err(|_| DataError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
+        .map_err(|e| DataError::Internal(format!("Failed to connect to proxy: {}", e)))?;
 
     // Send HTTP CONNECT request
     let connect_request = format!(
@@ -88,7 +89,7 @@ async fn connect_via_proxy(
     writer
         .write_all(connect_request.as_bytes())
         .await
-        .map_err(|e| PloyError::Internal(format!("Failed to send CONNECT: {}", e)))?;
+        .map_err(|e| DataError::Internal(format!("Failed to send CONNECT: {}", e)))?;
 
     // Read response
     let mut buf_reader = BufReader::new(reader);
@@ -96,10 +97,10 @@ async fn connect_via_proxy(
     buf_reader
         .read_line(&mut response_line)
         .await
-        .map_err(|e| PloyError::Internal(format!("Failed to read proxy response: {}", e)))?;
+        .map_err(|e| DataError::Internal(format!("Failed to read proxy response: {}", e)))?;
 
     if !response_line.contains("200") {
-        return Err(PloyError::Internal(format!(
+        return Err(DataError::Internal(format!(
             "Proxy CONNECT failed: {}",
             response_line.trim()
         )));
@@ -111,7 +112,7 @@ async fn connect_via_proxy(
         buf_reader
             .read_line(&mut line)
             .await
-            .map_err(|e| PloyError::Internal(format!("Failed to read proxy headers: {}", e)))?;
+            .map_err(|e| DataError::Internal(format!("Failed to read proxy headers: {}", e)))?;
         if line.trim().is_empty() {
             break;
         }
@@ -121,7 +122,7 @@ async fn connect_via_proxy(
     let reader = buf_reader.into_inner();
     let stream = reader
         .reunite(writer)
-        .map_err(|e| PloyError::Internal(format!("Failed to reunite stream: {}", e)))?;
+        .map_err(|e| DataError::Internal(format!("Failed to reunite stream: {}", e)))?;
 
     Ok(stream)
 }
@@ -146,7 +147,7 @@ async fn connect_websocket_with_proxy(
                 client_async_tls_with_config(url.as_str(), tcp_stream, None, None)
                     .await
                     .map_err(|e| {
-                        PloyError::Internal(format!("WebSocket handshake failed: {}", e))
+                        DataError::Internal(format!("WebSocket handshake failed: {}", e))
                     })?;
 
             return Ok(ws_stream);
@@ -156,8 +157,8 @@ async fn connect_websocket_with_proxy(
     // No proxy or invalid proxy URL - connect directly
     let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
         .await
-        .map_err(|_| PloyError::Internal("WebSocket connection timeout".to_string()))?
-        .map_err(PloyError::WebSocket)?;
+        .map_err(|_| DataError::Internal("WebSocket connection timeout".to_string()))?
+        .map_err(DataError::WebSocket)?;
 
     Ok(ws_stream)
 }
@@ -233,7 +234,7 @@ pub struct BinanceKlineWebSocket {
     closed_only: bool,
     reconnect_delay: Duration,
     // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
+    freshness: OnceLock<Arc<dyn FreshnessTracker>>,
 }
 
 impl BinanceKlineWebSocket {
@@ -260,13 +261,13 @@ impl BinanceKlineWebSocket {
     }
 
     /// Attach a shared freshness tracker for the data plane.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+    pub fn set_freshness(&self, freshness: Arc<dyn FreshnessTracker>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
             freshness.set_subscription_count(
-                crate::platform::DataSource::BinanceKline,
+                DataSource::BinanceKline,
                 (self.symbols.len() * self.intervals.len()) as u64,
             );
-            freshness.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+            freshness.set_source_connected(DataSource::BinanceKline, false);
         }
     }
 
@@ -332,7 +333,7 @@ impl BinanceKlineWebSocket {
         impl Drop for ConnectionGuard<'_> {
             fn drop(&mut self) {
                 if let Some(f) = self.0.freshness.get() {
-                    f.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+                    f.set_source_connected(DataSource::BinanceKline, false);
                 }
             }
         }
@@ -340,14 +341,14 @@ impl BinanceKlineWebSocket {
 
         let url = self.build_url();
         let url = Url::parse(&url)
-            .map_err(|e| PloyError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
+            .map_err(|e| DataError::Internal(format!("Invalid WebSocket URL: {}", e)))?;
 
         info!("Connecting to Binance kline WS: {}", url);
 
         let ws_stream = connect_websocket_with_proxy(&url).await?;
         info!("Connected to Binance kline WS");
         if let Some(f) = self.freshness.get() {
-            f.set_source_connected(crate::platform::DataSource::BinanceKline, true);
+            f.set_source_connected(DataSource::BinanceKline, true);
         }
 
         let (mut write, mut read) = ws_stream.split();
@@ -372,7 +373,7 @@ impl BinanceKlineWebSocket {
                             break;
                         }
                         Some(Err(e)) => {
-                            return Err(PloyError::WebSocket(e));
+                            return Err(DataError::WebSocket(e));
                         }
                         None => {
                             info!("Binance kline WS stream ended");
@@ -463,7 +464,7 @@ impl BinanceKlineWebSocket {
 
         // Record per-symbol freshness for the data plane (before ev.symbol is moved).
         if let Some(f) = self.freshness.get() {
-            f.record_update(crate::platform::DataSource::BinanceKline, &ev.symbol);
+            f.record_update(DataSource::BinanceKline, &ev.symbol);
         }
 
         let update = KlineUpdate {
@@ -486,7 +487,6 @@ impl BinanceKlineWebSocket {
     }
 
     /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
-    #[cfg(test)]
     pub async fn ingest_test_message(&self, text: &str) {
         self.handle_message(text).await;
     }
@@ -656,8 +656,25 @@ mod tests {
 
     #[tokio::test]
     async fn characterization_freshness_recorded_on_kline() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use crate::freshness::{DataSource, FreshnessTracker};
+
+        #[derive(Debug)]
+        struct MockFreshness {
+            update_count: AtomicU64,
+        }
+        impl FreshnessTracker for MockFreshness {
+            fn record_update(&self, _source: DataSource, _symbol: &str) {
+                self.update_count.fetch_add(1, Ordering::Relaxed);
+            }
+            fn set_source_connected(&self, _source: DataSource, _connected: bool) {}
+            fn set_subscription_count(&self, _source: DataSource, _count: u64) {}
+        }
+
         let ws = BinanceKlineWebSocket::new(vec!["BTCUSDT".into()], vec!["5m".into()], true);
-        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness: Arc<dyn FreshnessTracker> = Arc::new(MockFreshness {
+            update_count: AtomicU64::new(0),
+        });
         ws.set_freshness(freshness.clone());
 
         let msg = r#"{
@@ -689,8 +706,8 @@ mod tests {
         }"#;
 
         ws.ingest_test_message(msg).await;
-        let staleness = freshness.staleness(crate::platform::DataSource::BinanceKline, "BTCUSDT");
-        assert!(staleness.is_some(), "freshness should be recorded");
-        assert!(staleness.unwrap() < 1.0);
+        let mock = freshness.as_ref() as *const dyn FreshnessTracker as *const MockFreshness;
+        let count = unsafe { &*mock }.update_count.load(Ordering::Relaxed);
+        assert!(count > 0, "freshness should be recorded");
     }
 }

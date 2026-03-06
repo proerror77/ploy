@@ -501,3 +501,36 @@ mod tests {
         assert!(output.contains("ploy_source_subscriptions_total{source=\"polymarket_ws\"} 15"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bridge: implement ploy_data::FreshnessTracker for DataPlaneFreshness
+// ---------------------------------------------------------------------------
+
+impl ploy_data::freshness::FreshnessTracker for DataPlaneFreshness {
+    fn record_update(&self, source: ploy_data::freshness::DataSource, symbol: &str) {
+        let platform_source = match source {
+            ploy_data::freshness::DataSource::BinanceSpot => DataSource::BinanceSpot,
+            ploy_data::freshness::DataSource::BinanceKline => DataSource::BinanceKline,
+            ploy_data::freshness::DataSource::BinanceLob => DataSource::BinanceLob,
+        };
+        self.record_update(platform_source, symbol);
+    }
+
+    fn set_source_connected(&self, source: ploy_data::freshness::DataSource, connected: bool) {
+        let platform_source = match source {
+            ploy_data::freshness::DataSource::BinanceSpot => DataSource::BinanceSpot,
+            ploy_data::freshness::DataSource::BinanceKline => DataSource::BinanceKline,
+            ploy_data::freshness::DataSource::BinanceLob => DataSource::BinanceLob,
+        };
+        self.set_source_connected(platform_source, connected);
+    }
+
+    fn set_subscription_count(&self, source: ploy_data::freshness::DataSource, count: u64) {
+        let platform_source = match source {
+            ploy_data::freshness::DataSource::BinanceSpot => DataSource::BinanceSpot,
+            ploy_data::freshness::DataSource::BinanceKline => DataSource::BinanceKline,
+            ploy_data::freshness::DataSource::BinanceLob => DataSource::BinanceLob,
+        };
+        self.set_subscription_count(platform_source, count);
+    }
+}

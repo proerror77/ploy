@@ -459,7 +459,7 @@ impl BacktestCollector {
     async fn append_kline(
         output_dir: &Path,
         symbol: &str,
-        kline: &super::binance_klines::Kline,
+        kline: &ploy_data::binance::Kline,
     ) -> Result<()> {
         let path = output_dir.join("klines.csv");
         let file = OpenOptions::new()

@@ -9,6 +9,7 @@ authors = ["Your Name"]
 members = [
     ".",
     "crates/ploy-core",
+    "crates/ploy-data",
     "crates/ploy-polymarket",
     "tools/sdk_auth_check",
 ]
@@ -17,6 +18,7 @@ resolver = "2"
 [dependencies]
 # Workspace crates
 ploy-core = { path = "crates/ploy-core" }
+ploy-data = { path = "crates/ploy-data", features = ["persistence"] }
 ploy-polymarket = { path = "crates/ploy-polymarket" }
 
 # Async runtime

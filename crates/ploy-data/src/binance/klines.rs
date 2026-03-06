@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::error::{PloyError, Result};
+use crate::error::{DataError, Result};
 
 const BINANCE_API_URL: &str = "https://api.binance.com";
 
@@ -111,10 +111,10 @@ impl BinanceKlineClient {
             .get(&url)
             .send()
             .await
-            .map_err(|e| PloyError::Internal(format!("K-line request failed: {}", e)))?;
+            .map_err(|e| DataError::Internal(format!("K-line request failed: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(PloyError::Internal(format!(
+            return Err(DataError::Internal(format!(
                 "K-line API error: {}",
                 response.status()
             )));
@@ -123,7 +123,7 @@ impl BinanceKlineClient {
         let data: Vec<Vec<serde_json::Value>> = response
             .json()
             .await
-            .map_err(|e| PloyError::Internal(format!("K-line parse error: {}", e)))?;
+            .map_err(|e| DataError::Internal(format!("K-line parse error: {}", e)))?;
 
         let klines: Vec<Kline> = data
             .into_iter()
@@ -171,10 +171,10 @@ impl BinanceKlineClient {
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| PloyError::Internal(format!("K-line request failed: {}", e)))?;
+                .map_err(|e| DataError::Internal(format!("K-line request failed: {}", e)))?;
 
             if !response.status().is_success() {
-                return Err(PloyError::Internal(format!(
+                return Err(DataError::Internal(format!(
                     "K-line API error: {}",
                     response.status()
                 )));
@@ -183,7 +183,7 @@ impl BinanceKlineClient {
             let data: Vec<Vec<serde_json::Value>> = response
                 .json()
                 .await
-                .map_err(|e| PloyError::Internal(format!("K-line parse error: {}", e)))?;
+                .map_err(|e| DataError::Internal(format!("K-line parse error: {}", e)))?;
 
             if data.is_empty() {
                 break;
@@ -291,7 +291,7 @@ impl BinanceKlineClient {
 
         let stats = self
             .calculate_stats(&klines)
-            .ok_or_else(|| PloyError::Internal("Failed to calculate stats".to_string()))?;
+            .ok_or_else(|| DataError::Internal("Failed to calculate stats".to_string()))?;
 
         info!(
             "{} 15m volatility: avg_range={:.3}%, avg_move={:.3}%, up_ratio={:.1}%",
@@ -351,6 +351,7 @@ impl BinanceKlineClient {
     /// Persist a batch of klines to the `binance_klines` database table.
     ///
     /// Uses ON CONFLICT DO NOTHING for idempotent inserts (dedup on symbol+interval+open_time).
+    #[cfg(feature = "persistence")]
     pub async fn save_klines_to_db(
         pool: &sqlx::PgPool,
         symbol: &str,

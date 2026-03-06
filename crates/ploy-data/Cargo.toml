@@ -1,0 +1,47 @@
+[package]
+name = "ploy-data"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ploy-core = { path = "../ploy-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "io-util", "macros"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+
+# Numeric types
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1"
+
+# URL parsing
+url = "2"
+
+# Database (optional, for kline persistence)
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "rust_decimal"], optional = true }
+
+[features]
+default = []
+persistence = ["dep:sqlx"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
