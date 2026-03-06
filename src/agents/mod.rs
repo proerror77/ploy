@@ -1,8 +1,8 @@
-//! Trading Agents — pull-based agent implementations
+//! Trading Agents — pull-based compatibility implementations
 //!
-//! Each agent implements `TradingAgent` and owns its main loop.
-//! Order-submitting compatibility agents use `AgentContext`; governance-only
-//! agents narrow access through `GovernanceContext`.
+//! New live strategy work must go through the canonical `Strategy` runtime.
+//! These modules remain available for transitional compatibility and niche
+//! governance/runtime-adapter use only.
 
 pub mod context;
 pub mod crypto;
@@ -15,13 +15,13 @@ pub mod sports;
 pub mod traits;
 
 pub use context::AgentContext;
-pub use crypto::{CryptoTradingAgent, CryptoTradingConfig};
+pub use crypto::CryptoTradingConfig;
 pub use crypto_lob_ml::{
     CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 pub use governance_context::GovernanceContext;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
-pub use politics::{PoliticsTradingAgent, PoliticsTradingConfig};
-pub use sports::{SportsTradingAgent, SportsTradingConfig};
+pub use politics::PoliticsTradingConfig;
+pub use sports::SportsTradingConfig;
 pub use traits::{AgentConfig, TradingAgent};

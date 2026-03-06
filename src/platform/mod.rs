@@ -2,6 +2,8 @@
 //!
 //! 提供領域無關的訂單執行、風控和倉位管理。
 //! 所有策略 Agent 透過這個平台提交訂單。
+//! `platform::agents` remains a transitional compatibility surface, not the
+//! canonical live strategy runtime extension point.
 
 pub mod agents;
 mod contracts;
@@ -49,9 +51,6 @@ pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
 };
-
-pub use agents::EventEdgePlatformAgent;
-pub use agents::NbaComebackAgent;
 
 // RL-powered agents (requires 'rl' feature)
 #[cfg(feature = "rl")]

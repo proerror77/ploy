@@ -40,7 +40,9 @@ fn build_platform_config_for_runtime(
         }
     }
 
-    // Runtime scope is intentionally limited to crypto + sports agents.
+    // CLI platform-mode filters currently expose only crypto + sports runtime
+    // scope. Politics canonical runtime is still controlled outside this
+    // selector surface.
     platform_cfg.enable_politics = false;
 
     if app_config.openclaw_runtime_lockdown() {
@@ -321,7 +323,7 @@ mod tests {
 
         assert!(
             !cfg.enable_politics,
-            "platform runtime should keep politics disabled in crypto+sports-only scope"
+            "platform-mode selector surface should keep politics disabled until an explicit politics runtime flag exists"
         );
     }
 }

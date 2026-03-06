@@ -1,6 +1,7 @@
-//! Domain Agent Implementations
+//! Domain Agent compatibility implementations
 //!
-//! 各領域策略 Agent 的具體實作。
+//! These platform agents are retained only for transitional compatibility.
+//! New live strategy work should land in the canonical `Strategy` runtime.
 
 mod crypto_agent;
 mod event_edge_agent;

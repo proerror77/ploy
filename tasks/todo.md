@@ -525,6 +525,32 @@ Move the default `nba_comeback` sports live bootstrap onto the canonical managed
 
 ---
 
+# Layered Live Runtime Task 8A: Narrow Legacy Runtime Re-Exports (2026-03-06)
+
+## Goal
+Shrink the public entry surface for legacy live runtimes so compatibility agents are no longer exposed from the top-level crate APIs as if they were canonical extension points.
+
+## Tasks
+
+- [x] Stop re-exporting legacy pull-based trading agent types from `src/agents/mod.rs`.
+- [x] Update the remaining legacy bootstrap fallback to import `SportsTradingAgent` through its explicit compatibility module path.
+- [x] Stop re-exporting platform-agent types from `src/platform/mod.rs`.
+- [x] Update the remaining CLI caller to use `crate::platform::agents::NbaComebackAgent` explicitly.
+- [x] Clarify `src/platform/agents/mod.rs` and `src/main_modes/platform_mode.rs` comments so they describe transitional/runtime-filter semantics instead of presenting legacy agents as the steady state.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The crate root no longer presents `CryptoTradingAgent`, `PoliticsTradingAgent`, `SportsTradingAgent`, `EventEdgePlatformAgent`, or `NbaComebackAgent` as first-class top-level APIs.
+- [x] Remaining legacy uses now go through explicit compatibility paths, which makes later deletion/gating work in Task 8 materially smaller.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo test --bin ploy runtime_scope_disables_politics_even_if_deployment_enables_it -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
