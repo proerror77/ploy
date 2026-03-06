@@ -209,6 +209,35 @@ Keep managed `staggered_arb` on share-based sizing, ship the canonical strategy 
 
 ---
 
+# Layered Live Runtime Refactor Design And Planning (2026-03-06)
+
+## Goal
+Define the target four-layer live trading architecture and write a concrete implementation plan to converge the repo onto one canonical strategy runtime.
+
+## Tasks
+
+- [x] Review the current architecture against the target four-layer model.
+- [x] Validate target boundaries for Strategy, Capital Governance, Execution, and Control planes.
+- [x] Write the approved design doc under `docs/plans/2026-03-06-layered-live-runtime-design.md`.
+- [x] Write the implementation plan under `docs/plans/2026-03-06-layered-live-runtime-implementation-plan.md`.
+- [x] Commit the planning docs atomically with explicit paths only.
+
+## Review
+
+- [x] Confirmed the primary architectural issue is missing canonical live runtime ownership, not lack of layering intent.
+- [x] Confirmed `bootstrap.rs` is currently over-coupled to strategy classification, runtime wiring, and strategy-specific behavior.
+- [x] Confirmed the target design keeps strategy decisions in the Strategy Plane and limits agentic behavior to capital governance.
+- [x] No runtime code changed in this planning step; only design and implementation planning docs were added.
+
+## Progress notes
+
+- 2026-03-06: Completed repository review across `src/strategy`, `src/agents`, `src/platform`, and `src/coordinator/bootstrap.rs`.
+- 2026-03-06: Approved target architecture: strategy-owned decisions, agentic capital governance, coordinator-only execution ingress, control-plane-only deployment/config ownership.
+- 2026-03-06: Saved design doc to `docs/plans/2026-03-06-layered-live-runtime-design.md`.
+- 2026-03-06: Saved implementation plan to `docs/plans/2026-03-06-layered-live-runtime-implementation-plan.md`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
