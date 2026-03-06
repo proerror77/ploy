@@ -66,3 +66,14 @@
   - Capture preflight (`git status --short`, `git diff --name-only`) before staging.
   - Use partial staging for mixed files; do not revert unrelated edits.
   - Report remaining unstaged files after commit.
+
+## 2026-03-06
+
+- Pattern: Managed strategy bootstrap can silently drift from the checked-in live strategy template and override production sizing without touching host config files.
+- Rule: Managed `staggered_arb` runtime config must derive from the canonical `config/strategies/staggered_arb.toml` template and only override runtime-scoped fields like `symbols` and `series_ids`.
+- Guardrail:
+  - Add a regression test that asserts managed runtime config still contains `shares_per_trade = 20`.
+  - Add a regression test that asserts managed runtime config does not inject `fixed_amount_usd` unless explicitly configured.
+
+- Pattern: A release workflow can partially deploy to production and then fail late because the remote shell script is too clever.
+- Rule: Keep remote deploy scripts explicit and small; prefer fixed service lists over dynamic shell pipelines for `systemctl` restarts, and syntax-check the extracted remote script before rerunning a production release.

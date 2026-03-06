@@ -69,3 +69,32 @@ Reduce strategy "listing/deployment" chaos by enforcing one control semantics ac
 - [x] Verified no unrelated dirty changes were reverted.
 - [x] Verified control plane behavior is consistent across endpoints.
 - [x] Verified strategy mapping no longer silently routes unknown strategy keys to momentum.
+
+---
+
+# Managed Staggered Arb Hotfix (2026-03-06)
+
+## Goal
+Close the live hotfix by making managed `staggered_arb` honor share-based sizing again and by fixing the formal Aliyun release workflow so future deploys complete cleanly.
+
+## Tasks
+
+- [x] Reproduce and confirm live mismatch between requested `20 shares` sizing and observed `fixed_amount_usd=$1 -> 5 shares` behavior.
+- [x] Add a regression test that fails when managed runtime config injects `fixed_amount_usd` or drops `shares_per_trade = 20`.
+- [x] Change managed split-arb runtime config generation to derive from the canonical `staggered_arb.toml` template and only inject runtime fields (`symbols`, `series_ids`).
+- [x] Simplify the Aliyun deploy restart script to explicit ploy unit handling and ship `staggered_arb.toml` in the release bundle.
+- [x] Re-run targeted Rust tests, `cargo check`, and shell syntax validation for the remote deploy script.
+- [x] Commit the strategy fix and CI fix as separate atomic commits.
+
+## Review
+
+- [x] Confirmed current production binary was already on `v0.1.1-hotfix.20260306.2`, but managed runtime still overrode sizing.
+- [x] Confirmed post-restart live logs no longer showed the old `LEG2 Failed -> retry full size` storm.
+- [x] Confirmed the remaining issue was config drift in managed bootstrap, not stale host config.
+- [x] Validated `.github/workflows/release-aliyun.yml` remote script with `bash -n` after simplification.
+
+## Progress notes
+
+- 2026-03-06: Added a bootstrap regression test asserting managed runtime config keeps `shares_per_trade = 20` and omits `fixed_amount_usd`.
+- 2026-03-06: Switched managed `staggered_arb` runtime rendering to start from the canonical strategy template instead of duplicating risk defaults in `bootstrap.rs`.
+- 2026-03-06: Updated the Aliyun release bundle/install path to carry `staggered_arb.toml` and replaced the brittle dynamic restart loop with explicit `ploy` unit handling.
