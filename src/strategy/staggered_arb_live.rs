@@ -2723,6 +2723,70 @@ series_ids = ["10684", "10192", "10684"]
     }
 
     #[test]
+    fn test_try_entry_only_allows_opening_window_entries() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.direction_threshold = 0.0;
+        adapter.config.backtest_config.use_greeks = false;
+        adapter
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(101), None, now));
+        adapter
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(0.02));
+        adapter.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+
+        let within_open_window = LiveWindow {
+            event_id: "evt-open".into(),
+            symbol: "BTCUSDT".into(),
+            up_token: "up-open".into(),
+            down_token: "down-open".into(),
+            condition_id: None,
+            end_time: now + chrono::Duration::seconds(280),
+            open_price: Some(dec!(100)),
+            window_secs: 300,
+        };
+        let late_window = LiveWindow {
+            event_id: "evt-late".into(),
+            symbol: "BTCUSDT".into(),
+            up_token: "up-late".into(),
+            down_token: "down-late".into(),
+            condition_id: None,
+            end_time: now + chrono::Duration::seconds(260),
+            open_price: Some(dec!(100)),
+            window_secs: 300,
+        };
+
+        let early_action = adapter.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &within_open_window,
+            dec!(101),
+            (Some(0.01), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+        assert!(
+            early_action.is_some(),
+            "entry should be allowed during the configured opening window even when sum is above the old 0.92 cap"
+        );
+
+        let late_action = adapter.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &late_window,
+            dec!(101),
+            (Some(0.01), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+        assert!(
+            late_action.is_none(),
+            "entry should be blocked once the opening window has expired"
+        );
+    }
+
+    #[test]
     fn test_min_balance_blocks_entry() {
         let toml = r#"
 [entry]

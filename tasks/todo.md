@@ -206,3 +206,23 @@ Keep managed `staggered_arb` on share-based sizing, ship the canonical strategy 
 - [x] Release workflow now deploys `staggered_arb.toml` alongside `momentum.toml`.
 - [x] Release workflow restart logic now handles both `restart` and `start`, with an explicit `active` wait loop.
 - [x] Release workflow now discovers and restarts installed `ploy-deribit-*` collector units on the trading host.
+
+---
+
+# Staggered Arb Opening-Window Entry Reset (2026-03-06)
+
+## Goal
+Restore `staggered_arb` to the intended live behavior: directional `LEG1` entries should be decided near event open, not blocked by an ultra-tight sum gate that rarely appears in production, while `LEG2` remains an opportunistic close.
+
+## Tasks
+
+- [x] Tighten entry timing back to the opening phase instead of leaving entry open for the full event.
+- [x] Relax the initial sum cap so opening `LEG1` can fire on realistic BTC/ETH/SOL crypto windows.
+- [x] Align backtest/default config with the checked-in live strategy template.
+- [x] Add a regression test covering the opening-window entry behavior.
+
+## Review
+
+- [x] `staggered_arb.toml` now limits fresh `LEG1` entries to the first 30 seconds and raises `max_initial_sum` from `0.92` to `1.10`.
+- [x] `StaggeredArbBacktestConfig::default()` now matches the live template for opening-window timing and initial-sum assumptions.
+- [x] Added a live-unit test proving entries are allowed inside the opening window and rejected after it expires.

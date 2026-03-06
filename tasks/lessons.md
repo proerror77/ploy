@@ -87,3 +87,6 @@
 
 - Pattern: A release workflow can partially deploy the new binary and still fail availability because installed but inactive services are not explicitly started.
 - Rule: Remote deploy steps must treat installed `ploy` services as start/restart targets, wait for `active`, and only then declare rollout success.
+
+- Pattern: A live trading template can drift from the operator's intended strategy style even when the code path is unchanged, especially when timing gates are disabled and sum caps are tuned for a different regime.
+- Rule: When a user describes intended entry behavior ("opening-window directional leg1" vs "strict sum-based arb"), verify both the checked-in TOML and the strategy defaults before diagnosing production inactivity.

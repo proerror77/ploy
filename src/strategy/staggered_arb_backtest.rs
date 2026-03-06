@@ -124,12 +124,12 @@ impl Default for StaggeredArbBacktestConfig {
             max_concurrent_positions: 5,
             direction_threshold: 0.04,
             reverse_signal: false,
-            max_initial_sum: dec!(0.92),
+            max_initial_sum: dec!(1.10),
             max_leg1_price: dec!(0.65),
             merge_target_sum: dec!(0.95),
             min_profit_target: dec!(0.02),
             max_wait_secs: 120,
-            entry_after_start_max_secs: 0, // disabled — rely on no_trade_last_secs
+            entry_after_start_max_secs: 30,
             no_trade_last_secs: 30,
             max_wait_pct: 0.30,
             min_time_remaining_secs: 45,
@@ -1875,11 +1875,12 @@ mod tests {
     fn test_config_defaults() {
         let config = StaggeredArbBacktestConfig::default();
         assert_eq!(config.direction_threshold, 0.04);
-        assert_eq!(config.max_initial_sum, dec!(0.92));
+        assert_eq!(config.max_initial_sum, dec!(1.10));
         assert_eq!(config.max_leg1_price, dec!(0.65));
         assert_eq!(config.merge_target_sum, dec!(0.95));
         assert_eq!(config.min_profit_target, dec!(0.02));
         assert_eq!(config.max_wait_secs, 120);
+        assert_eq!(config.entry_after_start_max_secs, 30);
         assert_eq!(config.min_leg2_delay_secs, 3);
         assert_eq!(config.max_trades_per_event, 3);
         assert_eq!(config.cooldown_secs, 5);
