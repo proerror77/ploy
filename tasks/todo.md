@@ -259,6 +259,36 @@
 ## Review (2026-03-06, momentum engine split)
 
 - Delivered in this slice:
+  - Moved the remaining `MomentumEngine` runtime and helper methods from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
+  - Reduced `mod.rs` to assembly/re-export responsibilities so future splits can avoid editing a giant mixed file.
+- Validation executed:
+  - `cargo build`
+  - `cargo test strategy::momentum::config::tests -- --nocapture`
+  - `cargo test strategy::momentum::window_risk::tests -- --nocapture`
+  - `cargo test strategy::momentum::tests -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 / 6 momentum backtest persistence split)
+
+- [x] Convert `src/strategy/momentum_backtest.rs` to directory form
+- [x] Move result persistence into `src/strategy/momentum_backtest/persistence.rs`
+- [x] Keep `crate::strategy::momentum_backtest::*` stable via `mod.rs` re-export
+- [x] Add direct tests for Sharpe status band mapping
+- [x] Re-run build plus focused momentum-backtest validation
+
+## Review (2026-03-06, momentum backtest persistence split)
+
+- Delivered in this slice:
+  - Renamed [`src/strategy/momentum_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest.rs) into directory form at [`src/strategy/momentum_backtest/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest/mod.rs).
+  - Moved the DB write path into [`src/strategy/momentum_backtest/persistence.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum_backtest/persistence.rs) so the engine file now owns runtime logic only.
+  - Preserved the existing external call surface by re-exporting `save_backtest_results` from `mod.rs`.
+  - Added a direct unit test for `FAIL` / `WARN` / `PASS` Sharpe status thresholds in the new persistence module.
+- Validation executed:
+  - `cargo test strategy::momentum_backtest -- --nocapture`
+  - `cargo build`
+
+- Delivered in this slice:
   - Moved the remaining runtime-heavy `MomentumEngine` implementation from [`src/strategy/momentum/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/mod.rs) into [`src/strategy/momentum/engine.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/momentum/engine.rs).
   - Reduced `mod.rs` to module wiring plus public re-exports for config, positions, signals, event matching, and the engine entry type.
   - Kept private `window_risk` internals scoped to the engine module instead of re-exporting them from the public module surface.
