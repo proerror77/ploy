@@ -9,7 +9,10 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use ploy_backtest::{BacktestResults, ExecutionSimulator, MarketFeed, UpdateType};
+use ploy_backtest::{
+    strategies::{build_momentum_results, MomentumClosedTrade},
+    BacktestResults, ExecutionSimulator, MarketFeed, UpdateType,
+};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -85,7 +88,7 @@ pub struct MomentumBacktestEngine {
     /// Latest PM asks per symbol: (up_ask, down_ask)
     pm_asks: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
     positions: Vec<BacktestPosition>,
-    closed_trades: Vec<BacktestClosedTrade>,
+    closed_trades: Vec<MomentumClosedTrade>,
     equity: Decimal,
     peak_equity: Decimal,
     max_drawdown: Decimal,
@@ -93,20 +96,6 @@ pub struct MomentumBacktestEngine {
     last_entry_time: HashMap<String, DateTime<Utc>>,
     data_range_start: Option<DateTime<Utc>>,
     data_range_end: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BacktestClosedTrade {
-    symbol: String,
-    direction: String,
-    entry_time: DateTime<Utc>,
-    exit_time: DateTime<Utc>,
-    entry_price: Decimal,
-    exit_price: Decimal,
-    shares: u64,
-    pnl: Decimal,
-    won: bool,
-    holding_secs: i64,
 }
 
 impl MomentumBacktestEngine {
@@ -354,7 +343,7 @@ impl MomentumBacktestEngine {
         let pnl = proceeds - Decimal::from(pos.shares) * pos.entry_price;
         let holding_secs = (ts - pos.entry_time).num_seconds();
 
-        self.closed_trades.push(BacktestClosedTrade {
+        self.closed_trades.push(MomentumClosedTrade {
             symbol: pos.symbol,
             direction: format!("{}", pos.direction),
             entry_time: pos.entry_time,
@@ -395,130 +384,13 @@ impl MomentumBacktestEngine {
     // ─── Results ─────────────────────────────────────────────
 
     fn build_results(&self) -> BacktestResults {
-        let total = self.closed_trades.len() as u64;
-        let winning = self.closed_trades.iter().filter(|t| t.won).count() as u64;
-        let losing = total - winning;
-        let total_pnl: Decimal = self.closed_trades.iter().map(|t| t.pnl).sum();
-
-        let win_rate = if total > 0 {
-            winning as f64 / total as f64
-        } else {
-            0.0
-        };
-
-        let avg_pnl = if total > 0 {
-            total_pnl / Decimal::from(total)
-        } else {
-            Decimal::ZERO
-        };
-
-        let wins: Vec<Decimal> = self
-            .closed_trades
-            .iter()
-            .filter(|t| t.won)
-            .map(|t| t.pnl)
-            .collect();
-        let losses: Vec<Decimal> = self
-            .closed_trades
-            .iter()
-            .filter(|t| !t.won)
-            .map(|t| t.pnl)
-            .collect();
-
-        let avg_win = if wins.is_empty() {
-            Decimal::ZERO
-        } else {
-            wins.iter().sum::<Decimal>() / Decimal::from(wins.len() as u64)
-        };
-        let avg_loss = if losses.is_empty() {
-            Decimal::ZERO
-        } else {
-            losses.iter().sum::<Decimal>() / Decimal::from(losses.len() as u64)
-        };
-
-        let largest_win = wins.iter().max().copied().unwrap_or(Decimal::ZERO);
-        let largest_loss = losses.iter().min().copied().unwrap_or(Decimal::ZERO);
-
-        let total_wins: Decimal = wins.iter().sum();
-        let total_losses_abs: Decimal = losses.iter().map(|l| l.abs()).sum();
-        let profit_factor = if total_losses_abs > Decimal::ZERO {
-            (total_wins / total_losses_abs).to_f64().unwrap_or(0.0)
-        } else if total_wins > Decimal::ZERO {
-            f64::INFINITY
-        } else {
-            0.0
-        };
-
-        let avg_holding = if total > 0 {
-            self.closed_trades
-                .iter()
-                .map(|t| t.holding_secs as f64)
-                .sum::<f64>()
-                / total as f64
-        } else {
-            0.0
-        };
-
-        // Simplified Sharpe: mean(trade_pnl) / std(trade_pnl) * sqrt(252)
-        let sharpe = self.calculate_sharpe();
-
-        // Total volume
-        let total_volume: Decimal = self
-            .closed_trades
-            .iter()
-            .map(|t| Decimal::from(t.shares) * t.entry_price)
-            .sum();
-
-        let start_time = self.data_range_start.unwrap_or(Utc::now());
-        let end_time = self.data_range_end.unwrap_or(Utc::now());
-
-        BacktestResults {
-            start_time,
-            end_time,
-            total_trades: total,
-            winning_trades: winning,
-            losing_trades: losing,
-            win_rate,
-            total_pnl,
-            total_volume,
-            avg_pnl_per_trade: avg_pnl,
-            max_drawdown: self.max_drawdown,
-            sharpe_ratio: sharpe,
-            profit_factor,
-            avg_win,
-            avg_loss,
-            largest_win,
-            largest_loss,
-            avg_holding_time_secs: avg_holding,
-            trades_by_symbol: HashMap::new(),
-            trades: Vec::new(), // full BacktestTrade list omitted for momentum
-            equity_curve: self.equity_curve.clone(),
-        }
-    }
-
-    fn calculate_sharpe(&self) -> f64 {
-        if self.closed_trades.len() < 2 {
-            return 0.0;
-        }
-
-        let pnls: Vec<f64> = self
-            .closed_trades
-            .iter()
-            .map(|t| t.pnl.to_f64().unwrap_or(0.0))
-            .collect();
-
-        let n = pnls.len() as f64;
-        let mean = pnls.iter().sum::<f64>() / n;
-        let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        let std_dev = variance.sqrt();
-
-        if std_dev < 1e-10 {
-            return 0.0;
-        }
-
-        // Annualize: assume ~24 trades/day for 15-min markets
-        let trades_per_year: f64 = 24.0 * 365.0;
-        (mean / std_dev) * trades_per_year.sqrt()
+        build_momentum_results(
+            &self.closed_trades,
+            &self.equity_curve,
+            self.max_drawdown,
+            self.data_range_start,
+            self.data_range_end,
+        )
     }
 }
 
@@ -644,10 +516,10 @@ mod tests {
 
     #[test]
     fn test_sharpe_calculation() {
-        let config =
-            MomentumBacktestConfig::default_with_symbols(vec!["BTCUSDT".into()], dec!(10000));
-        let engine = MomentumBacktestEngine::new(config);
         // With no trades, sharpe should be 0
-        assert_eq!(engine.calculate_sharpe(), 0.0);
+        assert_eq!(
+            ploy_backtest::strategies::calculate_momentum_sharpe(&[]),
+            0.0
+        );
     }
 }
