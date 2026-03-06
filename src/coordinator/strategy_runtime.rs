@@ -21,6 +21,7 @@ use super::state::AgentSnapshot;
 pub(crate) struct ManagedStrategyRuntimeConfig {
     pub strategy_label: String,
     pub agent_id: String,
+    pub domain: Domain,
     pub strategy_config_toml: String,
     pub dry_run: bool,
     pub pm_client: PolymarketClient,
@@ -562,6 +563,7 @@ pub(crate) async fn run_managed_strategy_runtime(
     let ManagedStrategyRuntimeConfig {
         strategy_label,
         agent_id,
+        domain,
         strategy_config_toml,
         dry_run,
         pm_client,
@@ -783,7 +785,7 @@ pub(crate) async fn run_managed_strategy_runtime(
                         let snapshot = AgentSnapshot {
                             agent_id: agent_id.to_string(),
                             name: strategy_label.to_string(),
-                            domain: Domain::Crypto,
+                            domain,
                             status,
                             position_count,
                             exposure: rust_decimal::Decimal::ZERO,

@@ -4896,6 +4896,7 @@ async fn handle_strategy_actions_runtime(
 async fn run_managed_strategy_runtime(
     strategy_label: &str,
     agent_id: &str,
+    domain: Domain,
     strategy_config_toml: String,
     dry_run: bool,
     pm_client: PolymarketClient,
@@ -4909,6 +4910,7 @@ async fn run_managed_strategy_runtime(
     run_managed_strategy_runtime_module(ManagedStrategyRuntimeConfig {
         strategy_label: strategy_label.to_string(),
         agent_id: agent_id.to_string(),
+        domain,
         strategy_config_toml,
         dry_run,
         pm_client,
@@ -6107,6 +6109,7 @@ pub async fn start_platform(
                     if let Err(e) = run_managed_strategy_runtime(
                         "momentum",
                         &strategy_agent_id_for_runtime,
+                        Domain::Crypto,
                         toml_cfg,
                         strategy_dry_run,
                         strategy_pm_client,
@@ -6178,6 +6181,7 @@ pub async fn start_platform(
                             if let Err(e) = run_managed_strategy_runtime(
                                 "pattern_memory",
                                 &strategy_agent_id,
+                                Domain::Crypto,
                                 toml_cfg,
                                 strategy_dry_run,
                                 strategy_pm_client,
@@ -6294,6 +6298,7 @@ pub async fn start_platform(
                         if let Err(e) = run_managed_strategy_runtime(
                             "split_arb",
                             &strategy_agent_id,
+                            Domain::Crypto,
                             toml_cfg,
                             strategy_dry_run,
                             strategy_pm_client,
@@ -6757,6 +6762,7 @@ pub async fn start_platform(
                 if let Err(e) = run_managed_strategy_runtime(
                     "event_edge",
                     &strategy_agent_id_for_runtime,
+                    Domain::Politics,
                     toml_cfg,
                     strategy_dry_run,
                     strategy_pm_client,

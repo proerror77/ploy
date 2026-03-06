@@ -452,6 +452,29 @@ Add the first canonical `nba_comeback` strategy wrapper so NBA logic can enter t
 
 ---
 
+# Layered Live Runtime Task 7C: Managed Runtime Domain Identity Fix (2026-03-06)
+
+## Goal
+Remove the remaining `Domain::Crypto` hardcoding from the canonical managed strategy runtime so runtime health/reporting reflects the actual strategy plane domain.
+
+## Tasks
+
+- [x] Add explicit `domain: Domain` to `ManagedStrategyRuntimeConfig`.
+- [x] Thread the domain through bootstrap's `run_managed_strategy_runtime(...)` wrapper.
+- [x] Pass concrete domains from each current managed-runtime bootstrap call site (`momentum`, `pattern_memory`, `split_arb`, `event_edge`).
+- [x] Use the configured domain in managed runtime health snapshots instead of hardcoding `Domain::Crypto`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Managed runtime identity is now explicit instead of inferred from a crypto-only default.
+- [x] Execution behavior did not change; this slice only fixes runtime metadata/reporting.
+- [x] Focused validation passed:
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal
