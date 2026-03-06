@@ -328,3 +328,24 @@
   - `cargo build`
   - `cargo test -p ploy-backtest directional -- --nocapture`
   - `cargo test strategy::directional_backtest::tests -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 staggered-arb helper migration)
+
+- [x] Add crate-owned staggered-arb trade/result helpers under `crates/ploy-backtest/src/strategies/`
+- [x] Re-export the staggered-arb helper API from `ploy_backtest::strategies`
+- [x] Keep `StaggeredArbBacktestConfig` and the engine in the app layer so live code stays untouched
+- [x] Re-run crate-side and app-side staggered-arb regression tests
+
+## Review (2026-03-06, staggered-arb helper migration)
+
+- Delivered in this slice:
+  - Added [`crates/ploy-backtest/src/strategies/staggered_arb.rs`](/Users/proerror/Documents/ploy-refactor-integrate/crates/ploy-backtest/src/strategies/staggered_arb.rs) with the crate-owned closed-trade type, Sharpe calculation, and generic result builder for staggered-arb runs.
+  - Exported the staggered-arb helper surface from [`crates/ploy-backtest/src/strategies/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/crates/ploy-backtest/src/strategies/mod.rs).
+  - Updated [`src/strategy/staggered_arb_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_backtest.rs) to re-export the crate-owned closed-trade type and delegate result aggregation to `ploy_backtest::strategies`.
+  - Explicitly kept `StaggeredArbBacktestConfig` in the app crate because [`src/strategy/staggered_arb_live.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/staggered_arb_live.rs) still depends on it.
+- Validation executed:
+  - `cargo build`
+  - `cargo test -p ploy-backtest staggered_arb -- --nocapture`
+  - `cargo test strategy::staggered_arb_backtest::tests -- --nocapture`
