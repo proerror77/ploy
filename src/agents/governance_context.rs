@@ -26,14 +26,25 @@ pub struct GovernanceContext {
     commands: mpsc::Receiver<CoordinatorCommand>,
 }
 
+impl GovernanceContext {
+    pub fn new(
+        agent_id: String,
+        domain: Domain,
+        handle: CoordinatorHandle,
+        commands: mpsc::Receiver<CoordinatorCommand>,
+    ) -> Self {
+        Self {
+            agent_id,
+            domain,
+            handle,
+            commands,
+        }
+    }
+}
+
 impl From<AgentContext> for GovernanceContext {
     fn from(ctx: AgentContext) -> Self {
-        Self {
-            agent_id: ctx.agent_id,
-            domain: ctx.domain,
-            handle: ctx.handle,
-            commands: ctx.commands,
-        }
+        Self::new(ctx.agent_id, ctx.domain, ctx.handle, ctx.commands)
     }
 }
 
@@ -160,14 +171,14 @@ mod tests {
             allowed_domains,
         );
         let (commands_tx, commands_rx) = mpsc::channel(8);
-        let agent_ctx = AgentContext::new(
+        let ctx = GovernanceContext::new(
             "openclaw".to_string(),
             Domain::Custom(0),
             coordinator.handle(),
             commands_rx,
         );
 
-        (agent_ctx.into(), commands_tx, coordinator)
+        (ctx, commands_tx, coordinator)
     }
 
     #[tokio::test]

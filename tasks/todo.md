@@ -785,6 +785,31 @@ Stop forcing governance-only logic through the `TradingAgent` interface. OpenCla
 
 ---
 
+# Layered Live Runtime Task 4B: Construct GovernanceContext Directly (2026-03-06)
+
+## Goal
+Finish separating governance-only bootstrap wiring from trading-agent wiring by letting governance paths construct `GovernanceContext` directly instead of first creating a trading context and then narrowing it.
+
+## Tasks
+
+- [x] Add a direct `GovernanceContext::new(...)` constructor.
+- [x] Update `spawn_governance_agent_task(...)` to construct `GovernanceContext` directly.
+- [x] Update governance-context tests to use the direct constructor.
+- [x] Keep the `From<AgentContext>` conversion available for transitional compatibility.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Governance-only bootstrap wiring no longer instantiates a trading context just to discard order-ingress capability immediately after.
+- [x] This slice does not change governance behavior; it only makes the context boundary explicit in code construction.
+- [x] Focused validation passed:
+  - `cargo test agents::governance_context --lib -- --nocapture`
+  - `cargo test coordinator::bootstrap --lib -- --nocapture`
+  - `cargo check --lib`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Staggered Arb Opening-Window Entry Reset (2026-03-06)
 
 ## Goal

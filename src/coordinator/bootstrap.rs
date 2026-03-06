@@ -5259,8 +5259,7 @@ fn spawn_governance_agent_task<A: GovernanceAgent>(
     let agent_id = agent.id().to_string();
     let domain = agent.domain();
     let cmd_rx = coordinator.register_agent(agent_id.clone(), domain.clone(), risk_params);
-    let trading_ctx = AgentContext::new(agent_id, domain, handle.clone(), cmd_rx);
-    let ctx: GovernanceContext = trading_ctx.into();
+    let ctx = GovernanceContext::new(agent_id, domain, handle.clone(), cmd_rx);
 
     let jh = tokio::spawn(async move {
         if let Err(e) = agent.run(ctx).await {
