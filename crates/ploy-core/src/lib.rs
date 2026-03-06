@@ -10,7 +10,7 @@ pub mod strategy;
 
 pub use config::{DatabaseConfig, DryRunConfig, ExecutionConfig, LoggingConfig, RiskConfig};
 pub use domain::{
-    Domain, OrderSide, OrderStatus, OrderType, RiskState, Side, StrategyState, TimeInForce,
+    Domain, OrderSide, OrderStatus, OrderType, RiskState, Round, Side, StrategyState, TimeInForce,
     Timeframe,
 };
 pub use error::{CoreError, CoreResult};

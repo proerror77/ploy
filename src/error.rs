@@ -199,3 +199,9 @@ impl From<RiskError> for PloyError {
         PloyError::RiskLimitExceeded(err.to_string())
     }
 }
+
+impl From<ploy_risk::RiskError> for PloyError {
+    fn from(err: ploy_risk::RiskError) -> Self {
+        PloyError::Validation(err.to_string())
+    }
+}

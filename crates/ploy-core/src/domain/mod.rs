@@ -434,6 +434,55 @@ impl fmt::Display for RiskState {
 }
 
 // ---------------------------------------------------------------------------
+// Round (binary market trading round)
+// ---------------------------------------------------------------------------
+
+use chrono::{DateTime, Utc};
+
+/// A trading round (e.g. 15-minute binary option window).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Round {
+    pub id: Option<i32>,
+    pub slug: String,
+    pub up_token_id: String,
+    pub down_token_id: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub outcome: Option<Side>,
+}
+
+impl Round {
+    /// Get token ID for a given side.
+    pub fn token_id(&self, side: Side) -> &str {
+        match side {
+            Side::Up => &self.up_token_id,
+            Side::Down => &self.down_token_id,
+        }
+    }
+
+    /// Seconds remaining until round ends.
+    pub fn seconds_remaining(&self) -> i64 {
+        (self.end_time - Utc::now()).num_seconds().max(0)
+    }
+
+    /// Check if round is still active.
+    pub fn is_active(&self) -> bool {
+        let now = Utc::now();
+        now >= self.start_time && now < self.end_time
+    }
+
+    /// Check if round has ended.
+    pub fn has_ended(&self) -> bool {
+        Utc::now() >= self.end_time
+    }
+
+    /// Minutes elapsed since round start.
+    pub fn minutes_elapsed(&self) -> i64 {
+        (Utc::now() - self.start_time).num_minutes().max(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,7 @@ members = [
     "crates/ploy-core",
     "crates/ploy-data",
     "crates/ploy-polymarket",
+    "crates/ploy-risk",
     "tools/sdk_auth_check",
 ]
 resolver = "2"
@@ -20,6 +21,7 @@ resolver = "2"
 ploy-core = { path = "crates/ploy-core" }
 ploy-data = { path = "crates/ploy-data", features = ["persistence"] }
 ploy-polymarket = { path = "crates/ploy-polymarket" }
+ploy-risk = { path = "crates/ploy-risk" }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "process"] }

@@ -5744,6 +5744,7 @@ dependencies = [
  "ploy-core",
  "ploy-data",
  "ploy-polymarket",
+ "ploy-risk",
  "polymarket-client-sdk",
  "rand 0.8.5",
  "ratatui",
@@ -5826,6 +5827,20 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "ploy-risk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ploy-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
