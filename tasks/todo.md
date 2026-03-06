@@ -136,3 +136,20 @@
 - Validation executed:
   - `cargo build`
   - `cargo test paper_runner -- --nocapture`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (agent-team handoff)
+
+- [ ] Phase 6.4 split `src/strategy/momentum.rs` into `src/strategy/momentum/`
+- [ ] Keep the public `crate::strategy::momentum::*` surface stable with `mod.rs` re-exports
+- [ ] Phase 5.2 migrate the first concrete backtest strategy into `crates/ploy-backtest/src/strategies/`
+- [ ] Add only the smallest new `ploy-backtest::strategies` API needed for that first migration
+- [ ] Re-run targeted build/tests for each slice before cherry-picking into `refactor/workspace-restructure`
+
+## Review (2026-03-06, agent-team handoff)
+
+- Worker ownership:
+  - `session/momentum-split` at `../ploy-momentum-split/` owns `src/strategy/momentum*`
+  - `session/backtest-migrate` at `../ploy-backtest-migrate/` owns `crates/ploy-backtest/src/strategies/*` plus the minimum caller updates for the first migrated strategy
+- Integrator keeps ownership of `tasks/todo.md`, final cherry-picks, and validation on `refactor/workspace-restructure`.
