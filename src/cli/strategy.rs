@@ -3572,7 +3572,7 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
     let core =
         crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats_provider, nba_cfg.clone());
 
-    let mut agent = crate::platform::agents::NbaComebackAgent::new(core);
+    let mut agent = crate::platform::agents::nba_agent::NbaComebackAgent::new(core);
     agent.start().await?;
 
     println!(

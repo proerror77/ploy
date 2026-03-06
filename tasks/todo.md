@@ -600,6 +600,28 @@ Stop presenting pull-based compatibility traits and contexts as part of the `age
 
 ---
 
+# Layered Live Runtime Task 8D: Narrow Platform Agent Module Re-Exports (2026-03-06)
+
+## Goal
+Stop presenting legacy platform-agent structs as convenience exports from `platform::agents`. Compatibility callers should name the explicit agent submodule they depend on.
+
+## Tasks
+
+- [x] Make the non-RL platform-agent submodules explicit public compatibility modules in `src/platform/agents/mod.rs`.
+- [x] Stop re-exporting `CryptoAgent`, `EventEdgePlatformAgent`, and `NbaComebackAgent` from `platform::agents`.
+- [x] Update the remaining CLI compatibility path to use `crate::platform::agents::nba_agent::NbaComebackAgent`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `crate::platform::agents::NbaComebackAgent` and the equivalent convenience paths for the other non-RL platform agents are no longer available; compatibility callers now opt into the explicit submodule path.
+- [x] This slice does not change runtime behavior; it only removes another convenience export layer around legacy platform-agent types.
+- [x] Focused validation passed:
+  - `cargo check --bin ploy`
+- [x] Validation still shows only the same pre-existing unrelated warnings in `src/strategy/event_edge/strategy.rs`, `liquidity_vacuum_backtest.rs`, and `garch_probability_backtest.rs`.
+
+---
+
 # Layered Live Runtime Task 9A: Managed Runtime Spawn Helper (2026-03-06)
 
 ## Goal
