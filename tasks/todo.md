@@ -307,3 +307,24 @@
   - Fixed the moved module's `include_str!` paths for bundled default strategy configs.
 - Validation executed:
   - `cargo build`
+
+---
+
+## 2026-03-06 Workspace Restructure Slice (Phase 5.2 directional helper migration)
+
+- [x] Add crate-owned directional backtest helpers under `crates/ploy-backtest/src/strategies/`
+- [x] Re-export the directional helper API from `ploy_backtest::strategies`
+- [x] Retain `src/strategy/directional_backtest.rs` as the owning engine while delegating pure helper logic to the crate
+- [x] Re-run crate-side and app-side directional regression tests
+
+## Review (2026-03-06, directional helper migration)
+
+- Delivered in this slice:
+  - Added [`crates/ploy-backtest/src/strategies/directional.rs`](/Users/proerror/Documents/ploy-refactor-integrate/crates/ploy-backtest/src/strategies/directional.rs) with the crate-owned directional config type, closed-trade type, fair-value helpers, Sharpe calculation, and generic result builder.
+  - Exported the directional helper surface from [`crates/ploy-backtest/src/strategies/mod.rs`](/Users/proerror/Documents/ploy-refactor-integrate/crates/ploy-backtest/src/strategies/mod.rs).
+  - Updated [`src/strategy/directional_backtest.rs`](/Users/proerror/Documents/ploy-refactor-integrate/src/strategy/directional_backtest.rs) to keep the engine local to the app while delegating pure helper logic and data types to `ploy_backtest::strategies`.
+  - Explicitly did not move the engine itself yet because it still depends on app-local `SpotPrice`, `FeeModel`, and `Direction`.
+- Validation executed:
+  - `cargo build`
+  - `cargo test -p ploy-backtest directional -- --nocapture`
+  - `cargo test strategy::directional_backtest::tests -- --nocapture`
