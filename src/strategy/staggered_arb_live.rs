@@ -381,13 +381,33 @@ impl StaggeredArbAdapter {
         }
     }
 
-    fn forced_close_allowed(&self, current_sum: Decimal) -> bool {
-        let threshold = self.config.backtest_config.force_complete_threshold;
+    fn forced_close_allowed(
+        &self,
+        current_sum: Decimal,
+        time_remaining_secs: f64,
+        window_duration_secs: u64,
+        in_final_window: bool,
+    ) -> bool {
+        let threshold = self.config.backtest_config.force_close_threshold_now(
+            time_remaining_secs,
+            window_duration_secs,
+            in_final_window,
+        );
         threshold <= Decimal::ZERO || current_sum <= threshold
     }
 
-    fn protective_close_allowed(&self, current_sum: Decimal) -> bool {
-        let threshold = self.config.backtest_config.protective_close_threshold;
+    fn protective_close_allowed(
+        &self,
+        current_sum: Decimal,
+        time_remaining_secs: f64,
+        window_duration_secs: u64,
+        in_final_window: bool,
+    ) -> bool {
+        let threshold = self.config.backtest_config.protective_close_threshold_now(
+            time_remaining_secs,
+            window_duration_secs,
+            in_final_window,
+        );
         threshold <= Decimal::ZERO || current_sum <= threshold
     }
 
@@ -1565,13 +1585,13 @@ impl StaggeredArbAdapter {
                 continue;
             }
 
-            let time_remaining = match self.active_windows.get(symbol) {
+            let (time_remaining, window_secs) = match self.active_windows.get(symbol) {
                 Some(windows) => windows
                     .iter()
                     .find(|w| w.event_id == pos.event_id)
-                    .map(|w| (w.end_time - ts).num_seconds() as f64)
-                    .unwrap_or(f64::MAX),
-                None => f64::MAX,
+                    .map(|w| ((w.end_time - ts).num_seconds() as f64, w.window_secs))
+                    .unwrap_or((f64::MAX, 0)),
+                None => (f64::MAX, 0),
             };
             let current_greeks = self.current_window_greeks(symbol, &pos.event_id, time_remaining);
             let in_final_window = bc.no_trade_last_secs > 0
@@ -1631,7 +1651,12 @@ impl StaggeredArbAdapter {
                             leg2_fills.push((i, other_ask, "merge".to_string()));
                             continue;
                         }
-                        if self.protective_close_allowed(current_sum) {
+                        if self.protective_close_allowed(
+                            current_sum,
+                            time_remaining,
+                            window_secs,
+                            in_final_window,
+                        ) {
                             leg2_fills.push((i, other_ask, "protective_theta".to_string()));
                             continue;
                         }
@@ -1664,7 +1689,12 @@ impl StaggeredArbAdapter {
                 if let Some(mark) = leg1_mark {
                     let leg1_loss = (pos.leg1_price - mark).max(Decimal::ZERO);
                     if leg1_loss >= bc.max_leg1_loss {
-                        if self.protective_close_allowed(current_sum) {
+                        if self.protective_close_allowed(
+                            current_sum,
+                            time_remaining,
+                            window_secs,
+                            in_final_window,
+                        ) {
                             leg2_fills.push((i, other_ask, "protective_stop_loss".to_string()));
                         } else {
                             *leg2_skip_batch
@@ -1678,7 +1708,12 @@ impl StaggeredArbAdapter {
 
             // E. Timeout — force-complete — always allowed
             if ts >= pos.wait_deadline && leg2_ready {
-                if self.forced_close_allowed(current_sum) {
+                if self.forced_close_allowed(
+                    current_sum,
+                    time_remaining,
+                    window_secs,
+                    in_final_window,
+                ) {
                     leg2_fills.push((i, other_ask, "forced_timeout".to_string()));
                 } else {
                     *leg2_skip_batch
@@ -1690,7 +1725,12 @@ impl StaggeredArbAdapter {
 
             // F. Time safety — not enough time left — always allowed
             if time_remaining < bc.min_time_remaining_secs as f64 && leg2_ready {
-                if self.forced_close_allowed(current_sum) {
+                if self.forced_close_allowed(
+                    current_sum,
+                    time_remaining,
+                    window_secs,
+                    in_final_window,
+                ) {
                     leg2_fills.push((i, other_ask, "forced_time_safety".to_string()));
                 } else {
                     *leg2_skip_batch
@@ -1780,7 +1820,12 @@ impl StaggeredArbAdapter {
                 };
 
                 if should_force_close {
-                    if !self.forced_close_allowed(current_sum) {
+                    if !self.forced_close_allowed(
+                        current_sum,
+                        time_remaining,
+                        window_secs,
+                        in_final_window,
+                    ) {
                         *leg2_skip_batch
                             .entry("force_threshold_blocked")
                             .or_default() += 1;
@@ -3166,6 +3211,7 @@ name = "staggered_arb"
         adapter.config.backtest_config.direction_threshold = 0.0;
         adapter.config.backtest_config.use_greeks = false;
         adapter.config.backtest_config.max_initial_sum = Decimal::ZERO;
+        adapter.config.backtest_config.max_leg1_price = dec!(0.60);
         adapter.config.backtest_config.entry_after_start_min_secs = 0;
         adapter.config.backtest_config.entry_after_start_max_secs = 0;
         adapter
@@ -3509,6 +3555,99 @@ min_balance_usd = 9.0
     }
 
     #[test]
+    fn test_dynamic_protective_threshold_blocks_early_expensive_stop_loss() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.max_leg1_loss = dec!(0.05);
+        adapter.config.backtest_config.protective_close_threshold = dec!(1.08);
+        adapter
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.50)), Some(dec!(0.52))));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now + chrono::Duration::seconds(300),
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.0825),
+            leg1_time: now - chrono::Duration::seconds(10),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_fee: None,
+            leg2_time: None,
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let actions = adapter.check_leg2_opportunities("BTCUSDT", now);
+
+        assert!(actions.is_empty());
+        assert_eq!(adapter.closed_trades.len(), 0);
+    }
+
+    #[test]
+    fn test_dynamic_force_threshold_allows_late_close_within_cap() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.force_complete_threshold = dec!(1.08);
+        adapter
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.75)), Some(dec!(0.32))));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now + chrono::Duration::seconds(20),
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.75),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.1125),
+            leg1_time: now - chrono::Duration::seconds(30),
+            wait_deadline: now - chrono::Duration::seconds(1),
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_fee: None,
+            leg2_time: None,
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let _actions = adapter.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(adapter.closed_trades.len(), 1);
+        assert_eq!(adapter.closed_trades[0].exit_reason, "forced_timeout");
+    }
+
+    #[test]
     fn test_theta_urgency_uses_protective_close_threshold() {
         let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
         let now = Utc::now();
@@ -3527,7 +3666,7 @@ min_balance_usd = 9.0
                 up_token: "up".into(),
                 down_token: "down".into(),
                 condition_id: None,
-                end_time: now + chrono::Duration::seconds(90),
+                end_time: now + chrono::Duration::seconds(20),
                 open_price: Some(dec!(100)),
                 window_secs: 300,
             }],

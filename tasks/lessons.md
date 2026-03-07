@@ -150,3 +150,6 @@
 
 - Pattern: A single overlap window with full PM + Binance L2 coverage can still be an unusually favorable regime and materially overstate staggered-arb edge.
 - Rule: Do not tune staggered-arb off one strong window like `2026-02-24` alone. Require at least one recent live-like window plus adjacent independent overlap windows before treating a parameter change as robust.
+
+- Pattern: Fixed `force_complete_threshold` / `protective_close_threshold` values can overpay for early hedges even when the same cap is appropriate near expiry.
+- Rule: Treat close thresholds as final caps, not flat gates. In staggered-arb, derive stricter early-window protective/forced thresholds from time remaining, then let them widen toward the configured cap as expiry risk rises.

@@ -188,6 +188,67 @@ impl StaggeredArbBacktestConfig {
         }
     }
 
+    fn adaptive_close_threshold(
+        &self,
+        configured_cap: Decimal,
+        time_remaining_secs: f64,
+        window_duration_secs: u64,
+        urgency_floor: f64,
+        in_final_window: bool,
+    ) -> Decimal {
+        if configured_cap <= Decimal::ZERO || configured_cap <= Decimal::ONE {
+            return configured_cap;
+        }
+        if in_final_window {
+            return configured_cap;
+        }
+        if !time_remaining_secs.is_finite() || window_duration_secs == 0 {
+            return configured_cap;
+        }
+
+        let window_secs = window_duration_secs as f64;
+        let remaining_ratio = (time_remaining_secs / window_secs).clamp(0.0, 1.0);
+        let elapsed_ratio = 1.0 - remaining_ratio;
+        let safety_ratio = if self.min_time_remaining_secs > 0 {
+            (1.0 - (time_remaining_secs / self.min_time_remaining_secs as f64)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let urgency = elapsed_ratio.max(safety_ratio).max(urgency_floor).min(1.0);
+        let urgency_dec = Decimal::from_f64(urgency).unwrap_or(Decimal::ONE);
+        Decimal::ONE + (configured_cap - Decimal::ONE) * urgency_dec
+    }
+
+    pub(crate) fn force_close_threshold_now(
+        &self,
+        time_remaining_secs: f64,
+        window_duration_secs: u64,
+        in_final_window: bool,
+    ) -> Decimal {
+        self.adaptive_close_threshold(
+            self.force_complete_threshold,
+            time_remaining_secs,
+            window_duration_secs,
+            0.50,
+            in_final_window,
+        )
+    }
+
+    pub(crate) fn protective_close_threshold_now(
+        &self,
+        time_remaining_secs: f64,
+        window_duration_secs: u64,
+        in_final_window: bool,
+    ) -> Decimal {
+        self.adaptive_close_threshold(
+            self.protective_close_threshold,
+            time_remaining_secs,
+            window_duration_secs,
+            0.25,
+            in_final_window,
+        )
+    }
+
     pub fn from_toml_str(config_str: &str) -> Result<Self> {
         Self::from_toml_str_with_default_symbols(config_str, Self::default().symbols)
     }
@@ -1180,8 +1241,6 @@ impl StaggeredArbBacktestEngine {
     fn check_leg2_opportunities(&mut self, symbol: &str, ts: DateTime<Utc>) {
         // Collect actions to take (can't mutate positions while iterating)
         let mut actions: Vec<(usize, Leg2Action)> = Vec::new();
-        let force_threshold = self.config.force_complete_threshold;
-        let protective_threshold = self.config.protective_close_threshold;
         for (i, pos) in self.positions.iter_mut().enumerate() {
             if pos.symbol != symbol || pos.state != ArbPositionState::Leg1Filled {
                 continue;
@@ -1220,6 +1279,16 @@ impl StaggeredArbBacktestEngine {
                 && time_remaining <= self.config.no_trade_last_secs as f64
                 && time_remaining > 0.0;
             let min_time = self.config.min_time_remaining_secs as f64;
+            let force_threshold = self.config.force_close_threshold_now(
+                time_remaining,
+                pos.window_duration_secs.max(0) as u64,
+                in_final_window,
+            );
+            let protective_threshold = self.config.protective_close_threshold_now(
+                time_remaining,
+                pos.window_duration_secs.max(0) as u64,
+                in_final_window,
+            );
 
             // Compute current Greeks for this position (if enabled)
             let current_greeks = if self.config.use_greeks {
@@ -2795,7 +2864,7 @@ mod tests {
             leg1_fee: dec!(0.0825),
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
-            event_end_time: now + chrono::Duration::seconds(300),
+            event_end_time: now + chrono::Duration::seconds(20),
             window_duration_secs: 300,
             entry_p_hat: 0.7,
             entry_sigma: 0.01,
@@ -2816,6 +2885,97 @@ mod tests {
 
         assert_eq!(engine.closed_trades.len(), 1);
         assert_eq!(engine.closed_trades[0].exit_reason, "protective_stop_loss");
+    }
+
+    #[test]
+    fn test_dynamic_protective_threshold_blocks_early_expensive_stop_loss() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+        config.max_leg1_loss = dec!(0.05);
+        config.protective_close_threshold = dec!(1.08);
+
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.52))));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(10),
+            leg1_fee: dec!(0.0825),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.07),
+            initial_sum: dec!(1.07),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 0);
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+    }
+
+    #[test]
+    fn test_dynamic_force_threshold_allows_late_close_within_cap() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+        config.force_complete_threshold = dec!(1.08);
+
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.75)), Some(dec!(0.32))));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.75),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(0.1125),
+            wait_deadline: now - chrono::Duration::seconds(1),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(20),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.07),
+            initial_sum: dec!(1.07),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(engine.closed_trades[0].exit_reason, "forced_timeout");
     }
 
     #[test]
