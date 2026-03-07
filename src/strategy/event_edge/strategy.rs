@@ -360,6 +360,7 @@ impl Strategy for EventEdgeStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Side;
     use crate::strategy::event_edge::data_source::EventSnapshot;
     use crate::strategy::traits::StrategyAction;
     use async_trait::async_trait;
