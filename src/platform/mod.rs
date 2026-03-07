@@ -20,6 +20,7 @@ pub mod subscription_planner;
 pub mod traits;
 mod types;
 
+pub use crate::plugins::DeploymentState;
 pub use contracts::{
     DeploymentExecutionMode, MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision,
     RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
@@ -48,6 +49,6 @@ pub use subscription_planner::{
 };
 pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus};
 pub use types::{
-    CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
-    OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
+    CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, IntentPurpose, OrderIntent,
+    OrderPriority, OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
 };

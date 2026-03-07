@@ -1950,6 +1950,7 @@ mod tests {
             },
             timeframe: Timeframe::M15,
             enabled: true,
+            state: crate::platform::DeploymentState::Enabled,
             allocator_profile: "balanced".to_string(),
             risk_profile: "default".to_string(),
             priority: 80,

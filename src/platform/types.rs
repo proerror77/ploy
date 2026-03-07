@@ -286,6 +286,23 @@ impl Default for OrderPriority {
     }
 }
 
+/// Normalized lifecycle purpose for an intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentPurpose {
+    Entry,
+    Exit,
+    Reduce,
+    Hedge,
+    Cancel,
+}
+
+impl Default for IntentPurpose {
+    fn default() -> Self {
+        Self::Entry
+    }
+}
+
 /// 訂單意圖 - Agent 提交給平台的下單請求
 #[derive(Debug, Clone)]
 pub struct OrderIntent {
@@ -303,6 +320,8 @@ pub struct OrderIntent {
     pub side: Side,
     /// 買入或賣出
     pub is_buy: bool,
+    /// Lifecycle purpose used by coordinator deployment gating.
+    pub purpose: IntentPurpose,
     /// 數量
     pub shares: u64,
     /// 限價
@@ -339,6 +358,11 @@ impl OrderIntent {
             token_id: token_id.into(),
             side,
             is_buy,
+            purpose: if is_buy {
+                IntentPurpose::Entry
+            } else {
+                IntentPurpose::Exit
+            },
             shares,
             limit_price,
             priority: OrderPriority::Normal,
@@ -355,6 +379,11 @@ impl OrderIntent {
 
     pub fn with_expiry(mut self, expires_at: DateTime<Utc>) -> Self {
         self.expires_at = Some(expires_at);
+        self
+    }
+
+    pub fn with_purpose(mut self, purpose: IntentPurpose) -> Self {
+        self.purpose = purpose;
         self
     }
 
@@ -561,5 +590,28 @@ mod tests {
 
         let alias = sample_intent().with_metadata("marketConditionId", " 0xdef ");
         assert_eq!(alias.condition_id(), Some("0xdef"));
+    }
+
+    #[test]
+    fn order_intent_defaults_purpose_from_side() {
+        assert_eq!(sample_intent().purpose, IntentPurpose::Entry);
+
+        let sell = OrderIntent::new(
+            "agent-1",
+            Domain::Crypto,
+            "btc-updown-15m",
+            "token-yes",
+            Side::Up,
+            false,
+            10,
+            Decimal::new(42, 2),
+        );
+        assert_eq!(sell.purpose, IntentPurpose::Exit);
+    }
+
+    #[test]
+    fn order_intent_with_purpose_overrides_default() {
+        let intent = sample_intent().with_purpose(IntentPurpose::Cancel);
+        assert_eq!(intent.purpose, IntentPurpose::Cancel);
     }
 }

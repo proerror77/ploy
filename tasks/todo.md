@@ -47,6 +47,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Save the design doc to `docs/plans/2026-03-07-strategy-plugin-platform-design.md`.
 - [x] Save the implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
 - [x] Execute Task 1 from the implementation plan: add the plugin object model and registry skeleton.
+- [x] Execute Task 2 from the implementation plan: add deployment lifecycle state and intent purpose gating.
 
 ## Review
 
@@ -64,6 +65,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Saved design doc to `docs/plans/2026-03-07-strategy-plugin-platform-design.md`.
 - 2026-03-07: Saved implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
 - 2026-03-07: Completed Task 1 by adding `src/plugins/*`, a file-backed `PluginRegistry`, and `config/plugins/README.md`.
+- 2026-03-07: Completed Task 2 by adding `IntentPurpose`, compatible deployment lifecycle state, and coordinator draining gates.
 
 ---
 

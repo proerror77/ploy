@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use crate::platform::{DeploymentState, IntentPurpose};
+
 // ============================================================================
 // Stats Types
 // ============================================================================
