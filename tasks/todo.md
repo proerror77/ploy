@@ -201,6 +201,26 @@ Remove redundant safety wrappers left behind after the legacy runtime retirement
 
 ---
 
+# Orphan Strategy File Cleanup (2026-03-08)
+
+## Goal
+Delete strategy experiment files that are no longer wired into `strategy/mod.rs` or any runtime path.
+
+## Tasks
+
+- [x] Confirm `src/strategy/live_arbitrage.rs` has no incoming references.
+- [x] Confirm `src/strategy/orchestrator.rs` has no incoming references.
+- [x] Delete both orphan files.
+- [x] Run minimal validation and commit atomically.
+
+## Progress notes
+
+- 2026-03-08: Confirmed `LiveArbitrageMonitor`, `StrategyOrchestrator`, and `OrchestratorConfig` are only referenced inside their own files and are not exported from `src/strategy/mod.rs`.
+- 2026-03-08: Deleted the orphan `live_arbitrage.rs` and `orchestrator.rs` strategy experiment files.
+- 2026-03-08: Verified the cleanup with `cargo check --bin ploy`; only pre-existing warnings remain.
+
+---
+
 # Strategy Deployment Control Plane Stabilization TODO (2026-03-05)
 
 ## Goal
