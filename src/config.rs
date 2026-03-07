@@ -1,7 +1,9 @@
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+use crate::platform::AgentRiskParams;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +101,173 @@ fn default_agent_framework_mode() -> String {
 
 fn default_agent_framework_hard_disable() -> bool {
     false
+}
+
+/// Entry mode for crypto-managed runtime configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoEntryMode {
+    /// Original arbitrage-only mode: require sum_of_asks < threshold.
+    ArbOnly,
+    /// Directional mode: trade based on momentum edge alone, no sum constraint.
+    Directional,
+    /// Volatility straddle: buy both UP and DOWN when sum < straddle_threshold.
+    VolStraddle,
+}
+
+fn default_crypto_entry_mode() -> CryptoEntryMode {
+    CryptoEntryMode::Directional
+}
+
+fn default_crypto_exit_edge_floor() -> Decimal {
+    Decimal::new(2, 2)
+}
+
+fn default_crypto_exit_price_band() -> Decimal {
+    Decimal::new(5, 2)
+}
+
+fn default_crypto_oracle_lag_buffer_secs() -> u64 {
+    3
+}
+
+fn default_crypto_max_spread_pct() -> Decimal {
+    Decimal::new(10, 2)
+}
+
+fn default_crypto_straddle_threshold() -> Decimal {
+    Decimal::new(99, 2)
+}
+
+fn default_crypto_straddle_min_vol() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_crypto_min_signal_score() -> Decimal {
+    Decimal::new(40, 2)
+}
+
+/// Neutral config owner for the canonical crypto runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoTradingConfig {
+    pub agent_id: String,
+    pub name: String,
+    pub coins: Vec<String>,
+    pub sum_threshold: Decimal,
+    pub min_momentum_1s: f64,
+    #[serde(default)]
+    pub min_window_move_pct: Decimal,
+    #[serde(default = "default_crypto_exit_edge_floor")]
+    pub min_edge: Decimal,
+    pub event_refresh_secs: u64,
+    pub min_time_remaining_secs: u64,
+    pub max_time_remaining_secs: u64,
+    pub prefer_close_to_end: bool,
+    #[serde(default)]
+    pub entry_cooldown_secs: u64,
+    #[serde(default)]
+    pub require_mtf_agreement: bool,
+    pub default_shares: u64,
+    #[serde(default = "default_crypto_exit_edge_floor")]
+    pub exit_edge_floor: Decimal,
+    #[serde(default = "default_crypto_exit_price_band")]
+    pub exit_price_band: Decimal,
+    pub enable_price_exits: bool,
+    pub min_hold_secs: u64,
+    pub risk_params: AgentRiskParams,
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_crypto_entry_mode")]
+    pub entry_mode: CryptoEntryMode,
+    #[serde(default = "default_crypto_oracle_lag_buffer_secs")]
+    pub oracle_lag_buffer_secs: u64,
+    #[serde(default = "default_crypto_max_spread_pct")]
+    pub max_spread_pct: Decimal,
+    #[serde(default = "default_crypto_straddle_threshold")]
+    pub straddle_threshold: Decimal,
+    #[serde(default = "default_crypto_straddle_min_vol")]
+    pub straddle_min_vol: Decimal,
+    #[serde(default = "default_crypto_min_signal_score")]
+    pub min_signal_score: Decimal,
+}
+
+impl Default for CryptoTradingConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: "crypto".into(),
+            name: "Crypto Momentum".into(),
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            sum_threshold: Decimal::new(96, 2),
+            min_momentum_1s: 0.001,
+            min_window_move_pct: Decimal::new(1, 4),
+            min_edge: Decimal::new(2, 2),
+            event_refresh_secs: 30,
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 300,
+            prefer_close_to_end: true,
+            entry_cooldown_secs: 0,
+            require_mtf_agreement: true,
+            default_shares: 100,
+            exit_edge_floor: default_crypto_exit_edge_floor(),
+            exit_price_band: default_crypto_exit_price_band(),
+            enable_price_exits: false,
+            min_hold_secs: 20,
+            risk_params: AgentRiskParams::conservative(),
+            heartbeat_interval_secs: 5,
+            entry_mode: default_crypto_entry_mode(),
+            oracle_lag_buffer_secs: default_crypto_oracle_lag_buffer_secs(),
+            max_spread_pct: default_crypto_max_spread_pct(),
+            straddle_threshold: default_crypto_straddle_threshold(),
+            straddle_min_vol: default_crypto_straddle_min_vol(),
+            min_signal_score: default_crypto_min_signal_score(),
+        }
+    }
+}
+
+/// Neutral config owner for the registered politics/event-edge runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticsTradingConfig {
+    pub agent_id: String,
+    pub name: String,
+    pub poll_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
+    pub risk_params: AgentRiskParams,
+}
+
+impl Default for PoliticsTradingConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: "politics".into(),
+            name: "Event Edge".into(),
+            poll_interval_secs: 300,
+            heartbeat_interval_secs: 5,
+            risk_params: AgentRiskParams::conservative(),
+        }
+    }
+}
+
+/// Neutral config owner for the registered sports runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SportsTradingConfig {
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    pub agent_id: String,
+    pub name: String,
+    pub poll_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
+    pub risk_params: AgentRiskParams,
+}
+
+impl Default for SportsTradingConfig {
+    fn default() -> Self {
+        Self {
+            account_id: default_account_id(),
+            agent_id: "sports".into(),
+            name: "NBA Comeback".into(),
+            poll_interval_secs: 30,
+            heartbeat_interval_secs: 5,
+            risk_params: AgentRiskParams::conservative(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

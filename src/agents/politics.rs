@@ -7,42 +7,20 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::agents::context::AgentContext;
 use crate::agents::traits::TradingAgent;
+pub use crate::config::PoliticsTradingConfig;
 use crate::coordinator::CoordinatorCommand;
 use crate::error::Result;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
+use crate::platform::{AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
 
 const DEPLOYMENT_ID_EVENT_EDGE: &str = "politics.pm.event_edge";
-
-/// Configuration for the PoliticsTradingAgent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoliticsTradingConfig {
-    pub agent_id: String,
-    pub name: String,
-    pub poll_interval_secs: u64,
-    pub heartbeat_interval_secs: u64,
-    pub risk_params: AgentRiskParams,
-}
-
-impl Default for PoliticsTradingConfig {
-    fn default() -> Self {
-        Self {
-            agent_id: "politics".into(),
-            name: "Event Edge".into(),
-            poll_interval_secs: 300, // 5 minutes
-            heartbeat_interval_secs: 5,
-            risk_params: AgentRiskParams::conservative(),
-        }
-    }
-}
 
 /// Pull-based politics/event trading agent wrapping EventEdgeCore
 pub struct PoliticsTradingAgent {

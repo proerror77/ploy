@@ -14,7 +14,6 @@ use tracing::{debug, error, info, trace, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agents::context::AgentContext;
-use crate::agents::crypto::CryptoTradingConfig;
 use crate::agents::crypto_lob_ml::{
     CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
@@ -22,11 +21,12 @@ use crate::agents::crypto_lob_ml::{
 use crate::agents::crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::agents::governance_context::GovernanceContext;
 use crate::agents::openclaw::{OpenClawAgent, OpenClawConfig};
-use crate::agents::politics::PoliticsTradingConfig;
-use crate::agents::sports::{SportsTradingAgent, SportsTradingConfig};
+use crate::agents::sports::SportsTradingAgent;
 use crate::agents::traits::{GovernanceAgent, TradingAgent};
 use crate::ai_clients::PolymarketSportsClient;
-use crate::config::AppConfig;
+use crate::config::{
+    AppConfig, CryptoEntryMode, CryptoTradingConfig, PoliticsTradingConfig, SportsTradingConfig,
+};
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
 use crate::domain::{OrderStatus, Side};
@@ -3384,13 +3384,13 @@ impl PlatformBootstrapConfig {
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENTRY_MODE") {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "arb_only" | "arb" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::ArbOnly
+                    cfg.crypto.entry_mode = CryptoEntryMode::ArbOnly
                 }
                 "directional" | "dir" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::Directional
+                    cfg.crypto.entry_mode = CryptoEntryMode::Directional
                 }
                 "vol_straddle" | "straddle" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::VolStraddle
+                    cfg.crypto.entry_mode = CryptoEntryMode::VolStraddle
                 }
                 _ => {}
             }
@@ -7548,6 +7548,33 @@ mod tests {
             .is_none(),
             "grok-enabled sports configs should stay on the legacy agent path until the canonical strategy bridge absorbs Grok behavior"
         );
+    }
+
+    #[test]
+    fn neutral_config_types_can_drive_runtime_projection() {
+        let symbols = vec!["BTCUSDT".to_string()];
+        let crypto_cfg = crate::config::CryptoTradingConfig::default();
+        let politics_cfg = crate::config::PoliticsTradingConfig::default();
+        let sports_cfg = crate::config::SportsTradingConfig::default();
+
+        let momentum = build_momentum_runtime_config(&symbols, &crypto_cfg);
+        assert!(momentum.contains("[strategy]"));
+
+        let nba_cfg = sample_nba_comeback_config(false);
+        let event_edge = build_event_edge_managed_runtime_spec(
+            "https://clob.polymarket.com",
+            &politics_cfg,
+            &crate::config::EventEdgeAgentConfig::default(),
+        );
+        assert_eq!(event_edge.strategy_label, "event_edge");
+
+        let nba = build_nba_comeback_managed_runtime_spec(
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &nba_cfg,
+        )
+        .expect("project nba comeback managed runtime spec");
+        assert_eq!(nba.strategy_label, "nba_comeback");
     }
 
     #[test]

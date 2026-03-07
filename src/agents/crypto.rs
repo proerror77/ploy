@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,11 +22,12 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::{PriceUpdate, QuoteUpdate};
 use crate::agents::context::AgentContext;
 use crate::agents::traits::TradingAgent;
+pub use crate::config::{CryptoEntryMode, CryptoTradingConfig};
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, AgentStatus, CryptoDataPlaneHandle, Domain, OrderIntent, OrderPriority,
+    AgentStatus, CryptoDataPlaneHandle, Domain, OrderIntent, OrderPriority,
 };
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
@@ -50,10 +50,6 @@ fn normal_cdf(x: f64) -> f64 {
     let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
 
     0.5 * (1.0 + sign * y)
-}
-
-fn default_exit_edge_floor() -> Decimal {
-    dec!(0.02)
 }
 
 /// Dynamic min_edge thresholds based on window move magnitude.
@@ -236,47 +232,6 @@ fn passes_hard_momentum_gate(
     }
 }
 
-fn default_exit_price_band() -> Decimal {
-    dec!(0.05)
-}
-
-/// Entry mode for the crypto momentum agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CryptoEntryMode {
-    /// Original arbitrage-only mode: require sum_of_asks < threshold.
-    ArbOnly,
-    /// Directional mode: trade based on momentum edge alone, no sum constraint.
-    Directional,
-    /// Volatility straddle: buy both UP and DOWN when sum < straddle_threshold.
-    VolStraddle,
-}
-
-fn default_entry_mode() -> CryptoEntryMode {
-    CryptoEntryMode::Directional
-}
-
-fn default_oracle_lag_buffer_secs() -> u64 {
-    3
-}
-
-fn default_max_spread_pct() -> Decimal {
-    dec!(0.10)
-}
-
-fn default_straddle_threshold() -> Decimal {
-    dec!(0.99)
-}
-
-fn default_straddle_min_vol() -> Decimal {
-    Decimal::ZERO
-}
-
-/// Minimum weighted signal score to allow entry (0.0 = allow all, 1.0 = require perfect agreement).
-fn default_min_signal_score() -> Decimal {
-    dec!(0.40)
-}
-
 /// Bias added to P(UP) for >= settlement rule (UP wins on ties).
 const GEQ_SETTLEMENT_BIAS: f64 = 0.002;
 
@@ -352,124 +307,6 @@ fn estimate_p_up_window(
         .unwrap_or(dec!(0.5))
         .max(dec!(0.01))
         .min(dec!(0.99))
-}
-
-/// Configuration for the CryptoTradingAgent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CryptoTradingConfig {
-    pub agent_id: String,
-    pub name: String,
-    pub coins: Vec<String>,
-    pub sum_threshold: Decimal,
-    pub min_momentum_1s: f64,
-    /// Minimum absolute move since the event start required to trade.
-    ///
-    /// For UP/DOWN markets, resolution depends on the net change over the full window, so this
-    /// threshold helps avoid "coin-flip" windows near flat.
-    #[serde(default)]
-    pub min_window_move_pct: Decimal,
-    /// Minimum edge required for entry:
-    /// edge = fair_value - market_entry_price.
-    #[serde(default = "default_exit_edge_floor")]
-    pub min_edge: Decimal,
-    /// Refresh interval for Gamma event discovery (seconds)
-    pub event_refresh_secs: u64,
-    /// Minimum time remaining for selected event (seconds)
-    pub min_time_remaining_secs: u64,
-    /// Maximum time remaining for selected event (seconds)
-    pub max_time_remaining_secs: u64,
-    /// Prefer events closest to end (confirmatory mode)
-    pub prefer_close_to_end: bool,
-    /// Optional entry cooldown per (symbol,timeframe), in seconds.
-    ///
-    /// This is a safety throttle to prevent bursty duplicate entries from noisy feeds.
-    /// Use `0` to disable and rely on per-market idempotency + duplicate guards.
-    #[serde(default)]
-    pub entry_cooldown_secs: u64,
-    /// Require multi-timeframe momentum agreement for entries.
-    ///
-    /// When enabled:
-    /// - 5m entries require 1s and 5s momentum to agree (when 5s momentum is available)
-    /// - 15m entries additionally require 30s momentum to agree (when available)
-    #[serde(default)]
-    pub require_mtf_agreement: bool,
-    pub default_shares: u64,
-    #[serde(default = "default_exit_edge_floor")]
-    pub exit_edge_floor: Decimal,
-    #[serde(default = "default_exit_price_band")]
-    pub exit_price_band: Decimal,
-    /// Optional mark-to-market binary exit thresholds (disabled by default)
-    pub enable_price_exits: bool,
-    /// Minimum hold time before edge/price-band exits are allowed (seconds)
-    pub min_hold_secs: u64,
-    pub risk_params: AgentRiskParams,
-    pub heartbeat_interval_secs: u64,
-
-    /// Entry mode: arb_only (legacy), directional (no sum gate), vol_straddle (buy both sides).
-    #[serde(default = "default_entry_mode")]
-    pub entry_mode: CryptoEntryMode,
-
-    /// Oracle lag buffer (seconds) added to remaining-time uncertainty near settlement.
-    /// Accounts for Chainlink-vs-Binance delay in the last 30s of the window.
-    #[serde(default = "default_oracle_lag_buffer_secs")]
-    pub oracle_lag_buffer_secs: u64,
-
-    /// Maximum bid-ask spread percentage per side to filter thin markets.
-    #[serde(default = "default_max_spread_pct")]
-    pub max_spread_pct: Decimal,
-
-    /// (VolStraddle mode) Maximum sum of asks to enter a straddle position.
-    #[serde(default = "default_straddle_threshold")]
-    pub straddle_threshold: Decimal,
-
-    /// (VolStraddle mode) Minimum 60s rolling volatility required to enter.
-    #[serde(default = "default_straddle_min_vol")]
-    pub straddle_min_vol: Decimal,
-
-    /// Minimum weighted signal score for entry (replaces binary MTF agreement).
-    ///
-    /// Score is computed as weighted sum of:
-    /// - 0.40 × window_trend (window move direction aligned with trade side)
-    /// - 0.30 × momentum_agreement (1s/5s/30s momentum aligned)
-    /// - 0.20 × volatility_signal (rolling vol above baseline)
-    /// - 0.10 × cross_asset_score (correlated assets agree)
-    ///
-    /// Range: [0.0, 1.0]. Default 0.40 allows entry if trend + partial momentum agree.
-    #[serde(default = "default_min_signal_score")]
-    pub min_signal_score: Decimal,
-}
-
-impl Default for CryptoTradingConfig {
-    fn default() -> Self {
-        Self {
-            agent_id: "crypto".into(),
-            name: "Crypto Momentum".into(),
-            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
-            sum_threshold: dec!(0.96),
-            min_momentum_1s: 0.001,
-            min_window_move_pct: dec!(0.0001), // 0.01%
-            min_edge: dec!(0.02),
-            event_refresh_secs: 30,
-            min_time_remaining_secs: 60,
-            max_time_remaining_secs: 300,
-            prefer_close_to_end: true,
-            entry_cooldown_secs: 0,
-            require_mtf_agreement: true,
-            default_shares: 100,
-            exit_edge_floor: default_exit_edge_floor(),
-            exit_price_band: default_exit_price_band(),
-            enable_price_exits: false,
-            min_hold_secs: 20,
-            risk_params: AgentRiskParams::conservative(),
-            heartbeat_interval_secs: 5,
-            entry_mode: default_entry_mode(),
-            oracle_lag_buffer_secs: default_oracle_lag_buffer_secs(),
-            max_spread_pct: default_max_spread_pct(),
-            straddle_threshold: default_straddle_threshold(),
-            straddle_min_vol: default_straddle_min_vol(),
-            min_signal_score: default_min_signal_score(),
-        }
-    }
 }
 
 /// Internal position tracking

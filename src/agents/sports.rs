@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -25,13 +24,14 @@ use crate::ai_clients::polymarket_sports::{
     OrderBookLevel as SportsOrderBookLevel, SportsOrderBook,
 };
 use crate::ai_clients::{EventDetails, LiveGameMarket, PolymarketSportsClient, NBA_SERIES_ID};
+pub use crate::config::SportsTradingConfig;
 use crate::collector::{
     ensure_collector_token_targets_table, upsert_collector_token_targets, CollectorTokenTarget,
 };
 use crate::coordinator::CoordinatorCommand;
 use crate::domain::Side;
 use crate::error::Result;
-use crate::platform::{AgentRiskParams, AgentStatus, Domain, OrderIntent, OrderPriority};
+use crate::platform::{AgentStatus, Domain, OrderIntent, OrderPriority};
 use crate::strategy::nba_comeback::core::{
     ComebackCandidate, ComebackOpportunity, GamePosition, NbaComebackCore, NbaComebackState,
 };
@@ -43,36 +43,6 @@ use crate::strategy::nba_comeback::grok_decision::{
 use crate::strategy::nba_comeback::grok_intel::{
     self, GrokGameIntel, GrokSignalEvaluator, GrokTradeSignal,
 };
-
-/// Configuration for the SportsTradingAgent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SportsTradingConfig {
-    /// DB account scope (single DB multi-account).
-    #[serde(default = "default_account_id")]
-    pub account_id: String,
-    pub agent_id: String,
-    pub name: String,
-    pub poll_interval_secs: u64,
-    pub heartbeat_interval_secs: u64,
-    pub risk_params: AgentRiskParams,
-}
-
-impl Default for SportsTradingConfig {
-    fn default() -> Self {
-        Self {
-            account_id: default_account_id(),
-            agent_id: "sports".into(),
-            name: "NBA Comeback".into(),
-            poll_interval_secs: 30,
-            heartbeat_interval_secs: 5,
-            risk_params: AgentRiskParams::conservative(),
-        }
-    }
-}
-
-fn default_account_id() -> String {
-    "default".to_string()
-}
 
 /// Pull-based sports trading agent wrapping NbaComebackCore
 pub struct SportsTradingAgent {

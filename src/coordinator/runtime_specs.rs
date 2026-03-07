@@ -7,12 +7,11 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 
-use crate::agents::crypto::{CryptoEntryMode, CryptoTradingConfig};
+use crate::config::{
+    CryptoEntryMode, CryptoTradingConfig, EventEdgeAgentConfig, NbaComebackConfig,
+};
 #[cfg(test)]
-use crate::agents::politics::PoliticsTradingConfig;
-#[cfg(test)]
-use crate::agents::sports::SportsTradingConfig;
-use crate::config::{EventEdgeAgentConfig, NbaComebackConfig};
+use crate::config::{PoliticsTradingConfig, SportsTradingConfig};
 use crate::error::{PloyError, Result};
 use crate::plugins::projector::ProjectedRuntimeSpec;
 #[cfg(test)]

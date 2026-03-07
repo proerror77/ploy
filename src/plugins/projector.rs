@@ -1,7 +1,7 @@
-use crate::agents::crypto::CryptoTradingConfig;
-use crate::agents::politics::PoliticsTradingConfig;
-use crate::agents::sports::SportsTradingConfig;
-use crate::config::{EventEdgeAgentConfig, NbaComebackConfig};
+use crate::config::{
+    CryptoTradingConfig, EventEdgeAgentConfig, NbaComebackConfig, PoliticsTradingConfig,
+    SportsTradingConfig,
+};
 use crate::coordinator::runtime_specs::{
     build_event_edge_runtime_config, build_momentum_runtime_config,
     build_nba_comeback_runtime_config, build_pattern_memory_runtime_config,
