@@ -57,5 +57,5 @@ use_greeks = true
 max_fair_value_distance = 0.15
 
 [filter]
-allowed_windows = [300, 900]
+allowed_windows = [300] # 15m windows have been the consistent drag in replay; keep live on 5m only for now
 window_tolerance = 30

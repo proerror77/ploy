@@ -182,7 +182,7 @@ impl Default for StaggeredArbBacktestConfig {
             obi_flip_exit_threshold: 0.008,
             min_ask_price: dec!(0.05),
             min_entry_sum: dec!(0.30),
-            allowed_window_durations: vec![300, 900],
+            allowed_window_durations: vec![300],
             window_duration_tolerance: 30,
             min_leg2_delay_secs: 3,
             max_trades_per_event: 0,
@@ -578,7 +578,7 @@ impl StaggeredArbBacktestConfig {
                         .filter_map(|v| v.as_integer().map(|i| i as u64))
                         .collect()
                 })
-                .unwrap_or_else(|| vec![300, 900]),
+                .unwrap_or_else(|| vec![300]),
             window_duration_tolerance: filter
                 .get("window_tolerance")
                 .and_then(|v| v.as_integer())
@@ -2740,6 +2740,7 @@ mod tests {
         assert_eq!(config.cooldown_secs, 5);
         assert_eq!(config.min_ask_price, dec!(0.05));
         assert_eq!(config.min_entry_sum, dec!(0.30));
+        assert_eq!(config.allowed_window_durations, vec![300]);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));
         assert_eq!(config.obi_decay_exit_ratio, 0.35);
@@ -2773,6 +2774,7 @@ mod tests {
         assert_eq!(config.entry_after_start_min_secs, 30);
         assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
+        assert_eq!(config.allowed_window_durations, vec![300]);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));
         assert_eq!(config.obi_decay_exit_ratio, 0.35);

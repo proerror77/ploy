@@ -532,3 +532,25 @@ Upgrade staggered-arb from a fixed-threshold OBI confirmation gate to a stronger
   - recent live-like window stayed at `39 trades / +20.65 / PF 3.69 / 5 aborts`
   - `2026-02-26T00:00:00Z..06:00:00Z` stayed at `20 trades / +32.89 / PF 103.44`
 - [x] Conclusion: the stronger OBI branch is logically sound and tested, but these windows were not bottlenecked by the old fixed OBI gate; the next marginal improvement is more likely to come from signal-persistence exits or smarter `LEG2` execution than from further loosening OBI entry alone.
+
+---
+
+# Staggered Arb 5m-Only Window Restriction (2026-03-07)
+
+## Goal
+Drop the 15m staggered-arb window from the canonical profile after replay showed it consistently drags recent production-like and adjacent overlap results, while the 5m window remains positive on both validation windows.
+
+## Tasks
+
+- [x] Compare current full-profile replay against 5m-only and 15m-only runs on the recent live-like window.
+- [x] Re-run the same decomposition on an adjacent overlap window with Binance L2 coverage.
+- [x] Restrict the checked-in staggered-arb profile and parser/default fallbacks to the 5m window only.
+- [x] Add regression assertions so missing-field TOML parsing keeps the 5m-only default.
+
+## Review
+
+- [x] Time-dynamic entry/merge thresholds were tested first and underperformed, so they were discarded rather than merged.
+- [x] `15m` was the consistent drag in both validation windows:
+  - `2026-03-06T20:30:00Z..2026-03-07T01:20:00Z`: full `64 trades / -2.88 / PF 0.91`, `5m-only 45 / +5.92 / PF 1.32`, `15m-only 21 / -9.22 / PF 0.35`
+  - `2026-02-26T00:00:00Z..06:00:00Z`: full `76 trades / +35.33 / PF 2.11`, `5m-only 35 / +36.47 / PF 3.58`, `15m-only 38 / -4.07 / PF 0.76`
+- [x] Canonical config, replay defaults, and live TOML regression tests now align on `allowed_windows = [300]`.

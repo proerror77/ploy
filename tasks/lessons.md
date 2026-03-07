@@ -156,3 +156,6 @@
 
 - Pattern: Strengthening OBI logic can be correct in isolation yet leave primary validation windows unchanged when those windows were never bottlenecked by the old OBI gate.
 - Rule: After adding a new staggered-arb signal feature, compare the same recent live-like and adjacent overlap windows first. If trade count and PnL stay flat, stop loosening entry further and shift attention to exit timing or `LEG2` execution quality.
+
+- Pattern: When staggered-arb mixes `5m` and `15m` windows under one profile, a broader timeframe can silently dilute or reverse edge even if the aggregate logic looks sensible.
+- Rule: Before adding new timing complexity or loosening entry further, decompose replay by window duration. If one timeframe is consistently negative across the recent live-like and adjacent overlap windows, remove that timeframe from the canonical profile before tuning anything else.
