@@ -109,6 +109,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Freeze the exact 2026-03-08 retirement inventory in docs and todo.
 - [x] Execute Task 2 from the retirement plan: move runtime config ownership out of legacy agent files.
 - [x] Execute Task 3 from the retirement plan: remove politics and sports compatibility runtimes.
+- [x] Execute Task 4 from the retirement plan: remove crypto compatibility runtimes.
 
 ## Review
 
@@ -117,6 +118,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.
+- [x] Crypto compatibility runtime branches, env gates, and agent modules are gone; the remaining retirement work is now trait/platform-layer deletion.
 
 ## Retirement inventory snapshot (2026-03-08)
 
@@ -127,17 +129,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 ### Delete after config extraction
 
-- `src/coordinator/runtime_specs.rs` imports `PoliticsTradingConfig` / `SportsTradingConfig` from legacy agent modules.
-- `src/plugins/projector.rs` imports `PoliticsTradingConfig` / `SportsTradingConfig` from legacy agent modules.
-- `src/coordinator/bootstrap.rs` still imports legacy agent config/runtime types and owns:
-  - `spawn_compat_trading_agent_task(...)`
-  - `spawn_compat_crypto_lob_ml_agent(...)`
-  - `maybe_spawn_compat_crypto_lob_ml_agent(...)`
-  - `spawn_compat_crypto_rl_policy_agent(...)`
-  - `maybe_spawn_compat_crypto_rl_policy_agent(...)`
-  - `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES`
-  - `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES`
-- `src/agents/politics.rs`, `src/agents/sports.rs`, `src/agents/crypto_lob_ml.rs`, and `src/agents/crypto_rl_policy.rs` still exist as compatibility runtimes.
+- None. Tasks 2-4 cleared the config-ownership blockers and removed the pull-based compatibility runtime modules.
 
 ### Delete after RL/CLI migration
 
@@ -156,6 +148,8 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - 2026-03-08: Verified Task 2 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
 - 2026-03-08: Removed `src/agents/politics.rs` and `src/agents/sports.rs`, deleted the sports compatibility env gate / fallback path from `bootstrap`, and made Grok-enabled `nba_comeback` project through the canonical runtime like other sports deployments.
 - 2026-03-08: Verified Task 3 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
+- 2026-03-08: Removed `src/agents/crypto_lob_ml.rs` and `src/agents/crypto_rl_policy.rs`, deleted the crypto compatibility env gate / bootstrap startup branches, and retired the corresponding `PlatformBootstrapConfig` fields and env parsing.
+- 2026-03-08: Verified Task 4 with `cargo test coordinator::bootstrap --lib -- --nocapture`, `cargo check --bin ploy`, and `cargo check --features rl --bin ploy`.
 
 ---
 

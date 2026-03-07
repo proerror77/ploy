@@ -20,7 +20,8 @@ use crate::rl::core::{
 };
 use crate::rl::memory::ReplayBuffer;
 use crate::strategy::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyStateInfo,
 };
 
 /// RL-based trading strategy
@@ -233,6 +234,7 @@ impl RLStrategy {
                         self.create_order(&self.token_ids.0, Side::Up, shares, ask, &action);
                     actions.push(StrategyAction::SubmitOrder {
                         client_order_id: format!("rl_buy_up_{}", self.step_count),
+                        purpose: OrderPurpose::Entry,
                         order,
                         priority: if action.is_aggressive() { 10 } else { 5 },
                     });
@@ -245,6 +247,7 @@ impl RLStrategy {
                         self.create_order(&self.token_ids.1, Side::Down, shares, ask, &action);
                     actions.push(StrategyAction::SubmitOrder {
                         client_order_id: format!("rl_buy_down_{}", self.step_count),
+                        purpose: OrderPurpose::Entry,
                         order,
                         priority: if action.is_aggressive() { 10 } else { 5 },
                     });
@@ -277,6 +280,7 @@ impl RLStrategy {
 
                         actions.push(StrategyAction::SubmitOrder {
                             client_order_id: format!("rl_sell_{}", self.step_count),
+                            purpose: OrderPurpose::Exit,
                             order,
                             priority: 10, // High priority for exits
                         });
@@ -542,6 +546,7 @@ impl Strategy for RLStrategy {
             if let Some(bid) = bid {
                 actions.push(StrategyAction::SubmitOrder {
                     client_order_id: format!("rl_shutdown_{}", self.step_count),
+                    purpose: OrderPurpose::Exit,
                     order: OrderRequest {
                         client_order_id: Uuid::new_v4().to_string(),
                         idempotency_key: None,

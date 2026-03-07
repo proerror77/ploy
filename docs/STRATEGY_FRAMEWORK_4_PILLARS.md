@@ -122,11 +122,11 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
 具體來說：
 
 - `TradingAgent` / `DomainAgent` 不再是新 live 策略入口
-- `crypto_lob_ml` / `crypto_rl_policy` 只有在 `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true` 時才允許暫時啟動
 - sports / politics live path 已經只走 canonical managed runtime
+- crypto compatibility runtimes 已經退休，剩下的 crypto live path 只走 canonical runtime
 
 所以今天最大的架構現實，不是「策略分散在三套正式 runtime」，而是：
-canonical runtime 已經確立，剩下的是少量 compatibility path 尚未刪除。
+canonical runtime 已經確立，剩下的是更底層的舊 trait / platform-agent 層退休。
 
 ### 2.1 讀側可見性
 

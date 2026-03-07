@@ -25,11 +25,7 @@ Production runtime is converging on a 4-plane model:
 
 Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; strategies decide entries/exits inside those boundaries.
 
-Compatibility live runtimes are now opt-in only:
-
-- `crypto_lob_ml` / `crypto_rl_policy` require `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true`
-
-Sports and politics now start only through the canonical managed `Strategy` runtime.
+Live strategies now start only through the canonical managed `Strategy` runtime.
 
 Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
 
