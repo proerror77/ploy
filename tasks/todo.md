@@ -160,6 +160,26 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 ---
 
+# Legacy CLI Cleanup (2026-03-08)
+
+## Goal
+Delete abandoned non-runtime CLI surfaces that no longer participate in the actual `ploy` entrypoint.
+
+## Tasks
+
+- [x] Confirm the unused management `Cli`/`Commands` in `src/cli/mod.rs` are not referenced by the real binary.
+- [x] Delete the disabled `src/cli/service.rs` legacy stub.
+- [x] Shrink `src/cli/mod.rs` back to a pure module namespace.
+- [x] Run minimal compile validation and commit atomically.
+
+## Progress notes
+
+- 2026-03-08: Confirmed `main.rs` and `main_dispatch.rs` use `ploy::cli::runtime::Cli`, not the abandoned `src/cli/mod.rs` top-level `Cli`.
+- 2026-03-08: Deleted the dead `ploy service` stub surface and removed the unused top-level management `Cli`/`Commands` wrapper from `src/cli/mod.rs`.
+- 2026-03-08: Verified the cleanup with `cargo check --bin ploy` and `cargo check --features rl --bin ploy`; only pre-existing warnings remain.
+
+---
+
 # Strategy Deployment Control Plane Stabilization TODO (2026-03-05)
 
 ## Goal
