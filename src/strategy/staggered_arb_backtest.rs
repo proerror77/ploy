@@ -205,6 +205,10 @@ impl Default for StaggeredArbBacktestConfig {
     }
 }
 
+pub(crate) fn polymarket_order_meets_minimum(price: Decimal, shares: u64) -> bool {
+    shares >= 5 && price > Decimal::ZERO && price * Decimal::from(shares) >= Decimal::ONE
+}
+
 impl StaggeredArbBacktestConfig {
     pub fn with_symbols(symbols: Vec<String>) -> Self {
         Self {
@@ -949,8 +953,10 @@ impl StaggeredArbBacktestEngine {
                         .insert(update.symbol.clone(), *ask_depth_shares);
                 }
                 UpdateType::BinanceL2 { obi_5, .. } => {
-                    if let Some(prev) = self.binance_l2_obi_5.insert(update.symbol.clone(), *obi_5) {
-                        self.binance_l2_obi_prev_5.insert(update.symbol.clone(), prev);
+                    if let Some(prev) = self.binance_l2_obi_5.insert(update.symbol.clone(), *obi_5)
+                    {
+                        self.binance_l2_obi_prev_5
+                            .insert(update.symbol.clone(), prev);
                     }
                     self.binance_l2_obi_ts
                         .insert(update.symbol.clone(), update.timestamp);
@@ -1254,8 +1260,8 @@ impl StaggeredArbBacktestEngine {
             .map(|value| value.to_f64().unwrap_or(0.0));
         let fair_value_distance = greeks.as_ref().map(|g| (g.fair_value - 0.5).abs());
         let premium_sum_excess = self.config.premium_sum_excess(current_sum);
-        let required_obi_strength =
-            self.config.obi_confirm_threshold + premium_sum_excess * self.config.premium_sum_obi_slope;
+        let required_obi_strength = self.config.obi_confirm_threshold
+            + premium_sum_excess * self.config.premium_sum_obi_slope;
         if !self
             .config
             .obi_confirms_direction(predicted_up, obi, required_obi_strength)
@@ -1267,9 +1273,9 @@ impl StaggeredArbBacktestEngine {
             );
             return;
         }
-        let obi_persistent = self
-            .config
-            .obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
+        let obi_persistent =
+            self.config
+                .obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
         let strong_obi_bonus_active = self.config.strong_obi_entry_bonus_active(
             predicted_up,
             obi,
@@ -1686,8 +1692,7 @@ impl StaggeredArbBacktestEngine {
                     let armed_at = pos.protective_stop_armed_at.unwrap_or(ts);
                     let recovery_elapsed = (ts - armed_at).num_seconds();
                     let recovery_expired = self.config.protective_recovery_window_secs == 0
-                        || recovery_elapsed
-                            >= self.config.protective_recovery_window_secs as i64;
+                        || recovery_elapsed >= self.config.protective_recovery_window_secs as i64;
                     if !hard_signal_broken && !recovery_expired {
                         protective_arm_updates.push((i, Some(armed_at)));
                         trace!(
@@ -1757,6 +1762,9 @@ impl StaggeredArbBacktestEngine {
         };
         let remaining_shares = pos.leg1_shares.saturating_sub(pos.leg2_shares.unwrap_or(0));
         if remaining_shares == 0 {
+            return;
+        }
+        if !polymarket_order_meets_minimum(other_ask, remaining_shares) {
             return;
         }
 
@@ -3344,7 +3352,9 @@ mod tests {
         engine
             .pm_asks_by_event
             .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
-        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.005));
+        engine
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(0.005));
         engine.positions.push(StaggeredArbPosition {
             symbol: "BTCUSDT".into(),
             event_slug: "test-event".into(),
@@ -3399,7 +3409,9 @@ mod tests {
         engine
             .pm_asks_by_event
             .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
-        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(-0.02));
+        engine
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(-0.02));
         engine.positions.push(StaggeredArbPosition {
             symbol: "BTCUSDT".into(),
             event_slug: "test-event".into(),
@@ -3530,6 +3542,49 @@ mod tests {
         assert_eq!(engine.positions[0].leg2_shares, Some(200));
         assert_eq!(engine.closed_trades.len(), 1);
         assert_eq!(engine.closed_trades[0].shares, 200);
+    }
+
+    #[test]
+    fn test_fill_leg2_skips_residual_below_venue_minimum() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine.lob_depth.insert("BTCUSDT".into(), 100);
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.40),
+            leg1_shares: 20,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(0.12),
+            entry_obi: None,
+            protective_stop_armed_at: None,
+            wait_deadline: now + chrono::Duration::seconds(60),
+            s0: dec!(100),
+            event_end_time: now + chrono::Duration::seconds(20),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.03),
+            initial_sum: dec!(1.03),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: Some(Direction::Down),
+            leg2_price: Some(dec!(0.63)),
+            leg2_shares: Some(19),
+            leg2_time: Some(now - chrono::Duration::seconds(5)),
+            leg2_fee: Some(dec!(0.17955)),
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.fill_leg2(0, dec!(0.63), "forced_timeout", now);
+
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+        assert_eq!(engine.positions[0].leg2_shares, Some(19));
+        assert_eq!(engine.closed_trades.len(), 0);
     }
 
     #[test]

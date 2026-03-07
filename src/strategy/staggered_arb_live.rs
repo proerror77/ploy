@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use super::momentum::Direction;
 use super::probability::estimate_probability;
-use super::staggered_arb_backtest::StaggeredArbBacktestConfig;
+use super::staggered_arb_backtest::{polymarket_order_meets_minimum, StaggeredArbBacktestConfig};
 use super::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
     StrategyEventType, StrategyStateInfo,
@@ -1316,7 +1316,8 @@ impl StaggeredArbAdapter {
             self.bump_entry_reject(reason);
             return None;
         }
-        let obi_persistent = bc.obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
+        let obi_persistent =
+            bc.obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
         let strong_obi_bonus_active = bc.strong_obi_entry_bonus_active(
             predicted_up,
             obi,
@@ -1613,7 +1614,13 @@ impl StaggeredArbAdapter {
                 Some(windows) => windows
                     .iter()
                     .find(|w| w.event_id == pos.event_id)
-                    .map(|w| ((w.end_time - ts).num_seconds() as f64, w.window_secs, w.open_price))
+                    .map(|w| {
+                        (
+                            (w.end_time - ts).num_seconds() as f64,
+                            w.window_secs,
+                            w.open_price,
+                        )
+                    })
                     .unwrap_or((f64::MAX, 0, None)),
                 None => (f64::MAX, 0, None),
             };
@@ -1816,19 +1823,13 @@ impl StaggeredArbAdapter {
                 continue;
             }
 
-            // G. Final window smart close — use probability to decide.
+            // G. Final window close — this profile should keep hedge discipline.
             //
-            // In the last no_trade_last_secs (30s), compute p_hat to assess
-            // whether our Leg1 direction is likely to win at settlement:
-            //
-            //   p_win HIGH (>0.80): our side is strongly favored → let it settle
-            //     single-leg. EV of settlement > cost of buying expensive Leg2.
-            //   p_win LOW (<0.80) or uncertain: directional risk too high →
-            //     force buy Leg2 to lock in a known (possibly negative) outcome.
-            //
-            // This avoids the worst case: holding a losing single-leg to $0.
+            // In the last no_trade_last_secs, always try to buy Leg2 if the
+            // forced-close threshold still allows it. We still log p_win /
+            // displacement for diagnostics, but we no longer intentionally
+            // hold a single-leg into settlement.
             if in_final_window && leg2_ready {
-                // Compute p_hat for this position's window
                 let window_info = self
                     .active_windows
                     .get(symbol)
@@ -1851,65 +1852,50 @@ impl StaggeredArbAdapter {
                     })
                     .unwrap_or(bc.vol_floor);
 
-                let should_force_close = match (s0, st) {
+                match (s0, st) {
                     (Some(s0_val), Some(st_val)) if s0_val > Decimal::ZERO => {
                         let p_hat =
                             estimate_probability(s0_val, st_val, sigma, time_remaining, bc.mu);
-                        // p_win = probability that OUR Leg1 direction wins
                         let p_win = match pos.leg1_direction {
                             Direction::Up => p_hat,
                             Direction::Down => 1.0 - p_hat,
                         };
-
-                        // Also check: is price near the strike? (high uncertainty zone)
                         let displacement =
                             ((st_val - s0_val) / s0_val).to_f64().unwrap_or(0.0).abs();
                         let near_strike = displacement < 0.001; // within 10 bps
-
-                        // Also check: is vol high relative to time left?
-                        // High vol + little time = anything can happen
                         let vol_time_ratio =
                             sigma / (time_remaining / window_secs as f64).max(0.01);
                         let high_vol_regime = vol_time_ratio > 0.05;
-
-                        if p_win >= 0.80 && !near_strike {
-                            // Strongly in our favor AND price has moved away from strike
-                            // → let it settle single-leg for higher EV
-                            info!(
-                                "[STAG-ARB] FINAL WINDOW HOLD {} {} p_win={:.3} disp={:.4} vol_ratio={:.4} — letting settle",
-                                symbol, pos.leg1_direction, p_win, displacement, vol_time_ratio,
-                            );
-                            false
-                        } else {
-                            // Uncertain or against us → force close
-                            info!(
-                                "[STAG-ARB] FINAL WINDOW CLOSE {} {} p_win={:.3} disp={:.4} near_strike={} high_vol={} — buying Leg2",
-                                symbol, pos.leg1_direction, p_win, displacement, near_strike, high_vol_regime,
-                            );
-                            true
-                        }
+                        info!(
+                            "[STAG-ARB] FINAL WINDOW CLOSE {} {} p_win={:.3} disp={:.4} near_strike={} high_vol={} — buying Leg2",
+                            symbol,
+                            pos.leg1_direction,
+                            p_win,
+                            displacement,
+                            near_strike,
+                            high_vol_regime,
+                        );
                     }
                     _ => {
-                        // No price data → can't assess risk → force close to be safe
-                        true
+                        info!(
+                            "[STAG-ARB] FINAL WINDOW CLOSE {} {} without price context — buying Leg2",
+                            symbol, pos.leg1_direction,
+                        );
                     }
-                };
-
-                if should_force_close {
-                    if !self.forced_close_allowed(
-                        current_sum,
-                        time_remaining,
-                        window_secs,
-                        in_final_window,
-                    ) {
-                        *leg2_skip_batch
-                            .entry("force_threshold_blocked")
-                            .or_default() += 1;
-                        continue;
-                    }
-                    leg2_fills.push((i, other_ask, "forced_final_window".to_string()));
+                }
+                if !self.forced_close_allowed(
+                    current_sum,
+                    time_remaining,
+                    window_secs,
+                    in_final_window,
+                ) {
+                    *leg2_skip_batch
+                        .entry("force_threshold_blocked")
+                        .or_default() += 1;
                     continue;
                 }
+                leg2_fills.push((i, other_ask, "forced_final_window".to_string()));
+                continue;
             }
         }
 
@@ -1947,6 +1933,10 @@ impl StaggeredArbAdapter {
         let already_filled = Self::leg2_filled_shares(pos);
         let shares = Self::leg2_remaining_shares(pos);
         if shares == 0 {
+            return None;
+        }
+        if !polymarket_order_meets_minimum(other_ask, shares) {
+            self.bump_leg2_skip("leg2_residual_below_venue_minimum");
             return None;
         }
 
@@ -3785,7 +3775,10 @@ min_balance_usd = 9.0
         let now = Utc::now();
         adapter.config.backtest_config.use_greeks = false;
         adapter.config.backtest_config.max_leg1_loss = dec!(0.05);
-        adapter.config.backtest_config.protective_recovery_window_secs = 12;
+        adapter
+            .config
+            .backtest_config
+            .protective_recovery_window_secs = 12;
         adapter.config.backtest_config.protective_close_threshold = dec!(1.08);
         adapter
             .pm_asks_by_event
@@ -3847,7 +3840,10 @@ min_balance_usd = 9.0
         let now = Utc::now();
         adapter.config.backtest_config.use_greeks = false;
         adapter.config.backtest_config.max_leg1_loss = dec!(0.05);
-        adapter.config.backtest_config.protective_recovery_window_secs = 12;
+        adapter
+            .config
+            .backtest_config
+            .protective_recovery_window_secs = 12;
         adapter.config.backtest_config.protective_close_threshold = dec!(1.08);
         adapter
             .pm_asks_by_event
@@ -4315,6 +4311,100 @@ min_balance_usd = 9.0
             matches!(action, Some(StrategyAction::SubmitOrder { .. })),
             "live leg2 should still submit even if active window already expired"
         );
+    }
+
+    #[test]
+    fn test_live_fill_leg2_skips_residual_below_venue_minimum() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), false);
+        let now = Utc::now();
+
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up-token".into(),
+            down_token: "down-token".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.40),
+            leg1_shares: 20,
+            leg1_fee: dec!(0.12),
+            leg1_time: now - chrono::Duration::seconds(60),
+            entry_obi: None,
+            protective_stop_armed_at: None,
+            wait_deadline: now + chrono::Duration::seconds(30),
+            leg2_price: Some(dec!(0.63)),
+            leg2_shares: Some(19),
+            leg2_fee: Some(dec!(0.17955)),
+            leg2_time: Some(now - chrono::Duration::seconds(5)),
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let action = adapter.fill_leg2(0, dec!(0.63), "forced_timeout", now);
+
+        assert!(
+            action.is_none(),
+            "live leg2 should not submit venue-invalid residual orders"
+        );
+        assert!(adapter.live_orders.is_empty());
+        assert!(!adapter.pending_leg2_positions.contains(&0));
+        assert_eq!(adapter.positions[0].leg2_shares, Some(19));
+    }
+
+    #[test]
+    fn test_final_window_high_confidence_still_forces_leg2() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.use_greeks = false;
+        adapter.config.backtest_config.min_leg2_delay_secs = 0;
+        adapter.config.backtest_config.min_time_remaining_secs = 0;
+        adapter
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(101.2), None, now));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now + chrono::Duration::seconds(10),
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.55)), Some(dec!(0.40))));
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.0825),
+            leg1_time: now - chrono::Duration::seconds(30),
+            entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
+            wait_deadline: now + chrono::Duration::seconds(30),
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_fee: None,
+            leg2_time: None,
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let actions = adapter.check_leg2_opportunities("BTCUSDT", now);
+
+        assert!(
+            actions.iter().any(|a| matches!(a, StrategyAction::LogEvent { .. })),
+            "final-window positions should close through leg2 instead of intentionally holding a single leg"
+        );
+        assert_eq!(adapter.closed_trades.len(), 1);
+        assert_eq!(adapter.closed_trades[0].exit_reason, "forced_final_window");
     }
 
     #[tokio::test]

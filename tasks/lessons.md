@@ -148,6 +148,12 @@
 - Pattern: Once live orders and L2 persistence are working, the next performance drag can still come from overly loose protective merge caps rather than execution bugs.
 - Rule: Before changing the order state machine again, break recent live/backtest results down by exit reason. If `protective_stop_loss` dominates losses while ordinary merges are profitable, tighten `max_leg1_loss`, `force_complete_threshold`, `protective_close_threshold`, and the post-open entry window before adding more execution complexity.
 
+- Pattern: Managed-runtime staggered-arb can diverge sharply from replay when a partial `LEG2` leaves a residual below Polymarket's venue minimum, because live will fail every submit while replay may keep assuming the remainder is fillable.
+- Rule: Apply the same Polymarket minimum-order rule (`>= 5 shares` and `>= $1` notional at the attempted price) to every live and replay `LEG2` submit. Never resubmit impossible residual sizes.
+
+- Pattern: A "smart" final-window single-leg hold can make the profile look profitable in isolated cases, but it silently changes a hedge strategy into a directional settlement bet and breaks live/replay comparability.
+- Rule: For hedge-disciplined staggered-arb profiles, final-window logic should always attempt an explicit `LEG2` close when thresholds allow. Single-leg settlement should be a residual fallback, not an intentional preferred path.
+
 - Pattern: A single overlap window with full PM + Binance L2 coverage can still be an unusually favorable regime and materially overstate staggered-arb edge.
 - Rule: Do not tune staggered-arb off one strong window like `2026-02-24` alone. Require at least one recent live-like window plus adjacent independent overlap windows before treating a parameter change as robust.
 

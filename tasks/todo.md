@@ -627,16 +627,24 @@ Stop the live strategy from drifting into unhedged directional behavior by elimi
 
 ## Tasks
 
-- [ ] Keep `tango-1-1` live strategy stopped until the fixes and validations are complete.
-- [ ] Add a failing live test showing `fill_leg2()` must not submit residual orders below the Polymarket minimum size/notional.
-- [ ] Add a failing live/backtest test showing final-window positions should force `LEG2` instead of holding single-leg to settlement.
-- [ ] Implement live residual-`LEG2` minimum-size handling so impossible remainders stop retrying and are finalized deterministically.
-- [ ] Remove or gate the current final-window single-leg settlement path for this staggered-arb profile.
-- [ ] Align replay/backtest close behavior with the hardened live rules.
-- [ ] Run targeted staggered-arb live/backtest tests and summarize whether the new profile is closer to the desired hedge discipline.
+- [x] Keep `tango-1-1` live strategy stopped until the fixes and validations are complete.
+- [x] Add a failing live test showing `fill_leg2()` must not submit residual orders below the Polymarket minimum size/notional.
+- [x] Add a failing live/backtest test showing final-window positions should force `LEG2` instead of holding single-leg to settlement.
+- [x] Implement live residual-`LEG2` minimum-size handling so impossible remainders stop retrying and are finalized deterministically.
+- [x] Remove or gate the current final-window single-leg settlement path for this staggered-arb profile.
+- [x] Align replay/backtest close behavior with the hardened live rules.
+- [x] Run targeted staggered-arb live/backtest tests and summarize whether the new profile is closer to the desired hedge discipline.
 
 ## Review
 
-- [ ] Verify the host remains stopped during implementation.
-- [ ] Verify there are no new `LEG2` retry storms for `shares=1`.
-- [ ] Verify final-window cycles now resolve through explicit hedge logic instead of opportunistic single-leg settlement.
+- [x] Verify the host remains stopped during implementation.
+- [x] Verify there are no new `LEG2` retry storms for `shares=1`.
+- [x] Verify final-window cycles now resolve through explicit hedge logic instead of opportunistic single-leg settlement.
+
+- [x] `tango-1-1` was stopped before implementation and remained `inactive (dead)` during the local fix cycle.
+- [x] Live `fill_leg2()` no longer submits venue-invalid residual orders; the new regression test proves a `1-share` remainder now returns no order action instead of another `SubmitOrder`.
+- [x] Backtest `fill_leg2()` now uses the same minimum-order rule, so replay no longer assumes a below-minimum residual can always be completed.
+- [x] Final-window logic no longer intentionally holds a single-leg when `p_win` is high; the adapter now always attempts an explicit `LEG2` close if the force threshold still allows it.
+- [x] Targeted verification passed:
+  - `cargo test strategy::staggered_arb_live::tests -- --nocapture`
+  - `cargo test strategy::staggered_arb_backtest::tests -- --nocapture`
