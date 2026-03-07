@@ -70,6 +70,7 @@ pub mod backtest_report;
 pub mod calculations;
 #[cfg(feature = "claimer_daemon")]
 pub mod claimer;
+pub mod composable_crypto;
 pub mod deribit_probability_arb;
 pub mod directional_backtest;
 pub mod dump_hedge;
@@ -248,6 +249,7 @@ pub use calculations::{
     calculate_cycle_pnl, check_leg2_condition, effective_sum_target, TradingCalculator,
     DEFAULT_SLIPPAGE, MIN_PROFIT_TARGET, POLYMARKET_FEE_RATE as CALC_FEE_RATE,
 };
+pub use composable_crypto::ComposableCryptoStrategy;
 pub use risk_mgmt::validation::{
     leg1_entry_chain, leg2_entry_chain, ExposureValidator, RiskStateValidator, SpreadValidator,
     SumTargetValidator, TimeRemainingValidator, ValidationChain, ValidationContext,

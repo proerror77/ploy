@@ -446,7 +446,16 @@ impl StrategyFactory {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing strategy.name"))?;
 
-        let strategy_id = format!("{}_{}", strategy_name, chrono::Utc::now().timestamp());
+        let strategy_id_base = if strategy_name == "composable_crypto" {
+            strategy_section
+                .get("plugin_id")
+                .and_then(|v| v.as_str())
+                .map(|plugin_id| plugin_id.replace(['.', '-'], "_"))
+                .unwrap_or_else(|| strategy_name.to_string())
+        } else {
+            strategy_name.to_string()
+        };
+        let strategy_id = format!("{}_{}", strategy_id_base, chrono::Utc::now().timestamp());
 
         match strategy_name {
             "momentum" => {
@@ -456,6 +465,14 @@ impl StrategyFactory {
                     dry_run,
                 )?;
                 Ok(Box::new(adapter))
+            }
+            "composable_crypto" => {
+                let strat = super::composable_crypto::ComposableCryptoStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
             }
             "split_arb" => {
                 let adapter = super::adapters::SplitArbStrategyAdapter::from_toml(
@@ -504,6 +521,12 @@ impl StrategyFactory {
     /// Get list of available strategy types
     pub fn available_strategies() -> Vec<StrategyInfo> {
         vec![
+            StrategyInfo {
+                name: "composable_crypto".to_string(),
+                description: "Composable crypto strategy runtime backed by plugin blocks"
+                    .to_string(),
+                config_template: "composable_crypto_default.toml".to_string(),
+            },
             StrategyInfo {
                 name: "momentum".to_string(),
                 description: "Trade crypto UP/DOWN based on CEX price momentum".to_string(),

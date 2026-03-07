@@ -36,6 +36,10 @@ use crate::platform::{
     AgentRiskParams, BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, Domain,
     MarketSelector, PlatformDataPlane, StrategyDeployment,
 };
+use crate::plugins::{
+    ComposableCryptoSpec, DeploymentState as PluginDeploymentState, PluginDefinition,
+    PluginDeployment, PluginKind, PluginSpec,
+};
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
@@ -57,14 +61,15 @@ use tokio::sync::mpsc;
 use tracing::instrument;
 
 use super::runtime_specs::{
-    build_event_edge_managed_runtime_spec, build_momentum_managed_runtime_spec,
-    build_nba_comeback_managed_runtime_spec, build_pattern_memory_managed_runtime_spec,
-    build_split_arb_managed_runtime_spec, ManagedStrategyBootstrapSpec,
+    build_event_edge_managed_runtime_spec, build_nba_comeback_managed_runtime_spec,
+    build_pattern_memory_managed_runtime_spec, build_split_arb_managed_runtime_spec,
+    ManagedStrategyBootstrapSpec,
 };
 #[cfg(test)]
 use super::runtime_specs::{
-    build_event_edge_runtime_config, build_momentum_runtime_config,
-    build_nba_comeback_runtime_config, build_split_arb_runtime_config,
+    build_event_edge_runtime_config, build_momentum_managed_runtime_spec,
+    build_momentum_runtime_config, build_nba_comeback_runtime_config,
+    build_split_arb_runtime_config,
 };
 use super::strategy_runtime::{
     run_managed_strategy_runtime as run_managed_strategy_runtime_module,
@@ -5144,20 +5149,40 @@ async fn spawn_canonical_crypto_strategy_runtimes(
             );
         } else {
             let strategy_agent_id = crypto_cfg.agent_id.clone();
-            let runtime_spec = build_momentum_managed_runtime_spec(momentum_symbols, crypto_cfg);
-            if let Err(e) = spawn_managed_strategy_runtime_spec(
-                agent_handles,
-                coordinator,
-                shutdown_tx,
-                runtime_spec,
-                crypto_cfg.risk_params.clone(),
-                dry_run,
-                pm_client.clone(),
-                pm_ws_url,
-                data_plane.clone(),
-                shared_pool.clone(),
-                account_id,
-            ) {
+            let runtime_spec = crate::plugins::projector::project_momentum_runtime_spec(
+                &PluginDefinition {
+                    plugin_id: "crypto.momentum.v1".to_string(),
+                    kind: PluginKind::ComposableCrypto,
+                    version: "v1".to_string(),
+                    domain: Domain::Crypto,
+                },
+                &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+                    signal_blocks: vec!["momentum".to_string()],
+                }),
+                &PluginDeployment {
+                    deployment_id: format!("deploy.crypto.momentum.{}", strategy_agent_id),
+                    plugin_id: "crypto.momentum.v1".to_string(),
+                    account_id: account_id.to_string(),
+                    state: PluginDeploymentState::Enabled,
+                },
+                momentum_symbols,
+                crypto_cfg,
+            );
+            if let Err(e) = runtime_spec.and_then(|runtime_spec| {
+                spawn_managed_strategy_runtime_spec(
+                    agent_handles,
+                    coordinator,
+                    shutdown_tx,
+                    runtime_spec,
+                    crypto_cfg.risk_params.clone(),
+                    dry_run,
+                    pm_client.clone(),
+                    pm_ws_url,
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    account_id,
+                )
+            }) {
                 warn!(
                     agent = crypto_cfg.agent_id,
                     error = %e,
@@ -6976,10 +7001,13 @@ mod tests {
 
         let spec = build_momentum_managed_runtime_spec(&symbols, &crypto_cfg);
 
-        assert_eq!(spec.strategy_label, "momentum");
+        assert_eq!(spec.strategy_label, "composable_crypto");
         assert_eq!(spec.agent_id, crypto_cfg.agent_id);
         assert_eq!(spec.domain, Domain::Crypto);
-        assert!(spec.strategy_config_toml.contains("name = \"momentum\""));
+        assert!(spec
+            .strategy_config_toml
+            .contains("name = \"composable_crypto\""));
+        assert!(spec.strategy_config_toml.contains("[composable_crypto]"));
     }
 
     #[test]
@@ -7012,12 +7040,15 @@ mod tests {
         )
         .expect("project momentum runtime spec");
 
-        assert_eq!(projected.strategy_label, "momentum");
+        assert_eq!(projected.strategy_label, "composable_crypto");
         assert_eq!(projected.agent_id, crypto_cfg.agent_id);
         assert_eq!(projected.domain, Domain::Crypto);
         assert!(projected
             .strategy_config_toml
-            .contains("name = \"momentum\""));
+            .contains("name = \"composable_crypto\""));
+        assert!(projected
+            .strategy_config_toml
+            .contains("[composable_crypto]"));
     }
 
     #[test]
@@ -7055,6 +7086,48 @@ mod tests {
         assert_eq!(managed.agent_id, projected.agent_id);
         assert_eq!(managed.domain, projected.domain);
         assert_eq!(managed.strategy_config_toml, projected.strategy_config_toml);
+    }
+
+    #[test]
+    fn project_momentum_plugin_runtime_spec_projects_composable_crypto_launch() {
+        let symbols = vec!["BTCUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+        let definition = crate::plugins::PluginDefinition {
+            plugin_id: "crypto.momentum.v1".to_string(),
+            kind: crate::plugins::PluginKind::ComposableCrypto,
+            version: "v1".to_string(),
+            domain: Domain::Crypto,
+        };
+        let spec =
+            crate::plugins::PluginSpec::ComposableCrypto(crate::plugins::ComposableCryptoSpec {
+                signal_blocks: vec!["momentum".to_string()],
+            });
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.crypto.momentum.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+
+        let projected = crate::plugins::projector::project_momentum_runtime_spec(
+            &definition,
+            &spec,
+            &deployment,
+            &symbols,
+            &crypto_cfg,
+        )
+        .expect("project momentum runtime spec");
+
+        assert_eq!(projected.strategy_label, "composable_crypto");
+        assert!(projected
+            .strategy_config_toml
+            .contains("name = \"composable_crypto\""));
+        assert!(projected
+            .strategy_config_toml
+            .contains("[composable_crypto]"));
+        assert!(projected
+            .strategy_config_toml
+            .contains("signal_blocks = [\"momentum\"]"));
     }
 
     #[test]

@@ -84,6 +84,87 @@ fn require_composable_crypto_spec<'a>(
     }
 }
 
+fn build_composable_crypto_runtime_config(
+    definition: &PluginDefinition,
+    spec: &ComposableCryptoSpec,
+    base_config_toml: String,
+) -> Result<String> {
+    let mut config: toml::Value = toml::from_str(&base_config_toml).map_err(|err| {
+        PloyError::Validation(format!(
+            "plugin {} produced invalid composable base config: {err}",
+            definition.plugin_id
+        ))
+    })?;
+    let root = config.as_table_mut().ok_or_else(|| {
+        PloyError::Validation(format!(
+            "plugin {} composable runtime config must be a TOML table",
+            definition.plugin_id
+        ))
+    })?;
+
+    let strategy = root
+        .entry("strategy")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or_else(|| {
+            PloyError::Validation(format!(
+                "plugin {} runtime [strategy] section must be a TOML table",
+                definition.plugin_id
+            ))
+        })?;
+    strategy.insert(
+        "name".to_string(),
+        toml::Value::String("composable_crypto".to_string()),
+    );
+    strategy.insert(
+        "plugin_id".to_string(),
+        toml::Value::String(definition.plugin_id.clone()),
+    );
+
+    let mut composable = toml::map::Map::new();
+    composable.insert(
+        "signal_blocks".to_string(),
+        toml::Value::Array(
+            spec.signal_blocks
+                .iter()
+                .cloned()
+                .map(toml::Value::String)
+                .collect(),
+        ),
+    );
+    composable.insert("filters".to_string(), block_array(&["volatility_gate"]));
+    composable.insert("entry".to_string(), block_array(&["marketable_limit"]));
+    composable.insert("exit".to_string(), block_array(&["trailing_stop"]));
+    composable.insert("sizing".to_string(), block_array(&["fixed_shares"]));
+    root.insert(
+        "composable_crypto".to_string(),
+        toml::Value::Table(composable),
+    );
+
+    toml::to_string(&config).map_err(|err| {
+        PloyError::Validation(format!(
+            "failed to serialize composable runtime config for plugin {}: {err}",
+            definition.plugin_id
+        ))
+    })
+}
+
+fn block_array(types: &[&str]) -> toml::Value {
+    toml::Value::Array(
+        types
+            .iter()
+            .map(|block_type| {
+                let mut table = toml::map::Map::new();
+                table.insert(
+                    "type".to_string(),
+                    toml::Value::String((*block_type).to_string()),
+                );
+                toml::Value::Table(table)
+            })
+            .collect(),
+    )
+}
+
 fn require_registered_strategy_spec<'a>(
     definition: &PluginDefinition,
     spec: &'a PluginSpec,
@@ -120,13 +201,18 @@ pub(crate) fn project_momentum_runtime_spec(
         PluginKind::ComposableCrypto,
         Domain::Crypto,
     )?;
-    let _ = require_composable_crypto_spec(definition, spec, "momentum")?;
+    let inner = require_composable_crypto_spec(definition, spec, "momentum")?;
+    let strategy_config_toml = build_composable_crypto_runtime_config(
+        definition,
+        inner,
+        build_momentum_runtime_config(symbols, crypto_cfg),
+    )?;
 
     Ok(ProjectedRuntimeSpec {
-        strategy_label: "momentum".to_string(),
+        strategy_label: "composable_crypto".to_string(),
         agent_id: crypto_cfg.agent_id.clone(),
         domain: Domain::Crypto,
-        strategy_config_toml: build_momentum_runtime_config(symbols, crypto_cfg),
+        strategy_config_toml,
     })
 }
 
