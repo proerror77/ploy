@@ -28,7 +28,8 @@ Key rule: OpenClaw does not sit in the synchronous per-order decision path for H
 Compatibility live runtimes are now opt-in only:
 
 - `crypto_lob_ml` / `crypto_rl_policy` require `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true`
-- Grok-enabled legacy `nba_comeback` fallback requires `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true`
+
+Sports and politics now start only through the canonical managed `Strategy` runtime.
 
 Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
 

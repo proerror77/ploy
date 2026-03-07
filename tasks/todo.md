@@ -108,6 +108,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Write the retirement plan at `docs/plans/2026-03-07-legacy-runtime-retirement-plan.md`.
 - [x] Freeze the exact 2026-03-08 retirement inventory in docs and todo.
 - [x] Execute Task 2 from the retirement plan: move runtime config ownership out of legacy agent files.
+- [x] Execute Task 3 from the retirement plan: remove politics and sports compatibility runtimes.
 
 ## Review
 
@@ -115,6 +116,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] The two remaining `STAG-ARB` items are operational acceptance checks, not blockers for writing the retirement plan.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
+- [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.
 
 ## Retirement inventory snapshot (2026-03-08)
 
@@ -152,6 +154,8 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - 2026-03-08: Re-ran the retirement grep inventory in a fresh worktree and split remaining legacy surfaces into delete-now docs, config-extraction blockers, and RL/CLI-gated compatibility layers.
 - 2026-03-08: Moved `CryptoTradingConfig`, `CryptoEntryMode`, `PoliticsTradingConfig`, and `SportsTradingConfig` into `src/config.rs`; `bootstrap`, `runtime_specs`, and `plugins/projector` now import neutral config types directly.
 - 2026-03-08: Verified Task 2 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
+- 2026-03-08: Removed `src/agents/politics.rs` and `src/agents/sports.rs`, deleted the sports compatibility env gate / fallback path from `bootstrap`, and made Grok-enabled `nba_comeback` project through the canonical runtime like other sports deployments.
+- 2026-03-08: Verified Task 3 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
 
 ---
 

@@ -313,7 +313,7 @@ pub(crate) fn project_nba_comeback_runtime_spec(
     database_url: &str,
     sports_cfg: &SportsTradingConfig,
     nba_cfg: &NbaComebackConfig,
-) -> Result<Option<ProjectedRuntimeSpec>> {
+) -> Result<ProjectedRuntimeSpec> {
     validate_plugin_identity(
         definition,
         deployment,
@@ -323,11 +323,7 @@ pub(crate) fn project_nba_comeback_runtime_spec(
     )?;
     let _ = require_registered_strategy_spec(definition, spec, "nba_comeback")?;
 
-    if nba_cfg.grok_enabled {
-        return Ok(None);
-    }
-
-    Ok(Some(ProjectedRuntimeSpec {
+    Ok(ProjectedRuntimeSpec {
         strategy_label: "nba_comeback".to_string(),
         agent_id: sports_cfg.agent_id.clone(),
         domain: Domain::Sports,
@@ -335,7 +331,7 @@ pub(crate) fn project_nba_comeback_runtime_spec(
             definition,
             build_nba_comeback_runtime_config(database_url, nba_cfg),
         )?,
-    }))
+    })
 }
 
 pub(crate) fn project_split_arb_runtime_spec(

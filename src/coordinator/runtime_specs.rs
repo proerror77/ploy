@@ -571,7 +571,7 @@ pub(crate) fn build_nba_comeback_managed_runtime_spec(
     database_url: &str,
     sports_cfg: &SportsTradingConfig,
     nba_cfg: &NbaComebackConfig,
-) -> Option<ManagedStrategyBootstrapSpec> {
+) -> ManagedStrategyBootstrapSpec {
     projector::project_nba_comeback_runtime_spec(
         &plugin_definition(
             "sports.nba_comeback.v1",

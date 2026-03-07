@@ -10,6 +10,4 @@ pub mod crypto_lob_ml;
 pub mod crypto_rl_policy;
 pub mod governance_context;
 pub mod openclaw;
-pub mod politics;
-pub mod sports;
 pub mod traits;

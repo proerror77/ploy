@@ -21,9 +21,7 @@ use crate::agents::crypto_lob_ml::{
 use crate::agents::crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::agents::governance_context::GovernanceContext;
 use crate::agents::openclaw::{OpenClawAgent, OpenClawConfig};
-use crate::agents::sports::SportsTradingAgent;
 use crate::agents::traits::{GovernanceAgent, TradingAgent};
-use crate::ai_clients::PolymarketSportsClient;
 use crate::config::{
     AppConfig, CryptoEntryMode, CryptoTradingConfig, PoliticsTradingConfig, SportsTradingConfig,
 };
@@ -4874,77 +4872,6 @@ async fn start_sports_market_data_support(
     Ok(pool)
 }
 
-fn spawn_legacy_nba_comeback_agent(
-    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
-    coordinator: &mut Coordinator,
-    handle: &CoordinatorHandle,
-    sports_cfg: SportsTradingConfig,
-    nba_cfg: crate::config::NbaComebackConfig,
-    pool: PgPool,
-) {
-    warn!(
-        agent = %sports_cfg.agent_id,
-        "grok-enabled nba_comeback deployment remains on the legacy sports agent path until canonical strategy runtime absorbs Grok behavior"
-    );
-
-    let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
-    let stats = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-        pool.clone(),
-        nba_cfg.season.clone(),
-    );
-    let core = crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
-    let risk_params = sports_cfg.risk_params.clone();
-    let mut agent = SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
-
-    match PolymarketSportsClient::new() {
-        Ok(pm_sports) => {
-            agent = agent.with_pm_sports(pm_sports);
-        }
-        Err(e) => {
-            warn!(
-                agent = sports_cfg.agent_id,
-                error = %e,
-                "failed to initialize PolymarketSportsClient; continuing without PM market observations"
-            );
-        }
-    }
-
-    if nba_cfg.grok_enabled {
-        match crate::ai_clients::grok::GrokClient::from_env() {
-            Ok(grok) if grok.is_configured() => {
-                info!(
-                    agent = sports_cfg.agent_id,
-                    "grok live search enabled for sports agent"
-                );
-                agent = agent.with_grok(grok);
-            }
-            Ok(_) => {
-                warn!(
-                    agent = sports_cfg.agent_id,
-                    "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    agent = sports_cfg.agent_id,
-                    error = %e,
-                    "failed to initialize GrokClient; continuing without Grok"
-                );
-            }
-        }
-    }
-
-    spawn_compat_trading_agent_task(
-        agent_handles,
-        coordinator,
-        handle,
-        agent,
-        risk_params,
-        "sports",
-    );
-    info!("sports agent spawned");
-}
-
 fn spawn_openclaw_agent(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     coordinator: &mut Coordinator,
@@ -5114,10 +5041,6 @@ fn maybe_spawn_compat_crypto_rl_policy_agent(
 
 fn compat_crypto_runtimes_enabled() -> bool {
     env_bool("PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES", false)
-}
-
-fn compat_sports_runtimes_enabled() -> bool {
-    env_bool("PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES", false)
 }
 
 fn builtin_runtime_plugin_definition(plugin_id: &str) -> Result<PluginDefinition> {
@@ -5412,7 +5335,6 @@ async fn start_sports_strategy_runtime(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     coordinator: &mut Coordinator,
     shutdown_tx: &broadcast::Sender<()>,
-    handle: &CoordinatorHandle,
     app_config: &AppConfig,
     shared_pool: Option<PgPool>,
     freshness: Arc<crate::platform::DataPlaneFreshness>,
@@ -5421,7 +5343,6 @@ async fn start_sports_strategy_runtime(
     dry_run: bool,
     sports_cfg: SportsTradingConfig,
     nba_cfg: &crate::config::NbaComebackConfig,
-    compat_sports_runtimes_enabled: bool,
 ) -> Result<()> {
     let registry = PluginRegistry::builtin_runtime_registry()?;
     let definition = registry
@@ -5441,45 +5362,26 @@ async fn start_sports_strategy_runtime(
         nba_cfg,
     )?;
 
-    if managed_runtime_spec.is_some() || compat_sports_runtimes_enabled {
-        let pool =
-            start_sports_market_data_support(shared_pool, app_config, freshness, &sports_cfg)
-                .await?;
+    let pool = start_sports_market_data_support(shared_pool, app_config, freshness, &sports_cfg)
+        .await?;
 
-        if let Some(runtime_spec) = managed_runtime_spec {
-            spawn_managed_strategy_runtime_spec(
-                agent_handles,
-                coordinator,
-                shutdown_tx,
-                runtime_spec,
-                sports_cfg.risk_params.clone(),
-                dry_run,
-                pm_client,
-                &app_config.market.ws_url,
-                None,
-                Some(pool.clone()),
-                account_id,
-            )?;
-            info!(
-                agent = %sports_cfg.agent_id,
-                "sports nba_comeback strategy runtime spawned"
-            );
-        } else {
-            spawn_legacy_nba_comeback_agent(
-                agent_handles,
-                coordinator,
-                handle,
-                sports_cfg.clone(),
-                nba_cfg.clone(),
-                pool,
-            );
-        }
-    } else {
-        warn!(
-            agent = %sports_cfg.agent_id,
-            "grok-enabled nba_comeback compatibility runtime disabled; set PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true to allow temporary startup or disable grok_enabled for canonical runtime"
-        );
-    }
+    spawn_managed_strategy_runtime_spec(
+        agent_handles,
+        coordinator,
+        shutdown_tx,
+        managed_runtime_spec,
+        sports_cfg.risk_params.clone(),
+        dry_run,
+        pm_client,
+        &app_config.market.ws_url,
+        None,
+        Some(pool.clone()),
+        account_id,
+    )?;
+    info!(
+        agent = %sports_cfg.agent_id,
+        "sports nba_comeback strategy runtime spawned"
+    );
 
     Ok(())
 }
@@ -5591,7 +5493,6 @@ pub async fn start_platform(
     let runtime_crypto_targets =
         collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
     let compat_crypto_runtimes_enabled = compat_crypto_runtimes_enabled();
-    let compat_sports_runtimes_enabled = compat_sports_runtimes_enabled();
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
@@ -5606,7 +5507,6 @@ pub async fn start_platform(
         crypto_lob_ml = config.enable_crypto_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         compat_crypto_runtimes = compat_crypto_runtimes_enabled,
-        compat_sports_runtimes = compat_sports_runtimes_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
@@ -6761,7 +6661,6 @@ pub async fn start_platform(
                 &mut agent_handles,
                 &mut coordinator,
                 &shutdown_tx,
-                &handle,
                 app_config,
                 shared_pool.clone(),
                 Arc::clone(&freshness),
@@ -6770,7 +6669,6 @@ pub async fn start_platform(
                 config.dry_run,
                 config.sports.clone(),
                 nba_cfg,
-                compat_sports_runtimes_enabled,
             )
             .await?;
         }
@@ -7303,8 +7201,7 @@ mod tests {
             &sports_cfg,
             &cfg,
         )
-        .expect("project nba runtime spec")
-        .expect("managed nba runtime spec");
+        .expect("project nba runtime spec");
 
         assert!(projected
             .strategy_config_toml
@@ -7517,8 +7414,7 @@ mod tests {
             "postgres://db.example.com/ploy",
             &sports_cfg,
             &nba_cfg,
-        )
-        .expect("managed nba runtime spec");
+        );
 
         assert_eq!(spec.strategy_label, "nba_comeback");
         assert_eq!(spec.agent_id, sports_cfg.agent_id);
@@ -7535,19 +7431,19 @@ mod tests {
     }
 
     #[test]
-    fn build_nba_comeback_managed_runtime_spec_defers_grok_enabled_configs() {
+    fn build_nba_comeback_managed_runtime_spec_projects_grok_enabled_configs() {
         let sports_cfg = SportsTradingConfig::default();
         let nba_cfg = sample_nba_comeback_config(true);
 
-        assert!(
-            build_nba_comeback_managed_runtime_spec(
-                "postgres://db.example.com/ploy",
-                &sports_cfg,
-                &nba_cfg,
-            )
-            .is_none(),
-            "grok-enabled sports configs should stay on the legacy agent path until the canonical strategy bridge absorbs Grok behavior"
+        let spec = build_nba_comeback_managed_runtime_spec(
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &nba_cfg,
         );
+
+        assert_eq!(spec.strategy_label, "nba_comeback");
+        assert!(spec.strategy_config_toml.contains("[grok]"));
+        assert!(spec.strategy_config_toml.contains("enabled = true"));
     }
 
     #[test]
@@ -7572,8 +7468,7 @@ mod tests {
             "postgres://db.example.com/ploy",
             &sports_cfg,
             &nba_cfg,
-        )
-        .expect("project nba comeback managed runtime spec");
+        );
         assert_eq!(nba.strategy_label, "nba_comeback");
     }
 
@@ -7985,35 +7880,4 @@ symbols = ["SOLUSDT"]
         }
     }
 
-    #[test]
-    fn compat_sports_runtimes_default_to_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let key = "PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES";
-        let prev = std::env::var(key).ok();
-
-        set_env(key, None);
-        assert!(!compat_sports_runtimes_enabled());
-
-        match prev.as_deref() {
-            Some(v) => set_env(key, Some(v)),
-            None => set_env(key, None),
-        }
-    }
-
-    #[test]
-    fn compat_sports_runtimes_can_be_enabled_explicitly() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let key = "PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES";
-        let prev = std::env::var(key).ok();
-
-        set_env(key, Some("true"));
-        assert!(compat_sports_runtimes_enabled());
-        set_env(key, Some("false"));
-        assert!(!compat_sports_runtimes_enabled());
-
-        match prev.as_deref() {
-            Some(v) => set_env(key, Some(v)),
-            None => set_env(key, None),
-        }
-    }
 }
