@@ -46,7 +46,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Approve the target plugin-platform design with composable crypto plugins and registered event/sports plugins.
 - [x] Save the design doc to `docs/plans/2026-03-07-strategy-plugin-platform-design.md`.
 - [x] Save the implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
-- [ ] Execute Task 1 from the implementation plan: add the plugin object model and registry skeleton.
+- [x] Execute Task 1 from the implementation plan: add the plugin object model and registry skeleton.
 
 ## Review
 
@@ -63,6 +63,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Identified two structural missing planes in the current repo: a formal `plugins/` layer and a formal `account/` layer.
 - 2026-03-07: Saved design doc to `docs/plans/2026-03-07-strategy-plugin-platform-design.md`.
 - 2026-03-07: Saved implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
+- 2026-03-07: Completed Task 1 by adding `src/plugins/*`, a file-backed `PluginRegistry`, and `config/plugins/README.md`.
 
 ---
 

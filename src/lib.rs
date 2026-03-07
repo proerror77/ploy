@@ -16,6 +16,7 @@ pub mod exchange;
 pub mod ml;
 pub mod persistence;
 pub mod platform;
+pub mod plugins;
 pub mod safety;
 pub mod services;
 pub mod signing;
