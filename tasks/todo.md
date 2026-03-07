@@ -247,14 +247,57 @@ Find why the ETH 5-minute Up/Down order pair appears to have been bought but is 
 
 ## Tasks
 
-- [ ] Confirm live host services and identify the components responsible for order tracking and claim/settlement.
-- [ ] Collect host evidence for the 2026-03-07 01:05-01:10 CST window (ETH Up/Down 2026-03-06 12:05PM-12:10PM ET).
-- [ ] Determine whether the order disappeared because of fill/cancel behavior, event-expiry handling, local state loss, or unresolved claim processing.
-- [ ] Summarize root cause and required fix or operational follow-up.
+- [x] Confirm live host services and identify the components responsible for order tracking and claim/settlement.
+- [x] Collect host evidence for the 2026-03-07 01:05-01:10 CST window (ETH Up/Down 2026-03-06 12:05PM-12:10PM ET).
+- [x] Determine whether the order disappeared because of fill/cancel behavior, event-expiry handling, local state loss, or unresolved claim processing.
+- [x] Summarize root cause and required fix or operational follow-up.
 
 ## Review
 
-- [ ] Root cause is supported by host evidence, not inference alone.
+- [x] Root cause is supported by host evidence, not inference alone.
+
+## Findings
+
+---
+
+# Crypto 5m Repricing V1 Framework (2026-03-07)
+
+## Goal
+Ship a backtestable, live-ready v1 framework for Polymarket 5-minute crypto repricing trades:
+enter during the early repricing window, use fair-gap plus Binance L2 direction as the baseline
+signal, and force exits before the last 45 seconds.
+
+## Tasks
+
+- [x] Review existing replay/live strategy modules, data feeds, and fee/execution helpers.
+- [x] Write the design baseline in `docs/plans/2026-03-07-crypto-5m-repricing-v1-design.md`.
+- [x] Write the implementation plan in `docs/plans/2026-03-07-crypto-5m-repricing-v1.md`.
+- [x] Add a dedicated pure 5-minute crypto repricing core module without mutating the current directional momentum semantics.
+- [x] Add targeted core tests for time-window gating, cost-aware entry filters, and direction confirmation.
+- [ ] Add a thin replay/backtest harness on top of the core module.
+- [ ] Wire a CLI backtest entrypoint after the thin harness is accepted.
+- [ ] Run targeted replay validation once the thin harness exists.
+
+## Review
+
+- [x] Confirm the current step is only the pure decision core, not the old backtest/runtime shell.
+- [x] Confirm the core boundary is reusable for future replay/live adapters.
+- [ ] Confirm replay PnL includes Polymarket crypto taker fees and simulated execution frictions once the thin harness is added.
+
+## Progress notes
+
+- 2026-03-07: Started with a broader framework cut, then trimmed back to core-first after user feedback that the old repo shell was making the code too heavy.
+- 2026-03-07: Kept only `src/strategy/crypto_repricing.rs` as the reusable decision layer; deferred replay/CLI wiring.
+- 2026-03-07: Verified core unit tests with `CARGO_TARGET_DIR=/tmp/ploy-core-target cargo test crypto_repricing::tests -- --nocapture` (5 passed).
+
+- 2026-03-07: `tango-1-1` `ploy-platform.service` restarted at `2026-03-07 01:04:50 CST`, just before the target ETH `12:05PM-12:10PM ET` window opened.
+- 2026-03-07: PM/host evidence shows both legs really matched for condition `0xaa911a860983c1c2233029a67a7565e679ea1c9270b8451156ee63a2d812e8ad` (`Ethereum Up or Down - March 6, 12:05PM-12:10PM ET`):
+  - `LEG1 FILLED ETHUSDT DOWN @ 55.00¢ (20 shares)` with order `0x790a...3383`
+  - `LEG2` order `0x4abf...cce3` also matched on PM for the `Up` side.
+- 2026-03-07: PM Gamma still reported this market as `active=true`, `closed=false` when checked after the fills, so PM had not yet published official settlement state. That explains why the user could see buys but no settlement info.
+- 2026-03-07: The account-level auto-claimer later detected both outcome positions as redeemable under the same condition and sent a relayer redeem (`tx=0xf3b9...2737`) at `2026-03-06T17:30:47Z`.
+- 2026-03-07: The local Postgres `orders`, `fills`, and `positions` tables returned no matching rows for these PM order/token IDs, so this live path currently leaves no DB-backed settlement trail for the pair.
+- 2026-03-07: Most likely user-visible behavior is "paired position was merge/redeem processed" rather than "market settlement record appeared". A follow-up product/code review is warranted because `src/strategy/claimer.rs` currently collapses both sides by `condition_id` and redeems `[1,2]`, which can make PM UI behavior look like disappearance without a settlement line item.
 
 ---
 
@@ -435,7 +478,57 @@ Find the exact `tango-1-1` trading-host service names, log locations, and the re
 
 ## Tasks
 
-- [ ] Locate exact `systemd` service names and any host/logging paths referenced for `tango-1-1`.
-- [ ] Search docs, tasks, and scripts for Polymarket claim/settlement and host-debug guidance.
-- [ ] Search runtime code for claimers, expiry settlement, reconciliation, and order/archive flows relevant to disappearing positions.
-- [ ] Summarize concise debug-oriented findings with exact file references.
+- [x] Locate exact `systemd` service names and any host/logging paths referenced for `tango-1-1`.
+- [x] Search docs, tasks, and scripts for Polymarket claim/settlement and host-debug guidance.
+- [x] Search runtime code for claimers, expiry settlement, reconciliation, and order/archive flows relevant to disappearing positions.
+- [x] Summarize concise debug-oriented findings with exact file references.
+
+## Review
+
+- [x] Current host evidence in `tasks/todo.md` points to `ploy-platform.service` on `tango-1-1`, while deploy/control code still supports legacy `ploy` / `ploy-platform-live` naming.
+- [x] Primary log surfaces are `journalctl -u <unit>` plus file logging under `/opt/ploy/logs/ploy.log` (or `PLOY_LOG_DIR` / `/var/log/ploy` fallback).
+- [x] Wallet claim/redeem path lives in `src/strategy/claimer.rs` and is started as an in-process account-level daemon from platform bootstrap; `pm_token_settlements` is separate read-only market-resolution persistence for data/labels.
+- [x] Main “disappearing order” debug surfaces are exchange truth (`pm.get_positions`, `pm.get_open_orders`), DB truth (`orders`, `positions`, `signal_history`), and `staggered_arb_live` event-expiry/orphan-order reconciliation paths.
+
+---
+
+# Staggered Arb Dynamic Close Caps (2026-03-07)
+
+## Goal
+Replace the static `force_complete_threshold` / `protective_close_threshold` gates with urgency-aware dynamic caps so early protective closes stay stricter while late forced closes can still cap risk near expiry.
+
+## Tasks
+
+- [x] Add shared live/backtest helpers that derive dynamic protective and forced close thresholds from time remaining and configured cap.
+- [x] Update live `LEG2` decision paths to use dynamic thresholds instead of a flat `1.08` gate.
+- [x] Update replay logic and targeted tests so live/backtest stay aligned.
+- [x] Re-run staggered-arb backtests on the recent live-like window and one adjacent overlap window to verify whether the dynamic cap improves trade quality.
+
+## Review
+
+- [x] Static `force_complete_threshold` / `protective_close_threshold` are now treated as final caps, while early-window forced/protective closes use stricter adaptive thresholds derived from time remaining.
+- [x] Recent live-like replay improved from `39 trades / +13.46 / PF 1.97 / 9 aborts` under the static `1.08` gate to `39 trades / +20.66 / PF 3.69 / 5 aborts` with dynamic caps.
+- [x] Adjacent overlap validation on `2026-02-26T00:00:00Z..06:00:00Z` also improved from `20 trades / +31.42 / PF 19.61` to `20 trades / +32.89 / PF 103.44`, with largest loss shrinking from `-1.37` to `-0.32`.
+
+---
+
+# Staggered Arb OBI Signal Strengthening (2026-03-07)
+
+## Goal
+Upgrade staggered-arb from a fixed-threshold OBI confirmation gate to a stronger OBI regime that uses persistence for entry, unlocks slightly more aggressive entry only for strong persistent signals, and delays protective stop merges when OBI/displacement/Greeks still support the original leg1 thesis.
+
+## Tasks
+
+- [x] Add shared OBI helper logic for direction confirmation, persistence, strong-signal entry bonuses, and OBI decay/flip support checks.
+- [x] Apply the stronger OBI entry/stop logic to both live and replay code paths.
+- [x] Add targeted tests for strong-OBI entry bonuses and supportive-OBI stop-loss suppression.
+- [x] Re-run the recent live-like replay window and the adjacent `2026-02-26` overlap window to see whether trade count or PnL improves.
+
+## Review
+
+- [x] New OBI logic is in place: strong/persistent OBI can slightly relax direction threshold, widen the leg1 price cap, and extend the 15m opening window; supportive OBI can delay protective stop-loss merges.
+- [x] Unit coverage passed: `staggered_arb_backtest` `18/18`, `staggered_arb_live` `35/35`.
+- [x] Replay impact on the two primary validation windows was neutral rather than positive:
+  - recent live-like window stayed at `39 trades / +20.65 / PF 3.69 / 5 aborts`
+  - `2026-02-26T00:00:00Z..06:00:00Z` stayed at `20 trades / +32.89 / PF 103.44`
+- [x] Conclusion: the stronger OBI branch is logically sound and tested, but these windows were not bottlenecked by the old fixed OBI gate; the next marginal improvement is more likely to come from signal-persistence exits or smarter `LEG2` execution than from further loosening OBI entry alone.
