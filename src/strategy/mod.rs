@@ -47,6 +47,8 @@ pub use staggered_arb_live::StaggeredArbAdapter;
 
 pub mod core;
 pub mod crypto;
+pub mod crypto_repricing;
+pub mod crypto_repricing_replay;
 pub mod nba_comeback;
 pub mod pattern_memory;
 pub mod sports;
@@ -149,6 +151,16 @@ pub use backtest_recorder::{
     BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, PgBacktestRecorder, SignalType,
 };
 pub use backtest_report::{load_report, BacktestReport, Suggestion, SuggestionPriority};
+pub use crypto_repricing::{
+    cost_buffer, direction_score, estimate_remaining_fair_value, evaluate_entry_candidate,
+    flow_shock, realized_variance, BinanceFeatureSnapshot, CryptoRepricingConfig,
+    CryptoRepricingDecision, EntryRejectReason, ExecutionUrgency, FairValueEstimate, QuotePair,
+    QuoteWithDepth, RepricingSide, RepricingTradePhase, VolatilityCoefficients,
+};
+pub use crypto_repricing_replay::{
+    CryptoRepricingReplayConfig, CryptoRepricingReplayEngine, CryptoRepricingReplayResults,
+    CryptoRepricingReplayTrade,
+};
 pub use deribit_probability_arb::{
     binary_call_prob_forward, interpolate_iv_linear, net_edge, norm_cdf, parse_polymarket_question,
     run_deribit_probability_arb, DeribitProbabilityArbConfig, ParsedPolymarketQuestion,

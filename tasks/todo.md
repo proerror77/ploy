@@ -274,21 +274,23 @@ signal, and force exits before the last 45 seconds.
 - [x] Write the implementation plan in `docs/plans/2026-03-07-crypto-5m-repricing-v1.md`.
 - [x] Add a dedicated pure 5-minute crypto repricing core module without mutating the current directional momentum semantics.
 - [x] Add targeted core tests for time-window gating, cost-aware entry filters, and direction confirmation.
-- [ ] Add a thin replay/backtest harness on top of the core module.
+- [x] Add a thin replay/backtest harness on top of the core module.
 - [ ] Wire a CLI backtest entrypoint after the thin harness is accepted.
-- [ ] Run targeted replay validation once the thin harness exists.
+- [x] Run targeted replay validation once the thin harness exists.
 
 ## Review
 
 - [x] Confirm the current step is only the pure decision core, not the old backtest/runtime shell.
 - [x] Confirm the core boundary is reusable for future replay/live adapters.
-- [ ] Confirm replay PnL includes Polymarket crypto taker fees and simulated execution frictions once the thin harness is added.
+- [x] Confirm replay PnL includes Polymarket crypto taker fees and observed quote spread via bid/ask execution; a separate maker fill / market-impact simulator is still intentionally out of scope for this thin harness.
 
 ## Progress notes
 
 - 2026-03-07: Started with a broader framework cut, then trimmed back to core-first after user feedback that the old repo shell was making the code too heavy.
 - 2026-03-07: Kept only `src/strategy/crypto_repricing.rs` as the reusable decision layer; deferred replay/CLI wiring.
 - 2026-03-07: Verified core unit tests with `CARGO_TARGET_DIR=/tmp/ploy-core-target cargo test crypto_repricing::tests -- --nocapture` (5 passed).
+- 2026-03-07: Added `src/strategy/crypto_repricing_replay.rs` as a thin `HistoricalFeed` consumer with no recorder, no legacy `BacktestResults`, and no generic `ExecutionSimulator`.
+- 2026-03-07: Verified combined core + replay tests with `CARGO_TARGET_DIR=/tmp/ploy-core-target cargo test crypto_repricing -- --nocapture` (8 passed).
 
 - 2026-03-07: `tango-1-1` `ploy-platform.service` restarted at `2026-03-07 01:04:50 CST`, just before the target ETH `12:05PM-12:10PM ET` window opened.
 - 2026-03-07: PM/host evidence shows both legs really matched for condition `0xaa911a860983c1c2233029a67a7565e679ea1c9270b8451156ee63a2d812e8ad` (`Ethereum Up or Down - March 6, 12:05PM-12:10PM ET`):

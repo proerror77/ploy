@@ -106,6 +106,7 @@ struct PaperPosition {
     leg1_fee: Decimal,
     leg1_time: DateTime<Utc>,
     entry_obi: Option<f64>,
+    protective_stop_armed_at: Option<DateTime<Utc>>,
     wait_deadline: DateTime<Utc>,
     leg2_price: Option<Decimal>,
     leg2_shares: Option<u64>,
@@ -952,6 +953,7 @@ impl StaggeredArbAdapter {
             leg1_fee,
             leg1_time: ts,
             entry_obi: track.entry_obi,
+            protective_stop_armed_at: None,
             wait_deadline,
             leg2_price: None,
             leg2_shares: None,
@@ -1491,6 +1493,7 @@ impl StaggeredArbAdapter {
                 leg1_fee,
                 leg1_time: ts,
                 entry_obi: Some(obi),
+                protective_stop_armed_at: None,
                 wait_deadline,
                 leg2_price: None,
                 leg2_shares: None,
@@ -1581,6 +1584,7 @@ impl StaggeredArbAdapter {
 
         // Collect indices + actions (can't mutate while iterating)
         let mut leg2_fills: Vec<(usize, Decimal, String)> = Vec::new();
+        let mut protective_arm_updates: Vec<(usize, Option<DateTime<Utc>>)> = Vec::new();
         let mut saw_event_quotes = false;
 
         for (i, pos) in self.positions.iter().enumerate() {
@@ -1738,11 +1742,27 @@ impl StaggeredArbAdapter {
                             current_obi,
                         );
                         if obi_supportive && displacement_supportive && greeks_supportive {
+                            protective_arm_updates.push((i, None));
                             *leg2_skip_batch
                                 .entry("protective_signal_still_supportive")
                                 .or_default() += 1;
                             continue;
                         }
+                        let hard_signal_broken = bc
+                            .obi_signal_hard_flipped(pos.leg1_direction, current_obi)
+                            || (!displacement_supportive && !greeks_supportive);
+                        let armed_at = pos.protective_stop_armed_at.unwrap_or(ts);
+                        let recovery_elapsed = (ts - armed_at).num_seconds();
+                        let recovery_expired = bc.protective_recovery_window_secs == 0
+                            || recovery_elapsed >= bc.protective_recovery_window_secs as i64;
+                        if !hard_signal_broken && !recovery_expired {
+                            protective_arm_updates.push((i, Some(armed_at)));
+                            *leg2_skip_batch
+                                .entry("protective_recovery_window")
+                                .or_default() += 1;
+                            continue;
+                        }
+                        protective_arm_updates.push((i, None));
                         if self.protective_close_allowed(
                             current_sum,
                             time_remaining,
@@ -1756,6 +1776,8 @@ impl StaggeredArbAdapter {
                                 .or_default() += 1;
                         }
                         continue;
+                    } else if pos.protective_stop_armed_at.is_some() {
+                        protective_arm_updates.push((i, None));
                     }
                 }
             }
@@ -1893,6 +1915,12 @@ impl StaggeredArbAdapter {
 
         if !saw_event_quotes {
             self.bump_leg2_skip("missing_pm_quotes");
+        }
+
+        for (idx, armed_at) in protective_arm_updates {
+            if let Some(pos) = self.positions.get_mut(idx) {
+                pos.protective_stop_armed_at = armed_at;
+            }
         }
 
         // Execute in reverse order to preserve indices
