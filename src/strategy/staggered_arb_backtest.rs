@@ -166,12 +166,12 @@ impl Default for StaggeredArbBacktestConfig {
             strong_obi_window_bonus_secs: 60,
             reverse_signal: false,
             max_initial_sum: Decimal::ZERO,
-            max_leg1_price: dec!(0.55),
+            max_leg1_price: dec!(0.56),
             merge_target_sum: dec!(0.95),
             min_profit_target: dec!(0.02),
             max_wait_secs: 120,
             entry_after_start_min_secs: 30,
-            entry_after_start_max_secs: 180,
+            entry_after_start_max_secs: 240,
             no_trade_last_secs: 30,
             max_wait_pct: 0.30,
             min_time_remaining_secs: 45,
@@ -489,9 +489,9 @@ impl StaggeredArbBacktestConfig {
                 entry
                     .get("max_leg1_price")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(0.55),
+                    .unwrap_or(0.56),
             )
-            .unwrap_or(dec!(0.55)),
+            .unwrap_or(dec!(0.56)),
             merge_target_sum: Decimal::try_from(
                 entry
                     .get("merge_target_sum")
@@ -517,7 +517,7 @@ impl StaggeredArbBacktestConfig {
             entry_after_start_max_secs: timing
                 .get("entry_after_start_max_secs")
                 .and_then(|v| v.as_integer())
-                .unwrap_or(180) as u64,
+                .unwrap_or(240) as u64,
             no_trade_last_secs: timing
                 .get("no_trade_last_secs")
                 .and_then(|v| v.as_integer())
@@ -2729,12 +2729,12 @@ mod tests {
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.max_concurrent_positions, 0);
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
-        assert_eq!(config.max_leg1_price, dec!(0.55));
+        assert_eq!(config.max_leg1_price, dec!(0.56));
         assert_eq!(config.merge_target_sum, dec!(0.95));
         assert_eq!(config.min_profit_target, dec!(0.02));
         assert_eq!(config.max_wait_secs, 120);
         assert_eq!(config.entry_after_start_min_secs, 30);
-        assert_eq!(config.entry_after_start_max_secs, 180);
+        assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.min_leg2_delay_secs, 3);
         assert_eq!(config.max_trades_per_event, 0);
         assert_eq!(config.cooldown_secs, 5);
@@ -2769,9 +2769,9 @@ mod tests {
         assert_eq!(config.obi_confirm_threshold, 0.005);
         assert_eq!(config.strong_obi_threshold, 0.015);
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
-        assert_eq!(config.max_leg1_price, dec!(0.55));
+        assert_eq!(config.max_leg1_price, dec!(0.56));
         assert_eq!(config.entry_after_start_min_secs, 30);
-        assert_eq!(config.entry_after_start_max_secs, 180);
+        assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));
@@ -2790,8 +2790,8 @@ mod tests {
             Some(0.03)
         ));
         assert!((config.direction_threshold_now(dec!(1.02), true) - 0.06).abs() < 1e-9);
-        assert_eq!(config.max_leg1_price_now(true), dec!(0.57));
-        assert_eq!(config.entry_after_start_max_secs_now(900, true), 240);
+        assert_eq!(config.max_leg1_price_now(true), dec!(0.58));
+        assert_eq!(config.entry_after_start_max_secs_now(900, true), 300);
     }
 
     #[test]

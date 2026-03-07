@@ -17,7 +17,7 @@ strong_obi_threshold = 0.015
 strong_obi_direction_relaxation = 0.015
 strong_obi_price_bonus = 0.02
 max_initial_sum = 0.0
-max_leg1_price = 0.55
+max_leg1_price = 0.56
 merge_target_sum = 0.95
 min_profit_target = 0.02
 min_ask_price = 0.05
@@ -31,7 +31,7 @@ cooldown_secs = 5
 min_leg2_delay_secs = 3
 max_trades_per_event = 0
 entry_after_start_min_secs = 30  # observe the first 30s before opening new leg1s
-entry_after_start_max_secs = 180 # only trade the early post-open window after the 30s observation delay
+entry_after_start_max_secs = 240 # keep the early post-open window slightly wider; replay shows this lifts trade count without hurting quality
 strong_obi_window_bonus_secs = 60 # allow a little longer on 15m windows when OBI is both strong and persistent
 no_trade_last_secs = 30          # block new leg1s in the final 30s
 

@@ -3092,7 +3092,7 @@ name = "staggered_arb"
         assert_eq!(config.max_concurrent_positions, 0);
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
         assert_eq!(config.entry_after_start_min_secs, 30);
-        assert_eq!(config.entry_after_start_max_secs, 180);
+        assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.max_trades_per_event, 0);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
@@ -3114,8 +3114,8 @@ name = "staggered_arb"
             Some(0.03)
         ));
         assert!((config.direction_threshold_now(dec!(1.02), true) - 0.06).abs() < 1e-9);
-        assert_eq!(config.max_leg1_price_now(true), dec!(0.57));
-        assert_eq!(config.entry_after_start_max_secs_now(900, true), 240);
+        assert_eq!(config.max_leg1_price_now(true), dec!(0.58));
+        assert_eq!(config.entry_after_start_max_secs_now(900, true), 300);
     }
 
     #[test]
