@@ -260,6 +260,20 @@ Find why the ETH 5-minute Up/Down order pair appears to have been bought but is 
 
 ---
 
+# Wallet-Level PnL Reconciliation (2026-03-08)
+
+## Goal
+Correct staggered-arb live performance review so it matches the user's official Polymarket wallet PnL instead of only internal cycle-completed totals.
+
+## Findings
+
+- Official Polymarket profile 1D series for wallet `0xCbaAa60c5DEc85eaC2A2c424bdcD7258Ab67eEE2` moved from `-1166.9908` to `-1240.8458`, a delta of `-73.855`.
+- Public wallet activity over the same rolling window was entirely crypto `Up or Down` flow in the sampled rows and netted about `-82.8991` cashflow, which is directionally consistent with the official `1D` wallet loss.
+- Internal host `signal_history` over the same rolling window showed about `+25.0811` across `58` `split_arb_cycle_completed` rows (`merge +18.6563`, `forced -16.6014`, `settled +23.0262`), proving `cycle_completed` alone materially understates live wallet losses.
+- Follow-up reviews must treat official wallet 1D PnL as the primary live truth, with public activity and internal strategy logs used only to explain the delta.
+
+---
+
 # Crypto 5m Repricing V1 Framework (2026-03-07)
 
 ## Goal

@@ -177,3 +177,6 @@
 
 - Pattern: Managed-runtime staggered-arb currently records fills in `orders` and `signal_history`, but not in the `fills` ledger table, so relying on `fills` alone falsely suggests no live executions occurred.
 - Rule: When reconciling live trading records, treat `orders.filled_shares` plus `signal_history` as the source of truth until managed-runtime fill events also persist into `fills`. Do not declare “no成交” from an empty `fills` query without checking `orders`.
+
+- Pattern: Internal staggered-arb `split_arb_cycle_completed` totals can materially diverge from the user-visible Polymarket wallet 1D PnL, because official portfolio PnL is wallet-level and includes inventory mark-to-market while `cycle_completed` is only a strategy-emitted subset.
+- Rule: For any live strategy performance review, reconcile three views in this order: (1) official Polymarket wallet 1D / profile PnL, (2) public wallet activity cashflow by market/event, (3) internal `signal_history` / `orders`. Never present `cycle_completed` totals alone as the user's真钱表现.
