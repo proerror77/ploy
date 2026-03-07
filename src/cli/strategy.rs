@@ -1365,6 +1365,7 @@ async fn handle_strategy_actions(
                 client_order_id,
                 mut order,
                 priority: _,
+                ..
             } => {
                 if order.client_order_id != client_order_id {
                     warn!(

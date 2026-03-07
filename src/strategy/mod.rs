@@ -40,8 +40,8 @@ pub mod registry;
 pub mod traits;
 
 pub use traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    AlertLevel, DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, PositionInfo, RiskLevel,
+    Strategy, StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
 };
 
 pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};
@@ -165,9 +165,6 @@ pub use deribit_probability_arb::{
 pub use directional_backtest::{
     DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
 };
-pub use liquidity_vacuum_backtest::{
-    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
-};
 pub use dump_hedge::{
     DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
     PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
@@ -177,11 +174,13 @@ pub use event_edge::{run_event_edge, EventEdgeConfig};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
 pub use gamma_scalping::{
-    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer,
-    Straddle,
+    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer, Straddle,
 };
 pub use garch_probability_backtest::{
     GarchProbabilityBacktestConfig, GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade,
+};
+pub use liquidity_vacuum_backtest::{
+    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
 };
 pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,

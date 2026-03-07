@@ -6,13 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::adapters::{PolymarketClient, PolymarketWebSocket};
 use crate::domain::OrderStatus;
 use crate::error::Result;
-use crate::platform::{AgentStatus, Domain, PlatformDataPlane};
+use crate::platform::{AgentStatus, Domain, IntentPurpose, OrderCommand, PlatformDataPlane};
 use crate::strategy::{
-    DataFeed, DataFeedManager, OrderExecutor, StrategyAction, StrategyFactory, StrategyManager,
+    DataFeed, DataFeedManager, OrderExecutor, OrderPurpose, StrategyAction, StrategyFactory,
+    StrategyManager,
 };
 
 use super::command::{AgentHealthResponse, CoordinatorCommand};
@@ -40,8 +42,32 @@ fn runtime_env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn build_runtime_order_contract(
+    deployment_id: &str,
+    client_order_id: &str,
+    purpose: OrderPurpose,
+    order: &crate::domain::OrderRequest,
+    _priority: u8,
+) -> OrderCommand {
+    let mut request = order.clone();
+    request.client_order_id = client_order_id.to_string();
+    let idempotency_key = request
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| client_order_id.to_string());
+
+    OrderCommand {
+        intent_id: Uuid::new_v4(),
+        deployment_id: deployment_id.to_string(),
+        purpose: IntentPurpose::from(purpose),
+        idempotency_key,
+        request,
+    }
+}
+
 async fn handle_strategy_actions_runtime(
     strategy_label: &str,
+    deployment_id: &str,
     manager: Arc<StrategyManager>,
     mut rx: mpsc::Receiver<(String, StrategyAction)>,
     executor: Arc<OrderExecutor>,
@@ -56,9 +82,17 @@ async fn handle_strategy_actions_runtime(
         match action {
             StrategyAction::SubmitOrder {
                 client_order_id,
+                purpose,
                 order,
-                priority: _,
+                priority,
             } => {
+                let command = build_runtime_order_contract(
+                    deployment_id,
+                    &client_order_id,
+                    purpose,
+                    &order,
+                    priority,
+                );
                 if paused.load(Ordering::Relaxed) {
                     warn!(
                         strategy = strategy_label,
@@ -79,6 +113,7 @@ async fn handle_strategy_actions_runtime(
                         let context = serde_json::json!({
                             "source": "managed_runtime",
                             "phase": "submit_paused",
+                            "purpose": format!("{:?}", command.purpose),
                             "order_id": update.order_id,
                             "client_order_id": client_order_id.clone(),
                             "status": format!("{:?}", update.status),
@@ -106,11 +141,12 @@ async fn handle_strategy_actions_runtime(
                                 super::bootstrap::split_arb_leg_and_mode(&client_order_id);
                             let signal_type = format!("split_arb_{}_{}_rejected", leg, mode);
                             let context = serde_json::json!({
-                                "source": "managed_runtime",
-                                "phase": "submit_paused",
-                                "order_id": update.order_id,
-                                "client_order_id": client_order_id,
-                                "status": format!("{:?}", update.status),
+                                    "source": "managed_runtime",
+                                    "phase": "submit_paused",
+                                    "purpose": format!("{:?}", command.purpose),
+                                    "order_id": update.order_id,
+                                    "client_order_id": client_order_id,
+                                    "status": format!("{:?}", update.status),
                                 "filled_qty": update.filled_qty,
                                 "error": update.error,
                                 "leg": leg,
@@ -135,7 +171,7 @@ async fn handle_strategy_actions_runtime(
                 }
 
                 orders_submitted.fetch_add(1, Ordering::Relaxed);
-                match executor.execute(&order).await {
+                match executor.execute(&command.request).await {
                     Ok(result) => {
                         if matches!(result.status, OrderStatus::Filled) {
                             orders_filled.fetch_add(1, Ordering::Relaxed);
@@ -154,6 +190,7 @@ async fn handle_strategy_actions_runtime(
                             let context = serde_json::json!({
                                 "source": "managed_runtime",
                                 "phase": "submit_result",
+                                "purpose": format!("{:?}", command.purpose),
                                 "order_id": update.order_id,
                                 "client_order_id": client_order_id.clone(),
                                 "status": format!("{:?}", update.status),
@@ -186,6 +223,7 @@ async fn handle_strategy_actions_runtime(
                                 let context = serde_json::json!({
                                     "source": "managed_runtime",
                                     "phase": "submit_result",
+                                    "purpose": format!("{:?}", command.purpose),
                                     "order_id": update.order_id,
                                     "client_order_id": client_order_id.clone(),
                                     "status": format!("{:?}", update.status),
@@ -378,11 +416,12 @@ async fn handle_strategy_actions_runtime(
                         manager.send_order_update(update.clone());
                         if let Some(pool) = observability_pool.as_ref() {
                             let context = serde_json::json!({
-                                "source": "managed_runtime",
-                                "phase": "submit_error",
-                                "order_id": update.order_id,
-                                "client_order_id": client_order_id.clone(),
-                                "status": format!("{:?}", update.status),
+                            "source": "managed_runtime",
+                            "phase": "submit_error",
+                            "purpose": format!("{:?}", command.purpose),
+                            "order_id": update.order_id,
+                            "client_order_id": client_order_id.clone(),
+                            "status": format!("{:?}", update.status),
                                 "filled_qty": update.filled_qty,
                                 "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
                                 "error": update.error,
@@ -409,6 +448,7 @@ async fn handle_strategy_actions_runtime(
                                 let context = serde_json::json!({
                                     "source": "managed_runtime",
                                     "phase": "submit_error",
+                                    "purpose": format!("{:?}", command.purpose),
                                     "order_id": update.order_id,
                                     "client_order_id": client_order_id,
                                     "status": format!("{:?}", update.status),
@@ -675,7 +715,7 @@ pub(crate) async fn run_managed_strategy_runtime(
 
     #[cfg(feature = "claimer_daemon")]
     if !dry_run {
-        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
+        if let Err(e) = crate::account::ensure_account_claimer_daemon().await {
             warn!(
                 strategy = strategy_label,
                 agent_id = agent_id,
@@ -699,9 +739,11 @@ pub(crate) async fn run_managed_strategy_runtime(
     let strategy_label_owned = strategy_label.clone();
     let observability_pool_for_actions = observability_pool.clone();
     let observability_account_for_actions = observability_account_id.clone();
+    let agent_id_for_actions = agent_id.clone();
     let action_task = tokio::spawn(async move {
         handle_strategy_actions_runtime(
             &strategy_label_owned,
+            &agent_id_for_actions,
             manager_for_actions,
             action_rx,
             executor,
@@ -830,4 +872,70 @@ pub(crate) async fn run_managed_strategy_runtime(
     action_task.abort();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{OrderRequest, Side};
+    use crate::platform::{IntentPurpose, MarketSelector, StrategyDeployment, Timeframe};
+    use crate::plugins::DeploymentState;
+    use crate::strategy::OrderPurpose;
+    use rust_decimal_macros::dec;
+
+    fn sample_strategy_order() -> OrderRequest {
+        OrderRequest::buy_limit("token-runtime".to_string(), Side::Up, 7, dec!(0.39))
+    }
+
+    fn sample_deployment(state: DeploymentState) -> StrategyDeployment {
+        StrategyDeployment {
+            id: "dep-runtime".to_string(),
+            strategy: "momentum".to_string(),
+            strategy_version: "v1".to_string(),
+            domain: Domain::Crypto,
+            market_selector: MarketSelector::Static {
+                symbol: Some("BTC".to_string()),
+                series_id: None,
+                market_slug: Some("btc-up-5m".to_string()),
+            },
+            timeframe: Timeframe::M5,
+            enabled: true,
+            state,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 0,
+            cooldown_secs: 0,
+            account_ids: Vec::new(),
+            execution_mode: Default::default(),
+            lifecycle_stage: crate::platform::StrategyLifecycleStage::Live,
+            product_type: crate::platform::StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        }
+    }
+
+    #[test]
+    fn submit_order_runtime_bridge_maps_order_purpose_to_intent_purpose() {
+        let order = sample_strategy_order();
+        let command = build_runtime_order_contract(
+            "runtime-deployment",
+            "cid-runtime",
+            OrderPurpose::Hedge,
+            &order,
+            9,
+        );
+
+        assert_eq!(command.purpose, IntentPurpose::Hedge);
+        assert_eq!(command.deployment_id, "runtime-deployment");
+        assert_eq!(command.request.token_id, "token-runtime");
+        assert_eq!(command.request.client_order_id, "cid-runtime");
+    }
+
+    #[test]
+    fn draining_deployment_still_allows_cancel_contract() {
+        let deployment = sample_deployment(DeploymentState::Draining);
+
+        assert!(deployment.allows_intent_purpose(IntentPurpose::Cancel));
+        assert!(!deployment.allows_intent_purpose(IntentPurpose::Entry));
+    }
 }

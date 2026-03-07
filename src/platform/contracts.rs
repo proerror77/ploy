@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::plugins::DeploymentState;
+use crate::strategy::OrderPurpose;
 
 use super::types::{Domain, IntentPurpose, OrderIntent, OrderPriority};
 
@@ -219,6 +220,17 @@ impl StrategyDeployment {
     }
 }
 
+impl From<OrderPurpose> for IntentPurpose {
+    fn from(value: OrderPurpose) -> Self {
+        match value {
+            OrderPurpose::Entry => IntentPurpose::Entry,
+            OrderPurpose::Exit => IntentPurpose::Exit,
+            OrderPurpose::Reduce => IntentPurpose::Reduce,
+            OrderPurpose::Hedge => IntentPurpose::Hedge,
+        }
+    }
+}
+
 /// Evidence stage for strategy evaluation artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -406,6 +418,7 @@ pub enum RiskDecisionStatus {
 pub struct OrderCommand {
     pub intent_id: Uuid,
     pub deployment_id: String,
+    pub purpose: IntentPurpose,
     pub idempotency_key: String,
     pub request: OrderRequest,
 }

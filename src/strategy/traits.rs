@@ -14,7 +14,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderRequest, OrderSide, OrderStatus, Quote, Side};
 use crate::error::Result;
 
 // ============================================================================
@@ -208,6 +208,25 @@ pub struct OrderUpdate {
 // Strategy Actions
 // ============================================================================
 
+/// Strategy-declared lifecycle purpose for a submitted order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderPurpose {
+    Entry,
+    Exit,
+    Reduce,
+    Hedge,
+}
+
+impl OrderPurpose {
+    pub fn from_order_request(order: &OrderRequest) -> Self {
+        match order.order_side {
+            OrderSide::Buy => Self::Entry,
+            OrderSide::Sell => Self::Exit,
+        }
+    }
+}
+
 /// Actions a strategy can request.
 ///
 /// This enum is intentionally limited to decision-layer outcomes. Feed wiring
@@ -219,6 +238,8 @@ pub enum StrategyAction {
     SubmitOrder {
         /// Strategy-assigned ID for tracking
         client_order_id: String,
+        /// Lifecycle purpose for deployment draining / execution policy.
+        purpose: OrderPurpose,
         /// Order details
         order: OrderRequest,
         /// Priority (higher = more urgent)

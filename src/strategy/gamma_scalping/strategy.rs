@@ -218,11 +218,13 @@ impl GammaScalpingStrategy {
         let mut actions = vec![
             StrategyAction::SubmitOrder {
                 client_order_id: up_order_id.clone(),
+                purpose: crate::strategy::OrderPurpose::Entry,
                 order: up_order,
                 priority: 1,
             },
             StrategyAction::SubmitOrder {
                 client_order_id: down_order_id.clone(),
+                purpose: crate::strategy::OrderPurpose::Entry,
                 order: down_order,
                 priority: 1,
             },
@@ -313,6 +315,7 @@ impl GammaScalpingStrategy {
                         );
                         actions.push(StrategyAction::SubmitOrder {
                             client_order_id: format!("gs-rebal-sell-{}", Uuid::new_v4()),
+                            purpose: crate::strategy::OrderPurpose::Hedge,
                             order: sell_order,
                             priority: 2,
                         });
@@ -330,6 +333,7 @@ impl GammaScalpingStrategy {
                         );
                         actions.push(StrategyAction::SubmitOrder {
                             client_order_id: format!("gs-rebal-buy-{}", Uuid::new_v4()),
+                            purpose: crate::strategy::OrderPurpose::Hedge,
                             order: buy_order,
                             priority: 2,
                         });
@@ -362,6 +366,7 @@ impl GammaScalpingStrategy {
                             );
                             actions.push(StrategyAction::SubmitOrder {
                                 client_order_id: format!("gs-exit-up-{}", Uuid::new_v4()),
+                                purpose: crate::strategy::OrderPurpose::Exit,
                                 order,
                                 priority: 3,
                             });
@@ -379,6 +384,7 @@ impl GammaScalpingStrategy {
                             );
                             actions.push(StrategyAction::SubmitOrder {
                                 client_order_id: format!("gs-exit-dn-{}", Uuid::new_v4()),
+                                purpose: crate::strategy::OrderPurpose::Exit,
                                 order,
                                 priority: 3,
                             });

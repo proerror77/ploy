@@ -558,8 +558,9 @@ pub struct StrategyInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{OrderRequest, Side};
     use crate::strategy::traits::{
-        AlertLevel, DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction,
+        AlertLevel, DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, Strategy, StrategyAction,
         StrategyStateInfo,
     };
     use async_trait::async_trait;
@@ -571,6 +572,7 @@ mod tests {
         id: String,
         name: String,
         shutdown_actions: Vec<StrategyAction>,
+        market_actions: Vec<StrategyAction>,
     }
 
     impl TestStrategy {
@@ -579,6 +581,7 @@ mod tests {
                 id: id.to_string(),
                 name: "test_strategy".to_string(),
                 shutdown_actions: Vec::new(),
+                market_actions: Vec::new(),
             }
         }
 
@@ -590,6 +593,16 @@ mod tests {
                     level: AlertLevel::Warning,
                     message: "shutdown".to_string(),
                 }],
+                market_actions: Vec::new(),
+            }
+        }
+
+        fn with_market_actions(id: &str, market_actions: Vec<StrategyAction>) -> Self {
+            Self {
+                id: id.to_string(),
+                name: "test_strategy".to_string(),
+                shutdown_actions: Vec::new(),
+                market_actions,
             }
         }
     }
@@ -618,10 +631,14 @@ mod tests {
             &mut self,
             _update: &MarketUpdate,
         ) -> crate::error::Result<Vec<StrategyAction>> {
-            Ok(vec![StrategyAction::Alert {
-                level: AlertLevel::Info,
-                message: "market_update".to_string(),
-            }])
+            if self.market_actions.is_empty() {
+                Ok(vec![StrategyAction::Alert {
+                    level: AlertLevel::Info,
+                    message: "market_update".to_string(),
+                }])
+            } else {
+                Ok(self.market_actions.clone())
+            }
         }
 
         async fn on_order_update(
@@ -767,5 +784,59 @@ mod tests {
             "unexpected error message: {}",
             msg
         );
+    }
+
+    #[tokio::test]
+    async fn test_market_submit_order_preserves_order_purpose() {
+        let manager = StrategyManager::new(60_000);
+        let mut action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+
+        let order = OrderRequest::buy_limit("token-hedge".to_string(), Side::Up, 4, dec!(0.41));
+
+        manager
+            .start_strategy(
+                Box::new(TestStrategy::with_market_actions(
+                    "s-purpose",
+                    vec![StrategyAction::SubmitOrder {
+                        client_order_id: "cid-purpose".to_string(),
+                        purpose: OrderPurpose::Hedge,
+                        order: order.clone(),
+                        priority: 9,
+                    }],
+                )),
+                None,
+            )
+            .await
+            .expect("start strategy");
+
+        manager.send_market_update(MarketUpdate::BinancePrice {
+            symbol: "BTCUSDT".to_string(),
+            price: dec!(65000.0),
+            timestamp: Utc::now(),
+        });
+
+        let (strategy_id, action) = timeout(Duration::from_secs(1), action_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("channel closed");
+        assert_eq!(strategy_id, "s-purpose");
+
+        match action {
+            StrategyAction::SubmitOrder {
+                client_order_id,
+                purpose,
+                order,
+                priority,
+            } => {
+                assert_eq!(client_order_id, "cid-purpose");
+                assert_eq!(purpose, OrderPurpose::Hedge);
+                assert_eq!(priority, 9);
+                assert_eq!(order.token_id, "token-hedge");
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
     }
 }

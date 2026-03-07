@@ -50,6 +50,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Execute Task 2 from the implementation plan: add deployment lifecycle state and intent purpose gating.
 - [x] Execute Task 3 from the implementation plan: promote `runtime_specs` into plugin projection.
 - [x] Execute Task 4 from the implementation plan: add the account-plane skeleton and re-home claimer ownership.
+- [x] Execute Task 5 from the implementation plan: add order purpose to canonical strategy actions.
 
 ## Review
 
@@ -60,6 +61,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Chose pre-defined block composition for crypto, not scripts or DSLs.
 - [x] Confirmed bootstrap can now consume projected runtime specs through `src/plugins/projector.rs` instead of owning the projection contract itself.
 - [x] Confirmed account-facing claimer ownership now goes through `src/account/*`, while the old strategy claimer implementation remains as a temporary delegated backend.
+- [x] Confirmed canonical `StrategyAction::SubmitOrder` now carries explicit lifecycle purpose, and managed runtime bridges it into the normalized order contract for draining-aware execution semantics.
 
 ## Progress notes
 
@@ -72,6 +74,8 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Completed Task 2 by adding `IntentPurpose`, compatible deployment lifecycle state, and coordinator draining gates.
 - 2026-03-07: Completed Task 3 by adding `src/plugins/projector.rs`, moving managed runtime spec ownership onto projected specs, and keeping `src/coordinator/runtime_specs.rs` as a compatibility wrapper.
 - 2026-03-07: Completed Task 4 by adding `src/account/*`, moving claimer ownership behind an account-facing handle, and routing system account summaries through `AccountService`.
+- 2026-03-07: Completed Task 5 by adding `OrderPurpose` to canonical strategy actions, propagating it through `StrategyManager`, and bridging managed runtime submit-orders into a normalized `OrderCommand` purpose field.
+- 2026-03-07: Verified Task 5 with `cargo test strategy::manager --lib -- --nocapture`, `cargo test coordinator::strategy_runtime --lib -- --nocapture`, `cargo test coordinator::bootstrap --lib -- --nocapture`, and `cargo check --bin ploy`.
 
 ---
 

@@ -13,13 +13,13 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
+use crate::agents::context::AgentContext;
 use crate::agents::crypto::CryptoTradingConfig;
 use crate::agents::crypto_lob_ml::{
     CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 #[cfg(feature = "rl")]
 use crate::agents::crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
-use crate::agents::context::AgentContext;
 use crate::agents::governance_context::GovernanceContext;
 use crate::agents::openclaw::{OpenClawAgent, OpenClawConfig};
 use crate::agents::politics::PoliticsTradingConfig;
@@ -28,9 +28,7 @@ use crate::agents::traits::{GovernanceAgent, TradingAgent};
 use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
-use crate::coordinator::{
-    Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState,
-};
+use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
@@ -58,10 +56,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
-use super::strategy_runtime::{
-    run_managed_strategy_runtime as run_managed_strategy_runtime_module,
-    ManagedStrategyRuntimeConfig,
-};
 use super::runtime_specs::{
     build_event_edge_managed_runtime_spec, build_momentum_managed_runtime_spec,
     build_nba_comeback_managed_runtime_spec, build_pattern_memory_managed_runtime_spec,
@@ -71,6 +65,10 @@ use super::runtime_specs::{
 use super::runtime_specs::{
     build_event_edge_runtime_config, build_momentum_runtime_config,
     build_nba_comeback_runtime_config, build_split_arb_runtime_config,
+};
+use super::strategy_runtime::{
+    run_managed_strategy_runtime as run_managed_strategy_runtime_module,
+    ManagedStrategyRuntimeConfig,
 };
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
@@ -4034,6 +4032,7 @@ async fn handle_strategy_actions_runtime(
                 client_order_id,
                 order,
                 priority: _,
+                ..
             } => {
                 if paused.load(Ordering::Relaxed) {
                     warn!(
@@ -4887,8 +4886,10 @@ fn spawn_legacy_nba_comeback_agent(
     );
 
     let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
-    let stats =
-        crate::strategy::nba_comeback::ComebackStatsProvider::new(pool.clone(), nba_cfg.season.clone());
+    let stats = crate::strategy::nba_comeback::ComebackStatsProvider::new(
+        pool.clone(),
+        nba_cfg.season.clone(),
+    );
     let core = crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
     let risk_params = sports_cfg.risk_params.clone();
     let mut agent = SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
@@ -5333,13 +5334,9 @@ async fn start_sports_strategy_runtime(
         build_nba_comeback_managed_runtime_spec(&app_config.database.url, &sports_cfg, nba_cfg);
 
     if managed_runtime_spec.is_some() || compat_sports_runtimes_enabled {
-        let pool = start_sports_market_data_support(
-            shared_pool,
-            app_config,
-            freshness,
-            &sports_cfg,
-        )
-        .await?;
+        let pool =
+            start_sports_market_data_support(shared_pool, app_config, freshness, &sports_cfg)
+                .await?;
 
         if let Some(runtime_spec) = managed_runtime_spec {
             spawn_managed_strategy_runtime_spec(
@@ -6995,11 +6992,10 @@ mod tests {
             version: "v1".to_string(),
             domain: Domain::Crypto,
         };
-        let spec = crate::plugins::PluginSpec::ComposableCrypto(
-            crate::plugins::ComposableCryptoSpec {
+        let spec =
+            crate::plugins::PluginSpec::ComposableCrypto(crate::plugins::ComposableCryptoSpec {
                 signal_blocks: vec!["momentum".to_string()],
-            },
-        );
+            });
         let deployment = crate::plugins::PluginDeployment {
             deployment_id: "deploy.crypto.momentum.default".to_string(),
             plugin_id: definition.plugin_id.clone(),
@@ -7034,11 +7030,10 @@ mod tests {
             version: "v1".to_string(),
             domain: Domain::Crypto,
         };
-        let spec = crate::plugins::PluginSpec::ComposableCrypto(
-            crate::plugins::ComposableCryptoSpec {
+        let spec =
+            crate::plugins::PluginSpec::ComposableCrypto(crate::plugins::ComposableCryptoSpec {
                 signal_blocks: vec!["momentum".to_string()],
-            },
-        );
+            });
         let deployment = crate::plugins::PluginDeployment {
             deployment_id: "deploy.crypto.momentum.default".to_string(),
             plugin_id: definition.plugin_id.clone(),
@@ -7166,8 +7161,7 @@ mod tests {
             early_exit_stop_loss_pct: 16.0,
         };
 
-        let rendered =
-            build_nba_comeback_runtime_config("postgres://db.example.com/ploy", &cfg);
+        let rendered = build_nba_comeback_runtime_config("postgres://db.example.com/ploy", &cfg);
 
         assert!(rendered.contains("name = \"nba_comeback\""));
         assert!(rendered.contains("poll_interval_secs = 45"));
@@ -7243,8 +7237,12 @@ mod tests {
         assert_eq!(spec.strategy_label, "nba_comeback");
         assert_eq!(spec.agent_id, sports_cfg.agent_id);
         assert_eq!(spec.domain, Domain::Sports);
-        assert!(spec.strategy_config_toml.contains("name = \"nba_comeback\""));
-        assert!(spec.strategy_config_toml.contains("poll_interval_secs = 45"));
+        assert!(spec
+            .strategy_config_toml
+            .contains("name = \"nba_comeback\""));
+        assert!(spec
+            .strategy_config_toml
+            .contains("poll_interval_secs = 45"));
         assert!(spec
             .strategy_config_toml
             .contains("url = \"postgres://db.example.com/ploy\""));

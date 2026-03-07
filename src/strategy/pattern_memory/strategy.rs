@@ -751,6 +751,7 @@ impl PatternMemoryStrategy {
 
         actions.push(StrategyAction::SubmitOrder {
             client_order_id,
+            purpose: crate::strategy::OrderPurpose::from_order_request(&order),
             order,
             priority: 7,
         });

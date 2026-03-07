@@ -1078,6 +1078,7 @@ impl MomentumStrategyAdapter {
 
         Some(StrategyAction::SubmitOrder {
             client_order_id,
+            purpose: crate::strategy::OrderPurpose::from_order_request(&order),
             order,
             priority: 5,
         })
@@ -1423,6 +1424,7 @@ impl Strategy for MomentumStrategyAdapter {
 
                         actions.push(StrategyAction::SubmitOrder {
                             client_order_id,
+                            purpose: crate::strategy::OrderPurpose::from_order_request(&order),
                             order,
                             priority: 8,
                         });
@@ -2082,6 +2084,7 @@ impl SplitArbStrategyAdapter {
 
         Some(StrategyAction::SubmitOrder {
             client_order_id,
+            purpose: crate::strategy::OrderPurpose::from_order_request(&order),
             order,
             priority: 10, // Higher priority for arb
         })
@@ -2220,6 +2223,7 @@ impl Strategy for SplitArbStrategyAdapter {
 
                                         actions.push(StrategyAction::SubmitOrder {
                                             client_order_id,
+                                            purpose: crate::strategy::OrderPurpose::Hedge,
                                             order,
                                             priority: 10,
                                         });
@@ -2560,6 +2564,7 @@ impl Strategy for SplitArbStrategyAdapter {
 
                                 actions.push(StrategyAction::SubmitOrder {
                                     client_order_id,
+                                    purpose: crate::strategy::OrderPurpose::Exit,
                                     order,
                                     priority: 15,
                                 });
@@ -2644,6 +2649,7 @@ impl Strategy for SplitArbStrategyAdapter {
 
                 actions.push(StrategyAction::SubmitOrder {
                     client_order_id,
+                    purpose: crate::strategy::OrderPurpose::Exit,
                     order,
                     priority: 8,
                 });
