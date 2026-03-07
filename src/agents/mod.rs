@@ -1,11 +1,8 @@
-//! Trading Agents — pull-based compatibility implementations
+//! Governance agents and coordinator-facing agent helpers.
 //!
-//! New live strategy work must go through the canonical `Strategy` runtime.
-//! These modules remain available for transitional compatibility and niche
-//! governance/runtime-adapter use only.
+//! Live trading now runs through the canonical `Strategy` runtime. The
+//! remaining `agents/*` surface is governance-oriented.
 
-pub mod context;
-pub mod crypto;
 pub mod governance_context;
 pub mod openclaw;
 pub mod traits;

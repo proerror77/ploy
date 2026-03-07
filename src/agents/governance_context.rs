@@ -16,8 +16,6 @@ use crate::coordinator::{
 use crate::error::Result;
 use crate::platform::{AgentStatus, Domain};
 
-use super::context::AgentContext;
-
 /// Narrowed coordinator access for governance-only agents such as OpenClaw.
 pub struct GovernanceContext {
     agent_id: String,
@@ -39,12 +37,6 @@ impl GovernanceContext {
             handle,
             commands,
         }
-    }
-}
-
-impl From<AgentContext> for GovernanceContext {
-    fn from(ctx: AgentContext) -> Self {
-        Self::new(ctx.agent_id, ctx.domain, ctx.handle, ctx.commands)
     }
 }
 

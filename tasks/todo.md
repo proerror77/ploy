@@ -110,6 +110,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Execute Task 2 from the retirement plan: move runtime config ownership out of legacy agent files.
 - [x] Execute Task 3 from the retirement plan: remove politics and sports compatibility runtimes.
 - [x] Execute Task 4 from the retirement plan: remove crypto compatibility runtimes.
+- [x] Execute Task 5 from the retirement plan: remove the `TradingAgent` compatibility contract.
 
 ## Review
 
@@ -119,6 +120,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.
 - [x] Crypto compatibility runtime branches, env gates, and agent modules are gone; the remaining retirement work is now trait/platform-layer deletion.
+- [x] `TradingAgent`, `AgentContext`, and the last unused pull-based crypto runtime shell are gone; `agents/*` is now governance-only.
 
 ## Retirement inventory snapshot (2026-03-08)
 
@@ -133,7 +135,6 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 ### Delete after RL/CLI migration
 
-- `src/agents/traits.rs` still defines `TradingAgent`.
 - `src/platform/traits.rs`, `src/platform/platform.rs`, and `src/platform/router.rs` still depend on `DomainAgent`.
 - `src/platform/agents/{crypto_agent,event_edge_agent,nba_agent,rl_crypto_agent}.rs` still implement the compatibility `DomainAgent` layer.
 - `src/cli/strategy.rs` still instantiates `crate::platform::agents::nba_agent::NbaComebackAgent`.
@@ -150,6 +151,8 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - 2026-03-08: Verified Task 3 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
 - 2026-03-08: Removed `src/agents/crypto_lob_ml.rs` and `src/agents/crypto_rl_policy.rs`, deleted the crypto compatibility env gate / bootstrap startup branches, and retired the corresponding `PlatformBootstrapConfig` fields and env parsing.
 - 2026-03-08: Verified Task 4 with `cargo test coordinator::bootstrap --lib -- --nocapture`, `cargo check --bin ploy`, and `cargo check --features rl --bin ploy`.
+- 2026-03-08: Confirmed the red-state compile blocker for Task 5 by removing `TradingAgent` and watching `src/agents/crypto.rs` fail to compile, then deleted `TradingAgent`, `AgentContext`, and the unused pull-based crypto runtime shell.
+- 2026-03-08: Verified Task 5 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
 
 ---
 
