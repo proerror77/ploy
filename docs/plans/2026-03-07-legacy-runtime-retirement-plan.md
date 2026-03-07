@@ -28,6 +28,48 @@ What is still open falls into two buckets:
 
 This plan is only about bucket 2.
 
+## Inventory Snapshot (2026-03-08)
+
+The live retirement scope is now frozen to these remaining surfaces.
+
+### Delete now
+
+- `README.md` compatibility-flag notes for `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES`
+  and `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES`
+- `docs/STRATEGY_FRAMEWORK_4_PILLARS.md` steady-state text that still treats those
+  env gates as active operator-facing surfaces
+
+Historical docs that mention `TradingAgent` / `DomainAgent` stay until Task 7 so
+the code-deletion commits remain narrowly scoped.
+
+### Delete after config extraction
+
+- `src/coordinator/runtime_specs.rs` imports `PoliticsTradingConfig` /
+  `SportsTradingConfig` from legacy runtime modules
+- `src/plugins/projector.rs` imports `PoliticsTradingConfig` /
+  `SportsTradingConfig` from legacy runtime modules
+- `src/coordinator/bootstrap.rs` still owns:
+  - `spawn_compat_trading_agent_task(...)`
+  - `spawn_compat_crypto_lob_ml_agent(...)`
+  - `maybe_spawn_compat_crypto_lob_ml_agent(...)`
+  - `spawn_compat_crypto_rl_policy_agent(...)`
+  - `maybe_spawn_compat_crypto_rl_policy_agent(...)`
+  - `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES`
+  - `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES`
+- `src/agents/politics.rs`
+- `src/agents/sports.rs`
+- `src/agents/crypto_lob_ml.rs`
+- `src/agents/crypto_rl_policy.rs`
+
+### Delete after RL/CLI migration
+
+- `src/agents/traits.rs` `TradingAgent`
+- `src/platform/traits.rs` `DomainAgent` / `SimpleAgent`
+- `src/platform/platform.rs` and `src/platform/router.rs` `DomainAgent` callsites
+- `src/platform/agents/{crypto_agent,event_edge_agent,nba_agent,rl_crypto_agent}.rs`
+- `src/cli/strategy.rs` `NbaComebackAgent` compatibility CLI path
+- `src/main_commands/rl/agent.rs` `RLCryptoAgent` / `DomainAgent` imports
+
 ### Task 1: Freeze The Retirement Scope With A Grep-Based Inventory
 
 **Files:**

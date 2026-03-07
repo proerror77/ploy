@@ -106,6 +106,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 - [x] Inventory the remaining legacy runtime surfaces and compatibility flags.
 - [x] Write the retirement plan at `docs/plans/2026-03-07-legacy-runtime-retirement-plan.md`.
+- [ ] Freeze the exact 2026-03-08 retirement inventory in docs and todo.
 - [ ] Execute Task 2 from the retirement plan: move runtime config ownership out of legacy agent files.
 
 ## Review
@@ -114,10 +115,40 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] The two remaining `STAG-ARB` items are operational acceptance checks, not blockers for writing the retirement plan.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 
+## Retirement inventory snapshot (2026-03-08)
+
+### Delete now
+
+- `README.md` and `docs/STRATEGY_FRAMEWORK_4_PILLARS.md` still document `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES` / `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES` as temporary operator flags.
+- Historical docs under `docs/plans/2026-03-06-*` and `docs/review-code-quality.md` still mention `TradingAgent` / `DomainAgent`, but these should be cleaned only in the final docs pass, not during code deletion commits.
+
+### Delete after config extraction
+
+- `src/coordinator/runtime_specs.rs` imports `PoliticsTradingConfig` / `SportsTradingConfig` from legacy agent modules.
+- `src/plugins/projector.rs` imports `PoliticsTradingConfig` / `SportsTradingConfig` from legacy agent modules.
+- `src/coordinator/bootstrap.rs` still imports legacy agent config/runtime types and owns:
+  - `spawn_compat_trading_agent_task(...)`
+  - `spawn_compat_crypto_lob_ml_agent(...)`
+  - `maybe_spawn_compat_crypto_lob_ml_agent(...)`
+  - `spawn_compat_crypto_rl_policy_agent(...)`
+  - `maybe_spawn_compat_crypto_rl_policy_agent(...)`
+  - `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES`
+  - `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES`
+- `src/agents/politics.rs`, `src/agents/sports.rs`, `src/agents/crypto_lob_ml.rs`, and `src/agents/crypto_rl_policy.rs` still exist as compatibility runtimes.
+
+### Delete after RL/CLI migration
+
+- `src/agents/traits.rs` still defines `TradingAgent`.
+- `src/platform/traits.rs`, `src/platform/platform.rs`, and `src/platform/router.rs` still depend on `DomainAgent`.
+- `src/platform/agents/{crypto_agent,event_edge_agent,nba_agent,rl_crypto_agent}.rs` still implement the compatibility `DomainAgent` layer.
+- `src/cli/strategy.rs` still instantiates `crate::platform::agents::nba_agent::NbaComebackAgent`.
+- `src/main_commands/rl/agent.rs` still imports `RLCryptoAgent` and `DomainAgent`.
+
 ## Progress notes
 
 - 2026-03-07: Confirmed surviving compatibility/runtime surfaces are concentrated in `src/agents/*`, `src/platform/agents/*`, `src/platform/traits.rs`, and `src/coordinator/bootstrap.rs`.
 - 2026-03-07: Wrote `docs/plans/2026-03-07-legacy-runtime-retirement-plan.md` to sequence config extraction before runtime deletion.
+- 2026-03-08: Re-ran the retirement grep inventory in a fresh worktree and split remaining legacy surfaces into delete-now docs, config-extraction blockers, and RL/CLI-gated compatibility layers.
 
 ---
 
