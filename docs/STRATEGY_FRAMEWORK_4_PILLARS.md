@@ -11,8 +11,8 @@
   - Capital Governance Plane
   - Execution Plane
   - Control Plane
-- `src/strategy/*` 已是 canonical live strategy path；`TradingAgent` / `DomainAgent` 只剩 compatibility surface。
-- 預設平台啟動面已不再自動拉起 compatibility crypto/sports live runtimes；它們需要顯式 env gate 才會啟動。
+- `src/strategy/*` 已是 canonical live strategy path；`TradingAgent` / `DomainAgent` 已退休。
+- 平台啟動面已不再保留 compatibility crypto/sports live runtimes 或對應 env gate。
 - 本文件的目標是把「策略分類」變成可追蹤的工程邊界：每一類策略要能回答：
   - 入口在哪（CLI / service / agent）
   - 核心邏輯在哪（module）
@@ -113,20 +113,20 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
 
 ## 2) 執行框架現況（目前的穩態）
 
-目前 repo 的穩態目標已經不是「3 套框架並存」，而是：
+目前 repo 的穩態已經不是「3 套框架並存」，而是：
 
 1. `src/strategy/*` + coordinator managed runtime = 正式 live path
-2. `src/agents/*` / `src/platform/agents/*` = compatibility / governance surface
-3. legacy 或 compatibility live runtimes 預設不再自動啟動
+2. `src/agents/*` = governance-only surface
+3. `src/platform/*` = execution / shared contracts，不再承載另一套 live strategy runtime
 
 具體來說：
 
-- `TradingAgent` / `DomainAgent` 不再是新 live 策略入口
-- sports / politics live path 已經只走 canonical managed runtime
-- crypto compatibility runtimes 已經退休，剩下的 crypto live path 只走 canonical runtime
+- `TradingAgent` / `DomainAgent` 已退休，不再是 live 策略入口
+- sports / politics live path 只走 canonical managed runtime
+- crypto live path 只走 canonical runtime
 
 所以今天最大的架構現實，不是「策略分散在三套正式 runtime」，而是：
-canonical runtime 已經確立，剩下的是更底層的舊 trait / platform-agent 層退休。
+canonical runtime 已經確立，舊 trait / platform-agent 層也已經退休；剩下的是 plugin / account / order plane 的持續產品化。
 
 ### 2.1 讀側可見性
 

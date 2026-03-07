@@ -6,7 +6,7 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 
 - **Two runtime domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds)
 - **Multiple strategies** -- Momentum, Split-Arb, Event-Edge mispricing scanner, NBA Q3-Q4 comeback, market making
-- **Multi-agent platform** -- Coordinator with central order queue, per-domain agents, risk gate, and position aggregation
+- **Coordinator-managed runtime** -- Canonical strategy runtime with central order queue, governance gate, risk gate, and position aggregation
 - **Event registry** -- Automated DISCOVER -> RESEARCH -> MONITOR -> TRADE pipeline for new markets
 - **TUI dashboard** -- Ratatui-based terminal UI with live positions, quotes, Binance price feed, and trade log
 - **Claude AI agent** -- Advisory, autonomous, and chat modes for market analysis and trade execution
@@ -16,7 +16,7 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 
 ## Architecture (Layered Live Runtime)
 
-Production runtime is converging on a 4-plane model:
+Production runtime now uses a 4-plane model:
 
 - **Strategy Plane**: canonical `Strategy` implementations decide direction, timing, sizing, and state transitions.
 - **Capital Governance Plane**: OpenClaw-style governance agents manage budget, pause/resume, throttle, and deployment-scoped policy.
@@ -29,7 +29,8 @@ Live strategies now start only through the canonical managed `Strategy` runtime.
 
 Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
 
-New live strategies should implement the canonical `Strategy` contract, not `TradingAgent` or `DomainAgent`.
+New live strategies should implement the canonical `Strategy` contract.
+`TradingAgent` / `DomainAgent` are retired and only remain in historical design docs.
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
 For plugin/runtime lifecycle visibility, query `GET /api/system/capabilities`; it now reports deployment state counts (`enabled|draining|disabled|archived`) plus builtin plugin summaries.
 For account-scoped lifecycle visibility, query `GET /api/system/accounts`; it now reports per-account deployment state counts and the runtime budget snapshot.
@@ -39,7 +40,7 @@ For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
 Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
 Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
 
-Canonical agent namespace is now `crate::agent_system::{ai,runtime,legacy_platform}` (legacy paths kept for compatibility).
+Governance agents live under `crate::agents`; canonical live strategy runtime ownership lives under `crate::strategy`, `crate::coordinator`, and `crate::plugins`.
 
 ## Prerequisites
 
@@ -125,10 +126,10 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 ### Live Trading (Recommended)
 
-Ploy is migrating to a **Coordinator-only** live execution plane. For live orders, use the multi-agent platform entry point:
+Ploy uses a **Coordinator-only** live execution plane. For live orders, use the platform entry point:
 
 ```bash
-ploy platform start --crypto --sports              # Coordinator + Agents (live)
+ploy platform start --crypto --sports              # Coordinator + canonical live strategies
 ploy platform start --crypto --dry-run             # Safe dry-run
 ```
 

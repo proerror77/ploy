@@ -112,6 +112,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Execute Task 4 from the retirement plan: remove crypto compatibility runtimes.
 - [x] Execute Task 5 from the retirement plan: remove the `TradingAgent` compatibility contract.
 - [x] Execute Task 6 from the retirement plan: remove the `DomainAgent` / `platform::agents` compatibility layer.
+- [x] Execute Task 7 from the retirement plan: finalize steady-state docs and validation.
 
 ## Review
 
@@ -122,13 +123,13 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.
 - [x] Crypto compatibility runtime branches, env gates, and agent modules are gone; the remaining retirement work is now trait/platform-layer deletion.
 - [x] `TradingAgent`, `AgentContext`, and the last unused pull-based crypto runtime shell are gone; `agents/*` is now governance-only.
+- [x] Legacy runtime retirement is complete; only operational live acceptance checks remain open.
 
 ## Retirement inventory snapshot (2026-03-08)
 
 ### Delete now
 
-- `README.md` and `docs/STRATEGY_FRAMEWORK_4_PILLARS.md` still document `PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES` / `PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES` as temporary operator flags.
-- Historical docs under `docs/plans/2026-03-06-*` and `docs/review-code-quality.md` still mention `TradingAgent` / `DomainAgent`, but these should be cleaned only in the final docs pass, not during code deletion commits.
+- None. Task 7 removed the last steady-state compatibility-flag/operator references.
 
 ### Delete after config extraction
 
@@ -154,6 +155,8 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - 2026-03-08: Rewired `ploy strategy nba-comeback` to instantiate `NbaComebackStrategy` directly from canonical runtime config, removing the standalone CLI dependency on `platform::agents::nba_agent::NbaComebackAgent`.
 - 2026-03-08: Moved the remaining RL helper into `src/rl/integration/live_runtime.rs`, rewired `src/main_commands/rl/agent.rs` to use it directly, and deleted `src/platform/agents/*`, `src/platform/router.rs`, `src/platform/platform.rs`, plus the retired `DomainAgent` / `SimpleAgent` traits.
 - 2026-03-08: Verified Task 6 with `cargo test --features rl rl::integration::live_runtime --lib -- --nocapture`, `cargo check --features rl --bin ploy`, and `cargo check --bin ploy`.
+- 2026-03-08: Finalized steady-state docs, marked legacy runtime retirement complete, and restricted remaining `TradingAgent` / `DomainAgent` mentions to historical design context only.
+- 2026-03-08: Final proof passed with `cargo test coordinator::bootstrap --lib -- --nocapture`, three `--bin ploy` platform-mode regressions, `cargo check --bin ploy`, and `cargo check --features rl --bin ploy`. The `cargo test main_modes::platform_mode --lib` filter still matches 0 tests, so the bin regressions remain the meaningful platform-mode validation.
 
 ---
 

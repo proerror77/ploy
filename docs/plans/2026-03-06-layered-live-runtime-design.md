@@ -2,6 +2,10 @@
 
 Date: 2026-03-06
 
+> Historical design note (2026-03-08): this document captures the pre-retirement target state.
+> `TradingAgent`, `DomainAgent`, compatibility runtime branches, and compatibility env gates have now been removed.
+> OpenClaw is governance-only, and the canonical live runtime is the only supported live path.
+
 ## Goal
 
 把 `ploy` 的 live trading 架構收斂成明確四層：

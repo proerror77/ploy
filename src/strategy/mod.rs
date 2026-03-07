@@ -9,8 +9,8 @@
 //!   [`crate::strategy::traits`].
 //! - New live strategy runtime work should plug into the canonical
 //!   coordinator-managed strategy runtime path.
-//! - `TradingAgent` / `DomainAgent` paths are transitional compatibility
-//!   surfaces and are not approved entry points for new live strategies.
+//! - `TradingAgent` / `DomainAgent` are retired historical paths and are not
+//!   available entry points for new live strategies.
 //!
 //! Strategies are organized by market type:
 //! - `core/` - Shared abstractions and generic split arbitrage engine

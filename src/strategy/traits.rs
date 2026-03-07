@@ -4,8 +4,8 @@
 //! New live strategies must implement [`Strategy`] and integrate through the
 //! canonical strategy runtime / coordinator execution path.
 //!
-//! Transitional interfaces under `src/agents/*` and `src/platform/*` still
-//! exist for compatibility during migration, but they are not the approved
+//! Retired `TradingAgent` / `DomainAgent` paths are mentioned only in
+//! historical design docs and compatibility notes; they are not available
 //! extension points for new live strategy work.
 
 use async_trait::async_trait;
@@ -24,7 +24,7 @@ use crate::error::Result;
 /// Canonical live strategy contract.
 ///
 /// New live strategy implementations should enter the system through this
-/// interface instead of `TradingAgent` or `DomainAgent`.
+/// interface. The old `TradingAgent` / `DomainAgent` runtime paths are retired.
 #[async_trait]
 pub trait Strategy: Send + Sync {
     /// Unique strategy identifier
