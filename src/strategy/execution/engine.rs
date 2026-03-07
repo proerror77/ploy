@@ -1270,7 +1270,10 @@ impl StrategyEngine {
                 let today = Utc::now().date_naive();
                 if let Err(e) = self
                     .store
-                    .abort_cycle(ctx.cycle_id, &format!("DB update failed after Leg2 fill: {}", err))
+                    .abort_cycle(
+                        ctx.cycle_id,
+                        &format!("DB update failed after Leg2 fill: {}", err),
+                    )
                     .await
                 {
                     error!("Failed to abort cycle {} in DB: {}", ctx.cycle_id, e);

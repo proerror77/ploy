@@ -15,8 +15,8 @@ use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
 use crate::error::Result;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy,
-    StrategyAction, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
+    StrategyEventType, StrategyStateInfo,
 };
 use crate::strategy::volatility_arb::calculate_implied_volatility;
 
@@ -211,18 +211,9 @@ impl GammaScalpingStrategy {
         let up_order_id = format!("gs-entry-up-{}", Uuid::new_v4());
         let down_order_id = format!("gs-entry-dn-{}", Uuid::new_v4());
 
-        let up_order = OrderRequest::buy_limit(
-            ctx.up_token.clone(),
-            Side::Up,
-            shares,
-            up_price,
-        );
-        let down_order = OrderRequest::buy_limit(
-            ctx.down_token.clone(),
-            Side::Down,
-            shares,
-            down_price,
-        );
+        let up_order = OrderRequest::buy_limit(ctx.up_token.clone(), Side::Up, shares, up_price);
+        let down_order =
+            OrderRequest::buy_limit(ctx.down_token.clone(), Side::Down, shares, down_price);
 
         let mut actions = vec![
             StrategyAction::SubmitOrder {
@@ -238,7 +229,11 @@ impl GammaScalpingStrategy {
             StrategyAction::LogEvent {
                 event: StrategyEvent::new(
                     StrategyEventType::EntryTriggered,
-                    format!("Gamma scalp entry: {} vol_edge={:.1}%", ctx.symbol, vol_edge * 100.0),
+                    format!(
+                        "Gamma scalp entry: {} vol_edge={:.1}%",
+                        ctx.symbol,
+                        vol_edge * 100.0
+                    ),
                 )
                 .with_data("event_id", &ctx.event_id)
                 .with_data("vol_edge", format!("{:.4}", vol_edge))
@@ -513,12 +508,9 @@ impl Strategy for GammaScalpingStrategy {
 
             MarketUpdate::BinanceKline { symbol, kline, .. } => {
                 if kline.is_closed {
-                    let closes = self
-                        .kline_history
-                        .entry(symbol.clone())
-                        .or_insert_with(|| {
-                            VecDeque::with_capacity(self.config.vol_lookback_periods + 1)
-                        });
+                    let closes = self.kline_history.entry(symbol.clone()).or_insert_with(|| {
+                        VecDeque::with_capacity(self.config.vol_lookback_periods + 1)
+                    });
 
                     closes.push_back(kline.close.to_f64().unwrap_or(0.0));
                     if closes.len() > self.config.vol_lookback_periods {
@@ -546,9 +538,10 @@ impl Strategy for GammaScalpingStrategy {
     }
 
     async fn on_order_update(&mut self, update: &OrderUpdate) -> Result<Vec<StrategyAction>> {
-        let pending = match self.pending_orders.remove(
-            update.client_order_id.as_deref().unwrap_or(""),
-        ) {
+        let pending = match self
+            .pending_orders
+            .remove(update.client_order_id.as_deref().unwrap_or(""))
+        {
             Some(p) => p,
             None => return Ok(vec![]),
         };
@@ -566,12 +559,8 @@ impl Strategy for GammaScalpingStrategy {
                             let ctx = self.active_events.get(&pending.event_id);
                             Straddle {
                                 event_id: pending.event_id.clone(),
-                                symbol: ctx
-                                    .map(|c| c.symbol.clone())
-                                    .unwrap_or_default(),
-                                up_token_id: ctx
-                                    .map(|c| c.up_token.clone())
-                                    .unwrap_or_default(),
+                                symbol: ctx.map(|c| c.symbol.clone()).unwrap_or_default(),
+                                up_token_id: ctx.map(|c| c.up_token.clone()).unwrap_or_default(),
                                 down_token_id: ctx
                                     .map(|c| c.down_token.clone())
                                     .unwrap_or_default(),
@@ -580,9 +569,7 @@ impl Strategy for GammaScalpingStrategy {
                                 up_entry_price: Decimal::ZERO,
                                 down_entry_price: Decimal::ZERO,
                                 entry_time: Utc::now(),
-                                expiry_time: ctx
-                                    .map(|c| c.end_time)
-                                    .unwrap_or_else(Utc::now),
+                                expiry_time: ctx.map(|c| c.end_time).unwrap_or_else(Utc::now),
                                 last_rebalance: Utc::now(),
                                 rebalance_count: 0,
                                 realized_pnl: Decimal::ZERO,
@@ -591,8 +578,7 @@ impl Strategy for GammaScalpingStrategy {
                         });
 
                     let fill_price = update.avg_fill_price.unwrap_or(pending.price);
-                    let cost = fill_price
-                        * Decimal::from(update.filled_qty);
+                    let cost = fill_price * Decimal::from(update.filled_qty);
 
                     if pending.side == Side::Up {
                         straddle.up_shares += update.filled_qty;
@@ -614,8 +600,8 @@ impl Strategy for GammaScalpingStrategy {
                     // Rebalance or exit fill — update share counts
                     if let Some(straddle) = self.straddles.get_mut(&pending.event_id) {
                         let fill_price = update.avg_fill_price.unwrap_or(pending.price);
-                        let pnl_delta = (fill_price - pending.price)
-                            * Decimal::from(update.filled_qty);
+                        let pnl_delta =
+                            (fill_price - pending.price) * Decimal::from(update.filled_qty);
 
                         if pending.token_id == straddle.up_token_id {
                             // Selling UP or buying UP
@@ -708,11 +694,7 @@ impl Strategy for GammaScalpingStrategy {
     }
 
     fn state(&self) -> StrategyStateInfo {
-        let total_exposure: Decimal = self
-            .straddles
-            .values()
-            .map(|s| s.cost_basis)
-            .sum();
+        let total_exposure: Decimal = self.straddles.values().map(|s| s.cost_basis).sum();
 
         let unrealized: Decimal = self
             .straddles

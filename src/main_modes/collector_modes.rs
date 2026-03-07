@@ -191,7 +191,9 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
                             .as_deref()
                             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                             .map(|dt| dt.with_timezone(&Utc))
-                            .is_some_and(|end| end <= soon_cutoff && end >= now - chrono::Duration::minutes(15))
+                            .is_some_and(|end| {
+                                end <= soon_cutoff && end >= now - chrono::Duration::minutes(15)
+                            })
                     })
                     .take(4)
                     .collect();

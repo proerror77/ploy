@@ -468,9 +468,7 @@ impl DirectionalBacktestEngine {
                 .get(&window.event_slug)
                 .copied()
                 .unwrap_or((None, None));
-            self.try_entry_for_window(
-                symbol, ts, &window, spot_price, momentum, up_ask, down_ask,
-            );
+            self.try_entry_for_window(symbol, ts, &window, spot_price, momentum, up_ask, down_ask);
         }
     }
 

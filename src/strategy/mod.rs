@@ -157,9 +157,6 @@ pub use deribit_probability_arb::{
 pub use directional_backtest::{
     DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
 };
-pub use liquidity_vacuum_backtest::{
-    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
-};
 pub use dump_hedge::{
     DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
     PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
@@ -174,6 +171,9 @@ pub use gamma_scalping::{
 };
 pub use garch_probability_backtest::{
     GarchProbabilityBacktestConfig, GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade,
+};
+pub use liquidity_vacuum_backtest::{
+    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
 };
 pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,

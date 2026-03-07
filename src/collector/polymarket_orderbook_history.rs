@@ -387,8 +387,7 @@ impl OrderbookHistoryCollector {
 
             debug!(
                 history_rows,
-                canonical_rows,
-                "persisted orderbook-history batch"
+                canonical_rows, "persisted orderbook-history batch"
             );
         }
 

@@ -261,7 +261,10 @@ pub struct GarchProbabilityBacktestEngine {
 }
 
 impl GarchProbabilityBacktestEngine {
-    pub fn new(config: GarchProbabilityBacktestConfig, recorder: Box<dyn BacktestRecorder>) -> Self {
+    pub fn new(
+        config: GarchProbabilityBacktestConfig,
+        recorder: Box<dyn BacktestRecorder>,
+    ) -> Self {
         let equity = config.initial_capital;
         Self {
             config,
@@ -352,9 +355,10 @@ impl GarchProbabilityBacktestEngine {
                                 true
                             } else {
                                 let tol = self.config.window_duration_tolerance as i64;
-                                self.config.allowed_window_durations.iter().any(|&d| {
-                                    (duration_secs - d as i64).abs() <= tol
-                                })
+                                self.config
+                                    .allowed_window_durations
+                                    .iter()
+                                    .any(|&d| (duration_secs - d as i64).abs() <= tol)
                             };
                             if allowed {
                                 let events =
@@ -401,7 +405,12 @@ impl GarchProbabilityBacktestEngine {
 
         self.vol_models
             .entry(symbol.to_string())
-            .or_insert_with(|| EwmaGarchVol::new(self.config.ewma_half_life_secs, self.config.initial_sigma_15m))
+            .or_insert_with(|| {
+                EwmaGarchVol::new(
+                    self.config.ewma_half_life_secs,
+                    self.config.initial_sigma_15m,
+                )
+            })
             .update(price, ts);
     }
 
@@ -528,7 +537,9 @@ impl GarchProbabilityBacktestEngine {
             .map(|m| m.sigma_15m())
             .unwrap_or(self.config.initial_sigma_15m)
             .max(self.config.vol_floor_15m);
-        let sigma_eff_15m = (sigma_15m * sigma_15m + self.config.basis_sigma_15m * self.config.basis_sigma_15m).sqrt();
+        let sigma_eff_15m = (sigma_15m * sigma_15m
+            + self.config.basis_sigma_15m * self.config.basis_sigma_15m)
+            .sqrt();
 
         for window in windows {
             let (up_ask, down_ask) = self
@@ -536,15 +547,7 @@ impl GarchProbabilityBacktestEngine {
                 .get(&window.event_slug)
                 .copied()
                 .unwrap_or((None, None));
-            self.try_entry_for_window(
-                symbol,
-                ts,
-                &window,
-                st,
-                sigma_eff_15m,
-                up_ask,
-                down_ask,
-            );
+            self.try_entry_for_window(symbol, ts, &window, st, sigma_eff_15m, up_ask, down_ask);
         }
     }
 
@@ -639,9 +642,9 @@ impl GarchProbabilityBacktestEngine {
         }
 
         let depth = self.config.market_depth_shares.max(1);
-        let sim_result = self
-            .execution_sim
-            .simulate_buy(market_ask, ts, self.config.shares_per_trade, depth);
+        let sim_result =
+            self.execution_sim
+                .simulate_buy(market_ask, ts, self.config.shares_per_trade, depth);
 
         if sim_result.filled_shares == 0 {
             return;
@@ -699,7 +702,13 @@ impl GarchProbabilityBacktestEngine {
 
         debug!(
             "ENTRY {} {} @ {:.4} | fv={:.3} edge={:.3} sigma15m={:.4} window={}s",
-            symbol, direction, sim_result.fill_price, fair_value, edge, sigma_15m, window.window_duration_secs
+            symbol,
+            direction,
+            sim_result.fill_price,
+            fair_value,
+            edge,
+            sigma_15m,
+            window.window_duration_secs
         );
     }
 
@@ -722,7 +731,13 @@ impl GarchProbabilityBacktestEngine {
 
     // ─── Settlement ─────────────────────────────────────────
 
-    fn resolve_positions(&mut self, symbol: &str, event_slug: &str, up_won: bool, ts: DateTime<Utc>) {
+    fn resolve_positions(
+        &mut self,
+        symbol: &str,
+        event_slug: &str,
+        up_won: bool,
+        ts: DateTime<Utc>,
+    ) {
         let mut to_close = Vec::new();
         for (i, pos) in self.positions.iter().enumerate() {
             if pos.symbol == symbol && pos.event_slug == event_slug {
@@ -984,4 +999,3 @@ impl GarchProbabilityBacktestEngine {
         mean / std
     }
 }
-
