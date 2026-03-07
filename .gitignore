@@ -68,3 +68,7 @@ results/
 # Sidecar build artifacts
 ploy-sidecar/dist/
 .worktrees
+
+# Local skill/agent tooling
+skill-creator-updated/
+skills/
