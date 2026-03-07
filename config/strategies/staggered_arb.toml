@@ -12,6 +12,10 @@ direction_threshold = 0.05
 premium_sum_threshold = 1.00
 premium_sum_direction_slope = 1.25
 premium_sum_obi_slope = 0.25
+obi_confirm_threshold = 0.005
+strong_obi_threshold = 0.015
+strong_obi_direction_relaxation = 0.015
+strong_obi_price_bonus = 0.02
 max_initial_sum = 0.0
 max_leg1_price = 0.55
 merge_target_sum = 0.95
@@ -28,6 +32,7 @@ min_leg2_delay_secs = 3
 max_trades_per_event = 0
 entry_after_start_min_secs = 30  # observe the first 30s before opening new leg1s
 entry_after_start_max_secs = 180 # only trade the early post-open window after the 30s observation delay
+strong_obi_window_bonus_secs = 60 # allow a little longer on 15m windows when OBI is both strong and persistent
 no_trade_last_secs = 30          # block new leg1s in the final 30s
 
 [risk]
@@ -39,6 +44,8 @@ min_balance_usd = 5.0           # Keep $5 reserve
 max_leg1_loss = 0.03            # Trigger protective merge earlier; recent live data showed 5c waits were too loose
 force_complete_threshold = 1.08 # Keep timeout/time-safety/final-window closes capped near parity
 protective_close_threshold = 1.08 # Bound stop-loss/theta protective merges before they become punitive
+obi_decay_exit_ratio = 0.35     # If OBI falls below 35% of entry strength, the directional edge is considered decayed
+obi_flip_exit_threshold = 0.008 # Treat opposite-side OBI beyond this magnitude as a real flip against the position
 
 [model]
 mu = 0.0

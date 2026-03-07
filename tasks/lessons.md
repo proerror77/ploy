@@ -153,3 +153,6 @@
 
 - Pattern: Fixed `force_complete_threshold` / `protective_close_threshold` values can overpay for early hedges even when the same cap is appropriate near expiry.
 - Rule: Treat close thresholds as final caps, not flat gates. In staggered-arb, derive stricter early-window protective/forced thresholds from time remaining, then let them widen toward the configured cap as expiry risk rises.
+
+- Pattern: Strengthening OBI logic can be correct in isolation yet leave primary validation windows unchanged when those windows were never bottlenecked by the old OBI gate.
+- Rule: After adding a new staggered-arb signal feature, compare the same recent live-like and adjacent overlap windows first. If trade count and PnL stay flat, stop loosening entry further and shift attention to exit timing or `LEG2` execution quality.

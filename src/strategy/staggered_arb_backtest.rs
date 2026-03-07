@@ -60,6 +60,16 @@ pub struct StaggeredArbBacktestConfig {
     /// Extra OBI confirmation required per 1.0 sum above `premium_sum_threshold`.
     /// Live-only today; kept in shared config so live/backtest profiles stay aligned.
     pub premium_sum_obi_slope: f64,
+    /// Base OBI confirmation threshold before premium adjustments.
+    pub obi_confirm_threshold: f64,
+    /// OBI strength that unlocks the strong-signal entry profile.
+    pub strong_obi_threshold: f64,
+    /// How much strong OBI can relax the direction-strength gate.
+    pub strong_obi_direction_relaxation: f64,
+    /// Extra Leg1 price we will tolerate when OBI is both strong and persistent.
+    pub strong_obi_price_bonus: Decimal,
+    /// Extra opening-window seconds allowed for 15m windows under a strong OBI regime.
+    pub strong_obi_window_bonus_secs: u64,
     /// Reverse the direction signal: if true, buy the OPPOSITE of what the model predicts.
     /// Useful when the model is consistently wrong (accuracy < 50%).
     pub reverse_signal: bool,
@@ -93,6 +103,10 @@ pub struct StaggeredArbBacktestConfig {
     pub force_complete_threshold: Decimal,
     /// Maximum sum allowed for protective Leg2 closes (stop-loss / theta urgency)
     pub protective_close_threshold: Decimal,
+    /// Exit support decays once OBI falls below this ratio of entry OBI.
+    pub obi_decay_exit_ratio: f64,
+    /// Treat OBI as flipped once it crosses this directional magnitude against the position.
+    pub obi_flip_exit_threshold: f64,
     /// Minimum ask price to consider (filters out illiquid extreme prices)
     pub min_ask_price: Decimal,
     /// Minimum up_ask + down_ask to enter (filters out illiquid extreme-price pairs)
@@ -145,6 +159,11 @@ impl Default for StaggeredArbBacktestConfig {
             premium_sum_threshold: Decimal::ONE,
             premium_sum_direction_slope: 1.25,
             premium_sum_obi_slope: 0.25,
+            obi_confirm_threshold: 0.005,
+            strong_obi_threshold: 0.015,
+            strong_obi_direction_relaxation: 0.015,
+            strong_obi_price_bonus: dec!(0.02),
+            strong_obi_window_bonus_secs: 60,
             reverse_signal: false,
             max_initial_sum: Decimal::ZERO,
             max_leg1_price: dec!(0.55),
@@ -159,6 +178,8 @@ impl Default for StaggeredArbBacktestConfig {
             max_leg1_loss: dec!(0.03),
             force_complete_threshold: dec!(1.08),
             protective_close_threshold: dec!(1.08),
+            obi_decay_exit_ratio: 0.35,
+            obi_flip_exit_threshold: 0.008,
             min_ask_price: dec!(0.05),
             min_entry_sum: dec!(0.30),
             allowed_window_durations: vec![300, 900],
@@ -217,6 +238,122 @@ impl StaggeredArbBacktestConfig {
         let urgency = elapsed_ratio.max(safety_ratio).max(urgency_floor).min(1.0);
         let urgency_dec = Decimal::from_f64(urgency).unwrap_or(Decimal::ONE);
         Decimal::ONE + (configured_cap - Decimal::ONE) * urgency_dec
+    }
+
+    fn obi_directional_value(&self, predicted_up: bool, obi: f64) -> f64 {
+        if predicted_up {
+            obi
+        } else {
+            -obi
+        }
+    }
+
+    pub(crate) fn obi_confirms_direction(
+        &self,
+        predicted_up: bool,
+        obi: f64,
+        required_strength: f64,
+    ) -> bool {
+        self.obi_directional_value(predicted_up, obi) >= required_strength
+    }
+
+    pub(crate) fn obi_is_persistent(
+        &self,
+        predicted_up: bool,
+        obi: f64,
+        prev_obi: Option<f64>,
+        required_strength: f64,
+    ) -> bool {
+        if !self.obi_confirms_direction(predicted_up, obi, required_strength) {
+            return false;
+        }
+        let Some(prev) = prev_obi else {
+            return self.obi_directional_value(predicted_up, obi) >= self.strong_obi_threshold;
+        };
+        self.obi_directional_value(predicted_up, prev) >= required_strength * 0.75
+    }
+
+    pub(crate) fn strong_obi_entry_bonus_active(
+        &self,
+        predicted_up: bool,
+        obi: f64,
+        prev_obi: Option<f64>,
+        current_sum: Decimal,
+        fair_value_distance: Option<f64>,
+    ) -> bool {
+        if current_sum > self.premium_sum_threshold + dec!(0.04) {
+            return false;
+        }
+        if fair_value_distance.unwrap_or(f64::INFINITY) > self.max_fair_value_distance.min(0.10) {
+            return false;
+        }
+        let directional_obi = self.obi_directional_value(predicted_up, obi);
+        let Some(prev) = prev_obi else {
+            return false;
+        };
+        directional_obi >= self.strong_obi_threshold
+            && self.obi_directional_value(predicted_up, prev) >= self.obi_confirm_threshold
+    }
+
+    pub(crate) fn direction_threshold_now(
+        &self,
+        current_sum: Decimal,
+        strong_obi_bonus_active: bool,
+    ) -> f64 {
+        let premium_sum_excess = self.premium_sum_excess(current_sum);
+        let mut threshold =
+            self.direction_threshold + premium_sum_excess * self.premium_sum_direction_slope;
+        if strong_obi_bonus_active {
+            threshold = (threshold - self.strong_obi_direction_relaxation).max(0.0);
+        }
+        threshold
+    }
+
+    pub(crate) fn max_leg1_price_now(&self, strong_obi_bonus_active: bool) -> Decimal {
+        if strong_obi_bonus_active {
+            self.max_leg1_price + self.strong_obi_price_bonus
+        } else {
+            self.max_leg1_price
+        }
+    }
+
+    pub(crate) fn entry_after_start_max_secs_now(
+        &self,
+        window_duration_secs: u64,
+        strong_obi_bonus_active: bool,
+    ) -> u64 {
+        if self.entry_after_start_max_secs == 0 {
+            return 0;
+        }
+        if strong_obi_bonus_active && window_duration_secs >= 900 {
+            self.entry_after_start_max_secs + self.strong_obi_window_bonus_secs
+        } else {
+            self.entry_after_start_max_secs
+        }
+    }
+
+    pub(crate) fn obi_signal_still_supportive(
+        &self,
+        leg1_direction: Direction,
+        entry_obi: Option<f64>,
+        current_obi: Option<f64>,
+    ) -> bool {
+        let Some(current) = current_obi else {
+            return false;
+        };
+        let directional_current = match leg1_direction {
+            Direction::Up => current,
+            Direction::Down => -current,
+        };
+        if directional_current <= 0.0 {
+            return false;
+        }
+
+        let required_support = entry_obi
+            .map(|obi| obi.abs() * self.obi_decay_exit_ratio)
+            .unwrap_or(self.obi_flip_exit_threshold)
+            .max(self.obi_flip_exit_threshold);
+        directional_current >= required_support
     }
 
     pub(crate) fn force_close_threshold_now(
@@ -314,6 +451,29 @@ impl StaggeredArbBacktestConfig {
                 .get("premium_sum_obi_slope")
                 .and_then(|v| v.as_float())
                 .unwrap_or(0.25),
+            obi_confirm_threshold: entry
+                .get("obi_confirm_threshold")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.005),
+            strong_obi_threshold: entry
+                .get("strong_obi_threshold")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.015),
+            strong_obi_direction_relaxation: entry
+                .get("strong_obi_direction_relaxation")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.015),
+            strong_obi_price_bonus: Decimal::try_from(
+                entry
+                    .get("strong_obi_price_bonus")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.02),
+            )
+            .unwrap_or(dec!(0.02)),
+            strong_obi_window_bonus_secs: timing
+                .get("strong_obi_window_bonus_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(60) as u64,
             reverse_signal: entry
                 .get("reverse_signal")
                 .and_then(|v| v.as_bool())
@@ -388,6 +548,14 @@ impl StaggeredArbBacktestConfig {
                     .unwrap_or(1.08),
             )
             .unwrap_or(dec!(1.08)),
+            obi_decay_exit_ratio: risk
+                .get("obi_decay_exit_ratio")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.35),
+            obi_flip_exit_threshold: risk
+                .get("obi_flip_exit_threshold")
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.008),
             min_ask_price: Decimal::try_from(
                 entry
                     .get("min_ask_price")
@@ -529,6 +697,8 @@ struct StaggeredArbPosition {
     best_sum_seen: Decimal,
     /// Initial sum at entry (up_ask + down_ask)
     initial_sum: Decimal,
+    /// Binance top-of-book OBI captured at Leg1 entry.
+    entry_obi: Option<f64>,
     // ── Greeks at entry ──
     /// Binary option greeks computed at Leg1 entry
     entry_greeks: Option<BinaryGreeks>,
@@ -613,6 +783,8 @@ pub struct StaggeredArbBacktestEngine {
     lob_depth: HashMap<String, u64>,
     /// Latest Binance L2 OBI per symbol for live-parity replay filtering.
     binance_l2_obi_5: HashMap<String, Decimal>,
+    /// Previous Binance L2 OBI per symbol for persistence / flip checks.
+    binance_l2_obi_prev_5: HashMap<String, Decimal>,
     binance_l2_obi_ts: HashMap<String, DateTime<Utc>>,
     // Data range
     data_range_start: Option<DateTime<Utc>>,
@@ -640,6 +812,7 @@ impl StaggeredArbBacktestEngine {
             event_trade_count: HashMap::new(),
             lob_depth: HashMap::new(),
             binance_l2_obi_5: HashMap::new(),
+            binance_l2_obi_prev_5: HashMap::new(),
             binance_l2_obi_ts: HashMap::new(),
             data_range_start: None,
             data_range_end: None,
@@ -751,7 +924,9 @@ impl StaggeredArbBacktestEngine {
                         .insert(update.symbol.clone(), *ask_depth_shares);
                 }
                 UpdateType::BinanceL2 { obi_5, .. } => {
-                    self.binance_l2_obi_5.insert(update.symbol.clone(), *obi_5);
+                    if let Some(prev) = self.binance_l2_obi_5.insert(update.symbol.clone(), *obi_5) {
+                        self.binance_l2_obi_prev_5.insert(update.symbol.clone(), prev);
+                    }
                     self.binance_l2_obi_ts
                         .insert(update.symbol.clone(), update.timestamp);
                 }
@@ -903,11 +1078,6 @@ impl StaggeredArbBacktestEngine {
         {
             return;
         }
-        if self.config.entry_after_start_max_secs > 0
-            && elapsed_since_start > self.config.entry_after_start_max_secs as i64
-        {
-            return;
-        }
 
         // 2. Need both asks to compute sum
         let (ua, da) = match (up_ask, down_ask) {
@@ -1012,22 +1182,7 @@ impl StaggeredArbBacktestEngine {
             }
         }
 
-        // 6. Direction threshold: |p_hat - 0.5| >= direction_threshold
-        let direction_strength = (p_hat - 0.5).abs();
-        let premium_sum_excess = self.config.premium_sum_excess(current_sum);
-        let required_direction_strength = self.config.direction_threshold
-            + premium_sum_excess * self.config.premium_sum_direction_slope;
-        if direction_strength < required_direction_strength {
-            trace!(
-                "Skipping: direction_strength {:.4} < required {:.4} (premium_sum_excess {:.4})",
-                direction_strength,
-                required_direction_strength,
-                premium_sum_excess
-            );
-            return;
-        }
-
-        // 7. Direction: p_hat > 0.5 → buy UP first (it's about to get expensive)
+        // 6. Direction: p_hat > 0.5 → buy UP first (it's about to get expensive)
         //    If reverse_signal is true, flip: buy the opposite of what the model says
         let predicted_up = if self.config.reverse_signal {
             p_hat < 0.5
@@ -1035,7 +1190,21 @@ impl StaggeredArbBacktestEngine {
             p_hat > 0.5
         };
 
-        const OI_CONFIRM_THRESHOLD: f64 = 0.005;
+        // 6b. Require meaningful price displacement and direction agreement.
+        const MIN_PRICE_DISPLACEMENT: f64 = 0.0003;
+        let displacement = ((st - window.s0) / window.s0).to_f64().unwrap_or(0.0);
+        if displacement.abs() < MIN_PRICE_DISPLACEMENT {
+            return;
+        }
+        if predicted_up && displacement <= 0.0 {
+            return;
+        }
+        if !predicted_up && displacement >= 0.0 {
+            return;
+        }
+
+        // 6c. OBI confirmation: require the current signal to be aligned and either
+        // persistent or strong enough to justify a directional first leg.
         const OI_MAX_STALE_SECS: i64 = 60;
         let Some(obi_ts) = self.binance_l2_obi_ts.get(symbol).copied() else {
             trace!("Skipping: no Binance L2 OBI history for {}", symbol);
@@ -1054,21 +1223,66 @@ impl StaggeredArbBacktestEngine {
             return;
         };
         let obi = obi_value.to_f64().unwrap_or(0.0);
+        let prev_obi = self
+            .binance_l2_obi_prev_5
+            .get(symbol)
+            .map(|value| value.to_f64().unwrap_or(0.0));
+        let fair_value_distance = greeks.as_ref().map(|g| (g.fair_value - 0.5).abs());
+        let premium_sum_excess = self.config.premium_sum_excess(current_sum);
         let required_obi_strength =
-            OI_CONFIRM_THRESHOLD + premium_sum_excess * self.config.premium_sum_obi_slope;
-        if predicted_up && obi < required_obi_strength {
+            self.config.obi_confirm_threshold + premium_sum_excess * self.config.premium_sum_obi_slope;
+        if !self
+            .config
+            .obi_confirms_direction(predicted_up, obi, required_obi_strength)
+        {
             trace!(
-                "Skipping: OBI {:.4} < required {:.4} for long entry",
+                "Skipping: OBI {:.4} not aligned with required {:.4}",
                 obi,
                 required_obi_strength
             );
             return;
         }
-        if !predicted_up && obi > -required_obi_strength {
+        let obi_persistent = self
+            .config
+            .obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
+        let strong_obi_bonus_active = self.config.strong_obi_entry_bonus_active(
+            predicted_up,
+            obi,
+            prev_obi,
+            current_sum,
+            fair_value_distance,
+        );
+        if !obi_persistent && !strong_obi_bonus_active {
+            trace!("Skipping: OBI {:.4} lacks persistence for {}", obi, symbol);
+            return;
+        }
+
+        // 7. Direction threshold: |p_hat - 0.5| >= direction_threshold
+        let direction_strength = (p_hat - 0.5).abs();
+        let required_direction_strength = self
+            .config
+            .direction_threshold_now(current_sum, strong_obi_bonus_active);
+        if direction_strength < required_direction_strength {
             trace!(
-                "Skipping: OBI {:.4} > required {:.4} for short entry",
-                obi,
-                -required_obi_strength
+                "Skipping: direction_strength {:.4} < required {:.4} (premium_sum_excess {:.4} strong_obi={})",
+                direction_strength,
+                required_direction_strength,
+                premium_sum_excess,
+                strong_obi_bonus_active
+            );
+            return;
+        }
+
+        let allowed_entry_window_secs = self.config.entry_after_start_max_secs_now(
+            window.window_duration_secs as u64,
+            strong_obi_bonus_active,
+        );
+        if allowed_entry_window_secs > 0 && elapsed_since_start > allowed_entry_window_secs as i64 {
+            trace!(
+                "Skipping: elapsed_since_start {}s > allowed {}s (strong_obi={})",
+                elapsed_since_start,
+                allowed_entry_window_secs,
+                strong_obi_bonus_active
             );
             return;
         }
@@ -1081,7 +1295,7 @@ impl StaggeredArbBacktestEngine {
 
         // 7b. Leg1 price cap: don't buy if predicted side is too expensive
         //     (leaves no room for the other side to drop enough for profit)
-        if leg1_ask > self.config.max_leg1_price {
+        if leg1_ask > self.config.max_leg1_price_now(strong_obi_bonus_active) {
             return;
         }
 
@@ -1196,6 +1410,7 @@ impl StaggeredArbBacktestEngine {
             entry_sigma: sigma,
             best_sum_seen: current_sum,
             initial_sum: current_sum,
+            entry_obi: Some(obi),
             entry_greeks: greeks,
             state: ArbPositionState::Leg1Filled,
             leg2_direction: None,
@@ -1312,6 +1527,31 @@ impl StaggeredArbBacktestEngine {
             } else {
                 None
             };
+            let current_obi = self
+                .binance_l2_obi_5
+                .get(&pos.symbol)
+                .map(|value| value.to_f64().unwrap_or(0.0));
+            let displacement_supportive = self
+                .spot_prices
+                .get(&pos.symbol)
+                .and_then(|sp| {
+                    if pos.s0 <= Decimal::ZERO {
+                        return None;
+                    }
+                    Some(((sp.price - pos.s0) / pos.s0).to_f64().unwrap_or(0.0))
+                })
+                .map(|displacement| match pos.leg1_direction {
+                    Direction::Up => displacement > 0.0,
+                    Direction::Down => displacement < 0.0,
+                })
+                .unwrap_or(false);
+            let greeks_supportive = current_greeks
+                .as_ref()
+                .map(|g| match pos.leg1_direction {
+                    Direction::Up => g.d2 > 0.05 && g.fair_value > 0.5,
+                    Direction::Down => g.d2 < -0.05 && g.fair_value < 0.5,
+                })
+                .unwrap_or(!self.config.use_greeks);
 
             // Check minimum delay since Leg1 fill (execution realism)
             let secs_since_leg1 = (ts - pos.leg1_time).num_seconds();
@@ -1397,6 +1637,20 @@ impl StaggeredArbBacktestEngine {
                 };
                 let leg1_loss = pos.leg1_price - leg1_current_value;
                 if leg1_loss >= self.config.max_leg1_loss && leg2_ready {
+                    let obi_supportive = self.config.obi_signal_still_supportive(
+                        pos.leg1_direction,
+                        pos.entry_obi,
+                        current_obi,
+                    );
+                    if obi_supportive && displacement_supportive && greeks_supportive {
+                        trace!(
+                            "Skipping protective stop: signal still supportive obi={:?} displacement_supportive={} greeks_supportive={}",
+                            current_obi,
+                            displacement_supportive,
+                            greeks_supportive
+                        );
+                        continue;
+                    }
                     if protective_threshold <= Decimal::ZERO || current_sum <= protective_threshold
                     {
                         actions.push((
@@ -2468,6 +2722,11 @@ mod tests {
         assert_eq!(config.premium_sum_threshold, Decimal::ONE);
         assert_eq!(config.premium_sum_direction_slope, 1.25);
         assert_eq!(config.premium_sum_obi_slope, 0.25);
+        assert_eq!(config.obi_confirm_threshold, 0.005);
+        assert_eq!(config.strong_obi_threshold, 0.015);
+        assert_eq!(config.strong_obi_direction_relaxation, 0.015);
+        assert_eq!(config.strong_obi_price_bonus, dec!(0.02));
+        assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.max_concurrent_positions, 0);
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
         assert_eq!(config.max_leg1_price, dec!(0.55));
@@ -2483,6 +2742,8 @@ mod tests {
         assert_eq!(config.min_entry_sum, dec!(0.30));
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));
+        assert_eq!(config.obi_decay_exit_ratio, 0.35);
+        assert_eq!(config.obi_flip_exit_threshold, 0.008);
         assert_eq!(config.min_entry_sigma, 0.003);
         assert_eq!(config.max_entry_sigma, 0.0);
         assert_eq!(config.max_fair_value_distance, 0.15);
@@ -2505,12 +2766,32 @@ mod tests {
         );
         assert_eq!(config.shares_per_trade, 20);
         assert_eq!(config.direction_threshold, 0.05);
+        assert_eq!(config.obi_confirm_threshold, 0.005);
+        assert_eq!(config.strong_obi_threshold, 0.015);
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
         assert_eq!(config.max_leg1_price, dec!(0.55));
         assert_eq!(config.entry_after_start_min_secs, 30);
         assert_eq!(config.entry_after_start_max_secs, 180);
+        assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));
+        assert_eq!(config.obi_decay_exit_ratio, 0.35);
+        assert_eq!(config.obi_flip_exit_threshold, 0.008);
+    }
+
+    #[test]
+    fn test_strong_obi_bonus_adjusts_entry_thresholds() {
+        let config = StaggeredArbBacktestConfig::default();
+        assert!(config.strong_obi_entry_bonus_active(
+            true,
+            0.02,
+            Some(0.01),
+            dec!(1.02),
+            Some(0.03)
+        ));
+        assert!((config.direction_threshold_now(dec!(1.02), true) - 0.06).abs() < 1e-9);
+        assert_eq!(config.max_leg1_price_now(true), dec!(0.57));
+        assert_eq!(config.entry_after_start_max_secs_now(900, true), 240);
     }
 
     #[test]
@@ -2815,6 +3096,7 @@ mod tests {
             leg1_shares: 10,
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(0.1125),
+            entry_obi: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),
@@ -2862,6 +3144,7 @@ mod tests {
             leg1_shares: 10,
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(0.0825),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(20),
@@ -2908,6 +3191,7 @@ mod tests {
             leg1_shares: 10,
             leg1_time: now - chrono::Duration::seconds(10),
             leg1_fee: dec!(0.0825),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),
@@ -2916,6 +3200,55 @@ mod tests {
             entry_sigma: 0.01,
             best_sum_seen: dec!(1.07),
             initial_sum: dec!(1.07),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 0);
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+    }
+
+    #[test]
+    fn test_supportive_obi_skips_protective_stop_loss() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+        config.max_leg1_loss = dec!(0.05);
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.53))));
+        engine
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(100.6), None, now));
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.01));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(10),
+            leg1_fee: dec!(0.0825),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.08),
+            initial_sum: dec!(1.08),
+            entry_obi: Some(0.02),
             entry_greeks: None,
             state: ArbPositionState::Leg1Filled,
             leg2_direction: None,
@@ -2953,6 +3286,7 @@ mod tests {
             leg1_shares: 10,
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(0.1125),
+            entry_obi: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(20),
@@ -2993,6 +3327,7 @@ mod tests {
             leg1_shares: 200,
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(1.65),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),
@@ -3044,6 +3379,7 @@ mod tests {
             leg1_shares: 200,
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(1.65),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),

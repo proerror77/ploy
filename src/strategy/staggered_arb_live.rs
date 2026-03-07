@@ -105,6 +105,7 @@ struct PaperPosition {
     leg1_shares: u64,
     leg1_fee: Decimal,
     leg1_time: DateTime<Utc>,
+    entry_obi: Option<f64>,
     wait_deadline: DateTime<Utc>,
     leg2_price: Option<Decimal>,
     leg2_shares: Option<u64>,
@@ -161,6 +162,8 @@ struct LiveOrderTrack {
     exchange_order_id: Option<String>,
     /// Cumulative filled shares already reflected in strategy state for this order.
     acknowledged_filled_qty: u64,
+    /// OBI value at the time the leg1 signal was accepted.
+    entry_obi: Option<f64>,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -176,6 +179,8 @@ pub struct StaggeredArbAdapter {
     spot_prices: HashMap<String, SpotPrice>,
     /// symbol -> latest Binance L2 OBI(top-5)
     binance_l2_obi_5: HashMap<String, Decimal>,
+    /// symbol -> previous Binance L2 OBI(top-5) for persistence / flip checks
+    binance_l2_obi_prev_5: HashMap<String, Decimal>,
     /// symbol -> timestamp for latest Binance L2 OBI update
     binance_l2_obi_ts: HashMap<String, DateTime<Utc>>,
     /// event_id → (up_ask, down_ask)
@@ -237,6 +242,7 @@ impl StaggeredArbAdapter {
             dry_run,
             spot_prices: HashMap::new(),
             binance_l2_obi_5: HashMap::new(),
+            binance_l2_obi_prev_5: HashMap::new(),
             binance_l2_obi_ts: HashMap::new(),
             pm_asks_by_event: HashMap::new(),
             token_to_quote_route: HashMap::new(),
@@ -945,6 +951,7 @@ impl StaggeredArbAdapter {
             leg1_shares: filled_shares,
             leg1_fee,
             leg1_time: ts,
+            entry_obi: track.entry_obi,
             wait_deadline,
             leg2_price: None,
             leg2_shares: None,
@@ -1031,8 +1038,8 @@ impl StaggeredArbAdapter {
                         return false;
                     }
 
-                    bc.entry_after_start_max_secs == 0
-                        || elapsed_since_start <= bc.entry_after_start_max_secs as i64
+                    let allowed_max = bc.entry_after_start_max_secs_now(window.window_secs, true);
+                    allowed_max == 0 || elapsed_since_start <= allowed_max as i64
                 })
             })
             .unwrap_or(false)
@@ -1132,12 +1139,6 @@ impl StaggeredArbAdapter {
             self.bump_entry_reject("entry_observation_delay_active");
             return None;
         }
-        if bc.entry_after_start_max_secs > 0
-            && elapsed_since_start > bc.entry_after_start_max_secs as i64
-        {
-            self.bump_entry_reject("entry_window_expired");
-            return None;
-        }
 
         // 2. Need both asks
         let (ua, da) = match (up_ask, down_ask) {
@@ -1230,22 +1231,7 @@ impl StaggeredArbAdapter {
             }
         }
 
-        // 8. Direction threshold
-        let direction_strength = (p_hat - 0.5).abs();
-        let premium_sum_excess = self.premium_sum_excess(current_sum);
-        let required_direction_strength =
-            bc.direction_threshold + premium_sum_excess * bc.premium_sum_direction_slope;
-        if direction_strength < required_direction_strength {
-            let reason = if required_direction_strength > bc.direction_threshold {
-                "direction_strength_below_sum_adjusted_threshold"
-            } else {
-                "direction_strength_below_threshold"
-            };
-            self.bump_entry_reject(reason);
-            return None;
-        }
-
-        // 8b. Price displacement force from event open anchor.
+        // 8. Price displacement force from event open anchor.
         // Require meaningful move and direction agreement to avoid noisy fake thresholds.
         const MIN_PRICE_DISPLACEMENT: f64 = 0.0003; // 3 bps
         let displacement = ((st - s0) / s0).to_f64().unwrap_or(0.0);
@@ -1311,9 +1297,15 @@ impl StaggeredArbAdapter {
                 return None;
             }
         };
+        let prev_obi = self
+            .binance_l2_obi_prev_5
+            .get(symbol)
+            .map(|value| value.to_f64().unwrap_or(0.0));
+        let fair_value_distance = greeks.as_ref().map(|g| (g.fair_value - 0.5).abs());
+        let premium_sum_excess = self.premium_sum_excess(current_sum);
         let required_obi_strength =
-            OI_CONFIRM_THRESHOLD + premium_sum_excess * bc.premium_sum_obi_slope;
-        if predicted_up && obi < required_obi_strength {
+            bc.obi_confirm_threshold + premium_sum_excess * bc.premium_sum_obi_slope;
+        if !bc.obi_confirms_direction(predicted_up, obi, required_obi_strength) {
             let reason = if required_obi_strength > OI_CONFIRM_THRESHOLD {
                 "obi_not_confirmed_for_premium_entry"
             } else {
@@ -1322,13 +1314,39 @@ impl StaggeredArbAdapter {
             self.bump_entry_reject(reason);
             return None;
         }
-        if !predicted_up && obi > -required_obi_strength {
-            let reason = if required_obi_strength > OI_CONFIRM_THRESHOLD {
-                "obi_not_confirmed_for_premium_entry"
+        let obi_persistent = bc.obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
+        let strong_obi_bonus_active = bc.strong_obi_entry_bonus_active(
+            predicted_up,
+            obi,
+            prev_obi,
+            current_sum,
+            fair_value_distance,
+        );
+        if !obi_persistent && !strong_obi_bonus_active {
+            self.bump_entry_reject("obi_not_persistent");
+            return None;
+        }
+
+        // 9c. Direction threshold can relax slightly when OBI is both strong and persistent.
+        let direction_strength = (p_hat - 0.5).abs();
+        let required_direction_strength =
+            bc.direction_threshold_now(current_sum, strong_obi_bonus_active);
+        if direction_strength < required_direction_strength {
+            let reason = if strong_obi_bonus_active {
+                "direction_strength_below_strong_obi_adjusted_threshold"
+            } else if required_direction_strength > bc.direction_threshold {
+                "direction_strength_below_sum_adjusted_threshold"
             } else {
-                "obi_not_confirmed"
+                "direction_strength_below_threshold"
             };
             self.bump_entry_reject(reason);
+            return None;
+        }
+
+        let allowed_entry_window_secs =
+            bc.entry_after_start_max_secs_now(window.window_secs, strong_obi_bonus_active);
+        if allowed_entry_window_secs > 0 && elapsed_since_start > allowed_entry_window_secs as i64 {
+            self.bump_entry_reject("entry_window_expired");
             return None;
         }
 
@@ -1338,8 +1356,8 @@ impl StaggeredArbAdapter {
             (Direction::Down, da)
         };
 
-        // 9b. Leg1 price cap
-        if leg1_ask > bc.max_leg1_price {
+        // 9d. Leg1 price cap
+        if leg1_ask > bc.max_leg1_price_now(strong_obi_bonus_active) {
             self.bump_entry_reject("leg1_price_above_cap");
             return None;
         }
@@ -1472,6 +1490,7 @@ impl StaggeredArbAdapter {
                 leg1_shares: shares,
                 leg1_fee,
                 leg1_time: ts,
+                entry_obi: Some(obi),
                 wait_deadline,
                 leg2_price: None,
                 leg2_shares: None,
@@ -1526,6 +1545,7 @@ impl StaggeredArbAdapter {
                     cancel_requested_at: None,
                     exchange_order_id: None,
                     acknowledged_filled_qty: 0,
+                    entry_obi: Some(obi),
                 },
             );
             self.pending_leg1_events.insert(window.event_id.clone());
@@ -1585,18 +1605,41 @@ impl StaggeredArbAdapter {
                 continue;
             }
 
-            let (time_remaining, window_secs) = match self.active_windows.get(symbol) {
+            let (time_remaining, window_secs, window_open) = match self.active_windows.get(symbol) {
                 Some(windows) => windows
                     .iter()
                     .find(|w| w.event_id == pos.event_id)
-                    .map(|w| ((w.end_time - ts).num_seconds() as f64, w.window_secs))
-                    .unwrap_or((f64::MAX, 0)),
-                None => (f64::MAX, 0),
+                    .map(|w| ((w.end_time - ts).num_seconds() as f64, w.window_secs, w.open_price))
+                    .unwrap_or((f64::MAX, 0, None)),
+                None => (f64::MAX, 0, None),
             };
             let current_greeks = self.current_window_greeks(symbol, &pos.event_id, time_remaining);
+            let current_obi = self
+                .binance_l2_obi_5
+                .get(symbol)
+                .map(|value| value.to_f64().unwrap_or(0.0));
             let in_final_window = bc.no_trade_last_secs > 0
                 && time_remaining <= bc.no_trade_last_secs as f64
                 && time_remaining > 0.0;
+            let displacement_supportive = window_open
+                .filter(|open| *open > Decimal::ZERO)
+                .and_then(|open| {
+                    self.spot_prices
+                        .get(symbol)
+                        .map(|sp| ((sp.price - open) / open).to_f64().unwrap_or(0.0))
+                })
+                .map(|displacement| match pos.leg1_direction {
+                    Direction::Up => displacement > 0.0,
+                    Direction::Down => displacement < 0.0,
+                })
+                .unwrap_or(false);
+            let greeks_supportive = current_greeks
+                .as_ref()
+                .map(|g| match pos.leg1_direction {
+                    Direction::Up => g.d2 > 0.05 && g.fair_value > 0.5,
+                    Direction::Down => g.d2 < -0.05 && g.fair_value < 0.5,
+                })
+                .unwrap_or(!bc.use_greeks);
 
             let other_ask = match pos.leg1_direction {
                 Direction::Up => pm_asks.1,
@@ -1689,6 +1732,17 @@ impl StaggeredArbAdapter {
                 if let Some(mark) = leg1_mark {
                     let leg1_loss = (pos.leg1_price - mark).max(Decimal::ZERO);
                     if leg1_loss >= bc.max_leg1_loss {
+                        let obi_supportive = bc.obi_signal_still_supportive(
+                            pos.leg1_direction,
+                            pos.entry_obi,
+                            current_obi,
+                        );
+                        if obi_supportive && displacement_supportive && greeks_supportive {
+                            *leg2_skip_batch
+                                .entry("protective_signal_still_supportive")
+                                .or_default() += 1;
+                            continue;
+                        }
                         if self.protective_close_allowed(
                             current_sum,
                             time_remaining,
@@ -1987,6 +2041,7 @@ impl StaggeredArbAdapter {
                     cancel_requested_at: None,
                     exchange_order_id: None,
                     acknowledged_filled_qty: already_filled,
+                    entry_obi: pos.entry_obi,
                 },
             );
             self.pending_leg2_positions.insert(idx);
@@ -2159,7 +2214,9 @@ impl Strategy for StaggeredArbAdapter {
                 timestamp,
                 ..
             } => {
-                self.binance_l2_obi_5.insert(symbol.clone(), *obi_5);
+                if let Some(prev) = self.binance_l2_obi_5.insert(symbol.clone(), *obi_5) {
+                    self.binance_l2_obi_prev_5.insert(symbol.clone(), prev);
+                }
                 self.binance_l2_obi_ts.insert(symbol.clone(), *timestamp);
             }
 
@@ -2864,6 +2921,9 @@ impl Strategy for StaggeredArbAdapter {
         self.active_windows.clear();
         self.spot_prices.clear();
         self.pm_asks_by_event.clear();
+        self.binance_l2_obi_5.clear();
+        self.binance_l2_obi_prev_5.clear();
+        self.binance_l2_obi_ts.clear();
         self.token_to_quote_route.clear();
         self.last_summary = None;
         self.fixed_amount_overage_warned = false;
@@ -2905,6 +2965,7 @@ mod tests {
             cancel_requested_at: Some(now - chrono::Duration::seconds(5)),
             exchange_order_id: Some("0xabc".to_string()),
             acknowledged_filled_qty: 0,
+            entry_obi: Some(0.02),
         }
     }
 
@@ -2926,6 +2987,7 @@ mod tests {
             cancel_requested_at: None,
             exchange_order_id: Some("0xleg2".to_string()),
             acknowledged_filled_qty: 0,
+            entry_obi: Some(-0.02),
         }
     }
 
@@ -3008,6 +3070,8 @@ series_ids = ["10684", "10192", "10684"]
             1.25
         );
         assert_eq!(adapter.config.backtest_config.premium_sum_obi_slope, 0.25);
+        assert_eq!(adapter.config.backtest_config.obi_confirm_threshold, 0.005);
+        assert_eq!(adapter.config.backtest_config.strong_obi_threshold, 0.015);
         assert_eq!(adapter.config.backtest_config.symbols, vec!["BTCUSDT"]);
         assert_eq!(
             adapter.series_ids,
@@ -3029,11 +3093,29 @@ name = "staggered_arb"
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
         assert_eq!(config.entry_after_start_min_secs, 30);
         assert_eq!(config.entry_after_start_max_secs, 180);
+        assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.max_trades_per_event, 0);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));
+        assert_eq!(config.obi_decay_exit_ratio, 0.35);
+        assert_eq!(config.obi_flip_exit_threshold, 0.008);
         assert_eq!(config.min_entry_sum, dec!(0.30));
         assert_eq!(config.max_entry_sigma, 0.0);
+    }
+
+    #[test]
+    fn test_strong_obi_bonus_adjusts_entry_thresholds() {
+        let config = StaggeredArbBacktestConfig::default();
+        assert!(config.strong_obi_entry_bonus_active(
+            true,
+            0.02,
+            Some(0.01),
+            dec!(1.02),
+            Some(0.03)
+        ));
+        assert!((config.direction_threshold_now(dec!(1.02), true) - 0.06).abs() < 1e-9);
+        assert_eq!(config.max_leg1_price_now(true), dec!(0.57));
+        assert_eq!(config.entry_after_start_max_secs_now(900, true), 240);
     }
 
     #[test]
@@ -3080,6 +3162,7 @@ name = "staggered_arb"
             leg1_shares: 10,
             leg1_fee: dec!(0.075),
             leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(60),
             leg2_price: None,
             leg2_shares: None,
@@ -3277,6 +3360,7 @@ name = "staggered_arb"
             leg1_shares: 20,
             leg1_fee: dec!(0.153),
             leg1_time: now - chrono::Duration::seconds(20),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3469,6 +3553,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.075),
             leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3503,6 +3588,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.1125),
             leg1_time: now - chrono::Duration::seconds(30),
+            entry_obi: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: None,
             leg2_shares: None,
@@ -3540,6 +3626,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(30),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3587,6 +3674,60 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: None,
+            wait_deadline: now + chrono::Duration::seconds(120),
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_fee: None,
+            leg2_time: None,
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let actions = adapter.check_leg2_opportunities("BTCUSDT", now);
+
+        assert!(actions.is_empty());
+        assert_eq!(adapter.closed_trades.len(), 0);
+    }
+
+    #[test]
+    fn test_supportive_obi_skips_protective_stop_loss() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.max_leg1_loss = dec!(0.05);
+        adapter
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.50)), Some(dec!(0.53))));
+        adapter
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(100.6), None, now));
+        adapter
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(0.01));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now + chrono::Duration::seconds(300),
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.0825),
+            leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: Some(0.02),
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3633,6 +3774,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.1125),
             leg1_time: now - chrono::Duration::seconds(30),
+            entry_obi: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: None,
             leg2_shares: None,
@@ -3685,6 +3827,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(30),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3821,6 +3964,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(20),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3869,6 +4013,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(60),
+            entry_obi: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: None,
             leg2_shares: None,
@@ -3926,6 +4071,7 @@ min_balance_usd = 9.0
             leg1_shares: 10,
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(60),
+            entry_obi: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: Some(dec!(0.40)),
             leg2_shares: Some(4),
@@ -3995,6 +4141,7 @@ min_balance_usd = 9.0
             leg1_shares: 5,
             leg1_fee: dec!(0.03),
             leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(30),
             leg2_price: None,
             leg2_shares: None,
@@ -4140,6 +4287,7 @@ min_balance_usd = 9.0
             leg1_shares: 20,
             leg1_fee: dec!(0.186),
             leg1_time: now - chrono::Duration::seconds(20),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -4201,6 +4349,7 @@ min_balance_usd = 9.0
             leg1_shares: 20,
             leg1_fee: dec!(0.186),
             leg1_time: now - chrono::Duration::seconds(20),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -4310,6 +4459,7 @@ min_balance_usd = 9.0
             leg1_shares: 20,
             leg1_fee: dec!(0.186),
             leg1_time: now - chrono::Duration::seconds(20),
+            entry_obi: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: Some(dec!(0.38)),
             leg2_shares: Some(7),
