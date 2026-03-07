@@ -4533,7 +4533,7 @@ fn spawn_managed_strategy_runtime_task(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     coordinator: &mut Coordinator,
     shutdown_tx: &broadcast::Sender<()>,
-    strategy_label: &'static str,
+    strategy_label: String,
     agent_id: String,
     domain: Domain,
     risk_params: AgentRiskParams,
@@ -4548,10 +4548,11 @@ fn spawn_managed_strategy_runtime_task(
     let strategy_cmd_rx = coordinator.register_agent(agent_id.clone(), domain.clone(), risk_params);
     let strategy_shutdown_rx = shutdown_tx.subscribe();
     let strategy_agent_id_for_runtime = agent_id.clone();
+    let strategy_label_for_log = strategy_label.clone();
 
     let jh = tokio::spawn(async move {
         if let Err(e) = run_managed_strategy_runtime_module(ManagedStrategyRuntimeConfig {
-            strategy_label: strategy_label.to_string(),
+            strategy_label,
             agent_id: strategy_agent_id_for_runtime,
             domain,
             strategy_config_toml,
@@ -4567,7 +4568,7 @@ fn spawn_managed_strategy_runtime_task(
         .await
         {
             error!(
-                agent = strategy_label,
+                agent = strategy_label_for_log.as_str(),
                 error = %e,
                 "managed strategy runtime exited with error"
             );
@@ -6982,6 +6983,83 @@ mod tests {
         assert_eq!(spec.agent_id, crypto_cfg.agent_id);
         assert_eq!(spec.domain, Domain::Crypto);
         assert!(spec.strategy_config_toml.contains("name = \"momentum\""));
+    }
+
+    #[test]
+    fn project_momentum_plugin_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+        let definition = crate::plugins::PluginDefinition {
+            plugin_id: "crypto.momentum.v1".to_string(),
+            kind: crate::plugins::PluginKind::ComposableCrypto,
+            version: "v1".to_string(),
+            domain: Domain::Crypto,
+        };
+        let spec = crate::plugins::PluginSpec::ComposableCrypto(
+            crate::plugins::ComposableCryptoSpec {
+                signal_blocks: vec!["momentum".to_string()],
+            },
+        );
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.crypto.momentum.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+
+        let projected = crate::plugins::projector::project_momentum_runtime_spec(
+            &definition,
+            &spec,
+            &deployment,
+            &symbols,
+            &crypto_cfg,
+        )
+        .expect("project momentum runtime spec");
+
+        assert_eq!(projected.strategy_label, "momentum");
+        assert_eq!(projected.agent_id, crypto_cfg.agent_id);
+        assert_eq!(projected.domain, Domain::Crypto);
+        assert!(projected
+            .strategy_config_toml
+            .contains("name = \"momentum\""));
+    }
+
+    #[test]
+    fn build_momentum_managed_runtime_spec_matches_plugin_projection() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+        let definition = crate::plugins::PluginDefinition {
+            plugin_id: "crypto.momentum.v1".to_string(),
+            kind: crate::plugins::PluginKind::ComposableCrypto,
+            version: "v1".to_string(),
+            domain: Domain::Crypto,
+        };
+        let spec = crate::plugins::PluginSpec::ComposableCrypto(
+            crate::plugins::ComposableCryptoSpec {
+                signal_blocks: vec!["momentum".to_string()],
+            },
+        );
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.crypto.momentum.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+
+        let managed = build_momentum_managed_runtime_spec(&symbols, &crypto_cfg);
+        let projected = crate::plugins::projector::project_momentum_runtime_spec(
+            &definition,
+            &spec,
+            &deployment,
+            &symbols,
+            &crypto_cfg,
+        )
+        .expect("project momentum runtime spec");
+
+        assert_eq!(managed.strategy_label, projected.strategy_label);
+        assert_eq!(managed.agent_id, projected.agent_id);
+        assert_eq!(managed.domain, projected.domain);
+        assert_eq!(managed.strategy_config_toml, projected.strategy_config_toml);
     }
 
     #[test]

@@ -12,16 +12,33 @@ use crate::agents::politics::PoliticsTradingConfig;
 use crate::agents::sports::SportsTradingConfig;
 use crate::config::{EventEdgeAgentConfig, NbaComebackConfig};
 use crate::error::{PloyError, Result};
+use crate::plugins::projector::{self, ProjectedRuntimeSpec};
+use crate::plugins::{
+    ComposableCryptoSpec, DeploymentState as PluginDeploymentState, PluginDefinition,
+    PluginDeployment, PluginKind, PluginSpec, RegisteredStrategySpec,
+};
 use crate::platform::Domain;
 
 use super::bootstrap::{coin_symbol_for, crypto_series_id_for};
 
-#[derive(Debug, Clone)]
-pub(crate) struct ManagedStrategyBootstrapSpec {
-    pub(crate) strategy_label: &'static str,
-    pub(crate) agent_id: String,
-    pub(crate) domain: Domain,
-    pub(crate) strategy_config_toml: String,
+pub(crate) type ManagedStrategyBootstrapSpec = ProjectedRuntimeSpec;
+
+fn plugin_definition(plugin_id: &str, kind: PluginKind, domain: Domain) -> PluginDefinition {
+    PluginDefinition {
+        plugin_id: plugin_id.to_string(),
+        kind,
+        version: "v1".to_string(),
+        domain,
+    }
+}
+
+fn plugin_deployment(plugin_id: &str, deployment_id: &str) -> PluginDeployment {
+    PluginDeployment {
+        deployment_id: deployment_id.to_string(),
+        plugin_id: plugin_id.to_string(),
+        account_id: "default".to_string(),
+        state: PluginDeploymentState::Enabled,
+    }
 }
 
 pub(crate) fn build_pattern_memory_runtime_config(coins: &[String]) -> Result<String> {
@@ -328,23 +345,40 @@ pub(crate) fn build_momentum_managed_runtime_spec(
     symbols: &[String],
     crypto_cfg: &CryptoTradingConfig,
 ) -> ManagedStrategyBootstrapSpec {
-    ManagedStrategyBootstrapSpec {
-        strategy_label: "momentum",
-        agent_id: crypto_cfg.agent_id.clone(),
-        domain: Domain::Crypto,
-        strategy_config_toml: build_momentum_runtime_config(symbols, crypto_cfg),
-    }
+    projector::project_momentum_runtime_spec(
+        &plugin_definition(
+            "crypto.momentum.v1",
+            PluginKind::ComposableCrypto,
+            Domain::Crypto,
+        ),
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["momentum".to_string()],
+        }),
+        &plugin_deployment(
+            "crypto.momentum.v1",
+            &format!("managed-runtime.{}", crypto_cfg.agent_id),
+        ),
+        symbols,
+        crypto_cfg,
+    )
+    .expect("momentum plugin projection must stay valid")
 }
 
 pub(crate) fn build_pattern_memory_managed_runtime_spec(
     coins: &[String],
 ) -> Result<ManagedStrategyBootstrapSpec> {
-    Ok(ManagedStrategyBootstrapSpec {
-        strategy_label: "pattern_memory",
-        agent_id: "pattern_memory".to_string(),
-        domain: Domain::Crypto,
-        strategy_config_toml: build_pattern_memory_runtime_config(coins)?,
-    })
+    projector::project_pattern_memory_runtime_spec(
+        &plugin_definition(
+            "crypto.pattern_memory.v1",
+            PluginKind::ComposableCrypto,
+            Domain::Crypto,
+        ),
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["pattern_memory".to_string()],
+        }),
+        &plugin_deployment("crypto.pattern_memory.v1", "managed-runtime.pattern_memory"),
+        coins,
+    )
 }
 
 pub(crate) fn build_event_edge_managed_runtime_spec(
@@ -352,12 +386,24 @@ pub(crate) fn build_event_edge_managed_runtime_spec(
     politics_cfg: &PoliticsTradingConfig,
     ee_cfg: &EventEdgeAgentConfig,
 ) -> ManagedStrategyBootstrapSpec {
-    ManagedStrategyBootstrapSpec {
-        strategy_label: "event_edge",
-        agent_id: politics_cfg.agent_id.clone(),
-        domain: Domain::Politics,
-        strategy_config_toml: build_event_edge_runtime_config(rest_url, ee_cfg),
-    }
+    projector::project_event_edge_runtime_spec(
+        &plugin_definition(
+            "politics.event_edge.v1",
+            PluginKind::RegisteredStrategy,
+            Domain::Politics,
+        ),
+        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec {
+            strategy_name: "event_edge".to_string(),
+        }),
+        &plugin_deployment(
+            "politics.event_edge.v1",
+            &format!("managed-runtime.{}", politics_cfg.agent_id),
+        ),
+        rest_url,
+        politics_cfg,
+        ee_cfg,
+    )
+    .expect("event_edge plugin projection must stay valid")
 }
 
 pub(crate) fn build_nba_comeback_runtime_config(
@@ -533,16 +579,24 @@ pub(crate) fn build_nba_comeback_managed_runtime_spec(
     sports_cfg: &SportsTradingConfig,
     nba_cfg: &NbaComebackConfig,
 ) -> Option<ManagedStrategyBootstrapSpec> {
-    if nba_cfg.grok_enabled {
-        return None;
-    }
-
-    Some(ManagedStrategyBootstrapSpec {
-        strategy_label: "nba_comeback",
-        agent_id: sports_cfg.agent_id.clone(),
-        domain: Domain::Sports,
-        strategy_config_toml: build_nba_comeback_runtime_config(database_url, nba_cfg),
-    })
+    projector::project_nba_comeback_runtime_spec(
+        &plugin_definition(
+            "sports.nba_comeback.v1",
+            PluginKind::RegisteredStrategy,
+            Domain::Sports,
+        ),
+        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec {
+            strategy_name: "nba_comeback".to_string(),
+        }),
+        &plugin_deployment(
+            "sports.nba_comeback.v1",
+            &format!("managed-runtime.{}", sports_cfg.agent_id),
+        ),
+        database_url,
+        sports_cfg,
+        nba_cfg,
+    )
+    .expect("nba_comeback plugin projection must stay valid")
 }
 
 fn render_split_arb_runtime_config(
@@ -631,10 +685,18 @@ pub(crate) fn build_split_arb_managed_runtime_spec(
     symbols: &[String],
     series_ids: &[String],
 ) -> ManagedStrategyBootstrapSpec {
-    ManagedStrategyBootstrapSpec {
-        strategy_label: "split_arb",
-        agent_id: "split_arb".to_string(),
-        domain: Domain::Crypto,
-        strategy_config_toml: build_split_arb_runtime_config(symbols, series_ids),
-    }
+    projector::project_split_arb_runtime_spec(
+        &plugin_definition(
+            "crypto.split_arb.v1",
+            PluginKind::ComposableCrypto,
+            Domain::Crypto,
+        ),
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["split_arb".to_string()],
+        }),
+        &plugin_deployment("crypto.split_arb.v1", "managed-runtime.split_arb"),
+        symbols,
+        series_ids,
+    )
+    .expect("split_arb plugin projection must stay valid")
 }

@@ -48,6 +48,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Save the implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
 - [x] Execute Task 1 from the implementation plan: add the plugin object model and registry skeleton.
 - [x] Execute Task 2 from the implementation plan: add deployment lifecycle state and intent purpose gating.
+- [x] Execute Task 3 from the implementation plan: promote `runtime_specs` into plugin projection.
 
 ## Review
 
@@ -56,6 +57,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Confirmed order management is mostly complete operationally, but draining semantics still need an explicit order/intent purpose contract.
 - [x] Chose an operational plugin model, not dynamic code loading.
 - [x] Chose pre-defined block composition for crypto, not scripts or DSLs.
+- [x] Confirmed bootstrap can now consume projected runtime specs through `src/plugins/projector.rs` instead of owning the projection contract itself.
 
 ## Progress notes
 
@@ -66,6 +68,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Saved implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
 - 2026-03-07: Completed Task 1 by adding `src/plugins/*`, a file-backed `PluginRegistry`, and `config/plugins/README.md`.
 - 2026-03-07: Completed Task 2 by adding `IntentPurpose`, compatible deployment lifecycle state, and coordinator draining gates.
+- 2026-03-07: Completed Task 3 by adding `src/plugins/projector.rs`, moving managed runtime spec ownership onto projected specs, and keeping `src/coordinator/runtime_specs.rs` as a compatibility wrapper.
 
 ---
 
