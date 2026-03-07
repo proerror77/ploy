@@ -165,3 +165,9 @@
 
 - Pattern: Tightening staggered-arb close caps slightly can improve both recent live-like windows and independent overlap windows, while caps that are too tight or too loose both degrade results in different ways.
 - Rule: For current 5m-only staggered-arb, treat `1.06` as the new protective/forced close baseline. Re-validate `1.05`, `1.06`, and `1.07+` around any future profile change instead of assuming the old `1.08` cap is still appropriate.
+
+- Pattern: Live staggered-arb can diverge sharply from replay when a partially filled `LEG2` leaves a residual position smaller than venue minimum order size; replay assumes any positive remainder can be completed, while live keeps retrying an impossible order.
+- Rule: Before trusting live-vs-replay comparisons, inspect one concrete cycle across `orders`, `signal_history`, and venue constraints. For Polymarket-style execution, never resubmit residual `LEG2` orders below venue minimums (`5` shares and `$1` notional); clamp or settle them explicitly instead of retrying forever.
+
+- Pattern: Managed-runtime staggered-arb currently records fills in `orders` and `signal_history`, but not in the `fills` ledger table, so relying on `fills` alone falsely suggests no live executions occurred.
+- Rule: When reconciling live trading records, treat `orders.filled_shares` plus `signal_history` as the source of truth until managed-runtime fill events also persist into `fills`. Do not declare “no成交” from an empty `fills` query without checking `orders`.

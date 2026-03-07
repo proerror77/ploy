@@ -584,3 +584,59 @@ Increase recent live-like replay PnL without materially reducing trade count by 
   - `protective_recovery_window_secs = 0`
   - `force_complete_threshold = 1.06`
   - `protective_close_threshold = 1.06`
+
+---
+
+# Live Trading Record Reconciliation (2026-03-08)
+
+## Goal
+Explain why the current live trading record differs from replay backtest expectations, and verify whether live fills, order rows, and strategy logs are all being recorded correctly.
+
+## Tasks
+
+- [x] Pull the latest `orders`, `signal_history`, and strategy journal entries from `tango-1-1`.
+- [x] Reconcile what the strategy thought it did versus what the host actually persisted.
+- [x] Identify whether the gap comes from execution quality, partial fills, config drift, or missing persistence.
+- [x] Summarize whether live成交记录 is trustworthy enough to use for further tuning.
+
+## Review
+
+- [x] Live trading records are partially trustworthy:
+  - `orders` is being populated with submitted status, terminal status, `filled_shares`, and `avg_fill_price`
+  - `signal_history` is being populated with `live_order_submit_result`, `live_order_poll_update`, and split-arb state/error events
+  - `fills` is still empty for managed-runtime staggered-arb orders, so there is no per-trade fill ledger for these cycles yet
+- [x] The concrete live-vs-replay divergence is not hypothetical; cycle `250192` on `ETHUSDT` shows it clearly:
+  - first two `LEG1 -> LEG2 merge` cycles filled normally
+  - the third cycle filled `LEG1` fully and then `LEG2 forced` filled `19/20` at `0.63`
+  - the remaining `1` share was retried indefinitely as new `stag_leg2_forced_250192_*` orders and every retry failed before getting an exchange order id
+- [x] The most likely root cause is venue minimum sizing on the residual `LEG2`:
+  - the strategy accepts partial fills and resubmits the exact remainder
+  - for cycle `250192`, the remainder became `1` share at `0.63`, i.e. below the live venue minimums already enforced elsewhere in the codebase (`5` shares and `$1` notional)
+  - replay currently assumes that any positive remainder can always be completed, so it cannot reproduce this live failure mode
+- [x] Practical conclusion:
+  - yes, we do have live成交记录 in `orders` and `signal_history`
+  - no, current live records do not fully match replay assumptions because the live execution path can get stuck on below-minimum residual `LEG2` orders
+  - the next fix should clamp residual live `LEG2` submits against venue minimums and stop retrying impossible remainder sizes
+
+---
+
+# Staggered Arb Live Discipline Hardening (2026-03-08)
+
+## Goal
+Stop the live strategy from drifting into unhedged directional behavior by eliminating impossible residual `LEG2` retries, disabling single-leg final-window settlement for this profile, and keeping replay/live behavior aligned.
+
+## Tasks
+
+- [ ] Keep `tango-1-1` live strategy stopped until the fixes and validations are complete.
+- [ ] Add a failing live test showing `fill_leg2()` must not submit residual orders below the Polymarket minimum size/notional.
+- [ ] Add a failing live/backtest test showing final-window positions should force `LEG2` instead of holding single-leg to settlement.
+- [ ] Implement live residual-`LEG2` minimum-size handling so impossible remainders stop retrying and are finalized deterministically.
+- [ ] Remove or gate the current final-window single-leg settlement path for this staggered-arb profile.
+- [ ] Align replay/backtest close behavior with the hardened live rules.
+- [ ] Run targeted staggered-arb live/backtest tests and summarize whether the new profile is closer to the desired hedge discipline.
+
+## Review
+
+- [ ] Verify the host remains stopped during implementation.
+- [ ] Verify there are no new `LEG2` retry storms for `shares=1`.
+- [ ] Verify final-window cycles now resolve through explicit hedge logic instead of opportunistic single-leg settlement.
