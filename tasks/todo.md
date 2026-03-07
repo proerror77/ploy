@@ -182,6 +182,25 @@ Delete abandoned non-runtime CLI surfaces that no longer participate in the actu
 
 ---
 
+# Direct Live Gate Cleanup (2026-03-08)
+
+## Goal
+Remove redundant safety wrappers left behind after the legacy runtime retirement.
+
+## Tasks
+
+- [x] Confirm `strategy_direct_live_allowed()` has no remaining callsites.
+- [x] Delete the redundant wrapper and its dedicated test.
+- [x] Re-run the direct-live gate tests and commit atomically.
+
+## Progress notes
+
+- 2026-03-08: Confirmed all live gating now goes through `direct_live_allowed()` and `enforce_live_gate()`.
+- 2026-03-08: Removed the unused `strategy_direct_live_allowed()` wrapper from `src/safety/direct_live.rs`.
+- 2026-03-08: Verified the cleanup with `cargo test safety::direct_live --lib -- --nocapture`; all 4 direct-live gate tests passed.
+
+---
+
 # Strategy Deployment Control Plane Stabilization TODO (2026-03-05)
 
 ## Goal

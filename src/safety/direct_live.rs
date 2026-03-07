@@ -10,12 +10,6 @@ pub fn direct_live_allowed() -> bool {
         .unwrap_or(false)
 }
 
-/// Strategy-specific direct live override — follows the same env gate.
-#[inline]
-pub fn strategy_direct_live_allowed() -> bool {
-    direct_live_allowed()
-}
-
 /// Single enforcement gate for all legacy live entry points.
 ///
 /// Returns `Err(PloyError::Validation)` when `direct_live_allowed()` is false
@@ -47,14 +41,6 @@ mod tests {
         unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "true") };
         assert!(direct_live_allowed());
         unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
-    }
-
-    #[test]
-    fn strategy_direct_live_follows_env() {
-        unsafe { std::env::set_var("PLOY_ALLOW_DIRECT_LIVE", "1") };
-        assert!(strategy_direct_live_allowed());
-        unsafe { std::env::remove_var("PLOY_ALLOW_DIRECT_LIVE") };
-        assert!(!strategy_direct_live_allowed());
     }
 
     #[test]
