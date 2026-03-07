@@ -170,12 +170,14 @@ Delete abandoned non-runtime CLI surfaces that no longer participate in the actu
 - [x] Confirm the unused management `Cli`/`Commands` in `src/cli/mod.rs` are not referenced by the real binary.
 - [x] Delete the disabled `src/cli/service.rs` legacy stub.
 - [x] Shrink `src/cli/mod.rs` back to a pure module namespace.
+- [x] Delete the abandoned `ploy config` / `ploy infra` management modules that are not wired into `runtime::Cli`.
 - [x] Run minimal compile validation and commit atomically.
 
 ## Progress notes
 
 - 2026-03-08: Confirmed `main.rs` and `main_dispatch.rs` use `ploy::cli::runtime::Cli`, not the abandoned `src/cli/mod.rs` top-level `Cli`.
 - 2026-03-08: Deleted the dead `ploy service` stub surface and removed the unused top-level management `Cli`/`Commands` wrapper from `src/cli/mod.rs`.
+- 2026-03-08: Confirmed `src/cli/config.rs` and `src/cli/infra.rs` were likewise detached from the real runtime entrypoint and removed them with the stale `mod.rs` exports.
 - 2026-03-08: Verified the cleanup with `cargo check --bin ploy` and `cargo check --features rl --bin ploy`; only pre-existing warnings remain.
 
 ---
