@@ -28,6 +28,7 @@ What is still open falls into two buckets:
 
 This plan is only about bucket 2.
 
+<<<<<<< HEAD
 ## Inventory Snapshot (2026-03-08)
 
 The live retirement scope is now frozen to these remaining surfaces.
@@ -70,6 +71,8 @@ the code-deletion commits remain narrowly scoped.
 - `src/cli/strategy.rs` `NbaComebackAgent` compatibility CLI path
 - `src/main_commands/rl/agent.rs` `RLCryptoAgent` / `DomainAgent` imports
 
+=======
+>>>>>>> 76a4f05 (docs: plan legacy runtime retirement)
 ### Task 1: Freeze The Retirement Scope With A Grep-Based Inventory
 
 **Files:**

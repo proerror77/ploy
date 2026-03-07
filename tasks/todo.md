@@ -2163,6 +2163,30 @@ Reduce duplicated market-data collection paths and converge on canonical raw tab
 
 ---
 
+# Legacy Runtime Retirement Planning (2026-03-07)
+
+## Goal
+Plan the next phase after layered-runtime convergence: delete env-gated compatibility runtimes, remove `TradingAgent` / `DomainAgent` execution paths, and retire `platform::agents/*`.
+
+## Tasks
+
+- [x] Inventory the remaining legacy runtime surfaces and compatibility flags.
+- [x] Write the retirement plan at `docs/plans/2026-03-07-legacy-runtime-retirement-plan.md`.
+- [ ] Execute Task 2 from the retirement plan: move runtime config ownership out of legacy agent files.
+
+## Review
+
+- [x] There is no large architectural redesign left; remaining work is retirement of old code paths.
+- [x] The two remaining `STAG-ARB` items are operational acceptance checks, not blockers for writing the retirement plan.
+- [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
+
+## Progress notes
+
+- 2026-03-07: Confirmed surviving compatibility/runtime surfaces are concentrated in `src/agents/*`, `src/platform/agents/*`, `src/platform/traits.rs`, and `src/coordinator/bootstrap.rs`.
+- 2026-03-07: Wrote `docs/plans/2026-03-07-legacy-runtime-retirement-plan.md` to sequence config extraction before runtime deletion.
+
+---
+
 # Strategy Deployment Control Plane Stabilization TODO (2026-03-05)
 
 ## Goal
