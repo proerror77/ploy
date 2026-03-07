@@ -307,6 +307,9 @@ fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
 ///
 /// This is intentionally strategy-agnostic: it scans the account for redeemable
 /// positions every minute (configurable), independent of any strategy lifecycle.
+///
+/// Canonical callers should prefer `crate::account::ensure_account_claimer_daemon()`;
+/// this module retains the implementation while ownership moves into the account plane.
 pub async fn ensure_account_claimer_daemon() -> Result<()> {
     if !env_flag("CLAIMER_DAEMON_ENABLED", true) {
         return Ok(());

@@ -3,6 +3,7 @@ use serde::Deserialize;
 use sqlx::{postgres::Postgres, QueryBuilder, Row};
 use std::collections::{BTreeSet, HashMap};
 
+use crate::account::{AccountBudgetSnapshot, AccountRegistryEntry, AccountService};
 use crate::api::{
     auth::ensure_admin_authorized,
     state::{AppState, SystemRunStatus},
@@ -211,7 +212,7 @@ pub async fn get_system_accounts(
 
     let runtime_account = state.account_id.trim().to_string();
 
-    let mut accounts: Vec<AccountRuntimeSummary> = Vec::new();
+    let mut registry_rows: Vec<AccountRegistryEntry> = Vec::new();
     if let Ok(rows) = sqlx::query(
         r#"
         SELECT account_id, wallet_address, label
@@ -228,51 +229,32 @@ pub async fn get_system_accounts(
             if account_id.is_empty() {
                 continue;
             }
-            accounts.push(AccountRuntimeSummary {
+            registry_rows.push(AccountRegistryEntry {
                 account_id,
                 wallet_address: row.try_get("wallet_address").ok(),
                 label: row.try_get("label").ok(),
-                runtime_active: false,
-                deployment_total: 0,
-                deployment_enabled: 0,
             });
         }
     }
 
-    if !accounts
-        .iter()
-        .any(|a| a.account_id.eq_ignore_ascii_case(runtime_account.as_str()))
-    {
-        accounts.push(AccountRuntimeSummary {
-            account_id: runtime_account.clone(),
-            wallet_address: None,
-            label: Some("runtime".to_string()),
-            runtime_active: false,
-            deployment_total: 0,
-            deployment_enabled: 0,
-        });
-    }
-
     let deployments = state.deployments.read().await;
-    for account in &mut accounts {
-        account.runtime_active = account
-            .account_id
-            .eq_ignore_ascii_case(runtime_account.as_str());
-
-        let mut total = 0usize;
-        let mut enabled = 0usize;
-        for dep in deployments.values() {
-            if dep.matches_account(account.account_id.as_str()) {
-                total += 1;
-                if dep.enabled {
-                    enabled += 1;
-                }
-            }
-        }
-        account.deployment_total = total;
-        account.deployment_enabled = enabled;
-    }
-    accounts.sort_by(|a, b| a.account_id.cmp(&b.account_id));
+    let service = AccountService::new(
+        registry_rows,
+        deployments.values().cloned().collect(),
+        AccountBudgetSnapshot::default(),
+    );
+    let accounts = service
+        .accounts_overview(runtime_account.as_str())
+        .into_iter()
+        .map(|account| AccountRuntimeSummary {
+            account_id: account.account_id,
+            wallet_address: account.wallet_address,
+            label: account.label,
+            runtime_active: account.runtime_active,
+            deployment_total: account.deployment_total,
+            deployment_enabled: account.deployment_enabled,
+        })
+        .collect();
 
     Ok(Json(AccountsOverview {
         runtime_account_id: runtime_account,

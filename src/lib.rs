@@ -1,3 +1,4 @@
+pub mod account;
 pub mod adapters;
 pub mod agents;
 pub mod ai_clients;

@@ -49,6 +49,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Execute Task 1 from the implementation plan: add the plugin object model and registry skeleton.
 - [x] Execute Task 2 from the implementation plan: add deployment lifecycle state and intent purpose gating.
 - [x] Execute Task 3 from the implementation plan: promote `runtime_specs` into plugin projection.
+- [x] Execute Task 4 from the implementation plan: add the account-plane skeleton and re-home claimer ownership.
 
 ## Review
 
@@ -58,6 +59,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Chose an operational plugin model, not dynamic code loading.
 - [x] Chose pre-defined block composition for crypto, not scripts or DSLs.
 - [x] Confirmed bootstrap can now consume projected runtime specs through `src/plugins/projector.rs` instead of owning the projection contract itself.
+- [x] Confirmed account-facing claimer ownership now goes through `src/account/*`, while the old strategy claimer implementation remains as a temporary delegated backend.
 
 ## Progress notes
 
@@ -69,6 +71,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Completed Task 1 by adding `src/plugins/*`, a file-backed `PluginRegistry`, and `config/plugins/README.md`.
 - 2026-03-07: Completed Task 2 by adding `IntentPurpose`, compatible deployment lifecycle state, and coordinator draining gates.
 - 2026-03-07: Completed Task 3 by adding `src/plugins/projector.rs`, moving managed runtime spec ownership onto projected specs, and keeping `src/coordinator/runtime_specs.rs` as a compatibility wrapper.
+- 2026-03-07: Completed Task 4 by adding `src/account/*`, moving claimer ownership behind an account-facing handle, and routing system account summaries through `AccountService`.
 
 ---
 

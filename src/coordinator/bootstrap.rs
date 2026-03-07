@@ -6693,7 +6693,7 @@ pub async fn start_platform(
     // direct AutoClaimer loop in platform bootstrap.
     #[cfg(feature = "claimer_daemon")]
     if !config.dry_run && pm_client.is_some() {
-        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
+        if let Err(e) = crate::account::ensure_account_claimer_daemon().await {
             warn!(error = %e, "failed to ensure account-level auto-claimer daemon");
         } else {
             info!("auto-claimer background task ensured (account-level)");
