@@ -128,6 +128,20 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
 所以今天最大的架構現實，不是「策略分散在三套正式 runtime」，而是：
 canonical runtime 已經確立，剩下的是少量 compatibility path 尚未刪除。
 
+### 2.1 讀側可見性
+
+現在 API 已經可以直接把 plugin/account lifecycle 暴露給 operator：
+
+- `GET /api/system/capabilities`
+  - deployment state counts：`enabled|draining|disabled|archived`
+  - scoped deployment state counts（account + dry_run scope）
+  - builtin plugin summaries（`plugin_id` / `kind` / `domain` / `version`）
+- `GET /api/system/accounts`
+  - per-account deployment state counts
+  - runtime budget snapshot
+
+這表示 `draining` 不再只是 runtime 內部默契，而是正式可觀測的 control-plane 狀態。
+
 ---
 
 ## 3) Backlog（建議的下一步工程化）

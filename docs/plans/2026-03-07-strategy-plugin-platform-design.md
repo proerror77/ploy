@@ -278,6 +278,25 @@ crypto 新 alpha 不再默认等于新增一个 Rust strategy。相反，系统�
 - `claimer` 不应继续属于 `strategy` 语义
 - 它应属于账户层资产回收能力
 
+## Read-Side API Visibility
+
+为了让 plugin/account lifecycle 成为正式平台能力，而不是内部约定，读侧 API 需要直接暴露这些状态：
+
+- `GET /api/system/capabilities`
+  - deployment state counts：`enabled|draining|disabled|archived`
+  - scoped deployment state counts（account + dry_run scope）
+  - builtin plugin summaries（`plugin_id` / `kind` / `domain` / `version`）
+- `GET /api/system/accounts`
+  - per-account deployment state counts
+  - runtime budget snapshot
+
+这样 operator 才能直接观察：
+
+- 哪些 deployments 正在 `draining`
+- `draining` 是 active-but-draining，而不是 disabled
+- 当前 runtime 认识哪些 builtin plugins
+- runtime account 当前预算快照是什么
+
 ## Repo Mapping
 
 ### New Modules

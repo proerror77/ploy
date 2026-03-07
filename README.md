@@ -34,6 +34,8 @@ Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md
 
 New live strategies should implement the canonical `Strategy` contract, not `TradingAgent` or `DomainAgent`.
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
+For plugin/runtime lifecycle visibility, query `GET /api/system/capabilities`; it now reports deployment state counts (`enabled|draining|disabled|archived`) plus builtin plugin summaries.
+For account-scoped lifecycle visibility, query `GET /api/system/accounts`; it now reports per-account deployment state counts and the runtime budget snapshot.
 For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
 For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
 `strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.

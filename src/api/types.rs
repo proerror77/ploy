@@ -112,6 +112,28 @@ pub struct SystemControlResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentStateSummary {
+    pub enabled: usize,
+    pub draining: usize,
+    pub disabled: usize,
+    pub archived: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginCapabilitySummary {
+    pub plugin_id: String,
+    pub kind: String,
+    pub version: String,
+    pub domain: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountBudgetSummary {
+    pub available_notional_usd: String,
+    pub reserved_notional_usd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformCapabilities {
     pub account_id: String,
     pub runtime_mode: String,
@@ -124,7 +146,10 @@ pub struct PlatformCapabilities {
     pub enabled_deployments: usize,
     pub scoped_total_deployments: usize,
     pub scoped_enabled_deployments: usize,
+    pub deployment_states: DeploymentStateSummary,
+    pub scoped_deployment_states: DeploymentStateSummary,
     pub deployments_by_domain: HashMap<String, usize>,
+    pub available_plugins: Vec<PluginCapabilitySummary>,
     pub system_controls: Vec<String>,
 }
 
@@ -136,12 +161,14 @@ pub struct AccountRuntimeSummary {
     pub runtime_active: bool,
     pub deployment_total: usize,
     pub deployment_enabled: usize,
+    pub deployment_states: DeploymentStateSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountsOverview {
     pub runtime_account_id: String,
     pub dry_run: bool,
+    pub runtime_budget: AccountBudgetSummary,
     pub accounts: Vec<AccountRuntimeSummary>,
 }
 

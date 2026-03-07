@@ -1925,6 +1925,7 @@ async fn persist_sidecar_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header::AUTHORIZATION;
     use crate::platform::{StrategyLifecycleStage, StrategyProductType, Timeframe};
     use std::sync::Mutex;
 
@@ -1955,6 +1956,8 @@ mod tests {
             risk_profile: "default".to_string(),
             priority: 80,
             cooldown_secs: 30,
+            account_ids: Vec::new(),
+            execution_mode: crate::platform::DeploymentExecutionMode::Any,
             lifecycle_stage,
             product_type: StrategyProductType::BinaryOption,
             last_evaluated_at: Some(Utc::now()),
