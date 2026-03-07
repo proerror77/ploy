@@ -396,10 +396,7 @@ impl StaggeredArbAdapter {
         if current_sum <= threshold {
             0.0
         } else {
-            (current_sum - threshold)
-                .to_f64()
-                .unwrap_or(0.0)
-                .max(0.0)
+            (current_sum - threshold).to_f64().unwrap_or(0.0).max(0.0)
         }
     }
 
@@ -470,14 +467,16 @@ impl StaggeredArbAdapter {
         position_idx: Option<usize>,
     ) {
         if let Some(track) = self.live_orders.get_mut(client_id) {
-            track.acknowledged_filled_qty =
-                cumulative_filled_qty.min(track.shares).max(track.acknowledged_filled_qty);
+            track.acknowledged_filled_qty = cumulative_filled_qty
+                .min(track.shares)
+                .max(track.acknowledged_filled_qty);
             if let Some(idx) = position_idx {
                 track.position_idx = Some(idx);
             }
         } else if let Some(track) = self.archived_live_orders.get_mut(client_id) {
-            track.acknowledged_filled_qty =
-                cumulative_filled_qty.min(track.shares).max(track.acknowledged_filled_qty);
+            track.acknowledged_filled_qty = cumulative_filled_qty
+                .min(track.shares)
+                .max(track.acknowledged_filled_qty);
             if let Some(idx) = position_idx {
                 track.position_idx = Some(idx);
             }
@@ -560,8 +559,7 @@ impl StaggeredArbAdapter {
         let total_shares = prev_shares + add_shares;
         let total_notional = prev_notional + add_notional;
         let avg_price = total_notional / Decimal::from(total_shares);
-        let total_fee =
-            prev_fee + fill_price * Decimal::from(add_shares) * self.config.fee_rate;
+        let total_fee = prev_fee + fill_price * Decimal::from(add_shares) * self.config.fee_rate;
 
         pos.leg2_shares = Some(total_shares);
         pos.leg2_price = Some(avg_price);
@@ -870,7 +868,8 @@ impl StaggeredArbAdapter {
         }
 
         if let Some(idx) = track.position_idx {
-            let total_shares = self.append_leg1_fill_to_position(idx, filled_shares, fill_price, ts);
+            let total_shares =
+                self.append_leg1_fill_to_position(idx, filled_shares, fill_price, ts);
             info!(
                 "[STAG-ARB] LEG1 FILL ADD {} {} @ {:.2}¢ total_shares={}",
                 track.symbol,
@@ -995,9 +994,7 @@ impl StaggeredArbAdapter {
             .map(|windows| {
                 windows.iter().any(|window| {
                     let time_remaining = (window.end_time - ts).num_seconds();
-                    if time_remaining <= 0
-                        || time_remaining < bc.min_time_remaining_secs as i64
-                    {
+                    if time_remaining <= 0 || time_remaining < bc.min_time_remaining_secs as i64 {
                         return false;
                     }
 
@@ -1684,7 +1681,9 @@ impl StaggeredArbAdapter {
                 if self.forced_close_allowed(current_sum) {
                     leg2_fills.push((i, other_ask, "forced_timeout".to_string()));
                 } else {
-                    *leg2_skip_batch.entry("force_threshold_blocked").or_default() += 1;
+                    *leg2_skip_batch
+                        .entry("force_threshold_blocked")
+                        .or_default() += 1;
                 }
                 continue;
             }
@@ -1694,7 +1693,9 @@ impl StaggeredArbAdapter {
                 if self.forced_close_allowed(current_sum) {
                     leg2_fills.push((i, other_ask, "forced_time_safety".to_string()));
                 } else {
-                    *leg2_skip_batch.entry("force_threshold_blocked").or_default() += 1;
+                    *leg2_skip_batch
+                        .entry("force_threshold_blocked")
+                        .or_default() += 1;
                 }
                 continue;
             }
@@ -1780,7 +1781,9 @@ impl StaggeredArbAdapter {
 
                 if should_force_close {
                     if !self.forced_close_allowed(current_sum) {
-                        *leg2_skip_batch.entry("force_threshold_blocked").or_default() += 1;
+                        *leg2_skip_batch
+                            .entry("force_threshold_blocked")
+                            .or_default() += 1;
                         continue;
                     }
                     leg2_fills.push((i, other_ask, "forced_final_window".to_string()));
@@ -1981,7 +1984,8 @@ impl StaggeredArbAdapter {
             .iter()
             .filter(|(reason, count)| {
                 let reason = reason.as_str();
-                let include_match = include_reasons.map_or(true, |included| included.contains(&reason));
+                let include_match =
+                    include_reasons.map_or(true, |included| included.contains(&reason));
                 let exclude_match = exclude_reasons.contains(&reason);
                 **count > 0 && include_match && !exclude_match
             })
@@ -2294,7 +2298,13 @@ impl Strategy for StaggeredArbAdapter {
             OrderStatus::Filled => {
                 if track.leg == 1 {
                     let position_idx = if filled_delta > 0 {
-                        Some(self.record_leg1_fill(&track, filled_delta, fill_price, ts, &mut actions))
+                        Some(self.record_leg1_fill(
+                            &track,
+                            filled_delta,
+                            fill_price,
+                            ts,
+                            &mut actions,
+                        ))
                     } else {
                         track.position_idx
                     };
@@ -2316,7 +2326,11 @@ impl Strategy for StaggeredArbAdapter {
                             } else {
                                 Self::leg2_filled_shares(&self.positions[idx])
                             };
-                            self.update_order_fill_progress(&client_id, cumulative_filled, Some(idx));
+                            self.update_order_fill_progress(
+                                &client_id,
+                                cumulative_filled,
+                                Some(idx),
+                            );
                             let target = self.positions[idx].leg1_shares;
 
                             if total_filled >= target {
@@ -2432,8 +2446,7 @@ impl Strategy for StaggeredArbAdapter {
                         return Ok(actions);
                     }
                     if filled_delta > 0 {
-                        let total_filled =
-                            self.record_leg2_fill(idx, filled_delta, fill_price, ts);
+                        let total_filled = self.record_leg2_fill(idx, filled_delta, fill_price, ts);
                         self.update_order_fill_progress(&client_id, cumulative_filled, Some(idx));
                         let target = self
                             .positions
@@ -2484,28 +2497,35 @@ impl Strategy for StaggeredArbAdapter {
             OrderStatus::PartiallyFilled => {
                 if track.leg == 1 {
                     let position_idx = if filled_delta > 0 {
-                        Some(self.record_leg1_fill(&track, filled_delta, fill_price, ts, &mut actions))
+                        Some(self.record_leg1_fill(
+                            &track,
+                            filled_delta,
+                            fill_price,
+                            ts,
+                            &mut actions,
+                        ))
                     } else {
                         track.position_idx
                     };
                     self.update_order_fill_progress(&client_id, cumulative_filled, position_idx);
 
                     if filled_delta > 0 {
-                        let cancel_id = if let Some(track_mut) = self.live_orders.get_mut(&client_id) {
-                            if track_mut.cancel_requested_at.is_none() {
-                                track_mut.cancel_requested_at = Some(ts);
-                                Some(
-                                    track_mut
-                                        .exchange_order_id
-                                        .clone()
-                                        .unwrap_or_else(|| client_id.clone()),
-                                )
+                        let cancel_id =
+                            if let Some(track_mut) = self.live_orders.get_mut(&client_id) {
+                                if track_mut.cancel_requested_at.is_none() {
+                                    track_mut.cancel_requested_at = Some(ts);
+                                    Some(
+                                        track_mut
+                                            .exchange_order_id
+                                            .clone()
+                                            .unwrap_or_else(|| client_id.clone()),
+                                    )
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
-                            }
-                        } else {
-                            None
-                        };
+                            };
                         if let Some(order_id) = cancel_id {
                             info!(
                                 "[STAG-ARB] LEG1 PARTIAL ACCEPT {} {} cumulative={}/{} — cancelling remainder",
@@ -2525,8 +2545,7 @@ impl Strategy for StaggeredArbAdapter {
                         return Ok(actions);
                     }
                     if filled_delta > 0 {
-                        let total_filled =
-                            self.record_leg2_fill(idx, filled_delta, fill_price, ts);
+                        let total_filled = self.record_leg2_fill(idx, filled_delta, fill_price, ts);
                         self.update_order_fill_progress(&client_id, cumulative_filled, Some(idx));
                         let target = self.positions.get(idx).map(|p| p.leg1_shares).unwrap_or(0);
                         info!(
@@ -2935,8 +2954,14 @@ series_ids = ["10684", "10192", "10684"]
         let adapter = StaggeredArbAdapter::from_toml("test".into(), toml, true).unwrap();
         assert_eq!(adapter.config.backtest_config.shares_per_trade, 20);
         assert_eq!(adapter.config.backtest_config.max_concurrent_positions, 3);
-        assert_eq!(adapter.config.backtest_config.premium_sum_threshold, Decimal::ONE);
-        assert_eq!(adapter.config.backtest_config.premium_sum_direction_slope, 1.25);
+        assert_eq!(
+            adapter.config.backtest_config.premium_sum_threshold,
+            Decimal::ONE
+        );
+        assert_eq!(
+            adapter.config.backtest_config.premium_sum_direction_slope,
+            1.25
+        );
         assert_eq!(adapter.config.backtest_config.premium_sum_obi_slope, 0.25);
         assert_eq!(adapter.config.backtest_config.symbols, vec!["BTCUSDT"]);
         assert_eq!(
@@ -2958,10 +2983,10 @@ name = "staggered_arb"
         assert_eq!(config.max_concurrent_positions, 0);
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
         assert_eq!(config.entry_after_start_min_secs, 30);
-        assert_eq!(config.entry_after_start_max_secs, 0);
+        assert_eq!(config.entry_after_start_max_secs, 180);
         assert_eq!(config.max_trades_per_event, 0);
-        assert_eq!(config.force_complete_threshold, dec!(1.20));
-        assert_eq!(config.protective_close_threshold, dec!(1.20));
+        assert_eq!(config.force_complete_threshold, dec!(1.08));
+        assert_eq!(config.protective_close_threshold, dec!(1.08));
         assert_eq!(config.min_entry_sum, dec!(0.30));
         assert_eq!(config.max_entry_sigma, 0.0);
     }
@@ -3721,7 +3746,9 @@ min_balance_usd = 9.0
             .unwrap();
 
         assert!(
-            actions.iter().any(|a| matches!(a, StrategyAction::LogEvent { .. })),
+            actions
+                .iter()
+                .any(|a| matches!(a, StrategyAction::LogEvent { .. })),
             "settlement should emit a cycle completion log"
         );
         assert_eq!(adapter.closed_trades.len(), 1);
@@ -3806,7 +3833,11 @@ min_balance_usd = 9.0
         let late_actions = adapter.on_order_update(&late_update).await.unwrap();
 
         assert!(late_actions.is_empty());
-        assert_eq!(adapter.closed_trades.len(), 1, "late leg2 updates after settlement must not close the same cycle twice");
+        assert_eq!(
+            adapter.closed_trades.len(),
+            1,
+            "late leg2 updates after settlement must not close the same cycle twice"
+        );
     }
 
     #[test]
@@ -3870,7 +3901,11 @@ min_balance_usd = 9.0
             !adapter.live_orders.contains_key(&client_id),
             "partial-cancelled leg1 should be removed from live order tracking"
         );
-        assert_eq!(adapter.positions.len(), 1, "leg1 partial fill should open position");
+        assert_eq!(
+            adapter.positions.len(),
+            1,
+            "leg1 partial fill should open position"
+        );
         let pos = &adapter.positions[0];
         assert_eq!(pos.leg1_shares, 7);
         assert_eq!(pos.leg1_price, dec!(0.52));
@@ -3884,9 +3919,7 @@ min_balance_usd = 9.0
         let client_id = "cid-leg1-partial".to_string();
         let mut track = sample_leg1_track(now);
         track.cancel_requested_at = None;
-        adapter
-            .live_orders
-            .insert(client_id.clone(), track);
+        adapter.live_orders.insert(client_id.clone(), track);
         adapter.pending_leg1_events.insert("evt-1".to_string());
 
         let update = OrderUpdate {
@@ -3901,7 +3934,11 @@ min_balance_usd = 9.0
 
         let actions = adapter.on_order_update(&update).await.unwrap();
 
-        assert_eq!(adapter.positions.len(), 1, "partial fill should create the live leg1 position immediately");
+        assert_eq!(
+            adapter.positions.len(),
+            1,
+            "partial fill should create the live leg1 position immediately"
+        );
         assert_eq!(adapter.positions[0].leg1_shares, 7);
         assert!(
             actions.iter().any(|action| matches!(action, StrategyAction::CancelOrder { .. })),
@@ -4103,7 +4140,11 @@ min_balance_usd = 9.0
 
         let _actions = adapter.on_order_update(&update).await.unwrap();
 
-        assert_eq!(adapter.positions.len(), 1, "late fill should still reconcile into a real position");
+        assert_eq!(
+            adapter.positions.len(),
+            1,
+            "late fill should still reconcile into a real position"
+        );
         assert_eq!(adapter.positions[0].leg1_shares, 7);
         assert!(
             !adapter.pending_leg1_events.contains("evt-1"),

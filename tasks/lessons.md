@@ -144,3 +144,6 @@
 
 - Pattern: A Binance depth socket can remain connected while top-of-book persistence goes stale if the collector tries to reconstruct a book from unsynchronized diff updates.
 - Rule: For spot L2 features that only need top levels, prefer the combined partial-depth snapshot stream (or do full snapshot+sequence sync). Do not build a production book from raw diffs without explicit synchronization and liveness tracking.
+
+- Pattern: Once live orders and L2 persistence are working, the next performance drag can still come from overly loose protective merge caps rather than execution bugs.
+- Rule: Before changing the order state machine again, break recent live/backtest results down by exit reason. If `protective_stop_loss` dominates losses while ordinary merges are profitable, tighten `max_leg1_loss`, `force_complete_threshold`, `protective_close_threshold`, and the post-open entry window before adding more execution complexity.

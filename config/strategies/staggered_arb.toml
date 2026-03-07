@@ -8,12 +8,12 @@ name = "staggered_arb"
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 shares_per_trade = 20
 max_concurrent = 0
-direction_threshold = 0.04
+direction_threshold = 0.05
 premium_sum_threshold = 1.00
 premium_sum_direction_slope = 1.25
 premium_sum_obi_slope = 0.25
 max_initial_sum = 0.0
-max_leg1_price = 0.58
+max_leg1_price = 0.55
 merge_target_sum = 0.95
 min_profit_target = 0.02
 min_ask_price = 0.05
@@ -27,7 +27,7 @@ cooldown_secs = 5
 min_leg2_delay_secs = 3
 max_trades_per_event = 0
 entry_after_start_min_secs = 30  # observe the first 30s before opening new leg1s
-entry_after_start_max_secs = 0   # 0 disables the upper bound; rely on time remaining / final-window guards
+entry_after_start_max_secs = 180 # only trade the early post-open window after the 30s observation delay
 no_trade_last_secs = 30          # block new leg1s in the final 30s
 
 [risk]
@@ -36,9 +36,9 @@ no_trade_last_secs = 30          # block new leg1s in the final 30s
 min_balance_usd = 5.0           # Keep $5 reserve
 
 # === STAGGERED ARB SPECIFIC ===
-max_leg1_loss = 0.05            # Protective stop: if Leg1 loses 5c, buy Leg2 to cap the trade
-force_complete_threshold = 1.20 # Generic force-close cap for timeout/time-safety/final-window; 0 disables the cap
-protective_close_threshold = 1.20 # Stop-loss/theta protective cap; allows bounded-loss Leg2 up to $1.20
+max_leg1_loss = 0.03            # Trigger protective merge earlier; recent live data showed 5c waits were too loose
+force_complete_threshold = 1.08 # Keep timeout/time-safety/final-window closes capped near parity
+protective_close_threshold = 1.08 # Bound stop-loss/theta protective merges before they become punitive
 
 [model]
 mu = 0.0
