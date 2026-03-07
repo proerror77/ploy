@@ -53,6 +53,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Execute Task 5 from the implementation plan: add order purpose to canonical strategy actions.
 - [x] Execute Task 6 from the implementation plan: add the composable crypto schema and block catalog.
 - [x] Execute Task 7 from the implementation plan: add the composable crypto runtime and migrate the momentum path.
+- [x] Execute Task 8 from the implementation plan: register event and sports strategies on the plugin registry path.
 
 ## Review
 
@@ -66,6 +67,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Confirmed canonical `StrategyAction::SubmitOrder` now carries explicit lifecycle purpose, and managed runtime bridges it into the normalized order contract for draining-aware execution semantics.
 - [x] Confirmed the plugin plane now has a validated `composable_crypto` schema surface with an explicit v1 block catalog and singleton-stage validation.
 - [x] Confirmed the first crypto managed path now boots through `ComposableCryptoStrategy`, while momentum logic is still reused internally as the initial delegate-backed implementation.
+- [x] Confirmed `event_edge` and `nba_comeback` now resolve through builtin plugin registry lookup plus projector-owned runtime config stamping instead of bespoke managed-runtime wrapper selection.
 
 ## Progress notes
 
@@ -84,6 +86,8 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Verified Task 6 with `cargo test plugins::composable_crypto --lib -- --nocapture` and `cargo check --lib`.
 - 2026-03-07: Completed Task 7 by adding `src/strategy/composable_crypto.rs`, registering `composable_crypto` in `StrategyFactory`, projecting momentum plugin deployments into composable runtime TOML, and switching bootstrap momentum startup to resolve through the plugin projector instead of a direct momentum runtime builder.
 - 2026-03-07: Verified Task 7 with `cargo test strategy::composable_crypto --lib -- --nocapture`, `cargo test coordinator::bootstrap --lib -- --nocapture`, and `cargo check --bin ploy`.
+- 2026-03-07: Completed Task 8 by adding a builtin runtime plugin registry, registering `event_edge` / `nba_comeback` specs, stamping `strategy.plugin_id` into registered-strategy runtime configs, and switching sports/politics canonical startup to resolve through registry + projector objects.
+- 2026-03-07: Verified Task 8 with `cargo test plugins::registry --lib -- --nocapture`, `cargo test coordinator::bootstrap --lib -- --nocapture`, `cargo test strategy::event_edge --lib -- --nocapture`, `cargo test strategy::nba_comeback --lib -- --nocapture`, and `cargo check --bin ploy`.
 
 ---
 
