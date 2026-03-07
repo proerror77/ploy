@@ -1,3 +1,4 @@
+pub mod composable_crypto;
 pub mod definition;
 pub mod deployment;
 pub mod projector;

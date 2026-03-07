@@ -6,6 +6,12 @@ pub struct ComposableCryptoSpec {
     pub signal_blocks: Vec<String>,
 }
 
+impl ComposableCryptoSpec {
+    pub fn has_signal_block(&self, name: &str) -> bool {
+        self.signal_blocks.iter().any(|signal| signal == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredStrategySpec {
     pub strategy_name: String,
