@@ -953,6 +953,7 @@ impl StaggeredArbAdapter {
             leg1_fee,
             leg1_time: ts,
             entry_obi: track.entry_obi,
+            protective_stop_armed_at: None,
             wait_deadline,
             leg2_price: None,
             leg2_shares: None,
@@ -1492,6 +1493,7 @@ impl StaggeredArbAdapter {
                 leg1_fee,
                 leg1_time: ts,
                 entry_obi: Some(obi),
+                protective_stop_armed_at: None,
                 wait_deadline,
                 leg2_price: None,
                 leg2_shares: None,
@@ -1582,6 +1584,7 @@ impl StaggeredArbAdapter {
 
         // Collect indices + actions (can't mutate while iterating)
         let mut leg2_fills: Vec<(usize, Decimal, String)> = Vec::new();
+        let mut protective_arm_updates: Vec<(usize, Option<DateTime<Utc>>)> = Vec::new();
         let mut saw_event_quotes = false;
 
         for (i, pos) in self.positions.iter().enumerate() {
@@ -1739,11 +1742,27 @@ impl StaggeredArbAdapter {
                             current_obi,
                         );
                         if obi_supportive && displacement_supportive && greeks_supportive {
+                            protective_arm_updates.push((i, None));
                             *leg2_skip_batch
                                 .entry("protective_signal_still_supportive")
                                 .or_default() += 1;
                             continue;
                         }
+                        let hard_signal_broken = bc
+                            .obi_signal_hard_flipped(pos.leg1_direction, current_obi)
+                            || (!displacement_supportive && !greeks_supportive);
+                        let armed_at = pos.protective_stop_armed_at.unwrap_or(ts);
+                        let recovery_elapsed = (ts - armed_at).num_seconds();
+                        let recovery_expired = bc.protective_recovery_window_secs == 0
+                            || recovery_elapsed >= bc.protective_recovery_window_secs as i64;
+                        if !hard_signal_broken && !recovery_expired {
+                            protective_arm_updates.push((i, Some(armed_at)));
+                            *leg2_skip_batch
+                                .entry("protective_recovery_window")
+                                .or_default() += 1;
+                            continue;
+                        }
+                        protective_arm_updates.push((i, None));
                         if self.protective_close_allowed(
                             current_sum,
                             time_remaining,
@@ -1757,6 +1776,8 @@ impl StaggeredArbAdapter {
                                 .or_default() += 1;
                         }
                         continue;
+                    } else if pos.protective_stop_armed_at.is_some() {
+                        protective_arm_updates.push((i, None));
                     }
                 }
             }
@@ -1894,6 +1915,12 @@ impl StaggeredArbAdapter {
 
         if !saw_event_quotes {
             self.bump_leg2_skip("missing_pm_quotes");
+        }
+
+        for (idx, armed_at) in protective_arm_updates {
+            if let Some(pos) = self.positions.get_mut(idx) {
+                pos.protective_stop_armed_at = armed_at;
+            }
         }
 
         // Execute in reverse order to preserve indices
@@ -3096,10 +3123,10 @@ name = "staggered_arb"
         assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.allowed_window_durations, vec![300]);
-        assert_eq!(config.protective_recovery_window_secs, 12);
+        assert_eq!(config.protective_recovery_window_secs, 0);
         assert_eq!(config.max_trades_per_event, 0);
-        assert_eq!(config.force_complete_threshold, dec!(1.08));
-        assert_eq!(config.protective_close_threshold, dec!(1.08));
+        assert_eq!(config.force_complete_threshold, dec!(1.06));
+        assert_eq!(config.protective_close_threshold, dec!(1.06));
         assert_eq!(config.obi_decay_exit_ratio, 0.35);
         assert_eq!(config.obi_flip_exit_threshold, 0.008);
         assert_eq!(config.min_entry_sum, dec!(0.30));
@@ -3166,6 +3193,7 @@ name = "staggered_arb"
             leg1_fee: dec!(0.075),
             leg1_time: now - chrono::Duration::seconds(10),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(60),
             leg2_price: None,
             leg2_shares: None,
@@ -3364,6 +3392,7 @@ name = "staggered_arb"
             leg1_fee: dec!(0.153),
             leg1_time: now - chrono::Duration::seconds(20),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3557,6 +3586,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.075),
             leg1_time: now - chrono::Duration::seconds(10),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3592,6 +3622,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.1125),
             leg1_time: now - chrono::Duration::seconds(30),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: None,
             leg2_shares: None,
@@ -3630,6 +3661,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(30),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3678,6 +3710,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(10),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3731,6 +3764,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(10),
             entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3743,6 +3777,123 @@ min_balance_usd = 9.0
 
         assert!(actions.is_empty());
         assert_eq!(adapter.closed_trades.len(), 0);
+    }
+
+    #[test]
+    fn test_protective_stop_arms_then_waits_before_closing() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.use_greeks = false;
+        adapter.config.backtest_config.max_leg1_loss = dec!(0.05);
+        adapter.config.backtest_config.protective_recovery_window_secs = 12;
+        adapter.config.backtest_config.protective_close_threshold = dec!(1.08);
+        adapter
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
+        adapter
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(0.005));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now + chrono::Duration::seconds(300),
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.0825),
+            leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
+            wait_deadline: now + chrono::Duration::seconds(120),
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_fee: None,
+            leg2_time: None,
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let actions = adapter.check_leg2_opportunities("BTCUSDT", now);
+
+        assert!(actions.is_empty());
+        assert_eq!(adapter.closed_trades.len(), 0);
+        assert_eq!(adapter.positions[0].protective_stop_armed_at, Some(now));
+
+        let actions =
+            adapter.check_leg2_opportunities("BTCUSDT", now + chrono::Duration::seconds(13));
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(adapter.closed_trades.len(), 1);
+        assert_eq!(adapter.closed_trades[0].exit_reason, "protective_stop_loss");
+    }
+
+    #[test]
+    fn test_hard_obi_flip_bypasses_protective_recovery_window() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        adapter.config.backtest_config.use_greeks = false;
+        adapter.config.backtest_config.max_leg1_loss = dec!(0.05);
+        adapter.config.backtest_config.protective_recovery_window_secs = 12;
+        adapter.config.backtest_config.protective_close_threshold = dec!(1.08);
+        adapter
+            .pm_asks_by_event
+            .insert("evt".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
+        adapter
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(-0.02));
+        adapter.active_windows.insert(
+            "BTCUSDT".into(),
+            vec![LiveWindow {
+                event_id: "evt".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up".into(),
+                down_token: "down".into(),
+                condition_id: None,
+                end_time: now + chrono::Duration::seconds(300),
+                open_price: Some(dec!(100)),
+                window_secs: 300,
+            }],
+        );
+        adapter.positions.push(PaperPosition {
+            symbol: "BTCUSDT".into(),
+            event_id: "evt".into(),
+            condition_id: None,
+            up_token: "up".into(),
+            down_token: "down".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_fee: dec!(0.0825),
+            leg1_time: now - chrono::Duration::seconds(10),
+            entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
+            wait_deadline: now + chrono::Duration::seconds(120),
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_fee: None,
+            leg2_time: None,
+            state: PaperPositionState::Leg1Filled,
+        });
+
+        let actions = adapter.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(adapter.closed_trades.len(), 1);
+        assert_eq!(adapter.closed_trades[0].exit_reason, "protective_stop_loss");
     }
 
     #[test]
@@ -3778,6 +3929,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.1125),
             leg1_time: now - chrono::Duration::seconds(30),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: None,
             leg2_shares: None,
@@ -3831,6 +3983,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(30),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -3968,6 +4121,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(20),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -4017,6 +4171,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(60),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: None,
             leg2_shares: None,
@@ -4075,6 +4230,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.0825),
             leg1_time: now - chrono::Duration::seconds(60),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             leg2_price: Some(dec!(0.40)),
             leg2_shares: Some(4),
@@ -4145,6 +4301,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.03),
             leg1_time: now - chrono::Duration::seconds(10),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(30),
             leg2_price: None,
             leg2_shares: None,
@@ -4291,6 +4448,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.186),
             leg1_time: now - chrono::Duration::seconds(20),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -4353,6 +4511,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.186),
             leg1_time: now - chrono::Duration::seconds(20),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: None,
             leg2_shares: None,
@@ -4463,6 +4622,7 @@ min_balance_usd = 9.0
             leg1_fee: dec!(0.186),
             leg1_time: now - chrono::Duration::seconds(20),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             leg2_price: Some(dec!(0.38)),
             leg2_shares: Some(7),

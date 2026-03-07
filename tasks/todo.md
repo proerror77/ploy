@@ -554,3 +554,33 @@ Drop the 15m staggered-arb window from the canonical profile after replay showed
   - `2026-03-06T20:30:00Z..2026-03-07T01:20:00Z`: full `64 trades / -2.88 / PF 0.91`, `5m-only 45 / +5.92 / PF 1.32`, `15m-only 21 / -9.22 / PF 0.35`
   - `2026-02-26T00:00:00Z..06:00:00Z`: full `76 trades / +35.33 / PF 2.11`, `5m-only 35 / +36.47 / PF 3.58`, `15m-only 38 / -4.07 / PF 0.76`
 - [x] Canonical config, replay defaults, and live TOML regression tests now align on `allowed_windows = [300]`.
+
+---
+
+# Staggered Arb Protective Close Cap Sweep (2026-03-07)
+
+## Goal
+Increase recent live-like replay PnL without materially reducing trade count by tightening close caps, after testing showed the new protective recovery window logic did not improve outcomes on its own.
+
+## Tasks
+
+- [x] Implement and test a short protective recovery window before `protective_stop_loss`.
+- [x] Replay the recent live-like window and adjacent overlap window with the recovery-window build.
+- [x] Sweep `protective_recovery_window_secs` on the recent live-like window to confirm whether the new logic helps at all.
+- [x] Sweep `force_complete_threshold` / `protective_close_threshold` on the same recent window, then validate the best cap on independent windows.
+- [x] Update canonical config plus parser/default fallbacks to the best cap that improved all validation windows.
+
+## Review
+
+- [x] The recovery-window implementation is correct and covered by new live/replay tests, but it did not improve the target window:
+  - recent live-like window with `recovery=12`: `46 trades / +5.62 / PF 1.30 / 9 aborts`
+  - same window with `recovery=0`: `46 trades / +5.83 / PF 1.32 / 9 aborts`
+  - `8s`, `12s`, `20s`, and `30s` all converged to the same weaker result, so the feature is now disabled by default
+- [x] Tightening both close caps to `1.06` was the first change that improved the recent main window while preserving turnover:
+  - `2026-03-06T20:30:00Z..2026-03-07T01:20:00Z`: `46 trades / +6.24 / PF 1.35` vs `1.08 => +5.83 / PF 1.32`
+  - `2026-02-26T00:00:00Z..06:00:00Z`: `35 trades / +36.86 / PF 3.68` vs `1.08 => +36.47 / PF 3.58`
+  - `2026-03-07T00:00:00Z..06:00:00Z`: `21 trades / +18.26 / PF 12.69` vs `1.08 => +17.43 / PF 8.30`
+- [x] Canonical TOML, backtest defaults, and parser fallbacks now align on:
+  - `protective_recovery_window_secs = 0`
+  - `force_complete_threshold = 1.06`
+  - `protective_close_threshold = 1.06`

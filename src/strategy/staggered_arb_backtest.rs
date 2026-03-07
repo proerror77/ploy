@@ -99,6 +99,9 @@ pub struct StaggeredArbBacktestConfig {
     // ── Risk control ──
     /// Maximum unrealized loss on Leg1 before buying Leg2 to cap the trade
     pub max_leg1_loss: Decimal,
+    /// After a stop-loss breach, allow a short recovery window before forcing Leg2,
+    /// unless the directional signal hard-flips against the position.
+    pub protective_recovery_window_secs: u64,
     /// If sum <= this value, allow generic forced Leg2 closes (timeout / time-safety / final window)
     pub force_complete_threshold: Decimal,
     /// Maximum sum allowed for protective Leg2 closes (stop-loss / theta urgency)
@@ -176,8 +179,9 @@ impl Default for StaggeredArbBacktestConfig {
             max_wait_pct: 0.30,
             min_time_remaining_secs: 45,
             max_leg1_loss: dec!(0.03),
-            force_complete_threshold: dec!(1.08),
-            protective_close_threshold: dec!(1.08),
+            protective_recovery_window_secs: 0,
+            force_complete_threshold: dec!(1.06),
+            protective_close_threshold: dec!(1.06),
             obi_decay_exit_ratio: 0.35,
             obi_flip_exit_threshold: 0.008,
             min_ask_price: dec!(0.05),
@@ -354,6 +358,21 @@ impl StaggeredArbBacktestConfig {
             .unwrap_or(self.obi_flip_exit_threshold)
             .max(self.obi_flip_exit_threshold);
         directional_current >= required_support
+    }
+
+    pub(crate) fn obi_signal_hard_flipped(
+        &self,
+        leg1_direction: Direction,
+        current_obi: Option<f64>,
+    ) -> bool {
+        let Some(current) = current_obi else {
+            return false;
+        };
+        let directional_current = match leg1_direction {
+            Direction::Up => current,
+            Direction::Down => -current,
+        };
+        directional_current <= -self.obi_flip_exit_threshold
     }
 
     pub(crate) fn force_close_threshold_now(
@@ -536,18 +555,22 @@ impl StaggeredArbBacktestConfig {
                     .unwrap_or(0.03),
             )
             .unwrap_or(dec!(0.03)),
+            protective_recovery_window_secs: risk
+                .get("protective_recovery_window_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as u64,
             force_complete_threshold: Decimal::try_from(
                 risk.get("force_complete_threshold")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(1.08),
+                    .unwrap_or(1.06),
             )
-            .unwrap_or(dec!(1.08)),
+            .unwrap_or(dec!(1.06)),
             protective_close_threshold: Decimal::try_from(
                 risk.get("protective_close_threshold")
                     .and_then(|v| v.as_float())
-                    .unwrap_or(1.08),
+                    .unwrap_or(1.06),
             )
-            .unwrap_or(dec!(1.08)),
+            .unwrap_or(dec!(1.06)),
             obi_decay_exit_ratio: risk
                 .get("obi_decay_exit_ratio")
                 .and_then(|v| v.as_float())
@@ -699,6 +722,8 @@ struct StaggeredArbPosition {
     initial_sum: Decimal,
     /// Binance top-of-book OBI captured at Leg1 entry.
     entry_obi: Option<f64>,
+    /// When the position first breached the protective stop-loss threshold.
+    protective_stop_armed_at: Option<DateTime<Utc>>,
     // ── Greeks at entry ──
     /// Binary option greeks computed at Leg1 entry
     entry_greeks: Option<BinaryGreeks>,
@@ -1411,6 +1436,7 @@ impl StaggeredArbBacktestEngine {
             best_sum_seen: current_sum,
             initial_sum: current_sum,
             entry_obi: Some(obi),
+            protective_stop_armed_at: None,
             entry_greeks: greeks,
             state: ArbPositionState::Leg1Filled,
             leg2_direction: None,
@@ -1456,6 +1482,7 @@ impl StaggeredArbBacktestEngine {
     fn check_leg2_opportunities(&mut self, symbol: &str, ts: DateTime<Utc>) {
         // Collect actions to take (can't mutate positions while iterating)
         let mut actions: Vec<(usize, Leg2Action)> = Vec::new();
+        let mut protective_arm_updates: Vec<(usize, Option<DateTime<Utc>>)> = Vec::new();
         for (i, pos) in self.positions.iter_mut().enumerate() {
             if pos.symbol != symbol || pos.state != ArbPositionState::Leg1Filled {
                 continue;
@@ -1643,6 +1670,7 @@ impl StaggeredArbBacktestEngine {
                         current_obi,
                     );
                     if obi_supportive && displacement_supportive && greeks_supportive {
+                        protective_arm_updates.push((i, None));
                         trace!(
                             "Skipping protective stop: signal still supportive obi={:?} displacement_supportive={} greeks_supportive={}",
                             current_obi,
@@ -1651,6 +1679,26 @@ impl StaggeredArbBacktestEngine {
                         );
                         continue;
                     }
+                    let hard_signal_broken = self
+                        .config
+                        .obi_signal_hard_flipped(pos.leg1_direction, current_obi)
+                        || (!displacement_supportive && !greeks_supportive);
+                    let armed_at = pos.protective_stop_armed_at.unwrap_or(ts);
+                    let recovery_elapsed = (ts - armed_at).num_seconds();
+                    let recovery_expired = self.config.protective_recovery_window_secs == 0
+                        || recovery_elapsed
+                            >= self.config.protective_recovery_window_secs as i64;
+                    if !hard_signal_broken && !recovery_expired {
+                        protective_arm_updates.push((i, Some(armed_at)));
+                        trace!(
+                            "Arming protective stop: loss={:.4} recovery_elapsed={}s window={}s",
+                            leg1_loss,
+                            recovery_elapsed,
+                            self.config.protective_recovery_window_secs
+                        );
+                        continue;
+                    }
+                    protective_arm_updates.push((i, None));
                     if protective_threshold <= Decimal::ZERO || current_sum <= protective_threshold
                     {
                         actions.push((
@@ -1659,6 +1707,8 @@ impl StaggeredArbBacktestEngine {
                         ));
                     }
                     continue;
+                } else if pos.protective_stop_armed_at.is_some() {
+                    protective_arm_updates.push((i, None));
                 }
             }
 
@@ -1670,6 +1720,12 @@ impl StaggeredArbBacktestEngine {
                         Leg2Action::Fill(other_ask, "forced_time_safety".to_string()),
                     ));
                 }
+            }
+        }
+
+        for (idx, armed_at) in protective_arm_updates {
+            if let Some(pos) = self.positions.get_mut(idx) {
+                pos.protective_stop_armed_at = armed_at;
             }
         }
 
@@ -2741,8 +2797,9 @@ mod tests {
         assert_eq!(config.min_ask_price, dec!(0.05));
         assert_eq!(config.min_entry_sum, dec!(0.30));
         assert_eq!(config.allowed_window_durations, vec![300]);
-        assert_eq!(config.force_complete_threshold, dec!(1.08));
-        assert_eq!(config.protective_close_threshold, dec!(1.08));
+        assert_eq!(config.force_complete_threshold, dec!(1.06));
+        assert_eq!(config.protective_close_threshold, dec!(1.06));
+        assert_eq!(config.protective_recovery_window_secs, 0);
         assert_eq!(config.obi_decay_exit_ratio, 0.35);
         assert_eq!(config.obi_flip_exit_threshold, 0.008);
         assert_eq!(config.min_entry_sigma, 0.003);
@@ -2775,8 +2832,9 @@ mod tests {
         assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.allowed_window_durations, vec![300]);
-        assert_eq!(config.force_complete_threshold, dec!(1.08));
-        assert_eq!(config.protective_close_threshold, dec!(1.08));
+        assert_eq!(config.force_complete_threshold, dec!(1.06));
+        assert_eq!(config.protective_close_threshold, dec!(1.06));
+        assert_eq!(config.protective_recovery_window_secs, 0);
         assert_eq!(config.obi_decay_exit_ratio, 0.35);
         assert_eq!(config.obi_flip_exit_threshold, 0.008);
     }
@@ -3099,6 +3157,7 @@ mod tests {
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(0.1125),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),
@@ -3132,12 +3191,13 @@ mod tests {
         config.use_greeks = false;
         config.min_leg2_delay_secs = 0;
         config.max_leg1_loss = dec!(0.05);
+        config.protective_recovery_window_secs = 0;
 
         let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
         let now = Utc::now();
         engine
             .pm_asks_by_event
-            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.48))));
+            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
         engine.positions.push(StaggeredArbPosition {
             symbol: "BTCUSDT".into(),
             event_slug: "test-event".into(),
@@ -3147,14 +3207,15 @@ mod tests {
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(0.0825),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(20),
             window_duration_secs: 300,
             entry_p_hat: 0.7,
             entry_sigma: 0.01,
-            best_sum_seen: dec!(1.03),
-            initial_sum: dec!(1.03),
+            best_sum_seen: dec!(1.02),
+            initial_sum: dec!(1.02),
             entry_greeks: None,
             state: ArbPositionState::Leg1Filled,
             leg2_direction: None,
@@ -3194,6 +3255,7 @@ mod tests {
             leg1_time: now - chrono::Duration::seconds(10),
             leg1_fee: dec!(0.0825),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),
@@ -3251,6 +3313,7 @@ mod tests {
             best_sum_seen: dec!(1.08),
             initial_sum: dec!(1.08),
             entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
             entry_greeks: None,
             state: ArbPositionState::Leg1Filled,
             leg2_direction: None,
@@ -3266,6 +3329,110 @@ mod tests {
 
         assert_eq!(engine.closed_trades.len(), 0);
         assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+    }
+
+    #[test]
+    fn test_protective_stop_arms_then_waits_before_closing() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+        config.max_leg1_loss = dec!(0.05);
+        config.protective_recovery_window_secs = 12;
+        config.protective_close_threshold = dec!(1.08);
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.005));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(10),
+            leg1_fee: dec!(0.0825),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.02),
+            initial_sum: dec!(1.02),
+            entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 0);
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
+        assert_eq!(engine.positions[0].protective_stop_armed_at, Some(now));
+
+        engine.check_leg2_opportunities("BTCUSDT", now + chrono::Duration::seconds(13));
+
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(engine.closed_trades[0].exit_reason, "protective_stop_loss");
+    }
+
+    #[test]
+    fn test_hard_obi_flip_bypasses_protective_recovery_window() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+        config.max_leg1_loss = dec!(0.05);
+        config.protective_recovery_window_secs = 12;
+        config.protective_close_threshold = dec!(1.08);
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.50)), Some(dec!(0.47))));
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(-0.02));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(10),
+            leg1_fee: dec!(0.0825),
+            wait_deadline: now + chrono::Duration::seconds(120),
+            s0: dec!(100),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.02),
+            initial_sum: dec!(1.02),
+            entry_obi: Some(0.02),
+            protective_stop_armed_at: None,
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(engine.closed_trades[0].exit_reason, "protective_stop_loss");
     }
 
     #[test]
@@ -3289,6 +3456,7 @@ mod tests {
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(0.1125),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now - chrono::Duration::seconds(1),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(20),
@@ -3330,6 +3498,7 @@ mod tests {
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(1.65),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),
@@ -3382,6 +3551,7 @@ mod tests {
             leg1_time: now - chrono::Duration::seconds(30),
             leg1_fee: dec!(1.65),
             entry_obi: None,
+            protective_stop_armed_at: None,
             wait_deadline: now + chrono::Duration::seconds(120),
             s0: dec!(100000),
             event_end_time: now + chrono::Duration::seconds(300),

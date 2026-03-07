@@ -159,3 +159,9 @@
 
 - Pattern: When staggered-arb mixes `5m` and `15m` windows under one profile, a broader timeframe can silently dilute or reverse edge even if the aggregate logic looks sensible.
 - Rule: Before adding new timing complexity or loosening entry further, decompose replay by window duration. If one timeframe is consistently negative across the recent live-like and adjacent overlap windows, remove that timeframe from the canonical profile before tuning anything else.
+
+- Pattern: A new staggered-arb control path can be logically sound and fully tested, yet still underperform a simpler parameter-only change on the actual production-like validation windows.
+- Rule: After implementing new exit logic, always run a parameter sweep against the current best simple baseline before keeping the extra complexity. If a tighter close cap outperforms the new branch on the recent live-like window and independent overlap windows, disable the new branch by default and ship the simpler profile.
+
+- Pattern: Tightening staggered-arb close caps slightly can improve both recent live-like windows and independent overlap windows, while caps that are too tight or too loose both degrade results in different ways.
+- Rule: For current 5m-only staggered-arb, treat `1.06` as the new protective/forced close baseline. Re-validate `1.05`, `1.06`, and `1.07+` around any future profile change instead of assuming the old `1.08` cap is still appropriate.
