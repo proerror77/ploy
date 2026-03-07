@@ -45,9 +45,9 @@ pub use persistence::{
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
 pub use platform::{
-    AgentStatus, DeploymentState, Domain, EventRouter, ExecutionReport, IntentPurpose,
-    MarketSelector, OrderCommand, OrderExecutionReport, OrderIntent, OrderPlatform, PlatformConfig,
-    RiskDecision, RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe, TradeIntent,
+    AgentStatus, DeploymentState, Domain, ExecutionReport, IntentPurpose, MarketSelector,
+    OrderCommand, OrderExecutionReport, OrderIntent, RiskDecision, RiskDecisionStatus, RiskGate,
+    StrategyDeployment, Timeframe, TradeIntent,
 };
 pub use signing::Wallet;
 pub use supervisor::{

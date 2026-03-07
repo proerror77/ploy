@@ -111,6 +111,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - [x] Execute Task 3 from the retirement plan: remove politics and sports compatibility runtimes.
 - [x] Execute Task 4 from the retirement plan: remove crypto compatibility runtimes.
 - [x] Execute Task 5 from the retirement plan: remove the `TradingAgent` compatibility contract.
+- [x] Execute Task 6 from the retirement plan: remove the `DomainAgent` / `platform::agents` compatibility layer.
 
 ## Review
 
@@ -135,9 +136,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 ### Delete after RL/CLI migration
 
-- `src/platform/traits.rs`, `src/platform/platform.rs`, and `src/platform/router.rs` still depend on `DomainAgent`.
-- `src/platform/agents/{crypto_agent,event_edge_agent,nba_agent,rl_crypto_agent}.rs` still implement the compatibility `DomainAgent` layer.
-- `src/main_commands/rl/agent.rs` still imports `RLCryptoAgent` and `DomainAgent`.
+- None. Task 6 moved the last RL helper into `src/rl/integration/live_runtime.rs`, deleted `platform::agents/*`, and removed `DomainAgent` / router / `OrderPlatform`.
 
 ## Progress notes
 
@@ -153,6 +152,8 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - 2026-03-08: Confirmed the red-state compile blocker for Task 5 by removing `TradingAgent` and watching `src/agents/crypto.rs` fail to compile, then deleted `TradingAgent`, `AgentContext`, and the unused pull-based crypto runtime shell.
 - 2026-03-08: Verified Task 5 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
 - 2026-03-08: Rewired `ploy strategy nba-comeback` to instantiate `NbaComebackStrategy` directly from canonical runtime config, removing the standalone CLI dependency on `platform::agents::nba_agent::NbaComebackAgent`.
+- 2026-03-08: Moved the remaining RL helper into `src/rl/integration/live_runtime.rs`, rewired `src/main_commands/rl/agent.rs` to use it directly, and deleted `src/platform/agents/*`, `src/platform/router.rs`, `src/platform/platform.rs`, plus the retired `DomainAgent` / `SimpleAgent` traits.
+- 2026-03-08: Verified Task 6 with `cargo test --features rl rl::integration::live_runtime --lib -- --nocapture`, `cargo check --features rl --bin ploy`, and `cargo check --bin ploy`.
 
 ---
 
