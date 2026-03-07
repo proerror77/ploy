@@ -38,7 +38,7 @@ use crate::platform::{
 };
 use crate::plugins::{
     ComposableCryptoSpec, DeploymentState as PluginDeploymentState, PluginDefinition,
-    PluginDeployment, PluginKind, PluginSpec,
+    PluginDeployment, PluginKind, PluginRegistry, PluginSpec, RegisteredStrategySpec,
 };
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
@@ -60,16 +60,16 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::instrument;
 
-use super::runtime_specs::{
-    build_event_edge_managed_runtime_spec, build_nba_comeback_managed_runtime_spec,
-    build_pattern_memory_managed_runtime_spec, build_split_arb_managed_runtime_spec,
-    ManagedStrategyBootstrapSpec,
-};
 #[cfg(test)]
 use super::runtime_specs::{
-    build_event_edge_runtime_config, build_momentum_managed_runtime_spec,
-    build_momentum_runtime_config, build_nba_comeback_runtime_config,
+    build_event_edge_managed_runtime_spec, build_event_edge_runtime_config,
+    build_momentum_managed_runtime_spec, build_momentum_runtime_config,
+    build_nba_comeback_managed_runtime_spec, build_nba_comeback_runtime_config,
     build_split_arb_runtime_config,
+};
+use super::runtime_specs::{
+    build_pattern_memory_managed_runtime_spec, build_split_arb_managed_runtime_spec,
+    ManagedStrategyBootstrapSpec,
 };
 use super::strategy_runtime::{
     run_managed_strategy_runtime as run_managed_strategy_runtime_module,
@@ -5355,8 +5355,23 @@ async fn start_sports_strategy_runtime(
     nba_cfg: &crate::config::NbaComebackConfig,
     compat_sports_runtimes_enabled: bool,
 ) -> Result<()> {
-    let managed_runtime_spec =
-        build_nba_comeback_managed_runtime_spec(&app_config.database.url, &sports_cfg, nba_cfg);
+    let registry = PluginRegistry::builtin_runtime_registry()?;
+    let definition = registry
+        .plugin("sports.nba_comeback.v1")
+        .ok_or_else(|| anyhow::anyhow!("missing sports.nba_comeback.v1 plugin definition"))?;
+    let managed_runtime_spec = crate::plugins::projector::project_nba_comeback_runtime_spec(
+        definition,
+        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec::nba_comeback()),
+        &PluginDeployment {
+            deployment_id: format!("deploy.sports.nba_comeback.{}", sports_cfg.agent_id),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: account_id.to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        },
+        &app_config.database.url,
+        &sports_cfg,
+        nba_cfg,
+    )?;
 
     if managed_runtime_spec.is_some() || compat_sports_runtimes_enabled {
         let pool =
@@ -5414,8 +5429,23 @@ fn spawn_politics_strategy_runtime(
     ee_cfg: &crate::config::EventEdgeAgentConfig,
 ) -> Result<()> {
     let strategy_agent_id = politics_cfg.agent_id.clone();
-    let runtime_spec =
-        build_event_edge_managed_runtime_spec(&app_config.market.rest_url, &politics_cfg, ee_cfg);
+    let registry = PluginRegistry::builtin_runtime_registry()?;
+    let definition = registry
+        .plugin("politics.event_edge.v1")
+        .ok_or_else(|| anyhow::anyhow!("missing politics.event_edge.v1 plugin definition"))?;
+    let runtime_spec = crate::plugins::projector::project_event_edge_runtime_spec(
+        definition,
+        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec::event_edge()),
+        &PluginDeployment {
+            deployment_id: format!("deploy.politics.event_edge.{}", politics_cfg.agent_id),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: account_id.to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        },
+        &app_config.market.rest_url,
+        &politics_cfg,
+        ee_cfg,
+    )?;
     spawn_managed_strategy_runtime_spec(
         agent_handles,
         coordinator,
@@ -7128,6 +7158,89 @@ mod tests {
         assert!(projected
             .strategy_config_toml
             .contains("signal_blocks = [\"momentum\"]"));
+    }
+
+    #[test]
+    fn project_event_edge_plugin_runtime_spec_stamps_plugin_identity() {
+        let registry = crate::plugins::PluginRegistry::builtin_runtime_registry()
+            .expect("builtin plugin registry");
+        let definition = registry
+            .plugin("politics.event_edge.v1")
+            .expect("event edge plugin definition");
+        let spec = crate::plugins::PluginSpec::RegisteredStrategy(
+            crate::plugins::RegisteredStrategySpec::event_edge(),
+        );
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.politics.event_edge.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+        let politics_cfg = PoliticsTradingConfig::default();
+        let cfg = crate::config::EventEdgeAgentConfig {
+            enabled: true,
+            framework: "deterministic".to_string(),
+            event_ids: vec!["evt-1".to_string()],
+            titles: vec!["Best AI model".to_string()],
+            interval_secs: 180,
+            min_edge: Decimal::new(8, 2),
+            max_entry: Decimal::new(70, 2),
+            shares: 25,
+            trade: true,
+            cooldown_secs: 120,
+            max_daily_spend_usd: Decimal::from(55),
+            model: None,
+            claude_max_turns: 0,
+        };
+
+        let projected = crate::plugins::projector::project_event_edge_runtime_spec(
+            definition,
+            &spec,
+            &deployment,
+            "https://clob.polymarket.com",
+            &politics_cfg,
+            &cfg,
+        )
+        .expect("project event_edge runtime spec");
+
+        assert!(projected
+            .strategy_config_toml
+            .contains("plugin_id = \"politics.event_edge.v1\""));
+    }
+
+    #[test]
+    fn project_nba_comeback_plugin_runtime_spec_stamps_plugin_identity() {
+        let registry = crate::plugins::PluginRegistry::builtin_runtime_registry()
+            .expect("builtin plugin registry");
+        let definition = registry
+            .plugin("sports.nba_comeback.v1")
+            .expect("nba plugin definition");
+        let spec = crate::plugins::PluginSpec::RegisteredStrategy(
+            crate::plugins::RegisteredStrategySpec::nba_comeback(),
+        );
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.sports.nba_comeback.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+        let sports_cfg = SportsTradingConfig::default();
+        let cfg = sample_nba_comeback_config(false);
+
+        let projected = crate::plugins::projector::project_nba_comeback_runtime_spec(
+            definition,
+            &spec,
+            &deployment,
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &cfg,
+        )
+        .expect("project nba runtime spec")
+        .expect("managed nba runtime spec");
+
+        assert!(projected
+            .strategy_config_toml
+            .contains("plugin_id = \"sports.nba_comeback.v1\""));
     }
 
     #[test]

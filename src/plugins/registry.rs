@@ -3,8 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::{PloyError, Result};
+use crate::platform::Domain;
 
-use super::definition::PluginDefinition;
+use super::definition::{PluginDefinition, PluginKind};
 
 #[derive(Debug, Default, Clone)]
 pub struct PluginRegistry {
@@ -13,6 +14,36 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    pub fn builtin_runtime_registry() -> Result<Self> {
+        Self::from_definitions(vec![
+            builtin_definition(
+                "crypto.momentum.v1",
+                PluginKind::ComposableCrypto,
+                Domain::Crypto,
+            ),
+            builtin_definition(
+                "crypto.pattern_memory.v1",
+                PluginKind::ComposableCrypto,
+                Domain::Crypto,
+            ),
+            builtin_definition(
+                "crypto.split_arb.v1",
+                PluginKind::ComposableCrypto,
+                Domain::Crypto,
+            ),
+            builtin_definition(
+                "politics.event_edge.v1",
+                PluginKind::RegisteredStrategy,
+                Domain::Politics,
+            ),
+            builtin_definition(
+                "sports.nba_comeback.v1",
+                PluginKind::RegisteredStrategy,
+                Domain::Sports,
+            ),
+        ])
+    }
+
     pub fn load_from_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
         let mut entries =
@@ -49,7 +80,7 @@ impl PluginRegistry {
         &self.definitions
     }
 
-    fn from_definitions(definitions: Vec<PluginDefinition>) -> Result<Self> {
+    pub fn from_definitions(definitions: Vec<PluginDefinition>) -> Result<Self> {
         let mut index = HashMap::new();
         for (idx, definition) in definitions.iter().enumerate() {
             if let Some(previous_idx) = index.insert(definition.plugin_id.clone(), idx) {
@@ -62,6 +93,15 @@ impl PluginRegistry {
         }
 
         Ok(Self { definitions, index })
+    }
+}
+
+fn builtin_definition(plugin_id: &str, kind: PluginKind, domain: Domain) -> PluginDefinition {
+    PluginDefinition {
+        plugin_id: plugin_id.to_string(),
+        kind,
+        version: "v1".to_string(),
+        domain,
     }
 }
 
@@ -165,5 +205,13 @@ domain = "crypto"
         let err = PluginRegistry::load_from_dir(&dir).expect_err("unknown kind");
 
         assert!(err.to_string().contains("unknown plugin kind"));
+    }
+
+    #[test]
+    fn builtin_runtime_registry_includes_registered_strategy_plugins() {
+        let registry = PluginRegistry::builtin_runtime_registry().expect("builtin registry");
+
+        assert!(registry.plugin("politics.event_edge.v1").is_some());
+        assert!(registry.plugin("sports.nba_comeback.v1").is_some());
     }
 }

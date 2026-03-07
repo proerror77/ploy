@@ -165,6 +165,45 @@ fn block_array(types: &[&str]) -> toml::Value {
     )
 }
 
+fn stamp_strategy_plugin_id(
+    definition: &PluginDefinition,
+    base_config_toml: String,
+) -> Result<String> {
+    let mut config: toml::Value = toml::from_str(&base_config_toml).map_err(|err| {
+        PloyError::Validation(format!(
+            "plugin {} produced invalid runtime config: {err}",
+            definition.plugin_id
+        ))
+    })?;
+    let root = config.as_table_mut().ok_or_else(|| {
+        PloyError::Validation(format!(
+            "plugin {} runtime config must be a TOML table",
+            definition.plugin_id
+        ))
+    })?;
+    let strategy = root
+        .entry("strategy")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or_else(|| {
+            PloyError::Validation(format!(
+                "plugin {} runtime [strategy] section must be a TOML table",
+                definition.plugin_id
+            ))
+        })?;
+    strategy.insert(
+        "plugin_id".to_string(),
+        toml::Value::String(definition.plugin_id.clone()),
+    );
+
+    toml::to_string(&config).map_err(|err| {
+        PloyError::Validation(format!(
+            "failed to serialize runtime config for plugin {}: {err}",
+            definition.plugin_id
+        ))
+    })
+}
+
 fn require_registered_strategy_spec<'a>(
     definition: &PluginDefinition,
     spec: &'a PluginSpec,
@@ -260,7 +299,10 @@ pub(crate) fn project_event_edge_runtime_spec(
         strategy_label: "event_edge".to_string(),
         agent_id: politics_cfg.agent_id.clone(),
         domain: Domain::Politics,
-        strategy_config_toml: build_event_edge_runtime_config(rest_url, ee_cfg),
+        strategy_config_toml: stamp_strategy_plugin_id(
+            definition,
+            build_event_edge_runtime_config(rest_url, ee_cfg),
+        )?,
     })
 }
 
@@ -289,7 +331,10 @@ pub(crate) fn project_nba_comeback_runtime_spec(
         strategy_label: "nba_comeback".to_string(),
         agent_id: sports_cfg.agent_id.clone(),
         domain: Domain::Sports,
-        strategy_config_toml: build_nba_comeback_runtime_config(database_url, nba_cfg),
+        strategy_config_toml: stamp_strategy_plugin_id(
+            definition,
+            build_nba_comeback_runtime_config(database_url, nba_cfg),
+        )?,
     }))
 }
 

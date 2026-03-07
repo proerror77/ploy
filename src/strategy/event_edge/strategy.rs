@@ -403,6 +403,7 @@ mod tests {
         let toml = r#"
 [strategy]
 name = "event_edge"
+plugin_id = "politics.event_edge.v1"
 enabled = true
 trade = true
 

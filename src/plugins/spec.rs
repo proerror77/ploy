@@ -17,6 +17,20 @@ pub struct RegisteredStrategySpec {
     pub strategy_name: String,
 }
 
+impl RegisteredStrategySpec {
+    pub fn event_edge() -> Self {
+        Self {
+            strategy_name: "event_edge".to_string(),
+        }
+    }
+
+    pub fn nba_comeback() -> Self {
+        Self {
+            strategy_name: "nba_comeback".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginSpec {

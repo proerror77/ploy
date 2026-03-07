@@ -762,6 +762,7 @@ mod tests {
         let toml = r#"
 [strategy]
 name = "nba_comeback"
+plugin_id = "sports.nba_comeback.v1"
 enabled = true
 
 [entry]
