@@ -147,3 +147,6 @@
 
 - Pattern: Once live orders and L2 persistence are working, the next performance drag can still come from overly loose protective merge caps rather than execution bugs.
 - Rule: Before changing the order state machine again, break recent live/backtest results down by exit reason. If `protective_stop_loss` dominates losses while ordinary merges are profitable, tighten `max_leg1_loss`, `force_complete_threshold`, `protective_close_threshold`, and the post-open entry window before adding more execution complexity.
+
+- Pattern: A single overlap window with full PM + Binance L2 coverage can still be an unusually favorable regime and materially overstate staggered-arb edge.
+- Rule: Do not tune staggered-arb off one strong window like `2026-02-24` alone. Require at least one recent live-like window plus adjacent independent overlap windows before treating a parameter change as robust.
