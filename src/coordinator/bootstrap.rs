@@ -65,12 +65,9 @@ use super::runtime_specs::{
     build_event_edge_managed_runtime_spec, build_event_edge_runtime_config,
     build_momentum_managed_runtime_spec, build_momentum_runtime_config,
     build_nba_comeback_managed_runtime_spec, build_nba_comeback_runtime_config,
-    build_split_arb_runtime_config,
+    build_split_arb_managed_runtime_spec, build_split_arb_runtime_config,
 };
-use super::runtime_specs::{
-    build_pattern_memory_managed_runtime_spec, build_split_arb_managed_runtime_spec,
-    ManagedStrategyBootstrapSpec,
-};
+use super::runtime_specs::ManagedStrategyBootstrapSpec;
 use super::strategy_runtime::{
     run_managed_strategy_runtime as run_managed_strategy_runtime_module,
     ManagedStrategyRuntimeConfig,
@@ -5123,6 +5120,67 @@ fn compat_sports_runtimes_enabled() -> bool {
     env_bool("PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES", false)
 }
 
+fn builtin_runtime_plugin_definition(plugin_id: &str) -> Result<PluginDefinition> {
+    let registry = PluginRegistry::builtin_runtime_registry()?;
+    registry
+        .plugin(plugin_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("missing {plugin_id} plugin definition").into())
+}
+
+fn builtin_runtime_plugin_deployment(
+    plugin_id: &str,
+    deployment_id: impl Into<String>,
+    account_id: &str,
+) -> PluginDeployment {
+    PluginDeployment {
+        deployment_id: deployment_id.into(),
+        plugin_id: plugin_id.to_string(),
+        account_id: account_id.to_string(),
+        state: PluginDeploymentState::Enabled,
+    }
+}
+
+fn project_pattern_memory_plugin_runtime_spec(
+    coins: &[String],
+    account_id: &str,
+) -> Result<ManagedStrategyBootstrapSpec> {
+    let definition = builtin_runtime_plugin_definition("crypto.pattern_memory.v1")?;
+    crate::plugins::projector::project_pattern_memory_runtime_spec(
+        &definition,
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["pattern_memory".to_string()],
+        }),
+        &builtin_runtime_plugin_deployment(
+            "crypto.pattern_memory.v1",
+            "managed-runtime.pattern_memory",
+            account_id,
+        ),
+        coins,
+    )
+}
+
+fn project_split_arb_plugin_runtime_spec(
+    symbols: &[String],
+    series_ids: &[String],
+    account_id: &str,
+) -> Result<ManagedStrategyBootstrapSpec> {
+    let definition = builtin_runtime_plugin_definition("crypto.split_arb.v1")?;
+    crate::plugins::projector::project_split_arb_runtime_spec(
+        &definition,
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["split_arb".to_string()],
+        }),
+        &builtin_runtime_plugin_deployment(
+            "crypto.split_arb.v1",
+            "managed-runtime.split_arb",
+            account_id,
+        ),
+        symbols,
+        series_ids,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_canonical_crypto_strategy_runtimes(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
@@ -5218,7 +5276,7 @@ async fn spawn_canonical_crypto_strategy_runtimes(
         coins.sort();
         coins.dedup();
 
-        match build_pattern_memory_managed_runtime_spec(&coins) {
+        match project_pattern_memory_plugin_runtime_spec(&coins, account_id) {
             Ok(runtime_spec) => {
                 if let Err(e) = spawn_managed_strategy_runtime_spec(
                     agent_handles,
@@ -5313,27 +5371,37 @@ async fn spawn_canonical_crypto_strategy_runtimes(
                 "split_arb enabled but no recognized coin/horizon series ids were resolved"
             );
         } else {
-            let runtime_spec = build_split_arb_managed_runtime_spec(&symbols, &series_ids);
-            if let Err(e) = spawn_managed_strategy_runtime_spec(
-                agent_handles,
-                coordinator,
-                shutdown_tx,
-                runtime_spec,
-                crypto_cfg.risk_params.clone(),
-                dry_run,
-                pm_client,
-                pm_ws_url,
-                data_plane,
-                shared_pool,
-                account_id,
-            ) {
-                warn!(
-                    agent = "split_arb",
-                    error = %e,
-                    "split_arb enabled but canonical runtime could not be spawned"
-                );
-            } else {
-                info!("split_arb strategy runtime spawned");
+            match project_split_arb_plugin_runtime_spec(&symbols, &series_ids, account_id) {
+                Ok(runtime_spec) => {
+                    if let Err(e) = spawn_managed_strategy_runtime_spec(
+                        agent_handles,
+                        coordinator,
+                        shutdown_tx,
+                        runtime_spec,
+                        crypto_cfg.risk_params.clone(),
+                        dry_run,
+                        pm_client,
+                        pm_ws_url,
+                        data_plane,
+                        shared_pool,
+                        account_id,
+                    ) {
+                        warn!(
+                            agent = "split_arb",
+                            error = %e,
+                            "split_arb enabled but canonical runtime could not be spawned"
+                        );
+                    } else {
+                        info!("split_arb strategy runtime spawned");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        agent = "split_arb",
+                        error = %e,
+                        "split_arb enabled but no valid plugin runtime spec could be built"
+                    );
+                }
             }
         }
     }
@@ -7241,6 +7309,38 @@ mod tests {
         assert!(projected
             .strategy_config_toml
             .contains("plugin_id = \"sports.nba_comeback.v1\""));
+    }
+
+    #[test]
+    fn project_pattern_memory_plugin_runtime_spec_projects_canonical_launch() {
+        let coins = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+
+        let projected = project_pattern_memory_plugin_runtime_spec(&coins, "default")
+            .expect("project pattern_memory runtime spec");
+
+        assert_eq!(projected.strategy_label, "pattern_memory");
+        assert_eq!(projected.agent_id, "pattern_memory");
+        assert_eq!(projected.domain, Domain::Crypto);
+        assert!(projected
+            .strategy_config_toml
+            .contains("name = \"pattern_memory\""));
+    }
+
+    #[test]
+    fn project_split_arb_plugin_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let series_ids = vec!["10192".to_string(), "10684".to_string()];
+
+        let projected =
+            project_split_arb_plugin_runtime_spec(&symbols, &series_ids, "default")
+                .expect("project split_arb runtime spec");
+
+        assert_eq!(projected.strategy_label, "split_arb");
+        assert_eq!(projected.agent_id, "split_arb");
+        assert_eq!(projected.domain, Domain::Crypto);
+        assert!(projected
+            .strategy_config_toml
+            .contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
     }
 
     #[test]

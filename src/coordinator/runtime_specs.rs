@@ -8,21 +8,28 @@ use rust_decimal::Decimal;
 use tracing::{info, warn};
 
 use crate::agents::crypto::{CryptoEntryMode, CryptoTradingConfig};
+#[cfg(test)]
 use crate::agents::politics::PoliticsTradingConfig;
+#[cfg(test)]
 use crate::agents::sports::SportsTradingConfig;
 use crate::config::{EventEdgeAgentConfig, NbaComebackConfig};
 use crate::error::{PloyError, Result};
-use crate::plugins::projector::{self, ProjectedRuntimeSpec};
+use crate::plugins::projector::ProjectedRuntimeSpec;
+#[cfg(test)]
+use crate::plugins::projector;
+#[cfg(test)]
 use crate::plugins::{
     ComposableCryptoSpec, DeploymentState as PluginDeploymentState, PluginDefinition,
     PluginDeployment, PluginKind, PluginSpec, RegisteredStrategySpec,
 };
+#[cfg(test)]
 use crate::platform::Domain;
 
 use super::bootstrap::{coin_symbol_for, crypto_series_id_for};
 
 pub(crate) type ManagedStrategyBootstrapSpec = ProjectedRuntimeSpec;
 
+#[cfg(test)]
 fn plugin_definition(plugin_id: &str, kind: PluginKind, domain: Domain) -> PluginDefinition {
     PluginDefinition {
         plugin_id: plugin_id.to_string(),
@@ -32,6 +39,7 @@ fn plugin_definition(plugin_id: &str, kind: PluginKind, domain: Domain) -> Plugi
     }
 }
 
+#[cfg(test)]
 fn plugin_deployment(plugin_id: &str, deployment_id: &str) -> PluginDeployment {
     PluginDeployment {
         deployment_id: deployment_id.to_string(),
@@ -341,6 +349,7 @@ pub(crate) fn build_event_edge_runtime_config(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_momentum_managed_runtime_spec(
     symbols: &[String],
     crypto_cfg: &CryptoTradingConfig,
@@ -364,23 +373,7 @@ pub(crate) fn build_momentum_managed_runtime_spec(
     .expect("momentum plugin projection must stay valid")
 }
 
-pub(crate) fn build_pattern_memory_managed_runtime_spec(
-    coins: &[String],
-) -> Result<ManagedStrategyBootstrapSpec> {
-    projector::project_pattern_memory_runtime_spec(
-        &plugin_definition(
-            "crypto.pattern_memory.v1",
-            PluginKind::ComposableCrypto,
-            Domain::Crypto,
-        ),
-        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
-            signal_blocks: vec!["pattern_memory".to_string()],
-        }),
-        &plugin_deployment("crypto.pattern_memory.v1", "managed-runtime.pattern_memory"),
-        coins,
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn build_event_edge_managed_runtime_spec(
     rest_url: &str,
     politics_cfg: &PoliticsTradingConfig,
@@ -574,6 +567,7 @@ pub(crate) fn build_nba_comeback_runtime_config(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_nba_comeback_managed_runtime_spec(
     database_url: &str,
     sports_cfg: &SportsTradingConfig,
@@ -681,6 +675,7 @@ pub(crate) fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[S
     render_split_arb_runtime_config(config, symbols, series_ids)
 }
 
+#[cfg(test)]
 pub(crate) fn build_split_arb_managed_runtime_spec(
     symbols: &[String],
     series_ids: &[String],

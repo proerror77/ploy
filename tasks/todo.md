@@ -55,6 +55,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Execute Task 7 from the implementation plan: add the composable crypto runtime and migrate the momentum path.
 - [x] Execute Task 8 from the implementation plan: register event and sports strategies on the plugin registry path.
 - [x] Execute Task 9 from the implementation plan: expose plugin and account lifecycles through the API and docs.
+- [x] Execute Task 10 from the implementation plan: retire obsolete strategy startup surfaces.
 
 ## Review
 
@@ -70,6 +71,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Confirmed the first crypto managed path now boots through `ComposableCryptoStrategy`, while momentum logic is still reused internally as the initial delegate-backed implementation.
 - [x] Confirmed `event_edge` and `nba_comeback` now resolve through builtin plugin registry lookup plus projector-owned runtime config stamping instead of bespoke managed-runtime wrapper selection.
 - [x] Confirmed `/api/system/capabilities` and `/api/system/accounts` now expose deployment lifecycle counts plus builtin plugin/account budget visibility.
+- [x] Confirmed canonical crypto startup now projects `pattern_memory` and `split_arb` directly from builtin plugin definitions/deployments in `bootstrap`, while `runtime_specs.rs` keeps only the remaining test-facing compatibility wrappers.
 
 ## Progress notes
 
@@ -91,6 +93,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Completed Task 8 by adding a builtin runtime plugin registry, registering `event_edge` / `nba_comeback` specs, stamping `strategy.plugin_id` into registered-strategy runtime configs, and switching sports/politics canonical startup to resolve through registry + projector objects.
 - 2026-03-07: Verified Task 8 with `cargo test plugins::registry --lib -- --nocapture`, `cargo test coordinator::bootstrap --lib -- --nocapture`, `cargo test strategy::event_edge --lib -- --nocapture`, `cargo test strategy::nba_comeback --lib -- --nocapture`, and `cargo check --bin ploy`.
 - 2026-03-07: Completed Task 9 by exposing deployment lifecycle summaries, builtin plugin visibility, and runtime account budget snapshots through `/api/system/capabilities` and `/api/system/accounts`, plus aligned README/design docs.
+- 2026-03-07: Completed Task 10 by routing `pattern_memory` and `split_arb` canonical startup through builtin plugin/deployment projection helpers in `bootstrap`, deleting the now-dead pattern-memory managed wrapper from `runtime_specs.rs`, and validating the remaining platform-mode selection regressions.
 
 ---
 
