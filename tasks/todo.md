@@ -52,6 +52,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Execute Task 4 from the implementation plan: add the account-plane skeleton and re-home claimer ownership.
 - [x] Execute Task 5 from the implementation plan: add order purpose to canonical strategy actions.
 - [x] Execute Task 6 from the implementation plan: add the composable crypto schema and block catalog.
+- [x] Execute Task 7 from the implementation plan: add the composable crypto runtime and migrate the momentum path.
 
 ## Review
 
@@ -64,6 +65,7 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - [x] Confirmed account-facing claimer ownership now goes through `src/account/*`, while the old strategy claimer implementation remains as a temporary delegated backend.
 - [x] Confirmed canonical `StrategyAction::SubmitOrder` now carries explicit lifecycle purpose, and managed runtime bridges it into the normalized order contract for draining-aware execution semantics.
 - [x] Confirmed the plugin plane now has a validated `composable_crypto` schema surface with an explicit v1 block catalog and singleton-stage validation.
+- [x] Confirmed the first crypto managed path now boots through `ComposableCryptoStrategy`, while momentum logic is still reused internally as the initial delegate-backed implementation.
 
 ## Progress notes
 
@@ -80,6 +82,8 @@ Record the approved design for a plugin-shaped strategy platform, then write an 
 - 2026-03-07: Verified Task 5 with `cargo test strategy::manager --lib -- --nocapture`, `cargo test coordinator::strategy_runtime --lib -- --nocapture`, `cargo test coordinator::bootstrap --lib -- --nocapture`, and `cargo check --bin ploy`.
 - 2026-03-07: Completed Task 6 by adding `src/plugins/composable_crypto/*`, a validated TOML schema parser, and a v1 signal/filter/entry/exit/sizing block catalog while keeping `ComposableCryptoSpec` backward-compatible for existing projector callsites.
 - 2026-03-07: Verified Task 6 with `cargo test plugins::composable_crypto --lib -- --nocapture` and `cargo check --lib`.
+- 2026-03-07: Completed Task 7 by adding `src/strategy/composable_crypto.rs`, registering `composable_crypto` in `StrategyFactory`, projecting momentum plugin deployments into composable runtime TOML, and switching bootstrap momentum startup to resolve through the plugin projector instead of a direct momentum runtime builder.
+- 2026-03-07: Verified Task 7 with `cargo test strategy::composable_crypto --lib -- --nocapture`, `cargo test coordinator::bootstrap --lib -- --nocapture`, and `cargo check --bin ploy`.
 
 ---
 
