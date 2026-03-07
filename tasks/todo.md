@@ -35,6 +35,37 @@ Reduce duplicated market-data collection paths and converge on canonical raw tab
 
 ---
 
+# Strategy Plugin Platform Planning (2026-03-07)
+
+## Goal
+Record the approved design for a plugin-shaped strategy platform, then write an execution-ready implementation plan before touching runtime code.
+
+## Tasks
+
+- [x] Review current strategy onboarding, account management, and order management surfaces.
+- [x] Approve the target plugin-platform design with composable crypto plugins and registered event/sports plugins.
+- [x] Save the design doc to `docs/plans/2026-03-07-strategy-plugin-platform-design.md`.
+- [x] Save the implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
+- [ ] Execute Task 1 from the implementation plan: add the plugin object model and registry skeleton.
+
+## Review
+
+- [x] Confirmed current layered runtime is close to the target steady state but lacks an explicit plugin plane.
+- [x] Confirmed account management exists functionally but is still scattered across config, bootstrap, claimer, and API summary code.
+- [x] Confirmed order management is mostly complete operationally, but draining semantics still need an explicit order/intent purpose contract.
+- [x] Chose an operational plugin model, not dynamic code loading.
+- [x] Chose pre-defined block composition for crypto, not scripts or DSLs.
+
+## Progress notes
+
+- 2026-03-07: Approved plugin platform direction: `composable_crypto` for crypto alpha composition, `registered_strategy` for event/sports, unified lifecycle and runtime.
+- 2026-03-07: Defined target deployment states: `enabled`, `draining`, `disabled`, `archived`.
+- 2026-03-07: Identified two structural missing planes in the current repo: a formal `plugins/` layer and a formal `account/` layer.
+- 2026-03-07: Saved design doc to `docs/plans/2026-03-07-strategy-plugin-platform-design.md`.
+- 2026-03-07: Saved implementation plan to `docs/plans/2026-03-07-strategy-plugin-platform-implementation-plan.md`.
+
+---
+
 # Legacy Runtime Retirement Planning (2026-03-07)
 
 ## Goal
@@ -218,7 +249,6 @@ Fold the separate hotfix worktree back into this strategy branch without regress
 Keep managed `staggered_arb` on share-based sizing, ship the canonical strategy template in release bundles, and make the Aliyun rollout path recover installed inactive services automatically.
 
 ## Tasks
-
 - [x] Confirm managed runtime sizing drift came from bootstrap rendering, not host config drift.
 - [x] Render managed split-arb runtime from the canonical `staggered_arb.toml` template while keeping runtime symbol/series overrides.
 - [x] Include `staggered_arb.toml` in the release bundle and install it on the host during rollout.
