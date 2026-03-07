@@ -106,6 +106,7 @@ struct PaperPosition {
     leg1_fee: Decimal,
     leg1_time: DateTime<Utc>,
     entry_obi: Option<f64>,
+    protective_stop_armed_at: Option<DateTime<Utc>>,
     wait_deadline: DateTime<Utc>,
     leg2_price: Option<Decimal>,
     leg2_shares: Option<u64>,
@@ -3095,6 +3096,7 @@ name = "staggered_arb"
         assert_eq!(config.entry_after_start_max_secs, 240);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.allowed_window_durations, vec![300]);
+        assert_eq!(config.protective_recovery_window_secs, 12);
         assert_eq!(config.max_trades_per_event, 0);
         assert_eq!(config.force_complete_threshold, dec!(1.08));
         assert_eq!(config.protective_close_threshold, dec!(1.08));

@@ -42,6 +42,7 @@ min_balance_usd = 5.0           # Keep $5 reserve
 
 # === STAGGERED ARB SPECIFIC ===
 max_leg1_loss = 0.03            # Trigger protective merge earlier; recent live data showed 5c waits were too loose
+protective_recovery_window_secs = 12 # After a stop breach, give the trade a short chance to recover into a merge unless the signal hard-flips
 force_complete_threshold = 1.08 # Keep timeout/time-safety/final-window closes capped near parity
 protective_close_threshold = 1.08 # Bound stop-loss/theta protective merges before they become punitive
 obi_decay_exit_ratio = 0.35     # If OBI falls below 35% of entry strength, the directional edge is considered decayed
