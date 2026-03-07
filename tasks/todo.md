@@ -137,7 +137,6 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 - `src/platform/traits.rs`, `src/platform/platform.rs`, and `src/platform/router.rs` still depend on `DomainAgent`.
 - `src/platform/agents/{crypto_agent,event_edge_agent,nba_agent,rl_crypto_agent}.rs` still implement the compatibility `DomainAgent` layer.
-- `src/cli/strategy.rs` still instantiates `crate::platform::agents::nba_agent::NbaComebackAgent`.
 - `src/main_commands/rl/agent.rs` still imports `RLCryptoAgent` and `DomainAgent`.
 
 ## Progress notes
@@ -153,6 +152,7 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 - 2026-03-08: Verified Task 4 with `cargo test coordinator::bootstrap --lib -- --nocapture`, `cargo check --bin ploy`, and `cargo check --features rl --bin ploy`.
 - 2026-03-08: Confirmed the red-state compile blocker for Task 5 by removing `TradingAgent` and watching `src/agents/crypto.rs` fail to compile, then deleted `TradingAgent`, `AgentContext`, and the unused pull-based crypto runtime shell.
 - 2026-03-08: Verified Task 5 with `cargo test coordinator::bootstrap --lib -- --nocapture` and `cargo check --bin ploy`.
+- 2026-03-08: Rewired `ploy strategy nba-comeback` to instantiate `NbaComebackStrategy` directly from canonical runtime config, removing the standalone CLI dependency on `platform::agents::nba_agent::NbaComebackAgent`.
 
 ---
 

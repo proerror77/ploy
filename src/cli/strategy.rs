@@ -3486,7 +3486,9 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
 
 /// Run the NBA comeback agent standalone
 async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
-    use crate::platform::traits::DomainAgent;
+    use crate::coordinator::runtime_specs::build_nba_comeback_runtime_config;
+    use crate::strategy::nba_comeback::strategy::NbaComebackStrategy;
+    use crate::strategy::traits::{Strategy, StrategyAction};
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
     println!("\x1b[36m║  NBA Q3→Q4 Comeback Trading Agent                            ║\x1b[0m");
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
@@ -3548,36 +3550,13 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
     );
     println!();
 
-    // Connect to DB and load stats
-    let db_url = app_config.database.url;
-    let store = crate::adapters::PostgresStore::new(&db_url, 5)
-        .await
-        .context("Failed to connect to database")?;
-
-    let mut stats_provider = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-        store.pool().clone(),
-        nba_cfg.season.clone(),
-    );
-    stats_provider
-        .load_all()
-        .await
-        .context("Failed to load team stats — run 'ploy strategy nba-seed-stats' first")?;
+    let runtime_toml = build_nba_comeback_runtime_config(&app_config.database.url, &nba_cfg);
+    let mut strategy =
+        NbaComebackStrategy::from_toml("nba_comeback_cli".to_string(), &runtime_toml, _dry_run)
+            .context("Failed to build canonical NBA comeback strategy")?;
 
     println!(
-        "  \x1b[32m✓\x1b[0m Loaded {} team profiles",
-        stats_provider.team_count()
-    );
-
-    // Create core + agent
-    let espn = crate::strategy::nba_comeback::EspnClient::new();
-    let core =
-        crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats_provider, nba_cfg.clone());
-
-    let mut agent = crate::platform::agents::nba_agent::NbaComebackAgent::new(core);
-    agent.start().await?;
-
-    println!(
-        "  \x1b[32m✓\x1b[0m Agent running — scanning every {}s",
+        "  \x1b[32m✓\x1b[0m Canonical strategy running — scanning every {}s",
         nba_cfg.espn_poll_interval_secs
     );
     println!("\nPress Ctrl+C to stop...\n");
@@ -3588,21 +3567,25 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("\n\x1b[33m⚠ Shutdown signal received\x1b[0m");
-                agent.stop().await?;
-                println!("\x1b[32m✓ Agent stopped\x1b[0m");
+                let exit_actions = strategy.shutdown().await?;
+                if !exit_actions.is_empty() {
+                    println!("  \x1b[33m↘ queued {} shutdown exit actions\x1b[0m", exit_actions.len());
+                }
+                println!("\x1b[32m✓ Strategy stopped\x1b[0m");
                 break;
             }
             _ = tokio::time::sleep(interval) => {
-                use crate::platform::traits::DomainAgent;
-                let intents = agent.on_event(crate::platform::DomainEvent::Tick(chrono::Utc::now())).await?;
-                if !intents.is_empty() {
-                    for intent in &intents {
-                        println!("  \x1b[36m📤 ORDER: {} {} shares @ {} (edge: {})\x1b[0m",
-                            intent.metadata.get("trailing_team").unwrap_or(&"?".to_string()),
-                            intent.shares,
-                            intent.limit_price,
-                            intent.metadata.get("edge").unwrap_or(&"?".to_string()),
-                        );
+                let actions = strategy.on_tick(chrono::Utc::now()).await?;
+                if !actions.is_empty() {
+                    for action in &actions {
+                        if let StrategyAction::SubmitOrder { order, .. } = action {
+                            println!(
+                                "  \x1b[36m📤 ORDER: {} {} shares @ {} \x1b[0m",
+                                order.market_side,
+                                order.shares,
+                                order.limit_price,
+                            );
+                        }
                     }
                 }
             }
