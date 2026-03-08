@@ -234,8 +234,12 @@ pub struct StaggeredArbAdapter {
     balance_pause_until: Option<DateTime<Utc>>,
     /// Entry gate reject counters (why Leg1 was skipped)
     entry_reject_counts: HashMap<String, u64>,
+    /// Entry gate reject counters partitioned by symbol for diagnostics.
+    entry_reject_counts_by_symbol: HashMap<String, HashMap<String, u64>>,
     /// Leg2 skip counters (why close was skipped/deferred)
     leg2_skip_counts: HashMap<String, u64>,
+    /// Leg2 skip counters partitioned by symbol for diagnostics.
+    leg2_skip_counts_by_symbol: HashMap<String, HashMap<String, u64>>,
 }
 
 impl StaggeredArbAdapter {
@@ -271,7 +275,9 @@ impl StaggeredArbAdapter {
             consecutive_balance_failures: 0,
             balance_pause_until: None,
             entry_reject_counts: HashMap::new(),
+            entry_reject_counts_by_symbol: HashMap::new(),
             leg2_skip_counts: HashMap::new(),
+            leg2_skip_counts_by_symbol: HashMap::new(),
         }
     }
 
@@ -282,8 +288,28 @@ impl StaggeredArbAdapter {
             .or_default() += 1;
     }
 
+    fn bump_entry_reject_for_symbol(&mut self, symbol: &str, reason: &str) {
+        self.bump_entry_reject(reason);
+        *self
+            .entry_reject_counts_by_symbol
+            .entry(symbol.to_string())
+            .or_default()
+            .entry(reason.to_string())
+            .or_default() += 1;
+    }
+
     fn bump_leg2_skip(&mut self, reason: &str) {
         *self.leg2_skip_counts.entry(reason.to_string()).or_default() += 1;
+    }
+
+    fn bump_leg2_skip_for_symbol(&mut self, symbol: &str, reason: &str) {
+        self.bump_leg2_skip(reason);
+        *self
+            .leg2_skip_counts_by_symbol
+            .entry(symbol.to_string())
+            .or_default()
+            .entry(reason.to_string())
+            .or_default() += 1;
     }
 
     /// Create from TOML configuration string.
@@ -475,7 +501,8 @@ impl StaggeredArbAdapter {
             }
         }
         state.update(side, ask, ask_size, ts);
-        self.pm_asks_by_event.insert(event_id.to_string(), state.asks());
+        self.pm_asks_by_event
+            .insert(event_id.to_string(), state.asks());
     }
 
     fn event_quote_state(
@@ -1146,7 +1173,7 @@ impl StaggeredArbAdapter {
         if !self.dry_run {
             if let Some(pause_until) = self.balance_pause_until {
                 if ts < pause_until {
-                    self.bump_entry_reject("balance_pause_active");
+                    self.bump_entry_reject_for_symbol(symbol, "balance_pause_active");
                     return None;
                 }
                 // Pause expired, reset
@@ -1158,7 +1185,7 @@ impl StaggeredArbAdapter {
 
         // Per-event cycle lock: each event can only have one active cycle.
         if self.has_active_cycle_for_event(&window.event_id) {
-            self.bump_entry_reject("event_cycle_active");
+            self.bump_entry_reject_for_symbol(symbol, "event_cycle_active");
             return None;
         }
 
@@ -1166,27 +1193,27 @@ impl StaggeredArbAdapter {
         if bc.max_concurrent_positions > 0
             && self.active_cycle_count() >= bc.max_concurrent_positions
         {
-            self.bump_entry_reject("max_concurrent_reached");
+            self.bump_entry_reject_for_symbol(symbol, "max_concurrent_reached");
             return None;
         }
 
         // 1. Time remaining
         let time_remaining = (window.end_time - ts).num_seconds() as f64;
         if time_remaining <= 0.0 || time_remaining < bc.min_time_remaining_secs as f64 {
-            self.bump_entry_reject("time_remaining_too_low");
+            self.bump_entry_reject_for_symbol(symbol, "time_remaining_too_low");
             return None;
         }
         // Entry timing gate: prefer entering soon after event starts.
         let window_start = window.end_time - chrono::Duration::seconds(window.window_secs as i64);
         let elapsed_since_start = (ts - window_start).num_seconds();
         if elapsed_since_start < 0 {
-            self.bump_entry_reject("before_event_start");
+            self.bump_entry_reject_for_symbol(symbol, "before_event_start");
             return None;
         }
         if bc.entry_after_start_min_secs > 0
             && elapsed_since_start < bc.entry_after_start_min_secs as i64
         {
-            self.bump_entry_reject("entry_observation_delay_active");
+            self.bump_entry_reject_for_symbol(symbol, "entry_observation_delay_active");
             return None;
         }
 
@@ -1194,7 +1221,7 @@ impl StaggeredArbAdapter {
         let (ua, da) = match (up_ask, down_ask) {
             (Some(u), Some(d)) => (u, d),
             _ => {
-                self.bump_entry_reject("missing_pm_quotes");
+                self.bump_entry_reject_for_symbol(symbol, "missing_pm_quotes");
                 return None;
             }
         };
@@ -1202,26 +1229,26 @@ impl StaggeredArbAdapter {
         if !bc.pm_quote_is_fresh(quote_state.up.last_seen_at, ts)
             || !bc.pm_quote_is_fresh(quote_state.down.last_seen_at, ts)
         {
-            self.bump_entry_reject("pm_quotes_stale");
+            self.bump_entry_reject_for_symbol(symbol, "pm_quotes_stale");
             return None;
         }
 
         // 3. Min ask price filter
         if ua < bc.min_ask_price || da < bc.min_ask_price {
-            self.bump_entry_reject("ask_below_min");
+            self.bump_entry_reject_for_symbol(symbol, "ask_below_min");
             return None;
         }
 
         // 4. Min entry sum filter
         let current_sum = ua + da;
         if current_sum < bc.min_entry_sum {
-            self.bump_entry_reject("sum_below_min_entry_sum");
+            self.bump_entry_reject_for_symbol(symbol, "sum_below_min_entry_sum");
             return None;
         }
 
         // 5. Max entry sum filter (strict): require current_sum < max_initial_sum
         if bc.max_initial_sum > Decimal::ZERO && current_sum >= bc.max_initial_sum {
-            self.bump_entry_reject("sum_above_max_initial_sum");
+            self.bump_entry_reject_for_symbol(symbol, "sum_above_max_initial_sum");
             return None;
         }
 
@@ -1238,11 +1265,11 @@ impl StaggeredArbAdapter {
         };
 
         if sigma < bc.min_entry_sigma {
-            self.bump_entry_reject("sigma_below_min_entry_sigma");
+            self.bump_entry_reject_for_symbol(symbol, "sigma_below_min_entry_sigma");
             return None;
         }
         if bc.max_entry_sigma > 0.0 && sigma > bc.max_entry_sigma {
-            self.bump_entry_reject("sigma_above_max_entry_sigma");
+            self.bump_entry_reject_for_symbol(symbol, "sigma_above_max_entry_sigma");
             return None;
         }
 
@@ -1251,7 +1278,7 @@ impl StaggeredArbAdapter {
         let s0 = match window.open_price {
             Some(v) if v > Decimal::ZERO => v,
             _ => {
-                self.bump_entry_reject("missing_window_open_anchor");
+                self.bump_entry_reject_for_symbol(symbol, "missing_window_open_anchor");
                 return None;
             }
         };
@@ -1273,17 +1300,20 @@ impl StaggeredArbAdapter {
         // 7c. Greeks-based filters
         if let Some(ref g) = greeks {
             if bc.min_gamma > 0.0 && g.gamma.abs() < bc.min_gamma {
-                self.bump_entry_reject("greeks_gamma_below_min");
+                self.bump_entry_reject_for_symbol(symbol, "greeks_gamma_below_min");
                 return None;
             }
             if bc.max_theta_cost > 0.0 && g.theta.abs() > bc.max_theta_cost {
-                self.bump_entry_reject("greeks_theta_above_max");
+                self.bump_entry_reject_for_symbol(symbol, "greeks_theta_above_max");
                 return None;
             }
             if bc.max_fair_value_distance < 0.5
                 && (g.fair_value - 0.5).abs() > bc.max_fair_value_distance
             {
-                self.bump_entry_reject("greeks_fair_value_outside_long_gamma_band");
+                self.bump_entry_reject_for_symbol(
+                    symbol,
+                    "greeks_fair_value_outside_long_gamma_band",
+                );
                 return None;
             }
         }
@@ -1293,7 +1323,7 @@ impl StaggeredArbAdapter {
         const MIN_PRICE_DISPLACEMENT: f64 = 0.0003; // 3 bps
         let displacement = ((st - s0) / s0).to_f64().unwrap_or(0.0);
         if displacement.abs() < MIN_PRICE_DISPLACEMENT {
-            self.bump_entry_reject("price_displacement_too_small");
+            self.bump_entry_reject_for_symbol(symbol, "price_displacement_too_small");
             return None;
         }
 
@@ -1305,11 +1335,11 @@ impl StaggeredArbAdapter {
         };
 
         if predicted_up && displacement <= 0.0 {
-            self.bump_entry_reject("direction_displacement_mismatch");
+            self.bump_entry_reject_for_symbol(symbol, "direction_displacement_mismatch");
             return None;
         }
         if !predicted_up && displacement >= 0.0 {
-            self.bump_entry_reject("direction_displacement_mismatch");
+            self.bump_entry_reject_for_symbol(symbol, "direction_displacement_mismatch");
             return None;
         }
 
@@ -1319,16 +1349,16 @@ impl StaggeredArbAdapter {
             const MIN_VEGA_ABS: f64 = 0.0001;
             const MIN_D2_STRENGTH: f64 = 0.05;
             if g.delta.abs() < MIN_DELTA_ABS || g.vega.abs() < MIN_VEGA_ABS {
-                self.bump_entry_reject("greeks_strength_too_low");
+                self.bump_entry_reject_for_symbol(symbol, "greeks_strength_too_low");
                 return None;
             }
             if predicted_up {
                 if g.d2 < MIN_D2_STRENGTH || g.fair_value <= 0.5 {
-                    self.bump_entry_reject("greeks_direction_mismatch");
+                    self.bump_entry_reject_for_symbol(symbol, "greeks_direction_mismatch");
                     return None;
                 }
             } else if g.d2 > -MIN_D2_STRENGTH || g.fair_value >= 0.5 {
-                self.bump_entry_reject("greeks_direction_mismatch");
+                self.bump_entry_reject_for_symbol(symbol, "greeks_direction_mismatch");
                 return None;
             }
         }
@@ -1339,18 +1369,18 @@ impl StaggeredArbAdapter {
         let obi_ts = match self.binance_l2_obi_ts.get(symbol) {
             Some(v) => *v,
             None => {
-                self.bump_entry_reject("obi_missing");
+                self.bump_entry_reject_for_symbol(symbol, "obi_missing");
                 return None;
             }
         };
         if (ts - obi_ts).num_seconds().abs() > OI_MAX_STALE_SECS {
-            self.bump_entry_reject("obi_stale");
+            self.bump_entry_reject_for_symbol(symbol, "obi_stale");
             return None;
         }
         let obi = match self.binance_l2_obi_5.get(symbol) {
             Some(v) => v.to_f64().unwrap_or(0.0),
             None => {
-                self.bump_entry_reject("obi_missing");
+                self.bump_entry_reject_for_symbol(symbol, "obi_missing");
                 return None;
             }
         };
@@ -1368,7 +1398,7 @@ impl StaggeredArbAdapter {
             } else {
                 "obi_not_confirmed"
             };
-            self.bump_entry_reject(reason);
+            self.bump_entry_reject_for_symbol(symbol, reason);
             return None;
         }
         let obi_persistent =
@@ -1381,7 +1411,7 @@ impl StaggeredArbAdapter {
             fair_value_distance,
         );
         if !obi_persistent && !strong_obi_bonus_active {
-            self.bump_entry_reject("obi_not_persistent");
+            self.bump_entry_reject_for_symbol(symbol, "obi_not_persistent");
             return None;
         }
 
@@ -1397,14 +1427,14 @@ impl StaggeredArbAdapter {
             } else {
                 "direction_strength_below_threshold"
             };
-            self.bump_entry_reject(reason);
+            self.bump_entry_reject_for_symbol(symbol, reason);
             return None;
         }
 
         let allowed_entry_window_secs =
             bc.entry_after_start_max_secs_now(window.window_secs, strong_obi_bonus_active);
         if allowed_entry_window_secs > 0 && elapsed_since_start > allowed_entry_window_secs as i64 {
-            self.bump_entry_reject("entry_window_expired");
+            self.bump_entry_reject_for_symbol(symbol, "entry_window_expired");
             return None;
         }
 
@@ -1419,27 +1449,27 @@ impl StaggeredArbAdapter {
             quote_state.up
         };
         if !bc.entry_quote_is_persistent(other_quote_state.first_seen_at, ts) {
-            self.bump_entry_reject("other_ask_not_persistent");
+            self.bump_entry_reject_for_symbol(symbol, "other_ask_not_persistent");
             return None;
         }
 
         // 9d. Leg1 price cap
         if leg1_ask > bc.max_leg1_price_now(strong_obi_bonus_active) {
-            self.bump_entry_reject("leg1_price_above_cap");
+            self.bump_entry_reject_for_symbol(symbol, "leg1_price_above_cap");
             return None;
         }
 
         // 10. Target Leg2 feasibility: need leg1 + leg2 < merge_target_sum
         let target_leg2 = bc.merge_target_sum - leg1_ask;
         if target_leg2 <= Decimal::ZERO {
-            self.bump_entry_reject("target_leg2_non_positive");
+            self.bump_entry_reject_for_symbol(symbol, "target_leg2_non_positive");
             return None;
         }
 
         // 11. Cooldown
         if let Some(last) = self.cooldowns.get(symbol) {
             if (ts - *last).num_seconds() < bc.cooldown_secs as i64 {
-                self.bump_entry_reject("cooldown_active");
+                self.bump_entry_reject_for_symbol(symbol, "cooldown_active");
                 return None;
             }
         }
@@ -1454,7 +1484,7 @@ impl StaggeredArbAdapter {
                 .copied()
                 .unwrap_or(0);
             if count >= bc.max_trades_per_event {
-                self.bump_entry_reject("max_trades_per_event_reached");
+                self.bump_entry_reject_for_symbol(symbol, "max_trades_per_event_reached");
                 return None;
             }
         }
@@ -1492,7 +1522,7 @@ impl StaggeredArbAdapter {
             }
         };
         if shares == 0 {
-            self.bump_entry_reject("zero_share_sizing");
+            self.bump_entry_reject_for_symbol(symbol, "zero_share_sizing");
             return None;
         }
 
@@ -1519,7 +1549,7 @@ impl StaggeredArbAdapter {
         let available_before = self.available_balance_for_leg1();
         let remaining_after = available_before - total_cost;
         if total_cost > available_before || remaining_after < self.min_balance_usd {
-            self.bump_entry_reject("reserve_guard");
+            self.bump_entry_reject_for_symbol(symbol, "reserve_guard");
             info!(
                 "[STAG-ARB] SKIP ENTRY {} reserve_guard available=${:.4} cost=${:.4} min_balance=${:.4}",
                 symbol, available_before, total_cost, self.min_balance_usd
@@ -1578,7 +1608,7 @@ impl StaggeredArbAdapter {
                 symbol, leg1_dir, leg1_ask, current_sum, p_hat, sigma,
             );
             info!("{}", msg);
-            self.bump_entry_reject("entry_accepted");
+            self.bump_entry_reject_for_symbol(symbol, "entry_accepted");
 
             Some(StrategyAction::LogEvent {
                 event: StrategyEvent::new(StrategyEventType::EntryTriggered, msg),
@@ -1591,7 +1621,9 @@ impl StaggeredArbAdapter {
                 Utc::now().timestamp_millis()
             );
 
-            let order = OrderRequest::buy_limit(token_id.clone(), side, shares, leg1_ask);
+            let mut order = OrderRequest::buy_limit(token_id.clone(), side, shares, leg1_ask);
+            order.client_order_id = client_order_id.clone();
+            order.idempotency_key = Some(client_order_id.clone());
 
             // Track pending order
             self.live_orders.insert(
@@ -1630,7 +1662,7 @@ impl StaggeredArbAdapter {
                 sigma,
             );
             info!("{}", msg);
-            self.bump_entry_reject("entry_accepted");
+            self.bump_entry_reject_for_symbol(symbol, "entry_accepted");
 
             Some(StrategyAction::SubmitOrder {
                 client_order_id,
@@ -1970,7 +2002,7 @@ impl StaggeredArbAdapter {
         }
 
         if !saw_event_quotes {
-            self.bump_leg2_skip("missing_pm_quotes");
+            self.bump_leg2_skip_for_symbol(symbol, "missing_pm_quotes");
         }
 
         for (idx, armed_at) in protective_arm_updates {
@@ -1988,6 +2020,12 @@ impl StaggeredArbAdapter {
         }
         for (reason, count) in leg2_skip_batch {
             *self.leg2_skip_counts.entry(reason.to_string()).or_default() += count;
+            *self
+                .leg2_skip_counts_by_symbol
+                .entry(symbol.to_string())
+                .or_default()
+                .entry(reason.to_string())
+                .or_default() += count;
         }
         actions
     }
@@ -2000,13 +2038,14 @@ impl StaggeredArbAdapter {
         ts: DateTime<Utc>,
     ) -> Option<StrategyAction> {
         let pos = &self.positions[idx];
+        let symbol = pos.symbol.clone();
         let already_filled = Self::leg2_filled_shares(pos);
         let shares = Self::leg2_remaining_shares(pos);
         if shares == 0 {
             return None;
         }
         if !polymarket_order_meets_minimum(other_ask, shares) {
-            self.bump_leg2_skip("leg2_residual_below_venue_minimum");
+            self.bump_leg2_skip_for_symbol(&symbol, "leg2_residual_below_venue_minimum");
             return None;
         }
 
@@ -2107,7 +2146,9 @@ impl StaggeredArbAdapter {
                 Utc::now().timestamp_millis()
             );
 
-            let order = OrderRequest::buy_limit(token_id.clone(), side, shares, other_ask);
+            let mut order = OrderRequest::buy_limit(token_id.clone(), side, shares, other_ask);
+            order.client_order_id = client_order_id.clone();
+            order.idempotency_key = Some(client_order_id.clone());
 
             // Track pending Leg2 order
             self.live_orders.insert(
@@ -2193,6 +2234,36 @@ impl StaggeredArbAdapter {
             .join(",")
     }
 
+    fn summarize_symbol_gate_counts(
+        counts_by_symbol: &HashMap<String, HashMap<String, u64>>,
+        symbols: &[String],
+        include_reasons: Option<&[&str]>,
+        exclude_reasons: &[&str],
+        per_symbol_limit: usize,
+    ) -> String {
+        let mut parts = Vec::new();
+        for symbol in symbols {
+            let Some(counts) = counts_by_symbol.get(symbol) else {
+                continue;
+            };
+            let summary = Self::summarize_gate_counts(
+                counts,
+                include_reasons,
+                exclude_reasons,
+                per_symbol_limit,
+            );
+            if !summary.is_empty() {
+                parts.push(format!("{}:[{}]", symbol, summary));
+            }
+        }
+
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(";")
+        }
+    }
+
     fn build_summary(&self) -> String {
         let total = self.closed_trades.len();
         let wins = self
@@ -2237,11 +2308,30 @@ impl StaggeredArbAdapter {
             ],
             3,
         );
+        let entry_signal_by_symbol = Self::summarize_symbol_gate_counts(
+            &self.entry_reject_counts_by_symbol,
+            &self.config.backtest_config.symbols,
+            None,
+            &[
+                "entry_accepted",
+                "before_event_start",
+                "entry_window_expired",
+                "time_remaining_too_low",
+            ],
+            1,
+        );
         let leg2_gates = Self::summarize_gate_counts(&self.leg2_skip_counts, None, &[], 3);
+        let leg2_by_symbol = Self::summarize_symbol_gate_counts(
+            &self.leg2_skip_counts_by_symbol,
+            &self.config.backtest_config.symbols,
+            None,
+            &[],
+            1,
+        );
 
         format!(
-            "[STAG-ARB] equity=${:.2} trades={} win_rate={:.0}% avg_pnl=${:.4} open={} entry_timing_gates={} entry_signal_gates={} leg2_gates={}",
-            self.equity, total, win_rate, avg_pnl, open, entry_timing_gates, entry_signal_gates, leg2_gates,
+            "[STAG-ARB] equity=${:.2} trades={} win_rate={:.0}% avg_pnl=${:.4} open={} entry_timing_gates={} entry_signal_gates={} entry_signal_by_symbol={} leg2_gates={} leg2_by_symbol={}",
+            self.equity, total, win_rate, avg_pnl, open, entry_timing_gates, entry_signal_gates, entry_signal_by_symbol, leg2_gates, leg2_by_symbol,
         )
     }
 }
@@ -2940,8 +3030,24 @@ impl Strategy for StaggeredArbAdapter {
         for (k, v) in self.entry_reject_counts.iter() {
             metrics.insert(format!("entry_gate_{}", k), v.to_string());
         }
+        for (symbol, counts) in self.entry_reject_counts_by_symbol.iter() {
+            for (reason, count) in counts {
+                metrics.insert(
+                    format!("entry_gate_{}_{}", symbol, reason),
+                    count.to_string(),
+                );
+            }
+        }
         for (k, v) in self.leg2_skip_counts.iter() {
             metrics.insert(format!("leg2_gate_{}", k), v.to_string());
+        }
+        for (symbol, counts) in self.leg2_skip_counts_by_symbol.iter() {
+            for (reason, count) in counts {
+                metrics.insert(
+                    format!("leg2_gate_{}_{}", symbol, reason),
+                    count.to_string(),
+                );
+            }
         }
 
         StrategyStateInfo {
@@ -3231,6 +3337,83 @@ name = "staggered_arb"
         let summary = adapter.build_summary();
         assert!(summary.contains("trades=0"));
         assert!(summary.contains("open=0"));
+    }
+
+    #[test]
+    fn test_summary_includes_per_symbol_gate_breakdown() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        adapter.config.backtest_config.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into()];
+        adapter.bump_entry_reject_for_symbol("BTCUSDT", "obi_stale");
+        adapter.bump_leg2_skip_for_symbol("ETHUSDT", "missing_pm_quotes");
+
+        let summary = adapter.build_summary();
+
+        assert!(summary.contains("entry_signal_by_symbol=BTCUSDT:[obi_stale:1]"));
+        assert!(summary.contains("leg2_by_symbol=ETHUSDT:[missing_pm_quotes:1]"));
+    }
+
+    #[test]
+    fn test_live_leg1_submit_sets_client_order_and_idempotency_key() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), false);
+        let now = Utc::now();
+        adapter.config.backtest_config.direction_threshold = 0.0;
+        adapter.config.backtest_config.use_greeks = false;
+        adapter.config.backtest_config.max_initial_sum = Decimal::ZERO;
+        adapter.config.backtest_config.entry_after_start_min_secs = 0;
+        adapter.config.backtest_config.entry_after_start_max_secs = 0;
+        adapter
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(101), None, now));
+        adapter
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(0.03));
+        adapter.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-live-order",
+            Some(dec!(0.55)),
+            Some(dec!(0.48)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
+
+        let window = LiveWindow {
+            event_id: "evt-live-order".into(),
+            symbol: "BTCUSDT".into(),
+            up_token: "up-live".into(),
+            down_token: "down-live".into(),
+            condition_id: None,
+            end_time: now + chrono::Duration::seconds(260),
+            open_price: Some(dec!(100)),
+            window_secs: 300,
+        };
+
+        let action = adapter
+            .try_entry_for_window(
+                "BTCUSDT",
+                now,
+                &window,
+                dec!(101),
+                (Some(0.01), 100.0),
+                Some(dec!(0.55)),
+                Some(dec!(0.48)),
+            )
+            .expect("entry should be accepted");
+
+        match action {
+            StrategyAction::SubmitOrder {
+                client_order_id,
+                order,
+                ..
+            } => {
+                assert_eq!(order.client_order_id, client_order_id);
+                assert_eq!(
+                    order.idempotency_key.as_deref(),
+                    Some(client_order_id.as_str())
+                );
+            }
+            other => panic!("expected submit order action, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -3683,7 +3866,13 @@ name = "staggered_arb"
         );
 
         adapter.record_pm_quote("evt-persist", Direction::Up, Some(dec!(0.55)), None, later);
-        adapter.record_pm_quote("evt-persist", Direction::Down, Some(dec!(0.45)), None, later);
+        adapter.record_pm_quote(
+            "evt-persist",
+            Direction::Down,
+            Some(dec!(0.45)),
+            None,
+            later,
+        );
         let delayed_action = adapter.try_entry_for_window(
             "BTCUSDT",
             later,

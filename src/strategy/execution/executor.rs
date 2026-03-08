@@ -2,7 +2,7 @@ use super::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResul
 use crate::adapters::{FeishuNotifier, PolymarketClient};
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
-use crate::error::{OrderError, Result};
+use crate::error::Result;
 use crate::exchange::ExchangeClient;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -198,6 +198,82 @@ impl OrderExecutor {
         ))
     }
 
+    fn retryable_order_submission_message(message: &str) -> bool {
+        let normalized = message.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return true;
+        }
+
+        let definitely_non_retryable = [
+            "invalid token_id",
+            "invalid token id",
+            "invalid price",
+            "invalid size",
+            "failed to build order",
+            "failed to sign order",
+            "gateway-only mode: idempotency_key is required",
+            "gateway-only mode: client_order_id must start with 'intent:'",
+            "not authenticated",
+            "authentication error",
+            "signature error",
+            "insufficient liquidity",
+        ];
+        if definitely_non_retryable
+            .iter()
+            .any(|needle| normalized.contains(needle))
+        {
+            return false;
+        }
+
+        let definitely_retryable = [
+            "rate limit",
+            "timeout",
+            "timed out",
+            "temporar",
+            "connection reset",
+            "connection refused",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "502",
+            "503",
+            "504",
+            "too many requests",
+            "network",
+        ];
+        if definitely_retryable
+            .iter()
+            .any(|needle| normalized.contains(needle))
+        {
+            return true;
+        }
+
+        true
+    }
+
+    fn error_is_retryable(error: &crate::error::PloyError) -> bool {
+        match error {
+            crate::error::PloyError::Validation(_)
+            | crate::error::PloyError::Auth(_)
+            | crate::error::PloyError::AddressParsing(_)
+            | crate::error::PloyError::Wallet(_)
+            | crate::error::PloyError::Signature(_)
+            | crate::error::PloyError::OrderRejected(_)
+            | crate::error::PloyError::InsufficientLiquidity(_) => false,
+            crate::error::PloyError::OrderSubmission(message) => {
+                Self::retryable_order_submission_message(message)
+            }
+            crate::error::PloyError::Cancelled => false,
+            crate::error::PloyError::RateLimited(_)
+            | crate::error::PloyError::Http(_)
+            | crate::error::PloyError::WebSocket(_)
+            | crate::error::PloyError::OrderTimeout(_)
+            | crate::error::PloyError::MarketDataUnavailable(_)
+            | crate::error::PloyError::StaleData(_) => true,
+            _ => true,
+        }
+    }
+
     /// Execute order with retry logic (internal method)
     async fn execute_with_retry(&self, request: &OrderRequest) -> Result<ExecutionResult> {
         let mut attempts = 0;
@@ -251,9 +327,22 @@ impl OrderExecutor {
                     return Ok(result);
                 }
                 Err(e) => {
+                    let retryable = Self::error_is_retryable(&e);
+                    if !retryable {
+                        error!(
+                            attempts,
+                            error = %e,
+                            "Order execution failed with non-retryable error"
+                        );
+                        return Err(e);
+                    }
+
                     if attempts >= self.config.max_retries {
                         error!("Order execution failed after {} attempts: {}", attempts, e);
-                        return Err(OrderError::MaxRetriesExceeded { attempts }.into());
+                        return Err(crate::error::PloyError::OrderSubmission(format!(
+                            "Max retries exceeded after {} attempts; last error: {}",
+                            attempts, e
+                        )));
                     }
 
                     warn!("Order attempt {} failed: {}. Retrying...", attempts, e);
@@ -610,17 +699,26 @@ mod tests {
 
     #[derive(Default)]
     struct MockExchangeClient {
-        submit_responses: Mutex<VecDeque<OrderResponse>>,
+        submit_results: Mutex<VecDeque<Result<OrderResponse>>>,
         get_order_responses: Mutex<VecDeque<OrderResponse>>,
         get_order_calls: Mutex<Vec<String>>,
+        submit_calls: Mutex<u32>,
     }
 
     impl MockExchangeClient {
         fn with_submit_response(self, response: OrderResponse) -> Self {
-            self.submit_responses
+            self.submit_results
                 .lock()
-                .expect("submit_responses lock")
-                .push_back(response);
+                .expect("submit_results lock")
+                .push_back(Ok(response));
+            self
+        }
+
+        fn with_submit_error(self, error: crate::error::PloyError) -> Self {
+            self.submit_results
+                .lock()
+                .expect("submit_results lock")
+                .push_back(Err(error));
             self
         }
 
@@ -644,12 +742,15 @@ mod tests {
         }
 
         async fn submit_order_gateway(&self, _request: &OrderRequest) -> Result<OrderResponse> {
-            self.submit_responses
+            *self.submit_calls.lock().expect("submit_calls lock") += 1;
+            self.submit_results
                 .lock()
-                .expect("submit_responses lock")
+                .expect("submit_results lock")
                 .pop_front()
-                .ok_or_else(|| {
-                    crate::error::PloyError::Internal("missing submit response".to_string())
+                .unwrap_or_else(|| {
+                    Err(crate::error::PloyError::Internal(
+                        "missing submit response".to_string(),
+                    ))
                 })
         }
 
@@ -741,5 +842,52 @@ mod tests {
         assert_eq!(result.status, OrderStatus::Filled);
         assert_eq!(result.filled_shares, 20);
         assert_eq!(result.avg_fill_price, Some(dec!(0.34)));
+    }
+
+    #[tokio::test]
+    async fn execute_stops_retrying_non_retryable_validation_errors() {
+        let client = Arc::new(MockExchangeClient::default().with_submit_error(
+            crate::error::PloyError::Validation("bad request".to_string()),
+        ));
+        let mut config = ExecutionConfig::default();
+        config.max_retries = 3;
+        let executor = OrderExecutor::new_with_exchange(client.clone(), config);
+        let request = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+
+        let err = executor
+            .execute(&request)
+            .await
+            .expect_err("validation error should not be retried");
+
+        assert!(matches!(err, crate::error::PloyError::Validation(_)));
+        assert_eq!(*client.submit_calls.lock().expect("submit_calls lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_reports_last_retryable_error_when_retries_exhausted() {
+        let client = Arc::new(
+            MockExchangeClient::default()
+                .with_submit_error(crate::error::PloyError::OrderSubmission(
+                    "temporary backend 503".to_string(),
+                ))
+                .with_submit_error(crate::error::PloyError::OrderSubmission(
+                    "temporary backend 503".to_string(),
+                )),
+        );
+        let mut config = ExecutionConfig::default();
+        config.max_retries = 2;
+        let executor = OrderExecutor::new_with_exchange(client.clone(), config);
+        let request = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+
+        let err = executor
+            .execute(&request)
+            .await
+            .expect_err("retry exhaustion should surface the last error");
+
+        assert!(matches!(err, crate::error::PloyError::OrderSubmission(_)));
+        let message = err.to_string();
+        assert!(message.contains("Max retries exceeded after 2 attempts"));
+        assert!(message.contains("temporary backend 503"));
+        assert_eq!(*client.submit_calls.lock().expect("submit_calls lock"), 2);
     }
 }

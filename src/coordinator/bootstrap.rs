@@ -4053,6 +4053,7 @@ fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String
 async fn persist_split_arb_signal_history(
     pool: &PgPool,
     account_id: &str,
+    strategy_name: &str,
     strategy_id: &str,
     signal_type: &str,
     token_id: Option<&str>,
@@ -4069,12 +4070,13 @@ async fn persist_split_arb_signal_history(
             market_slug, token_id, symbol, side, confidence, fair_value, market_price, edge, config_hash, context
         )
         VALUES (
-            $1, NULL, 'split_arb', $2, 'crypto', $3,
-            NULL, $4, NULL, $5, NULL, $6, $7, $8, NULL, $9
+            $1, NULL, $2, $3, 'crypto', $4,
+            NULL, $5, NULL, $6, NULL, $7, $8, $9, NULL, $10
         )
         "#,
     )
     .bind(account_id)
+    .bind(strategy_name)
     .bind(strategy_id)
     .bind(signal_type)
     .bind(token_id)
@@ -4088,13 +4090,17 @@ async fn persist_split_arb_signal_history(
 
     if let Err(e) = result {
         warn!(
-            strategy = "split_arb",
+            strategy = strategy_name,
             strategy_id = strategy_id,
             signal_type = signal_type,
             error = %e,
-            "failed to persist managed split_arb signal_history observation"
+            "failed to persist managed staggered_arb signal_history observation"
         );
     }
+}
+
+fn is_managed_staggered_arb_label(strategy_label: &str) -> bool {
+    matches!(strategy_label, "split_arb" | "staggered_arb")
 }
 
 async fn persist_live_order_signal_history(
@@ -4204,6 +4210,14 @@ fn normalize_runtime_order_request(client_order_id: &str, order: &mut crate::dom
         );
         order.client_order_id = client_order_id.to_string();
     }
+    let missing_idempotency = order
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty);
+    if missing_idempotency {
+        order.idempotency_key = Some(client_order_id.to_string());
+    }
 }
 
 fn runtime_order_leg(client_order_id: &str) -> u8 {
@@ -4279,7 +4293,7 @@ async fn handle_strategy_actions_runtime(
         .map(|pool| Arc::new(PostgresStore::from_pool(pool.clone())) as Arc<dyn RuntimeOrderStore>);
 
     while let Some((strategy_id, action)) = rx.recv().await {
-        let split_arb_managed = strategy_label == "split_arb";
+        let split_arb_managed = is_managed_staggered_arb_label(strategy_label);
         match action {
             StrategyAction::SubmitOrder {
                 client_order_id,
@@ -4347,6 +4361,7 @@ async fn handle_strategy_actions_runtime(
                             persist_split_arb_signal_history(
                                 pool,
                                 &observability_account_id,
+                                strategy_label,
                                 &strategy_id,
                                 &signal_type,
                                 Some(order.token_id.as_str()),
@@ -4458,6 +4473,7 @@ async fn handle_strategy_actions_runtime(
                                 persist_split_arb_signal_history(
                                     pool,
                                     &observability_account_id,
+                                    strategy_label,
                                     &strategy_id,
                                     &signal_type,
                                     Some(order.token_id.as_str()),
@@ -4620,6 +4636,7 @@ async fn handle_strategy_actions_runtime(
                                         persist_split_arb_signal_history(
                                             pool,
                                             &observability_account_for_poll,
+                                            strategy_label_owned.as_str(),
                                             &strategy_id_for_poll,
                                             &signal_type,
                                             Some(order_for_poll.token_id.as_str()),
@@ -4717,6 +4734,7 @@ async fn handle_strategy_actions_runtime(
                                 persist_split_arb_signal_history(
                                     pool,
                                     &observability_account_id,
+                                    strategy_label,
                                     &strategy_id,
                                     &signal_type,
                                     Some(order.token_id.as_str()),
@@ -4837,6 +4855,7 @@ async fn handle_strategy_actions_runtime(
                         persist_split_arb_signal_history(
                             pool,
                             &observability_account_id,
+                            strategy_label,
                             &strategy_id,
                             &signal_type,
                             None,
@@ -4909,7 +4928,7 @@ async fn run_managed_strategy_runtime(
         ))
     })?;
 
-    if strategy_label == "split_arb" {
+    if is_managed_staggered_arb_label(strategy_label) {
         if let Some(pool) = observability_pool.as_ref() {
             if let Err(e) = ensure_strategy_observability_tables(pool).await {
                 warn!(
@@ -6478,12 +6497,12 @@ pub async fn start_platform(
 
             if series_ids.is_empty() {
                 warn!(
-                    agent = "split_arb",
-                    "split_arb enabled but no recognized coin/horizon series ids were resolved"
+                    agent = "staggered_arb",
+                    "staggered_arb enabled but no recognized coin/horizon series ids were resolved"
                 );
             } else {
                 let toml_cfg = build_split_arb_runtime_config(&symbols, &series_ids);
-                let strategy_agent_id = "split_arb".to_string();
+                let strategy_agent_id = "staggered_arb".to_string();
                 if let Some(strategy_pm_client) = pm_client.clone() {
                     let strategy_cmd_rx = coordinator.register_agent(
                         strategy_agent_id.clone(),
@@ -6498,7 +6517,7 @@ pub async fn start_platform(
                     let strategy_account_id = account_id.clone();
                     let jh = tokio::spawn(async move {
                         if let Err(e) = run_managed_strategy_runtime(
-                            "split_arb",
+                            "staggered_arb",
                             &strategy_agent_id,
                             toml_cfg,
                             strategy_dry_run,
@@ -6512,15 +6531,15 @@ pub async fn start_platform(
                         )
                         .await
                         {
-                            error!(agent = "split_arb", error = %e, "managed strategy runtime exited with error");
+                            error!(agent = "staggered_arb", error = %e, "managed strategy runtime exited with error");
                         }
                     });
                     agent_handles.push(jh);
-                    info!("split_arb strategy runtime spawned");
+                    info!("staggered_arb strategy runtime spawned");
                 } else {
                     warn!(
-                        agent = "split_arb",
-                        "split_arb enabled but pm client not configured; skipping"
+                        agent = "staggered_arb",
+                        "staggered_arb enabled but pm client not configured; skipping"
                     );
                 }
             }
@@ -7394,6 +7413,18 @@ symbols = ["SOLUSDT"]
             inserted[0].strategy_id.as_deref(),
             Some("staggered_arb_strategy")
         );
+    }
+
+    #[test]
+    fn normalize_runtime_order_request_sets_idempotency_key_from_action_id() {
+        let mut order = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+        order.client_order_id = "mismatched".to_string();
+        order.idempotency_key = None;
+
+        normalize_runtime_order_request("stag_leg1_123", &mut order);
+
+        assert_eq!(order.client_order_id, "stag_leg1_123");
+        assert_eq!(order.idempotency_key.as_deref(), Some("stag_leg1_123"));
     }
 
     #[tokio::test]

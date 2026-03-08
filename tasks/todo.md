@@ -694,3 +694,33 @@ Bring staggered-arb closer to the user's intended hedge discipline by fixing the
 - 2026-03-08: Targeted stale-gap persistence regression tests passed in both replay and live paths:
   - `CARGO_INCREMENTAL=0 cargo test strategy::staggered_arb_backtest::tests::test_record_pm_quote_resets_persistence_after_stale_gap -- --nocapture`
   - `CARGO_INCREMENTAL=0 cargo test strategy::staggered_arb_live::tests::test_record_pm_quote_resets_persistence_after_stale_gap -- --nocapture`
+
+---
+
+# Staggered Arb Managed Execution And BTC Diagnostics Hardening (2026-03-08)
+
+## Goal
+Reduce the remaining live execution ambiguity after the March 7 wallet loss by making managed staggered-arb orders use stable idempotency keys, surfacing the final submit error instead of generic retry exhaustion, and emitting per-symbol gate diagnostics so BTC no-trigger can be attributed directly.
+
+## Tasks
+
+- [x] Normalize managed runtime orders so `idempotency_key` defaults to the action `client_order_id`.
+- [x] Make staggered-arb live `LEG1`/`LEG2` submit actions carry explicit `client_order_id` and `idempotency_key`.
+- [x] Stop retrying clearly non-retryable execution errors and preserve the last underlying error when retries are exhausted.
+- [x] Align managed runtime observability labels with `staggered_arb` instead of the stale `split_arb` alias.
+- [x] Add per-symbol entry/leg2 gate counters to live summary and state metrics for BTC/ETH/SOL diagnosis.
+- [x] Add targeted tests for executor retry behavior, managed runtime idempotency normalization, and per-symbol summary output.
+
+## Review
+
+- [x] Managed staggered-arb orders now use stable IDs end-to-end in both strategy submit actions and managed runtime normalization.
+- [x] Retry exhaustion now reports the last underlying submit error, which makes `Max retries exceeded` debuggable in signal history.
+- [x] Live summary now exposes `entry_signal_by_symbol` and `leg2_by_symbol`, so BTC no-trigger can be attributed without guessing from aggregate counters.
+
+## Progress notes
+
+- 2026-03-08: Updated `staggered_arb_live` so live `LEG1` and `LEG2` `OrderRequest`s reuse the strategy-generated `client_order_id` and set `idempotency_key` to the same stable value.
+- 2026-03-08: Updated managed runtime order normalization to backfill `idempotency_key` from the action order ID whenever it is missing.
+- 2026-03-08: Updated `OrderExecutor` retry handling to stop on non-retryable validation/auth/signing/liquidity failures and to surface the last underlying submit error when retryable attempts are exhausted.
+- 2026-03-08: Renamed managed staggered-arb runtime observability labels from `split_arb` to `staggered_arb` while still accepting the legacy alias at runtime.
+- 2026-03-08: Added per-symbol gate breakdowns to live summary/metrics so BTC/ETH/SOL reject reasons can be inspected directly.

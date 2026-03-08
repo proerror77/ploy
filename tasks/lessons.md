@@ -186,3 +186,12 @@
 
 - Pattern: PM quote persistence gates still overstate hedgeability if a side disappears long enough to go stale and then reappears; carrying forward the old `first_seen_at` makes a fresh quote look durable when it is not.
 - Rule: Whenever staggered-arb tracks quote persistence, reset persistence timing after stale quote gaps, not only when an explicit `ask=None` update arrives. Add a regression test for the stale-gap reappearance path in both live and replay code.
+
+- Pattern: Generic `Max retries exceeded: 3` hides the real managed-order failure mode and makes live wallet-loss debugging nearly impossible.
+- Rule: For managed execution retries, stop immediately on clearly non-retryable validation/auth/signing/liquidity errors, and when retries are exhausted surface the last underlying submit error verbatim in the returned error and observability path.
+
+- Pattern: Aggregate staggered-arb gate counters can make BTC look like “not configured” when it is actually being filtered by symbol-specific entry conditions.
+- Rule: Whenever diagnosing missing live trades for one symbol in a multi-symbol strategy, emit and inspect per-symbol gate counters in addition to aggregate summary counters. Do not infer symbol-level behavior from aggregate reject totals alone.
+
+- Pattern: Managed runtime orders can silently lose gateway/idempotency guarantees if the strategy-generated `client_order_id` is not propagated into the actual `OrderRequest`.
+- Rule: For coordinator-managed order submission, the strategy-generated action ID must be copied into both `client_order_id` and `idempotency_key` before execution or persistence. Add a regression test for that normalization path.
