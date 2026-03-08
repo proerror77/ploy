@@ -116,9 +116,8 @@ The default configuration lives in `config/default.toml`. Override the path with
 | `[database]` | `url`, `max_connections` |
 | `[dry_run]` | `enabled` (defaults to `true`) |
 | `[logging]` | `level`, `json` |
-| `[event_edge_agent]` | `enabled`, `framework`, `trade`, `interval_secs`, `min_edge`, `max_entry`, `shares`, `cooldown_secs`, `max_daily_spend_usd`, `titles` |
+| `[event_edge_agent]` | `enabled`, `trade`, `interval_secs`, `min_edge`, `max_entry`, `shares`, `cooldown_secs`, `max_daily_spend_usd`, `titles` |
 | `[nba_comeback]` | `enabled`, `min_edge`, `max_entry_price`, `shares`, `min_deficit`, `max_deficit`, `target_quarter`, `espn_poll_interval_secs` |
-| `[event_registry]` | `enabled`, `scan_interval_secs`, `sports_keywords`, `general_keywords` |
 
 See the inline comments in `config/default.toml` for a full explanation of every field.
 

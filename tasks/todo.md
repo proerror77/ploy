@@ -165,6 +165,19 @@ Delete background service modules that no longer participate in any runtime path
 - [x] Confirm `services/order_monitor.rs` has no runtime startup path.
 - [x] Remove the dead module exports from `src/services/mod.rs`.
 - [x] Delete the orphan service modules.
+
+---
+
+# Discovery Config Cleanup (2026-03-08)
+
+## Goal
+Remove the dead `event_registry` config surface now that the discovery service has been deleted.
+
+## Tasks
+
+- [x] Confirm `AppConfig.event_registry` has no runtime consumer.
+- [x] Remove `DiscoveryConfig` and the `event_registry` field from `src/config.rs`.
+- [x] Align README config surface docs with the remaining active sections.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

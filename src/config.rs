@@ -36,9 +36,6 @@ pub struct AppConfig {
     /// Optional NBA Q3→Q4 comeback trading agent
     #[serde(default)]
     pub nba_comeback: Option<NbaComebackConfig>,
-    /// Optional event registry discovery service
-    #[serde(default)]
-    pub event_registry: Option<DiscoveryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -619,31 +616,6 @@ fn default_early_exit_stop_loss_pct() -> f64 {
     20.0
 }
 
-/// Event registry discovery service configuration
-#[derive(Debug, Clone, Deserialize)]
-pub struct DiscoveryConfig {
-    /// Enable the background discovery scanner
-    #[serde(default)]
-    pub enabled: bool,
-    /// Scan interval in seconds (default: 300 = 5 minutes)
-    #[serde(default = "default_discovery_scan_interval")]
-    pub scan_interval_secs: u64,
-    /// Sports keywords to scan (e.g. ["NBA", "NFL"])
-    #[serde(default = "default_discovery_sports_keywords")]
-    pub sports_keywords: Vec<String>,
-    /// General keywords to scan
-    #[serde(default)]
-    pub general_keywords: Vec<String>,
-}
-
-fn default_discovery_scan_interval() -> u64 {
-    300
-}
-
-fn default_discovery_sports_keywords() -> Vec<String> {
-    vec!["NBA".to_string(), "NFL".to_string()]
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketConfig {
     /// WebSocket endpoint for market data
@@ -957,7 +929,6 @@ impl AppConfig {
             api_port: Some(8081),
             event_edge_agent: None,
             nba_comeback: None,
-            event_registry: None,
         }
     }
 
