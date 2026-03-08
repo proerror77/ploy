@@ -1642,3 +1642,20 @@ Remove the unused `account/ledger.rs` skeleton after confirming no runtime, API,
 ## Review
 
 - [x] `AccountLedgerSnapshot` had no remaining runtime, API, or test consumers; the account plane currently only uses registry, budget, service, and claimer surfaces.
+
+---
+
+# Account Re-Export Cleanup (2026-03-08)
+
+## Goal
+Narrow the `account` top-level re-export surface so it only exposes the account-plane types that still have in-repo callers.
+
+## Tasks
+
+- [x] Confirm only `ensure_account_claimer_daemon`, `AccountBudgetSnapshot`, `AccountRegistryEntry`, and `AccountService` still have top-level `crate::account::*` consumers.
+- [x] Remove unused `AccountClaimerHandle`, `AccountOverviewRow`, `AccountSnapshot`, and `RuntimeAccountView` re-exports from `src/account/mod.rs`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The current runtime and API code only consume the smaller top-level account surface; the removed account re-exports had become dead compatibility API.
