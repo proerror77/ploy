@@ -51,8 +51,8 @@
   - 多結果/單調性/拆合套利/EV：`src/strategy/multi_outcome.rs`
   - 波動套利：`src/strategy/volatility_arb.rs`
 - 跨市場（傳統博彩）相關
-  - Odds 來源：`src/agent/odds_provider.rs`（The Odds API：DraftKings/FanDuel...）
-  - 比較/edge：`src/agent/sports_analyst.rs`（含 DK 對照）
+  - Odds 來源：`src/ai_clients/odds_provider.rs`（The Odds API：DraftKings/FanDuel...）
+  - 比較/edge：`src/ai_clients/sports_analyst.rs`（含 DK 對照）
 - 已完成
   - Polymarket 內部套利（split/two-leg/multi-outcome）能力完整
   - Sportsbook odds 拉取與 bookmaker 間 arb 偵測（The Odds API）
@@ -97,10 +97,10 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
   - Polymarket CLOB/WS adapters（`src/adapters/polymarket_*.rs`）
 - Tier 2：專業/模型
   - NBA winprob：`src/strategy/nba_winprob.rs`
-  - Odds/博彩：`src/agent/odds_provider.rs`
+  - Odds/博彩：`src/ai_clients/odds_provider.rs`
 - Tier 3：市場資訊/情緒
-  - Grok/X：`src/agent/grok.rs`
-  - 多源資料聚合：`src/agent/sports_data_aggregator.rs`（品質分數、降級、快取）
+  - Grok/X：`src/ai_clients/grok.rs`
+  - 多源資料聚合：`src/ai_clients/sports_data.rs`（品質分數、降級、快取）
   - OBI/深度不平衡：`src/strategy/momentum.rs`、`src/strategy/nba_filters.rs` 等
 
 ---

@@ -70,12 +70,12 @@ Local static check command:
 8. SDK/type safety for series event discovery.
    - Replaced manual `reqwest` `/series/{id}` parsing with typed `GammaClient::series_by_id` in `src/adapters/polymarket_clob.rs`.
 9. Legacy Gamma query parameter style in strategy/agent paths.
-   - Replaced `_limit` with `limit` (plus `offset`) in `src/strategy/event_edge/mod.rs` and `src/agent/sports_analyst.rs`.
+   - Replaced `_limit` with `limit` (plus `offset`) in `src/strategy/event_edge/mod.rs` and `src/ai_clients/sports_analyst.rs`.
 10. Trade collector using raw Data API HTTP endpoint.
    - Replaced raw `GET https://data-api.polymarket.com/trades` calls in `src/coordinator/bootstrap.rs` with typed SDK `DataClient::trades(TradesRequest)`.
    - Kept pagination/high-water-mark/overlap behavior, and enforced official SDK offset bound (`<= 10000`).
 11. Sports/Event-edge raw Gamma discovery paths.
-   - Replaced raw Gamma `/events` and `/markets` HTTP calls in `src/agent/sports_analyst.rs` and `src/strategy/event_edge/mod.rs` with typed SDK search/event flows.
+   - Replaced raw Gamma `/events` and `/markets` HTTP calls in `src/ai_clients/sports_analyst.rs` and `src/strategy/event_edge/mod.rs` with typed SDK search/event flows.
    - Added static audit guard in `scripts/check_polymarket_api_usage.sh` to prevent regression in these SDK-migrated modules.
 12. Domain-level portfolio risk split and hard-stop hooks.
    - Added domain exposure/day-loss controls in `src/platform/risk.rs`:
@@ -83,11 +83,11 @@ Local static check command:
      - per-domain daily loss caps (`crypto_daily_loss_limit`, `sports_daily_loss_limit`, ...)
    - Coordinator now registers agent domain into risk gate, enabling domain-scoped checks.
    - Bootstrap exposes env-driven split controls (e.g. `PLOY_RISK__CRYPTO_ALLOCATION_PCT`, `PLOY_RISK__SPORTS_ALLOCATION_PCT`).
-13. Remaining raw Gamma reads in helper/CLI paths.
-   - Migrated `src/agent/sports_analyst_enhanced.rs`, `src/strategy/live_arbitrage.rs`, and `src/main.rs::fetch_market_snapshot` from raw HTTP Gamma URLs to typed `GammaClient` requests (`SearchRequest`, `SeriesByIdRequest`, `EventByIdRequest`).
-   - Expanded `scripts/check_polymarket_api_usage.sh` regression guard to include these modules.
+13. Historical raw Gamma reads in helper/CLI paths.
+   - Earlier cleanup migrated helper paths such as `sports_analyst_enhanced.rs`, `live_arbitrage.rs`, and `main.rs::fetch_market_snapshot` from raw HTTP Gamma URLs to typed `GammaClient` requests (`SearchRequest`, `SeriesByIdRequest`, `EventByIdRequest`).
+   - The regression guard work remains relevant even though some of those helper modules were later retired.
 14. Historical sports/politics integration modules previously used raw Gamma URLs.
-   - The old migration covered `src/agent/polymarket_sports.rs` and `src/agent/polymarket_politics.rs`; the politics helper was later retired during the March 2026 cleanup.
+   - The old migration covered the sports/politics market helpers now living under `src/ai_clients/`; the politics helper was later retired during the March 2026 cleanup.
    - The remaining sports-side integrations stay under the static audit regression guard.
 
 ## Remaining TODO For “Production-Complete” State

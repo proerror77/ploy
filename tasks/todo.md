@@ -1550,3 +1550,20 @@ Remove the orphan `ai_clients/polymarket_politics.rs` helper after the canonical
 - [x] The politics market helper had become a dead client surface; no remaining runtime, CLI, API, or strategy modules imported its types after the canonical `event_edge` migration.
 - [x] Focused validation passed:
   - `cargo check --bin ploy`
+
+---
+
+# Documentation Path Sync Cleanup (2026-03-08)
+
+## Goal
+Bring active docs back in sync with the current codebase after the `agent -> ai_clients` rename and the removal of retired modules such as `cli/service.rs` and `src/validation.rs`.
+
+## Tasks
+
+- [x] Update active architecture docs to point at `src/ai_clients/*` instead of retired `src/agent/*` paths.
+- [x] Remove stale references to already-deleted cleanup targets from non-archive review docs.
+- [x] Keep `docs/archive/` untouched so historical writeups remain intact.
+
+## Review
+
+- [x] The active docs now point at `src/ai_clients/*`, the canonical risk-validation path, and no longer describe deleted `cli/service.rs` stubs as pending work.
