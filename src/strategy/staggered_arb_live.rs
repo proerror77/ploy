@@ -23,7 +23,9 @@ use tracing::{debug, info, warn};
 
 use super::momentum::Direction;
 use super::probability::estimate_probability;
-use super::staggered_arb_backtest::{polymarket_order_meets_minimum, StaggeredArbBacktestConfig};
+use super::staggered_arb_backtest::{
+    polymarket_order_meets_minimum, PmEventQuoteState, StaggeredArbBacktestConfig,
+};
 use super::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
     StrategyEventType, StrategyStateInfo,
@@ -186,6 +188,8 @@ pub struct StaggeredArbAdapter {
     binance_l2_obi_ts: HashMap<String, DateTime<Utc>>,
     /// event_id → (up_ask, down_ask)
     pm_asks_by_event: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    /// event_id → quote freshness/persistence tracking for both sides
+    pm_quote_state_by_event: HashMap<String, PmEventQuoteState>,
     /// token_id → quote routing metadata
     token_to_quote_route: HashMap<String, QuoteRoute>,
 
@@ -246,6 +250,7 @@ impl StaggeredArbAdapter {
             binance_l2_obi_prev_5: HashMap::new(),
             binance_l2_obi_ts: HashMap::new(),
             pm_asks_by_event: HashMap::new(),
+            pm_quote_state_by_event: HashMap::new(),
             token_to_quote_route: HashMap::new(),
             active_windows: HashMap::new(),
             series_ids: default_staggered_series_ids(),
@@ -441,6 +446,49 @@ impl StaggeredArbAdapter {
                 (tick_vol * n.sqrt()).max(bc.vol_floor)
             })
             .unwrap_or(bc.vol_floor)
+    }
+
+    fn record_pm_quote(
+        &mut self,
+        event_id: &str,
+        direction: Direction,
+        ask: Option<Decimal>,
+        ask_size: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) {
+        let state = self
+            .pm_quote_state_by_event
+            .entry(event_id.to_string())
+            .or_default();
+        let side = match direction {
+            Direction::Up => Side::Up,
+            Direction::Down => Side::Down,
+        };
+        let side_state = state.side_mut(side);
+        if self.config.backtest_config.pm_quote_max_stale_secs > 0 {
+            if let Some(last_seen_at) = side_state.last_seen_at {
+                if (ts - last_seen_at).num_seconds()
+                    > self.config.backtest_config.pm_quote_max_stale_secs as i64
+                {
+                    side_state.clear();
+                }
+            }
+        }
+        state.update(side, ask, ask_size, ts);
+        self.pm_asks_by_event.insert(event_id.to_string(), state.asks());
+    }
+
+    fn event_quote_state(
+        &self,
+        event_id: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) -> PmEventQuoteState {
+        self.pm_quote_state_by_event
+            .get(event_id)
+            .copied()
+            .unwrap_or_else(|| PmEventQuoteState::synthetic(up_ask, down_ask, ts))
     }
 
     fn current_window_greeks(
@@ -1150,6 +1198,13 @@ impl StaggeredArbAdapter {
                 return None;
             }
         };
+        let quote_state = self.event_quote_state(&window.event_id, up_ask, down_ask, ts);
+        if !bc.pm_quote_is_fresh(quote_state.up.last_seen_at, ts)
+            || !bc.pm_quote_is_fresh(quote_state.down.last_seen_at, ts)
+        {
+            self.bump_entry_reject("pm_quotes_stale");
+            return None;
+        }
 
         // 3. Min ask price filter
         if ua < bc.min_ask_price || da < bc.min_ask_price {
@@ -1358,6 +1413,15 @@ impl StaggeredArbAdapter {
         } else {
             (Direction::Down, da)
         };
+        let other_quote_state = if predicted_up {
+            quote_state.down
+        } else {
+            quote_state.up
+        };
+        if !bc.entry_quote_is_persistent(other_quote_state.first_seen_at, ts) {
+            self.bump_entry_reject("other_ask_not_persistent");
+            return None;
+        }
 
         // 9d. Leg1 price cap
         if leg1_ask > bc.max_leg1_price_now(strong_obi_bonus_active) {
@@ -1603,6 +1667,7 @@ impl StaggeredArbAdapter {
                     continue;
                 }
             };
+            let quote_state = self.event_quote_state(&pos.event_id, pm_asks.0, pm_asks.1, ts);
 
             // Skip positions with in-flight Leg2 orders
             if self.pending_leg2_positions.contains(&i) {
@@ -1652,10 +1717,14 @@ impl StaggeredArbAdapter {
                 })
                 .unwrap_or(!bc.use_greeks);
 
-            let other_ask = match pos.leg1_direction {
-                Direction::Up => pm_asks.1,
-                Direction::Down => pm_asks.0,
+            let (other_ask, other_state, leg1_mark, leg1_mark_state) = match pos.leg1_direction {
+                Direction::Up => (pm_asks.1, quote_state.down, pm_asks.0, quote_state.up),
+                Direction::Down => (pm_asks.0, quote_state.up, pm_asks.1, quote_state.down),
             };
+            if !bc.pm_quote_is_fresh(other_state.last_seen_at, ts) {
+                *leg2_skip_batch.entry("stale_other_ask").or_default() += 1;
+                continue;
+            }
             let other_ask = match other_ask {
                 Some(a) if a >= bc.min_ask_price => a,
                 Some(_) => {
@@ -1736,9 +1805,10 @@ impl StaggeredArbAdapter {
 
             // D. Leg1 loss guard (if configured) — always allowed
             if bc.max_leg1_loss > Decimal::ZERO && leg2_ready {
-                let leg1_mark = match pos.leg1_direction {
-                    Direction::Up => pm_asks.0,
-                    Direction::Down => pm_asks.1,
+                let leg1_mark = if bc.pm_quote_is_fresh(leg1_mark_state.last_seen_at, ts) {
+                    leg1_mark
+                } else {
+                    None
                 };
                 if let Some(mark) = leg1_mark {
                     let leg1_loss = (pos.leg1_price - mark).max(Decimal::ZERO);
@@ -2239,29 +2309,26 @@ impl Strategy for StaggeredArbAdapter {
             }
 
             MarketUpdate::PolymarketQuote {
-                token_id, quote, ..
+                token_id,
+                quote,
+                timestamp,
+                ..
             } => {
                 if let Some(route) = self.token_to_quote_route.get(token_id) {
                     let symbol = route.symbol.clone();
                     let event_id = route.event_id.clone();
                     let direction = route.direction.clone();
                     let ask = quote.best_ask;
+                    let ts = *timestamp;
 
-                    let entry = self
-                        .pm_asks_by_event
-                        .entry(event_id)
-                        .or_insert((None, None));
-                    match direction {
-                        Direction::Up => entry.0 = ask,
-                        Direction::Down => entry.1 = ask,
-                    }
+                    self.record_pm_quote(&event_id, direction, ask, quote.ask_size, ts);
 
                     // Check Leg2 opportunities first (existing positions)
-                    let leg2_actions = self.check_leg2_opportunities(&symbol, Utc::now());
+                    let leg2_actions = self.check_leg2_opportunities(&symbol, ts);
                     actions.extend(leg2_actions);
 
                     // Then try new entries
-                    let entry_actions = self.try_entry(&symbol, Utc::now());
+                    let entry_actions = self.try_entry(&symbol, ts);
                     actions.extend(entry_actions);
                 }
             }
@@ -2358,6 +2425,7 @@ impl Strategy for StaggeredArbAdapter {
                     windows.retain(|w| w.event_id != *event_id);
                 }
                 self.pm_asks_by_event.remove(event_id);
+                self.pm_quote_state_by_event.remove(event_id);
                 self.token_to_quote_route
                     .retain(|_, route| route.event_id != *event_id);
             }
@@ -2939,6 +3007,7 @@ impl Strategy for StaggeredArbAdapter {
         self.active_windows.clear();
         self.spot_prices.clear();
         self.pm_asks_by_event.clear();
+        self.pm_quote_state_by_event.clear();
         self.binance_l2_obi_5.clear();
         self.binance_l2_obi_prev_5.clear();
         self.binance_l2_obi_ts.clear();
@@ -3006,6 +3075,22 @@ mod tests {
             exchange_order_id: Some("0xleg2".to_string()),
             acknowledged_filled_qty: 0,
             entry_obi: Some(-0.02),
+        }
+    }
+
+    fn seed_persistent_pm_quotes(
+        adapter: &mut StaggeredArbAdapter,
+        event_id: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        first_seen_at: DateTime<Utc>,
+        last_seen_at: DateTime<Utc>,
+    ) {
+        adapter.record_pm_quote(event_id, Direction::Up, up_ask, None, first_seen_at);
+        adapter.record_pm_quote(event_id, Direction::Down, down_ask, None, first_seen_at);
+        if last_seen_at != first_seen_at {
+            adapter.record_pm_quote(event_id, Direction::Up, up_ask, None, last_seen_at);
+            adapter.record_pm_quote(event_id, Direction::Down, down_ask, None, last_seen_at);
         }
     }
 
@@ -3111,6 +3196,8 @@ name = "staggered_arb"
         assert_eq!(config.max_initial_sum, Decimal::ZERO);
         assert_eq!(config.entry_after_start_min_secs, 30);
         assert_eq!(config.entry_after_start_max_secs, 240);
+        assert_eq!(config.pm_quote_max_stale_secs, 10);
+        assert_eq!(config.entry_quote_persistence_secs, 8);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.allowed_window_durations, vec![300]);
         assert_eq!(config.protective_recovery_window_secs, 0);
@@ -3239,9 +3326,14 @@ name = "staggered_arb"
                 },
             ],
         );
-        adapter
-            .pm_asks_by_event
-            .insert("evt-a".into(), (Some(dec!(0.55)), Some(dec!(0.30))));
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-a",
+            Some(dec!(0.55)),
+            Some(dec!(0.30)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
 
         let actions = adapter.try_entry("BTCUSDT", now);
 
@@ -3267,6 +3359,14 @@ name = "staggered_arb"
             .binance_l2_obi_5
             .insert("BTCUSDT".into(), dec!(0.02));
         adapter.binance_l2_obi_ts.insert("BTCUSDT".into(), later);
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-delayed",
+            Some(dec!(0.55)),
+            Some(dec!(0.48)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
 
         let window = LiveWindow {
             event_id: "evt-delayed".into(),
@@ -3291,6 +3391,15 @@ name = "staggered_arb"
         assert!(
             too_early_action.is_none(),
             "entry should be blocked during the initial observation delay before the post-open entry window begins"
+        );
+
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-delayed",
+            Some(dec!(0.55)),
+            Some(dec!(0.48)),
+            later - chrono::Duration::seconds(10),
+            later,
         );
 
         let delayed_action = adapter.try_entry_for_window(
@@ -3325,6 +3434,14 @@ name = "staggered_arb"
             .binance_l2_obi_5
             .insert("BTCUSDT".into(), dec!(0.03));
         adapter.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-premium",
+            Some(dec!(0.58)),
+            Some(dec!(0.50)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
 
         let window = LiveWindow {
             event_id: "evt-premium".into(),
@@ -3370,6 +3487,14 @@ name = "staggered_arb"
             .binance_l2_obi_5
             .insert("BTCUSDT".into(), dec!(0.03));
         adapter.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-new",
+            Some(dec!(0.55)),
+            Some(dec!(0.48)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
         adapter.positions.push(PaperPosition {
             symbol: "ETHUSDT".into(),
             event_id: "evt-existing".into(),
@@ -3488,9 +3613,14 @@ name = "staggered_arb"
                 window_secs: 300,
             }],
         );
-        adapter
-            .pm_asks_by_event
-            .insert("evt-open".into(), (Some(dec!(0.55)), Some(dec!(0.45))));
+        seed_persistent_pm_quotes(
+            &mut adapter,
+            "evt-open",
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
 
         let actions = adapter.on_tick(now).await.unwrap();
 
@@ -3506,6 +3636,106 @@ name = "staggered_arb"
                     if matches!(event.event_type, StrategyEventType::EntryTriggered)
             )),
             "tick-driven recheck should emit an EntryTriggered event when it opens leg1"
+        );
+    }
+
+    #[test]
+    fn test_try_entry_requires_persistent_other_ask_before_leg1() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let now = Utc::now();
+        let later = now + chrono::Duration::seconds(9);
+        adapter.config.backtest_config.direction_threshold = 0.0;
+        adapter.config.backtest_config.use_greeks = false;
+        adapter.config.backtest_config.entry_after_start_min_secs = 0;
+        adapter
+            .spot_prices
+            .insert("BTCUSDT".into(), SpotPrice::new(dec!(101), None, later));
+        adapter
+            .binance_l2_obi_5
+            .insert("BTCUSDT".into(), dec!(0.02));
+        adapter.binance_l2_obi_ts.insert("BTCUSDT".into(), later);
+
+        let window = LiveWindow {
+            event_id: "evt-persist".into(),
+            symbol: "BTCUSDT".into(),
+            up_token: "up-persist".into(),
+            down_token: "down-persist".into(),
+            condition_id: None,
+            end_time: later + chrono::Duration::seconds(280),
+            open_price: Some(dec!(100)),
+            window_secs: 300,
+        };
+
+        adapter.record_pm_quote("evt-persist", Direction::Up, Some(dec!(0.55)), None, now);
+        adapter.record_pm_quote("evt-persist", Direction::Down, Some(dec!(0.45)), None, now);
+        let early_action = adapter.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &window,
+            dec!(101),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+        assert!(
+            early_action.is_none(),
+            "entry should wait until the opposite-side ask has persisted for the configured duration"
+        );
+
+        adapter.record_pm_quote("evt-persist", Direction::Up, Some(dec!(0.55)), None, later);
+        adapter.record_pm_quote("evt-persist", Direction::Down, Some(dec!(0.45)), None, later);
+        let delayed_action = adapter.try_entry_for_window(
+            "BTCUSDT",
+            later,
+            &window,
+            dec!(101),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+        assert!(
+            delayed_action.is_some(),
+            "entry should proceed once the opposite-side ask has stayed visible long enough"
+        );
+    }
+
+    #[test]
+    fn test_record_pm_quote_resets_persistence_after_stale_gap() {
+        let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
+        let first_seen_at = Utc::now();
+        let reappeared_at = first_seen_at + chrono::Duration::seconds(20);
+
+        adapter.record_pm_quote(
+            "evt-persist",
+            Direction::Down,
+            Some(dec!(0.45)),
+            None,
+            first_seen_at,
+        );
+        adapter.record_pm_quote(
+            "evt-persist",
+            Direction::Down,
+            Some(dec!(0.45)),
+            None,
+            reappeared_at,
+        );
+
+        let state = adapter
+            .pm_quote_state_by_event
+            .get("evt-persist")
+            .copied()
+            .expect("quote state should exist");
+        assert_eq!(
+            state.down.first_seen_at,
+            Some(reappeared_at),
+            "a quote that reappears after a stale gap must restart persistence timing"
+        );
+        assert!(
+            !adapter
+                .config
+                .backtest_config
+                .entry_quote_is_persistent(state.down.first_seen_at, reappeared_at),
+            "reappearing quotes should not immediately satisfy the persistence gate"
         );
     }
 

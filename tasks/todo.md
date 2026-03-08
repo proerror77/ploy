@@ -662,3 +662,35 @@ Stop the live strategy from drifting into unhedged directional behavior by elimi
 - [x] Targeted verification passed:
   - `cargo test strategy::staggered_arb_live::tests -- --nocapture`
   - `cargo test strategy::staggered_arb_backtest::tests -- --nocapture`
+
+---
+
+# Staggered Arb Wallet-Loss Root Cause Fixes (2026-03-08)
+
+## Goal
+Bring staggered-arb closer to the user's intended hedge discipline by fixing the main live-vs-replay mismatches behind the March 7 wallet loss: stale replay PM asks, missing quote-persistence gating before `LEG1`, and overly optimistic settlement handling in replay.
+
+## Tasks
+
+- [x] Add failing coverage for PM ask clearing/persistence before entry in both live and backtest.
+- [x] Require fresh, persistent opposite-side PM quotes before `LEG1` so the strategy only enters when hedgeability is durable, not just momentarily visible.
+- [x] Use live quote timestamps instead of `Utc::now()` when reacting to Polymarket quote updates.
+- [x] Make replay settlement behavior match live by removing the forced `LEG2` buy-at-settlement path.
+- [x] Re-run targeted tests plus the previously bad replay window to see how much optimism is removed.
+
+## Review
+
+- [x] Confirm replay now clears PM asks when the book side disappears instead of keeping stale values alive.
+- [x] Confirm unhedged expiry remains a residual fallback, not an optimistic forced close in replay.
+- [x] Confirm the modified replay/live path materially narrows, but does not close, the gap on the March 7 loss window.
+
+## Progress notes
+
+- 2026-03-08: Added PM quote state tracking keyed by event in replay and live, including fresh-quote checks, persistence gating before `LEG1`, and feed-timestamp-driven live quote handling.
+- 2026-03-08: Replay now clears vanished PM asks and resets persistence timing when a quote reappears after a stale gap; live mirrors the same persistence reset logic.
+- 2026-03-08: Replay settlement no longer forces a synthetic `LEG2` buy at expiry. Residual single-leg positions are settled directly and recorded through the normal trade recorder path.
+- 2026-03-08: Re-ran the March 7 wallet-loss window against `tango-1-1` data via SSH tunnel. Updated replay result: `84 trades / +33.48 PnL / PF 1.65`, with `76` merges, `5` settlements, `3` aborts, and per-symbol PnL `BTC -0.49`, `ETH +22.13`, `SOL +11.84`.
+- 2026-03-08: The new replay is materially less optimistic than the earlier `+66.85` result and now exposes `Settlements: $-34.15`, but it still remains far above the official wallet `1D` loss (`~-$74`), so an execution/reconciliation gap still remains after these fixes.
+- 2026-03-08: Targeted stale-gap persistence regression tests passed in both replay and live paths:
+  - `CARGO_INCREMENTAL=0 cargo test strategy::staggered_arb_backtest::tests::test_record_pm_quote_resets_persistence_after_stale_gap -- --nocapture`
+  - `CARGO_INCREMENTAL=0 cargo test strategy::staggered_arb_live::tests::test_record_pm_quote_resets_persistence_after_stale_gap -- --nocapture`

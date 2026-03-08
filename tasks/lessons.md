@@ -180,3 +180,9 @@
 
 - Pattern: Internal staggered-arb `split_arb_cycle_completed` totals can materially diverge from the user-visible Polymarket wallet 1D PnL, because official portfolio PnL is wallet-level and includes inventory mark-to-market while `cycle_completed` is only a strategy-emitted subset.
 - Rule: For any live strategy performance review, reconcile three views in this order: (1) official Polymarket wallet 1D / profile PnL, (2) public wallet activity cashflow by market/event, (3) internal `signal_history` / `orders`. Never present `cycle_completed` totals alone as the user's真钱表现.
+
+- Pattern: Using shell `exec_command` to invoke `apply_patch` triggers avoidable tool warnings and makes edit provenance harder to audit.
+- Rule: In Codex sessions, always use the dedicated `apply_patch` tool for manual file edits. Do not run `apply_patch` through shell commands.
+
+- Pattern: PM quote persistence gates still overstate hedgeability if a side disappears long enough to go stale and then reappears; carrying forward the old `first_seen_at` makes a fresh quote look durable when it is not.
+- Rule: Whenever staggered-arb tracks quote persistence, reset persistence timing after stale quote gaps, not only when an explicit `ask=None` update arrives. Add a regression test for the stale-gap reappearance path in both live and replay code.

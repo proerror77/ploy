@@ -90,6 +90,10 @@ pub struct StaggeredArbBacktestConfig {
     pub entry_after_start_min_secs: u64,
     /// Prefer entering soon after event start. 0 disables this gate.
     pub entry_after_start_max_secs: u64,
+    /// Require PM quotes used for entry/exit to be newer than this many seconds. 0 disables staleness gating.
+    pub pm_quote_max_stale_secs: u64,
+    /// Require the opposite-side PM ask to remain visible for this many seconds before opening Leg1.
+    pub entry_quote_persistence_secs: u64,
     /// In the final N seconds, do not place hedge/exit trades. 0 disables this gate.
     pub no_trade_last_secs: u64,
     /// Maximum fraction of window duration to wait for Leg2
@@ -175,6 +179,8 @@ impl Default for StaggeredArbBacktestConfig {
             max_wait_secs: 120,
             entry_after_start_min_secs: 30,
             entry_after_start_max_secs: 240,
+            pm_quote_max_stale_secs: 10,
+            entry_quote_persistence_secs: 8,
             no_trade_last_secs: 30,
             max_wait_pct: 0.30,
             min_time_remaining_secs: 45,
@@ -207,6 +213,82 @@ impl Default for StaggeredArbBacktestConfig {
 
 pub(crate) fn polymarket_order_meets_minimum(price: Decimal, shares: u64) -> bool {
     shares >= 5 && price > Decimal::ZERO && price * Decimal::from(shares) >= Decimal::ONE
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PmSideQuoteState {
+    pub ask: Option<Decimal>,
+    pub ask_size: Option<Decimal>,
+    pub first_seen_at: Option<DateTime<Utc>>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl PmSideQuoteState {
+    pub(crate) fn clear(&mut self) {
+        self.ask = None;
+        self.ask_size = None;
+        self.first_seen_at = None;
+        self.last_seen_at = None;
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        ask: Option<Decimal>,
+        ask_size: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) {
+        let had_quote = self.ask.is_some();
+        self.ask = ask;
+        self.ask_size = ask_size;
+        self.last_seen_at = Some(ts);
+        match ask {
+            Some(_) if !had_quote => self.first_seen_at = Some(ts),
+            Some(_) => {}
+            None => {
+                self.first_seen_at = None;
+                self.ask_size = None;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PmEventQuoteState {
+    pub up: PmSideQuoteState,
+    pub down: PmSideQuoteState,
+}
+
+impl PmEventQuoteState {
+    pub(crate) fn side_mut(&mut self, side: Side) -> &mut PmSideQuoteState {
+        match side {
+            Side::Up => &mut self.up,
+            Side::Down => &mut self.down,
+        }
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        side: Side,
+        ask: Option<Decimal>,
+        ask_size: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) {
+        match side {
+            Side::Up => self.up.update(ask, ask_size, ts),
+            Side::Down => self.down.update(ask, ask_size, ts),
+        }
+    }
+
+    pub(crate) fn asks(&self) -> (Option<Decimal>, Option<Decimal>) {
+        (self.up.ask, self.down.ask)
+    }
+
+    pub(crate) fn synthetic(up_ask: Option<Decimal>, down_ask: Option<Decimal>, ts: DateTime<Utc>) -> Self {
+        let mut state = Self::default();
+        state.up.update(up_ask, None, ts);
+        state.down.update(down_ask, None, ts);
+        state
+    }
 }
 
 impl StaggeredArbBacktestConfig {
@@ -338,6 +420,34 @@ impl StaggeredArbBacktestConfig {
         } else {
             self.entry_after_start_max_secs
         }
+    }
+
+    pub(crate) fn pm_quote_is_fresh(
+        &self,
+        last_seen_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let Some(last_seen_at) = last_seen_at else {
+            return false;
+        };
+        if self.pm_quote_max_stale_secs == 0 {
+            return true;
+        }
+        (now - last_seen_at).num_seconds().abs() <= self.pm_quote_max_stale_secs as i64
+    }
+
+    pub(crate) fn entry_quote_is_persistent(
+        &self,
+        first_seen_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let Some(first_seen_at) = first_seen_at else {
+            return false;
+        };
+        if self.entry_quote_persistence_secs == 0 {
+            return true;
+        }
+        (now - first_seen_at).num_seconds() >= self.entry_quote_persistence_secs as i64
     }
 
     pub(crate) fn obi_signal_still_supportive(
@@ -541,6 +651,14 @@ impl StaggeredArbBacktestConfig {
                 .get("entry_after_start_max_secs")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(240) as u64,
+            pm_quote_max_stale_secs: timing
+                .get("pm_quote_max_stale_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(10) as u64,
+            entry_quote_persistence_secs: timing
+                .get("entry_quote_persistence_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(8) as u64,
             no_trade_last_secs: timing
                 .get("no_trade_last_secs")
                 .and_then(|v| v.as_integer())
@@ -795,6 +913,7 @@ pub struct StaggeredArbBacktestEngine {
     // Market state
     spot_prices: HashMap<String, SpotPrice>,
     pm_asks_by_event: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    pm_quote_state_by_event: HashMap<String, PmEventQuoteState>,
     // Active events: symbol -> concurrent windows
     active_events: HashMap<String, Vec<ActiveWindowInfo>>,
     // Positions & trades
@@ -830,6 +949,7 @@ impl StaggeredArbBacktestEngine {
             recorder,
             spot_prices: HashMap::new(),
             pm_asks_by_event: HashMap::new(),
+            pm_quote_state_by_event: HashMap::new(),
             active_events: HashMap::new(),
             positions: Vec::new(),
             closed_trades: Vec::new(),
@@ -909,6 +1029,7 @@ impl StaggeredArbBacktestEngine {
                             events.retain(|e| e.event_slug != *event_slug);
                         }
                         self.pm_asks_by_event.remove(event_slug);
+                        self.pm_quote_state_by_event.remove(event_slug);
                     }
 
                     if outcome.is_none() {
@@ -1002,23 +1123,7 @@ impl StaggeredArbBacktestEngine {
         best_ask: Option<Decimal>,
         ts: DateTime<Utc>,
     ) {
-        // Update latest asks (per event_slug)
-        let entry = self
-            .pm_asks_by_event
-            .entry(event_slug.to_string())
-            .or_insert((None, None));
-        match quote_side {
-            Side::Up => {
-                if best_ask.is_some() {
-                    entry.0 = best_ask;
-                }
-            }
-            Side::Down => {
-                if best_ask.is_some() {
-                    entry.1 = best_ask;
-                }
-            }
-        }
+        self.record_pm_quote(event_slug, quote_side, best_ask, ts);
 
         // 1. Check Leg2 opportunities for existing positions
         self.check_leg2_opportunities(symbol, ts);
@@ -1035,6 +1140,43 @@ impl StaggeredArbBacktestEngine {
     /// Get current LOB depth for a symbol, falling back to a conservative default.
     fn market_depth(&self, symbol: &str) -> u64 {
         self.lob_depth.get(symbol).copied().unwrap_or(500)
+    }
+
+    fn record_pm_quote(
+        &mut self,
+        event_slug: &str,
+        quote_side: Side,
+        best_ask: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) {
+        let state = self
+            .pm_quote_state_by_event
+            .entry(event_slug.to_string())
+            .or_default();
+        let side_state = state.side_mut(quote_side);
+        if self.config.pm_quote_max_stale_secs > 0 {
+            if let Some(last_seen_at) = side_state.last_seen_at {
+                if (ts - last_seen_at).num_seconds() > self.config.pm_quote_max_stale_secs as i64 {
+                    side_state.clear();
+                }
+            }
+        }
+        state.update(quote_side, best_ask, None, ts);
+        self.pm_asks_by_event
+            .insert(event_slug.to_string(), state.asks());
+    }
+
+    fn event_quote_state(
+        &self,
+        event_slug: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) -> PmEventQuoteState {
+        self.pm_quote_state_by_event
+            .get(event_slug)
+            .copied()
+            .unwrap_or_else(|| PmEventQuoteState::synthetic(up_ask, down_ask, ts))
     }
 
     // ─── Entry logic ─────────────────────────────────────────
@@ -1115,6 +1257,13 @@ impl StaggeredArbBacktestEngine {
             (Some(u), Some(d)) => (u, d),
             _ => return,
         };
+        let quote_state = self.event_quote_state(&window.event_slug, up_ask, down_ask, ts);
+        if !self.config.pm_quote_is_fresh(quote_state.up.last_seen_at, ts)
+            || !self.config.pm_quote_is_fresh(quote_state.down.last_seen_at, ts)
+        {
+            trace!("Skipping: PM quotes stale for {}", window.event_slug);
+            return;
+        }
 
         // 2b. Filter out extreme prices with no real liquidity
         if ua < self.config.min_ask_price || da < self.config.min_ask_price {
@@ -1323,6 +1472,18 @@ impl StaggeredArbBacktestEngine {
         } else {
             (Direction::Down, da)
         };
+        let other_quote_state = if predicted_up {
+            quote_state.down
+        } else {
+            quote_state.up
+        };
+        if !self
+            .config
+            .entry_quote_is_persistent(other_quote_state.first_seen_at, ts)
+        {
+            trace!("Skipping: opposite ask not persistent yet for {}", window.event_slug);
+            return;
+        }
 
         // 7b. Leg1 price cap: don't buy if predicted side is too expensive
         //     (leaves no room for the other side to drop enough for profit)
@@ -1489,21 +1650,60 @@ impl StaggeredArbBacktestEngine {
         // Collect actions to take (can't mutate positions while iterating)
         let mut actions: Vec<(usize, Leg2Action)> = Vec::new();
         let mut protective_arm_updates: Vec<(usize, Option<DateTime<Utc>>)> = Vec::new();
-        for (i, pos) in self.positions.iter_mut().enumerate() {
-            if pos.symbol != symbol || pos.state != ArbPositionState::Leg1Filled {
+        for i in 0..self.positions.len() {
+            let (
+                pos_symbol,
+                pos_state,
+                event_slug,
+                leg1_direction,
+                leg1_price,
+                best_sum_seen,
+                event_end_time,
+                window_duration_secs,
+                entry_sigma,
+                s0,
+                leg1_time,
+                wait_deadline,
+                entry_obi,
+                protective_stop_armed_at,
+            ) = {
+                let pos = &self.positions[i];
+                (
+                    pos.symbol.clone(),
+                    pos.state.clone(),
+                    pos.event_slug.clone(),
+                    pos.leg1_direction,
+                    pos.leg1_price,
+                    pos.best_sum_seen,
+                    pos.event_end_time,
+                    pos.window_duration_secs,
+                    pos.entry_sigma,
+                    pos.s0,
+                    pos.leg1_time,
+                    pos.wait_deadline,
+                    pos.entry_obi,
+                    pos.protective_stop_armed_at,
+                )
+            };
+
+            if pos_symbol != symbol || pos_state != ArbPositionState::Leg1Filled {
                 continue;
             }
 
-            let pm_asks = match self.pm_asks_by_event.get(&pos.event_slug).copied() {
+            let pm_asks = match self.pm_asks_by_event.get(&event_slug).copied() {
                 Some(a) => a,
                 None => continue,
             };
+            let quote_state = self.event_quote_state(&event_slug, pm_asks.0, pm_asks.1, ts);
 
             // Get the opposite side's ask
-            let other_ask = match pos.leg1_direction {
-                Direction::Up => pm_asks.1,   // need DOWN ask
-                Direction::Down => pm_asks.0, // need UP ask
+            let (other_ask, other_state) = match leg1_direction {
+                Direction::Up => (pm_asks.1, quote_state.down),
+                Direction::Down => (pm_asks.0, quote_state.up),
             };
+            if !self.config.pm_quote_is_fresh(other_state.last_seen_at, ts) {
+                continue;
+            }
             let other_ask = match other_ask {
                 Some(a) if a >= self.config.min_ask_price => a,
                 Some(_) => continue, // too cheap, no real liquidity
@@ -1511,30 +1711,32 @@ impl StaggeredArbBacktestEngine {
             };
 
             // Also reject if combined sum is too low (illiquid extreme-price pair)
-            if pos.leg1_price + other_ask < self.config.min_entry_sum {
+            if leg1_price + other_ask < self.config.min_entry_sum {
                 continue;
             }
 
-            let current_sum = pos.leg1_price + other_ask;
+            let current_sum = leg1_price + other_ask;
 
             // Track best sum seen
-            if current_sum < pos.best_sum_seen {
-                pos.best_sum_seen = current_sum;
+            if current_sum < best_sum_seen {
+                if let Some(pos) = self.positions.get_mut(i) {
+                    pos.best_sum_seen = current_sum;
+                }
             }
 
-            let time_remaining = (pos.event_end_time - ts).num_seconds() as f64;
+            let time_remaining = (event_end_time - ts).num_seconds() as f64;
             let in_final_window = self.config.no_trade_last_secs > 0
                 && time_remaining <= self.config.no_trade_last_secs as f64
                 && time_remaining > 0.0;
             let min_time = self.config.min_time_remaining_secs as f64;
             let force_threshold = self.config.force_close_threshold_now(
                 time_remaining,
-                pos.window_duration_secs.max(0) as u64,
+                window_duration_secs.max(0) as u64,
                 in_final_window,
             );
             let protective_threshold = self.config.protective_close_threshold_now(
                 time_remaining,
-                pos.window_duration_secs.max(0) as u64,
+                window_duration_secs.max(0) as u64,
                 in_final_window,
             );
 
@@ -1542,17 +1744,17 @@ impl StaggeredArbBacktestEngine {
             let current_greeks = if self.config.use_greeks {
                 let spot = self
                     .spot_prices
-                    .get(&pos.symbol)
+                    .get(&pos_symbol)
                     .map(|sp| sp.price.to_f64().unwrap_or(0.0))
                     .unwrap_or(0.0);
-                let strike = pos.s0.to_f64().unwrap_or(0.0);
+                let strike = s0.to_f64().unwrap_or(0.0);
                 if spot > 0.0 && strike > 0.0 && time_remaining > 0.0 {
                     binary_greeks(
                         spot,
                         strike,
-                        pos.entry_sigma,
+                        entry_sigma,
                         time_remaining,
-                        pos.window_duration_secs as f64,
+                        window_duration_secs as f64,
                     )
                 } else {
                     None
@@ -1562,32 +1764,32 @@ impl StaggeredArbBacktestEngine {
             };
             let current_obi = self
                 .binance_l2_obi_5
-                .get(&pos.symbol)
+                .get(&pos_symbol)
                 .map(|value| value.to_f64().unwrap_or(0.0));
             let displacement_supportive = self
                 .spot_prices
-                .get(&pos.symbol)
+                .get(&pos_symbol)
                 .and_then(|sp| {
-                    if pos.s0 <= Decimal::ZERO {
+                    if s0 <= Decimal::ZERO {
                         return None;
                     }
-                    Some(((sp.price - pos.s0) / pos.s0).to_f64().unwrap_or(0.0))
+                    Some(((sp.price - s0) / s0).to_f64().unwrap_or(0.0))
                 })
-                .map(|displacement| match pos.leg1_direction {
+                .map(|displacement| match leg1_direction {
                     Direction::Up => displacement > 0.0,
                     Direction::Down => displacement < 0.0,
                 })
                 .unwrap_or(false);
             let greeks_supportive = current_greeks
                 .as_ref()
-                .map(|g| match pos.leg1_direction {
+                .map(|g| match leg1_direction {
                     Direction::Up => g.d2 > 0.05 && g.fair_value > 0.5,
                     Direction::Down => g.d2 < -0.05 && g.fair_value < 0.5,
                 })
                 .unwrap_or(!self.config.use_greeks);
 
             // Check minimum delay since Leg1 fill (execution realism)
-            let secs_since_leg1 = (ts - pos.leg1_time).num_seconds();
+            let secs_since_leg1 = (ts - leg1_time).num_seconds();
             let leg2_ready = secs_since_leg1 >= self.config.min_leg2_delay_secs as i64;
 
             // A. Profitable merge: sum < merge_target_sum
@@ -1654,7 +1856,7 @@ impl StaggeredArbBacktestEngine {
             // C. Timeout — force-complete the arb to avoid directional risk
             //    Even if sum > 1.0, the loss is bounded: (sum - 1.0) × shares
             //    Much better than risking full Leg1 cost at settlement
-            if ts >= pos.wait_deadline && leg2_ready {
+            if ts >= wait_deadline && leg2_ready {
                 if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
                     actions.push((i, Leg2Action::Fill(other_ask, "forced_timeout".to_string())));
                 }
@@ -1664,15 +1866,20 @@ impl StaggeredArbBacktestEngine {
             // D. Stop loss on Leg1 — force-complete if loss exceeds threshold
             //    With max_leg1_loss = 0 the stop-loss is disabled
             if self.config.max_leg1_loss > Decimal::ZERO {
-                let leg1_current_value = match pos.leg1_direction {
-                    Direction::Up => pm_asks.0.unwrap_or(pos.leg1_price),
-                    Direction::Down => pm_asks.1.unwrap_or(pos.leg1_price),
+                let (leg1_mark, leg1_mark_state) = match leg1_direction {
+                    Direction::Up => (pm_asks.0, quote_state.up),
+                    Direction::Down => (pm_asks.1, quote_state.down),
                 };
-                let leg1_loss = pos.leg1_price - leg1_current_value;
+                let leg1_current_value = if self.config.pm_quote_is_fresh(leg1_mark_state.last_seen_at, ts) {
+                    leg1_mark.unwrap_or(leg1_price)
+                } else {
+                    leg1_price
+                };
+                let leg1_loss = leg1_price - leg1_current_value;
                 if leg1_loss >= self.config.max_leg1_loss && leg2_ready {
                     let obi_supportive = self.config.obi_signal_still_supportive(
-                        pos.leg1_direction,
-                        pos.entry_obi,
+                        leg1_direction,
+                        entry_obi,
                         current_obi,
                     );
                     if obi_supportive && displacement_supportive && greeks_supportive {
@@ -1687,9 +1894,9 @@ impl StaggeredArbBacktestEngine {
                     }
                     let hard_signal_broken = self
                         .config
-                        .obi_signal_hard_flipped(pos.leg1_direction, current_obi)
+                        .obi_signal_hard_flipped(leg1_direction, current_obi)
                         || (!displacement_supportive && !greeks_supportive);
-                    let armed_at = pos.protective_stop_armed_at.unwrap_or(ts);
+                    let armed_at = protective_stop_armed_at.unwrap_or(ts);
                     let recovery_elapsed = (ts - armed_at).num_seconds();
                     let recovery_expired = self.config.protective_recovery_window_secs == 0
                         || recovery_elapsed >= self.config.protective_recovery_window_secs as i64;
@@ -1712,7 +1919,7 @@ impl StaggeredArbBacktestEngine {
                         ));
                     }
                     continue;
-                } else if pos.protective_stop_armed_at.is_some() {
+                } else if protective_stop_armed_at.is_some() {
                     protective_arm_updates.push((i, None));
                 }
             }
@@ -2045,8 +2252,6 @@ impl StaggeredArbBacktestEngine {
         up_won: bool,
         ts: DateTime<Utc>,
     ) {
-        // At settlement, force-complete any remaining Leg1 positions by buying Leg2.
-        // This avoids directional risk — even if sum > 1.0, the loss is bounded.
         let mut to_fill: Vec<usize> = Vec::new();
 
         for (i, pos) in self.positions.iter().enumerate() {
@@ -2061,27 +2266,7 @@ impl StaggeredArbBacktestEngine {
 
         to_fill.sort_by(|a, b| b.cmp(a));
         for idx in to_fill {
-            let pos = &self.positions[idx];
-            // Get the opposite side's ask for forced Leg2
-            let pm_asks = self.pm_asks_by_event.get(&pos.event_slug).copied();
-            let other_ask = pm_asks.and_then(|a| match pos.leg1_direction {
-                Direction::Up => a.1,   // need DOWN ask
-                Direction::Down => a.0, // need UP ask
-            });
-            match other_ask {
-                Some(ask) => {
-                    // Force buy Leg2 and merge — bounded loss
-                    self.fill_leg2(idx, ask, "forced_settlement", ts);
-                    if idx < self.positions.len()
-                        && self.positions[idx].state == ArbPositionState::Leg1Filled
-                    {
-                        self.settle_position_with_outcome(idx, up_won, ts, "settlement");
-                    }
-                }
-                None => {
-                    self.settle_position_with_outcome(idx, up_won, ts, "settlement");
-                }
-            }
+            self.settle_position_with_outcome(idx, up_won, ts, "settlement");
         }
     }
 
@@ -2152,6 +2337,47 @@ impl StaggeredArbBacktestEngine {
             entry_gamma: pos.entry_greeks.map(|g| g.gamma),
             entry_theta: pos.entry_greeks.map(|g| g.theta),
             entry_fair_value: pos.entry_greeks.map(|g| g.fair_value),
+        });
+
+        let exit_price = if winner_matches_leg1 {
+            Decimal::ONE
+        } else {
+            Decimal::ZERO
+        };
+
+        self.recorder.record_exit(&BacktestSignal {
+            signal_type: SignalType::Exit,
+            symbol: symbol.clone(),
+            direction: format!("{}", pos.leg1_direction),
+            timestamp: ts,
+            p_hat: Some(pos.entry_p_hat),
+            ev_net: Some(pnl.to_f64().unwrap_or(0.0)),
+            sigma: Some(pos.entry_sigma),
+            market_price: Some(exit_price),
+            spot_price: None,
+            s0: Some(pos.s0),
+            time_remaining_secs: None,
+            filter_reason: None,
+            exit_reason: Some(reason.to_string()),
+            exit_price: Some(exit_price),
+        });
+
+        self.recorder.record_trade(&PendingTrade {
+            symbol,
+            direction: format!("{}", pos.leg1_direction),
+            entry_time: pos.leg1_time,
+            exit_time: ts,
+            entry_price: pos.leg1_price,
+            exit_price,
+            shares: pos.leg1_shares as i32,
+            pnl,
+            won: pnl > Decimal::ZERO,
+            holding_secs,
+            exit_reason: reason.to_string(),
+            entry_p_hat: Some(pos.entry_p_hat),
+            entry_ev_net: Some(pnl.to_f64().unwrap_or(0.0)),
+            entry_sigma: Some(pos.entry_sigma),
+            s0: Some(pos.s0),
         });
     }
 
@@ -2738,6 +2964,22 @@ mod tests {
         ]
     }
 
+    fn seed_persistent_pm_quotes(
+        engine: &mut StaggeredArbBacktestEngine,
+        event_slug: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        first_seen_at: DateTime<Utc>,
+        last_seen_at: DateTime<Utc>,
+    ) {
+        engine.record_pm_quote(event_slug, Side::Up, up_ask, first_seen_at);
+        engine.record_pm_quote(event_slug, Side::Down, down_ask, first_seen_at);
+        if last_seen_at != first_seen_at {
+            engine.record_pm_quote(event_slug, Side::Up, up_ask, last_seen_at);
+            engine.record_pm_quote(event_slug, Side::Down, down_ask, last_seen_at);
+        }
+    }
+
     fn make_event_open(
         ts: &str,
         symbol: &str,
@@ -2799,6 +3041,8 @@ mod tests {
         assert_eq!(config.max_wait_secs, 120);
         assert_eq!(config.entry_after_start_min_secs, 30);
         assert_eq!(config.entry_after_start_max_secs, 240);
+        assert_eq!(config.pm_quote_max_stale_secs, 10);
+        assert_eq!(config.entry_quote_persistence_secs, 8);
         assert_eq!(config.min_leg2_delay_secs, 3);
         assert_eq!(config.max_trades_per_event, 0);
         assert_eq!(config.cooldown_secs, 5);
@@ -2838,6 +3082,8 @@ mod tests {
         assert_eq!(config.max_leg1_price, dec!(0.56));
         assert_eq!(config.entry_after_start_min_secs, 30);
         assert_eq!(config.entry_after_start_max_secs, 240);
+        assert_eq!(config.pm_quote_max_stale_secs, 10);
+        assert_eq!(config.entry_quote_persistence_secs, 8);
         assert_eq!(config.strong_obi_window_bonus_secs, 60);
         assert_eq!(config.allowed_window_durations, vec![300]);
         assert_eq!(config.force_complete_threshold, dec!(1.06));
@@ -3637,6 +3883,57 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_positions_does_not_force_buy_leg2_at_settlement() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.use_greeks = false;
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        seed_persistent_pm_quotes(
+            &mut engine,
+            "test-event",
+            Some(dec!(0.60)),
+            Some(dec!(0.40)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.55),
+            leg1_shares: 20,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(0.165),
+            entry_obi: None,
+            protective_stop_armed_at: None,
+            wait_deadline: now + chrono::Duration::seconds(60),
+            s0: dec!(100000),
+            event_end_time: now,
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.00),
+            initial_sum: dec!(1.00),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.resolve_positions("BTCUSDT", "test-event", true, now);
+
+        assert_eq!(engine.closed_trades.len(), 1);
+        assert_eq!(engine.closed_trades[0].exit_reason, "settlement");
+        assert_eq!(engine.closed_trades[0].leg2_price, None);
+        assert_eq!(engine.closed_trades[0].final_sum, None);
+    }
+
+    #[test]
     fn test_entry_uses_simulated_fill_time_for_leg1_clock() {
         let mut config = StaggeredArbBacktestConfig::default();
         config.direction_threshold = 0.0;
@@ -3658,9 +3955,14 @@ mod tests {
         engine
             .active_events
             .insert("BTCUSDT".into(), vec![window.clone()]);
-        engine
-            .pm_asks_by_event
-            .insert("evt".into(), (Some(dec!(0.55)), Some(dec!(0.45))));
+        seed_persistent_pm_quotes(
+            &mut engine,
+            "evt",
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+            now - chrono::Duration::seconds(10),
+            now,
+        );
         engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.02));
         engine.binance_l2_obi_ts.insert("BTCUSDT".into(), now);
 
@@ -3693,6 +3995,115 @@ mod tests {
         assert_eq!(engine.positions.len(), 1);
         assert_eq!(engine.positions[0].leg1_time, expected_fill);
         assert_eq!(engine.positions[0].wait_deadline, expected_wait);
+    }
+
+    #[test]
+    fn test_entry_requires_persistent_other_ask_before_opening_leg1() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.direction_threshold = 0.0;
+        config.use_greeks = false;
+        config.entry_after_start_min_secs = 0;
+        config.max_initial_sum = dec!(1.20);
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+
+        let now = Utc::now();
+        let later = now + chrono::Duration::seconds(9);
+        let window = ActiveWindowInfo {
+            event_slug: "evt".into(),
+            s0: dec!(100),
+            end_time: later + chrono::Duration::seconds(280),
+            window_duration_secs: 300,
+        };
+
+        engine
+            .active_events
+            .insert("BTCUSDT".into(), vec![window.clone()]);
+        engine.binance_l2_obi_5.insert("BTCUSDT".into(), dec!(0.02));
+        engine.binance_l2_obi_ts.insert("BTCUSDT".into(), later);
+
+        engine.record_pm_quote("evt", Side::Up, Some(dec!(0.55)), now);
+        engine.record_pm_quote("evt", Side::Down, Some(dec!(0.45)), now);
+        engine.try_entry_for_window(
+            "BTCUSDT",
+            now,
+            &window,
+            dec!(101),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+        assert!(
+            engine.positions.is_empty(),
+            "entry should wait until the opposite-side ask has persisted for the configured duration"
+        );
+
+        engine.record_pm_quote("evt", Side::Up, Some(dec!(0.55)), later);
+        engine.record_pm_quote("evt", Side::Down, Some(dec!(0.45)), later);
+        engine.try_entry_for_window(
+            "BTCUSDT",
+            later,
+            &window,
+            dec!(101),
+            (Some(0.001), 100.0),
+            Some(dec!(0.55)),
+            Some(dec!(0.45)),
+        );
+        assert_eq!(
+            engine.positions.len(),
+            1,
+            "entry should proceed once the opposite-side ask has remained visible long enough"
+        );
+    }
+
+    #[test]
+    fn test_record_pm_quote_clears_disappearing_ask_side() {
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(
+            StaggeredArbBacktestConfig::default(),
+        );
+        let now = Utc::now();
+
+        engine.record_pm_quote("evt", Side::Up, Some(dec!(0.55)), now - chrono::Duration::seconds(10));
+        engine.record_pm_quote("evt", Side::Down, Some(dec!(0.45)), now - chrono::Duration::seconds(10));
+        assert_eq!(
+            engine.pm_asks_by_event.get("evt").copied(),
+            Some((Some(dec!(0.55)), Some(dec!(0.45))))
+        );
+
+        engine.record_pm_quote("evt", Side::Down, None, now);
+        assert_eq!(
+            engine.pm_asks_by_event.get("evt").copied(),
+            Some((Some(dec!(0.55)), None)),
+            "replay should clear vanished PM asks instead of leaving stale prices live"
+        );
+    }
+
+    #[test]
+    fn test_record_pm_quote_resets_persistence_after_stale_gap() {
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(
+            StaggeredArbBacktestConfig::default(),
+        );
+        let first_seen_at = Utc::now();
+        let reappeared_at = first_seen_at + chrono::Duration::seconds(20);
+
+        engine.record_pm_quote("evt", Side::Down, Some(dec!(0.45)), first_seen_at);
+        engine.record_pm_quote("evt", Side::Down, Some(dec!(0.45)), reappeared_at);
+
+        let state = engine
+            .pm_quote_state_by_event
+            .get("evt")
+            .copied()
+            .expect("quote state should exist");
+        assert_eq!(
+            state.down.first_seen_at,
+            Some(reappeared_at),
+            "a quote that reappears after a stale gap must restart persistence timing"
+        );
+        assert!(
+            !engine
+                .config
+                .entry_quote_is_persistent(state.down.first_seen_at, reappeared_at),
+            "reappearing quotes should not immediately satisfy the persistence gate"
+        );
     }
 
     #[test]

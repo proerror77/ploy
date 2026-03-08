@@ -32,6 +32,8 @@ min_leg2_delay_secs = 3
 max_trades_per_event = 0
 entry_after_start_min_secs = 30  # observe the first 30s before opening new leg1s
 entry_after_start_max_secs = 240 # keep the early post-open window slightly wider; replay shows this lifts trade count without hurting quality
+pm_quote_max_stale_secs = 10     # live/replay should ignore Polymarket asks that have gone quiet for too long
+entry_quote_persistence_secs = 8 # only open LEG1 when the opposite-side ask has stayed visible long enough to look hedgeable
 strong_obi_window_bonus_secs = 60 # allow a little longer on 15m windows when OBI is both strong and persistent
 no_trade_last_secs = 30          # block new leg1s in the final 30s
 
