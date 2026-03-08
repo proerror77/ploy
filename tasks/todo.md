@@ -1709,3 +1709,20 @@ Delete the unreferenced legacy JSON-weights training script now that the repo's 
 ## Review
 
 - [x] The deleted script was an orphaned training path; the active codebase and docs point at ONNX-based training instead.
+
+---
+
+# Legacy AWS Deployment Script Cleanup (2026-03-08)
+
+## Goal
+Delete the unreferenced AWS Japan deployment helper that still describes on-host Rust builds, which now violates the repo's trading-host deployment policy.
+
+## Tasks
+
+- [x] Confirm `scripts/deploy-aws-jp.sh` has no repo references outside itself.
+- [x] Confirm the script still instructs building Rust source directly on the host/instance.
+- [x] Delete `scripts/deploy-aws-jp.sh`.
+
+## Review
+
+- [x] The script was stale manual tooling and conflicted with the current release-artifact-only deployment policy for trading hosts.
