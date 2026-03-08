@@ -1,3 +1,31 @@
+# Coordinator Execution Accounting And Aliyun Release Fixes (2026-03-08)
+
+## Goal
+Validate the latest external review against the current branch and land the confirmed low-risk critical fixes without expanding into the larger bootstrap/runtime refactor.
+
+## Tasks
+
+- [x] Re-verify the reported critical findings against current code and mark stale findings explicitly.
+- [x] Fix duplicated `record_success` accounting in `src/coordinator/coordinator.rs`.
+- [x] Replace misleading `let _ = positions.open_position(...)` drops with explicit position tracking in `src/coordinator/coordinator.rs`.
+- [x] Make `.github/workflows/release-aliyun.yml` build a Linux ARM release artifact for the Aliyun trading host.
+- [x] Add targeted regression coverage for coordinator execution accounting.
+- [x] Run targeted validation and capture results.
+
+## Review
+
+- [x] Confirm which external review findings were valid versus stale on this branch.
+- [x] Confirm coordinator success counters no longer double-count a single fill.
+- [x] Confirm the Aliyun release workflow now targets `aarch64-unknown-linux-gnu`.
+
+## Progress notes
+
+- 2026-03-08: Re-verified the external review against the current branch. Valid findings: duplicate `record_success`, oversized `bootstrap.rs`, and the Aliyun release workflow building the wrong architecture. Stale/inaccurate findings: root `README.md` exists, and the two `let _ = positions.open_position(...)` sites were not discarding errors because `open_position` is infallible and returns a `position_id`.
+- 2026-03-08: Added an execution-path regression test proving a single dry-run BUY fill increments RiskGate success counters exactly once.
+- 2026-03-08: `release-aliyun.yml` now builds on `ubuntu-24.04-arm`, targets `aarch64-unknown-linux-gnu`, and records the target in `RELEASE.txt` and the deployment summary.
+
+---
+
 # Collector consolidation TODO
 
 ## Goal

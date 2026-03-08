@@ -2731,7 +2731,7 @@ impl Coordinator {
                 .await;
 
             if fill.is_buy {
-                let _ = self
+                let position_id = self
                     .positions
                     .open_position(
                         &fill.agent_id,
@@ -2743,6 +2743,14 @@ impl Coordinator {
                         fill.fill_price,
                     )
                     .await;
+                debug!(
+                    agent_id = %fill.agent_id,
+                    intent_id = %fill.intent_id,
+                    %position_id,
+                    shares = fill.filled_shares,
+                    fill_price = %fill.fill_price,
+                    "restored tracked BUY position"
+                );
             } else {
                 let realized_pnl = self
                     .apply_sell_fill_to_positions(&intent, fill.filled_shares, fill.fill_price)
@@ -4226,7 +4234,7 @@ impl Coordinator {
                     let mut realized_pnl = Decimal::ZERO;
                     if result.filled_shares > 0 {
                         if intent.is_buy {
-                            let _ = self
+                            let position_id = self
                                 .positions
                                 .open_position(
                                     &agent_id,
@@ -4238,6 +4246,14 @@ impl Coordinator {
                                     fill_price,
                                 )
                                 .await;
+                            debug!(
+                                %agent_id,
+                                %intent_id,
+                                %position_id,
+                                shares = result.filled_shares,
+                                fill_price = %fill_price,
+                                "tracked executed BUY position"
+                            );
                         } else {
                             realized_pnl = self
                                 .apply_sell_fill_to_positions(
@@ -4263,9 +4279,6 @@ impl Coordinator {
                     } else {
                         self.risk_gate.record_success(&agent_id, realized_pnl).await;
                     }
-
-                    // Record execution outcome with realized PnL attribution.
-                    self.risk_gate.record_success(&agent_id, realized_pnl).await;
                 }
                 Err(e) => {
                     error!(
@@ -5775,6 +5788,26 @@ mod tests {
         assert!(key.contains("dep:market"));
         assert!(key
             .contains("condition:0xabcd00000000000000000000000000000000000000000000000000000000"));
+    }
+
+    #[tokio::test]
+    async fn test_drain_and_execute_records_single_success_for_buy_fill() {
+        let (_handle, coordinator) = make_test_handle();
+        coordinator
+            .risk_gate
+            .register_agent_with_domain("crypto_lob_ml", Domain::Crypto, AgentRiskParams::default())
+            .await;
+
+        let intent =
+            make_intent(true, OrderPriority::Normal).with_metadata("deployment_id", "deploy.test");
+
+        coordinator.handle_order_intent(intent).await;
+        coordinator.drain_and_execute().await;
+
+        let (total_pnl, success_count, failure_count) = coordinator.risk_gate.daily_stats().await;
+        assert_eq!(total_pnl, Decimal::ZERO);
+        assert_eq!(success_count, 1);
+        assert_eq!(failure_count, 0);
     }
 
     #[test]

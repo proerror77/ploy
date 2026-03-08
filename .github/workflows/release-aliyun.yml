@@ -29,6 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
+  PLOY_RELEASE_TARGET: aarch64-unknown-linux-gnu
   DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
   PLOY_SYSTEMD_MEMORY_HIGH: ${{ vars.PLOY_SYSTEMD_MEMORY_HIGH || '1280M' }}
   PLOY_SYSTEMD_MEMORY_MAX: ${{ vars.PLOY_SYSTEMD_MEMORY_MAX || '1536M' }}
@@ -36,8 +37,8 @@ env:
 
 jobs:
   build:
-    name: Build Linux Release Artifact
-    runs-on: ubuntu-latest
+    name: Build Linux ARM64 Release Artifact
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     outputs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
@@ -72,6 +73,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.PLOY_RELEASE_TARGET }}
 
       - name: Install build dependencies
         run: |
@@ -99,8 +102,10 @@ jobs:
           RUSTC_WRAPPER: sccache
           SCCACHE_CACHE_SIZE: 10G
         run: |
-          cargo build --release --locked --features "${PLOY_RELEASE_FEATURES}"
-          strip target/release/ploy || true
+          cargo build --release --locked \
+            --target "${PLOY_RELEASE_TARGET}" \
+            --features "${PLOY_RELEASE_FEATURES}"
+          strip "target/${PLOY_RELEASE_TARGET}/release/ploy" || true
 
       - name: Show sccache stats
         if: always()
@@ -108,13 +113,14 @@ jobs:
 
       - name: Verify Linux binary format
         run: |
-          file target/release/ploy | tee dist-file.txt
+          file "target/${PLOY_RELEASE_TARGET}/release/ploy" | tee dist-file.txt
           grep -q "ELF 64-bit LSB" dist-file.txt
+          grep -Eq "ARM aarch64|ARM64|aarch64" dist-file.txt
 
       - name: Create release bundle
         run: |
           mkdir -p dist
-          cp target/release/ploy dist/ploy
+          cp "target/${PLOY_RELEASE_TARGET}/release/ploy" dist/ploy
           cp config/strategies/momentum.toml dist/momentum.toml
           cp config/strategies/staggered_arb.toml dist/staggered_arb.toml
           cp migrations/022_order_strategy_tracking.sql dist/022_order_strategy_tracking.sql
@@ -123,6 +129,7 @@ jobs:
           Release: ${{ steps.meta.outputs.release_tag }}
           Commit: ${{ steps.source-sha.outputs.source_sha }}
           Features: ${PLOY_RELEASE_FEATURES}
+          Target: ${PLOY_RELEASE_TARGET}
           Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
           EOF
           tar czf "dist/ploy-release-${{ steps.meta.outputs.release_tag }}.tar.gz" -C dist \
@@ -471,5 +478,6 @@ jobs:
           echo "- Release: ${{ needs.build.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: ${{ needs.build.outputs.source_sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- Features: ${{ env.PLOY_RELEASE_FEATURES }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: ${{ env.PLOY_RELEASE_TARGET }}" >> $GITHUB_STEP_SUMMARY
           echo "- Target host: \`${{ steps.resolve-host.outputs.host }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
