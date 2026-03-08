@@ -362,7 +362,6 @@ Referenced files:
 - `src/persistence/dlq_processor.rs`
 - `src/services/health.rs`
 - `src/services/metrics.rs`
-- `src/services/order_monitor.rs`
 - `src/strategy/event_edge/core.rs`
 - `src/strategy/execution/engine.rs`
 - `src/strategy/execution/engine_store.rs`
@@ -406,7 +405,6 @@ Referenced files:
 
 - `migrations/009_event_registry.sql`
 - `src/adapters/postgres.rs`
-- `src/config.rs`
 - `src/strategy/registry/mod.rs`
 
 ### event_snapshots
@@ -452,7 +450,6 @@ Referenced files:
 - `src/main_modes/collector_modes.rs`
 - `src/platform/agents/nba_agent.rs`
 - `src/rl/integration/rl_strategy.rs`
-- `src/services/order_monitor.rs`
 - `src/strategy/adapters.rs`
 - `src/strategy/backtest_feed.rs`
 - `src/strategy/dump_hedge.rs`

@@ -178,6 +178,19 @@ Remove the dead `event_registry` config surface now that the discovery service h
 - [x] Confirm `AppConfig.event_registry` has no runtime consumer.
 - [x] Remove `DiscoveryConfig` and the `event_registry` field from `src/config.rs`.
 - [x] Align README config surface docs with the remaining active sections.
+
+---
+
+# Docs Reference Cleanup (2026-03-08)
+
+## Goal
+Remove doc references that still point at deleted legacy services or deleted config surfaces.
+
+## Tasks
+
+- [x] Drop deleted `services/order_monitor.rs` references from schema/code-map docs.
+- [x] Drop deleted `event_registry` config references from schema/code-map docs.
+- [x] Rewrite stale review/migration notes so they no longer point at deleted files as live paths.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

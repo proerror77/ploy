@@ -320,7 +320,7 @@ definitions:
 | `ExecutionConfig` | `src/config.rs:144` | `src/strategy/core/executor.rs:21` | -- |
 | `OrderExecutor` | `src/strategy/executor.rs:14` | `src/strategy/core/executor.rs:110` | -- |
 | `ArbSide` | `src/strategy/split_arb.rs:137` | `src/strategy/core/position.rs:11` | -- |
-| `ReconciliationResult` | `src/strategy/reconciliation.rs:54` | `src/services/order_monitor.rs:467` | -- |
+| `ReconciliationResult` | `src/strategy/reconciliation.rs:54` | -- | -- |
 
 This creates real confusion. The `mod.rs` re-exports use aliases to avoid
 collisions (e.g., `ArbSide as CoreArbSide`), but downstream code must know
@@ -649,13 +649,10 @@ items by making everything public.
 
 ### 8.3 Untracked New Files [MEDIUM]
 
-The git status shows several untracked files that appear to be
+The git status originally showed several untracked files that appeared to be
 work-in-progress or experimental:
 
 ```
-?? src/services/event_edge_agent.rs
-?? src/services/event_edge_claude_framework.rs
-?? src/services/event_edge_event_driven.rs
 ?? src/strategy/event_edge.rs
 ?? src/strategy/event_models/
 ```

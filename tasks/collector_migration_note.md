@@ -43,7 +43,7 @@ Prefer reading canonical with:
 
 ## Legacy `ticks` pathway
 
-- `services/data_collector` now writes canonical `clob_quote_ticks` by default.
+- The legacy collector write path now writes canonical `clob_quote_ticks` by default.
 - Legacy `ticks` table writes are deprecated and disabled by default.
   - Re-enable only for compatibility: `PLOY_LEGACY_TICKS_ENABLED=true`
 
