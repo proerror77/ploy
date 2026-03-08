@@ -726,13 +726,10 @@ failures because fill confirmation was not enabled.
 
 ### 9.3 Validation at Boundaries [GOOD]
 
-**File**: `src/validation.rs`
-
-The validation module provides defensive checks for external API data:
-prices must be in `[0, 1]`, share quantities must be non-zero and below
-a maximum, and timestamps must not be in the future. This is critical
-for a system that consumes data from external APIs where malformed
-responses could trigger incorrect trades.
+Historical note: the repo previously carried a top-level
+`src/validation.rs` helper module for boundary validation. That module
+has since been retired in favor of the remaining canonical validation
+surfaces under strategy/risk-management code.
 
 ### 9.4 Comment Language Mixing [LOW]
 

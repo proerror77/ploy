@@ -191,6 +191,19 @@ Remove doc references that still point at deleted legacy services or deleted con
 - [x] Drop deleted `services/order_monitor.rs` references from schema/code-map docs.
 - [x] Drop deleted `event_registry` config references from schema/code-map docs.
 - [x] Rewrite stale review/migration notes so they no longer point at deleted files as live paths.
+
+---
+
+# Validation Module Cleanup (2026-03-08)
+
+## Goal
+Delete the top-level `src/validation.rs` helper module after confirming it has no in-repo callers and no longer represents the canonical validation surface.
+
+## Tasks
+
+- [x] Confirm `src/validation.rs` has no runtime or test callers outside its own file.
+- [x] Remove the dead public export from `src/lib.rs`.
+- [x] Delete `src/validation.rs`.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

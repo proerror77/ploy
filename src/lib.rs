@@ -24,7 +24,6 @@ pub mod signing;
 pub mod strategy;
 pub mod supervisor;
 pub mod tui;
-pub mod validation;
 
 // Reinforcement Learning module (optional, enabled with "rl" feature)
 #[cfg(feature = "rl")]
