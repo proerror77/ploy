@@ -320,7 +320,7 @@ definitions:
 | `ExecutionConfig` | `src/config.rs:144` | `src/strategy/core/executor.rs:21` | -- |
 | `OrderExecutor` | `src/strategy/executor.rs:14` | `src/strategy/core/executor.rs:110` | -- |
 | `ArbSide` | `src/strategy/split_arb.rs:137` | `src/strategy/core/position.rs:11` | -- |
-| `ReconciliationResult` | `src/strategy/reconciliation.rs:54` | -- | -- |
+| `ReconciliationResult` | retired legacy module | -- | -- |
 
 This creates real confusion. The `mod.rs` re-exports use aliases to avoid
 collisions (e.g., `ArbSide as CoreArbSide`), but downstream code must know

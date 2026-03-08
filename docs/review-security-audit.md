@@ -522,7 +522,6 @@ The `CheckpointService::start` method spawns a background task with `tokio::spaw
 
 **Files reviewed:**
 - `/Users/proerror/Documents/ploy/src/strategy/fund_manager.rs`
-- `/Users/proerror/Documents/ploy/src/strategy/reconciliation.rs`
 
 ### 9.1 Fund Manager Balance Caching (Good Practice)
 
@@ -539,11 +538,7 @@ The `can_open_position` method enforces multiple safety checks in sequence:
 6. Maximum single exposure limit
 7. Minimum order size (5 shares, $1 value)
 
-### 9.3 Reconciliation Service (Good Practice)
-
-The `ReconciliationService` runs every 30 seconds, comparing local database positions against exchange balances. It classifies discrepancies by severity (Info < 5%, Warning 5-20%, Critical > 20%) and auto-corrects only minor (Info-level) differences. Critical discrepancies are logged at error level and persisted to the database for manual review.
-
-### Finding SEC-16: Reconciliation Relies on Unimplemented get_positions()
+### Finding SEC-16: Legacy Reconciliation Path Relied on Unimplemented get_positions()
 
 | Attribute | Value |
 |-----------|-------|
@@ -551,7 +546,7 @@ The `ReconciliationService` runs every 30 seconds, comparing local database posi
 | **File** | `src/adapters/polymarket_clob.rs:1271-1280` |
 | **Status** | Open |
 
-The `ReconciliationService` calls `self.client.get_positions()` to fetch exchange balances. However, the `PolymarketClient::get_positions()` method is a stub that always returns an empty vector:
+The retired reconciliation path called `self.client.get_positions()` to fetch exchange balances. However, the `PolymarketClient::get_positions()` method is a stub that always returns an empty vector:
 
 ```rust
 pub async fn get_positions(&self) -> Result<Vec<PositionResponse>> {

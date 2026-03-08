@@ -218,6 +218,19 @@ Delete orphaned offline analysis modules once they no longer have any CLI or run
 - [x] Remove the dead export from `src/analysis/mod.rs`.
 - [x] Delete `src/analysis/pattern_memory_backtest.rs`.
 - [x] Drop code-map references that still pointed at the deleted file.
+
+---
+
+# Reconciliation Module Cleanup (2026-03-08)
+
+## Goal
+Delete the orphaned `strategy/reconciliation` module once it no longer has any runtime callers and only survives as a public re-export.
+
+## Tasks
+
+- [x] Confirm `ReconciliationService` and related types have no in-repo callers.
+- [x] Remove the dead re-export from `src/strategy/mod.rs`.
+- [x] Delete `src/strategy/reconciliation.rs`.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

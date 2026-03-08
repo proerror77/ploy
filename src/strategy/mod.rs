@@ -90,7 +90,6 @@ pub mod paper_runner;
 pub mod parquet_analysis;
 pub mod position_manager;
 pub mod probability;
-pub mod reconciliation;
 pub mod reverse_engineered;
 pub mod risk_mgmt;
 pub mod signal;
@@ -210,10 +209,6 @@ pub use position_manager::{
     PositionSummary,
 };
 pub use probability::{estimate_probability, full_estimate, Features, ProbabilityEstimate};
-pub use reconciliation::{
-    DiscrepancySeverity, PositionDiscrepancy, ReconciliationConfig, ReconciliationResult,
-    ReconciliationService,
-};
 pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
 pub use reverse_engineered::{
     extract_profile_snapshot, infer_strategy_params, run_reverse_engineered_profile_paper,

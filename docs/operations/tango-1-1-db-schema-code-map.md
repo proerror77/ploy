@@ -604,7 +604,6 @@ Referenced files:
 - `migrations/013_schema_repair_and_observability.sql`
 - `migrations/019_data_integrity.sql`
 - `src/coordinator/bootstrap.rs`
-- `src/strategy/reconciliation.rs`
 
 ### position_reconciliation_log
 
@@ -614,7 +613,6 @@ Referenced files:
 - `migrations/007_performance_indexes.sql`
 - `migrations/013_schema_repair_and_observability.sql`
 - `src/coordinator/bootstrap.rs`
-- `src/strategy/reconciliation.rs`
 
 ### positions
 
