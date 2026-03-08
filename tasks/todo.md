@@ -204,6 +204,20 @@ Delete the top-level `src/validation.rs` helper module after confirming it has n
 - [x] Confirm `src/validation.rs` has no runtime or test callers outside its own file.
 - [x] Remove the dead public export from `src/lib.rs`.
 - [x] Delete `src/validation.rs`.
+
+---
+
+# Analysis Module Cleanup (2026-03-08)
+
+## Goal
+Delete orphaned offline analysis modules once they no longer have any CLI or runtime entry points.
+
+## Tasks
+
+- [x] Confirm `src/analysis/pattern_memory_backtest.rs` has no caller outside its own module.
+- [x] Remove the dead export from `src/analysis/mod.rs`.
+- [x] Delete `src/analysis/pattern_memory_backtest.rs`.
+- [x] Drop code-map references that still pointed at the deleted file.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

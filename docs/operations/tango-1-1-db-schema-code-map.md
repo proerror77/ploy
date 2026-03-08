@@ -201,7 +201,6 @@ Referenced files:
 Referenced files:
 
 - `migrations/018_training_data_tables.sql`
-- `src/analysis/pattern_memory_backtest.rs`
 - `src/cli/strategy.rs`
 - `src/collector/backtest_collector.rs`
 - `src/collector/binance_klines.rs`
@@ -592,7 +591,6 @@ Referenced files:
 - `scripts/train_crypto_lob_mlp_onnx_from_db.py`
 - `scripts/train_crypto_lob_tcn_onnx_from_db.py`
 - `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
-- `src/analysis/pattern_memory_backtest.rs`
 - `src/cli/strategy.rs`
 - `src/coordinator/bootstrap.rs`
 - `src/strategy/backtest_feed.rs`
