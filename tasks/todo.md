@@ -1,3 +1,35 @@
+# Coordinator Admission Extraction (2026-03-09)
+
+## Goal
+Move deployment registry ownership and order-admission policy out of `src/coordinator/coordinator.rs` so coordinator keeps execution/orchestration while admission rules live behind one module.
+
+## Tasks
+
+- [x] Inventory the remaining admission subsystem: duplicate guard, deployment gate, kelly sizing, min-order constraints, and idempotency key generation.
+- [x] Add `src/coordinator/admission.rs` with `AdmissionController`, deployment registry loading/helpers, and the admission policy logic.
+- [x] Rewire `Coordinator` and `CoordinatorHandle` to use the shared admission controller instead of raw `deployments` / `duplicate_guard` fields.
+- [x] Move deployment-gate and duplicate-guard tests out of `coordinator.rs` and keep them with the admission module.
+- [x] Run targeted compile/test validation for deployment resolution, duplicate guard, and coordinator execution accounting.
+
+## Review
+
+- [x] Confirm deployment registry ownership no longer lives directly on `Coordinator`.
+- [x] Confirm `handle.shared_deployments()` still exposes the same underlying registry.
+- [x] Confirm request idempotency and deployment-gate behavior are unchanged after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Planned after governance extraction. The next large cohesive seam is order admission: deployment registry + duplicate guard + sizing + venue minimums + stable idempotency.
+- 2026-03-09: Added `src/coordinator/admission.rs` and moved duplicate guard, deployment registry loading/resolution, Kelly sizing, venue minimum checks, and stable idempotency key construction behind `AdmissionController`.
+- 2026-03-09: `Coordinator` and `CoordinatorHandle` now share one admission owner instead of directly owning `deployments` and `duplicate_guard`; `handle.shared_deployments()` delegates to the admission registry.
+- 2026-03-09: Moved deployment-gate, duplicate-guard, and idempotency coverage into the admission module; targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_deployment_gate_accepts_explicit_deployment_and_applies_metadata --lib -- --nocapture`
+  - `cargo test test_build_order_request_fallback_uses_intent_created_at --lib -- --nocapture`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+
+---
+
 # Coordinator Governance Extraction (2026-03-09)
 
 ## Goal

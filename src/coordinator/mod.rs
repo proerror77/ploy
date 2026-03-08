@@ -4,6 +4,7 @@
 //! Provides a single order submission chokepoint with risk checks,
 //! cross-agent position awareness, and dynamic pause/resume control.
 
+mod admission;
 pub mod bootstrap;
 mod capital;
 pub mod command;
