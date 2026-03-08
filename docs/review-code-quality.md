@@ -54,7 +54,7 @@ The `src/` directory contains 18 top-level modules:
 ```
 src/
   adapters/     - External service clients (Polymarket, Binance, Postgres, Feishu)
-  agent/        - LLM-powered advisory/autonomous agents (Grok, Claude)
+  ai_clients/   - LLM/data client integrations (Grok, Claude, sports data)
   api/          - REST API server (feature-gated behind "api")
   cli/          - Command-line interface definitions
   collector/    - Market data collection (Binance depth, klines)
@@ -211,7 +211,6 @@ across async boundaries instead of cloning the full struct each time.
 The codebase uses `async-trait` consistently for async trait definitions:
 
 - `Strategy` trait (`src/strategy/traits.rs:20`)
-- `DomainAgent` trait (`src/platform/traits.rs:120`)
 - `Checkpointable` trait (`src/persistence/checkpoint.rs`)
 
 This is the correct approach for Rust 2021 edition. When the project upgrades
@@ -508,8 +507,8 @@ using mocked adapters are essential.
 
 The `mockall` crate is listed in `dev-dependencies` but there is no
 evidence of mock-based testing in the codebase. The `Strategy` trait
-and `DomainAgent` trait are well-suited for mock-based testing, but
-no mocks have been created.
+and execution/order-plane contracts are well-suited for mock-based testing,
+but no mocks have been created.
 
 **Recommendation**: Create integration tests in `tests/` that:
 1. Mock `PolymarketClient` to simulate order fills and failures

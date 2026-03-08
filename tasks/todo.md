@@ -1659,3 +1659,19 @@ Narrow the `account` top-level re-export surface so it only exposes the account-
 ## Review
 
 - [x] The current runtime and API code only consume the smaller top-level account surface; the removed account re-exports had become dead compatibility API.
+
+---
+
+# Review Doc Sync Cleanup (2026-03-08)
+
+## Goal
+Keep active review docs aligned with the post-retirement codebase so they stop describing `agent/` and `DomainAgent` as current architecture.
+
+## Tasks
+
+- [x] Update active review docs to reference `ai_clients/` instead of the retired `agent/` path.
+- [x] Reword `DomainAgent` mentions in active review docs as historical rather than current architecture.
+
+## Review
+
+- [x] Active review docs now describe the current `ai_clients` layout and no longer present `DomainAgent` as an active contract in the runtime surface.
