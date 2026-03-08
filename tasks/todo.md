@@ -1,3 +1,35 @@
+# Coordinator Governance Extraction (2026-03-09)
+
+## Goal
+Move governance policy, ingress state, and per-agent pause ownership out of `src/coordinator/coordinator.rs` so the coordinator stops directly owning multiple control-plane locks.
+
+## Tasks
+
+- [x] Inventory the governance/ingress seam shared by `CoordinatorHandle` and `Coordinator`.
+- [x] Add `src/coordinator/governance.rs` with `GovernanceController`, `IngressMode`, governance policy helpers, and DB policy persistence/load functions.
+- [x] Rewire `Coordinator` and `CoordinatorHandle` to use the shared governance controller instead of raw ingress/policy locks.
+- [x] Keep execution behavior unchanged by leaving queue draining and order execution in `coordinator.rs`.
+- [x] Run targeted compile/test validation for governance blocking and domain pause behavior.
+
+## Review
+
+- [x] Confirm handle-side and coordinator-side buy gating now read from the same governance owner.
+- [x] Confirm policy update/history and governance status still work after the extraction.
+- [x] Confirm per-agent pause state is no longer owned directly by `Coordinator`.
+
+## Progress notes
+
+- 2026-03-09: Planned next slice after capital extraction. The seam is the control-plane state (`ingress_mode`, `domain_ingress_mode`, `governance_policy`, `paused_agent_ids`) plus its persistence helpers, not `drain_and_execute`.
+- 2026-03-09: Added `src/coordinator/governance.rs` and moved `IngressMode`, `GovernancePolicy`, governance DB persistence/load helpers, and the shared control-plane state into `GovernanceController`.
+- 2026-03-09: `Coordinator` and `CoordinatorHandle` now share one governance owner instead of each reaching into separate ingress/policy locks, which removes duplicated state ownership without touching execution/drain logic.
+- 2026-03-09: Moved pure governance policy tests out of `coordinator.rs`; targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_policy_blocks_domain --lib -- --nocapture`
+  - `cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --nocapture`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+
+---
+
 # Coordinator Capital Policy Extraction (2026-03-08)
 
 ## Goal

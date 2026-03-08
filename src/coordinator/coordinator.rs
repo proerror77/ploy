@@ -34,163 +34,22 @@ use super::capital::{
     CryptoHorizon,
 };
 use super::command::{
-    CoordinatorCommand, CoordinatorControlCommand, DomainIngressSnapshot, GovernanceAgentSnapshot,
+    CoordinatorCommand, CoordinatorControlCommand, GovernanceAgentSnapshot,
     GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
     GovernanceStatusSnapshot,
 };
 use super::config::{CoordinatorConfig, DuplicateGuardScope};
+use super::governance::{
+    governance_block_reason, governance_domain_snapshot_label, load_governance_policy,
+    load_governance_policy_history, persist_governance_policy, GovernanceController,
+    GovernancePolicy, IngressMode,
+};
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IngressMode {
-    Running,
-    Paused,
-    Halted,
-}
-
-impl IngressMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Paused => "paused",
-            Self::Halted => "halted",
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct AgentCommandChannel {
     domain: Domain,
     tx: mpsc::Sender<CoordinatorCommand>,
-}
-
-#[derive(Debug, Clone)]
-struct GovernancePolicy {
-    block_new_intents: bool,
-    blocked_domains: HashSet<Domain>,
-    max_intent_notional_usd: Option<Decimal>,
-    max_total_notional_usd: Option<Decimal>,
-    updated_at: chrono::DateTime<Utc>,
-    updated_by: String,
-    reason: Option<String>,
-    /// Extensible key-value metadata for cross-agent signaling (e.g., OpenClaw regime)
-    metadata: HashMap<String, String>,
-}
-
-impl GovernancePolicy {
-    fn from_config(config: &CoordinatorConfig) -> Self {
-        let blocked_domains = config
-            .governance_blocked_domains
-            .iter()
-            .filter_map(|raw| parse_governance_domain(raw))
-            .collect::<HashSet<_>>();
-
-        Self {
-            block_new_intents: config.governance_block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd: config.governance_max_intent_notional_usd,
-            max_total_notional_usd: config.governance_max_total_notional_usd,
-            updated_at: Utc::now(),
-            updated_by: "boot".to_string(),
-            reason: Some("loaded from coordinator config".to_string()),
-            metadata: HashMap::new(),
-        }
-    }
-
-    fn try_from_update(update: GovernancePolicyUpdate) -> std::result::Result<Self, String> {
-        let mut blocked_domains = HashSet::new();
-        for raw in &update.blocked_domains {
-            let Some(domain) = parse_governance_domain(raw) else {
-                return Err(format!("unknown blocked domain '{}'", raw));
-            };
-            blocked_domains.insert(domain);
-        }
-
-        if update.updated_by.trim().is_empty() {
-            return Err("updated_by is required".to_string());
-        }
-
-        if let Some(v) = update.max_intent_notional_usd {
-            if v <= Decimal::ZERO {
-                return Err("max_intent_notional_usd must be > 0".to_string());
-            }
-        }
-        if let Some(v) = update.max_total_notional_usd {
-            if v <= Decimal::ZERO {
-                return Err("max_total_notional_usd must be > 0".to_string());
-            }
-        }
-
-        Ok(Self {
-            block_new_intents: update.block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd: update.max_intent_notional_usd,
-            max_total_notional_usd: update.max_total_notional_usd,
-            updated_at: Utc::now(),
-            updated_by: update.updated_by.trim().to_string(),
-            reason: update.reason.and_then(|v| {
-                let trimmed = v.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            }),
-            metadata: update.metadata,
-        })
-    }
-
-    fn to_snapshot(&self) -> GovernancePolicySnapshot {
-        let mut blocked_domains = self
-            .blocked_domains
-            .iter()
-            .map(|d| governance_domain_label(*d).to_string())
-            .collect::<Vec<_>>();
-        blocked_domains.sort();
-        GovernancePolicySnapshot {
-            block_new_intents: self.block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd: self.max_intent_notional_usd,
-            max_total_notional_usd: self.max_total_notional_usd,
-            updated_at: self.updated_at,
-            updated_by: self.updated_by.clone(),
-            reason: self.reason.clone(),
-            metadata: self.metadata.clone(),
-        }
-    }
-}
-
-fn parse_governance_domain(raw: &str) -> Option<Domain> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "sports" => Some(Domain::Sports),
-        "crypto" => Some(Domain::Crypto),
-        "politics" => Some(Domain::Politics),
-        "economics" => Some(Domain::Economics),
-        _ => None,
-    }
-}
-
-fn governance_domain_label(domain: Domain) -> &'static str {
-    match domain {
-        Domain::Sports => "sports",
-        Domain::Crypto => "crypto",
-        Domain::Politics => "politics",
-        Domain::Economics => "economics",
-        Domain::Custom(_) => "custom",
-    }
-}
-
-fn governance_domain_snapshot_label(domain: Domain) -> String {
-    match domain {
-        Domain::Custom(id) => format!("custom:{}", id),
-        _ => governance_domain_label(domain).to_string(),
-    }
-}
-
-fn governance_policy_blocked_domains_sorted(policy: &GovernancePolicy) -> Vec<String> {
-    let mut blocked_domains = policy
-        .blocked_domains
-        .iter()
-        .map(|d| governance_domain_label(*d).to_string())
-        .collect::<Vec<_>>();
-    blocked_domains.sort();
-    blocked_domains
 }
 
 fn parse_persisted_domain(raw: &str) -> Option<Domain> {
@@ -503,306 +362,6 @@ fn sell_reduce_only_violation_reason(
     None
 }
 
-fn governance_block_reason(
-    policy: &GovernancePolicy,
-    intent: &OrderIntent,
-    current_account_notional: Decimal,
-) -> Option<String> {
-    // Binary-options runtime: sell intents are treated as risk-reducing closes.
-    // Governance "new intent" gates must not block exits/de-risking.
-    if !intent.is_buy {
-        return None;
-    }
-
-    if policy.block_new_intents {
-        return Some("global governance policy blocks new intents".to_string());
-    }
-
-    if policy.blocked_domains.contains(&intent.domain) {
-        return Some(format!(
-            "domain '{}' is blocked by global governance policy",
-            governance_domain_label(intent.domain)
-        ));
-    }
-
-    let intent_notional = intent.notional_value();
-    if let Some(max_intent) = policy.max_intent_notional_usd {
-        if intent_notional > max_intent {
-            return Some(format!(
-                "intent notional {} exceeds governance max_intent_notional_usd {}",
-                intent_notional, max_intent
-            ));
-        }
-    }
-
-    if intent.is_buy {
-        if let Some(max_total) = policy.max_total_notional_usd {
-            let projected = current_account_notional + intent_notional;
-            if projected > max_total {
-                return Some(format!(
-                    "projected account notional {} exceeds governance max_total_notional_usd {}",
-                    projected, max_total
-                ));
-            }
-        }
-    }
-
-    None
-}
-
-async fn persist_governance_policy(
-    pool: &PgPool,
-    account_id: &str,
-    policy: &GovernancePolicy,
-) -> Result<()> {
-    let blocked_domains = governance_policy_blocked_domains_sorted(policy);
-    let mut tx = pool.begin().await.map_err(|e| {
-        crate::error::PloyError::Internal(format!("begin governance policy tx: {}", e))
-    })?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO coordinator_governance_policies (
-            account_id,
-            block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd,
-            max_total_notional_usd,
-            updated_at,
-            updated_by,
-            reason
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (account_id) DO UPDATE SET
-            block_new_intents = EXCLUDED.block_new_intents,
-            blocked_domains = EXCLUDED.blocked_domains,
-            max_intent_notional_usd = EXCLUDED.max_intent_notional_usd,
-            max_total_notional_usd = EXCLUDED.max_total_notional_usd,
-            updated_at = EXCLUDED.updated_at,
-            updated_by = EXCLUDED.updated_by,
-            reason = EXCLUDED.reason
-        "#,
-    )
-    .bind(account_id)
-    .bind(policy.block_new_intents)
-    .bind(sqlx::types::Json(blocked_domains.clone()))
-    .bind(policy.max_intent_notional_usd)
-    .bind(policy.max_total_notional_usd)
-    .bind(policy.updated_at)
-    .bind(policy.updated_by.clone())
-    .bind(policy.reason.clone())
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| crate::error::PloyError::Internal(format!("persist governance policy: {}", e)))?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO coordinator_governance_policy_history (
-            account_id,
-            block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd,
-            max_total_notional_usd,
-            updated_at,
-            updated_by,
-            reason
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        "#,
-    )
-    .bind(account_id)
-    .bind(policy.block_new_intents)
-    .bind(sqlx::types::Json(blocked_domains))
-    .bind(policy.max_intent_notional_usd)
-    .bind(policy.max_total_notional_usd)
-    .bind(policy.updated_at)
-    .bind(policy.updated_by.clone())
-    .bind(policy.reason.clone())
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        crate::error::PloyError::Internal(format!("append governance policy history entry: {}", e))
-    })?;
-
-    tx.commit().await.map_err(|e| {
-        crate::error::PloyError::Internal(format!("commit governance policy tx: {}", e))
-    })?;
-
-    Ok(())
-}
-
-fn clamp_governance_history_limit(limit: usize) -> usize {
-    limit.clamp(1, 500)
-}
-
-async fn load_governance_policy_history(
-    pool: &PgPool,
-    account_id: &str,
-    limit: usize,
-) -> Result<Vec<GovernancePolicyHistoryEntry>> {
-    let limit = clamp_governance_history_limit(limit) as i64;
-    let rows = sqlx::query_as::<
-        _,
-        (
-            i64,
-            bool,
-            sqlx::types::Json<Vec<String>>,
-            Option<Decimal>,
-            Option<Decimal>,
-            chrono::DateTime<Utc>,
-            String,
-            Option<String>,
-        ),
-    >(
-        r#"
-        SELECT
-            id,
-            block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd,
-            max_total_notional_usd,
-            updated_at,
-            updated_by,
-            reason
-        FROM coordinator_governance_policy_history
-        WHERE account_id = $1
-        ORDER BY updated_at DESC, id DESC
-        LIMIT $2
-        "#,
-    )
-    .bind(account_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        crate::error::PloyError::Internal(format!("load governance policy history: {}", e))
-    })?;
-
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                block_new_intents,
-                sqlx::types::Json(blocked_domains),
-                max_intent_notional_usd,
-                max_total_notional_usd,
-                updated_at,
-                updated_by,
-                reason,
-            )| GovernancePolicyHistoryEntry {
-                id,
-                block_new_intents,
-                blocked_domains: blocked_domains
-                    .into_iter()
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty())
-                    .collect(),
-                max_intent_notional_usd,
-                max_total_notional_usd,
-                updated_at,
-                updated_by,
-                reason: reason.and_then(|v| {
-                    let trimmed = v.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_string())
-                }),
-                metadata: HashMap::new(),
-            },
-        )
-        .collect())
-}
-
-async fn load_governance_policy(
-    pool: &PgPool,
-    account_id: &str,
-) -> Result<Option<GovernancePolicy>> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            bool,
-            sqlx::types::Json<Vec<String>>,
-            Option<Decimal>,
-            Option<Decimal>,
-            chrono::DateTime<Utc>,
-            String,
-            Option<String>,
-        ),
-    >(
-        r#"
-        SELECT
-            block_new_intents,
-            blocked_domains,
-            max_intent_notional_usd,
-            max_total_notional_usd,
-            updated_at,
-            updated_by,
-            reason
-        FROM coordinator_governance_policies
-        WHERE account_id = $1
-        "#,
-    )
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| crate::error::PloyError::Internal(format!("load governance policy: {}", e)))?;
-
-    let Some((
-        block_new_intents,
-        sqlx::types::Json(raw_blocked_domains),
-        max_intent_notional_usd,
-        max_total_notional_usd,
-        updated_at,
-        updated_by,
-        reason,
-    )) = row
-    else {
-        return Ok(None);
-    };
-
-    let mut blocked_domains = HashSet::new();
-    let mut unknown_domains = Vec::new();
-    for raw in raw_blocked_domains {
-        if let Some(domain) = parse_governance_domain(&raw) {
-            blocked_domains.insert(domain);
-        } else {
-            unknown_domains.push(raw);
-        }
-    }
-    if !unknown_domains.is_empty() {
-        warn!(
-            account_id = %account_id,
-            domains = ?unknown_domains,
-            "ignoring unknown governance blocked domains from DB"
-        );
-    }
-
-    let max_intent_notional_usd = max_intent_notional_usd.filter(|v| *v > Decimal::ZERO);
-    let max_total_notional_usd = max_total_notional_usd.filter(|v| *v > Decimal::ZERO);
-    let updated_by = {
-        let trimmed = updated_by.trim();
-        if trimmed.is_empty() {
-            "db.restore".to_string()
-        } else {
-            trimmed.to_string()
-        }
-    };
-    let reason = reason.and_then(|v| {
-        let trimmed = v.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    });
-
-    Ok(Some(GovernancePolicy {
-        block_new_intents,
-        blocked_domains,
-        max_intent_notional_usd,
-        max_total_notional_usd,
-        updated_at,
-        updated_by,
-        reason,
-        metadata: HashMap::new(),
-    }))
-}
-
 /// Clonable handle given to agents for submitting orders and state updates
 #[derive(Clone)]
 pub struct CoordinatorHandle {
@@ -815,12 +374,10 @@ pub struct CoordinatorHandle {
     order_queue: Arc<RwLock<OrderQueue>>,
     capital_policy: Arc<CapitalPolicy>,
     positions: Arc<PositionAggregator>,
-    ingress_mode: Arc<RwLock<IngressMode>>,
-    domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
+    governance: Arc<GovernanceController>,
     deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
     allowed_domains: Arc<HashSet<Domain>>,
     authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
-    governance_policy: Arc<RwLock<GovernancePolicy>>,
     governance_store_pool: Option<PgPool>,
 }
 
@@ -863,14 +420,7 @@ impl CoordinatorHandle {
         // Binary-options semantics (Polymarket): SELL intents are treated as
         // reduce-only exits and must remain allowed during pause/halt.
         if intent.is_buy {
-            let global_mode = *self.ingress_mode.read().await;
-            let domain_mode = self
-                .domain_ingress_mode
-                .read()
-                .await
-                .get(&intent.domain)
-                .copied()
-                .unwrap_or(IngressMode::Running);
+            let (global_mode, domain_mode) = self.governance.ingress_modes(intent.domain).await;
 
             if global_mode != IngressMode::Running {
                 return Err(crate::error::PloyError::Validation(format!(
@@ -900,11 +450,7 @@ impl CoordinatorHandle {
 
     /// Pause all agents
     pub async fn pause_all(&self) -> Result<()> {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Paused;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Paused).await;
         self.control_tx
             .send(CoordinatorControlCommand::PauseAll)
             .await
@@ -915,11 +461,7 @@ impl CoordinatorHandle {
 
     /// Resume all agents
     pub async fn resume_all(&self) -> Result<()> {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Running;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Running).await;
         self.control_tx
             .send(CoordinatorControlCommand::ResumeAll)
             .await
@@ -930,11 +472,7 @@ impl CoordinatorHandle {
 
     /// Force-close all positions and stop agents
     pub async fn force_close_all(&self) -> Result<()> {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Halted;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Halted).await;
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseAll)
             .await
@@ -945,11 +483,7 @@ impl CoordinatorHandle {
 
     /// Shutdown all agents gracefully
     pub async fn shutdown_all(&self) -> Result<()> {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Halted;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Halted).await;
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownAll)
             .await
@@ -960,10 +494,9 @@ impl CoordinatorHandle {
 
     /// Pause a specific domain
     pub async fn pause_domain(&self, domain: Domain) -> Result<()> {
-        {
-            let mut domain_mode = self.domain_ingress_mode.write().await;
-            domain_mode.insert(domain, IngressMode::Paused);
-        }
+        self.governance
+            .set_domain_mode(domain, IngressMode::Paused)
+            .await;
         self.control_tx
             .send(CoordinatorControlCommand::PauseDomain(domain))
             .await
@@ -974,10 +507,9 @@ impl CoordinatorHandle {
 
     /// Resume a specific domain
     pub async fn resume_domain(&self, domain: Domain) -> Result<()> {
-        {
-            let mut domain_mode = self.domain_ingress_mode.write().await;
-            domain_mode.remove(&domain);
-        }
+        self.governance
+            .set_domain_mode(domain, IngressMode::Running)
+            .await;
         self.control_tx
             .send(CoordinatorControlCommand::ResumeDomain(domain))
             .await
@@ -988,10 +520,9 @@ impl CoordinatorHandle {
 
     /// Force-close positions for one domain
     pub async fn force_close_domain(&self, domain: Domain) -> Result<()> {
-        {
-            let mut domain_mode = self.domain_ingress_mode.write().await;
-            domain_mode.insert(domain, IngressMode::Halted);
-        }
+        self.governance
+            .set_domain_mode(domain, IngressMode::Halted)
+            .await;
         self.control_tx
             .send(CoordinatorControlCommand::ForceCloseDomain(domain))
             .await
@@ -1002,10 +533,9 @@ impl CoordinatorHandle {
 
     /// Shutdown one domain
     pub async fn shutdown_domain(&self, domain: Domain) -> Result<()> {
-        {
-            let mut domain_mode = self.domain_ingress_mode.write().await;
-            domain_mode.insert(domain, IngressMode::Halted);
-        }
+        self.governance
+            .set_domain_mode(domain, IngressMode::Halted)
+            .await;
         self.control_tx
             .send(CoordinatorControlCommand::ShutdownDomain(domain))
             .await
@@ -1064,7 +594,7 @@ impl CoordinatorHandle {
 
     /// Read current account-level governance policy.
     pub async fn governance_policy(&self) -> GovernancePolicySnapshot {
-        self.governance_policy.read().await.to_snapshot()
+        self.governance.policy_snapshot().await
     }
 
     /// Read account-level governance policy change history (latest first).
@@ -1090,28 +620,14 @@ impl CoordinatorHandle {
         if let Some(pool) = self.governance_store_pool.as_ref() {
             persist_governance_policy(pool, &self.account_id, &next).await?;
         }
-        let snapshot = next.to_snapshot();
-        let mut policy = self.governance_policy.write().await;
-        *policy = next;
-        Ok(snapshot)
+        Ok(self.governance.replace_policy(next).await)
     }
 
     /// Read runtime governance + risk + capital ledger snapshot.
     pub async fn governance_status(&self) -> GovernanceStatusSnapshot {
-        let ingress_mode = self.ingress_mode.read().await.as_str().to_string();
-        let domain_ingress_modes = {
-            let modes = self.domain_ingress_mode.read().await;
-            let mut rows = modes
-                .iter()
-                .map(|(domain, mode)| DomainIngressSnapshot {
-                    domain: governance_domain_snapshot_label(*domain),
-                    mode: mode.as_str().to_string(),
-                })
-                .collect::<Vec<_>>();
-            rows.sort_by(|a, b| a.domain.cmp(&b.domain));
-            rows
-        };
-        let policy = self.governance_policy.read().await.to_snapshot();
+        let ingress_mode = self.governance.ingress_mode_label().await;
+        let domain_ingress_modes = self.governance.domain_ingress_snapshot_rows().await;
+        let policy = self.governance.policy_snapshot().await;
         let risk_state = self.risk_gate.state().await;
         let platform_exposure_usd = self.risk_gate.total_exposure().await;
         let (daily_pnl_usd, _, _) = self.risk_gate.daily_stats().await;
@@ -1189,11 +705,8 @@ pub struct Coordinator {
     global_state: Arc<RwLock<GlobalState>>,
     execution_log_pool: Option<PgPool>,
     governance_store_pool: Option<PgPool>,
-    ingress_mode: Arc<RwLock<IngressMode>>,
-    domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
-    governance_policy: Arc<RwLock<GovernancePolicy>>,
+    governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
-    paused_agent_ids: Arc<RwLock<HashSet<String>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -1320,9 +833,7 @@ impl Coordinator {
         let capital_policy = Arc::new(CapitalPolicy::new(&config));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
-        let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
-        let governance_policy = Arc::new(RwLock::new(GovernancePolicy::from_config(&config)));
-        let domain_ingress_mode = Arc::new(RwLock::new(HashMap::new()));
+        let governance = Arc::new(GovernanceController::new(&config));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
@@ -1345,11 +856,8 @@ impl Coordinator {
             global_state,
             execution_log_pool: None,
             governance_store_pool: None,
-            ingress_mode,
-            domain_ingress_mode,
-            governance_policy,
+            governance,
             stale_heartbeat_warn_at,
-            paused_agent_ids: Arc::new(RwLock::new(HashSet::new())),
             order_tx,
             order_rx,
             state_tx,
@@ -1440,9 +948,7 @@ impl Coordinator {
             return Ok(());
         };
 
-        let snapshot = policy.to_snapshot();
-        let mut state = self.governance_policy.write().await;
-        *state = policy;
+        let snapshot = self.governance.replace_policy(policy).await;
         info!(
             account_id = %self.account_id,
             updated_by = %snapshot.updated_by,
@@ -1611,12 +1117,10 @@ impl Coordinator {
             order_queue: self.order_queue.clone(),
             capital_policy: self.capital_policy.clone(),
             positions: self.positions.clone(),
-            ingress_mode: self.ingress_mode.clone(),
-            domain_ingress_mode: self.domain_ingress_mode.clone(),
+            governance: self.governance.clone(),
             deployments: self.deployments.clone(),
             allowed_domains: self.allowed_domains.clone(),
             authorized_agents: self.authorized_agents.clone(),
-            governance_policy: self.governance_policy.clone(),
             governance_store_pool: self.governance_store_pool.clone(),
         }
     }
@@ -1695,18 +1199,6 @@ impl Coordinator {
         self.allowed_domains.contains(&domain)
     }
 
-    async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
-        let mut domain_modes = self.domain_ingress_mode.write().await;
-        match mode {
-            IngressMode::Running => {
-                domain_modes.remove(&domain);
-            }
-            _ => {
-                domain_modes.insert(domain, mode);
-            }
-        }
-    }
-
     async fn cancel_queued_buy_intents(&self, domain: Option<Domain>, reason: &str) {
         let dropped = {
             let mut queue = self.order_queue.write().await;
@@ -1726,11 +1218,7 @@ impl Coordinator {
 
     /// Pause all agents
     pub async fn pause_all(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Paused;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Paused).await;
         for (id, entry) in &self.agent_commands {
             if let Err(e) = entry.tx.send(CoordinatorCommand::Pause).await {
                 warn!(agent_id = %id, error = %e, "failed to send pause");
@@ -1740,11 +1228,7 @@ impl Coordinator {
 
     /// Resume all agents
     pub async fn resume_all(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Running;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Running).await;
         for (id, entry) in &self.agent_commands {
             if let Err(e) = entry.tx.send(CoordinatorCommand::Resume).await {
                 warn!(agent_id = %id, error = %e, "failed to send resume");
@@ -1754,11 +1238,7 @@ impl Coordinator {
 
     /// Force-close all agents (best-effort)
     pub async fn force_close_all(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Halted;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Halted).await;
         self.cancel_queued_buy_intents(None, "dropped by coordinator global halt")
             .await;
         info!("coordinator: sending force-close to all agents");
@@ -1771,11 +1251,7 @@ impl Coordinator {
 
     /// Shutdown all agents gracefully
     pub async fn shutdown(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Halted;
-        }
-        self.domain_ingress_mode.write().await.clear();
+        self.governance.set_global_mode(IngressMode::Halted).await;
         self.cancel_queued_buy_intents(None, "dropped by coordinator shutdown")
             .await;
         info!("coordinator: sending shutdown to all agents");
@@ -1788,7 +1264,9 @@ impl Coordinator {
 
     /// Pause one domain
     pub async fn pause_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Paused).await;
+        self.governance
+            .set_domain_mode(domain, IngressMode::Paused)
+            .await;
         for (id, entry) in &self.agent_commands {
             if self.should_apply_domain_cmd(entry, domain) {
                 if let Err(e) = entry.tx.send(CoordinatorCommand::Pause).await {
@@ -1800,7 +1278,9 @@ impl Coordinator {
 
     /// Resume one domain
     pub async fn resume_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Running).await;
+        self.governance
+            .set_domain_mode(domain, IngressMode::Running)
+            .await;
         for (id, entry) in &self.agent_commands {
             if self.should_apply_domain_cmd(entry, domain) {
                 if let Err(e) = entry.tx.send(CoordinatorCommand::Resume).await {
@@ -1812,7 +1292,9 @@ impl Coordinator {
 
     /// Force-close all agents in one domain
     pub async fn force_close_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Halted).await;
+        self.governance
+            .set_domain_mode(domain, IngressMode::Halted)
+            .await;
         self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain halt")
             .await;
         for (id, entry) in &self.agent_commands {
@@ -1826,7 +1308,9 @@ impl Coordinator {
 
     /// Shutdown all agents in one domain
     pub async fn shutdown_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Halted).await;
+        self.governance
+            .set_domain_mode(domain, IngressMode::Halted)
+            .await;
         self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain shutdown")
             .await;
         for (id, entry) in &self.agent_commands {
@@ -1875,12 +1359,11 @@ impl Coordinator {
                             self.shutdown_domain(domain).await
                         }
                         CoordinatorControlCommand::PauseAgent(id) => {
-                            // Track per-agent pause so handle_order_intent blocks BUY intents
-                            self.paused_agent_ids.write().await.insert(id.clone());
+                            self.governance.pause_agent(&id).await;
                             self.send_command(&id, CoordinatorCommand::Pause).await.ok();
                         }
                         CoordinatorControlCommand::ResumeAgent(id) => {
-                            self.paused_agent_ids.write().await.remove(&id);
+                            self.governance.resume_agent(&id).await;
                             self.send_command(&id, CoordinatorCommand::Resume).await.ok();
                         }
                     }
@@ -1975,7 +1458,7 @@ impl Coordinator {
                 return;
             }
         }
-        let ingress_mode = *self.ingress_mode.read().await;
+        let (ingress_mode, domain_mode) = self.governance.ingress_modes(intent.domain).await;
         if intent.is_buy && ingress_mode != IngressMode::Running {
             let reason = format!(
                 "Coordinator ingress is {:?}; blocking BUY intent while paused/halted",
@@ -1990,13 +1473,6 @@ impl Coordinator {
             return;
         }
         if intent.is_buy {
-            let domain_mode = self
-                .domain_ingress_mode
-                .read()
-                .await
-                .get(&intent.domain)
-                .copied()
-                .unwrap_or(IngressMode::Running);
             if domain_mode != IngressMode::Running {
                 let reason = format!(
                     "Domain {:?} ingress is {:?}; blocking BUY intent while paused/halted",
@@ -2012,13 +1488,7 @@ impl Coordinator {
             }
         }
         // Per-agent pause check
-        if intent.is_buy
-            && self
-                .paused_agent_ids
-                .read()
-                .await
-                .contains(&intent.agent_id)
-        {
+        if intent.is_buy && self.governance.is_agent_paused(&intent.agent_id).await {
             let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
             self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
@@ -2766,7 +2236,7 @@ impl Coordinator {
     }
 
     async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {
-        let policy = self.governance_policy.read().await.clone();
+        let policy = self.governance.current_policy().await;
         let current_notional = self.current_account_notional().await;
         governance_block_reason(&policy, intent, current_notional)
     }
@@ -4529,105 +3999,6 @@ mod tests {
         assert_eq!(first_key, second_key);
     }
 
-    #[test]
-    fn test_governance_policy_update_rejects_unknown_domain() {
-        let update = GovernancePolicyUpdate {
-            block_new_intents: false,
-            blocked_domains: vec!["unknown".to_string()],
-            max_intent_notional_usd: None,
-            max_total_notional_usd: None,
-            updated_by: "openclaw".to_string(),
-            reason: None,
-            metadata: HashMap::new(),
-        };
-
-        let parsed = GovernancePolicy::try_from_update(update);
-        assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn test_governance_policy_blocks_domain() {
-        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
-            block_new_intents: false,
-            blocked_domains: vec!["sports".to_string()],
-            max_intent_notional_usd: None,
-            max_total_notional_usd: None,
-            updated_by: "openclaw".to_string(),
-            reason: Some("maintenance".to_string()),
-            metadata: HashMap::new(),
-        })
-        .expect("valid policy");
-
-        let intent = OrderIntent::new(
-            "sports",
-            Domain::Sports,
-            "nba-game-1",
-            "sports-token-yes",
-            crate::domain::Side::Up,
-            true,
-            10,
-            dec!(0.45),
-        );
-        let reason = governance_block_reason(&policy, &intent, dec!(0));
-        assert!(reason.is_some());
-    }
-
-    #[test]
-    fn test_governance_policy_blocks_projected_total_notional() {
-        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
-            block_new_intents: false,
-            blocked_domains: vec![],
-            max_intent_notional_usd: Some(dec!(50)),
-            max_total_notional_usd: Some(dec!(100)),
-            updated_by: "openclaw".to_string(),
-            reason: None,
-            metadata: HashMap::new(),
-        })
-        .expect("valid policy");
-
-        let intent = OrderIntent::new(
-            "crypto",
-            Domain::Crypto,
-            "btc-updown-5m-1",
-            "token-up",
-            crate::domain::Side::Up,
-            true,
-            50,
-            dec!(0.50),
-        ); // 25 notional
-        let reason = governance_block_reason(&policy, &intent, dec!(90));
-        assert!(reason
-            .unwrap_or_default()
-            .contains("max_total_notional_usd"));
-    }
-
-    #[test]
-    fn test_governance_policy_allows_sell_when_new_intents_blocked() {
-        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
-            block_new_intents: true,
-            blocked_domains: vec!["sports".to_string()],
-            max_intent_notional_usd: Some(dec!(1)),
-            max_total_notional_usd: Some(dec!(1)),
-            updated_by: "openclaw".to_string(),
-            reason: Some("circuit".to_string()),
-            metadata: HashMap::new(),
-        })
-        .expect("valid policy");
-
-        let intent = OrderIntent::new(
-            "sports",
-            Domain::Sports,
-            "nba-game-1",
-            "sports-token-yes",
-            crate::domain::Side::Up,
-            false, // sell/close
-            10,
-            dec!(0.45),
-        );
-        let reason = governance_block_reason(&policy, &intent, dec!(999));
-        assert!(reason.is_none(), "sell intent should remain allowed");
-    }
-
     #[tokio::test]
     async fn test_handle_force_close_domain_blocks_new_buy_immediately() {
         let (handle, _coordinator) = make_test_handle();
@@ -4721,13 +4092,6 @@ mod tests {
             .any(|agent| agent.agent_id == "sports_agent"
                 && agent.domain == "sports"
                 && agent.status == "running"));
-    }
-
-    #[test]
-    fn test_clamp_governance_history_limit_bounds() {
-        assert_eq!(clamp_governance_history_limit(0), 1);
-        assert_eq!(clamp_governance_history_limit(25), 25);
-        assert_eq!(clamp_governance_history_limit(999), 500);
     }
 
     #[test]

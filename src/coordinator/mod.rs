@@ -9,6 +9,7 @@ mod capital;
 pub mod command;
 pub mod config;
 pub mod coordinator;
+mod governance;
 pub mod state;
 pub mod strategy_runtime;
 
