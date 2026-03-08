@@ -1603,3 +1603,24 @@ Narrow the `ai_clients` top-level re-export surface so it only exposes the small
 ## Review
 
 - [x] Current in-repo callers only rely on a small top-level set (`AdvisoryAgent`, `AutonomousAgent`, `AutonomousConfig`, `ClaudeAgentClient`, `AgentClientConfig`, `GrokClient`, `GrokConfig`, `SportsAnalyst`, `EventDetails`, `LiveGameMarket`, `PolymarketSportsClient`, `NBA_SERIES_ID`); the rest had become dead compatibility exports.
+
+---
+
+# Standalone Health Service Retirement (2026-03-08)
+
+## Goal
+Retire the unstarted standalone `services` health/metrics server and the stale deployment/script surface that still assumed `/healthz`, `/readyz`, and `/metrics` were backed by live code.
+
+## Tasks
+
+- [x] Confirm `src/services/*` only survives through the optional `polymarket_ws` health hook and has no runtime startup path.
+- [x] Remove the unused `HealthState` hook from `src/adapters/polymarket_ws.rs`.
+- [x] Delete `src/services/health.rs`, `src/services/metrics.rs`, and `src/services/mod.rs`.
+- [x] Remove `pub mod services;` from `src/lib.rs`.
+- [x] Retire the obsolete data-plane baseline collector scripts/docs that depended on the deleted `/metrics` endpoint.
+- [x] Align deployment/devops files so health checks use `/health`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The standalone health/metrics server had no startup path left in the codebase; only the API server's `/health` endpoint is live now.

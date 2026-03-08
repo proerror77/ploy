@@ -359,8 +359,7 @@ Referenced files:
 - `src/api/handlers/strategies.rs`
 - `src/api/state.rs`
 - `src/persistence/dlq_processor.rs`
-- `src/services/health.rs`
-- `src/services/metrics.rs`
+- `src/api/handlers/system.rs`
 - `src/strategy/event_edge/core.rs`
 - `src/strategy/execution/engine.rs`
 - `src/strategy/execution/engine_store.rs`
@@ -747,7 +746,7 @@ Referenced files:
 - `src/adapters/postgres.rs`
 - `src/ai_clients/advisor.rs`
 - `src/ai_clients/protocol.rs`
-- `src/services/health.rs`
+- `src/api/handlers/system.rs`
 - `src/strategy/execution/engine.rs`
 - `src/strategy/execution/engine_store.rs`
 - `src/tui/app.rs`

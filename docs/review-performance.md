@@ -464,18 +464,17 @@ Each phase has individual timeouts plus a global 120s timeout. The `wait_for_com
 
 ## 7. Monitoring & Observability
 
-### 7.1 Health Server
+### 7.1 Historical Health Server
 
-**File**: `src/services/health.rs:1-200`
+**Historical file**: `src/services/health.rs:1-200` (retired in March 2026 cleanup)
 
-**Finding (P3 - Positive)**: The health server provides:
-- Liveness and readiness probes (suitable for systemd/k8s)
-- Component-level health (WebSocket, database, risk state)
-- Quote staleness detection (30s threshold)
-- Uptime tracking
+**Historical note**: The repo previously carried a standalone health/metrics server that exposed:
+- liveness/readiness probes
+- component-level health summaries
+- quote staleness detection
+- uptime tracking
 
-**Finding (P2)**: The `get_health()` method (line 140) acquires **four separate read locks** sequentially:
-1. `last_ws_message.read()` (line 131)
+That standalone server was later retired because no runtime path actually started it; the active deployment surface now relies on the API server's `/health` endpoint instead.
 2. `last_ws_message.read()` again (line 167)
 3. `last_db_check.read()` (line 188)
 4. `strategy_state.read()` (line 210, estimated)

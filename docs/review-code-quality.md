@@ -67,7 +67,6 @@ src/
   persistence/  - Checkpoint, DLQ, event store
   platform/     - Unified order platform with risk gates
   rl/           - Reinforcement learning (optional, feature-gated)
-  services/     - Background services (health, metrics, event edge)
   signing/      - Wallet, HMAC, nonce management
   strategy/     - Trading strategies (24,971 lines across 40+ files)
   coordination/ - Circuit breaker, lifecycle, emergency stop

@@ -339,11 +339,10 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 src/
   adapters/      Polymarket CLOB, WebSocket, Binance WS
   agents/        Domain trading agents (crypto, sports)
-  agent/         Claude AI agent integration
+  ai_clients/    Claude/Grok client integrations
   coordinator/   Multi-agent coordinator + order queue
   domain/        Core types (Market, Order, Quote)
   persistence/   Event store, checkpoints, DLQ
-  services/      Discovery, metrics, health
   signing/       Wallet, order signing, nonce manager
   strategy/      Trading strategies + risk + registry
   coordination/  Circuit breaker, emergency stop, shutdown

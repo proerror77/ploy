@@ -1,6 +1,5 @@
 use crate::domain::{Quote, Side};
 use crate::error::{PloyError, Result};
-use crate::services::HealthState;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
@@ -660,8 +659,6 @@ pub struct PolymarketWebSocket {
     max_reconnect_attempts: u32,
     circuit_breaker: Arc<CircuitBreaker>,
     resubscribe_requested: Arc<std::sync::atomic::AtomicBool>,
-    // Optional: wired in at runtime by the binary to report connectivity to /health.
-    health_state: OnceLock<Arc<HealthState>>,
     // Optional: per-symbol freshness tracking for the data plane.
     freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
 }
@@ -697,16 +694,8 @@ impl PolymarketWebSocket {
             max_reconnect_attempts: 10,
             circuit_breaker: Arc::new(CircuitBreaker::new(cb_config)),
             resubscribe_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            health_state: OnceLock::new(),
             freshness: OnceLock::new(),
         }
-    }
-
-    /// Wire an optional `HealthState` for liveness/readiness reporting.
-    ///
-    /// Safe to call multiple times; only the first call wins.
-    pub fn set_health_state(&self, state: Arc<HealthState>) {
-        let _ = self.health_state.set(state);
     }
 
     /// Wire an optional `DataPlaneFreshness` for per-symbol tracking.
@@ -958,16 +947,7 @@ impl PolymarketWebSocket {
 
     /// Connect and subscribe to token updates
     async fn connect_and_subscribe(&self, token_ids: &[String]) -> Result<()> {
-        let health = self.health_state.get().cloned();
         let freshness = self.freshness.get().cloned();
-        struct WsHealthGuard(Option<Arc<HealthState>>);
-        impl Drop for WsHealthGuard {
-            fn drop(&mut self) {
-                if let Some(ref h) = self.0 {
-                    h.set_ws_connected(false);
-                }
-            }
-        }
         struct WsFreshnessGuard(Option<Arc<crate::platform::DataPlaneFreshness>>);
         impl Drop for WsFreshnessGuard {
             fn drop(&mut self) {
@@ -976,7 +956,6 @@ impl PolymarketWebSocket {
                 }
             }
         }
-        let _guard = WsHealthGuard(health.clone());
         let _fresh_guard = WsFreshnessGuard(freshness.clone());
 
         let url = Url::parse(&self.ws_url)
@@ -987,9 +966,6 @@ impl PolymarketWebSocket {
         let ws_stream = connect_websocket_with_proxy(&url).await?;
 
         info!("WebSocket connected");
-        if let Some(ref h) = health {
-            h.set_ws_connected(true);
-        }
         if let Some(ref f) = freshness {
             f.set_source_connected(crate::platform::DataSource::PolymarketWs, true);
         }
@@ -1021,9 +997,6 @@ impl PolymarketWebSocket {
                         Some(Ok(Message::Text(text))) => {
                             if self.handle_message(&text).await {
                                 last_market_data = Instant::now();
-                                if let Some(ref h) = health {
-                                    h.record_ws_message().await;
-                                }
                             }
                         }
                         Some(Ok(Message::Ping(data))) => {
