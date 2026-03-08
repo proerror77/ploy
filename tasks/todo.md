@@ -1675,3 +1675,20 @@ Keep active review docs aligned with the post-retirement codebase so they stop d
 ## Review
 
 - [x] Active review docs now describe the current `ai_clients` layout and no longer present `DomainAgent` as an active contract in the runtime surface.
+
+---
+
+# Orphan Script Cleanup (2026-03-08)
+
+## Goal
+Delete unreferenced one-off scripts that no longer participate in any documented deployment or trading workflow.
+
+## Tasks
+
+- [x] Confirm `scripts/deploy-simple.sh` has no references in the repo and only captures an old AWS Docker flow.
+- [x] Confirm `scripts/split-arb-notify.sh` has no references in the repo and only captures a local macOS notification loop.
+- [x] Delete both orphan scripts.
+
+## Review
+
+- [x] Both scripts were unreferenced from code, docs, tasks, and CI; removing them only trims stale manual tooling.
