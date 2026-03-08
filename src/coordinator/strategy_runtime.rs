@@ -21,12 +21,13 @@ use tracing::{debug, info, warn};
 
 use crate::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::coordinator::{AgentHealthResponse, AgentSnapshot, CoordinatorCommand};
-use crate::domain::{OrderRequest, OrderStatus, Side};
+use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::Result;
 use crate::platform::{AgentStatus, Domain, PlatformDataPlane};
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{
-    DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,
+    DataFeed, DataFeedManager, StrategyAction, StrategyControlAction, StrategyFactory,
+    StrategyManager,
 };
 
 fn split_arb_status_key(status: OrderStatus) -> &'static str {
@@ -915,31 +916,33 @@ async fn handle_strategy_actions_runtime(
                     }
                 }
             }
-            StrategyAction::UpdateRisk { level, reason } => {
-                info!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    risk_level = ?level,
-                    reason = reason,
-                    "strategy risk update"
-                );
-            }
-            StrategyAction::SubscribeFeed { feed } => {
-                warn!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    feed = ?feed,
-                    "dynamic subscribe-feed action is not implemented in platform mode"
-                );
-            }
-            StrategyAction::UnsubscribeFeed { feed } => {
-                warn!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    feed = ?feed,
-                    "dynamic unsubscribe-feed action is not implemented in platform mode"
-                );
-            }
+            StrategyAction::LegacyControl(control) => match control {
+                StrategyControlAction::UpdateRisk { level, reason } => {
+                    info!(
+                        strategy = strategy_label,
+                        strategy_id = %strategy_id,
+                        risk_level = ?level,
+                        reason = reason,
+                        "legacy strategy risk update"
+                    );
+                }
+                StrategyControlAction::SubscribeFeed { feed } => {
+                    warn!(
+                        strategy = strategy_label,
+                        strategy_id = %strategy_id,
+                        feed = ?feed,
+                        "legacy dynamic subscribe-feed action is not implemented in managed runtime"
+                    );
+                }
+                StrategyControlAction::UnsubscribeFeed { feed } => {
+                    warn!(
+                        strategy = strategy_label,
+                        strategy_id = %strategy_id,
+                        feed = ?feed,
+                        "legacy dynamic unsubscribe-feed action is not implemented in managed runtime"
+                    );
+                }
+            },
         }
     }
 }

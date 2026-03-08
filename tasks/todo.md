@@ -1,3 +1,34 @@
+# Strategy Action Contract Split (2026-03-08)
+
+## Goal
+Separate canonical strategy decision actions from legacy feed/governance control actions so the managed live runtime no longer presents dynamic feed and risk updates as first-class strategy outputs.
+
+## Tasks
+
+- [x] Inventory all `StrategyAction::{UpdateRisk,SubscribeFeed,UnsubscribeFeed}` producers and consumers.
+- [x] Split legacy control-plane actions out of the top-level action surface in `src/strategy/traits.rs`.
+- [x] Update managed runtime, CLI, and legacy orchestrator handling to route compatibility-only control actions through the new legacy branch.
+- [x] Retag dormant strategy emitters (`momentum_strat`, `two_leg`, `gamma_scalping`) to the legacy control path.
+- [x] Run targeted compile/test validation on the managed runtime and strategy manager.
+
+## Review
+
+- [x] Confirm current managed live strategies do not emit dynamic feed/risk actions.
+- [x] Confirm the coordinator runtime now treats these actions as explicit compatibility-only inputs.
+- [x] Confirm `cargo check --lib` and targeted runtime/manager tests still pass.
+
+## Progress notes
+
+- 2026-03-08: Parallel analysis confirmed `UpdateRisk`/`SubscribeFeed`/`UnsubscribeFeed` were only emitted by dormant strategy implementations, while the current `StrategyFactory` live path goes through adapters and static `required_feeds()` wiring.
+- 2026-03-08: Introduced `StrategyControlAction` and wrapped these compatibility-only actions behind `StrategyAction::LegacyControl`, which makes the canonical strategy contract explicit without breaking dormant legacy modules in one shot.
+- 2026-03-08: Updated `coordinator/strategy_runtime.rs`, `cli/strategy.rs`, and `strategy/orchestrator.rs` so live/coordinator paths handle the legacy branch explicitly instead of pretending these actions are canonical.
+- 2026-03-08: Validation passed:
+  - `cargo check --lib`
+  - `cargo test persist_runtime_order_ --lib -- --nocapture`
+  - `cargo test test_strategy_manager_creation --lib -- --nocapture`
+
+---
+
 # Bootstrap Managed Runtime Extraction (2026-03-08)
 
 ## Goal

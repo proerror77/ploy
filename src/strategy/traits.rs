@@ -222,14 +222,24 @@ pub enum StrategyAction {
         new_size: Option<u64>,
     },
 
-    /// Update risk state
-    UpdateRisk { level: RiskLevel, reason: String },
-
     /// Log a strategy event
     LogEvent { event: StrategyEvent },
 
     /// Send an alert
     Alert { level: AlertLevel, message: String },
+
+    /// Legacy control-plane action kept for non-canonical orchestrator paths.
+    LegacyControl(StrategyControlAction),
+}
+
+/// Non-decision actions emitted by legacy strategies.
+///
+/// Managed/coordinator runtimes should treat these as compatibility-only inputs and
+/// keep governance/feed ownership outside the canonical strategy contract.
+#[derive(Debug, Clone)]
+pub enum StrategyControlAction {
+    /// Update risk state
+    UpdateRisk { level: RiskLevel, reason: String },
 
     /// Request data feed subscription change
     SubscribeFeed { feed: DataFeed },

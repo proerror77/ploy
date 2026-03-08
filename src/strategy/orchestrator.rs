@@ -17,7 +17,8 @@ use super::core::{ExecutionConfig, OrderExecutor, PositionManager, RiskCheck, Ri
 use super::multi_event::MultiEventMonitor;
 use super::reconciliation::ReconciliationService;
 use super::traits::{
-    DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction, StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction, StrategyControlAction,
+    StrategyStateInfo,
 };
 
 /// Orchestrator configuration
@@ -316,10 +317,6 @@ impl StrategyOrchestrator {
                         }
                     }
                 }
-                StrategyAction::UpdateRisk { level, reason } => {
-                    info!("Strategy {} risk update: {:?} - {}", strategy_id, level, reason);
-                    // Could trigger circuit breaker based on level
-                }
                 StrategyAction::LogEvent { event } => {
                     info!(
                         "Strategy {} event: {:?} - {}",
@@ -334,21 +331,27 @@ impl StrategyOrchestrator {
                         super::traits::AlertLevel::Critical => error!("[CRITICAL] {}: {}", strategy_id, message),
                     }
                 }
-                StrategyAction::SubscribeFeed { feed } => {
-                    let mut active_feeds = self.active_feeds.write().await;
-                    active_feeds
-                        .entry(feed.clone())
-                        .or_default()
-                        .push(strategy_id.to_string());
-                    debug!("Strategy {} subscribed to {:?}", strategy_id, feed);
-                }
-                StrategyAction::UnsubscribeFeed { feed } => {
-                    let mut active_feeds = self.active_feeds.write().await;
-                    if let Some(subscribers) = active_feeds.get_mut(&feed) {
-                        subscribers.retain(|id| id != strategy_id);
+                StrategyAction::LegacyControl(control) => match control {
+                    StrategyControlAction::UpdateRisk { level, reason } => {
+                        info!("Strategy {} risk update: {:?} - {}", strategy_id, level, reason);
+                        // Could trigger circuit breaker based on level
                     }
-                    debug!("Strategy {} unsubscribed from {:?}", strategy_id, feed);
-                }
+                    StrategyControlAction::SubscribeFeed { feed } => {
+                        let mut active_feeds = self.active_feeds.write().await;
+                        active_feeds
+                            .entry(feed.clone())
+                            .or_default()
+                            .push(strategy_id.to_string());
+                        debug!("Strategy {} subscribed to {:?}", strategy_id, feed);
+                    }
+                    StrategyControlAction::UnsubscribeFeed { feed } => {
+                        let mut active_feeds = self.active_feeds.write().await;
+                        if let Some(subscribers) = active_feeds.get_mut(&feed) {
+                            subscribers.retain(|id| id != strategy_id);
+                        }
+                        debug!("Strategy {} unsubscribed from {:?}", strategy_id, feed);
+                    }
+                },
             }
         }
 

@@ -33,7 +33,8 @@ pub mod traits;
 
 pub use traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyAction, StrategyConfig, StrategyControlAction, StrategyEvent, StrategyEventType,
+    StrategyStateInfo,
 };
 
 pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};

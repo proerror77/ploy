@@ -1357,7 +1357,7 @@ async fn handle_strategy_actions(
     executor: Option<Arc<OrderExecutor>>,
     store: Option<Arc<PostgresStore>>,
 ) {
-    use crate::strategy::StrategyAction;
+    use crate::strategy::{StrategyAction, StrategyControlAction};
 
     while let Some((strategy_id, action)) = rx.recv().await {
         match action {
@@ -1561,18 +1561,20 @@ async fn handle_strategy_actions(
                     strategy_id, event.event_type, event.message
                 );
             }
-            StrategyAction::UpdateRisk { level, reason } => {
-                println!(
-                    "  \x1b[35m[{}]\x1b[0m Risk: {:?} - {}",
-                    strategy_id, level, reason
-                );
-            }
-            StrategyAction::SubscribeFeed { feed } => {
-                println!("  \x1b[90m[{}]\x1b[0m Subscribe: {:?}", strategy_id, feed);
-            }
-            StrategyAction::UnsubscribeFeed { feed } => {
-                println!("  \x1b[90m[{}]\x1b[0m Unsubscribe: {:?}", strategy_id, feed);
-            }
+            StrategyAction::LegacyControl(control) => match control {
+                StrategyControlAction::UpdateRisk { level, reason } => {
+                    println!(
+                        "  \x1b[35m[{}]\x1b[0m Risk: {:?} - {}",
+                        strategy_id, level, reason
+                    );
+                }
+                StrategyControlAction::SubscribeFeed { feed } => {
+                    println!("  \x1b[90m[{}]\x1b[0m Subscribe: {:?}", strategy_id, feed);
+                }
+                StrategyControlAction::UnsubscribeFeed { feed } => {
+                    println!("  \x1b[90m[{}]\x1b[0m Unsubscribe: {:?}", strategy_id, feed);
+                }
+            },
         }
     }
 }

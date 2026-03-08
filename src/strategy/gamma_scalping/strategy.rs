@@ -15,8 +15,8 @@ use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
 use crate::error::Result;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
-    StrategyEventType, StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyControlAction, StrategyEvent, StrategyEventType, StrategyStateInfo,
 };
 use crate::strategy::volatility_arb::calculate_implied_volatility;
 
@@ -482,11 +482,13 @@ impl Strategy for GammaScalpingStrategy {
                     price_to_beat: *price_to_beat,
                 };
 
-                let actions = vec![StrategyAction::SubscribeFeed {
-                    feed: DataFeed::PolymarketQuotes {
-                        tokens: vec![up_token.clone(), down_token.clone()],
+                let actions = vec![StrategyAction::LegacyControl(
+                    StrategyControlAction::SubscribeFeed {
+                        feed: DataFeed::PolymarketQuotes {
+                            tokens: vec![up_token.clone(), down_token.clone()],
+                        },
                     },
-                }];
+                )];
 
                 self.active_events.insert(event_id.clone(), ctx);
                 Ok(actions)
