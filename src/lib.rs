@@ -22,7 +22,6 @@ pub mod safety;
 pub mod services;
 pub mod signing;
 pub mod strategy;
-pub mod supervisor;
 pub mod tui;
 
 // Reinforcement Learning module (optional, enabled with "rl" feature)
@@ -49,11 +48,6 @@ pub use platform::{
     StrategyDeployment, Timeframe, TradeIntent,
 };
 pub use signing::Wallet;
-pub use supervisor::{
-    AlertLevel, AlertManager, AlertManagerConfig, ComponentHealth, RecoveryAction,
-    RecoveryPlaybook, Watchdog, WatchdogConfig,
-};
-
 // RL exports (when feature enabled)
 #[cfg(feature = "rl")]
 pub use rl::{RLConfig, RLStrategy};

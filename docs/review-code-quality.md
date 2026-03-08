@@ -70,7 +70,7 @@ src/
   services/     - Background services (health, metrics, event edge)
   signing/      - Wallet, HMAC, nonce management
   strategy/     - Trading strategies (24,971 lines across 40+ files)
-  supervisor/   - Watchdog, alert manager, recovery playbook
+  coordination/ - Circuit breaker, lifecycle, emergency stop
   tui/          - Terminal UI (ratatui)
   validation.rs - Input validation for external API data
 ```

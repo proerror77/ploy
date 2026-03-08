@@ -346,7 +346,7 @@ src/
   services/      Discovery, metrics, health
   signing/       Wallet, order signing, nonce manager
   strategy/      Trading strategies + risk + registry
-  supervisor/    Watchdog, emergency stop, shutdown
+  coordination/  Circuit breaker, emergency stop, shutdown
   tui/           Terminal dashboard (ratatui)
 config/          TOML configuration files
 migrations/      PostgreSQL schema migrations

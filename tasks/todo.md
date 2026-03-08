@@ -1508,3 +1508,24 @@ Remove the orphan `strategy/parquet_analysis.rs` module that is still feature-ga
 - [x] `parquet_analysis` had no remaining in-repo consumers outside its own source file; the `analysis` feature still supports dataset export from `cli/strategy.rs` without this module.
 - [x] Focused validation passed:
   - `cargo check --bin ploy`
+
+---
+
+# Supervisor Module Cleanup (2026-03-08)
+
+## Goal
+Remove the retired `src/supervisor/*` layer now that no runtime, CLI, API, or coordinator paths still construct or consume `Watchdog`, `AlertManager`, or `RecoveryPlaybook`.
+
+## Tasks
+
+- [x] Confirm the supervisor types are not referenced by any in-repo runtime/CLI/API code outside `src/lib.rs`.
+- [x] Remove the `supervisor` module from `src/lib.rs`.
+- [x] Delete the retired `src/supervisor/*` files.
+- [x] Update README/review docs to mark watchdog references as historical.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `supervisor/*` had become a dead library surface: internal searches found no remaining runtime, CLI, API, or coordinator consumers after the live-runtime retirement work.
+- [x] Focused validation passed:
+  - `cargo check --bin ploy`
