@@ -5,7 +5,7 @@
 
 use crate::domain::StrategyState;
 use crate::platform::DataPlaneFreshness;
-use crate::services::Metrics;
+use crate::services::metrics::Metrics;
 use crate::strategy::RiskManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use chrono::{DateTime, Utc};

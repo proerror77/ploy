@@ -1567,3 +1567,21 @@ Bring active docs back in sync with the current codebase after the `agent -> ai_
 ## Review
 
 - [x] The active docs now point at `src/ai_clients/*`, the canonical risk-validation path, and no longer describe deleted `cli/service.rs` stubs as pending work.
+
+---
+
+# Services Re-Export Cleanup (2026-03-08)
+
+## Goal
+Narrow the `services` public surface so it no longer re-exports unused health-server and metrics types that have no in-repo consumers outside the module itself.
+
+## Tasks
+
+- [x] Confirm only `HealthState` is consumed from `crate::services` by the current runtime code.
+- [x] Remove the unused `ComponentHealth`, `HealthResponse`, `HealthServer`, `HealthStatus`, and `Metrics` re-exports from `src/services/mod.rs`.
+- [x] Update `services/health.rs` to import `Metrics` from its concrete module path.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The current runtime code only imports `crate::services::HealthState`; the broader `services` re-export surface had become dead compatibility API.
