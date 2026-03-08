@@ -1529,3 +1529,24 @@ Remove the retired `src/supervisor/*` layer now that no runtime, CLI, API, or co
 - [x] `supervisor/*` had become a dead library surface: internal searches found no remaining runtime, CLI, API, or coordinator consumers after the live-runtime retirement work.
 - [x] Focused validation passed:
   - `cargo check --bin ploy`
+
+---
+
+# Politics Client Cleanup (2026-03-08)
+
+## Goal
+Remove the orphan `ai_clients/polymarket_politics.rs` helper after the canonical runtime migration left it with no remaining runtime, CLI, API, or strategy callers.
+
+## Tasks
+
+- [x] Confirm `PolymarketPoliticsClient` and related politics-market types are only referenced inside the module and `ai_clients/mod.rs`.
+- [x] Remove the politics client module/export from `src/ai_clients/mod.rs`.
+- [x] Delete `src/ai_clients/polymarket_politics.rs`.
+- [x] Update stale docs that still point at the retired politics helper path.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] The politics market helper had become a dead client surface; no remaining runtime, CLI, API, or strategy modules imported its types after the canonical `event_edge` migration.
+- [x] Focused validation passed:
+  - `cargo check --bin ploy`

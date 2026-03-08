@@ -86,9 +86,9 @@ Local static check command:
 13. Remaining raw Gamma reads in helper/CLI paths.
    - Migrated `src/agent/sports_analyst_enhanced.rs`, `src/strategy/live_arbitrage.rs`, and `src/main.rs::fetch_market_snapshot` from raw HTTP Gamma URLs to typed `GammaClient` requests (`SearchRequest`, `SeriesByIdRequest`, `EventByIdRequest`).
    - Expanded `scripts/check_polymarket_api_usage.sh` regression guard to include these modules.
-14. Sports/politics integration modules still using raw Gamma URLs.
-   - Migrated `src/agent/polymarket_sports.rs` and `src/agent/polymarket_politics.rs` from raw `/markets`, `/series/{id}`, `/events/{id}` HTTP calls to typed `GammaClient` requests (`MarketsRequest`, `SeriesByIdRequest`, `EventByIdRequest`).
-   - Added these modules (plus `src/agent/nba_moneyline_analyzer.rs`) to the static audit regression guard.
+14. Historical sports/politics integration modules previously used raw Gamma URLs.
+   - The old migration covered `src/agent/polymarket_sports.rs` and `src/agent/polymarket_politics.rs`; the politics helper was later retired during the March 2026 cleanup.
+   - The remaining sports-side integrations stay under the static audit regression guard.
 
 ## Remaining TODO For “Production-Complete” State
 

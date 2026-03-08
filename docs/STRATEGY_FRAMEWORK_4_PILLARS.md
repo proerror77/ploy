@@ -97,7 +97,6 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
   - Polymarket CLOB/WS adapters（`src/adapters/polymarket_*.rs`）
 - Tier 2：專業/模型
   - NBA winprob：`src/strategy/nba_winprob.rs`
-  - Politics poll edge：`src/agent/polymarket_politics.rs`
   - Odds/博彩：`src/agent/odds_provider.rs`
 - Tier 3：市場資訊/情緒
   - Grok/X：`src/agent/grok.rs`
