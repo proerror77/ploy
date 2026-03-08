@@ -1,3 +1,34 @@
+# Coordinator Capital Policy Extraction (2026-03-08)
+
+## Goal
+Extract coordinator-owned capital allocation state into a dedicated module so execution/gov code stops owning four allocator implementations directly.
+
+## Tasks
+
+- [x] Create `src/coordinator/capital.rs` with the allocator state, identity helpers, and deployment ledger snapshot logic.
+- [x] Wire `src/coordinator/mod.rs` and `src/coordinator/coordinator.rs` to use a single `Arc<CapitalPolicy>` instead of four allocator fields.
+- [x] Move allocator-focused tests out of `coordinator.rs` and keep them with the extracted capital module.
+- [x] Preserve existing coordinator behavior by routing `governance_status`, kelly sizing, reservation, release, and settlement through `CapitalPolicy`.
+- [x] Run targeted compile/test validation for both coordinator execution accounting and capital ledger behavior.
+
+## Review
+
+- [x] Confirm `CoordinatorHandle` no longer assembles allocator/deployment snapshots by reading four independent locks.
+- [x] Confirm `Coordinator::new`, runtime restore, and settlement helpers now delegate to `CapitalPolicy`.
+- [x] Confirm allocator regression tests live in `src/coordinator/capital.rs`, not at the bottom of `coordinator.rs`.
+
+## Progress notes
+
+- 2026-03-08: Added `src/coordinator/capital.rs` as the new ownership boundary for allocator identity, caps, reservation/release, settlement, and deployment ledger snapshots.
+- 2026-03-08: Replaced the four allocator fields on `Coordinator`/`CoordinatorHandle` with `Arc<CapitalPolicy>`, which collapses capital-governance state behind one seam without changing order execution flow.
+- 2026-03-08: Removed the duplicated allocator/type/test block from `src/coordinator/coordinator.rs`; the coordinator now consumes the module instead of defining it.
+- 2026-03-08: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+  - `cargo test test_crypto_allocator_ledger_snapshot_reports_open_pending_and_available --lib -- --nocapture`
+
+---
+
 # Strategy Action Contract Split (2026-03-08)
 
 ## Goal

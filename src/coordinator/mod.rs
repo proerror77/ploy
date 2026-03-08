@@ -5,6 +5,7 @@
 //! cross-agent position awareness, and dynamic pause/resume control.
 
 pub mod bootstrap;
+mod capital;
 pub mod command;
 pub mod config;
 pub mod coordinator;
