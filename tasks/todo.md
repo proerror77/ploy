@@ -150,6 +150,21 @@ Delete empty legacy Cargo feature shells once no code paths or docs still refere
 
 - [x] Confirm `tcn_db` is not referenced by source, tests, or docs.
 - [x] Remove the dead `tcn_db` feature from `Cargo.toml`.
+
+---
+
+# Orphan Service Cleanup (2026-03-08)
+
+## Goal
+Delete background service modules that no longer participate in any runtime path and are only left as unused exports.
+
+## Tasks
+
+- [x] Confirm `services/discovery.rs` has no runtime startup path.
+- [x] Confirm `services/data_collector.rs` has no runtime startup path.
+- [x] Confirm `services/order_monitor.rs` has no runtime startup path.
+- [x] Remove the dead module exports from `src/services/mod.rs`.
+- [x] Delete the orphan service modules.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.
