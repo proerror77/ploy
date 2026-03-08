@@ -21,15 +21,8 @@ pub mod sports_data;
 pub use advisor::AdvisoryAgent;
 pub use autonomous::{AutonomousAgent, AutonomousConfig};
 pub use client::{AgentClientConfig, ClaudeAgentClient};
-pub use grok::{GrokClient, GrokConfig, SearchResult, Sentiment};
-pub use odds_provider::{EdgeAnalysis, GameEvent, Market, OddsProvider, OddsProviderConfig, Sport};
+pub use grok::{GrokClient, GrokConfig};
 pub use polymarket_sports::{
-    EventDetails, LiveGameEvent, LiveGameMarket, PolymarketEdgeAnalysis, PolymarketSportsClient,
-    PolymarketSportsMarket, SportsMarketDetails, NBA_SERIES_ID,
+    EventDetails, LiveGameMarket, PolymarketSportsClient, NBA_SERIES_ID,
 };
-pub use protocol::{
-    AgentAction, AgentContext, AgentResponse, MarketSnapshot, PositionInfo, RiskAssessment,
-    TradeRecord,
-};
-pub use sports_analyst::{SportsAnalysis, SportsAnalysisWithDK, SportsAnalyst};
-pub use sports_data::{SportsDataFetcher, StructuredGameData};
+pub use sports_analyst::SportsAnalyst;

@@ -1585,3 +1585,21 @@ Narrow the `services` public surface so it no longer re-exports unused health-se
 ## Review
 
 - [x] The current runtime code only imports `crate::services::HealthState`; the broader `services` re-export surface had become dead compatibility API.
+
+---
+
+# AI Client Re-Export Cleanup (2026-03-08)
+
+## Goal
+Narrow the `ai_clients` top-level re-export surface so it only exposes the small set of client/runtime types that still have in-repo consumers.
+
+## Tasks
+
+- [x] Confirm which `ai_clients` top-level re-exports still have real callers.
+- [x] Remove unused top-level `pub use` exports from `src/ai_clients/mod.rs`.
+- [x] Keep module paths (`ai_clients::protocol`, `ai_clients::grok`, `ai_clients::sports_analyst`, etc.) intact for code that already imports concrete submodules.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] Current in-repo callers only rely on a small top-level set (`AdvisoryAgent`, `AutonomousAgent`, `AutonomousConfig`, `ClaudeAgentClient`, `AgentClientConfig`, `GrokClient`, `GrokConfig`, `SportsAnalyst`, `EventDetails`, `LiveGameMarket`, `PolymarketSportsClient`, `NBA_SERIES_ID`); the rest had become dead compatibility exports.
