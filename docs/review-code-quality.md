@@ -200,7 +200,6 @@ The heaviest users:
 - `src/strategy/adapters.rs` (44) -- wrapping legacy types for new trait
 - `src/strategy/momentum.rs` (43) -- config/state cloning across async boundaries
 - `src/strategy/split_arb.rs` (25) -- position state management
-- `src/strategy/multi_event.rs` (24) -- event tracking
 
 Most clones are on `Arc<RwLock<T>>` handles (cheap) or `String`/`Decimal`
 (small). The `adapters.rs` clones are concerning because they clone entire

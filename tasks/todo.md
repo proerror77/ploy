@@ -231,6 +231,19 @@ Delete the orphaned `strategy/reconciliation` module once it no longer has any r
 - [x] Confirm `ReconciliationService` and related types have no in-repo callers.
 - [x] Remove the dead re-export from `src/strategy/mod.rs`.
 - [x] Delete `src/strategy/reconciliation.rs`.
+
+---
+
+# Multi-Event Module Cleanup (2026-03-08)
+
+## Goal
+Delete the orphaned multi-event monitor module now that it no longer has any runtime or CLI caller and only survives as a public export.
+
+## Tasks
+
+- [x] Confirm `MultiEventMonitor` and related types have no in-repo callers.
+- [x] Remove the dead re-export from `src/strategy/mod.rs`.
+- [x] Delete `src/strategy/multi_event.rs`.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

@@ -48,7 +48,6 @@
 - 主要實作
   - 時間套利（分時對沖）：`src/strategy/split_arb.rs`
   - 兩腿套利狀態機（time-bounded binary）：`src/strategy/engine.rs`
-  - 多事件/多市場掃描：`src/strategy/multi_event.rs`
   - 多結果/單調性/拆合套利/EV：`src/strategy/multi_outcome.rs`
   - 波動套利：`src/strategy/volatility_arb.rs`
 - 跨市場（傳統博彩）相關

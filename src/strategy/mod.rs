@@ -83,7 +83,6 @@ pub mod integrity;
 pub mod liquidity_vacuum_backtest;
 pub mod momentum;
 pub mod momentum_backtest;
-pub mod multi_event;
 pub mod multi_outcome;
 pub mod paper_runner;
 #[cfg(feature = "analysis")]
@@ -117,7 +116,6 @@ pub use execution::engine;
 pub use execution::executor;
 pub use execution::fund_manager;
 pub use execution::idempotency;
-pub use multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use multi_outcome::{
     analyze_market_making_opportunity,
     analyze_near_settlement,
