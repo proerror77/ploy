@@ -138,6 +138,18 @@ Remove the retired EventEdge service runners and the stale feature/config surfac
 
 - [x] Confirmed `bootstrap` / `runtime_specs` no longer branch on EventEdge framework mode.
 - [x] Confirmed the only active EventEdge path is the registered strategy runtime in `src/strategy/event_edge/strategy.rs`.
+
+---
+
+# Feature Flag Cleanup (2026-03-08)
+
+## Goal
+Delete empty legacy Cargo feature shells once no code paths or docs still reference them.
+
+## Tasks
+
+- [x] Confirm `tcn_db` is not referenced by source, tests, or docs.
+- [x] Remove the dead `tcn_db` feature from `Cargo.toml`.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

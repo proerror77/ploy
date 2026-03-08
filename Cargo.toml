@@ -134,7 +134,6 @@ rl = ["burn", "burn-ndarray", "bincode"]
 analysis = ["analysis_parquet"]
 analysis_parquet = ["duckdb"]
 onnx = ["tract-onnx"]
-tcn_db = [] # Legacy db-backed TCN path (currently unused)
 builder_relayer_sdk = ["dep:builder-relayer-client-rust", "dep:builder_signing_sdk_rs"]
 pm_bridge = ["polymarket-client-sdk/bridge"]
 pm_ctf = ["polymarket-client-sdk/ctf"]
