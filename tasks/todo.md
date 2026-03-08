@@ -1692,3 +1692,20 @@ Delete unreferenced one-off scripts that no longer participate in any documented
 ## Review
 
 - [x] Both scripts were unreferenced from code, docs, tasks, and CI; removing them only trims stale manual tooling.
+
+---
+
+# Legacy MLP Script Cleanup (2026-03-08)
+
+## Goal
+Delete the unreferenced legacy JSON-weights training script now that the repo's documented production path is the ONNX-based training/inference flow.
+
+## Tasks
+
+- [x] Confirm `scripts/train_crypto_lob_mlp.py` has no repo references.
+- [x] Confirm the script describes itself as a legacy path superseded by ONNX tooling.
+- [x] Delete `scripts/train_crypto_lob_mlp.py`.
+
+## Review
+
+- [x] The deleted script was an orphaned training path; the active codebase and docs point at ONNX-based training instead.
