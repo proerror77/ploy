@@ -1624,3 +1624,21 @@ Retire the unstarted standalone `services` health/metrics server and the stale d
 ## Review
 
 - [x] The standalone health/metrics server had no startup path left in the codebase; only the API server's `/health` endpoint is live now.
+
+---
+
+# Account Ledger Skeleton Cleanup (2026-03-08)
+
+## Goal
+Remove the unused `account/ledger.rs` skeleton after confirming no runtime, API, or account-plane callers still consume `AccountLedgerSnapshot`.
+
+## Tasks
+
+- [x] Confirm `AccountLedgerSnapshot` is only referenced by `account/mod.rs` and its own file.
+- [x] Remove the `ledger` module and re-export from `src/account/mod.rs`.
+- [x] Delete `src/account/ledger.rs`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `AccountLedgerSnapshot` had no remaining runtime, API, or test consumers; the account plane currently only uses registry, budget, service, and claimer surfaces.
