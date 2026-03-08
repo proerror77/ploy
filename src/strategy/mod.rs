@@ -85,8 +85,6 @@ pub mod momentum;
 pub mod momentum_backtest;
 pub mod multi_outcome;
 pub mod paper_runner;
-#[cfg(feature = "analysis")]
-pub mod parquet_analysis;
 pub mod position_manager;
 pub mod probability;
 pub mod reverse_engineered;

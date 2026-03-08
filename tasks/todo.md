@@ -1488,3 +1488,23 @@ Restore `staggered_arb` to the intended live behavior: directional `LEG1` entrie
 - [x] `staggered_arb.toml` now limits fresh `LEG1` entries to the first 30 seconds and raises `max_initial_sum` from `0.92` to `1.10`.
 - [x] `StaggeredArbBacktestConfig::default()` now matches the live template for opening-window timing and initial-sum assumptions.
 - [x] Added a live-unit test proving entries are allowed inside the opening window and rejected after it expires.
+
+---
+
+# Parquet Analysis Module Cleanup (2026-03-08)
+
+## Goal
+Remove the orphan `strategy/parquet_analysis.rs` module that is still feature-gated in `strategy/mod.rs` but no longer has any CLI, runtime, API, or test callers.
+
+## Tasks
+
+- [x] Confirm `ParquetAnalyzer` and related result types are only referenced inside the module itself.
+- [x] Remove the `parquet_analysis` module export from `src/strategy/mod.rs`.
+- [x] Delete `src/strategy/parquet_analysis.rs`.
+- [x] Run focused validation and capture the results.
+
+## Review
+
+- [x] `parquet_analysis` had no remaining in-repo consumers outside its own source file; the `analysis` feature still supports dataset export from `cli/strategy.rs` without this module.
+- [x] Focused validation passed:
+  - `cargo check --bin ploy`
