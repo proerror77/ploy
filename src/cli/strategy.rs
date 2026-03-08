@@ -452,8 +452,8 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
-/// Run a strategy backtest against the integrated DB pipeline
-Backtest {
+    /// Run a strategy backtest against the integrated DB pipeline
+    Backtest {
         /// Strategy name (momentum, directional, prob-garch/prob_garch, liquidity-vacuum/liquidity_vacuum, staggered-arb/staggered_arb/gamma_scalping)
         name: String,
 
@@ -914,32 +914,14 @@ impl StrategyCommands {
                 symbols,
                 synthetic_depth,
                 database_url,
-            } => {
-                backfill_pm_replay_tables(
-                    from,
-                    to,
-                    &symbols,
-                    synthetic_depth,
-                    database_url,
-                )
-                .await
-            }
+            } => backfill_pm_replay_tables(from, to, &symbols, synthetic_depth, database_url).await,
             Self::BackfillPmTokenSettlements {
                 from,
                 to,
                 symbols,
                 limit,
                 database_url,
-            } => {
-                backfill_pm_token_settlements(
-                    from,
-                    to,
-                    &symbols,
-                    limit,
-                    database_url,
-                )
-                .await
-            }
+            } => backfill_pm_token_settlements(from, to, &symbols, limit, database_url).await,
         }
     }
 }
@@ -3728,7 +3710,7 @@ async fn run_backtest(
     };
     use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
 
-        match name {
+    match name {
             "momentum"
             | "directional"
             | "prob-garch"
@@ -3988,8 +3970,8 @@ async fn run_backtest(
             }
 
             if let Some(v) = lv_price_move_threshold {
-                config.price_move_threshold = Decimal::from_f64(v)
-                    .context("Invalid --lv-price-move-threshold value")?;
+                config.price_move_threshold =
+                    Decimal::from_f64(v).context("Invalid --lv-price-move-threshold value")?;
             }
             if let Some(v) = lv_volume_multiplier_threshold {
                 config.volume_multiplier_threshold = Decimal::from_f64(v)
@@ -4000,12 +3982,12 @@ async fn run_backtest(
                     .context("Invalid --lv-order-concentration-threshold value")?;
             }
             if let Some(v) = lv_entry_deviation_threshold {
-                config.entry_deviation_threshold = Decimal::from_f64(v)
-                    .context("Invalid --lv-entry-deviation-threshold value")?;
+                config.entry_deviation_threshold =
+                    Decimal::from_f64(v).context("Invalid --lv-entry-deviation-threshold value")?;
             }
             if let Some(v) = lv_entry_zscore_threshold {
-                config.entry_zscore_threshold = Decimal::from_f64(v)
-                    .context("Invalid --lv-entry-zscore-threshold value")?;
+                config.entry_zscore_threshold =
+                    Decimal::from_f64(v).context("Invalid --lv-entry-zscore-threshold value")?;
             }
             if let Some(v) = lv_take_profit_zscore_threshold {
                 config.take_profit_zscore_threshold = Decimal::from_f64(v)
@@ -4016,8 +3998,8 @@ async fn run_backtest(
                     .context("Invalid --lv-stop-loss-zscore-threshold value")?;
             }
             if let Some(v) = lv_take_profit_ema_band_pct {
-                config.take_profit_ema_band_pct = Decimal::from_f64(v)
-                    .context("Invalid --lv-take-profit-ema-band-pct value")?;
+                config.take_profit_ema_band_pct =
+                    Decimal::from_f64(v).context("Invalid --lv-take-profit-ema-band-pct value")?;
             }
             if let Some(v) = lv_stop_loss_pct {
                 config.stop_loss_pct =
@@ -4284,7 +4266,8 @@ async fn print_backtest_db_diagnostics(
     use chrono::{DateTime, Utc};
 
     fn fmt_ts(ts: Option<DateTime<Utc>>) -> String {
-        ts.map(|t| t.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+        ts.map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
     }
 
     async fn table_exists(pool: &sqlx::PgPool, table: &str) -> Result<bool> {
@@ -4331,7 +4314,11 @@ async fn print_backtest_db_diagnostics(
         {
             Ok((count, min_ts, max_ts, slugs)) => {
                 println!("\n[sync_records]");
-                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
                 println!("distinct pm_market_slug: {slugs}");
             }
             Err(e) => {
@@ -4361,7 +4348,11 @@ async fn print_backtest_db_diagnostics(
         {
             Ok((count, min_ts, max_ts)) => {
                 println!("\n[binance_price_ticks]");
-                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
             }
             Err(e) => {
                 println!("\n[binance_price_ticks] query failed: {e}");
@@ -4394,7 +4385,11 @@ async fn print_backtest_db_diagnostics(
         {
             Ok((count, min_ts, max_ts, intervals)) => {
                 println!("\n[binance_klines]");
-                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
                 println!("distinct intervals: {intervals}");
             }
             Err(e) => {
@@ -4426,7 +4421,11 @@ async fn print_backtest_db_diagnostics(
         {
             Ok((count, min_ts, max_ts, tokens)) => {
                 println!("\n[clob_quote_ticks]");
-                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
                 println!("distinct token_id: {tokens}");
             }
             Err(e) => {
@@ -4458,7 +4457,11 @@ async fn print_backtest_db_diagnostics(
         {
             Ok((count, min_ts, max_ts, tokens)) => {
                 println!("\n[clob_orderbook_snapshots]");
-                println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
                 println!("distinct token_id: {tokens}");
             }
             Err(e) => {
@@ -4525,7 +4528,11 @@ async fn print_backtest_db_diagnostics(
             Ok((count, slugs, resolved, min_ts, max_ts)) => {
                 println!("\n[pm_token_settlements]");
                 println!("rows: {count}, distinct market_slug: {slugs}, resolved_rows: {resolved}");
-                println!("resolved_at range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                println!(
+                    "resolved_at range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
             }
             Err(e) => {
                 println!("\n[pm_token_settlements] query failed: {e}");
@@ -4559,7 +4566,11 @@ async fn print_backtest_db_diagnostics(
         {
             printed = true;
             println!("\n[deribit_iv_ticks]");
-            println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+            println!(
+                "rows: {count}, ts_range: {} .. {}",
+                fmt_ts(min_ts),
+                fmt_ts(max_ts)
+            );
             println!("distinct currency: {ccy}");
         }
 
@@ -4583,7 +4594,11 @@ async fn print_backtest_db_diagnostics(
             {
                 Ok((count, min_ts, max_ts, symbols)) => {
                     println!("\n[deribit_iv_ticks]");
-                    println!("rows: {count}, ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+                    println!(
+                        "rows: {count}, ts_range: {} .. {}",
+                        fmt_ts(min_ts),
+                        fmt_ts(max_ts)
+                    );
                     println!("distinct symbol: {symbols}");
                 }
                 Err(e) => {
@@ -5239,8 +5254,7 @@ async fn run_live_backtest_compare(
         if filled_qty > 0 {
             if let (Some(limit_px), Some(fill_px)) = (limit_price, fill_price) {
                 if limit_px > Decimal::ZERO {
-                    if let (Some(limit_f64), Some(fill_f64)) =
-                        (limit_px.to_f64(), fill_px.to_f64())
+                    if let (Some(limit_f64), Some(fill_f64)) = (limit_px.to_f64(), fill_px.to_f64())
                     {
                         let side_lower = side.unwrap_or_else(|| "buy".to_string()).to_lowercase();
                         let slip_bps = if side_lower == "sell" {
@@ -5517,7 +5531,14 @@ async fn backfill_pm_replay_tables(
     .context("Failed to ensure pm_market_metadata table")?;
 
     println!("\nBackfilling PM replay tables from sync_records...");
-    println!("  symbols: {}", if symbol_list.is_empty() { "(all)".to_string() } else { symbol_list.join(",") });
+    println!(
+        "  symbols: {}",
+        if symbol_list.is_empty() {
+            "(all)".to_string()
+        } else {
+            symbol_list.join(",")
+        }
+    );
     println!(
         "  from: {}",
         from_dt
@@ -5526,7 +5547,9 @@ async fn backfill_pm_replay_tables(
     );
     println!(
         "  to:   {}",
-        to_dt.map(|v| v.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+        to_dt
+            .map(|v| v.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
     );
 
     let quote_up = sqlx::query(
@@ -5964,7 +5987,9 @@ async fn backfill_pm_token_settlements(
     );
     println!(
         "  to:   {}",
-        to_dt.map(|v| v.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+        to_dt
+            .map(|v| v.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
     );
     println!("  token limit: {}", limit);
 

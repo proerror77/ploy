@@ -166,8 +166,7 @@ pub use event_edge::{run_event_edge, EventEdgeConfig};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
 pub use gamma_scalping::{
-    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer,
-    Straddle,
+    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer, Straddle,
 };
 pub use garch_probability_backtest::{
     GarchProbabilityBacktestConfig, GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade,

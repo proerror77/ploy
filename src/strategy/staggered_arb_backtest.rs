@@ -283,7 +283,11 @@ impl PmEventQuoteState {
         (self.up.ask, self.down.ask)
     }
 
-    pub(crate) fn synthetic(up_ask: Option<Decimal>, down_ask: Option<Decimal>, ts: DateTime<Utc>) -> Self {
+    pub(crate) fn synthetic(
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+        ts: DateTime<Utc>,
+    ) -> Self {
         let mut state = Self::default();
         state.up.update(up_ask, None, ts);
         state.down.update(down_ask, None, ts);
@@ -1258,8 +1262,12 @@ impl StaggeredArbBacktestEngine {
             _ => return,
         };
         let quote_state = self.event_quote_state(&window.event_slug, up_ask, down_ask, ts);
-        if !self.config.pm_quote_is_fresh(quote_state.up.last_seen_at, ts)
-            || !self.config.pm_quote_is_fresh(quote_state.down.last_seen_at, ts)
+        if !self
+            .config
+            .pm_quote_is_fresh(quote_state.up.last_seen_at, ts)
+            || !self
+                .config
+                .pm_quote_is_fresh(quote_state.down.last_seen_at, ts)
         {
             trace!("Skipping: PM quotes stale for {}", window.event_slug);
             return;
@@ -1481,7 +1489,10 @@ impl StaggeredArbBacktestEngine {
             .config
             .entry_quote_is_persistent(other_quote_state.first_seen_at, ts)
         {
-            trace!("Skipping: opposite ask not persistent yet for {}", window.event_slug);
+            trace!(
+                "Skipping: opposite ask not persistent yet for {}",
+                window.event_slug
+            );
             return;
         }
 
@@ -1870,7 +1881,10 @@ impl StaggeredArbBacktestEngine {
                     Direction::Up => (pm_asks.0, quote_state.up),
                     Direction::Down => (pm_asks.1, quote_state.down),
                 };
-                let leg1_current_value = if self.config.pm_quote_is_fresh(leg1_mark_state.last_seen_at, ts) {
+                let leg1_current_value = if self
+                    .config
+                    .pm_quote_is_fresh(leg1_mark_state.last_seen_at, ts)
+                {
                     leg1_mark.unwrap_or(leg1_price)
                 } else {
                     leg1_price
@@ -4057,13 +4071,22 @@ mod tests {
 
     #[test]
     fn test_record_pm_quote_clears_disappearing_ask_side() {
-        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(
-            StaggeredArbBacktestConfig::default(),
-        );
+        let mut engine =
+            StaggeredArbBacktestEngine::new_without_recorder(StaggeredArbBacktestConfig::default());
         let now = Utc::now();
 
-        engine.record_pm_quote("evt", Side::Up, Some(dec!(0.55)), now - chrono::Duration::seconds(10));
-        engine.record_pm_quote("evt", Side::Down, Some(dec!(0.45)), now - chrono::Duration::seconds(10));
+        engine.record_pm_quote(
+            "evt",
+            Side::Up,
+            Some(dec!(0.55)),
+            now - chrono::Duration::seconds(10),
+        );
+        engine.record_pm_quote(
+            "evt",
+            Side::Down,
+            Some(dec!(0.45)),
+            now - chrono::Duration::seconds(10),
+        );
         assert_eq!(
             engine.pm_asks_by_event.get("evt").copied(),
             Some((Some(dec!(0.55)), Some(dec!(0.45))))
@@ -4079,9 +4102,8 @@ mod tests {
 
     #[test]
     fn test_record_pm_quote_resets_persistence_after_stale_gap() {
-        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(
-            StaggeredArbBacktestConfig::default(),
-        );
+        let mut engine =
+            StaggeredArbBacktestEngine::new_without_recorder(StaggeredArbBacktestConfig::default());
         let first_seen_at = Utc::now();
         let reappeared_at = first_seen_at + chrono::Duration::seconds(20);
 
