@@ -1,3 +1,34 @@
+# Bootstrap Managed Runtime Extraction (2026-03-08)
+
+## Goal
+Start the approved structure refactor by moving the managed strategy runtime out of `src/coordinator/bootstrap.rs` into a dedicated coordinator module, while preserving existing behavior and keeping regression coverage on the execution path.
+
+## Tasks
+
+- [x] Read `.full-review/01-05` and reconcile the valid structure findings with the approved layered-runtime plan.
+- [x] Extract managed strategy runtime helpers and launcher into `src/coordinator/strategy_runtime.rs`.
+- [x] Update `src/coordinator/mod.rs` and `src/coordinator/bootstrap.rs` so bootstrap launches the runtime instead of owning its internals.
+- [x] Move runtime-order helper tests to the new module and keep targeted regression coverage green.
+- [x] Add an architecture breadcrumb in the new runtime module explaining the ownership boundary.
+- [x] Run targeted validation for the extracted runtime helpers and existing split-arb runtime config behavior.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer owns managed strategy runtime internals.
+- [x] Confirm runtime-order helper tests now live with the extracted module.
+- [x] Confirm targeted tests still pass after the extraction.
+
+## Progress notes
+
+- 2026-03-08: Read the `.full-review` reports and confirmed the first high-leverage structural slice is extracting the managed strategy runtime from `bootstrap.rs`, not trying to unify all agent abstractions in one step.
+- 2026-03-08: Created `src/coordinator/strategy_runtime.rs` and moved strategy instantiation, feed wiring, action execution, runtime order persistence helpers, and managed-runtime observability there.
+- 2026-03-08: Left `ensure_strategy_observability_tables()` in `bootstrap.rs` for compatibility because it is still used by CLI/strategy codepaths; this slice changes runtime ownership without widening the schema migration surface.
+- 2026-03-08: Targeted validation passed after the extraction:
+  - `cargo test persist_runtime_order_ --lib -- --nocapture`
+  - `cargo test build_split_arb_runtime_config_ --lib -- --nocapture`
+
+---
+
 # Coordinator Execution Accounting And Aliyun Release Fixes (2026-03-08)
 
 ## Goal
