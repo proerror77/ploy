@@ -6494,7 +6494,6 @@ mod tests {
         let politics_cfg = PoliticsTradingConfig::default();
         let cfg = crate::config::EventEdgeAgentConfig {
             enabled: true,
-            framework: "deterministic".to_string(),
             event_ids: vec!["evt-1".to_string()],
             titles: vec!["Best AI model".to_string()],
             interval_secs: 180,
@@ -6504,8 +6503,6 @@ mod tests {
             trade: true,
             cooldown_secs: 120,
             max_daily_spend_usd: Decimal::from(55),
-            model: None,
-            claude_max_turns: 0,
         };
 
         let projected = crate::plugins::projector::project_event_edge_runtime_spec(
@@ -6593,7 +6590,6 @@ mod tests {
     fn build_event_edge_runtime_config_projects_targets_and_limits() {
         let cfg = crate::config::EventEdgeAgentConfig {
             enabled: true,
-            framework: "deterministic".to_string(),
             event_ids: vec!["evt-1".to_string()],
             titles: vec!["Best AI model".to_string()],
             interval_secs: 180,
@@ -6603,8 +6599,6 @@ mod tests {
             trade: true,
             cooldown_secs: 120,
             max_daily_spend_usd: Decimal::from(55),
-            model: None,
-            claude_max_turns: 0,
         };
 
         let rendered = build_event_edge_runtime_config("https://clob.polymarket.com", &cfg);
@@ -6623,7 +6617,6 @@ mod tests {
         let politics_cfg = PoliticsTradingConfig::default();
         let cfg = crate::config::EventEdgeAgentConfig {
             enabled: true,
-            framework: "deterministic".to_string(),
             event_ids: vec!["evt-1".to_string()],
             titles: vec!["Best AI model".to_string()],
             interval_secs: 180,
@@ -6633,8 +6626,6 @@ mod tests {
             trade: true,
             cooldown_secs: 120,
             max_daily_spend_usd: Decimal::from(55),
-            model: None,
-            claude_max_turns: 0,
         };
 
         let spec = build_event_edge_managed_runtime_spec(

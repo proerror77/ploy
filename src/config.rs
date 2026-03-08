@@ -275,12 +275,6 @@ pub struct EventEdgeAgentConfig {
     /// Enable the agent inside `ploy run`
     #[serde(default)]
     pub enabled: bool,
-    /// Agent framework to use:
-    /// - "deterministic" (default): internal loop with fixed rules
-    /// - "event_driven": event-driven + persisted-state loop (Arena `last_updated` gating)
-    /// - "claude_agent_sdk": tool-using agent via `claude-agent-sdk-rs` (Claude Code CLI)
-    #[serde(default = "default_event_edge_framework")]
-    pub framework: String,
     /// Polymarket event IDs to monitor (preferred)
     #[serde(default)]
     pub event_ids: Vec<String>,
@@ -308,13 +302,6 @@ pub struct EventEdgeAgentConfig {
     /// Maximum notional spend per UTC day (simple safety guard)
     #[serde(default = "default_event_edge_max_daily_spend_usd")]
     pub max_daily_spend_usd: Decimal,
-
-    /// Claude model override for framework mode (optional)
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Maximum Claude turns per cycle (framework mode)
-    #[serde(default = "default_event_edge_claude_max_turns")]
-    pub claude_max_turns: u32,
 }
 
 impl EventEdgeAgentConfig {
@@ -339,13 +326,6 @@ impl EventEdgeAgentConfig {
                 self.max_daily_spend_usd
             ));
         }
-        let valid_frameworks = ["deterministic", "event_driven", "claude_agent_sdk"];
-        if !valid_frameworks.contains(&self.framework.as_str()) {
-            errors.push(format!(
-                "framework must be one of {:?}, got \"{}\"",
-                valid_frameworks, self.framework
-            ));
-        }
         errors
     }
 }
@@ -354,7 +334,6 @@ impl Default for EventEdgeAgentConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            framework: default_event_edge_framework(),
             event_ids: Vec::new(),
             titles: Vec::new(),
             interval_secs: default_event_edge_interval_secs(),
@@ -364,14 +343,8 @@ impl Default for EventEdgeAgentConfig {
             trade: false,
             cooldown_secs: default_event_edge_cooldown_secs(),
             max_daily_spend_usd: default_event_edge_max_daily_spend_usd(),
-            model: None,
-            claude_max_turns: default_event_edge_claude_max_turns(),
         }
     }
-}
-
-fn default_event_edge_framework() -> String {
-    "deterministic".to_string()
 }
 
 fn default_event_edge_interval_secs() -> u64 {
@@ -396,10 +369,6 @@ fn default_event_edge_cooldown_secs() -> u64 {
 
 fn default_event_edge_max_daily_spend_usd() -> Decimal {
     Decimal::new(50, 0) // $50
-}
-
-fn default_event_edge_claude_max_turns() -> u32 {
-    20
 }
 
 /// NBA Q3→Q4 comeback trading agent configuration

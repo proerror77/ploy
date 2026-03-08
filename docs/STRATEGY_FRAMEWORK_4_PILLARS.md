@@ -34,16 +34,12 @@
 - 主要入口
   - CLI：`ploy event-edge ...`（Legacy CLI，見 `src/main.rs` 的 `run_event_edge_mode`）
   - 常駐背景 agent（跟著 `ploy platform start --politics` 起）：`[event_edge_agent]`（見 `config/default.toml`、`docs/EVENT_EDGE_AGENT.md`）
-  - 三種 framework runner：
-    - `src/services/event_edge_agent.rs`（deterministic）
-    - `src/services/event_edge_event_driven.rs`（event-driven + persisted state）
-    - `src/services/event_edge_claude_framework.rs`（Claude agent SDK + MCP tools）
+  - Canonical runtime：`src/strategy/event_edge/strategy.rs`（registered strategy plugin through the managed strategy runtime）
 - 已完成
   - `p_true` 估計 → `edge/EV` → 下單（可 dry-run）
-  - 狀態持久化（event_driven framework）
 - 缺口/下一步
   - 外部資料源目前幾乎只有 Arena（想覆蓋「選舉/監管事件」需新增 `event_models/*`）
-  - 把 EventEdge 作為 StrategyManager 的一級 Strategy（目前主要走 services/agents 路徑）
+  - 擴充更多事件資料源與 discovery path
 
 ### 1.2 套利策略（Arbitrage）
 

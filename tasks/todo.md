@@ -118,6 +118,26 @@ Plan the next phase after layered-runtime convergence: delete env-gated compatib
 
 - [x] There is no large architectural redesign left; remaining work is retirement of old code paths.
 - [x] The two remaining `STAG-ARB` items are operational acceptance checks, not blockers for writing the retirement plan.
+
+---
+
+# EventEdge Legacy Service Cleanup (2026-03-08)
+
+## Goal
+Remove the retired EventEdge service runners and the stale feature/config surface that no longer participates in canonical startup.
+
+## Tasks
+
+- [x] Confirm `event_edge_event_driven` and `event_edge_claude_framework` have no live startup path.
+- [x] Delete the dead EventEdge service runners from `src/services/`.
+- [x] Remove the unused Cargo feature/dependency for `event_edge_claude_sdk`.
+- [x] Shrink `EventEdgeAgentConfig` to the deterministic surface actually consumed by canonical runtime.
+- [x] Align EventEdge docs with the post-retirement steady state.
+
+## Review
+
+- [x] Confirmed `bootstrap` / `runtime_specs` no longer branch on EventEdge framework mode.
+- [x] Confirmed the only active EventEdge path is the registered strategy runtime in `src/strategy/event_edge/strategy.rs`.
 - [x] The first hard blocker for deletion is config ownership: `runtime_specs.rs` and `bootstrap.rs` still import config types from legacy agent modules.
 - [x] Neutral runtime config ownership now lives in `src/config.rs`; legacy agent modules only re-export those types for compatibility while deletion work continues.
 - [x] Politics and sports now start only through canonical registered-strategy projection; operator docs no longer advertise a sports compatibility gate.

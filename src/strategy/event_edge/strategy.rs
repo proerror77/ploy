@@ -76,7 +76,6 @@ impl EventEdgeStrategy {
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-            framework: "deterministic".to_string(),
             event_ids,
             titles,
             interval_secs: timing
@@ -110,8 +109,6 @@ impl EventEdgeStrategy {
                 .and_then(|v| v.as_float())
                 .and_then(Decimal::from_f64_retain)
                 .unwrap_or_else(|| Decimal::from(100)),
-            model: None,
-            claude_max_turns: 0,
         };
 
         Ok(Self {
@@ -382,7 +379,6 @@ mod tests {
             PolymarketClient::new("https://clob.polymarket.com", true).expect("test client");
         let cfg = EventEdgeAgentConfig {
             enabled: true,
-            framework: "deterministic".to_string(),
             event_ids: vec!["evt-1".to_string()],
             titles: Vec::new(),
             interval_secs: 300,
@@ -392,8 +388,6 @@ mod tests {
             trade: true,
             cooldown_secs: 300,
             max_daily_spend_usd: Decimal::from(100),
-            model: None,
-            claude_max_turns: 0,
         };
         EventEdgeCore::new(client, cfg)
     }

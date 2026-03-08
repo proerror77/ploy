@@ -1,17 +1,11 @@
 pub mod data_collector;
 pub mod discovery;
-#[cfg(feature = "event_edge_claude_sdk")]
-pub mod event_edge_claude_framework;
-pub mod event_edge_event_driven;
 pub mod health;
 pub mod metrics;
 pub mod order_monitor;
 
 pub use data_collector::DataCollector;
 pub use discovery::DiscoveryService;
-#[cfg(feature = "event_edge_claude_sdk")]
-pub use event_edge_claude_framework::EventEdgeClaudeFrameworkAgent;
-pub use event_edge_event_driven::EventEdgeEventDrivenAgent;
 pub use health::{ComponentHealth, HealthResponse, HealthServer, HealthState, HealthStatus};
 pub use metrics::Metrics;
 pub use order_monitor::{

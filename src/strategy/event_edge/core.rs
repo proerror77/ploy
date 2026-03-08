@@ -1,8 +1,7 @@
 //! Shared state and decision logic for EventEdge strategies.
 //!
 //! `EventEdgeCore` owns the scan→filter→cooldown→spend-cap pipeline that was
-//! previously duplicated across `event_edge_agent`, `event_edge_event_driven`,
-//! and `event_edge_claude_framework`.
+//! previously duplicated across legacy EventEdge runners.
 
 use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
