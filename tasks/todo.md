@@ -2867,3 +2867,30 @@ Move `AgentStatus` and `AgentRiskParams` out of `platform` so those agent-centri
   - `cargo check --lib --features rl`
   - `cargo test --lib agent_runtime::tests -- --nocapture`
   - `rg "AgentRiskParams|AgentStatus" src/platform src/lib.rs`
+
+# Strategy Runtime, Risk, And Adapter Ownership Cuts (2026-03-10)
+
+## Goal
+Finish the next large structural wave by shrinking the remaining core ownership hot spots: `strategy_runtime`, `platform/risk`, and `strategy/adapters`.
+
+## Tasks
+
+- [x] Extract `strategy_runtime` order-persistence / observability helpers into dedicated submodules so the canonical managed-runtime loop owns orchestration rather than inline storage/logging details.
+- [ ] Split `platform/risk.rs` into clearer ownership slices without changing risk semantics.
+- [ ] Split `strategy/adapters.rs` so momentum/shared adapter support stops living in one giant file.
+- [ ] Re-run compile and focused managed-runtime / risk / strategy regressions after each integrated slice.
+
+## Review
+
+- [x] Confirm `strategy_runtime.rs` keeps runtime-loop ownership only and delegates order bridge / observability helpers.
+- [ ] Confirm `risk.rs` no longer centralizes config, counters, and circuit-breaker bookkeeping in one file.
+- [ ] Confirm `adapters.rs` shrinks and its extracted modules own the moved adapter support logic.
+
+## Progress notes
+
+- 2026-03-10: Reserved mainline ownership for `src/coordinator/strategy_runtime.rs`; parallel sidecar ownership goes to `src/platform/risk.rs` and `src/strategy/adapters.rs`.
+- 2026-03-10: Added [observability.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/observability.rs) and [order_store.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/order_store.rs), moving managed-runtime signal-history persistence plus runtime order store/normalization helpers out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs).
+- 2026-03-10: Validation passed:
+  - `cargo check --lib`
+  - `cargo test persist_runtime_order_ --lib -- --nocapture`
+  - `cargo test normalize_runtime_order_request_sets_idempotency_key_from_action_id --lib -- --nocapture`
