@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::debug;
 
 use super::types::{Domain, OrderIntent, OrderPriority};
 use crate::agent_runtime::AgentRiskParams;
 mod checks;
 mod config;
+mod exposure;
 mod stats;
 mod transitions;
 mod types;
@@ -73,93 +73,6 @@ impl RiskGate {
             drawdown_stats: Arc::new(RwLock::new(DrawdownStats::default())),
             circuit_events: Arc::new(RwLock::new(Vec::new())),
             halted_at: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    /// 註冊 Agent 的風控參數
-    pub async fn register_agent(&self, agent_id: &str, params: AgentRiskParams) {
-        let mut params_map = self.agent_params.write().await;
-        params_map.insert(agent_id.to_string(), params);
-        debug!("Registered risk params for agent {}", agent_id);
-    }
-
-    /// 註冊 Agent 的風控參數 (含 domain)
-    pub async fn register_agent_with_domain(
-        &self,
-        agent_id: &str,
-        domain: Domain,
-        params: AgentRiskParams,
-    ) {
-        self.register_agent(agent_id, params).await;
-        self.agent_domains
-            .write()
-            .await
-            .insert(agent_id.to_string(), domain);
-    }
-
-    /// 取消註冊 Agent
-    pub async fn unregister_agent(&self, agent_id: &str) {
-        let removed_domain = self.agent_domains.write().await.remove(agent_id);
-        if let Some(domain) = removed_domain {
-            let old_exposure = self
-                .agent_stats
-                .read()
-                .await
-                .get(agent_id)
-                .map(|s| s.exposure)
-                .unwrap_or(Decimal::ZERO);
-            if old_exposure > Decimal::ZERO {
-                let mut domain_map = self.domain_exposure.write().await;
-                if let Some(current) = domain_map.get_mut(&domain) {
-                    *current = (*current - old_exposure).max(Decimal::ZERO);
-                    if *current == Decimal::ZERO {
-                        domain_map.remove(&domain);
-                    }
-                }
-            }
-        }
-        self.agent_params.write().await.remove(agent_id);
-        self.agent_stats.write().await.remove(agent_id);
-        debug!("Unregistered agent {}", agent_id);
-    }
-
-    // ==================== 狀態更新 ====================
-
-    /// 更新 Agent 暴露
-    pub async fn update_agent_exposure(
-        &self,
-        agent_id: &str,
-        exposure: Decimal,
-        unrealized_pnl: Decimal,
-        position_count: usize,
-        unhedged_count: u32,
-    ) {
-        let domain = self.agent_domains.read().await.get(agent_id).copied();
-
-        let mut stats_map = self.agent_stats.write().await;
-        let stats = stats_map.entry(agent_id.to_string()).or_default();
-
-        let old_exposure = stats.exposure;
-        stats.exposure = exposure;
-        stats.unrealized_pnl = unrealized_pnl;
-        stats.position_count = position_count;
-        stats.unhedged_count = unhedged_count;
-        stats.last_update = Some(Utc::now());
-
-        drop(stats_map);
-
-        // 更新平台總暴露
-        let mut total = self.total_exposure.write().await;
-        *total = *total - old_exposure + exposure;
-
-        // 更新 domain 暴露
-        if let Some(domain) = domain {
-            let mut domain_map = self.domain_exposure.write().await;
-            let current = domain_map.entry(domain).or_insert(Decimal::ZERO);
-            *current = (*current - old_exposure + exposure).max(Decimal::ZERO);
-            if *current == Decimal::ZERO {
-                domain_map.remove(&domain);
-            }
         }
     }
 
@@ -466,6 +379,32 @@ mod tests {
             }
             _ => panic!("Expected domain exposure block"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_unregister_agent_releases_domain_exposure() {
+        let gate = RiskGate::new(RiskConfig::default());
+
+        gate.register_agent_with_domain("agent1", Domain::Crypto, AgentRiskParams::default())
+            .await;
+        gate.update_agent_exposure("agent1", Decimal::from(15), Decimal::ZERO, 1, 0)
+            .await;
+
+        assert_eq!(*gate.total_exposure.read().await, Decimal::from(15));
+        assert_eq!(
+            gate.domain_exposure
+                .read()
+                .await
+                .get(&Domain::Crypto)
+                .copied(),
+            Some(Decimal::from(15))
+        );
+
+        gate.unregister_agent("agent1").await;
+
+        assert_eq!(gate.domain_exposure.read().await.get(&Domain::Crypto), None);
+        assert_eq!(gate.agent_stats("agent1").await, None);
+        assert!(gate.agent_params.read().await.get("agent1").is_none());
     }
 
     #[tokio::test]
