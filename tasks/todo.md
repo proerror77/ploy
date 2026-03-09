@@ -1,3 +1,35 @@
+# Momentum Managed Runtime Migration (2026-03-09)
+
+## Goal
+Replace the default directional crypto momentum live branch in `bootstrap.rs` with the canonical managed strategy runtime, while preserving legacy fallback for unsupported non-directional entry modes.
+
+## Tasks
+
+- [x] Add bootstrap-side momentum runtime config generation from `CryptoTradingConfig`.
+- [x] Switch the `enable_crypto_momentum` startup branch from `CryptoTradingAgent` to `run_managed_strategy_runtime` when `entry_mode == directional`.
+- [x] Preserve a legacy fallback path for `arb_only` and `vol_straddle` modes until canonical equivalents exist.
+- [x] Add targeted tests for momentum runtime config rendering and unsupported-mode fallback gating.
+- [x] Run targeted compile/tests for bootstrap config rendering and core coordinator governance coverage.
+
+## Review
+
+- [x] Confirm the default directional momentum path now spawns the canonical managed strategy runtime instead of `CryptoTradingAgent`.
+- [x] Confirm unsupported momentum modes still route to the legacy trading-agent path rather than silently changing behavior.
+- [x] Confirm generated momentum runtime config carries the expected symbols, timing, and risk envelope.
+
+## Progress notes
+
+- 2026-03-09: The canonical runtime already supports `momentum` through `StrategyFactory`, but bootstrap was still directly spawning `CryptoTradingAgent`.
+- 2026-03-09: Added `build_momentum_runtime_config(...)` plus a template/external-file renderer so bootstrap can derive a managed `momentum` TOML from `CryptoTradingConfig` while preserving the current risk and timing envelope.
+- 2026-03-09: Replaced the default directional `enable_crypto_momentum` branch in bootstrap with `run_managed_strategy_runtime(...)`, using the existing `crypto` agent id and coordinator registration path.
+- 2026-03-09: Kept a guarded legacy fallback for `arb_only` and `vol_straddle` entry modes so unsupported semantics do not silently drift during the migration.
+- 2026-03-09: Added bootstrap tests for managed momentum config rendering and non-directional rejection.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+
 # Bootstrap OpenClaw Spawn Extraction (2026-03-09)
 
 ## Goal

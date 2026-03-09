@@ -14,7 +14,7 @@ pub mod sports;
 pub mod traits;
 
 pub use context::AgentContext;
-pub use crypto::{CryptoTradingAgent, CryptoTradingConfig};
+pub use crypto::{CryptoEntryMode, CryptoTradingAgent, CryptoTradingConfig};
 pub use crypto_lob_ml::{
     CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
