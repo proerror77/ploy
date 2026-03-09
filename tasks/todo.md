@@ -2877,22 +2877,28 @@ Finish the next large structural wave by shrinking the remaining core ownership 
 ## Tasks
 
 - [x] Extract `strategy_runtime` order-persistence / observability helpers into dedicated submodules so the canonical managed-runtime loop owns orchestration rather than inline storage/logging details.
-- [ ] Split `platform/risk.rs` into clearer ownership slices without changing risk semantics.
-- [ ] Split `strategy/adapters.rs` so momentum/shared adapter support stops living in one giant file.
+- [x] Split `platform/risk.rs` into clearer ownership slices without changing risk semantics.
+- [x] Split `strategy/adapters.rs` so momentum/shared adapter support stops living in one giant file.
 - [ ] Re-run compile and focused managed-runtime / risk / strategy regressions after each integrated slice.
 
 ## Review
 
 - [x] Confirm `strategy_runtime.rs` keeps runtime-loop ownership only and delegates order bridge / observability helpers.
-- [ ] Confirm `risk.rs` no longer centralizes config, counters, and circuit-breaker bookkeeping in one file.
-- [ ] Confirm `adapters.rs` shrinks and its extracted modules own the moved adapter support logic.
+- [x] Confirm `risk.rs` no longer centralizes config, counters, and circuit-breaker bookkeeping in one file.
+- [x] Confirm `adapters.rs` shrinks and its extracted modules own the moved adapter support logic.
 
 ## Progress notes
 
 - 2026-03-10: Reserved mainline ownership for `src/coordinator/strategy_runtime.rs`; parallel sidecar ownership goes to `src/platform/risk.rs` and `src/strategy/adapters.rs`.
 - 2026-03-10: Added [observability.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/observability.rs) and [order_store.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/order_store.rs), moving managed-runtime signal-history persistence plus runtime order store/normalization helpers out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs).
 - 2026-03-10: Added [actions.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions.rs) and moved the managed runtime action-dispatch / poll-update loop out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), leaving the top-level file focused on runtime assembly, feed wiring, and command handling.
+- 2026-03-10: Added [config.rs](/Users/proerror/Documents/ploy/src/platform/risk/config.rs), [types.rs](/Users/proerror/Documents/ploy/src/platform/risk/types.rs), and [stats.rs](/Users/proerror/Documents/ploy/src/platform/risk/stats.rs), moving `RiskConfig`, public risk result/state types, and internal stats structs out of [risk.rs](/Users/proerror/Documents/ploy/src/platform/risk.rs).
+- 2026-03-10: Added [momentum_adapter.rs](/Users/proerror/Documents/ploy/src/strategy/adapters/momentum_adapter.rs) and moved the full `MomentumStrategyAdapter` ownership out of [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs), leaving the top-level file focused on shared helpers plus split-arb ownership.
 - 2026-03-10: Validation passed:
   - `cargo check --lib`
   - `cargo test persist_runtime_order_ --lib -- --nocapture`
   - `cargo test normalize_runtime_order_request_sets_idempotency_key_from_action_id --lib -- --nocapture`
+  - `cargo test test_basic_check --lib -- --nocapture`
+  - `cargo test test_drawdown_limit_triggers_circuit_breaker --lib -- --nocapture`
+  - `cargo test test_restore_runtime_counters_halts_when_daily_loss_exceeded --lib -- --nocapture`
+  - `cargo test strategy::adapters::tests --lib -- --nocapture`
