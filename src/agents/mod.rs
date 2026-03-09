@@ -1,6 +1,10 @@
 //! Trading Agents — pull-based agent implementations
 //!
-//! Each agent implements `TradingAgent` and owns its main loop.
+//! Legacy pull-based agent runtime.
+//!
+//! Crypto and governance runtimes still live here. Sports and politics now run
+//! through the canonical managed strategy runtime; their modules remain only as
+//! config compatibility shims for bootstrap deserialization.
 //! Agents communicate with the Coordinator via `AgentContext`.
 
 pub mod context;
@@ -21,6 +25,6 @@ pub use crypto_lob_ml::{
 pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 pub use governance_context::GovernanceContext;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
-pub use politics::{PoliticsTradingAgent, PoliticsTradingConfig};
-pub use sports::{SportsTradingAgent, SportsTradingConfig};
+pub use politics::PoliticsTradingConfig;
+pub use sports::SportsTradingConfig;
 pub use traits::{AgentConfig, GovernanceAgent, TradingAgent};

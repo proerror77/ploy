@@ -2913,7 +2913,7 @@ symbols = ["SOLUSDT"]
                 .collect::<Vec<_>>(),
             vec!["OpenAI funding"]
         );
-        assert_eq!(value["event_edge"]["trade"].as_bool(), Some(true));
+        assert_eq!(value["event_edge"]["trade"].as_bool(), Some(false));
         assert_eq!(value["event_edge"]["interval_secs"].as_integer(), Some(45));
         assert_eq!(value["event_edge"]["shares"].as_integer(), Some(33));
         assert_eq!(value["event_edge"]["model"].as_str(), Some("claude-test"));

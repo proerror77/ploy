@@ -62,6 +62,7 @@ Retire the legacy `SportsTradingAgent` / `PoliticsTradingAgent` startup paths fr
 - [x] Register `event_edge` and `nba_comeback` in `StrategyFactory` and strategy availability metadata.
 - [x] Re-open politics in `platform_mode` when no explicit domain filter is applied, while still filtering it out when the CLI only selects crypto/sports.
 - [x] Add or update targeted tests for the new runtime config builders and platform-mode gating.
+- [x] Collapse `src/agents/sports.rs` and `src/agents/politics.rs` into config-only compatibility modules and stop exporting their legacy agent types.
 
 ## Review
 
@@ -69,6 +70,7 @@ Retire the legacy `SportsTradingAgent` / `PoliticsTradingAgent` startup paths fr
 - [x] Confirm `event_edge` and `nba_comeback` now have canonical `StrategyFactory` entries.
 - [x] Confirm sports-specific market-data persistence support still initializes separately from strategy runtime ownership.
 - [x] Confirm the new builders emit canonical `[strategy] + [event_edge|nba_comeback]` TOML.
+- [x] Confirm `SportsTradingAgent` and `PoliticsTradingAgent` no longer appear anywhere under `src/`.
 
 ## Progress notes
 
@@ -76,6 +78,7 @@ Retire the legacy `SportsTradingAgent` / `PoliticsTradingAgent` startup paths fr
 - 2026-03-09: Rewired [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so `Domain::Sports` and `Domain::Politics` now use managed strategy runtime spawns instead of `SportsTradingAgent` / `PoliticsTradingAgent`.
 - 2026-03-09: Downgraded the old sports runtime helper into [runtime_spawns.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_spawns.rs) `prepare_sports_runtime_support(...)`, preserving PM WS/collector/persistence setup while removing strategy ownership.
 - 2026-03-09: Registered `event_edge` and `nba_comeback` in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs) and exported `NbaComebackStrategy` from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/mod.rs).
+- 2026-03-09: Reduced [sports.rs](/Users/proerror/Documents/ploy/src/agents/sports.rs) and [politics.rs](/Users/proerror/Documents/ploy/src/agents/politics.rs) to config-only compatibility shims, and stopped re-exporting the deleted legacy agent types from [mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs).
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo test strategy::event_edge::strategy --lib -- --nocapture`
