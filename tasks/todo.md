@@ -1,3 +1,32 @@
+# Crypto RL Policy Canonical Wrapper (2026-03-09)
+
+## Goal
+Let `crypto_rl_policy` start running through the canonical `Strategy` runtime by adding an observe-only wrapper that consumes the managed feed contract, reuses the extracted RL policy core, and emits decision logs instead of orders.
+
+## Tasks
+
+- [x] Add a canonical `CryptoRlPolicyStrategy` wrapper under `src/strategy/crypto_rl_policy/strategy.rs`.
+- [x] Reuse the extracted `crypto_rl_policy::core` helpers for observation building, action decoding, sizing, and fallback policy logic inside the wrapper.
+- [x] Register `crypto_rl_policy` in `StrategyFactory` so the managed runtime can construct it from TOML.
+- [x] Add narrow wrapper tests for feed wiring and decision-log emission once inputs are ready.
+- [x] Re-run compile plus targeted wrapper tests, including an `onnx` feature compile gate.
+
+## Review
+
+- [x] Confirm `crypto_rl_policy` now has a canonical `Strategy` implementation that stays observe-only and does not submit orders.
+- [x] Confirm the wrapper only owns feed/cache/decision-preview state and leaves live execution/governance on the legacy path.
+- [x] Confirm `StrategyFactory::from_toml()` can construct the wrapper and the targeted tests pass.
+
+## Progress notes
+
+- 2026-03-09: Added [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/strategy.rs) and exported it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/mod.rs).
+- 2026-03-09: Registered `crypto_rl_policy` in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs) so the managed runtime can instantiate it from TOML instead of depending solely on the legacy bootstrap path.
+- 2026-03-09: The wrapper stays observe-only, reuses the extracted RL policy core for inference/fallback logic, and currently uses `StrategyAction::LegacyControl(SubscribeFeed)` only to subscribe quotes for newly discovered event tokens.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test crypto_rl_policy::strategy --lib -- --nocapture`
+  - `cargo check --lib --features onnx`
+
 # Crypto RL Policy Core Extraction (2026-03-09)
 
 ## Goal
@@ -23,10 +52,8 @@ Move the pure policy interpretation, observation building, position tracking typ
 - 2026-03-09: Added new helper regressions in the extracted core for discrete-action mapping, share sizing, deployment-id normalization, and forced-loss sell behavior.
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
-  - `cargo test continuous_action_maps_to_expected_discrete_action --lib -- --nocapture`
-  - `cargo test compute_shares_scales_with_position_delta --lib -- --nocapture`
-  - `cargo test deployment_id_for_symbol_normalizes_case --lib -- --nocapture`
-  - `cargo test rule_based_policy_sells_on_deep_loss --lib -- --nocapture`
+  - `cargo test strategy::crypto_rl_policy::core --lib -- --nocapture`
+  - `cargo check --lib --features onnx`
 
 # Crypto LOB ML Canonical Wrapper (2026-03-09)
 

@@ -497,6 +497,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strategy))
             }
+            "crypto_rl_policy" => {
+                let strategy = super::crypto_rl_policy::strategy::CryptoRlPolicyStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
             "nba_comeback" => {
                 let strategy = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
                     strategy_id,
@@ -545,6 +553,13 @@ impl StrategyFactory {
                     "Canonical observe-only crypto LOB ML wrapper for runtime migration"
                         .to_string(),
                 config_template: "crypto_lob_ml.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "crypto_rl_policy".to_string(),
+                description:
+                    "Canonical observe-only crypto RL policy wrapper for runtime migration"
+                        .to_string(),
+                config_template: "crypto_rl_policy.toml".to_string(),
             },
             StrategyInfo {
                 name: "nba_comeback".to_string(),
