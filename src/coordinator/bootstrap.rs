@@ -143,6 +143,40 @@ fn spawn_managed_strategy_runtime_task(
     true
 }
 
+fn spawn_trading_agent_task<A>(
+    agent: A,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    runtime_label: &'static str,
+) where
+    A: TradingAgent,
+{
+    let agent_id = agent.id().to_string();
+    let domain = agent.domain();
+    let risk_params = agent.risk_params();
+    let cmd_rx = coordinator.register_agent(agent_id.clone(), domain, risk_params);
+    let ctx = AgentContext::new(agent_id.clone(), domain, handle.clone(), cmd_rx);
+    let runtime_agent_id = agent_id.clone();
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = agent.run(ctx).await {
+            error!(
+                agent = runtime_label,
+                runtime_agent_id = %runtime_agent_id,
+                error = %e,
+                "legacy trading agent exited with error"
+            );
+        }
+    });
+    agent_handles.push(jh);
+    info!(
+        agent = %agent_id,
+        runtime = runtime_label,
+        "legacy trading agent spawned"
+    );
+}
+
 fn spawn_openclaw_governance_agent(
     config: &PlatformBootstrapConfig,
     freshness: &Arc<crate::platform::DataPlaneFreshness>,
@@ -211,11 +245,6 @@ async fn spawn_sports_trading_agent(
     };
 
     let sports_cfg = config.sports.clone();
-    let cmd_rx = coordinator.register_agent(
-        sports_cfg.agent_id.clone(),
-        Domain::Sports,
-        sports_cfg.risk_params.clone(),
-    );
 
     let pool = match shared_pool {
         Some(pool) => pool.clone(),
@@ -484,20 +513,13 @@ async fn spawn_sports_trading_agent(
             }
         }
     }
-    let ctx = AgentContext::new(
-        sports_cfg.agent_id.clone(),
-        Domain::Sports,
-        handle.clone(),
-        cmd_rx,
+    spawn_trading_agent_task(
+        agent,
+        coordinator,
+        handle,
+        agent_handles,
+        "sports",
     );
-
-    let jh = tokio::spawn(async move {
-        if let Err(e) = agent.run(ctx).await {
-            error!(agent = "sports", error = %e, "agent exited with error");
-        }
-    });
-    agent_handles.push(jh);
-    info!("sports agent spawned");
     Ok(())
 }
 
@@ -514,12 +536,6 @@ async fn spawn_politics_trading_agent(
     };
 
     let politics_cfg = config.politics.clone();
-    let cmd_rx = coordinator.register_agent(
-        politics_cfg.agent_id.clone(),
-        Domain::Politics,
-        politics_cfg.risk_params.clone(),
-    );
-
     let pm_client_ref = pm_client.ok_or_else(|| {
         crate::error::PloyError::Validation(
             "politics domain requires a Polymarket client, but none was initialized".to_string(),
@@ -527,20 +543,13 @@ async fn spawn_politics_trading_agent(
     })?;
     let core = EventEdgeCore::new(pm_client_ref.clone(), ee_cfg.clone());
     let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);
-    let ctx = AgentContext::new(
-        politics_cfg.agent_id.clone(),
-        Domain::Politics,
-        handle.clone(),
-        cmd_rx,
+    spawn_trading_agent_task(
+        agent,
+        coordinator,
+        handle,
+        agent_handles,
+        "politics",
     );
-
-    let jh = tokio::spawn(async move {
-        if let Err(e) = agent.run(ctx).await {
-            error!(agent = "politics", error = %e, "agent exited with error");
-        }
-    });
-    agent_handles.push(jh);
-    info!("politics agent spawned");
     Ok(())
 }
 
@@ -5829,32 +5838,17 @@ pub async fn start_platform(
                         entry_mode = ?crypto_cfg.entry_mode,
                         "momentum runtime config unavailable; falling back to legacy trading agent"
                     );
-                    let cmd_rx = coordinator.register_agent(
-                        crypto_cfg.agent_id.clone(),
-                        Domain::Crypto,
-                        crypto_cfg.risk_params.clone(),
-                    );
                     let agent = CryptoTradingAgent::new(
                         crypto_cfg.clone(),
                         crypto_market_data.clone(),
                         event_matcher.clone(),
                     );
-                    let ctx = AgentContext::new(
-                        crypto_cfg.agent_id.clone(),
-                        Domain::Crypto,
-                        handle.clone(),
-                        cmd_rx,
-                    );
-
-                    let jh = tokio::spawn(async move {
-                        if let Err(e) = agent.run(ctx).await {
-                            error!(agent = "crypto", error = %e, "agent exited with error");
-                        }
-                    });
-                    agent_handles.push(jh);
-                    info!(
-                        agent = crypto_cfg.agent_id,
-                        "crypto momentum legacy agent spawned"
+                    spawn_trading_agent_task(
+                        agent,
+                        &mut coordinator,
+                        &handle,
+                        &mut agent_handles,
+                        "crypto_momentum_legacy",
                     );
                 }
             }
@@ -6031,32 +6025,19 @@ pub async fn start_platform(
                 );
             } else {
                 if let Some(lob_cache) = lob_cache_opt.clone() {
-                    let risk_params = lob_cfg.risk_params.clone();
                     let agent = CryptoLobMlAgent::new(
                         lob_cfg.clone(),
                         crypto_market_data.clone(),
                         event_matcher.clone(),
                         lob_cache,
                     )?;
-                    let cmd_rx = coordinator.register_agent(
-                        lob_cfg.agent_id.clone(),
-                        Domain::Crypto,
-                        risk_params,
+                    spawn_trading_agent_task(
+                        agent,
+                        &mut coordinator,
+                        &handle,
+                        &mut agent_handles,
+                        "crypto_lob_ml",
                     );
-                    let ctx = AgentContext::new(
-                        lob_cfg.agent_id.clone(),
-                        Domain::Crypto,
-                        handle.clone(),
-                        cmd_rx,
-                    );
-
-                    let jh = tokio::spawn(async move {
-                        if let Err(e) = agent.run(ctx).await {
-                            error!(agent = "crypto_lob_ml", error = %e, "agent exited with error");
-                        }
-                    });
-                    agent_handles.push(jh);
-                    info!("crypto lob-ml agent spawned");
                 } else {
                     warn!(
                         agent = lob_cfg.agent_id,
@@ -6070,33 +6051,19 @@ pub async fn start_platform(
         #[cfg(feature = "rl")]
         if rl_agent_enabled {
             if let Some(lob_cache) = lob_cache_opt.clone() {
-                let risk_params = rl_cfg.risk_params.clone();
-                let cmd_rx = coordinator.register_agent(
-                    rl_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    risk_params,
-                );
-
                 let agent = CryptoRlPolicyAgent::new(
                     rl_cfg.clone(),
                     crypto_market_data.clone(),
                     event_matcher.clone(),
                     lob_cache,
                 );
-                let ctx = AgentContext::new(
-                    rl_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    handle.clone(),
-                    cmd_rx,
+                spawn_trading_agent_task(
+                    agent,
+                    &mut coordinator,
+                    &handle,
+                    &mut agent_handles,
+                    "crypto_rl_policy",
                 );
-
-                let jh = tokio::spawn(async move {
-                    if let Err(e) = agent.run(ctx).await {
-                        error!(agent = "crypto_rl_policy", error = %e, "agent exited with error");
-                    }
-                });
-                agent_handles.push(jh);
-                info!("crypto RL policy agent spawned");
             } else {
                 warn!(
                     agent = rl_cfg.agent_id,

@@ -1,3 +1,32 @@
+# Bootstrap Legacy TradingAgent Spawn Consolidation (2026-03-09)
+
+## Goal
+Unify the remaining legacy `TradingAgent` registration and task-spawn plumbing behind one helper so `bootstrap.rs` no longer repeats `register_agent -> AgentContext::new -> tokio::spawn(agent.run)` across the old runtime paths.
+
+## Tasks
+
+- [x] Add a bootstrap-local helper for spawning legacy `TradingAgent` instances.
+- [x] Migrate the remaining legacy branches (`momentum` fallback, `lob_ml`, `rl`, `sports`, `politics`) to the shared helper without changing their runtime behavior.
+- [x] Leave governance-agent startup on its separate `GovernanceContext` path.
+- [x] Run targeted compile/tests for coordinator governance and bootstrap behavior.
+
+## Review
+
+- [x] Confirm the repeated legacy trading-agent spawn sequence now lives in one helper.
+- [x] Confirm sports/politics extracted helpers reuse the same legacy trading-agent spawn path as crypto legacy branches.
+- [x] Confirm OpenClaw still stays on the governance-only startup path.
+
+## Progress notes
+
+- 2026-03-09: After consolidating managed-runtime spawn ownership, the remaining repeated bootstrap wiring was the old `TradingAgent` registration and task launch path.
+- 2026-03-09: This slice is intended to make the runtime boundary explicit: managed strategies use one helper, legacy trading agents use another, governance agents keep their own context.
+- 2026-03-09: Added `spawn_trading_agent_task(...)` so legacy runtime spawn now centralizes coordinator registration, `AgentContext` construction, and task launch in one place.
+- 2026-03-09: Migrated the momentum fallback, `lob_ml`, `rl`, `sports`, and `politics` branches to that helper while keeping OpenClaw on `GovernanceContext`.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+  - `cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --nocapture`
+
 # Bootstrap Sports And Politics Spawn Extraction (2026-03-09)
 
 ## Goal
