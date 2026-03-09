@@ -2502,7 +2502,7 @@ symbols = ["SOLUSDT"]
     #[cfg(feature = "rl")]
     #[test]
     fn build_crypto_rl_policy_runtime_config_preserves_model_controls() {
-        let mut cfg = crate::agents::crypto_rl_policy::CryptoRlPolicyConfig::default();
+        let mut cfg = crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig::default();
         cfg.coins = vec!["sol".to_string()];
         cfg.min_time_remaining_secs = 75;
         cfg.max_time_remaining_secs = 420;

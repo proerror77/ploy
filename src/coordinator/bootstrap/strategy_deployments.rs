@@ -298,7 +298,7 @@ pub(super) fn build_crypto_lob_ml_runtime_config(
 
 #[cfg(feature = "rl")]
 pub(super) fn build_crypto_rl_policy_runtime_config(
-    cfg: &crate::agents::crypto_rl_policy::CryptoRlPolicyConfig,
+    cfg: &crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig,
 ) -> Result<String> {
     if cfg.coins.is_empty() {
         return Err(crate::error::PloyError::Validation(

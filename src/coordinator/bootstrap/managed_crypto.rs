@@ -4,9 +4,9 @@ use crate::agents::CryptoTradingConfig;
 use crate::agents::crypto_lob_ml::{
     CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
-#[cfg(feature = "rl")]
-use crate::agents::crypto_rl_policy::CryptoRlPolicyConfig;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "rl")]
+use crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedCryptoRuntimeConfig {

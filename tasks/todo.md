@@ -1,3 +1,32 @@
+# Crypto RL Legacy Agent Removal (2026-03-09)
+
+## Goal
+Delete the dead `CryptoRlPolicyAgent` runtime file now that bootstrap and the canonical wrapper only need the RL config surface.
+
+## Tasks
+
+- [x] Extract `CryptoRlPolicyConfig` into the canonical `strategy::crypto_rl_policy` namespace.
+- [x] Rewire bootstrap-managed crypto config and runtime TOML rendering to use the new strategy-side config type.
+- [x] Remove `src/agents/crypto_rl_policy.rs` and stop exporting it from `src/agents/mod.rs`.
+- [x] Re-run default + `rl` feature validation after deleting the legacy agent module.
+
+## Review
+
+- [x] Confirm there are no remaining source references to `crate::agents::crypto_rl_policy`.
+- [x] Confirm `CryptoRlPolicyConfig` now lives under [strategy/crypto_rl_policy](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/mod.rs).
+- [x] Confirm bootstrap and RL CLI validation still pass without the deleted legacy agent file.
+
+## Progress notes
+
+- 2026-03-09: Added [config.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/config.rs) and re-exported `CryptoRlPolicyConfig` from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/mod.rs) so the canonical strategy namespace now owns the shared RL runtime config.
+- 2026-03-09: Updated [managed_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto.rs), [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs), and the bootstrap RL config test in [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to consume the strategy-side config type.
+- 2026-03-09: Deleted [src/agents/crypto_rl_policy.rs](/Users/proerror/Documents/ploy/src/agents/crypto_rl_policy.rs) and removed its export from [src/agents/mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) after confirming there was no remaining live caller.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl build_crypto_rl_policy_runtime_config_preserves_model_controls --lib -- --nocapture`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+
 # Managed Crypto Bootstrap Config Rename (2026-03-09)
 
 ## Goal
