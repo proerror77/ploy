@@ -13,14 +13,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, Quote, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 
 use crate::strategy::detectors::{DumpDetector, DumpDetectorConfig, DumpSignal};
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
     StrategyAction, StrategyConfig, StrategyControlAction, StrategyEvent, StrategyEventType,
-    StrategyStateInfo,
+    StrategyOrderIntent, StrategyStateInfo,
 };
 
 /// Two-leg strategy configuration
@@ -188,9 +189,7 @@ impl TwoLegStrategy {
     fn is_in_cycle(&self) -> bool {
         matches!(
             self.state,
-            TwoLegState::Leg1Pending
-                | TwoLegState::Leg1Filled
-                | TwoLegState::Leg2Pending
+            TwoLegState::Leg1Pending | TwoLegState::Leg1Filled | TwoLegState::Leg2Pending
         )
     }
 
@@ -223,13 +222,6 @@ impl TwoLegStrategy {
         // Create Leg1 order
         let client_order_id = format!("{}-leg1-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::buy_limit(
-            token_id.to_string(),
-            signal.side,
-            self.config.shares,
-            signal.trigger_price,
-        );
-
         // Track pending order
         self.pending_orders.insert(
             client_order_id.clone(),
@@ -249,17 +241,26 @@ impl TwoLegStrategy {
             signal.side, self.config.shares, signal.trigger_price
         );
 
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
+        actions.push(StrategyAction::SubmitIntent {
+            intent: self.submit_intent(
+                client_order_id,
+                token_id.to_string(),
+                signal.side,
+                true,
+                self.config.shares,
+                signal.trigger_price,
+                10,
+            ),
         });
 
         actions.push(StrategyAction::LogEvent {
             event: StrategyEvent::new(StrategyEventType::EntryTriggered, "Leg1 entry triggered")
                 .with_data("side", signal.side.to_string())
                 .with_data("price", signal.trigger_price.to_string())
-                .with_data("drop_pct", (signal.drop_pct * Decimal::from(100)).to_string()),
+                .with_data(
+                    "drop_pct",
+                    (signal.drop_pct * Decimal::from(100)).to_string(),
+                ),
         });
 
         actions
@@ -300,13 +301,6 @@ impl TwoLegStrategy {
 
         let client_order_id = format!("{}-leg2-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::buy_limit(
-            token_id.to_string(),
-            side,
-            ctx.leg1_shares,
-            price,
-        );
-
         self.pending_orders.insert(
             client_order_id.clone(),
             PendingOrder {
@@ -319,15 +313,54 @@ impl TwoLegStrategy {
 
         self.state = TwoLegState::Leg2Pending;
 
-        info!("Entering Leg2: {} {} shares @ {}", side, ctx.leg1_shares, price);
+        info!(
+            "Entering Leg2: {} {} shares @ {}",
+            side, ctx.leg1_shares, price
+        );
 
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
+        actions.push(StrategyAction::SubmitIntent {
+            intent: self.submit_intent(
+                client_order_id,
+                token_id.to_string(),
+                side,
+                true,
+                ctx.leg1_shares,
+                price,
+                10,
+            ),
         });
 
         actions
+    }
+
+    fn submit_intent(
+        &self,
+        client_order_id: String,
+        token_id: String,
+        side: Side,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+        priority: u8,
+    ) -> StrategyOrderIntent {
+        let market_slug = self
+            .current_event
+            .as_ref()
+            .map(|event| event.event_id.clone())
+            .unwrap_or_else(|| token_id.clone());
+
+        StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            shares,
+            limit_price,
+            priority,
+            metadata: HashMap::new(),
+        }
     }
 
     /// Force Leg2 or abort
@@ -400,9 +433,7 @@ impl Strategy for TwoLegStrategy {
     }
 
     fn required_feeds(&self) -> Vec<DataFeed> {
-        vec![
-            DataFeed::Tick { interval_ms: 1000 },
-        ]
+        vec![DataFeed::Tick { interval_ms: 1000 }]
     }
 
     async fn on_market_update(&mut self, update: &MarketUpdate) -> Result<Vec<StrategyAction>> {
@@ -649,9 +680,7 @@ impl Strategy for TwoLegStrategy {
         let exposure = self
             .positions
             .iter()
-            .map(|p| {
-                p.current_price.unwrap_or(p.entry_price) * Decimal::from(p.shares)
-            })
+            .map(|p| p.current_price.unwrap_or(p.entry_price) * Decimal::from(p.shares))
             .sum();
 
         let unrealized_pnl = self.positions.iter().map(|p| p.unrealized_pnl).sum();
@@ -714,6 +743,7 @@ impl Strategy for TwoLegStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_state_transitions() {
@@ -722,5 +752,38 @@ mod tests {
 
         assert_eq!(strategy.state, TwoLegState::Idle);
         assert!(!strategy.is_active());
+    }
+
+    #[test]
+    fn handle_dump_signal_emits_submit_intent() {
+        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
+        strategy.current_event = Some(EventContext {
+            event_id: "event-1".to_string(),
+            up_token_id: "token-up".to_string(),
+            down_token_id: "token-down".to_string(),
+            end_time: Utc::now() + chrono::Duration::seconds(120),
+            start_time: Utc::now(),
+        });
+
+        let actions = strategy.handle_dump_signal(DumpSignal {
+            event_id: Some("event-1".to_string()),
+            side: Side::Up,
+            trigger_price: dec!(0.42),
+            reference_price: dec!(0.48),
+            drop_pct: dec!(0.12),
+            spread_bps: 0,
+            timestamp: Utc::now(),
+        });
+
+        match actions.first() {
+            Some(StrategyAction::SubmitIntent { intent }) => {
+                assert_eq!(intent.domain, Domain::Crypto);
+                assert_eq!(intent.market_slug, "event-1");
+                assert_eq!(intent.token_id, "token-up");
+                assert!(intent.is_buy);
+                assert_eq!(intent.shares, strategy.config.shares);
+            }
+            other => panic!("expected submit intent, got {other:?}"),
+        }
     }
 }

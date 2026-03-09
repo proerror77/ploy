@@ -1,3 +1,59 @@
+# Canonical Strategy SubmitIntent Migration (2026-03-09)
+
+## Goal
+Shrink the remaining raw `SubmitOrder` surface inside canonical strategy code by moving the active crypto strategy implementations onto `StrategyAction::SubmitIntent`, so the managed runtime no longer needs raw `OrderRequest` compatibility for these paths.
+
+## Tasks
+
+- [x] Convert the straightforward strategy modules (`momentum_strat`, `two_leg`, `gamma_scalping`) from `SubmitOrder` to `SubmitIntent`.
+- [x] Finish the in-progress canonical handoff migration already underway in `adapters.rs` and `staggered_arb_live.rs` so the branch compiles again.
+- [x] Add narrow regression tests proving the new canonical intent emission for touched strategy paths.
+- [x] Re-run `cargo check --lib` and the narrow canonical-handoff regression test that is wired into the current lib target.
+
+## Review
+
+- [x] Confirm the touched strategy paths now emit `StrategyOrderIntent` instead of raw `OrderRequest`.
+- [x] Confirm branch-level compile is restored after the partial `adapters` / `staggered_arb_live` migration.
+- [x] Confirm at least one targeted canonical-emission regression test passes in the current lib target.
+
+## Progress notes
+
+- 2026-03-09: Converted [momentum_strat.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/momentum_strat.rs), [two_leg.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/two_leg.rs), [gamma_scalping/strategy.rs](/Users/proerror/Documents/ploy/src/strategy/gamma_scalping/strategy.rs), [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs), and [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs) to emit canonical crypto `SubmitIntent` actions for the migrated paths.
+- 2026-03-09: Added narrow regression tests for momentum, two-leg, and gamma-scalping canonical intent emission; the gamma-scalping test is currently wired into the active lib test target.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test evaluate_entry_emits_submit_intents --lib -- --nocapture`
+
+# Canonical SubmitIntent Batch Conversion (2026-03-09)
+
+## Goal
+Shrink the remaining strategy-side raw `SubmitOrder` surface in one larger batch by moving the canonical strategy implementations and crypto adapters onto `StrategyAction::SubmitIntent`, leaving the legacy compatibility path for genuinely old runtimes instead of active strategy code.
+
+## Tasks
+
+- [x] Convert `MomentumStrategy`, `TwoLegStrategy`, and `GammaScalpingStrategy` to emit `SubmitIntent` directly.
+- [x] Convert `MomentumStrategyAdapter`, `SplitArbStrategyAdapter`, and `StaggeredArbAdapter` live submit paths to emit `SubmitIntent`.
+- [x] Add or update local helper builders so the converted strategies use one canonical strategy-side submit shape instead of open-coded `OrderRequest` assembly.
+- [x] Update targeted strategy tests to assert `SubmitIntent` behavior where the action type changed.
+- [x] Re-run compile plus targeted canonical-submit strategy tests.
+
+## Review
+
+- [x] Confirm the touched strategy/adaptor files no longer emit `StrategyAction::SubmitOrder` in production code.
+- [x] Confirm `staggered_arb_live` still preserves stable client-order/idempotency semantics through `StrategyOrderIntent::into_order_request()`.
+- [x] Confirm the converted strategies now carry explicit `Domain::Crypto` and market slug identity at the strategy contract boundary.
+
+## Progress notes
+
+- 2026-03-09: Converted [momentum_strat.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/momentum_strat.rs), [two_leg.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/two_leg.rs), and [gamma_scalping/strategy.rs](/Users/proerror/Documents/ploy/src/strategy/gamma_scalping/strategy.rs) to build `StrategyOrderIntent` directly.
+- 2026-03-09: Converted [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs) and [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs) so the active crypto adapters/runtime-facing live strategy paths now submit canonical strategy intents instead of raw `OrderRequest`s.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test evaluate_entry_emits_submit_intents --lib -- --nocapture`
+  - `cargo test submit_intent --lib -- --nocapture`
+  - `cargo test test_live_leg1_submit_sets_client_order_and_idempotency_key --lib -- --nocapture`
+  - `cargo test test_live_leg2_uses_position_tokens_even_without_active_window --lib -- --nocapture`
+
 # Binance L2 Feed Contract Expansion (2026-03-09)
 
 ## Goal

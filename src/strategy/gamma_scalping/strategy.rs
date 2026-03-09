@@ -11,12 +11,14 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, Quote, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyControlAction, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyControlAction, StrategyEvent, StrategyEventType, StrategyOrderIntent,
+    StrategyStateInfo,
 };
 use crate::strategy::volatility_arb::calculate_implied_volatility;
 
@@ -211,20 +213,30 @@ impl GammaScalpingStrategy {
         let up_order_id = format!("gs-entry-up-{}", Uuid::new_v4());
         let down_order_id = format!("gs-entry-dn-{}", Uuid::new_v4());
 
-        let up_order = OrderRequest::buy_limit(ctx.up_token.clone(), Side::Up, shares, up_price);
-        let down_order =
-            OrderRequest::buy_limit(ctx.down_token.clone(), Side::Down, shares, down_price);
-
         let mut actions = vec![
-            StrategyAction::SubmitOrder {
-                client_order_id: up_order_id.clone(),
-                order: up_order,
-                priority: 1,
+            StrategyAction::SubmitIntent {
+                intent: self.submit_intent(
+                    up_order_id.clone(),
+                    ctx.event_id.clone(),
+                    ctx.up_token.clone(),
+                    Side::Up,
+                    true,
+                    shares,
+                    up_price,
+                    1,
+                ),
             },
-            StrategyAction::SubmitOrder {
-                client_order_id: down_order_id.clone(),
-                order: down_order,
-                priority: 1,
+            StrategyAction::SubmitIntent {
+                intent: self.submit_intent(
+                    down_order_id.clone(),
+                    ctx.event_id.clone(),
+                    ctx.down_token.clone(),
+                    Side::Down,
+                    true,
+                    shares,
+                    down_price,
+                    1,
+                ),
             },
             StrategyAction::LogEvent {
                 event: StrategyEvent::new(
@@ -305,16 +317,18 @@ impl GammaScalpingStrategy {
                 // Sell order — use best bid as limit
                 if let Some(quote) = self.quote_cache.get(sell_token_id) {
                     if let Some(bid) = quote.best_bid {
-                        let sell_order = OrderRequest::sell_limit(
-                            sell_token_id.clone(),
-                            sell_side,
-                            sell_shares,
-                            bid,
-                        );
-                        actions.push(StrategyAction::SubmitOrder {
-                            client_order_id: format!("gs-rebal-sell-{}", Uuid::new_v4()),
-                            order: sell_order,
-                            priority: 2,
+                        let client_order_id = format!("gs-rebal-sell-{}", Uuid::new_v4());
+                        actions.push(StrategyAction::SubmitIntent {
+                            intent: self.submit_intent(
+                                client_order_id,
+                                straddle.event_id.clone(),
+                                sell_token_id.clone(),
+                                sell_side,
+                                false,
+                                sell_shares,
+                                bid,
+                                2,
+                            ),
                         });
                     }
                 }
@@ -322,16 +336,18 @@ impl GammaScalpingStrategy {
                 // Buy order — use best ask as limit
                 if let Some(quote) = self.quote_cache.get(buy_token_id) {
                     if let Some(ask) = quote.best_ask {
-                        let buy_order = OrderRequest::buy_limit(
-                            buy_token_id.clone(),
-                            buy_side,
-                            buy_shares,
-                            ask,
-                        );
-                        actions.push(StrategyAction::SubmitOrder {
-                            client_order_id: format!("gs-rebal-buy-{}", Uuid::new_v4()),
-                            order: buy_order,
-                            priority: 2,
+                        let client_order_id = format!("gs-rebal-buy-{}", Uuid::new_v4());
+                        actions.push(StrategyAction::SubmitIntent {
+                            intent: self.submit_intent(
+                                client_order_id,
+                                straddle.event_id.clone(),
+                                buy_token_id.clone(),
+                                buy_side,
+                                true,
+                                buy_shares,
+                                ask,
+                                2,
+                            ),
                         });
                     }
                 }
@@ -354,16 +370,18 @@ impl GammaScalpingStrategy {
                 if sell_up_shares > 0 {
                     if let Some(quote) = self.quote_cache.get(&straddle.up_token_id) {
                         if let Some(bid) = quote.best_bid {
-                            let order = OrderRequest::sell_limit(
-                                straddle.up_token_id.clone(),
-                                Side::Up,
-                                sell_up_shares,
-                                bid,
-                            );
-                            actions.push(StrategyAction::SubmitOrder {
-                                client_order_id: format!("gs-exit-up-{}", Uuid::new_v4()),
-                                order,
-                                priority: 3,
+                            let client_order_id = format!("gs-exit-up-{}", Uuid::new_v4());
+                            actions.push(StrategyAction::SubmitIntent {
+                                intent: self.submit_intent(
+                                    client_order_id,
+                                    straddle.event_id.clone(),
+                                    straddle.up_token_id.clone(),
+                                    Side::Up,
+                                    false,
+                                    sell_up_shares,
+                                    bid,
+                                    3,
+                                ),
                             });
                         }
                     }
@@ -371,16 +389,18 @@ impl GammaScalpingStrategy {
                 if sell_down_shares > 0 {
                     if let Some(quote) = self.quote_cache.get(&straddle.down_token_id) {
                         if let Some(bid) = quote.best_bid {
-                            let order = OrderRequest::sell_limit(
-                                straddle.down_token_id.clone(),
-                                Side::Down,
-                                sell_down_shares,
-                                bid,
-                            );
-                            actions.push(StrategyAction::SubmitOrder {
-                                client_order_id: format!("gs-exit-dn-{}", Uuid::new_v4()),
-                                order,
-                                priority: 3,
+                            let client_order_id = format!("gs-exit-dn-{}", Uuid::new_v4());
+                            actions.push(StrategyAction::SubmitIntent {
+                                intent: self.submit_intent(
+                                    client_order_id,
+                                    straddle.event_id.clone(),
+                                    straddle.down_token_id.clone(),
+                                    Side::Down,
+                                    false,
+                                    sell_down_shares,
+                                    bid,
+                                    3,
+                                ),
                             });
                         }
                     }
@@ -403,6 +423,31 @@ impl GammaScalpingStrategy {
         }
 
         actions
+    }
+
+    fn submit_intent(
+        &self,
+        client_order_id: String,
+        market_slug: String,
+        token_id: String,
+        side: Side,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+        priority: u8,
+    ) -> StrategyOrderIntent {
+        StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            shares,
+            limit_price,
+            priority,
+            metadata: HashMap::new(),
+        }
     }
 }
 
@@ -834,5 +879,69 @@ impl Strategy for GammaScalpingStrategy {
         self.trade_count = 0;
         self.last_cooldown = None;
         self.active = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn evaluate_entry_emits_submit_intents() {
+        let mut config = GammaScalpingConfig::default();
+        config.dry_run = false;
+        config.vol_lookback_periods = 5;
+        let mut strategy = GammaScalpingStrategy::new(config);
+        strategy.spot_prices.insert("BTCUSDT".to_string(), 100.0);
+        strategy.kline_history.insert(
+            "BTCUSDT".to_string(),
+            VecDeque::from(vec![100.0, 110.0, 90.0, 120.0, 80.0, 130.0]),
+        );
+        strategy.quote_cache.insert(
+            "token-up".to_string(),
+            Quote {
+                side: Side::Up,
+                best_bid: Some(dec!(0.30)),
+                best_ask: Some(dec!(0.31)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: Utc::now(),
+            },
+        );
+        strategy.quote_cache.insert(
+            "token-down".to_string(),
+            Quote {
+                side: Side::Down,
+                best_bid: Some(dec!(0.28)),
+                best_ask: Some(dec!(0.29)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: Utc::now(),
+            },
+        );
+
+        let ctx = EventContext {
+            event_id: "event-1".to_string(),
+            series_id: "btc-series".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            up_token: "token-up".to_string(),
+            down_token: "token-down".to_string(),
+            end_time: Utc::now() + chrono::Duration::seconds(600),
+            price_to_beat: Some(dec!(100)),
+        };
+
+        let actions = strategy
+            .evaluate_entry(&ctx, Utc::now())
+            .expect("entry actions");
+
+        assert!(matches!(
+            actions.first(),
+            Some(StrategyAction::SubmitIntent { .. })
+        ));
+        assert!(matches!(
+            actions.get(1),
+            Some(StrategyAction::SubmitIntent { .. })
+        ));
     }
 }

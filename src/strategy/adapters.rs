@@ -16,10 +16,11 @@ use tracing::{debug, info, warn};
 use super::momentum::{Direction, ExitConfig, MomentumConfig};
 use super::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
-use crate::domain::{OrderRequest, Side};
+use crate::domain::Side;
 use crate::error::Result;
+use crate::platform::Domain;
 use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
 
 fn database_url_from_env() -> Option<String> {
@@ -40,6 +41,32 @@ fn account_id_from_env() -> String {
         .unwrap_or_else(|| "default".to_string())
         .trim()
         .to_string()
+}
+
+fn crypto_submit_intent(
+    client_order_id: String,
+    market_slug: String,
+    token_id: String,
+    side: Side,
+    is_buy: bool,
+    shares: u64,
+    limit_price: Decimal,
+    priority: u8,
+) -> StrategyAction {
+    StrategyAction::SubmitIntent {
+        intent: StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            shares,
+            limit_price,
+            priority,
+            metadata: HashMap::new(),
+        },
+    }
 }
 
 // ============================================================================
@@ -999,6 +1026,7 @@ impl MomentumStrategyAdapter {
         let event_list = self.events.get(symbol)?;
         let now = Utc::now();
         let event = self.pick_entry_event_in_window(event_list, now)?;
+        let market_slug = event.event_id.clone();
 
         let token_id = match direction {
             Direction::Up => event.up_token_id.clone(),
@@ -1032,8 +1060,6 @@ impl MomentumStrategyAdapter {
         }
         .max(5);
 
-        let order = OrderRequest::buy_limit(token_id.clone(), market_side, shares, entry_price);
-
         self.pending_orders.insert(
             client_order_id.clone(),
             MomentumOrderTrack {
@@ -1057,11 +1083,16 @@ impl MomentumStrategyAdapter {
             entry_price.to_string().parse::<f64>().unwrap_or(0.0) * shares as f64,
         );
 
-        Some(StrategyAction::SubmitOrder {
+        Some(crypto_submit_intent(
             client_order_id,
-            order,
-            priority: 5,
-        })
+            market_slug,
+            token_id,
+            market_side,
+            true,
+            shares,
+            entry_price,
+            5,
+        ))
     }
 }
 
@@ -1334,13 +1365,6 @@ impl Strategy for MomentumStrategyAdapter {
                             pos.symbol,
                             Utc::now().timestamp_millis()
                         );
-                        let order = OrderRequest::sell_limit(
-                            pos.token_id.clone(),
-                            pos.side,
-                            pos.shares,
-                            exit_price,
-                        );
-
                         self.pending_orders.insert(
                             client_order_id.clone(),
                             MomentumOrderTrack {
@@ -1372,11 +1396,16 @@ impl Strategy for MomentumStrategyAdapter {
                             );
                         }
 
-                        actions.push(StrategyAction::SubmitOrder {
+                        actions.push(crypto_submit_intent(
                             client_order_id,
-                            order,
-                            priority: 8,
-                        });
+                            pos.symbol.clone(),
+                            pos.token_id.clone(),
+                            pos.side,
+                            false,
+                            pos.shares,
+                            exit_price,
+                            8,
+                        ));
                     }
                 }
             }
@@ -1974,8 +2003,6 @@ impl SplitArbStrategyAdapter {
             self.config.shares_per_trade
         };
 
-        let order = OrderRequest::buy_limit(token_id.clone(), side, shares, price);
-
         info!(
             "[{}] First leg entry: {} @ {:.2}¢ ({} shares, ${:.2})",
             self.id,
@@ -1991,11 +2018,16 @@ impl SplitArbStrategyAdapter {
             map.insert(client_order_id.clone(), (market_id.to_string(), side));
         }
 
-        Some(StrategyAction::SubmitOrder {
+        Some(crypto_submit_intent(
             client_order_id,
-            order,
-            priority: 10, // Higher priority for arb
-        })
+            market_id.to_string(),
+            token_id,
+            side,
+            true,
+            shares,
+            price,
+            10,
+        ))
     }
 }
 
@@ -2091,13 +2123,6 @@ impl Strategy for SplitArbStrategyAdapter {
                                             Utc::now().timestamp_millis()
                                         );
 
-                                        let order = OrderRequest::buy_limit(
-                                            hedge_token,
-                                            hedge_side,
-                                            shares,
-                                            hedge_price,
-                                        );
-
                                         // Track hedge order -> market mapping
                                         {
                                             let mut map = self.order_market_map.write().await;
@@ -2129,11 +2154,16 @@ impl Strategy for SplitArbStrategyAdapter {
                                             ),
                                         });
 
-                                        actions.push(StrategyAction::SubmitOrder {
+                                        actions.push(crypto_submit_intent(
                                             client_order_id,
-                                            order,
-                                            priority: 10,
-                                        });
+                                            partial_market_id.clone(),
+                                            hedge_token,
+                                            hedge_side,
+                                            true,
+                                            shares,
+                                            hedge_price,
+                                            10,
+                                        ));
                                     }
                                 }
                             }
@@ -2462,18 +2492,16 @@ impl Strategy for SplitArbStrategyAdapter {
                                     Utc::now().timestamp_millis()
                                 );
 
-                                let order = OrderRequest::sell_limit(
+                                actions.push(crypto_submit_intent(
+                                    client_order_id,
+                                    market_id.clone(),
                                     pos.first_token_id.clone(),
                                     pos.first_side,
+                                    false,
                                     pos.shares,
                                     exit_price,
-                                );
-
-                                actions.push(StrategyAction::SubmitOrder {
-                                    client_order_id,
-                                    order,
-                                    priority: 15,
-                                });
+                                    15,
+                                ));
 
                                 let mut stats = self.stats.write().await;
                                 stats.unhedged_exits += 1;
@@ -2533,13 +2561,6 @@ impl Strategy for SplitArbStrategyAdapter {
                 let client_order_id =
                     format!("{}_exit_{}_{}", self.id, market_id, now.timestamp_millis());
 
-                let order = OrderRequest::sell_limit(
-                    pos.first_token_id.clone(),
-                    pos.first_side,
-                    pos.shares,
-                    exit_price,
-                );
-
                 info!(
                     "[{}] Unhedged exit: {} {} @ {:.2}c ({} shares)",
                     self.id,
@@ -2553,11 +2574,16 @@ impl Strategy for SplitArbStrategyAdapter {
                     pos.shares,
                 );
 
-                actions.push(StrategyAction::SubmitOrder {
+                actions.push(crypto_submit_intent(
                     client_order_id,
-                    order,
-                    priority: 8,
-                });
+                    market_id.clone(),
+                    pos.first_token_id.clone(),
+                    pos.first_side,
+                    false,
+                    pos.shares,
+                    exit_price,
+                    8,
+                ));
 
                 actions.push(StrategyAction::Alert {
                     level: AlertLevel::Warning,

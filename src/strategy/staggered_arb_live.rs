@@ -28,13 +28,38 @@ use super::staggered_arb_backtest::{
 };
 use super::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
-    StrategyEventType, StrategyStateInfo,
+    StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use crate::adapters::SpotPrice;
-use crate::domain::order::OrderRequest;
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
+
+fn crypto_submit_intent(
+    client_order_id: String,
+    market_slug: String,
+    token_id: String,
+    side: Side,
+    shares: u64,
+    limit_price: Decimal,
+    priority: u8,
+) -> StrategyAction {
+    StrategyAction::SubmitIntent {
+        intent: StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy: true,
+            shares,
+            limit_price,
+            priority,
+            metadata: HashMap::new(),
+        },
+    }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Config
@@ -1603,10 +1628,6 @@ impl StaggeredArbAdapter {
                 Utc::now().timestamp_millis()
             );
 
-            let mut order = OrderRequest::buy_limit(token_id.clone(), side, shares, leg1_ask);
-            order.client_order_id = client_order_id.clone();
-            order.idempotency_key = Some(client_order_id.clone());
-
             // Track pending order
             self.live_orders.insert(
                 client_order_id.clone(),
@@ -1617,7 +1638,7 @@ impl StaggeredArbAdapter {
                     up_token: window.up_token.clone(),
                     down_token: window.down_token.clone(),
                     direction: leg1_dir.clone(),
-                    token_id,
+                    token_id: token_id.clone(),
                     leg: 1,
                     price: leg1_ask,
                     shares,
@@ -1646,11 +1667,15 @@ impl StaggeredArbAdapter {
             info!("{}", msg);
             self.bump_entry_reject_for_symbol(symbol, "entry_accepted");
 
-            Some(StrategyAction::SubmitOrder {
+            Some(crypto_submit_intent(
                 client_order_id,
-                order,
-                priority: 10,
-            })
+                window.event_id.clone(),
+                token_id,
+                side,
+                shares,
+                leg1_ask,
+                10,
+            ))
         }
     }
 
@@ -2128,10 +2153,6 @@ impl StaggeredArbAdapter {
                 Utc::now().timestamp_millis()
             );
 
-            let mut order = OrderRequest::buy_limit(token_id.clone(), side, shares, other_ask);
-            order.client_order_id = client_order_id.clone();
-            order.idempotency_key = Some(client_order_id.clone());
-
             // Track pending Leg2 order
             self.live_orders.insert(
                 client_order_id.clone(),
@@ -2142,7 +2163,7 @@ impl StaggeredArbAdapter {
                     up_token,
                     down_token,
                     direction: leg2_direction,
-                    token_id,
+                    token_id: token_id.clone(),
                     leg: 2,
                     price: other_ask,
                     shares,
@@ -2175,11 +2196,15 @@ impl StaggeredArbAdapter {
             );
             info!("{}", msg);
 
-            Some(StrategyAction::SubmitOrder {
+            Some(crypto_submit_intent(
                 client_order_id,
-                order,
-                priority: 10,
-            })
+                event_id,
+                token_id,
+                side,
+                shares,
+                other_ask,
+                10,
+            ))
         }
     }
 
@@ -3383,18 +3408,16 @@ name = "staggered_arb"
             .expect("entry should be accepted");
 
         match action {
-            StrategyAction::SubmitOrder {
-                client_order_id,
-                order,
-                ..
-            } => {
-                assert_eq!(order.client_order_id, client_order_id);
+            StrategyAction::SubmitIntent { intent } => {
+                let order = intent.clone().into_order_request();
+                assert_eq!(order.client_order_id, intent.client_order_id);
                 assert_eq!(
                     order.idempotency_key.as_deref(),
-                    Some(client_order_id.as_str())
+                    Some(intent.client_order_id.as_str())
                 );
+                assert_eq!(intent.market_slug, "evt-live-order");
             }
-            other => panic!("expected submit order action, got {:?}", other),
+            other => panic!("expected submit intent action, got {:?}", other),
         }
     }
 
@@ -4709,7 +4732,7 @@ min_balance_usd = 9.0
 
         let action = adapter.fill_leg2(0, dec!(0.62), "forced_timeout", now);
         assert!(
-            matches!(action, Some(StrategyAction::SubmitOrder { .. })),
+            matches!(action, Some(StrategyAction::SubmitIntent { .. })),
             "live leg2 should still submit even if active window already expired"
         );
     }
@@ -4979,8 +5002,8 @@ min_balance_usd = 9.0
 
         let action = adapter.fill_leg2(0, dec!(0.40), "merge", now);
         match action {
-            Some(StrategyAction::SubmitOrder { order, .. }) => {
-                assert_eq!(order.shares, 13, "should only submit remaining shares")
+            Some(StrategyAction::SubmitIntent { intent }) => {
+                assert_eq!(intent.shares, 13, "should only submit remaining shares")
             }
             _ => panic!("expected leg2 submit action"),
         }
