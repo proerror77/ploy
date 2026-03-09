@@ -236,7 +236,7 @@ cooldown_secs = 30
 }
 
 pub(super) fn build_crypto_lob_ml_runtime_config(
-    cfg: &crate::agents::crypto_lob_ml::CryptoLobMlConfig,
+    cfg: &crate::strategy::crypto_lob_ml::CryptoLobMlConfig,
 ) -> Result<String> {
     if cfg.coins.is_empty() {
         return Err(crate::error::PloyError::Validation(

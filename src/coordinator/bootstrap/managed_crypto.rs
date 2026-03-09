@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::agents::CryptoTradingConfig;
-use crate::agents::crypto_lob_ml::{
+use crate::strategy::crypto_lob_ml::{
     CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 use serde::{Deserialize, Serialize};

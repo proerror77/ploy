@@ -1,3 +1,33 @@
+# Crypto LOB ML Legacy Agent Removal (2026-03-09)
+
+## Goal
+Delete the dead `CryptoLobMlAgent` runtime file after moving its bootstrap-facing config and enums into the canonical strategy namespace.
+
+## Tasks
+
+- [x] Extract `CryptoLobMlConfig`, `CryptoLobMlExitMode`, and `CryptoLobMlEntrySidePolicy` into `strategy::crypto_lob_ml`.
+- [x] Rewire bootstrap-managed crypto config, runtime TOML rendering, and bootstrap tests to use the new strategy-side types.
+- [x] Remove `src/agents/crypto_lob_ml.rs` and stop exporting it from `src/agents/mod.rs`.
+- [x] Re-run focused bootstrap/config validation after deleting the legacy agent module.
+
+## Review
+
+- [x] Confirm there are no remaining source references to `crate::agents::crypto_lob_ml`.
+- [x] Confirm `CryptoLobMlConfig` and the exit/entry enums now live under [strategy/crypto_lob_ml](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/mod.rs).
+- [x] Confirm bootstrap env parsing and runtime-config rendering still pass with the strategy-side config types.
+
+## Progress notes
+
+- 2026-03-09: Added [config.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/config.rs) and re-exported `CryptoLobMlConfig`, `CryptoLobMlExitMode`, and `CryptoLobMlEntrySidePolicy` from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/mod.rs).
+- 2026-03-09: Updated [managed_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto.rs), [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs), and bootstrap tests in [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to consume the strategy-side config/enums.
+- 2026-03-09: Deleted [src/agents/crypto_lob_ml.rs](/Users/proerror/Documents/ploy/src/agents/crypto_lob_ml.rs) and removed its export from [src/agents/mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) after confirming there was no remaining live caller.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test build_crypto_lob_ml_runtime_config_renders_coin_filters --lib -- --nocapture`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_deprecated_price_exits_env --lib -- --nocapture`
+  - `cargo test crypto_lob_ml_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
+
 # Crypto RL Legacy Agent Removal (2026-03-09)
 
 ## Goal

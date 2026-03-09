@@ -2230,9 +2230,11 @@ pub fn print_platform_status(state: &GlobalState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::crypto_lob_ml::{CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode};
     use crate::platform::{
         DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
+    };
+    use crate::strategy::crypto_lob_ml::{
+        CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
     };
     use rust_decimal_macros::dec;
     use sqlx::postgres::PgPoolOptions;
@@ -2470,7 +2472,7 @@ symbols = ["SOLUSDT"]
 
     #[test]
     fn build_crypto_lob_ml_runtime_config_renders_coin_filters() {
-        let mut cfg = crate::agents::crypto_lob_ml::CryptoLobMlConfig::default();
+        let mut cfg = CryptoLobMlConfig::default();
         cfg.coins = vec!["btc".to_string(), "ETH".to_string()];
         cfg.min_time_remaining_secs = 90;
         cfg.max_time_remaining_secs = 600;
