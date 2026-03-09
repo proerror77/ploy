@@ -6,20 +6,22 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::config::AppConfig;
-use crate::control_plane::{MarketSelector, StrategyDeployment};
+use crate::control_plane::StrategyDeployment;
 use crate::coordinator::{Coordinator, CoordinatorHandle, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
+    ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
+    spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
     BinanceDataPlaneHandle, DataPlaneConfig, Domain, PlatformDataPlane,
 };
 use crate::signing::Wallet;
@@ -28,16 +30,9 @@ use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
 use crate::strategy::DataFeed;
 use chrono::Utc;
-use futures_util::StreamExt;
-use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
-use polymarket_client_sdk::data::types::MarketFilter as DataMarketFilter;
-use polymarket_client_sdk::data::Client as DataApiClient;
-
-use serde_json::json;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::instrument;
 
 use super::strategy_runtime::run_managed_strategy_runtime;
 
@@ -45,7 +40,6 @@ mod bootstrap_config;
 mod coordinator_bootstrap;
 mod crypto_runtime_support;
 mod managed_crypto;
-mod market_persistence;
 mod openclaw_config;
 mod runtime_config;
 mod runtime_orchestration;
@@ -57,18 +51,11 @@ mod strategy_deployments;
 mod support;
 
 pub use self::bootstrap_config::PlatformBootstrapConfig;
-pub use self::openclaw_config::{
-    AllocatorConfig, OpenClawConfig, RegimeConfig, StraddleConfig,
-};
 use self::coordinator_bootstrap::initialize_coordinator_runtime;
-use self::market_persistence::{
-    ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
-    spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
-};
 use self::crypto_runtime_support::initialize_crypto_runtime_support;
-use self::runtime_spawns::{
-    spawn_managed_strategy_runtime_task, spawn_openclaw_governance_agent,
-};
+pub use self::openclaw_config::{AllocatorConfig, OpenClawConfig, RegimeConfig, StraddleConfig};
+use self::runtime_orchestration::run_platform_runtime;
+use self::runtime_spawns::{spawn_managed_strategy_runtime_task, spawn_openclaw_governance_agent};
 use self::schema::{
     ensure_accounts_table, ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,
     ensure_clob_quote_ticks_table, ensure_schema_repairs, upsert_account_from_config,
@@ -80,6 +67,8 @@ pub(crate) use self::schema::{
     ensure_pm_token_settlements_table, ensure_risk_runtime_state_table,
     ensure_strategy_observability_tables,
 };
+use self::sports_runtime_support::prepare_sports_runtime_support;
+use self::startup_context::initialize_startup_context;
 #[cfg(all(test, feature = "rl"))]
 use self::strategy_deployments::build_crypto_rl_policy_runtime_config;
 #[cfg(test)]
@@ -92,12 +81,7 @@ use self::strategy_deployments::{
     collect_managed_strategy_runtime_plans, collect_runtime_crypto_strategy_targets,
     ManagedRuntimeBootstrapStep, ManagedRuntimeDataPlaneKind,
 };
-use self::support::{
-    add_coins_from_selector, env_bool, env_i64, env_u64, env_usize, lob_levels_json,
-};
-use self::sports_runtime_support::prepare_sports_runtime_support;
-use self::startup_context::initialize_startup_context;
-use self::runtime_orchestration::run_platform_runtime;
+use self::support::{env_bool, env_i64, env_u64, env_usize, lob_levels_json};
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
@@ -192,10 +176,11 @@ pub fn print_platform_status(state: &GlobalState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordinator::bootstrap::strategy_deployments::apply_strategy_deployments;
     use crate::control_plane::{
-        DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
+        DeploymentExecutionMode, MarketSelector, StrategyLifecycleStage, StrategyProductType,
+        Timeframe,
     };
+    use crate::coordinator::bootstrap::strategy_deployments::apply_strategy_deployments;
     use crate::strategy::crypto_lob_ml::{
         CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
     };

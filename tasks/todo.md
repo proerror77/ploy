@@ -1,3 +1,108 @@
+# Market Persistence Ownership Extraction (2026-03-09)
+
+## Goal
+Move the Polymarket trade/settlement persistence service out of `coordinator/bootstrap` so bootstrap stops owning long-running market-data persistence behavior.
+
+## Tasks
+
+- [x] Move `bootstrap/market_persistence.rs` into a `platform`-owned module.
+- [x] Rewire bootstrap siblings to import the persistence service from the new owner.
+- [x] Keep bootstrap behavior unchanged while removing `market_persistence` from bootstrap-owned implementation.
+- [x] Re-run compile and focused persistence/bootstrap regressions after the move.
+
+## Review
+
+- [x] Confirm bootstrap no longer defines the market persistence implementation body.
+- [x] Confirm trade persistence, collector-target persistence, and settlement persistence still compile from the new owner module.
+
+## Progress notes
+
+- 2026-03-09: Moved the full Polymarket trade/settlement persistence implementation into [market_persistence.rs](/Users/proerror/Documents/ploy/src/platform/market_persistence.rs) and exposed it through [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-09: Follow-up cleanup deleted the leftover [market_persistence.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/market_persistence.rs) bootstrap shim and rewired [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to import persistence ownership directly from `crate::platform`.
+- 2026-03-09: Moved deployment-selector coin parsing out of [support.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/support.rs) after the strategy deployment/runtime-spec ownership transfer.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
+  - `cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --nocapture`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+
+# Runtime Schema Ownership Extraction (2026-03-09)
+
+## Goal
+Move bootstrap-owned runtime schema helpers into `src/persistence` so schema/table ownership stops hiding under the coordinator bootstrap path.
+
+## Tasks
+
+- [x] Introduce `src/persistence/runtime_schema.rs` as the owner for runtime schema helpers.
+- [x] Re-export runtime schema helpers from `src/persistence/mod.rs`.
+- [x] Rewire bootstrap/CLI/runtime callers away from `crate::coordinator::bootstrap::ensure_*` and onto `crate::persistence`.
+- [x] Re-run compile and focused regressions after the ownership move.
+
+## Review
+
+- [x] Confirm runtime schema helpers now compile from `crate::persistence`.
+- [x] Confirm bootstrap schema ownership is reduced to a thin compatibility layer instead of the implementation body.
+
+## Progress notes
+
+- 2026-03-09: Added [runtime_schema.rs](/Users/proerror/Documents/ploy/src/persistence/runtime_schema.rs) and re-exported the runtime schema helpers from [mod.rs](/Users/proerror/Documents/ploy/src/persistence/mod.rs).
+- 2026-03-09: Updated [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs), [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), and [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs) to consume runtime schema helpers from `crate::persistence`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
+
+# Strategy Runtime Specs Ownership (2026-03-09)
+
+## Goal
+Move deployment-matrix/runtime-config/runtime-plan ownership under `src/strategy` so bootstrap stops acting like the owner of managed strategy spec compilation.
+
+## Tasks
+
+- [x] Add `src/strategy/runtime_specs` as the strategy-owned home for deployment matrix, runtime config builders, and managed runtime plan compilation.
+- [x] Rewire bootstrap to consume `crate::strategy::runtime_specs` instead of owning submodules under `bootstrap/strategy_deployments`.
+- [x] Keep the bootstrap-facing plan wrapper thin while deleting the old bootstrap-owned implementation files.
+- [x] Re-run compile and focused managed-runtime regressions after the move.
+
+## Review
+
+- [x] Confirm `bootstrap/strategy_deployments` no longer owns the deployment matrix/runtime builder implementation files.
+- [x] Confirm managed runtime planning now compiles from `crate::strategy::runtime_specs`.
+
+## Progress notes
+
+- 2026-03-09: Added [runtime_specs](/Users/proerror/Documents/ploy/src/strategy/runtime_specs/mod.rs) under `src/strategy` and exposed it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-09: Converted [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs) into a thin bootstrap-facing wrapper over `crate::strategy::runtime_specs`.
+- 2026-03-09: Deleted the bootstrap-owned implementation files under `src/coordinator/bootstrap/strategy_deployments/`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
+
+# RL Order Runtime Alias Retirement (2026-03-09)
+
+## Goal
+Stop the RL CLI path from pretending `OrderPlatform` is a first-class runtime surface by keeping the canonical naming on the RL side and dropping the old compatibility aliases.
+
+## Tasks
+
+- [x] Remove `OrderPlatform` / `PlatformConfig` / `PlatformStats` aliases from the RL runtime surface.
+- [x] Rewire RL callers to use `RlOrderRuntime` / `RlOrderRuntimeConfig` / `RlRuntimeStats`.
+- [x] Re-run focused RL compile/tests after the alias retirement.
+
+## Review
+
+- [x] Confirm repo-wide source references to the removed RL order-runtime aliases are gone.
+- [x] Confirm the RL CLI/runtime still compiles and passes focused regressions.
+
+## Progress notes
+
+- 2026-03-09: Removed the legacy `OrderPlatform`, `PlatformConfig`, and `PlatformStats` aliases from [order_platform.rs](/Users/proerror/Documents/ploy/src/rl/order_platform.rs) and narrowed [mod.rs](/Users/proerror/Documents/ploy/src/rl/mod.rs) to the canonical RL runtime names.
+- 2026-03-09: Updated [agent.rs](/Users/proerror/Documents/ploy/src/main_commands/rl/agent.rs) to construct `RlOrderRuntime` directly.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --nocapture`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+
 # OpenClaw Config Shim Retirement (2026-03-09)
 
 ## Goal
