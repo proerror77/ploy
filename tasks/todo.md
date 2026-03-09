@@ -2600,3 +2600,28 @@ Move exchange/client/account/shared-db bootstrap preflight out of `start_platfor
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo check --lib --features rl`
+
+# Bootstrap Runtime Orchestration Extraction (2026-03-09)
+
+## Goal
+Move runtime support setup, managed runtime spawning, startup control application, and shutdown/join handling out of `start_platform()` so the top-level bootstrap path becomes a thin assembly function.
+
+## Tasks
+
+- [x] Extract settlement persistence, crypto/sports support wiring, managed runtime plan execution, OpenClaw spawn, and shutdown orchestration into a dedicated module.
+- [x] Rewire `start_platform()` to delegate the runtime phase to the extracted orchestration function.
+- [x] Re-run default + `rl` compile after the extraction.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer inlines runtime orchestration and shutdown handling.
+- [x] Confirm the new runtime orchestration module owns settlement persistence, managed plan loop, startup pause/resume, and shutdown/join logic.
+- [x] Confirm compile behavior is unchanged after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Added [runtime_orchestration.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_orchestration.rs) and moved settlement persistence, crypto/sports runtime support setup, managed plan spawning, OpenClaw spawn, auto-claimer wiring, startup control application, and shutdown/join logic there.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so `start_platform()` now delegates the runtime phase to `run_platform_runtime(...)`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
