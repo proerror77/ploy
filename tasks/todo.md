@@ -26,6 +26,33 @@ Move the Polymarket trade/settlement persistence service out of `coordinator/boo
   - `cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --nocapture`
   - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
 
+# Coordinator Control Surface Extraction (2026-03-10)
+
+## Goal
+Move coordinator ingress/control APIs and control-command fanout out of `src/coordinator/coordinator.rs` so the main file keeps execution/admission ownership while control surface logic lives in its own module.
+
+## Tasks
+
+- [x] Extract `CoordinatorHandle` submit/pause/resume/shutdown methods into a dedicated `coordinator/control_surface` module.
+- [x] Extract coordinator-side command fanout (`pause_all`, `resume_all`, domain halt/shutdown, agent pause/resume) into the same module.
+- [x] Simplify the main run loop to delegate control command handling instead of inlining the full match.
+- [x] Re-run compile and focused control-plane regressions after the extraction.
+
+## Review
+
+- [x] Confirm `coordinator.rs` no longer owns the full handle/control API surface.
+- [x] Confirm control commands still block/allow ingress correctly after the extraction.
+
+## Progress notes
+
+- 2026-03-10: Added [control_surface.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/control_surface.rs) to own `CoordinatorHandle` ingress/control methods plus coordinator command fanout.
+- 2026-03-10: Reduced [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs) by replacing the inlined control-command match with `handle_control_command(...)`.
+- 2026-03-10: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --nocapture`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+
 # Runtime Schema Ownership Extraction (2026-03-09)
 
 ## Goal
