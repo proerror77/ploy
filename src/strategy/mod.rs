@@ -33,6 +33,7 @@ mod research_facade;
 mod runtime_facade;
 pub mod runtime_order;
 pub mod runtime_specs;
+mod sports_facade;
 pub mod traits;
 
 pub use runtime_facade::{
@@ -146,23 +147,6 @@ pub use multi_outcome::{
     SplitMergeType,
     POLYMARKET_FEE_RATE,
 };
-pub use nba_comeback::nba_data_collector::{
-    CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,
-    GameState as NbaGameState, MarketSnapshot as NbaMarketSnapshot, OrderbookData, TeamStats,
-};
-pub use nba_comeback::nba_entry::{
-    EntryConfig, EntryDecision, EntryLogic, EntrySignal, PartialSignal,
-};
-pub use nba_comeback::nba_exit::{
-    ExitConfig as NbaExitConfig, ExitDecision, ExitLogic, ExitUrgency, PositionState,
-};
-pub use nba_comeback::nba_filters::{FilterConfig, FilterResult, MarketContext, MarketFilters};
-pub use nba_comeback::nba_state_machine::{
-    StateEvent as NbaStateEvent, StateMachine as NbaStateMachine, StrategyState as NbaStrategyState,
-};
-pub use nba_comeback::nba_winprob::{
-    GameFeatures, LiveWinProbModel, ModelMetadata, WinProbCoefficients, WinProbPrediction,
-};
 pub use position_manager::{
     Position as PersistedPosition, PositionManager, PositionStatus as PersistedPositionStatus,
     PositionSummary,
@@ -197,6 +181,14 @@ pub use signal::SignalDetector;
 pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
     SplitArbConfig, SplitArbEngine,
+};
+pub use sports_facade::{
+    EntryConfig, EntryDecision, EntryLogic, EntrySignal, ExitDecision, ExitLogic, ExitUrgency,
+    FilterConfig, FilterResult, GameFeatures, LiveWinProbModel, MarketContext, MarketFilters,
+    ModelMetadata, NbaCollectorConfig, NbaDataCollector, NbaExitConfig, NbaGameState,
+    NbaMarketSnapshot, NbaStateEvent, NbaStateMachine, NbaStrategyState, OrderbookData,
+    PartialSignal, PositionState, SportsLeague, SportsMarketDiscovery, TeamStats,
+    WinProbCoefficients, WinProbPrediction,
 };
 pub use trade_logger::{
     BucketStats, SymbolStats, TradeContext, TradeLogger, TradeOutcome, TradeRecord, TradingStats,
@@ -244,6 +236,3 @@ pub use core::{
 
 // Crypto strategies
 pub use crypto::{run_crypto_split_arb, CryptoMarketDiscovery, CryptoSplitArbConfig};
-
-// Sports strategies
-pub use sports::{SportsLeague, SportsMarketDiscovery};
