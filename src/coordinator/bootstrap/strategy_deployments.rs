@@ -1,5 +1,7 @@
 use super::runtime_spawns::ManagedStrategyRuntimeSpawn;
+use super::support::load_strategy_deployments;
 use super::*;
+use crate::strategy::CryptoTradingConfig;
 
 fn normalize_strategy_key(strategy: &str) -> String {
     strategy.to_ascii_lowercase().replace(['-', '_', ' '], "")

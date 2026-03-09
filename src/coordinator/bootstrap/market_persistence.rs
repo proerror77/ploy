@@ -1,3 +1,4 @@
+use super::support::env_decimal;
 use super::*;
 
 async fn ensure_clob_trade_ticks_table(pool: &PgPool) -> Result<()> {

@@ -1,3 +1,34 @@
+# Bootstrap Config Extraction (2026-03-09)
+
+## Goal
+Move the bootstrap config model and `from_app_config` env hydration out of `bootstrap.rs` so the top-level bootstrap flow stops owning both configuration assembly and runtime assembly.
+
+## Tasks
+
+- [x] Extract `PlatformBootstrapConfig` and its `Default` / `from_app_config` / deployment reapply logic into a dedicated bootstrap config module.
+- [x] Re-export the config type from `bootstrap.rs` so existing callers keep using `coordinator::bootstrap::PlatformBootstrapConfig`.
+- [x] Make sibling bootstrap modules import the support helpers they actually use instead of relying on `bootstrap.rs` parent imports.
+- [x] Re-run default + `rl` compile plus focused bootstrap config tests after the extraction.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer defines the config struct or its large env-hydration impl block.
+- [x] Confirm the new bootstrap config module owns the runtime enablement matrix, OpenClaw lockdown, and strategy deployment reapply path.
+- [x] Confirm focused bootstrap config regressions still pass after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Added [bootstrap_config.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/bootstrap_config.rs) and moved `PlatformBootstrapConfig` ownership there, including `Default`, `reapply_strategy_deployments_for_runtime`, and the full `from_app_config` env-hydration path.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to re-export `PlatformBootstrapConfig`, leaving the top-level file focused on platform startup and runtime assembly.
+- 2026-03-09: Updated [managed_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto.rs), [market_persistence.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/market_persistence.rs), and [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs) to import the env/config helpers they consume directly instead of relying on parent-module wildcard scope.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test from_app_config_reads_crypto_agent_signal_gate_env_vars --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_deprecated_price_exits_env --lib -- --nocapture`
+  - `cargo test --features rl build_crypto_rl_policy_runtime_config_preserves_model_controls --lib -- --nocapture`
+
 # RL Compatibility Runtime Extraction (2026-03-09)
 
 ## Goal

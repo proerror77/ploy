@@ -1,12 +1,13 @@
+use super::support::env_decimal;
 use super::*;
 
 use crate::strategy::crypto_lob_ml::{
     CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
-use crate::strategy::CryptoTradingConfig;
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "rl")]
 use crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig;
+use crate::strategy::CryptoTradingConfig;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedCryptoRuntimeConfig {
@@ -389,7 +390,8 @@ fn apply_crypto_rl_policy_env(
     );
     if managed_cfg.rl_policy.max_time_remaining_secs < managed_cfg.rl_policy.min_time_remaining_secs
     {
-        managed_cfg.rl_policy.max_time_remaining_secs = managed_cfg.rl_policy.min_time_remaining_secs;
+        managed_cfg.rl_policy.max_time_remaining_secs =
+            managed_cfg.rl_policy.min_time_remaining_secs;
     }
     if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__PREFER_CLOSE_TO_END") {
         match raw.trim().to_ascii_lowercase().as_str() {
