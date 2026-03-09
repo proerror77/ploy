@@ -1,6 +1,7 @@
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::fmt;
 use std::path::Path;
 
 /// Main configuration structure
@@ -607,7 +608,7 @@ impl Default for ExecutionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct KalshiConfig {
     /// Kalshi Trade API base URL.
     #[serde(default = "default_kalshi_base_url")]
@@ -618,6 +619,20 @@ pub struct KalshiConfig {
     /// Optional API secret (can also be sourced from env).
     #[serde(default)]
     pub api_secret: Option<String>,
+}
+
+fn redact_optional_secret(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| "[REDACTED]")
+}
+
+impl fmt::Debug for KalshiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KalshiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &redact_optional_secret(&self.api_key))
+            .field("api_secret", &redact_optional_secret(&self.api_secret))
+            .finish()
+    }
 }
 
 impl Default for KalshiConfig {
@@ -670,13 +685,22 @@ fn default_max_positions_per_symbol() -> u32 {
     1 // Default: only 1 position per symbol
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL
     pub url: String,
     /// Maximum connections in pool
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+}
+
+impl fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatabaseConfig")
+            .field("url", &"[REDACTED]")
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
 }
 
 fn default_max_connections() -> u32 {
@@ -1164,5 +1188,34 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.contains("execution.exchange must be one of [polymarket, kalshi]")));
+    }
+
+    #[test]
+    fn test_database_config_debug_redacts_url() {
+        let cfg = DatabaseConfig {
+            url: "postgres://user:password@localhost:5432/ploy".to_string(),
+            max_connections: 7,
+        };
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("password"));
+        assert!(!rendered.contains("postgres://user:password@localhost:5432/ploy"));
+        assert!(rendered.contains("7"));
+    }
+
+    #[test]
+    fn test_kalshi_config_debug_redacts_credentials() {
+        let cfg = KalshiConfig {
+            base_url: "https://example.com".to_string(),
+            api_key: Some("kalshi-key".to_string()),
+            api_secret: Some("kalshi-secret".to_string()),
+        };
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("kalshi-key"));
+        assert!(!rendered.contains("kalshi-secret"));
+        assert!(rendered.contains("https://example.com"));
     }
 }
