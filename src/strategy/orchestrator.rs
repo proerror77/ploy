@@ -257,7 +257,7 @@ impl StrategyOrchestrator {
             match action {
                 StrategyAction::SubmitIntent { intent } => {
                     let client_order_id = intent.client_order_id.clone();
-                    let order = intent.into_order_request();
+                    let order = super::runtime_order::order_request_from_intent(&intent);
                     // Check risk before submitting
                     let check = self.risk_manager
                         .check_new_position(

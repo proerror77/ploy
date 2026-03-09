@@ -343,7 +343,7 @@ async fn handle_strategy_actions_runtime(
         match action {
             StrategyAction::SubmitIntent { intent } => {
                 let client_order_id = intent.client_order_id.clone();
-                let mut order = intent.into_order_request();
+                let mut order = crate::strategy::order_request_from_intent(&intent);
                 normalize_runtime_order_request(&client_order_id, &mut order);
 
                 if paused.load(Ordering::Relaxed) {

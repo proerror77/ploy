@@ -873,7 +873,7 @@ name = "event_edge"
             .iter()
             .find_map(|action| match action {
                 StrategyAction::SubmitIntent { intent } => {
-                    let order = intent.clone().into_order_request();
+                    let order = crate::strategy::order_request_from_intent(&intent);
                     assert_eq!(order.client_order_id, intent.client_order_id);
                     assert_eq!(
                         order.idempotency_key.as_deref(),

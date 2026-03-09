@@ -2545,3 +2545,33 @@ Delete the `StrategyAction::LegacyControl` compatibility path so strategies stop
   - `cargo test --lib test_strategy_manager_creation -- --nocapture`
   - `cargo test --lib gamma_scalping::strategy::tests -- --nocapture`
   - `rg "StrategyControlAction|LegacyControl" src`
+
+# Strategy Intent Raw-Order Bridge Extraction (2026-03-09)
+
+## Goal
+Remove raw `OrderRequest` materialization from the canonical `StrategyOrderIntent` type so the strategy trait surface stops directly depending on execution payloads.
+
+## Tasks
+
+- [x] Delete `StrategyOrderIntent::into_order_request()` from `traits.rs`.
+- [x] Add a dedicated runtime-order bridge module and move the conversion helper there.
+- [x] Rewire managed runtime, orchestrator, CLI, and intent-focused strategy tests to use the bridge helper.
+- [x] Re-run compile and focused regression checks after the extraction.
+
+## Review
+
+- [x] Confirm `traits.rs` no longer imports or constructs `OrderRequest`.
+- [x] Confirm there are no remaining source references to `into_order_request()`.
+- [x] Confirm the runtime-order bridge helper preserves `client_order_id` and `idempotency_key`.
+
+## Progress notes
+
+- 2026-03-09: Added [runtime_order.rs](/Users/proerror/Documents/ploy/src/strategy/runtime_order.rs) and moved raw `OrderRequest` materialization there as `order_request_from_intent(...)`, including the action-id preservation regression test.
+- 2026-03-09: Removed `StrategyOrderIntent::into_order_request()` from [traits.rs](/Users/proerror/Documents/ploy/src/strategy/traits.rs), which drops the direct `OrderRequest` dependency from the canonical strategy trait surface.
+- 2026-03-09: Rewired [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), [orchestrator.rs](/Users/proerror/Documents/ploy/src/strategy/orchestrator.rs), [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs), and intent-focused strategy tests in [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy.rs), [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs), and [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/strategy.rs) to use the bridge helper.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --lib runtime_order::tests -- --nocapture`
+  - `cargo test --lib test_strategy_manager_creation -- --nocapture`
+  - `rg "into_order_request\\(|order_request_from_intent\\(" src`

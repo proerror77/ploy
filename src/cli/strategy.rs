@@ -1363,7 +1363,7 @@ async fn handle_strategy_actions(
         match action {
             StrategyAction::SubmitIntent { intent } => {
                 let client_order_id = intent.client_order_id.clone();
-                let mut order = intent.into_order_request();
+                let mut order = crate::strategy::order_request_from_intent(&intent);
                 if order.client_order_id != client_order_id {
                     warn!(
                         "Mismatched order IDs in strategy action: action={}, request={}; using action ID",

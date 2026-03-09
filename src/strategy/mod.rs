@@ -29,6 +29,7 @@ pub mod event_models;
 pub mod feeds;
 pub mod manager;
 pub mod registry;
+pub mod runtime_order;
 pub mod traits;
 
 pub use traits::{
@@ -39,6 +40,7 @@ pub use traits::{
 pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};
 pub use feeds::{DataFeedBuilder, DataFeedManager};
 pub use manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus};
+pub use runtime_order::order_request_from_intent;
 pub use staggered_arb_live::StaggeredArbAdapter;
 
 // =============================================================================

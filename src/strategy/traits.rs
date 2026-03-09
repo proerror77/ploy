@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::domain::{OrderRequest, OrderSide, OrderStatus, OrderType, Quote, Side, TimeInForce};
+use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 
@@ -243,27 +243,6 @@ pub struct StrategyOrderIntent {
     pub metadata: HashMap<String, String>,
 }
 
-impl StrategyOrderIntent {
-    pub fn into_order_request(self) -> OrderRequest {
-        let client_order_id = self.client_order_id.clone();
-        OrderRequest {
-            client_order_id: client_order_id.clone(),
-            idempotency_key: Some(client_order_id),
-            token_id: self.token_id,
-            market_side: self.side,
-            order_side: if self.is_buy {
-                OrderSide::Buy
-            } else {
-                OrderSide::Sell
-            },
-            shares: self.shares,
-            limit_price: self.limit_price,
-            order_type: self.order_type,
-            time_in_force: self.time_in_force,
-        }
-    }
-}
-
 // ============================================================================
 // Strategy State
 // ============================================================================
@@ -476,42 +455,5 @@ impl Default for StrategyConfig {
             dry_run: true,
             params: HashMap::new(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::StrategyOrderIntent;
-    use crate::domain::{OrderSide, OrderType, TimeInForce};
-    use crate::platform::Domain;
-    use rust_decimal_macros::dec;
-    use std::collections::HashMap;
-
-    #[test]
-    fn strategy_order_intent_into_order_request_preserves_action_id() {
-        let request = StrategyOrderIntent {
-            client_order_id: "intent-123".to_string(),
-            domain: Domain::Politics,
-            market_slug: "election-market".to_string(),
-            token_id: "token-1".to_string(),
-            side: crate::domain::Side::Up,
-            is_buy: true,
-            shares: 25,
-            limit_price: dec!(0.44),
-            order_type: OrderType::Market,
-            time_in_force: TimeInForce::IOC,
-            priority: 7,
-            metadata: HashMap::new(),
-        }
-        .into_order_request();
-
-        assert_eq!(request.client_order_id, "intent-123");
-        assert_eq!(request.idempotency_key.as_deref(), Some("intent-123"));
-        assert_eq!(request.order_side, OrderSide::Buy);
-        assert_eq!(request.market_side, crate::domain::Side::Up);
-        assert_eq!(request.shares, 25);
-        assert_eq!(request.limit_price, dec!(0.44));
-        assert_eq!(request.order_type, OrderType::Market);
-        assert_eq!(request.time_in_force, TimeInForce::IOC);
     }
 }
