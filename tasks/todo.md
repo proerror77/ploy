@@ -85,6 +85,44 @@ Retire the legacy `SportsTradingAgent` / `PoliticsTradingAgent` startup paths fr
   - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
   - `cargo test build_event_edge_runtime_config_ --lib -- --nocapture`
   - `cargo test build_nba_comeback_runtime_config_ --lib -- --nocapture`
+
+# Platform NBA Agent Retirement (2026-03-09)
+
+## Goal
+Delete the remaining `platform::NbaComebackAgent` compatibility path by moving the CLI `nba_comeback` command onto the canonical strategy-side implementation and removing the dead platform export/module.
+
+## Tasks
+
+- [ ] Rework `src/cli/strategy.rs` `run_nba_comeback(...)` to drive `NbaComebackStrategy` instead of `platform::NbaComebackAgent`.
+- [ ] Keep the CLI output useful for dry-run signal inspection without reintroducing a second runtime contract.
+- [ ] Remove the dead NBA agent export/module from `src/platform/mod.rs` and `src/platform/agents/mod.rs`.
+- [ ] Delete `src/platform/agents/nba_agent.rs` if nothing still instantiates it.
+- [ ] Re-run the narrowest CLI/strategy compile tests after the cutover.
+
+## Review
+
+- [ ] Confirm no code instantiates `platform::NbaComebackAgent`.
+- [ ] Confirm `src/platform/mod.rs` no longer re-exports the deleted agent.
+- [ ] Confirm the CLI command still prints NBA comeback signals in dry-run mode.
+
+# Canonical Strategy Handoff Unification (2026-03-09)
+
+## Goal
+Start collapsing the duplicate `StrategyAction::SubmitOrder { OrderRequest }` vs `CoordinatorHandle::submit_order(OrderIntent)` contract so canonical strategies stop depending on a private runtime-only execution path.
+
+## Tasks
+
+- [ ] Define the canonical strategy-side submit payload that can survive outside `strategy_runtime.rs`.
+- [ ] Keep existing strategies compiling through a compatibility path while the new handoff is introduced.
+- [ ] Move managed runtime submission closer to coordinator admission instead of direct executor ownership.
+- [ ] Preserve order-update feedback so strategies still receive fills/status changes.
+- [ ] Add a regression test covering action id propagation into the actual execution handoff.
+
+## Review
+
+- [ ] Confirm the new canonical submit payload is not another permanent fourth runtime contract.
+- [ ] Confirm managed runtime still preserves `client_order_id` and idempotency semantics.
+- [ ] Confirm strategies still observe terminal fill/failure updates after the handoff change.
 - 2026-03-09: Both validations were blocked by unrelated in-flight errors outside this slice, currently in `src/coordinator/bootstrap.rs` and `src/strategy/nba_comeback/*`. The latest `cargo check --lib` output no longer reported `event_edge` compile errors after fixing the local wrapper issues.
 
 # Strategy Metadata And Momentum State Cleanup (2026-03-09)
@@ -1438,3 +1476,34 @@ Reduce the remaining live execution ambiguity after the March 7 wallet loss by m
 - 2026-03-08: Updated `OrderExecutor` retry handling to stop on non-retryable validation/auth/signing/liquidity failures and to surface the last underlying submit error when retryable attempts are exhausted.
 - 2026-03-08: Renamed managed staggered-arb runtime observability labels from `split_arb` to `staggered_arb` while still accepting the legacy alias at runtime.
 - 2026-03-08: Added per-symbol gate breakdowns to live summary/metrics so BTC/ETH/SOL reject reasons can be inspected directly.
+
+---
+
+# Bootstrap Domain Runtime Config Decoupling (2026-03-09)
+
+## Goal
+Break `bootstrap.rs`'s remaining type-level dependency on the legacy sports/politics agent modules so those files can be retired without dragging their config structs along.
+
+## Tasks
+
+- [x] Add local bootstrap runtime-config structs for sports and politics.
+- [x] Switch `PlatformBootstrapConfig` to use the new local runtime-config types.
+- [x] Re-run compile and targeted bootstrap tests after the decoupling.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer imports sports/politics config types from `src/agents/*`.
+- [x] Confirm the new runtime-config defaults preserve prior agent IDs and polling defaults.
+- [x] Confirm bootstrap still compiles with the new local config module.
+
+## Progress notes
+
+- 2026-03-09: Added [runtime_config.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_config.rs) so bootstrap owns the sports/politics runtime config types directly instead of importing them from legacy agent modules.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test build_event_edge_runtime_config_ --lib -- --nocapture`
+  - `cargo test build_nba_comeback_runtime_config_ --lib -- --nocapture`
+  - `cargo test runtime_scope_keeps_politics_when_no_explicit_selection -- --nocapture`
+  - `cargo test explicit_selection_disables_politics_without_politics_flag -- --nocapture`
+  - `cargo test sports_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
+  - `cargo test politics_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
