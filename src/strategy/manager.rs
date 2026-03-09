@@ -489,6 +489,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strategy))
             }
+            "crypto_lob_ml" => {
+                let strategy = super::crypto_lob_ml::strategy::CryptoLobMlStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
             "nba_comeback" => {
                 let strategy = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
                     strategy_id,
@@ -530,6 +538,13 @@ impl StrategyFactory {
                 description: "Politics/event-driven edge strategy on Polymarket events"
                     .to_string(),
                 config_template: "event_edge.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "crypto_lob_ml".to_string(),
+                description:
+                    "Canonical observe-only crypto LOB ML wrapper for runtime migration"
+                        .to_string(),
+                config_template: "crypto_lob_ml.toml".to_string(),
             },
             StrategyInfo {
                 name: "nba_comeback".to_string(),

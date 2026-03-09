@@ -1,3 +1,33 @@
+# Crypto LOB ML Canonical Wrapper (2026-03-09)
+
+## Goal
+Let `crypto_lob_ml` start running through the canonical `Strategy` runtime without cutting over live order ownership, by adding an observe-only wrapper that consumes the managed feed contract, builds sequence state, and emits inference/log events instead of orders.
+
+## Tasks
+
+- [x] Add a canonical `CryptoLobMlStrategy` wrapper under `src/strategy/crypto_lob_ml/strategy.rs`.
+- [x] Reuse the extracted `crypto_lob_ml::core` helpers for sequence assembly and GBM-anchor inference inside the wrapper.
+- [x] Register `crypto_lob_ml` in `StrategyFactory` so the canonical runtime can instantiate it from TOML.
+- [x] Add narrow wrapper tests for config/feed wiring and sequence-warm inference logging.
+- [x] Re-run compile plus the targeted wrapper tests.
+
+## Review
+
+- [x] Confirm `crypto_lob_ml` now has a canonical `Strategy` implementation that does not emit submit actions.
+- [x] Confirm the wrapper only owns feed/cache/inference/logging state and leaves execution/governance/legacy bootstrap untouched.
+- [x] Confirm `StrategyFactory::from_toml()` can construct the wrapper and the targeted wrapper tests pass.
+
+## Progress notes
+
+- 2026-03-09: Added [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/strategy.rs) and exported it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/mod.rs).
+- 2026-03-09: The new canonical wrapper now tracks event discovery, Binance spot/L2 state, Polymarket quotes, and per-event sequence caches, then emits `StrategyAction::LogEvent` with GBM-anchor inference once a sequence is warm.
+- 2026-03-09: Registered `crypto_lob_ml` in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs) so canonical runtime creation no longer depends on the legacy agent bootstrap path.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_toml_builds_expected_feeds --lib -- --nocapture`
+  - `cargo test on_tick_emits_inference_log_once_sequence_is_ready --lib -- --nocapture`
+  - `cargo test on_tick_skips_events_without_price_to_beat_when_required --lib -- --nocapture`
+
 # Crypto LOB ML Core Extraction (2026-03-09)
 
 ## Goal
