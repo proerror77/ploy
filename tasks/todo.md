@@ -1,3 +1,120 @@
+# Strategy Metadata And Momentum State Cleanup (2026-03-09)
+
+## Goal
+Eliminate duplicated crypto up/down series mappings outside `bootstrap` and remove redundant per-field `Arc<RwLock<...>>` state from `MomentumStrategyAdapter` now that the strategy runtime already holds `&mut self`.
+
+## Tasks
+
+- [x] Add a shared crypto series registry under `src/strategy/crypto/`.
+- [x] Rewire non-`bootstrap` callers to use the shared registry instead of hardcoded series IDs and symbol/window mappings.
+- [x] Simplify `MomentumStrategyAdapter` internal state from nested async locks to direct owned state.
+- [x] Keep the public `Strategy` trait boundary unchanged.
+- [x] Run the smallest relevant compile/test coverage for the touched strategy modules.
+
+## Review
+
+- [x] Confirm the shared registry now owns the canonical 5m/15m crypto up/down series metadata for strategy-side callers.
+- [x] Confirm `MomentumStrategyAdapter` no longer uses redundant internal `Arc<RwLock<...>>` state for positions, quotes, cooldowns, and pending orders.
+- [x] Confirm targeted strategy tests still pass after the refactor.
+
+## Progress notes
+
+- 2026-03-09: Added [series_registry.rs](/Users/proerror/Documents/ploy/src/strategy/crypto/series_registry.rs) and re-exported it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto/mod.rs) as the strategy-side source of truth for crypto series metadata.
+- 2026-03-09: Rewired [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs), [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs), [updown_backtest.rs](/Users/proerror/Documents/ploy/src/analysis/updown_backtest.rs), [collector_modes.rs](/Users/proerror/Documents/ploy/src/main_modes/collector_modes.rs), and [crypto.rs](/Users/proerror/Documents/ploy/src/main_commands/crypto.rs) to stop hardcoding the same series metadata.
+- 2026-03-09: Simplified `MomentumStrategyAdapter` to use direct owned state instead of per-field async locks, while keeping its runtime contract unchanged.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test strategy::crypto::series_registry --lib -- --nocapture`
+  - `cargo test strategy::adapters::tests --lib -- --nocapture`
+
+# Bootstrap Schema And Persistence Module Extraction (2026-03-09)
+
+## Goal
+Move the remaining schema/DDL and market-persistence ownership out of `bootstrap.rs` so the main bootstrap file stops mixing startup assembly with table management, trade polling, alerts, and settlement refresh loops.
+
+## Tasks
+
+- [x] Create dedicated `bootstrap/schema.rs` and `bootstrap/market_persistence.rs` modules.
+- [x] Rewire `bootstrap.rs` to import those modules and delete the in-file implementations.
+- [x] Preserve the existing bootstrap/public entry points used by CLI, runtime spawns, and strategy observability setup.
+- [x] Run compile plus targeted bootstrap tests after the move.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer owns the schema DDL/repair implementations inline.
+- [x] Confirm trade polling, trade alerts, and settlement refresh ownership now live in the new market-persistence module.
+- [x] Confirm existing bootstrap tests still pass after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Added [schema.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/schema.rs) for startup schema helpers and [market_persistence.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/market_persistence.rs) for Polymarket trade/settlement persistence ownership.
+- 2026-03-09: `bootstrap.rs` now imports/re-exports those helpers instead of carrying the DDL, alerting, and settlement implementations inline.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test ensure_pm_market_metadata_table_exists --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+
+# Secret Debug Redaction Batch (2026-03-09)
+
+## Goal
+Eliminate clearly unsafe secret exposure through `Debug` formatting and low-risk secret cloning for runtime credential/config types, without touching bootstrap/coordinator runtime code.
+
+## Tasks
+
+- [x] Verify which `.full-review` secret-leak findings are still correct on this branch.
+- [x] Add failing/targeted tests for credential/config `Debug` redaction where practical.
+- [x] Replace unsafe derived `Debug` output on secret-bearing config/credential types with redacted manual implementations.
+- [x] Remove unsafe `Clone` on `Wallet` if the current branch does not require cloning wallet objects directly.
+- [x] Run the smallest relevant Rust test set plus a compile check for touched modules.
+
+## Review
+
+- [x] Confirm `ApiCredentials`, `DatabaseConfig`, `KalshiConfig`, and `GrokConfig` no longer print raw secrets via `Debug`.
+- [x] Confirm HMAC signing debug logging no longer includes the full signing payload.
+- [x] Confirm `Wallet` is no longer clonable directly if the codebase does not rely on that capability.
+
+## Progress notes
+
+- 2026-03-09: Scope is intentionally disjoint from the ongoing bootstrap/coordinator refactor; only secret-bearing config/credential types and their tests should move in this slice.
+- 2026-03-09: Verified `.full-review` items against the current branch before editing. `ApiCredentials` debug leakage, HMAC payload logging, and secret-bearing config `Debug` derives were all still real; `Wallet` already had custom `Debug`, so the only wallet-side change in this slice was dropping direct `Clone`.
+- 2026-03-09: Added targeted redaction tests for `ApiCredentials`, `GrokConfig`, `DatabaseConfig`, and `KalshiConfig`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_api_credentials_debug_redacts_secrets -- --nocapture`
+  - `cargo test test_grok_config_debug_redacts_api_key -- --nocapture`
+  - `cargo test test_database_config_debug_redacts_url -- --nocapture`
+  - `cargo test test_kalshi_config_debug_redacts_credentials -- --nocapture`
+
+# Bootstrap Strategy Deployments Module Extraction (2026-03-09)
+
+## Goal
+Move crypto strategy classification, deployment mapping, and runtime config builder ownership out of `bootstrap.rs` into a dedicated submodule so bootstrap stops doubling as a strategy router and TOML config factory.
+
+## Tasks
+
+- [x] Create a dedicated `bootstrap/strategy_deployments.rs` submodule for crypto strategy classification, deployment mapping, and managed-runtime config builders.
+- [x] Rewire `bootstrap.rs` to import those helpers and delete the in-file strategy deployment/config-builder block.
+- [x] Keep runtime behavior unchanged in this slice; this is a file-boundary cleanup, not a contract migration.
+- [x] Run targeted compile/tests for deployment routing and managed-runtime config rendering.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer owns crypto strategy classification or managed runtime TOML builder implementations inline.
+- [x] Confirm the new submodule owns both deployment enablement mapping and runtime config rendering helpers.
+- [x] Confirm existing bootstrap tests for deployment routing and momentum/staggered config rendering still pass after the move.
+
+## Progress notes
+
+- 2026-03-09: After extracting runtime spawns, the next thick bootstrap ownership block was the strategy deployment router and runtime config builder cluster.
+- 2026-03-09: Added [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs) and moved crypto strategy classification, deployment target collection, and momentum/staggered/pattern-memory config builder logic there.
+- 2026-03-09: `bootstrap.rs` now imports those helpers instead of owning the block inline.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+  - `cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
+
 # Bootstrap Runtime Spawns Module Extraction (2026-03-09)
 
 ## Goal
