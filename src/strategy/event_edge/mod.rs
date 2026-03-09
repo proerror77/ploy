@@ -6,6 +6,7 @@
 
 pub mod core;
 pub mod data_source;
+pub mod strategy;
 
 use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::adapters::PolymarketClient;
@@ -24,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{info, warn};
+
+pub use strategy::EventEdgeStrategy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEdgeConfig {

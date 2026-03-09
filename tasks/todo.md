@@ -23,6 +23,33 @@ Move the last top-level bootstrap utility helpers out of `bootstrap.rs` so the f
   - `cargo check --lib`
   - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
 
+# EventEdge Canonical Strategy Wrapper (2026-03-09)
+
+## Goal
+Wrap `EventEdgeCore` behind the canonical `Strategy` trait inside `src/strategy/event_edge/` only, so the repo gains a real strategy-side implementation without touching `bootstrap.rs`, `manager.rs`, or sports/NBA integration yet.
+
+## Tasks
+
+- [x] Add targeted failing tests for wrapper-local behavior: required feeds, discovered-event bookkeeping, canonical submit-action emission, and order-update position tracking.
+- [x] Add a new `src/strategy/event_edge/strategy.rs` wrapper implementing `Strategy` around `EventEdgeCore`.
+- [x] Keep all wiring local to `src/strategy/event_edge/` and avoid bootstrap/manager/sports/NBA edits in this slice.
+- [x] Run the smallest relevant compile/tests for touched files only.
+
+## Review
+
+- [x] Confirm the wrapper uses `EventEdgeCore` for decision policy instead of duplicating thresholds.
+- [x] Confirm the wrapper can hold discovered events, emit canonical `StrategyAction::SubmitOrder`, and translate fills into `PositionInfo`.
+- [x] Confirm no non-local integration files were edited.
+
+## Progress notes
+
+- 2026-03-09: Added [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy.rs) with a canonical `Strategy` wrapper, TOML builder, discovered-event bookkeeping, pending-order reservation tracking, and order-fill to `PositionInfo` translation.
+- 2026-03-09: Local wiring is limited to [mod.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/mod.rs) plus small deterministic helpers in [core.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/core.rs).
+- 2026-03-09: Validation attempted:
+  - `cargo test strategy::event_edge::strategy::tests --lib -- --nocapture`
+  - `cargo check --lib`
+- 2026-03-09: Both validations were blocked by unrelated in-flight errors outside this slice, currently in `src/coordinator/bootstrap.rs` and `src/strategy/nba_comeback/*`. The latest `cargo check --lib` output no longer reported `event_edge` compile errors after fixing the local wrapper issues.
+
 # Strategy Metadata And Momentum State Cleanup (2026-03-09)
 
 ## Goal
