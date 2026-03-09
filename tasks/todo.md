@@ -1,3 +1,32 @@
+# Crypto LOB ML Core Extraction (2026-03-09)
+
+## Goal
+Move the pure sequence-building, normalization, and observation-alignment logic out of the legacy `CryptoLobMlAgent` shell into a strategy-side module so future canonical strategy migration stops depending on the old trading-agent runtime for core model preparation.
+
+## Tasks
+
+- [x] Create a strategy-side `crypto_lob_ml` module that owns the extracted pure helpers and local sequence state types.
+- [x] Rewire the legacy `CryptoLobMlAgent` to delegate to the new strategy-side core instead of owning duplicate helper implementations.
+- [x] Move the duplicated pure helper regression coverage to the new core module and delete the now-redundant legacy-agent copies.
+- [x] Re-run compile plus narrow helper/inference regression tests after the ownership move.
+
+## Review
+
+- [x] Confirm the pure sequence helpers (`build_sequence`, sequence alignment, deployment metadata helpers, GBM anchor helper inputs) now live under `src/strategy/crypto_lob_ml/`.
+- [x] Confirm the legacy agent keeps compiling while delegating to the new strategy-side core.
+- [x] Confirm the extracted core owns the canonical helper regression coverage and the branch passes targeted compile/tests.
+
+## Progress notes
+
+- 2026-03-09: Added [core.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/core.rs) and [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/mod.rs), and exported the new module from [strategy/mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-09: Updated [crypto_lob_ml.rs](/Users/proerror/Documents/ploy/src/agents/crypto_lob_ml.rs) so the legacy agent delegates sequence caching, normalization, deployment metadata, and model-input alignment to the new strategy-side core instead of owning those implementations directly.
+- 2026-03-09: Deleted the duplicated pure helper tests from the legacy agent now that the extracted core owns that regression surface.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test build_sequence --lib -- --nocapture`
+  - `cargo test deployment_metadata_helpers --lib -- --nocapture`
+  - `cargo test test_estimate_p_up_validates_sequence_input_dim --lib -- --nocapture`
+
 # Canonical Strategy SubmitIntent Migration (2026-03-09)
 
 ## Goal

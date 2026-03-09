@@ -31,31 +31,19 @@ use crate::ml::OnnxModel;
 use crate::platform::{
     AgentRiskParams, AgentStatus, CryptoDataPlaneHandle, Domain, OrderIntent, OrderPriority,
 };
+use crate::strategy::crypto_lob_ml::core as lob_ml_core;
 use crate::strategy::momentum::{EventInfo, EventMatcher};
 
 const TRADED_EVENT_RETENTION_HOURS: i64 = 24;
 const STRATEGY_ID: &str = "crypto_lob_ml";
-const SEQ_LEN_5M: usize = 60;
-const SEQ_LEN_15M: usize = 180;
-const SEQ_FEATURE_DIM: usize = 11;
-
-/// Standard normal CDF approximation (Abramowitz-Stegun), ~4dp accuracy.
-fn normal_cdf(x: f64) -> f64 {
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let z = x.abs() / std::f64::consts::SQRT_2;
-
-    let t = 1.0 / (1.0 + p * z);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
-
-    0.5 * (1.0 + sign * y)
-}
+#[cfg(any(feature = "onnx", test))]
+const SEQ_LEN_5M: usize = lob_ml_core::SEQ_LEN_5M;
+#[cfg(any(feature = "onnx", test))]
+const SEQ_LEN_15M: usize = lob_ml_core::SEQ_LEN_15M;
+#[cfg(any(feature = "onnx", test))]
+const SEQ_FEATURE_DIM: usize = lob_ml_core::SEQ_FEATURE_DIM;
+type SequenceSnapshot = lob_ml_core::SequenceSnapshot;
+type SequenceAlignMode = lob_ml_core::SequenceAlignMode;
 
 fn default_exit_edge_floor() -> Decimal {
     dec!(0.15)
@@ -92,9 +80,6 @@ fn default_max_spread_pct() -> Decimal {
 fn default_force_settle_only_5m() -> bool {
     true
 }
-
-/// Bias added to P(UP) for >= settlement rule (UP wins on ties).
-const GEQ_SETTLEMENT_BIAS: f64 = 0.002;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -452,35 +437,9 @@ struct EntrySignal {
     down_ask: Decimal,
 }
 
-#[derive(Debug, Clone)]
-struct SequenceSnapshot {
-    ts: DateTime<Utc>,
-    obi_5: Decimal,
-    obi_10: Decimal,
-    spread_bps: Decimal,
-    bid_volume_5: Decimal,
-    ask_volume_5: Decimal,
-    momentum_1s: Decimal,
-    momentum_5s: Decimal,
-    spot_price: Decimal,
-    remaining_secs: Decimal,
-    price_to_beat: Decimal,
-    distance_to_beat: Decimal,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SequenceAlignMode {
-    Exact,
-    TruncateOldest,
-    LeftPadZero,
-}
-
+#[cfg(any(feature = "onnx", test))]
 fn sequence_len_for_horizon(horizon: &str) -> usize {
-    match normalize_timeframe(horizon).as_str() {
-        "15m" => SEQ_LEN_15M,
-        _ => SEQ_LEN_5M,
-    }
+    lob_ml_core::sequence_len_for_horizon(horizon)
 }
 
 pub struct CryptoLobMlAgent {
@@ -526,62 +485,24 @@ fn prune_stale_traded_events(
     traded_events.retain(|_, entered_at| now.signed_duration_since(*entered_at) < retention);
 }
 
-fn normalize_component(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-            out.push(ch.to_ascii_lowercase());
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        "unknown".to_string()
-    } else {
-        out
-    }
-}
-
 fn normalize_timeframe(horizon: &str) -> String {
-    let raw = horizon.trim().to_ascii_lowercase();
-    if raw.contains("15m") || raw == "15" {
-        "15m".to_string()
-    } else if raw.contains("5m") || raw == "5" {
-        "5m".to_string()
-    } else if raw.is_empty() {
-        "5m".to_string()
-    } else {
-        raw
-    }
+    lob_ml_core::normalize_timeframe(horizon)
 }
 
 fn event_window_secs_for_horizon(horizon: &str) -> u64 {
-    match normalize_timeframe(horizon).as_str() {
-        "15m" => 15 * 60,
-        "5m" => 5 * 60,
-        _ => 5 * 60,
-    }
+    lob_ml_core::event_window_secs_for_horizon(horizon)
 }
 
 fn deployment_id_for(strategy: &str, coin: &str, horizon: &str) -> String {
-    format!(
-        "crypto.pm.{}.{}.{}",
-        normalize_component(coin),
-        normalize_timeframe(horizon),
-        normalize_component(strategy)
-    )
+    lob_ml_core::deployment_id_for(strategy, coin, horizon)
 }
 
 fn infer_coin_from_market_slug(slug: &str) -> String {
-    slug.split('-')
-        .next()
-        .map(|s| s.trim().to_ascii_uppercase())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "UNKNOWN".to_string())
+    lob_ml_core::infer_coin_from_market_slug(slug)
 }
 
 fn infer_horizon_from_market_slug(slug: &str) -> String {
-    normalize_timeframe(slug)
+    lob_ml_core::infer_horizon_from_market_slug(slug)
 }
 
 fn tracked_position_from_global(position: &crate::platform::Position) -> TrackedPosition {
@@ -749,19 +670,7 @@ impl CryptoLobMlAgent {
         key: &str,
         snapshot: SequenceSnapshot,
     ) {
-        let window = sequence_cache.entry(key.to_string()).or_default();
-        if let Some(last) = window.back_mut() {
-            // Keep one row per second key to avoid dense duplicate ticks.
-            if last.ts == snapshot.ts {
-                *last = snapshot;
-                return;
-            }
-        }
-
-        window.push_back(snapshot);
-        while window.len() > SEQ_LEN_15M {
-            let _ = window.pop_front();
-        }
+        lob_ml_core::push_sequence_snapshot(sequence_cache, key, snapshot);
     }
 
     fn build_sequence(
@@ -771,41 +680,13 @@ impl CryptoLobMlAgent {
         feature_offsets: &[f32],
         feature_scales: &[f32],
     ) -> Option<Vec<f32>> {
-        let seq_len = sequence_len_for_horizon(horizon);
-        let window = sequence_cache.get(key)?;
-        if window.len() < seq_len {
-            return None;
-        }
-
-        let normalize =
-            feature_offsets.len() == SEQ_FEATURE_DIM && feature_scales.len() == SEQ_FEATURE_DIM;
-
-        let mut flat: Vec<f32> = Vec::with_capacity(seq_len * SEQ_FEATURE_DIM);
-        let start_idx = window.len().saturating_sub(seq_len);
-        for snap in window.iter().skip(start_idx) {
-            let raw = [
-                snap.obi_5.to_f64().unwrap_or(0.0) as f32,
-                snap.obi_10.to_f64().unwrap_or(0.0) as f32,
-                snap.spread_bps.to_f64().unwrap_or(0.0) as f32,
-                snap.bid_volume_5.to_f64().unwrap_or(0.0) as f32,
-                snap.ask_volume_5.to_f64().unwrap_or(0.0) as f32,
-                snap.momentum_1s.to_f64().unwrap_or(0.0) as f32,
-                snap.momentum_5s.to_f64().unwrap_or(0.0) as f32,
-                snap.spot_price.to_f64().unwrap_or(0.0) as f32,
-                snap.remaining_secs.to_f64().unwrap_or(0.0) as f32,
-                snap.price_to_beat.to_f64().unwrap_or(0.0) as f32,
-                snap.distance_to_beat.to_f64().unwrap_or(0.0) as f32,
-            ];
-            if normalize {
-                for (i, v) in raw.iter().enumerate() {
-                    flat.push((v - feature_offsets[i]) * feature_scales[i]);
-                }
-            } else {
-                flat.extend_from_slice(&raw);
-            }
-        }
-
-        Some(flat)
+        lob_ml_core::build_sequence(
+            sequence_cache,
+            key,
+            horizon,
+            feature_offsets,
+            feature_scales,
+        )
     }
 
     #[cfg(feature = "onnx")]
@@ -821,61 +702,14 @@ impl CryptoLobMlAgent {
         remaining_secs: i64,
         oracle_lag_buffer_secs: u64,
     ) -> Decimal {
-        let remaining_secs = remaining_secs.max(0) as f64;
-        let Some(sig_1s) = sigma_1s.and_then(|v| v.to_f64()) else {
-            return dec!(0.50);
-        };
-        if !sig_1s.is_finite() || sig_1s <= 0.0 {
-            return dec!(0.50);
-        }
-
-        // Oracle lag buffer: near settlement, inflate remaining-time uncertainty
-        // to account for Chainlink vs Binance price delay.
-        let effective_remaining = if remaining_secs < 30.0 {
-            remaining_secs + (oracle_lag_buffer_secs as f64)
-        } else {
-            remaining_secs
-        };
-        let sigma_rem = sig_1s * effective_remaining.sqrt();
-        if !sigma_rem.is_finite() || sigma_rem <= 0.0 {
-            return dec!(0.50);
-        }
-
-        let spot = spot_price.to_f64().unwrap_or(0.0);
-        if !spot.is_finite() || spot <= 0.0 {
-            return dec!(0.50);
-        }
-
-        // With price_to_beat: P(spot_at_end > price_to_beat) = 1 - Φ(required_return / σ)
-        // Fallback (no price_to_beat): P(UP) = Φ(window_move / σ)
-        if let Some(beat) = price_to_beat {
-            let beat_f = beat.to_f64().unwrap_or(0.0);
-            if beat_f.is_finite() && beat_f > 0.0 {
-                let required_return = (beat_f - spot) / spot;
-                if required_return.is_finite() {
-                    let p = (1.0 - normal_cdf(required_return / sigma_rem)).clamp(0.001, 0.999);
-                    return Decimal::from_f64_retain(p).unwrap_or(dec!(0.50));
-                }
-            }
-        }
-
-        // Fallback: use window_move = (spot - start) / start
-        let start_f = start_price.to_f64().unwrap_or(0.0);
-        if !start_f.is_finite() || start_f <= 0.0 {
-            return dec!(0.50);
-        }
-        let window_move = (spot - start_f) / start_f;
-        if !window_move.is_finite() {
-            return dec!(0.50);
-        }
-
-        let mut p = normal_cdf(window_move / sigma_rem).clamp(0.001, 0.999);
-
-        // >= settlement bias: UP wins on ties (close >= open).
-        // Only significant for pure UP/DOWN events (no price_to_beat).
-        p += GEQ_SETTLEMENT_BIAS;
-
-        Decimal::from_f64_retain(p.clamp(0.001, 0.999)).unwrap_or(dec!(0.50))
+        lob_ml_core::estimate_p_up_gbm_anchor(
+            spot_price,
+            start_price,
+            price_to_beat,
+            sigma_1s,
+            remaining_secs,
+            oracle_lag_buffer_secs,
+        )
     }
 
     #[allow(dead_code)]
@@ -883,45 +717,7 @@ impl CryptoLobMlAgent {
         sequence: &[f32],
         model_input_dim: usize,
     ) -> Result<(Vec<f32>, SequenceAlignMode)> {
-        if model_input_dim == 0 {
-            return Err(PloyError::Validation(
-                "onnx model input_dim must be > 0".to_string(),
-            ));
-        }
-        if model_input_dim % SEQ_FEATURE_DIM != 0 {
-            return Err(PloyError::Validation(format!(
-                "onnx model input_dim {} must be a multiple of sequence feature dim {}",
-                model_input_dim, SEQ_FEATURE_DIM
-            )));
-        }
-        if sequence.len() % SEQ_FEATURE_DIM != 0 {
-            return Err(PloyError::Validation(format!(
-                "sequence input dim {} must be a multiple of sequence feature dim {}",
-                sequence.len(),
-                SEQ_FEATURE_DIM
-            )));
-        }
-
-        let model_snapshots = model_input_dim / SEQ_FEATURE_DIM;
-        let sequence_snapshots = sequence.len() / SEQ_FEATURE_DIM;
-
-        if sequence_snapshots == model_snapshots {
-            return Ok((sequence.to_vec(), SequenceAlignMode::Exact));
-        }
-
-        if sequence_snapshots > model_snapshots {
-            let start_snapshot = sequence_snapshots - model_snapshots;
-            let start = start_snapshot * SEQ_FEATURE_DIM;
-            return Ok((
-                sequence[start..].to_vec(),
-                SequenceAlignMode::TruncateOldest,
-            ));
-        }
-
-        let pad_snapshots = model_snapshots - sequence_snapshots;
-        let mut aligned = vec![0.0f32; pad_snapshots * SEQ_FEATURE_DIM];
-        aligned.extend_from_slice(sequence);
-        Ok((aligned, SequenceAlignMode::LeftPadZero))
+        lob_ml_core::align_sequence_to_model_input(sequence, model_input_dim)
     }
 
     /// Estimate p(UP) using ONNX model from a flattened sequence input.
@@ -2594,168 +2390,6 @@ mod tests {
         agent.compute_blended_probability(dec!(0.62), dec!(0.58))
     }
 
-    fn sample_sequence_snapshot(ts: DateTime<Utc>) -> SequenceSnapshot {
-        SequenceSnapshot {
-            ts,
-            obi_5: dec!(0.10),
-            obi_10: dec!(0.12),
-            spread_bps: dec!(2.0),
-            bid_volume_5: dec!(1000),
-            ask_volume_5: dec!(980),
-            momentum_1s: dec!(0.001),
-            momentum_5s: dec!(0.003),
-            spot_price: dec!(102000),
-            remaining_secs: dec!(90),
-            price_to_beat: dec!(102500),
-            distance_to_beat: dec!(0.0049),
-        }
-    }
-
-    #[test]
-    fn test_build_sequence_lengths_for_5m_and_15m() {
-        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
-        let key = "BTCUSDT|15m";
-        let now = Utc::now();
-        for i in 0..SEQ_LEN_15M {
-            CryptoLobMlAgent::push_sequence_snapshot(
-                &mut cache,
-                key,
-                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
-            );
-        }
-
-        let seq_5m = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[])
-            .expect("5m sequence should be available");
-        assert_eq!(seq_5m.len(), SEQ_LEN_5M * SEQ_FEATURE_DIM);
-
-        let seq_15m = CryptoLobMlAgent::build_sequence(&cache, key, "15m", &[], &[])
-            .expect("15m sequence should be available");
-        assert_eq!(seq_15m.len(), SEQ_LEN_15M * SEQ_FEATURE_DIM);
-    }
-
-    #[test]
-    fn test_build_sequence_returns_none_when_insufficient_history() {
-        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
-        let key = "BTCUSDT|5m";
-        let now = Utc::now();
-        for i in 0..(SEQ_LEN_5M - 1) {
-            CryptoLobMlAgent::push_sequence_snapshot(
-                &mut cache,
-                key,
-                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
-            );
-        }
-
-        assert!(CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[]).is_none());
-    }
-
-    #[test]
-    fn test_build_sequence_applies_normalization() {
-        let mut cache: HashMap<String, VecDeque<SequenceSnapshot>> = HashMap::new();
-        let key = "BTCUSDT|5m";
-        let now = Utc::now();
-        // Push exactly SEQ_LEN_5M snapshots (one per second)
-        for i in 0..SEQ_LEN_5M {
-            CryptoLobMlAgent::push_sequence_snapshot(
-                &mut cache,
-                key,
-                sample_sequence_snapshot(now + chrono::Duration::seconds(i as i64)),
-            );
-        }
-
-        // Without normalization
-        let raw =
-            CryptoLobMlAgent::build_sequence(&cache, key, "5m", &[], &[]).expect("raw sequence");
-
-        // With identity normalization (offset=0, scale=1)
-        let offsets = vec![0.0f32; SEQ_FEATURE_DIM];
-        let scales = vec![1.0f32; SEQ_FEATURE_DIM];
-        let identity = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &offsets, &scales)
-            .expect("identity normalized");
-        assert_eq!(raw.len(), identity.len());
-        for (a, b) in raw.iter().zip(identity.iter()) {
-            assert!((a - b).abs() < 1e-6, "identity transform should match raw");
-        }
-
-        // With real normalization: offset=1, scale=2 for first feature
-        let mut offsets2 = vec![0.0f32; SEQ_FEATURE_DIM];
-        let mut scales2 = vec![1.0f32; SEQ_FEATURE_DIM];
-        offsets2[0] = 1.0;
-        scales2[0] = 2.0;
-        let normed = CryptoLobMlAgent::build_sequence(&cache, key, "5m", &offsets2, &scales2)
-            .expect("normalized");
-        // First feature of first timestep: (raw[0] - 1.0) * 2.0
-        let expected_first = (raw[0] - 1.0) * 2.0;
-        assert!(
-            (normed[0] - expected_first).abs() < 1e-6,
-            "expected {expected_first}, got {}",
-            normed[0]
-        );
-        // Second feature should be unchanged (offset=0, scale=1)
-        assert!(
-            (normed[1] - raw[1]).abs() < 1e-6,
-            "second feature should be unchanged"
-        );
-    }
-
-    #[test]
-    fn test_align_sequence_to_model_input_handles_boundary_cases() {
-        let exact = vec![1.0f32; SEQ_FEATURE_DIM * 2];
-        let (exact_aligned, exact_mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&exact, SEQ_FEATURE_DIM * 2).unwrap();
-        assert_eq!(exact_mode, SequenceAlignMode::Exact);
-        assert_eq!(exact_aligned, exact);
-    }
-
-    #[test]
-    fn test_align_sequence_to_model_input_rejects_non_snapshot_aligned_model_dim() {
-        let sequence = vec![1.0f32; SEQ_FEATURE_DIM * 2];
-        let err = CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM + 1)
-            .err()
-            .expect("non-snapshot input_dim must fail fast");
-        assert!(err
-            .to_string()
-            .contains("must be a multiple of sequence feature dim"));
-    }
-
-    #[test]
-    fn test_align_sequence_to_model_input_truncate_and_pad_keep_snapshot_boundaries() {
-        let mut sequence = Vec::new();
-        for snapshot_value in [1.0f32, 2.0, 3.0] {
-            sequence.extend(std::iter::repeat(snapshot_value).take(SEQ_FEATURE_DIM));
-        }
-
-        let (truncated, truncate_mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM * 2)
-                .unwrap();
-        assert_eq!(truncate_mode, SequenceAlignMode::TruncateOldest);
-        assert_eq!(truncated.len(), SEQ_FEATURE_DIM * 2);
-        assert!(truncated[..SEQ_FEATURE_DIM].iter().all(|v| *v == 2.0));
-        assert!(truncated[SEQ_FEATURE_DIM..].iter().all(|v| *v == 3.0));
-
-        let (padded, pad_mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&sequence, SEQ_FEATURE_DIM * 4)
-                .unwrap();
-        assert_eq!(pad_mode, SequenceAlignMode::LeftPadZero);
-        assert_eq!(padded.len(), SEQ_FEATURE_DIM * 4);
-        assert!(padded[..SEQ_FEATURE_DIM].iter().all(|v| *v == 0.0));
-        assert_eq!(&padded[SEQ_FEATURE_DIM..], sequence.as_slice());
-    }
-
-    #[test]
-    fn test_align_sequence_to_model_input_allows_15m_sequence_with_5m_model_dim() {
-        let seq_15m_len = SEQ_LEN_15M * SEQ_FEATURE_DIM;
-        let seq_5m_len = SEQ_LEN_5M * SEQ_FEATURE_DIM;
-        let seq_15m: Vec<f32> = (0..seq_15m_len).map(|i| i as f32).collect();
-
-        let (aligned, mode) =
-            CryptoLobMlAgent::align_sequence_to_model_input(&seq_15m, seq_5m_len).unwrap();
-
-        assert_eq!(mode, SequenceAlignMode::TruncateOldest);
-        assert_eq!(aligned.len(), seq_5m_len);
-        assert_eq!(aligned, seq_15m[(seq_15m_len - seq_5m_len)..].to_vec());
-    }
-
     #[test]
     fn test_estimate_p_up_validates_sequence_input_dim() {
         let agent = CryptoLobMlAgent {
@@ -3086,15 +2720,4 @@ mod tests {
         assert!(traded_events.contains_key("fresh"));
     }
 
-    #[test]
-    fn test_deployment_metadata_helpers() {
-        assert_eq!(normalize_timeframe("15"), "15m");
-        assert_eq!(normalize_timeframe("btc-5m"), "5m");
-        assert_eq!(event_window_secs_for_horizon("15m"), 900);
-        assert_eq!(event_window_secs_for_horizon("5m"), 300);
-        assert_eq!(
-            deployment_id_for("crypto_lob_ml", "ETH", "5m"),
-            "crypto.pm.eth.5m.crypto_lob_ml"
-        );
-    }
 }
