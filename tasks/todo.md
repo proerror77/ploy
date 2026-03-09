@@ -2935,3 +2935,32 @@ Move the standalone strategy runtime/process-management surface out of `src/cli/
   - `cargo test test_strategy_manager_creation --lib -- --nocapture`
   - `cargo test test_available_strategies --lib -- --nocapture`
   - `cargo test test_graceful_stop_reports_closed_action_channel --lib -- --nocapture`
+
+# CLI Backtest Ops Extraction (2026-03-10)
+
+## Goal
+Move the backtest/reporting ownership out of `src/cli/strategy.rs` so the CLI root keeps command dispatch while the backtest execution/report surface lives in a dedicated module.
+
+## Tasks
+
+- [x] Extract `run_backtest`, backtest diagnostics, gamma verification, and backtest comparison/report helpers into `src/cli/strategy/backtest_ops.rs`.
+- [x] Rewire `StrategyCommands::run` to import backtest command handlers from the new module.
+- [x] Keep replay/verification/report behavior unchanged while removing the large backtest block from the CLI root file.
+- [x] Re-run compile and focused backtest regressions after the extraction.
+
+## Review
+
+- [x] Confirm `src/cli/strategy.rs` no longer owns the `run_backtest*` / `verify_backtest_trades_gamma` / `run_live_backtest_compare` block inline.
+- [x] Confirm the new backtest module still drives settlement handoff, replay diagnostics, and saved-report loading without behavior changes.
+
+## Progress notes
+
+- 2026-03-10: Added [backtest_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops.rs) and moved the contiguous backtest execution/reporting surface out of [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs), including replay backtests, DB diagnostics, Gamma verification, run listing/diffing, and live-vs-backtest comparison.
+- 2026-03-10: Rewired [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) to delegate `Backtest`, `BacktestList`, `BacktestDiff`, and `LiveBacktestCompare` dispatch through the new backtest-ops module.
+- 2026-03-10: File size delta:
+  - [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs): `5137 -> 3444` lines
+  - [backtest_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops.rs): `0 -> 1702` lines
+- 2026-03-10: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_settlement_binary_payout --lib -- --nocapture`
+  - `cargo test test_config_from_toml_matches_checked_in_template --lib -- --nocapture`
