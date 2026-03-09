@@ -6,16 +6,16 @@
 //! - 組合級別風控 (每日損失、連續失敗)
 
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::types::{Domain, OrderIntent, OrderPriority};
 use crate::agent_runtime::AgentRiskParams;
+mod checks;
 mod config;
 mod stats;
 mod transitions;
@@ -24,8 +24,8 @@ mod types;
 pub use self::config::RiskConfig;
 use self::stats::{AgentRiskStats, DailyStats, DrawdownStats};
 pub use self::types::{
-    AdjustmentSuggestion, BlockReason, CircuitBreakerEvent, DrawdownSnapshot,
-    PlatformRiskState, RiskCheckResult,
+    AdjustmentSuggestion, BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState,
+    RiskCheckResult,
 };
 
 /// 風控閘門
@@ -121,187 +121,6 @@ impl RiskGate {
         self.agent_params.write().await.remove(agent_id);
         self.agent_stats.write().await.remove(agent_id);
         debug!("Unregistered agent {}", agent_id);
-    }
-
-    // ==================== 核心風控檢查 ====================
-
-    /// 檢查訂單是否可以執行
-    ///
-    /// 這是主要的風控入口點，會依序執行多層檢查。
-    pub async fn check_order(&self, intent: &OrderIntent) -> RiskCheckResult {
-        // Try automatic recovery before evaluating trading eligibility.
-        self.try_auto_recover_circuit_breaker().await;
-
-        // 1. 檢查訂單是否過期
-        if intent.is_expired() {
-            return RiskCheckResult::Blocked(BlockReason::OrderExpired);
-        }
-
-        // Binary-options semantics (Polymarket): SELL intents are reduce-only exits.
-        // They must stay allowed during circuit-breaker, daily-loss, and exposure limits.
-        if !intent.is_buy {
-            return RiskCheckResult::Passed;
-        }
-
-        // 2. 檢查平台狀態 (BUY only)
-        let platform_state = *self.state.read().await;
-        if !platform_state.can_trade() {
-            return RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped {
-                reason: "Platform trading halted".to_string(),
-            });
-        }
-
-        // 3. Critical 訂單不再繞過風控檢查
-        let is_critical = intent.priority == OrderPriority::Critical;
-        if is_critical && self.config.critical_bypass_exposure {
-            warn!(
-                "critical_bypass_exposure is enabled for intent {} but is ignored by policy",
-                intent.intent_id
-            );
-        }
-
-        // 4. 獲取 Agent 風控參數
-        let params = {
-            let params_map = self.agent_params.read().await;
-            match params_map.get(&intent.agent_id) {
-                Some(p) => p.clone(),
-                None => {
-                    warn!(
-                        "No risk params for agent {}, blocking order",
-                        intent.agent_id
-                    );
-                    return RiskCheckResult::Blocked(BlockReason::UnregisteredAgent {
-                        agent: intent.agent_id.clone(),
-                    });
-                }
-            }
-        };
-
-        // 5. 檢查市場是否允許
-        if !params.is_market_allowed(&intent.market_slug) {
-            return RiskCheckResult::Blocked(BlockReason::MarketNotAllowed {
-                market: intent.market_slug.clone(),
-                agent: intent.agent_id.clone(),
-            });
-        }
-
-        // 6. 計算訂單價值
-        let order_value = intent.notional_value();
-
-        // 7. 檢查單筆限額
-        if order_value > params.max_order_value {
-            // 可以建議調整數量
-            let max_shares = (params.max_order_value / intent.limit_price)
-                .to_u64()
-                .unwrap_or(0);
-
-            if max_shares > 0 {
-                return RiskCheckResult::Adjusted(AdjustmentSuggestion {
-                    max_shares,
-                    reason: format!(
-                        "Order value ${} exceeds agent limit ${}",
-                        order_value, params.max_order_value
-                    ),
-                });
-            } else {
-                return RiskCheckResult::Blocked(BlockReason::ExceedsSingleLimit {
-                    limit: params.max_order_value,
-                    requested: order_value,
-                });
-            }
-        }
-
-        // 8. 檢查 Agent 總暴露
-        let agent_stats = self.agent_stats.read().await;
-        let current_agent_exposure = agent_stats
-            .get(&intent.agent_id)
-            .map(|s| s.exposure)
-            .unwrap_or(Decimal::ZERO);
-        drop(agent_stats);
-
-        if current_agent_exposure + order_value > params.max_total_exposure {
-            return RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
-                limit: params.max_total_exposure,
-                current: current_agent_exposure,
-                requested: order_value,
-            });
-        }
-
-        // 8b. Domain exposure cap (if configured)
-        if let Some(domain_limit) = self.config.domain_exposure_limit(intent.domain) {
-            let current_domain_exposure = self
-                .domain_exposure
-                .read()
-                .await
-                .get(&intent.domain)
-                .copied()
-                .unwrap_or(Decimal::ZERO);
-            if current_domain_exposure + order_value > domain_limit {
-                return RiskCheckResult::Blocked(BlockReason::DomainExposureExceeded {
-                    domain: intent.domain,
-                    limit: domain_limit,
-                    current: current_domain_exposure,
-                    requested: order_value,
-                });
-            }
-        }
-
-        // 9. 檢查平台總暴露
-        let current_platform_exposure = *self.total_exposure.read().await;
-        if current_platform_exposure + order_value > self.config.max_platform_exposure {
-            return RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
-                limit: self.config.max_platform_exposure,
-                current: current_platform_exposure,
-                requested: order_value,
-            });
-        }
-
-        // 10. 新開倉時的額外檢查
-        if intent.is_buy && !platform_state.can_open_new() {
-            // 警戒狀態下可能需要更嚴格的檢查
-            debug!(
-                "Elevated state: allowing buy order {} with extra scrutiny",
-                intent.intent_id
-            );
-        }
-
-        // 11. 檢查每日損失
-        let daily = self.daily_stats.read().await;
-        if daily.total_pnl < Decimal::ZERO && daily.total_pnl.abs() >= self.config.daily_loss_limit
-        {
-            return RiskCheckResult::Blocked(BlockReason::DailyLossExceeded {
-                limit: self.config.daily_loss_limit,
-                current: daily.total_pnl.abs(),
-            });
-        }
-
-        if let Some(domain_loss_limit) = self.config.domain_daily_loss_limit(intent.domain) {
-            let domain_pnl = daily
-                .domain_pnl
-                .get(&intent.domain)
-                .copied()
-                .unwrap_or(Decimal::ZERO);
-            if domain_pnl < Decimal::ZERO && domain_pnl.abs() >= domain_loss_limit {
-                return RiskCheckResult::Blocked(BlockReason::DomainDailyLossExceeded {
-                    domain: intent.domain,
-                    limit: domain_loss_limit,
-                    current: domain_pnl.abs(),
-                });
-            }
-        }
-
-        // 12. 檢查回撤上限 (runtime cumulative realized curve)
-        if let Some(limit) = self.config.max_drawdown_limit {
-            let current_drawdown = self.drawdown_stats.read().await.current_drawdown;
-            if limit > Decimal::ZERO && current_drawdown >= limit {
-                return RiskCheckResult::Blocked(BlockReason::DrawdownExceeded {
-                    limit,
-                    current: current_drawdown,
-                });
-            }
-        }
-
-        RiskCheckResult::Passed
     }
 
     // ==================== 狀態更新 ====================
@@ -433,7 +252,6 @@ impl RiskGate {
         self.circuit_events.write().await.clear();
         *self.halted_at.write().await = None;
     }
-
 }
 
 impl Default for RiskGate {
