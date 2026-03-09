@@ -1,3 +1,28 @@
+# Bootstrap Support Helper Extraction (2026-03-09)
+
+## Goal
+Move the last top-level bootstrap utility helpers out of `bootstrap.rs` so the file stops accumulating env parsers, deployment-state loading, selector coin expansion, and orderbook formatting helpers alongside the real bootstrap flow.
+
+## Tasks
+
+- [x] Create a dedicated `bootstrap/support.rs` module for the remaining bootstrap utility helpers.
+- [x] Rewire `bootstrap.rs` to import those helpers and delete the inline implementations.
+- [x] Keep deployment loading and selector-expansion behavior unchanged in this slice.
+- [x] Re-run compile and a deployment-routing regression test after the move.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer owns the env/deployment support helpers inline.
+- [x] Confirm the extracted support module preserves the existing deployment-file fallback logic and market-selector coin extraction behavior.
+- [x] Confirm bootstrap still compiles and the deployment-routing regression test still passes.
+
+## Progress notes
+
+- 2026-03-09: Added [support.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/support.rs) and moved the remaining top-level bootstrap utility helpers there.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+
 # Strategy Metadata And Momentum State Cleanup (2026-03-09)
 
 ## Goal
