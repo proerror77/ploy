@@ -2218,3 +2218,34 @@ Retire `StrategyAction::SubmitOrder` completely by extending the canonical `Stra
   - `cargo test --features rl test_rl_strategy_creation --lib -- --nocapture`
   - `cargo test --features rl test_rule_based_action --lib -- --nocapture`
   - `rg "SubmitOrder|into_submit_order\\(" src`
+
+# Bootstrap Managed Runtime Spawn Plans (2026-03-09)
+
+## Goal
+Stop `bootstrap.rs` from owning seven separate managed-strategy spawn branches by collapsing them into a unified managed runtime plan pipeline emitted from `strategy_deployments.rs`.
+
+## Tasks
+
+- [x] Add a managed runtime plan type that captures spawn payload, data-plane selection, and bootstrap preflight needs.
+- [x] Move managed strategy selection/config building for `momentum`, `pattern_memory`, `staggered_arb`, `crypto_lob_ml`, `crypto_rl_policy`, `nba_comeback`, and `event_edge` into `strategy_deployments.rs`.
+- [x] Replace the repeated managed-strategy spawn branches in `bootstrap.rs` with a single loop over managed runtime plans.
+- [x] Keep the remaining sports support preflight outside the loop, but route the actual `nba_comeback` spawn through the shared plan pipeline.
+- [x] Re-run focused bootstrap validation after the ownership collapse.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer contains per-strategy managed-runtime spawn branches for the seven canonical managed strategies.
+- [x] Confirm `strategy_deployments.rs` is now the owner of managed runtime plan selection and config rendering.
+- [x] Confirm the new pipeline preserves the special cases that still matter: pattern-memory table init and split-arb shared crypto data plane.
+
+## Progress notes
+
+- 2026-03-09: Added `ManagedRuntimeDataPlaneKind`, `ManagedRuntimeBootstrapStep`, and `ManagedStrategyRuntimePlan` to [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs), plus a new `collect_managed_strategy_runtime_plans(...)` selector.
+- 2026-03-09: Moved managed runtime config selection for `momentum`, `pattern_memory`, `staggered_arb`, `crypto_lob_ml`, `crypto_rl_policy`, `nba_comeback`, and `event_edge` out of [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) and into the strategy-deployment layer.
+- 2026-03-09: Replaced the repeated managed spawn branches in [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) with a single `for plan in managed_runtime_plans` loop that applies bootstrap preflight and data-plane selection before calling `spawn_managed_strategy_runtime_task(...)`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+  - `cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`

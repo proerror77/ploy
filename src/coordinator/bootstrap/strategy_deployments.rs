@@ -1,3 +1,4 @@
+use super::runtime_spawns::ManagedStrategyRuntimeSpawn;
 use super::*;
 
 fn normalize_strategy_key(strategy: &str) -> String {
@@ -24,15 +25,15 @@ fn set_bool(table: &mut toml::map::Map<String, toml::Value>, key: &str, value: b
     table.insert(key.to_string(), toml::Value::Boolean(value));
 }
 
-fn set_string(table: &mut toml::map::Map<String, toml::Value>, key: &str, value: impl Into<String>) {
+fn set_string(
+    table: &mut toml::map::Map<String, toml::Value>,
+    key: &str,
+    value: impl Into<String>,
+) {
     table.insert(key.to_string(), toml::Value::String(value.into()));
 }
 
-fn set_string_array(
-    table: &mut toml::map::Map<String, toml::Value>,
-    key: &str,
-    values: &[String],
-) {
+fn set_string_array(table: &mut toml::map::Map<String, toml::Value>, key: &str, values: &[String]) {
     table.insert(
         key.to_string(),
         toml::Value::Array(values.iter().cloned().map(toml::Value::String).collect()),
@@ -137,6 +138,26 @@ pub(super) struct RuntimeCryptoStrategyTargets {
     pub(super) split_arb_horizons: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ManagedRuntimeDataPlaneKind {
+    ManagedCrypto,
+    SharedCrypto,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ManagedRuntimeBootstrapStep {
+    None,
+    EnsurePatternMemoryTable,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ManagedStrategyRuntimePlan {
+    pub(super) spawn: ManagedStrategyRuntimeSpawn,
+    pub(super) data_plane: ManagedRuntimeDataPlaneKind,
+    pub(super) bootstrap_step: ManagedRuntimeBootstrapStep,
+}
+
 pub(super) fn collect_runtime_crypto_strategy_targets(
     runtime_account_id: &str,
     runtime_dry_run: bool,
@@ -169,6 +190,270 @@ pub(super) fn collect_runtime_crypto_strategy_targets(
     }
 
     out
+}
+
+fn pattern_memory_runtime_coins(
+    crypto_cfg: &CryptoTradingConfig,
+    runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
+) -> Vec<String> {
+    let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
+        crypto_cfg.coins.clone()
+    } else {
+        runtime_crypto_targets
+            .pattern_memory_coins
+            .iter()
+            .cloned()
+            .collect()
+    };
+    coins.sort();
+    coins.dedup();
+    coins
+}
+
+fn split_arb_runtime_symbols_and_series(
+    crypto_cfg: &CryptoTradingConfig,
+    runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
+        crypto_cfg.coins.clone()
+    } else {
+        runtime_crypto_targets
+            .split_arb_coins
+            .iter()
+            .cloned()
+            .collect()
+    };
+    coins.sort();
+    coins.dedup();
+
+    let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty() {
+        vec!["5m".to_string(), "15m".to_string()]
+    } else {
+        runtime_crypto_targets
+            .split_arb_horizons
+            .iter()
+            .cloned()
+            .collect()
+    };
+    horizons.sort();
+    horizons.dedup();
+
+    let mut series_set: HashSet<String> = HashSet::new();
+    for coin in &coins {
+        let normalized = coin.trim_end_matches("USDT");
+        for horizon in &horizons {
+            if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
+                series_set.insert(series_id.to_string());
+            }
+        }
+    }
+    let mut series_ids: Vec<String> = series_set.into_iter().collect();
+    series_ids.sort();
+    if series_ids.is_empty() {
+        return None;
+    }
+
+    let mut symbols: Vec<String> = coins
+        .iter()
+        .filter_map(|coin| {
+            let normalized = coin.trim_end_matches("USDT");
+            coin_symbol_for(normalized)
+        })
+        .collect();
+    symbols.sort();
+    symbols.dedup();
+    if symbols.is_empty() {
+        symbols = series_ids
+            .iter()
+            .filter_map(|series_id| symbol_for_crypto_series_id(series_id).map(str::to_string))
+            .collect();
+        symbols.sort();
+        symbols.dedup();
+    }
+
+    Some((symbols, series_ids))
+}
+
+pub(super) fn collect_managed_strategy_runtime_plans(
+    config: &PlatformBootstrapConfig,
+    app_config: &AppConfig,
+    runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
+) -> Vec<ManagedStrategyRuntimePlan> {
+    let mut plans = Vec::new();
+
+    if config.enable_crypto {
+        let crypto_cfg = config.crypto.clone();
+        if config.enable_crypto_momentum {
+            match build_momentum_runtime_config(&crypto_cfg) {
+                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
+                    spawn: ManagedStrategyRuntimeSpawn {
+                        strategy_label: "momentum",
+                        agent_id: crypto_cfg.agent_id.clone(),
+                        domain: Domain::Crypto,
+                        risk_params: crypto_cfg.risk_params.clone(),
+                        strategy_config_toml,
+                    },
+                    data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::None,
+                }),
+                Err(e) => warn!(
+                    agent = crypto_cfg.agent_id,
+                    error = %e,
+                    entry_mode = ?crypto_cfg.entry_mode,
+                    "momentum runtime config unavailable; skipping managed momentum startup"
+                ),
+            }
+        } else {
+            info!(
+                agent = crypto_cfg.agent_id,
+                "crypto momentum agent disabled"
+            );
+        }
+
+        if config.enable_crypto_pattern_memory {
+            let coins = pattern_memory_runtime_coins(&crypto_cfg, runtime_crypto_targets);
+            match build_pattern_memory_runtime_config(&coins) {
+                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
+                    spawn: ManagedStrategyRuntimeSpawn {
+                        strategy_label: "pattern_memory",
+                        agent_id: "pattern_memory".to_string(),
+                        domain: Domain::Crypto,
+                        risk_params: crypto_cfg.risk_params.clone(),
+                        strategy_config_toml,
+                    },
+                    data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::EnsurePatternMemoryTable,
+                }),
+                Err(e) => warn!(
+                    agent = "pattern_memory",
+                    error = %e,
+                    "pattern_memory enabled but no valid runtime config could be built"
+                ),
+            }
+        }
+
+        if config.enable_crypto_split_arb {
+            if let Some((symbols, series_ids)) =
+                split_arb_runtime_symbols_and_series(&crypto_cfg, runtime_crypto_targets)
+            {
+                plans.push(ManagedStrategyRuntimePlan {
+                    spawn: ManagedStrategyRuntimeSpawn {
+                        strategy_label: "staggered_arb",
+                        agent_id: "staggered_arb".to_string(),
+                        domain: Domain::Crypto,
+                        risk_params: crypto_cfg.risk_params.clone(),
+                        strategy_config_toml: build_split_arb_runtime_config(&symbols, &series_ids),
+                    },
+                    data_plane: ManagedRuntimeDataPlaneKind::SharedCrypto,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::None,
+                });
+            } else {
+                warn!(
+                    agent = "staggered_arb",
+                    "staggered_arb enabled but no recognized coin/horizon series ids were resolved"
+                );
+            }
+        }
+
+        if config.managed_crypto.enable_lob_ml {
+            let lob_cfg = config.managed_crypto.lob_ml.clone();
+            match build_crypto_lob_ml_runtime_config(&lob_cfg) {
+                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
+                    spawn: ManagedStrategyRuntimeSpawn {
+                        strategy_label: "crypto_lob_ml",
+                        agent_id: format!("{}_strategy", lob_cfg.agent_id),
+                        domain: Domain::Crypto,
+                        risk_params: lob_cfg.risk_params.clone(),
+                        strategy_config_toml,
+                    },
+                    data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::None,
+                }),
+                Err(e) => warn!(
+                    agent = lob_cfg.agent_id,
+                    error = %e,
+                    "crypto_lob_ml canonical runtime config unavailable; skipping managed wrapper startup"
+                ),
+            }
+        }
+
+        #[cfg(feature = "rl")]
+        if config.managed_crypto.enable_rl_policy {
+            let rl_cfg = config.managed_crypto.rl_policy.clone();
+            match build_crypto_rl_policy_runtime_config(&rl_cfg) {
+                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
+                    spawn: ManagedStrategyRuntimeSpawn {
+                        strategy_label: "crypto_rl_policy",
+                        agent_id: format!("{}_strategy", rl_cfg.agent_id),
+                        domain: Domain::Crypto,
+                        risk_params: rl_cfg.risk_params.clone(),
+                        strategy_config_toml,
+                    },
+                    data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::None,
+                }),
+                Err(e) => warn!(
+                    agent = rl_cfg.agent_id,
+                    error = %e,
+                    "crypto_rl_policy canonical runtime config unavailable; skipping managed wrapper startup"
+                ),
+            }
+        }
+    }
+
+    if config.enable_sports {
+        if let Some(nba_cfg) = app_config.nba_comeback.as_ref() {
+            plans.push(ManagedStrategyRuntimePlan {
+                spawn: ManagedStrategyRuntimeSpawn {
+                    strategy_label: "nba_comeback",
+                    agent_id: config.sports.agent_id.clone(),
+                    domain: Domain::Sports,
+                    risk_params: config.sports.risk_params.clone(),
+                    strategy_config_toml: build_nba_comeback_runtime_config(
+                        nba_cfg,
+                        &app_config.database.url,
+                    ),
+                },
+                data_plane: ManagedRuntimeDataPlaneKind::None,
+                bootstrap_step: ManagedRuntimeBootstrapStep::None,
+            });
+        } else {
+            warn!(
+                agent = config.sports.agent_id,
+                "sports runtime enabled but nba_comeback config missing; skipping canonical managed runtime"
+            );
+        }
+    }
+
+    if config.enable_politics {
+        if let Some(event_edge_cfg) = app_config.event_edge_agent.as_ref() {
+            match build_event_edge_runtime_config(event_edge_cfg) {
+                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
+                    spawn: ManagedStrategyRuntimeSpawn {
+                        strategy_label: "event_edge",
+                        agent_id: config.politics.agent_id.clone(),
+                        domain: Domain::Politics,
+                        risk_params: config.politics.risk_params.clone(),
+                        strategy_config_toml,
+                    },
+                    data_plane: ManagedRuntimeDataPlaneKind::None,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::None,
+                }),
+                Err(e) => warn!(
+                    agent = config.politics.agent_id,
+                    error = %e,
+                    "event_edge canonical runtime config unavailable; skipping managed wrapper startup"
+                ),
+            }
+        } else {
+            warn!(
+                agent = config.politics.agent_id,
+                "politics runtime enabled but event_edge config missing; skipping canonical managed runtime"
+            );
+        }
+    }
+
+    plans
 }
 
 pub(super) fn build_pattern_memory_runtime_config(coins: &[String]) -> Result<String> {
@@ -248,7 +533,11 @@ pub(super) fn build_crypto_lob_ml_runtime_config(
     let mut strategy = toml::map::Map::new();
     let mut lob_ml = toml::map::Map::new();
 
-    let mut coins: Vec<String> = cfg.coins.iter().map(|coin| coin.to_ascii_uppercase()).collect();
+    let mut coins: Vec<String> = cfg
+        .coins
+        .iter()
+        .map(|coin| coin.to_ascii_uppercase())
+        .collect();
     coins.sort();
     coins.dedup();
 
@@ -290,10 +579,11 @@ pub(super) fn build_crypto_lob_ml_runtime_config(
 
     root.insert("strategy".to_string(), toml::Value::Table(strategy));
     root.insert("crypto_lob_ml".to_string(), toml::Value::Table(lob_ml));
-    toml::to_string_pretty(&toml::Value::Table(root))
-        .map_err(|e| crate::error::PloyError::Internal(format!(
+    toml::to_string_pretty(&toml::Value::Table(root)).map_err(|e| {
+        crate::error::PloyError::Internal(format!(
             "failed to render crypto_lob_ml runtime config: {e}"
-        )))
+        ))
+    })
 }
 
 #[cfg(feature = "rl")]
@@ -310,7 +600,11 @@ pub(super) fn build_crypto_rl_policy_runtime_config(
     let mut strategy = toml::map::Map::new();
     let mut rl_policy = toml::map::Map::new();
 
-    let mut coins: Vec<String> = cfg.coins.iter().map(|coin| coin.to_ascii_uppercase()).collect();
+    let mut coins: Vec<String> = cfg
+        .coins
+        .iter()
+        .map(|coin| coin.to_ascii_uppercase())
+        .collect();
     coins.sort();
     coins.dedup();
 
@@ -362,11 +656,15 @@ pub(super) fn build_crypto_rl_policy_runtime_config(
     }
 
     root.insert("strategy".to_string(), toml::Value::Table(strategy));
-    root.insert("crypto_rl_policy".to_string(), toml::Value::Table(rl_policy));
-    toml::to_string_pretty(&toml::Value::Table(root))
-        .map_err(|e| crate::error::PloyError::Internal(format!(
+    root.insert(
+        "crypto_rl_policy".to_string(),
+        toml::Value::Table(rl_policy),
+    );
+    toml::to_string_pretty(&toml::Value::Table(root)).map_err(|e| {
+        crate::error::PloyError::Internal(format!(
             "failed to render crypto_rl_policy runtime config: {e}"
-        )))
+        ))
+    })
 }
 
 pub(super) fn build_event_edge_runtime_config(
@@ -411,7 +709,12 @@ pub(super) fn build_event_edge_runtime_config(
         "max_daily_spend_usd",
         cfg.max_daily_spend_usd,
     );
-    if let Some(model) = cfg.model.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(model) = cfg
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         set_string(&mut event_edge, "model", model.to_string());
     }
     set_integer(
@@ -474,16 +777,8 @@ pub(super) fn build_nba_comeback_runtime_config(
         "grok_decision_cooldown_secs",
         i64::try_from(cfg.grok_decision_cooldown_secs).unwrap_or(60),
     );
-    set_bool(
-        &mut nba,
-        "grok_fallback_enabled",
-        cfg.grok_fallback_enabled,
-    );
-    set_float(
-        &mut nba,
-        "min_reward_risk_ratio",
-        cfg.min_reward_risk_ratio,
-    );
+    set_bool(&mut nba, "grok_fallback_enabled", cfg.grok_fallback_enabled);
+    set_float(&mut nba, "min_reward_risk_ratio", cfg.min_reward_risk_ratio);
     set_float(&mut nba, "min_expected_value", cfg.min_expected_value);
     set_float(&mut nba, "kelly_fraction_cap", cfg.kelly_fraction_cap);
     set_decimal(
@@ -577,7 +872,10 @@ fn render_momentum_runtime_config(
         .or_insert_with(|| toml::Value::Table(Default::default()))
         .as_table_mut()
         .expect("[strategy] must be a table");
-    strategy.insert("name".to_string(), toml::Value::String("momentum".to_string()));
+    strategy.insert(
+        "name".to_string(),
+        toml::Value::String("momentum".to_string()),
+    );
     strategy.insert("enabled".to_string(), toml::Value::Boolean(true));
     strategy.insert(
         "mode".to_string(),
@@ -838,9 +1136,10 @@ pub(super) fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[S
         return cfg;
     }
 
-    let config: toml::Value =
-        toml::from_str(include_str!("../../../config/strategies/staggered_arb.toml"))
-            .expect("embedded staggered_arb runtime config must stay valid TOML");
+    let config: toml::Value = toml::from_str(include_str!(
+        "../../../config/strategies/staggered_arb.toml"
+    ))
+    .expect("embedded staggered_arb runtime config must stay valid TOML");
     render_split_arb_runtime_config(config, symbols, series_ids)
 }
 

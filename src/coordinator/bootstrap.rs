@@ -21,8 +21,8 @@ use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    AgentRiskParams, BinanceDataPlaneHandle, DataPlaneConfig,
-    Domain, MarketSelector, PlatformDataPlane, StrategyDeployment,
+    AgentRiskParams, BinanceDataPlaneHandle, DataPlaneConfig, Domain, MarketSelector,
+    PlatformDataPlane, StrategyDeployment,
 };
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
@@ -44,26 +44,27 @@ use tracing::instrument;
 
 use super::strategy_runtime::run_managed_strategy_runtime;
 
-mod runtime_spawns;
-mod runtime_config;
 mod managed_crypto;
 mod market_persistence;
+mod runtime_config;
+mod runtime_spawns;
 mod schema;
-mod support;
 mod strategy_deployments;
+mod support;
 
-use self::managed_crypto::{
-    apply_managed_crypto_runtime_env, ManagedCryptoRuntimeConfig,
-};
+use self::managed_crypto::{apply_managed_crypto_runtime_env, ManagedCryptoRuntimeConfig};
 use self::market_persistence::{
     ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
-    spawn_polymarket_trade_persistence,
-    spawn_polymarket_trade_persistence_from_collector_targets,
+    spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
 };
 use self::runtime_config::{PoliticsRuntimeConfig, SportsRuntimeConfig};
 use self::runtime_spawns::{
     prepare_sports_runtime_support, spawn_managed_strategy_runtime_task,
-    spawn_openclaw_governance_agent, ManagedStrategyRuntimeSpawn,
+    spawn_openclaw_governance_agent,
+};
+use self::schema::{
+    ensure_accounts_table, ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,
+    ensure_clob_quote_ticks_table, ensure_schema_repairs, upsert_account_from_config,
 };
 pub(crate) use self::schema::{
     ensure_agent_order_executions_table, ensure_clob_orderbook_snapshots_table,
@@ -72,23 +73,23 @@ pub(crate) use self::schema::{
     ensure_pm_token_settlements_table, ensure_risk_runtime_state_table,
     ensure_strategy_observability_tables,
 };
-use self::schema::{
-    ensure_accounts_table, ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,
-    ensure_clob_quote_ticks_table, ensure_schema_repairs, upsert_account_from_config,
+#[cfg(all(test, feature = "rl"))]
+use self::strategy_deployments::build_crypto_rl_policy_runtime_config;
+use self::strategy_deployments::{
+    apply_strategy_deployments, collect_managed_strategy_runtime_plans,
+    collect_runtime_crypto_strategy_targets, ManagedRuntimeBootstrapStep,
+    ManagedRuntimeDataPlaneKind,
+};
+#[cfg(test)]
+use self::strategy_deployments::{
+    build_crypto_lob_ml_runtime_config, build_event_edge_runtime_config,
+    build_momentum_runtime_config, build_nba_comeback_runtime_config,
+    build_split_arb_runtime_config,
 };
 use self::support::{
-    add_coins_from_selector, env_bool, env_decimal, env_decimal_opt, env_i64, env_u64,
-    env_usize, load_strategy_deployments, lob_levels_json,
+    add_coins_from_selector, env_bool, env_decimal, env_decimal_opt, env_i64, env_u64, env_usize,
+    load_strategy_deployments, lob_levels_json,
 };
-use self::strategy_deployments::{
-    apply_strategy_deployments, build_crypto_lob_ml_runtime_config,
-    build_event_edge_runtime_config, build_momentum_runtime_config,
-    build_nba_comeback_runtime_config, build_pattern_memory_runtime_config,
-    build_split_arb_runtime_config, coin_symbol_for, collect_runtime_crypto_strategy_targets,
-    crypto_series_id_for, symbol_for_crypto_series_id,
-};
-#[cfg(feature = "rl")]
-use self::strategy_deployments::build_crypto_rl_policy_runtime_config;
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
@@ -1107,6 +1108,7 @@ pub async fn start_platform(
     let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
     let use_data_plane = env_bool("PLOY_DATA_PLANE", false);
     let mut managed_runtime_data_plane: Option<Arc<PlatformDataPlane>> = None;
+    let mut shared_crypto_data_plane: Option<Arc<PlatformDataPlane>> = None;
 
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
@@ -1801,46 +1803,21 @@ pub async fn start_platform(
             });
         }
 
-        if momentum_enabled {
-            match build_momentum_runtime_config(&crypto_cfg) {
-                Ok(toml_cfg) => {
-                    let _ = spawn_managed_strategy_runtime_task(
-                        ManagedStrategyRuntimeSpawn {
-                            strategy_label: "momentum",
-                            agent_id: crypto_cfg.agent_id.clone(),
-                            domain: Domain::Crypto,
-                            risk_params: crypto_cfg.risk_params.clone(),
-                            strategy_config_toml: toml_cfg,
-                        },
-                        &mut coordinator,
-                        &shutdown_tx,
-                &mut agent_handles,
-                config.dry_run,
-                pm_client.as_ref(),
-                &app_config.market.ws_url,
-                managed_runtime_data_plane.clone(),
-                shared_pool.clone(),
-                &account_id,
-            );
-                }
-                Err(e) => {
-                    warn!(
-                        agent = crypto_cfg.agent_id,
-                        error = %e,
-                        entry_mode = ?crypto_cfg.entry_mode,
-                        "momentum runtime config unavailable; skipping managed momentum startup"
-                    );
-                }
-            }
-        } else {
-            info!(
-                agent = crypto_cfg.agent_id,
-                "crypto momentum agent disabled"
-            );
-        }
+        shared_crypto_data_plane = data_plane;
+    }
 
-        if pattern_memory_enabled {
-            // Ensure persistence table exists
+    if config.enable_sports {
+        prepare_sports_runtime_support(&config, &app_config, shared_pool.as_ref(), &freshness)
+            .await?;
+    }
+
+    let managed_runtime_plans =
+        collect_managed_strategy_runtime_plans(&config, &app_config, &runtime_crypto_targets);
+    for plan in managed_runtime_plans {
+        if matches!(
+            plan.bootstrap_step,
+            ManagedRuntimeBootstrapStep::EnsurePatternMemoryTable
+        ) {
             if let Some(ref pool) = shared_pool {
                 if let Err(e) =
                     crate::strategy::pattern_memory::persistence::ensure_table(pool).await
@@ -1848,270 +1825,25 @@ pub async fn start_platform(
                     warn!(error = %e, "failed to create pattern_memory_samples table");
                 }
             }
-
-            let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
-                crypto_cfg.coins.clone()
-            } else {
-                runtime_crypto_targets
-                    .pattern_memory_coins
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            coins.sort();
-            coins.dedup();
-
-            match build_pattern_memory_runtime_config(&coins) {
-                Ok(toml_cfg) => {
-                    let _ = spawn_managed_strategy_runtime_task(
-                        ManagedStrategyRuntimeSpawn {
-                            strategy_label: "pattern_memory",
-                            agent_id: "pattern_memory".to_string(),
-                            domain: Domain::Crypto,
-                            risk_params: crypto_cfg.risk_params.clone(),
-                            strategy_config_toml: toml_cfg,
-                        },
-                        &mut coordinator,
-                        &shutdown_tx,
-                        &mut agent_handles,
-                        config.dry_run,
-                        pm_client.as_ref(),
-                        &app_config.market.ws_url,
-                        managed_runtime_data_plane.clone(),
-                        shared_pool.clone(),
-                        &account_id,
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        agent = "pattern_memory",
-                        error = %e,
-                        "pattern_memory enabled but no valid runtime config could be built"
-                    );
-                }
-            }
         }
 
-        if split_arb_enabled {
-            let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
-                crypto_cfg.coins.clone()
-            } else {
-                runtime_crypto_targets
-                    .split_arb_coins
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            coins.sort();
-            coins.dedup();
-
-            let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty()
-            {
-                vec!["5m".to_string(), "15m".to_string()]
-            } else {
-                runtime_crypto_targets
-                    .split_arb_horizons
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            horizons.sort();
-            horizons.dedup();
-
-            let mut series_set: HashSet<String> = HashSet::new();
-            for coin in &coins {
-                let normalized = coin.trim_end_matches("USDT");
-                for horizon in &horizons {
-                    if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
-                        series_set.insert(series_id.to_string());
-                    }
-                }
-            }
-            let mut series_ids: Vec<String> = series_set.into_iter().collect();
-            series_ids.sort();
-
-            let mut symbols: Vec<String> = coins
-                .iter()
-                .filter_map(|coin| {
-                    let normalized = coin.trim_end_matches("USDT");
-                    coin_symbol_for(normalized)
-                })
-                .collect();
-            symbols.sort();
-            symbols.dedup();
-            if symbols.is_empty() {
-                symbols = series_ids
-                    .iter()
-                    .filter_map(|series_id| {
-                        symbol_for_crypto_series_id(series_id).map(str::to_string)
-                    })
-                    .collect();
-                symbols.sort();
-                symbols.dedup();
-            }
-
-            if series_ids.is_empty() {
-                warn!(
-                    agent = "staggered_arb",
-                    "staggered_arb enabled but no recognized coin/horizon series ids were resolved"
-                );
-            } else {
-                let toml_cfg = build_split_arb_runtime_config(&symbols, &series_ids);
-                let _ = spawn_managed_strategy_runtime_task(
-                    ManagedStrategyRuntimeSpawn {
-                        strategy_label: "staggered_arb",
-                        agent_id: "staggered_arb".to_string(),
-                        domain: Domain::Crypto,
-                        risk_params: crypto_cfg.risk_params.clone(),
-                        strategy_config_toml: toml_cfg,
-                    },
-                    &mut coordinator,
-                    &shutdown_tx,
-                    &mut agent_handles,
-                    config.dry_run,
-                    pm_client.as_ref(),
-                    &app_config.market.ws_url,
-                    data_plane.clone(),
-                    shared_pool.clone(),
-                    &account_id,
-                );
-            }
-        }
-
-        if lob_agent_enabled {
-            match build_crypto_lob_ml_runtime_config(&lob_cfg) {
-                Ok(toml_cfg) => {
-                    let _ = spawn_managed_strategy_runtime_task(
-                        ManagedStrategyRuntimeSpawn {
-                            strategy_label: "crypto_lob_ml",
-                            agent_id: format!("{}_strategy", lob_cfg.agent_id),
-                            domain: Domain::Crypto,
-                            risk_params: lob_cfg.risk_params.clone(),
-                            strategy_config_toml: toml_cfg,
-                        },
-                        &mut coordinator,
-                        &shutdown_tx,
-                        &mut agent_handles,
-                        config.dry_run,
-                        pm_client.as_ref(),
-                        &app_config.market.ws_url,
-                        managed_runtime_data_plane.clone(),
-                        shared_pool.clone(),
-                        &account_id,
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        agent = lob_cfg.agent_id,
-                        error = %e,
-                        "crypto_lob_ml canonical runtime config unavailable; skipping managed wrapper startup"
-                    );
-                }
-            }
-        }
-
-        #[cfg(feature = "rl")]
-        if rl_agent_enabled {
-            match build_crypto_rl_policy_runtime_config(&rl_cfg) {
-                Ok(toml_cfg) => {
-                    let _ = spawn_managed_strategy_runtime_task(
-                        ManagedStrategyRuntimeSpawn {
-                            strategy_label: "crypto_rl_policy",
-                            agent_id: format!("{}_strategy", rl_cfg.agent_id),
-                            domain: Domain::Crypto,
-                            risk_params: rl_cfg.risk_params.clone(),
-                            strategy_config_toml: toml_cfg,
-                        },
-                        &mut coordinator,
-                        &shutdown_tx,
-                        &mut agent_handles,
-                        config.dry_run,
-                        pm_client.as_ref(),
-                        &app_config.market.ws_url,
-                        managed_runtime_data_plane.clone(),
-                        shared_pool.clone(),
-                        &account_id,
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        agent = rl_cfg.agent_id,
-                        error = %e,
-                        "crypto_rl_policy canonical runtime config unavailable; skipping managed wrapper startup"
-                    );
-                }
-            }
-        }
-    }
-
-    if config.enable_sports {
-        prepare_sports_runtime_support(&config, &app_config, shared_pool.as_ref(), &freshness)
-            .await?;
-        if let Some(nba_cfg) = app_config.nba_comeback.as_ref() {
-            let toml_cfg = build_nba_comeback_runtime_config(nba_cfg, &app_config.database.url);
-            let _ = spawn_managed_strategy_runtime_task(
-                ManagedStrategyRuntimeSpawn {
-                    strategy_label: "nba_comeback",
-                    agent_id: config.sports.agent_id.clone(),
-                    domain: Domain::Sports,
-                    risk_params: config.sports.risk_params.clone(),
-                    strategy_config_toml: toml_cfg,
-                },
-                &mut coordinator,
-                &shutdown_tx,
-                &mut agent_handles,
-                config.dry_run,
-                pm_client.as_ref(),
-                &app_config.market.ws_url,
-                None,
-                shared_pool.clone(),
-                &account_id,
-            );
-        } else {
-            warn!(
-                agent = config.sports.agent_id,
-                "sports runtime enabled but nba_comeback config missing; skipping canonical managed runtime"
-            );
-        }
-    }
-
-    if config.enable_politics {
-        if let Some(event_edge_cfg) = app_config.event_edge_agent.as_ref() {
-            match build_event_edge_runtime_config(event_edge_cfg) {
-                Ok(toml_cfg) => {
-                    let _ = spawn_managed_strategy_runtime_task(
-                        ManagedStrategyRuntimeSpawn {
-                            strategy_label: "event_edge",
-                            agent_id: config.politics.agent_id.clone(),
-                            domain: Domain::Politics,
-                            risk_params: config.politics.risk_params.clone(),
-                            strategy_config_toml: toml_cfg,
-                        },
-                        &mut coordinator,
-                        &shutdown_tx,
-                        &mut agent_handles,
-                        config.dry_run,
-                        pm_client.as_ref(),
-                        &app_config.market.ws_url,
-                        None,
-                        shared_pool.clone(),
-                        &account_id,
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        agent = config.politics.agent_id,
-                        error = %e,
-                        "politics runtime config unavailable; skipping canonical managed runtime"
-                    );
-                }
-            }
-        } else {
-            warn!(
-                agent = config.politics.agent_id,
-                "politics runtime enabled but event_edge config missing; skipping canonical managed runtime"
-            );
-        }
+        let runtime_data_plane = match plan.data_plane {
+            ManagedRuntimeDataPlaneKind::ManagedCrypto => managed_runtime_data_plane.clone(),
+            ManagedRuntimeDataPlaneKind::SharedCrypto => shared_crypto_data_plane.clone(),
+            ManagedRuntimeDataPlaneKind::None => None,
+        };
+        let _ = spawn_managed_strategy_runtime_task(
+            plan.spawn,
+            &mut coordinator,
+            &shutdown_tx,
+            &mut agent_handles,
+            config.dry_run,
+            pm_client.as_ref(),
+            &app_config.market.ws_url,
+            runtime_data_plane,
+            shared_pool.clone(),
+            &account_id,
+        );
     }
 
     // --- OpenClaw meta-agent (Layer 3 orchestrator) ---
@@ -2345,6 +2077,62 @@ mod tests {
     }
 
     #[test]
+    fn collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        cfg.enable_crypto = true;
+        cfg.enable_crypto_momentum = true;
+        cfg.enable_crypto_pattern_memory = true;
+        cfg.enable_crypto_split_arb = true;
+        cfg.managed_crypto.enable_lob_ml = true;
+        cfg.crypto.coins = vec!["BTC".to_string(), "ETH".to_string()];
+        cfg.managed_crypto.lob_ml.coins = vec!["BTC".to_string()];
+
+        let app_config = AppConfig::default_config(true, "btc-up-down");
+        let plans = collect_managed_strategy_runtime_plans(
+            &cfg,
+            &app_config,
+            &strategy_deployments::RuntimeCryptoStrategyTargets::default(),
+        );
+
+        let labels: Vec<&str> = plans.iter().map(|plan| plan.spawn.strategy_label).collect();
+        assert!(labels.contains(&"momentum"));
+        assert!(labels.contains(&"pattern_memory"));
+        assert!(labels.contains(&"staggered_arb"));
+        assert!(labels.contains(&"crypto_lob_ml"));
+
+        let momentum = plans
+            .iter()
+            .find(|plan| plan.spawn.strategy_label == "momentum")
+            .expect("momentum plan");
+        assert_eq!(
+            momentum.data_plane,
+            ManagedRuntimeDataPlaneKind::ManagedCrypto
+        );
+
+        let pattern_memory = plans
+            .iter()
+            .find(|plan| plan.spawn.strategy_label == "pattern_memory")
+            .expect("pattern_memory plan");
+        assert_eq!(
+            pattern_memory.bootstrap_step,
+            ManagedRuntimeBootstrapStep::EnsurePatternMemoryTable
+        );
+        assert_eq!(
+            pattern_memory.data_plane,
+            ManagedRuntimeDataPlaneKind::ManagedCrypto
+        );
+
+        let split_arb = plans
+            .iter()
+            .find(|plan| plan.spawn.strategy_label == "staggered_arb")
+            .expect("staggered_arb plan");
+        assert_eq!(
+            split_arb.data_plane,
+            ManagedRuntimeDataPlaneKind::SharedCrypto
+        );
+    }
+
+    #[test]
     fn apply_strategy_deployments_maps_gamma_scalping_alias_to_split_arb() {
         let mut cfg = PlatformBootstrapConfig::default();
         let deployments = vec![crypto_deployment("gamma_scalping", true)];
@@ -2450,9 +2238,15 @@ symbols = ["SOLUSDT"]
             vec!["BTCUSDT", "ETHUSDT"]
         );
         assert_eq!(value["entry"]["directional_mode"].as_bool(), Some(true));
-        assert_eq!(value["entry"]["require_mtf_agreement"].as_bool(), Some(true));
+        assert_eq!(
+            value["entry"]["require_mtf_agreement"].as_bool(),
+            Some(true)
+        );
         assert_eq!(value["timing"]["min_time_remaining"].as_float(), Some(90.0));
-        assert_eq!(value["timing"]["max_time_remaining"].as_float(), Some(420.0));
+        assert_eq!(
+            value["timing"]["max_time_remaining"].as_float(),
+            Some(420.0)
+        );
         assert_eq!(value["risk"]["shares"].as_float(), Some(42.0));
         assert_eq!(value["risk"]["max_positions"].as_float(), Some(7.0));
     }
@@ -2464,7 +2258,8 @@ symbols = ["SOLUSDT"]
 
         let err = build_momentum_runtime_config(&cfg).expect_err("non-directional mode rejected");
         assert!(
-            err.to_string().contains("only supports directional entry_mode"),
+            err.to_string()
+                .contains("only supports directional entry_mode"),
             "unexpected error: {}",
             err
         );
@@ -2483,7 +2278,8 @@ symbols = ["SOLUSDT"]
 
         let rendered =
             build_crypto_lob_ml_runtime_config(&cfg).expect("render crypto_lob_ml config");
-        let value: toml::Value = toml::from_str(&rendered).expect("valid crypto_lob_ml runtime toml");
+        let value: toml::Value =
+            toml::from_str(&rendered).expect("valid crypto_lob_ml runtime toml");
 
         assert_eq!(value["strategy"]["name"].as_str(), Some("crypto_lob_ml"));
         assert_eq!(
@@ -2603,7 +2399,8 @@ symbols = ["SOLUSDT"]
         let err =
             build_event_edge_runtime_config(&cfg).expect_err("event_edge config without targets");
         assert!(
-            err.to_string().contains("requires at least one event_id or title"),
+            err.to_string()
+                .contains("requires at least one event_id or title"),
             "unexpected error: {}",
             err
         );
@@ -2662,8 +2459,14 @@ symbols = ["SOLUSDT"]
             value["nba_comeback"]["performance_min_settled_trades"].as_integer(),
             Some(12)
         );
-        assert_eq!(value["nba_comeback"]["scaling_enabled"].as_bool(), Some(true));
-        assert_eq!(value["nba_comeback"]["early_exit_enabled"].as_bool(), Some(true));
+        assert_eq!(
+            value["nba_comeback"]["scaling_enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            value["nba_comeback"]["early_exit_enabled"].as_bool(),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -2816,7 +2619,10 @@ symbols = ["SOLUSDT"]
         );
         assert!(cfg.managed_crypto.lob_ml.use_price_to_beat);
         assert!(!cfg.managed_crypto.lob_ml.require_price_to_beat);
-        assert_eq!(cfg.managed_crypto.lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(
+            cfg.managed_crypto.lob_ml.exit_mode,
+            CryptoLobMlExitMode::EvExit
+        );
         assert_eq!(
             cfg.managed_crypto.lob_ml.entry_side_policy,
             CryptoLobMlEntrySidePolicy::LaggingOnly
@@ -2945,7 +2751,10 @@ symbols = ["SOLUSDT"]
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
 
-        assert_eq!(cfg.managed_crypto.lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(
+            cfg.managed_crypto.lob_ml.exit_mode,
+            CryptoLobMlExitMode::EvExit
+        );
 
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),

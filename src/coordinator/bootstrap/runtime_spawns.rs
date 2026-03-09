@@ -1,6 +1,7 @@
 use super::*;
 use crate::agents::{GovernanceAgent, GovernanceContext, OpenClawAgent};
 
+#[derive(Debug, Clone)]
 pub(super) struct ManagedStrategyRuntimeSpawn {
     pub(super) strategy_label: &'static str,
     pub(super) agent_id: String,
@@ -115,7 +116,12 @@ pub(super) fn spawn_openclaw_governance_agent(
 
     let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);
     let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
-    let ctx = GovernanceContext::new(oc_agent_id.clone(), Domain::Custom(0), handle.clone(), cmd_rx);
+    let ctx = GovernanceContext::new(
+        oc_agent_id.clone(),
+        Domain::Custom(0),
+        handle.clone(),
+        cmd_rx,
+    );
 
     let jh = tokio::spawn(async move {
         if let Err(e) = agent.run(ctx).await {
@@ -255,7 +261,8 @@ pub(super) async fn prepare_sports_runtime_support(
                 false
             }
         };
-        let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(&pool).await {
+        let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(&pool).await
+        {
             Ok(()) => true,
             Err(e) => {
                 warn!(
@@ -321,8 +328,10 @@ pub(super) async fn prepare_sports_runtime_support(
                         format!("{}.sports_orderbook", sports_cfg.agent_id),
                         |book_msg| {
                             use sha2::{Digest, Sha256};
-                            let bids_json = serde_json::to_value(&book_msg.bids).unwrap_or_default();
-                            let asks_json = serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                            let bids_json =
+                                serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                            let asks_json =
+                                serde_json::to_value(&book_msg.asks).unwrap_or_default();
                             let mut hasher = Sha256::new();
                             hasher.update(bids_json.to_string().as_bytes());
                             hasher.update(asks_json.to_string().as_bytes());
