@@ -30,9 +30,7 @@ use super::admission::{
     buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason, AdmissionController,
 };
 use super::capital::CapitalPolicy;
-use super::command::{
-    CoordinatorCommand, CoordinatorControlCommand,
-};
+use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
 use super::governance::{
     governance_block_reason, load_governance_policy, GovernanceController, IngressMode,
@@ -273,7 +271,6 @@ impl CoordinatorHandle {
             .map(|agents| agents.contains(agent_id))
             .unwrap_or(false)
     }
-
 }
 
 /// The Coordinator — owns shared infrastructure and runs the main event loop
@@ -1169,7 +1166,6 @@ impl Coordinator {
     async fn release_domain_reservation(&self, intent_id: Uuid) {
         self.capital_policy.release_buy_reservation(intent_id).await;
     }
-
 }
 
 #[cfg(test)]
@@ -1177,8 +1173,8 @@ mod tests {
     use super::*;
     use crate::adapters::PolymarketClient;
     use crate::agent_runtime::AgentStatus;
-    use crate::coordinator::QueueStatsSnapshot;
     use crate::config::ExecutionConfig;
+    use crate::coordinator::QueueStatsSnapshot;
     use crate::platform::{Domain, OrderPriority, QueueStats};
     use crate::strategy::executor::OrderExecutor;
     use rust_decimal_macros::dec;

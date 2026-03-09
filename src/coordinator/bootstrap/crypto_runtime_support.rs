@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Utc;
 
 #[derive(Default)]
 pub(super) struct CryptoRuntimeSupport {
@@ -158,8 +159,7 @@ pub(super) async fn initialize_crypto_runtime_support(
         })?;
         let pm_ws = dp.polymarket_ws().ok_or_else(|| {
             crate::error::PloyError::Validation(
-                "PLOY_DATA_PLANE=1 but PlatformDataPlane has no Polymarket WS adapter"
-                    .to_string(),
+                "PLOY_DATA_PLANE=1 but PlatformDataPlane has no Polymarket WS adapter".to_string(),
             )
         })?;
         data_plane = Some(dp);
@@ -515,8 +515,10 @@ pub(super) async fn initialize_crypto_runtime_support(
                         format!("{}.orderbook", crypto_cfg.agent_id),
                         |book_msg| {
                             use sha2::{Digest, Sha256};
-                            let bids_json = serde_json::to_value(&book_msg.bids).unwrap_or_default();
-                            let asks_json = serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                            let bids_json =
+                                serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                            let asks_json =
+                                serde_json::to_value(&book_msg.asks).unwrap_or_default();
                             let mut hasher = Sha256::new();
                             hasher.update(bids_json.to_string().as_bytes());
                             hasher.update(asks_json.to_string().as_bytes());
@@ -597,38 +599,34 @@ pub(super) async fn initialize_crypto_runtime_support(
                         let rx = depth_stream.subscribe();
                         let agent_id = crypto_cfg.agent_id.clone();
                         let max_levels = env_usize("BN_LOB_LEVELS", 20).clamp(0, 200);
-                        ph.spawn_bridge(
-                            rx,
-                            format!("{}.binance_lob", agent_id),
-                            move |update| {
-                                let symbol = update.symbol.clone();
-                                let (bids, asks) = if max_levels == 0 {
-                                    (Vec::new(), Vec::new())
-                                } else {
-                                    (
-                                        lob_levels_json(&update.raw_state, true, max_levels),
-                                        lob_levels_json(&update.raw_state, false, max_levels),
-                                    )
-                                };
-                                Some(crate::platform::PersistenceEvent::BinanceLob(
-                                    crate::platform::BinanceLobTick {
-                                        symbol,
-                                        update_id: update.snapshot.update_id,
-                                        best_bid: Some(update.snapshot.best_bid),
-                                        best_ask: Some(update.snapshot.best_ask),
-                                        mid_price: Some(update.snapshot.mid_price),
-                                        spread_bps: Some(update.snapshot.spread_bps),
-                                        obi_5: update.snapshot.obi_5.to_f64(),
-                                        obi_10: update.snapshot.obi_10.to_f64(),
-                                        bid_volume_5: Some(update.snapshot.bid_volume_5),
-                                        ask_volume_5: Some(update.snapshot.ask_volume_5),
-                                        bids: serde_json::to_value(&bids).unwrap_or_default(),
-                                        asks: serde_json::to_value(&asks).unwrap_or_default(),
-                                        event_time: update.snapshot.timestamp,
-                                    },
-                                ))
-                            },
-                        );
+                        ph.spawn_bridge(rx, format!("{}.binance_lob", agent_id), move |update| {
+                            let symbol = update.symbol.clone();
+                            let (bids, asks) = if max_levels == 0 {
+                                (Vec::new(), Vec::new())
+                            } else {
+                                (
+                                    lob_levels_json(&update.raw_state, true, max_levels),
+                                    lob_levels_json(&update.raw_state, false, max_levels),
+                                )
+                            };
+                            Some(crate::platform::PersistenceEvent::BinanceLob(
+                                crate::platform::BinanceLobTick {
+                                    symbol,
+                                    update_id: update.snapshot.update_id,
+                                    best_bid: Some(update.snapshot.best_bid),
+                                    best_ask: Some(update.snapshot.best_ask),
+                                    mid_price: Some(update.snapshot.mid_price),
+                                    spread_bps: Some(update.snapshot.spread_bps),
+                                    obi_5: update.snapshot.obi_5.to_f64(),
+                                    obi_10: update.snapshot.obi_10.to_f64(),
+                                    bid_volume_5: Some(update.snapshot.bid_volume_5),
+                                    ask_volume_5: Some(update.snapshot.ask_volume_5),
+                                    bids: serde_json::to_value(&bids).unwrap_or_default(),
+                                    asks: serde_json::to_value(&asks).unwrap_or_default(),
+                                    event_time: update.snapshot.timestamp,
+                                },
+                            ))
+                        });
                     } else {
                         warn!(
                             agent = crypto_cfg.agent_id,

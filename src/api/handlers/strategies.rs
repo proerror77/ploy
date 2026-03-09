@@ -313,8 +313,7 @@ pub async fn get_strategies_control(
 
     let latest_eval_by_key = {
         let rows = state.strategy_evaluations.read().await;
-        let mut map: HashMap<(String, String), StrategyEvaluationEvidence> =
-            HashMap::new();
+        let mut map: HashMap<(String, String), StrategyEvaluationEvidence> = HashMap::new();
         for row in rows.iter() {
             map.entry((row.deployment_id.clone(), row.strategy_version.clone()))
                 .or_insert_with(|| row.clone());

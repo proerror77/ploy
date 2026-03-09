@@ -498,11 +498,12 @@ impl StrategyFactory {
                 Ok(Box::new(strategy))
             }
             "crypto_rl_policy" => {
-                let strategy = super::crypto_rl_policy::strategy::CryptoRlPolicyStrategy::from_toml(
-                    strategy_id,
-                    config_content,
-                    dry_run,
-                )?;
+                let strategy =
+                    super::crypto_rl_policy::strategy::CryptoRlPolicyStrategy::from_toml(
+                        strategy_id,
+                        config_content,
+                        dry_run,
+                    )?;
                 Ok(Box::new(strategy))
             }
             "nba_comeback" => {

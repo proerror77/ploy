@@ -262,7 +262,10 @@ mod tests {
         coordinator.refresh_global_state().await;
 
         let state = coordinator.global_state.read().await;
-        let agent = state.agents.get("stale_agent").expect("stale agent present");
+        let agent = state
+            .agents
+            .get("stale_agent")
+            .expect("stale agent present");
         assert_eq!(agent.error_message.as_deref(), Some("heartbeat timeout"));
     }
 }

@@ -12,9 +12,9 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+use crate::agent_runtime::AgentStatus;
 use crate::agents::governance_agent::GovernanceAgent;
 use crate::agents::governance_context::GovernanceContext;
-use crate::agent_runtime::AgentStatus;
 use crate::coordinator::bootstrap::OpenClawConfig;
 use crate::coordinator::CoordinatorCommand;
 use crate::platform::{BinanceDataPlaneHandle, Domain};

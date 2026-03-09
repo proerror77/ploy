@@ -322,8 +322,8 @@ mod tests {
             build_sequence(&cache, key, "5m", &[], &[]).expect("5m sequence should be available");
         assert_eq!(seq_5m.len(), SEQ_LEN_5M * SEQ_FEATURE_DIM);
 
-        let seq_15m = build_sequence(&cache, key, "15m", &[], &[])
-            .expect("15m sequence should be available");
+        let seq_15m =
+            build_sequence(&cache, key, "15m", &[], &[]).expect("15m sequence should be available");
         assert_eq!(seq_15m.len(), SEQ_LEN_15M * SEQ_FEATURE_DIM);
     }
 
@@ -371,8 +371,7 @@ mod tests {
         let mut scales2 = vec![1.0f32; SEQ_FEATURE_DIM];
         offsets2[0] = 1.0;
         scales2[0] = 2.0;
-        let normed =
-            build_sequence(&cache, key, "5m", &offsets2, &scales2).expect("normalized");
+        let normed = build_sequence(&cache, key, "5m", &offsets2, &scales2).expect("normalized");
         let expected_first = (raw[0] - 1.0) * 2.0;
         assert!(
             (normed[0] - expected_first).abs() < 1e-6,

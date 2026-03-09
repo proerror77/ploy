@@ -15,8 +15,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::agent_runtime::AgentRiskParams;
 use super::types::{Domain, OrderIntent, OrderPriority};
+use crate::agent_runtime::AgentRiskParams;
 
 /// 風控配置
 #[derive(Debug, Clone, Serialize, Deserialize)]

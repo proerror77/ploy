@@ -3,12 +3,12 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+use crate::agent_runtime::AgentStatus;
 use crate::coordinator::{
     AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState, GovernancePolicySnapshot,
     GovernancePolicyUpdate,
 };
 use crate::error::Result;
-use crate::agent_runtime::AgentStatus;
 use crate::platform::Domain;
 
 /// Governance-only context given to non-trading control-plane agents.

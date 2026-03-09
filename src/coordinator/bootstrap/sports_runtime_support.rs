@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Utc;
 
 pub(super) async fn prepare_sports_runtime_support(
     config: &PlatformBootstrapConfig,
@@ -139,7 +140,9 @@ pub(super) async fn prepare_sports_runtime_support(
         let sports_orderbook_levels = env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
         let sports_orderbook_snapshot_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
             Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64).saturating_mul(1000),
+            Err(_) => {
+                (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64).saturating_mul(1000)
+            }
         };
         let sports_orderbook_require_hash_change =
             env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);

@@ -61,8 +61,10 @@ pub(super) async fn initialize_coordinator_runtime(
         }
         let require_startup_schema =
             env_bool("PLOY_REQUIRE_STARTUP_SCHEMA", !app_config.dry_run.enabled);
-        let require_runtime_restore =
-            env_bool("PLOY_REQUIRE_RUNTIME_STATE_RESTORE", !app_config.dry_run.enabled);
+        let require_runtime_restore = env_bool(
+            "PLOY_REQUIRE_RUNTIME_STATE_RESTORE",
+            !app_config.dry_run.enabled,
+        );
         let migration_store = PostgresStore::from_pool(pool.clone());
         if run_sqlx_migrations {
             if let Err(e) = migration_store.migrate().await {

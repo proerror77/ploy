@@ -418,11 +418,9 @@ impl CryptoRlPolicyStrategy {
                 )
             };
 
-            match model
-                .predict(&obs)
-                .ok()
-                .and_then(|output| core::action_from_policy_output(self.cfg.policy_output.as_str(), &output))
-            {
+            match model.predict(&obs).ok().and_then(|output| {
+                core::action_from_policy_output(self.cfg.policy_output.as_str(), &output)
+            }) {
                 Some(action) => {
                     policy_source = "onnx".to_string();
                     action
@@ -441,11 +439,7 @@ impl CryptoRlPolicyStrategy {
             discrete,
             core::DiscreteAction::Hold | core::DiscreteAction::SellPosition
         ) {
-            self.last_reason = Some(format!(
-                "{} {}",
-                event.symbol,
-                Self::action_label(discrete)
-            ));
+            self.last_reason = Some(format!("{} {}", event.symbol, Self::action_label(discrete)));
             return Ok(None);
         }
 
@@ -509,16 +503,14 @@ impl CryptoRlPolicyStrategy {
         .with_data("momentum_5s", signal.momentum_5s.to_string())
         .with_data(
             "policy_model_version",
-            self.cfg
-                .policy_model_version
-                .clone()
-                .unwrap_or_default(),
+            self.cfg.policy_model_version.clone().unwrap_or_default(),
         )
         .with_data("title", event.title.clone().unwrap_or_default())
         .with_data("at", signal.at.to_rfc3339())
         .with_data(
             "price_to_beat",
-            event.price_to_beat
+            event
+                .price_to_beat
                 .map(|price| price.to_string())
                 .unwrap_or_default(),
         )
@@ -731,7 +723,10 @@ impl Strategy for CryptoRlPolicyStrategy {
             self.active_events.len().to_string(),
         );
         metrics.insert("quote_count".to_string(), self.quotes.len().to_string());
-        metrics.insert("l2_symbols".to_string(), self.l2_by_symbol.len().to_string());
+        metrics.insert(
+            "l2_symbols".to_string(),
+            self.l2_by_symbol.len().to_string(),
+        );
         if let Some(reason) = &self.last_reason {
             metrics.insert("last_reason".to_string(), reason.clone());
         }
@@ -745,7 +740,10 @@ impl Strategy for CryptoRlPolicyStrategy {
                 "last_action".to_string(),
                 Self::action_label(signal.action).to_string(),
             );
-            metrics.insert("last_policy_source".to_string(), signal.policy_source.clone());
+            metrics.insert(
+                "last_policy_source".to_string(),
+                signal.policy_source.clone(),
+            );
             metrics.insert(
                 "last_desired_shares".to_string(),
                 signal.desired_shares.to_string(),
@@ -868,7 +866,13 @@ max_entry_price = 0.70
         }
     }
 
-    fn quote_update(token_id: &str, side: Side, bid: Decimal, ask: Decimal, ts: DateTime<Utc>) -> MarketUpdate {
+    fn quote_update(
+        token_id: &str,
+        side: Side,
+        bid: Decimal,
+        ask: Decimal,
+        ts: DateTime<Utc>,
+    ) -> MarketUpdate {
         MarketUpdate::PolymarketQuote {
             token_id: token_id.to_string(),
             side,

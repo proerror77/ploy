@@ -16,8 +16,8 @@ pub mod nba_entry;
 pub mod nba_exit;
 pub mod nba_filters;
 pub mod nba_state_machine;
-pub mod strategy;
 pub mod nba_winprob;
+pub mod strategy;
 
 pub use comeback_stats::{ComebackStatsProvider, TeamComebackProfile};
 pub use core::{

@@ -68,8 +68,9 @@ impl CryptoLobMlStrategyConfig {
         if self.min_time_remaining_secs == 0 {
             self.min_time_remaining_secs = 60;
         }
-        self.max_time_remaining_secs =
-            self.max_time_remaining_secs.max(self.min_time_remaining_secs);
+        self.max_time_remaining_secs = self
+            .max_time_remaining_secs
+            .max(self.min_time_remaining_secs);
         self.max_time_remaining_secs_5m = self
             .max_time_remaining_secs_5m
             .max(self.min_time_remaining_secs)
@@ -263,7 +264,9 @@ impl CryptoLobMlStrategy {
     }
 
     fn quote_mid(&self, token_id: &str) -> Option<Decimal> {
-        self.quotes.get(token_id).and_then(|quote| quote.mid_price())
+        self.quotes
+            .get(token_id)
+            .and_then(|quote| quote.mid_price())
     }
 
     fn should_emit_inference_log(&mut self, event_id: &str, now: DateTime<Utc>) -> bool {
@@ -272,7 +275,10 @@ impl CryptoLobMlStrategy {
                 self.last_logged_at.insert(event_id.to_string(), now);
                 true
             }
-            Some(last) if now.signed_duration_since(*last).num_seconds() >= INFERENCE_LOG_INTERVAL_SECS => {
+            Some(last)
+                if now.signed_duration_since(*last).num_seconds()
+                    >= INFERENCE_LOG_INTERVAL_SECS =>
+            {
                 self.last_logged_at.insert(event_id.to_string(), now);
                 true
             }
@@ -329,10 +335,13 @@ impl CryptoLobMlStrategy {
         } else {
             Decimal::ZERO
         };
-        let second_bucket =
-            chrono::DateTime::<Utc>::from_timestamp(spot.timestamp.timestamp(), 0)
-                .unwrap_or(spot.timestamp);
-        let entry_key = format!("{}|{}", event.symbol, core::normalize_timeframe(&event.horizon));
+        let second_bucket = chrono::DateTime::<Utc>::from_timestamp(spot.timestamp.timestamp(), 0)
+            .unwrap_or(spot.timestamp);
+        let entry_key = format!(
+            "{}|{}",
+            event.symbol,
+            core::normalize_timeframe(&event.horizon)
+        );
         core::push_sequence_snapshot(
             &mut self.sequence_cache,
             &entry_key,
@@ -359,7 +368,10 @@ impl CryptoLobMlStrategy {
             &self.cfg.feature_offsets,
             &self.cfg.feature_scales,
         ) else {
-            self.last_reason = Some(format!("{}:{} warming_sequence", event.symbol, event.horizon));
+            self.last_reason = Some(format!(
+                "{}:{} warming_sequence",
+                event.symbol, event.horizon
+            ));
             return Ok(None);
         };
 
@@ -526,7 +538,8 @@ impl Strategy for CryptoLobMlStrategy {
             match self.evaluate_event(now, &event) {
                 Ok(Some(summary)) => {
                     self.last_inference = Some(summary.clone());
-                    self.last_reason = Some(format!("{}:{} ready", summary.symbol, summary.horizon));
+                    self.last_reason =
+                        Some(format!("{}:{} ready", summary.symbol, summary.horizon));
                     self.last_error = None;
 
                     if self.should_emit_inference_log(&event_id, now) {
@@ -706,9 +719,8 @@ require_price_to_beat = true
 
     #[test]
     fn from_toml_builds_expected_feeds() {
-        let strategy =
-            CryptoLobMlStrategy::from_toml("lob-test".to_string(), minimal_toml(), true)
-                .expect("strategy");
+        let strategy = CryptoLobMlStrategy::from_toml("lob-test".to_string(), minimal_toml(), true)
+            .expect("strategy");
         let feeds = strategy.required_feeds();
         assert!(feeds.iter().any(|feed| matches!(
             feed,
@@ -753,7 +765,10 @@ require_price_to_beat = true
             }
         }
 
-        assert!(saw_inference_log, "expected inference log once sequence is warm");
+        assert!(
+            saw_inference_log,
+            "expected inference log once sequence is warm"
+        );
         let state = strategy.state();
         assert_eq!(
             state.metrics.get("last_symbol"),
@@ -794,7 +809,10 @@ require_price_to_beat = true
                 .expect("l2 update");
         }
 
-        let actions = strategy.on_tick(start + chrono::Duration::seconds(60)).await.unwrap();
+        let actions = strategy
+            .on_tick(start + chrono::Duration::seconds(60))
+            .await
+            .unwrap();
         assert!(actions.is_empty());
         assert_eq!(
             strategy.last_reason.as_deref(),

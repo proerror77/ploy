@@ -105,7 +105,10 @@ pub struct CryptoLobMlConfig {
     pub use_price_to_beat: bool,
     #[serde(default = "default_require_price_to_beat")]
     pub require_price_to_beat: bool,
-    #[serde(default = "default_model_blend_weight", alias = "threshold_prob_weight")]
+    #[serde(
+        default = "default_model_blend_weight",
+        alias = "threshold_prob_weight"
+    )]
     pub model_blend_weight: Decimal,
     #[serde(default = "default_min_direction_strength")]
     pub min_direction_strength: Decimal,
@@ -252,7 +255,10 @@ mod tests {
         let cfg = CryptoLobMlConfig::default();
         assert_eq!(cfg.agent_id, "crypto_lob_ml");
         assert_eq!(cfg.exit_mode, CryptoLobMlExitMode::EvExit);
-        assert_eq!(cfg.entry_side_policy, CryptoLobMlEntrySidePolicy::LaggingOnly);
+        assert_eq!(
+            cfg.entry_side_policy,
+            CryptoLobMlEntrySidePolicy::LaggingOnly
+        );
         assert!(cfg.use_price_to_beat);
         assert!(cfg.require_price_to_beat);
     }

@@ -6,6 +6,7 @@ use crate::strategy::runtime_specs::runtime_plans::{
     collect_managed_runtime_specs, ManagedRuntimeSpec,
 };
 
+pub(super) use crate::strategy::runtime_specs::deployment_matrix::RuntimeCryptoStrategyTargets;
 #[cfg(all(test, feature = "rl"))]
 pub(super) use crate::strategy::runtime_specs::runtime_configs::build_crypto_rl_policy_runtime_config;
 #[cfg(test)]
@@ -14,7 +15,6 @@ pub(super) use crate::strategy::runtime_specs::runtime_configs::{
     build_momentum_runtime_config, build_nba_comeback_runtime_config,
     build_split_arb_runtime_config,
 };
-pub(super) use crate::strategy::runtime_specs::deployment_matrix::RuntimeCryptoStrategyTargets;
 pub(super) use crate::strategy::runtime_specs::runtime_plans::{
     ManagedRuntimeBootstrapStep, ManagedRuntimeDataPlaneKind,
 };
@@ -71,12 +71,8 @@ pub(super) fn collect_managed_strategy_runtime_plans(
     app_config: &AppConfig,
     runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
 ) -> Vec<ManagedStrategyRuntimePlan> {
-    collect_managed_runtime_specs(
-        config,
-        app_config,
-        runtime_crypto_targets,
-    )
-    .into_iter()
-    .map(managed_runtime_plan_from_spec)
-    .collect()
+    collect_managed_runtime_specs(config, app_config, runtime_crypto_targets)
+        .into_iter()
+        .map(managed_runtime_plan_from_spec)
+        .collect()
 }

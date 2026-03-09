@@ -8,11 +8,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::agent_runtime::AgentRiskParams;
 use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::agent_runtime::AgentRiskParams;
 use crate::platform::OrderPriority;
 use crate::rl::config::RLConfig;
 #[cfg(feature = "onnx")]

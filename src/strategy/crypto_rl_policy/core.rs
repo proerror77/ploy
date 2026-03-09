@@ -199,10 +199,7 @@ pub fn action_from_discrete(action: DiscreteAction) -> ContinuousAction {
 }
 
 #[cfg(feature = "onnx")]
-pub fn action_from_policy_output(
-    policy_output: &str,
-    output: &[f32],
-) -> Option<ContinuousAction> {
+pub fn action_from_policy_output(policy_output: &str, output: &[f32]) -> Option<ContinuousAction> {
     match policy_output.trim().to_ascii_lowercase().as_str() {
         "continuous" => {
             if output.len() < CONTINUOUS_ACTION_DIM {
