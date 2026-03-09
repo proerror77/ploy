@@ -1,13 +1,14 @@
 use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
-use crate::domain::{OrderRequest, OrderStatus, Side};
+use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 use crate::strategy::event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
 use crate::strategy::event_edge::EventEdgeScan;
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -301,14 +302,6 @@ impl EventEdgeStrategy {
         }
 
         let client_order_id = self.client_order_id(&decision, now);
-        let mut order = OrderRequest::buy_limit(
-            decision.token_id.clone(),
-            decision.side,
-            decision.shares,
-            decision.limit_price,
-        );
-        order.client_order_id = client_order_id.clone();
-        order.idempotency_key = Some(client_order_id.clone());
 
         self.reserve_pending_order(&decision, client_order_id.clone());
         self.last_signal_event_id = Some(decision.event_id.clone());
@@ -317,10 +310,22 @@ impl EventEdgeStrategy {
             StrategyAction::LogEvent {
                 event: self.build_signal_event(&decision, scan, now),
             },
-            StrategyAction::SubmitOrder {
-                client_order_id,
-                order,
-                priority: EVENT_EDGE_PRIORITY,
+            StrategyAction::SubmitIntent {
+                intent: StrategyOrderIntent {
+                    client_order_id,
+                    domain: Domain::Politics,
+                    market_slug: decision.market_slug.clone(),
+                    token_id: decision.token_id.clone(),
+                    side: decision.side,
+                    is_buy: true,
+                    shares: decision.shares,
+                    limit_price: decision.limit_price,
+                    priority: EVENT_EDGE_PRIORITY,
+                    metadata: HashMap::from([
+                        ("event_id".to_string(), decision.event_id.clone()),
+                        ("strategy".to_string(), EVENT_EDGE_STRATEGY_NAME.to_string()),
+                    ]),
+                },
             },
         ]
     }
@@ -865,21 +870,20 @@ name = "event_edge"
         let client_order_id = actions
             .iter()
             .find_map(|action| match action {
-                StrategyAction::SubmitOrder {
-                    client_order_id,
-                    order,
-                    ..
-                } => {
-                    assert_eq!(order.client_order_id, *client_order_id);
+                StrategyAction::SubmitIntent { intent } => {
+                    let order = intent.clone().into_order_request();
+                    assert_eq!(order.client_order_id, intent.client_order_id);
                     assert_eq!(
                         order.idempotency_key.as_deref(),
-                        Some(client_order_id.as_str())
+                        Some(intent.client_order_id.as_str())
                     );
-                    Some(client_order_id.clone())
+                    assert_eq!(intent.domain, Domain::Politics);
+                    assert!(intent.is_buy);
+                    Some(intent.client_order_id.clone())
                 }
                 _ => None,
             })
-            .expect("submit order action");
+            .expect("submit intent action");
 
         assert_eq!(strategy.pending_orders.len(), 1);
 

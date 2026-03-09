@@ -342,11 +342,11 @@ async fn handle_strategy_actions_runtime(
     while let Some((strategy_id, action)) = rx.recv().await {
         let split_arb_managed = is_managed_staggered_arb_label(strategy_label);
         match action {
-            StrategyAction::SubmitOrder {
-                client_order_id,
-                mut order,
-                priority: _,
-            } => {
+            submit_action @ (StrategyAction::SubmitIntent { .. }
+            | StrategyAction::SubmitOrder { .. }) => {
+                let (client_order_id, mut order, _priority) = submit_action
+                    .into_submit_order()
+                    .expect("submit action should normalize");
                 normalize_runtime_order_request(&client_order_id, &mut order);
 
                 if paused.load(Ordering::Relaxed) {

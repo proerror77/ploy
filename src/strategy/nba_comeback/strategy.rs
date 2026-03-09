@@ -1,13 +1,14 @@
 use crate::ai_clients::{EventDetails, LiveGameMarket, PolymarketSportsClient};
 use crate::config::NbaComebackConfig;
-use crate::domain::{OrderRequest, OrderStatus, Side};
+use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 use crate::strategy::nba_comeback::comeback_stats::ComebackStatsProvider;
 use crate::strategy::nba_comeback::core::{ComebackOpportunity, NbaComebackCore, NbaComebackState};
 use crate::strategy::nba_comeback::espn::LiveGame;
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -503,11 +504,6 @@ impl NbaComebackStrategy {
         );
         let pending = self.reserve_pending_order(opp, client_order_id.clone(), condition_id.clone());
 
-        let mut order =
-            OrderRequest::buy_limit(opp.token_id.clone(), Side::Up, self.core.cfg.shares, opp.market_price);
-        order.client_order_id = client_order_id.clone();
-        order.idempotency_key = Some(client_order_id.clone());
-
         let mut signal_event = StrategyEvent::new(
             StrategyEventType::SignalDetected,
             format!(
@@ -532,10 +528,26 @@ impl NbaComebackStrategy {
 
         vec![
             StrategyAction::LogEvent { event: signal_event },
-            StrategyAction::SubmitOrder {
-                client_order_id: pending.client_order_id,
-                order,
-                priority: NBA_COMEBACK_PRIORITY,
+            StrategyAction::SubmitIntent {
+                intent: StrategyOrderIntent {
+                    client_order_id: pending.client_order_id,
+                    domain: Domain::Sports,
+                    market_slug: opp.market_slug.clone(),
+                    token_id: opp.token_id.clone(),
+                    side: Side::Up,
+                    is_buy: true,
+                    shares: self.core.cfg.shares,
+                    limit_price: opp.market_price,
+                    priority: NBA_COMEBACK_PRIORITY,
+                    metadata: HashMap::from([
+                        ("game_id".to_string(), opp.game.espn_game_id.clone()),
+                        ("trailing_team".to_string(), opp.trailing_abbrev.clone()),
+                        (
+                            "strategy".to_string(),
+                            NBA_COMEBACK_STRATEGY_NAME.to_string(),
+                        ),
+                    ]),
+                },
             },
         ]
     }
@@ -1017,14 +1029,14 @@ database_url = "postgres://localhost/unused"
         let client_order_id = actions
             .iter()
             .find_map(|action| match action {
-                StrategyAction::SubmitOrder {
-                    client_order_id,
-                    order,
-                    ..
-                } => {
-                    assert_eq!(order.client_order_id, *client_order_id);
-                    assert_eq!(order.idempotency_key.as_deref(), Some(client_order_id.as_str()));
-                    Some(client_order_id.clone())
+                StrategyAction::SubmitIntent { intent } => {
+                    let order = intent.clone().into_order_request();
+                    assert_eq!(order.client_order_id, intent.client_order_id);
+                    assert_eq!(
+                        order.idempotency_key.as_deref(),
+                        Some(intent.client_order_id.as_str())
+                    );
+                    Some(intent.client_order_id.clone())
                 }
                 _ => None,
             })

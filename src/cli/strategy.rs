@@ -1361,11 +1361,11 @@ async fn handle_strategy_actions(
 
     while let Some((strategy_id, action)) = rx.recv().await {
         match action {
-            StrategyAction::SubmitOrder {
-                client_order_id,
-                mut order,
-                priority: _,
-            } => {
+            submit_action @ (StrategyAction::SubmitIntent { .. }
+            | StrategyAction::SubmitOrder { .. }) => {
+                let (client_order_id, mut order, _priority) = submit_action
+                    .into_submit_order()
+                    .expect("submit action should normalize");
                 if order.client_order_id != client_order_id {
                     warn!(
                         "Mismatched order IDs in strategy action: action={}, request={}; using action ID",
@@ -3611,6 +3611,15 @@ async fn run_nba_comeback(config: Option<PathBuf>, dry_run: bool) -> Result<()> 
                                     _ => "ℹ EVENT",
                                 };
                                 println!("  \x1b[36m{}: {}\x1b[0m", prefix, event.message);
+                            }
+                            StrategyAction::SubmitIntent { intent } => {
+                                println!(
+                                    "  \x1b[36m📤 ORDER: {} shares @ {} token={} client_id={}\x1b[0m",
+                                    intent.shares,
+                                    intent.limit_price,
+                                    intent.token_id,
+                                    intent.client_order_id,
+                                );
                             }
                             StrategyAction::SubmitOrder {
                                 client_order_id,

@@ -124,18 +124,28 @@ Start collapsing the duplicate `StrategyAction::SubmitOrder { OrderRequest }` vs
 
 ## Tasks
 
-- [ ] Define the canonical strategy-side submit payload that can survive outside `strategy_runtime.rs`.
-- [ ] Keep existing strategies compiling through a compatibility path while the new handoff is introduced.
+- [x] Define the canonical strategy-side submit payload that can survive outside `strategy_runtime.rs`.
+- [x] Keep existing strategies compiling through a compatibility path while the new handoff is introduced.
 - [ ] Move managed runtime submission closer to coordinator admission instead of direct executor ownership.
 - [ ] Preserve order-update feedback so strategies still receive fills/status changes.
-- [ ] Add a regression test covering action id propagation into the actual execution handoff.
+- [x] Add a regression test covering action id propagation into the actual execution handoff.
 
 ## Review
 
 - [ ] Confirm the new canonical submit payload is not another permanent fourth runtime contract.
-- [ ] Confirm managed runtime still preserves `client_order_id` and idempotency semantics.
+- [x] Confirm managed runtime still preserves `client_order_id` and idempotency semantics.
 - [ ] Confirm strategies still observe terminal fill/failure updates after the handoff change.
-- 2026-03-09: Both validations were blocked by unrelated in-flight errors outside this slice, currently in `src/coordinator/bootstrap.rs` and `src/strategy/nba_comeback/*`. The latest `cargo check --lib` output no longer reported `event_edge` compile errors after fixing the local wrapper issues.
+
+## Progress notes
+
+- 2026-03-09: Added `StrategyAction::SubmitIntent { StrategyOrderIntent }` in [traits.rs](/Users/proerror/Documents/ploy/src/strategy/traits.rs) as the canonical strategy-side submit payload, plus a direct idempotency regression test for `into_order_request()`.
+- 2026-03-09: Updated [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy.rs) and [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/strategy.rs) so the current canonical domain strategies emit `SubmitIntent` instead of raw `OrderRequest`.
+- 2026-03-09: Added compatibility normalization in [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), [orchestrator.rs](/Users/proerror/Documents/ploy/src/strategy/orchestrator.rs), and [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) so existing execution paths still accept the new canonical payload without breaking older strategies.
+- 2026-03-09: Validation passed:
+  - `cargo check --bin ploy`
+  - `cargo test strategy::event_edge::strategy --lib -- --nocapture`
+  - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
+  - `cargo test strategy::traits::tests --lib -- --nocapture`
 
 # Strategy Metadata And Momentum State Cleanup (2026-03-09)
 

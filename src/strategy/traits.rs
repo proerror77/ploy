@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 
 // ============================================================================
 // Strategy Trait
@@ -202,7 +203,13 @@ pub struct OrderUpdate {
 /// Actions a strategy can request
 #[derive(Debug, Clone)]
 pub enum StrategyAction {
+    /// Canonical strategy-side submit payload.
+    SubmitIntent { intent: StrategyOrderIntent },
+
     /// Submit a new order
+    ///
+    /// Compatibility action kept for runtimes/strategies that still emit raw
+    /// `OrderRequest`s directly.
     SubmitOrder {
         /// Strategy-assigned ID for tracking
         client_order_id: String,
@@ -230,6 +237,62 @@ pub enum StrategyAction {
 
     /// Legacy control-plane action kept for non-canonical orchestrator paths.
     LegacyControl(StrategyControlAction),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyOrderIntent {
+    pub client_order_id: String,
+    pub domain: Domain,
+    pub market_slug: String,
+    pub token_id: String,
+    pub side: Side,
+    pub is_buy: bool,
+    pub shares: u64,
+    pub limit_price: Decimal,
+    pub priority: u8,
+    pub metadata: HashMap<String, String>,
+}
+
+impl StrategyOrderIntent {
+    pub fn into_order_request(self) -> OrderRequest {
+        let mut order = if self.is_buy {
+            OrderRequest::buy_limit(
+                self.token_id.clone(),
+                self.side,
+                self.shares,
+                self.limit_price,
+            )
+        } else {
+            OrderRequest::sell_limit(
+                self.token_id.clone(),
+                self.side,
+                self.shares,
+                self.limit_price,
+            )
+        };
+        order.client_order_id = self.client_order_id.clone();
+        order.idempotency_key = Some(self.client_order_id);
+        order
+    }
+}
+
+impl StrategyAction {
+    pub fn into_submit_order(self) -> Option<(String, OrderRequest, u8)> {
+        match self {
+            StrategyAction::SubmitIntent { intent } => {
+                let priority = intent.priority;
+                let client_order_id = intent.client_order_id.clone();
+                let order = intent.into_order_request();
+                Some((client_order_id, order, priority))
+            }
+            StrategyAction::SubmitOrder {
+                client_order_id,
+                order,
+                priority,
+            } => Some((client_order_id, order, priority)),
+            _ => None,
+        }
+    }
 }
 
 /// Non-decision actions emitted by legacy strategies.
@@ -460,5 +523,38 @@ impl Default for StrategyConfig {
             dry_run: true,
             params: HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StrategyOrderIntent;
+    use crate::domain::OrderSide;
+    use crate::platform::Domain;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    #[test]
+    fn strategy_order_intent_into_order_request_preserves_action_id() {
+        let request = StrategyOrderIntent {
+            client_order_id: "intent-123".to_string(),
+            domain: Domain::Politics,
+            market_slug: "election-market".to_string(),
+            token_id: "token-1".to_string(),
+            side: crate::domain::Side::Up,
+            is_buy: true,
+            shares: 25,
+            limit_price: dec!(0.44),
+            priority: 7,
+            metadata: HashMap::new(),
+        }
+        .into_order_request();
+
+        assert_eq!(request.client_order_id, "intent-123");
+        assert_eq!(request.idempotency_key.as_deref(), Some("intent-123"));
+        assert_eq!(request.order_side, OrderSide::Buy);
+        assert_eq!(request.market_side, crate::domain::Side::Up);
+        assert_eq!(request.shares, 25);
+        assert_eq!(request.limit_price, dec!(0.44));
     }
 }

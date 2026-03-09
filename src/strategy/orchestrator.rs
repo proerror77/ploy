@@ -258,11 +258,11 @@ impl StrategyOrchestrator {
     async fn execute_actions(&self, strategy_id: &str, actions: Vec<StrategyAction>) -> Result<()> {
         for action in actions {
             match action {
-                StrategyAction::SubmitOrder {
-                    client_order_id,
-                    order,
-                    priority,
-                } => {
+                submit_action @ (StrategyAction::SubmitIntent { .. }
+                | StrategyAction::SubmitOrder { .. }) => {
+                    let (client_order_id, order, priority) = submit_action
+                        .into_submit_order()
+                        .expect("submit action should normalize");
                     // Check risk before submitting
                     let check = self.risk_manager
                         .check_new_position(
