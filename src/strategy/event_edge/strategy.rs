@@ -762,6 +762,19 @@ event_ids = ["event-1"]
         assert!(err.to_string().contains("event_edge"));
     }
 
+    #[test]
+    fn from_toml_rejects_missing_event_edge_section() {
+        let toml = r#"
+[strategy]
+name = "event_edge"
+"#;
+
+        let err = EventEdgeStrategy::from_toml("ee-test".to_string(), toml, true)
+            .err()
+            .expect("missing event_edge section should fail");
+        assert!(err.to_string().contains("Missing [event_edge] section"));
+    }
+
     #[tokio::test]
     async fn on_market_update_tracks_discovered_events_and_expiry() {
         let core = EventEdgeCore::new(dry_run_client(), EventEdgeAgentConfig::default());
