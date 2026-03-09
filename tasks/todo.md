@@ -2575,3 +2575,28 @@ Remove raw `OrderRequest` materialization from the canonical `StrategyOrderInten
   - `cargo test --lib runtime_order::tests -- --nocapture`
   - `cargo test --lib test_strategy_manager_creation -- --nocapture`
   - `rg "into_order_request\\(|order_request_from_intent\\(" src`
+
+# Bootstrap Startup Context Extraction (2026-03-09)
+
+## Goal
+Move exchange/client/account/shared-db bootstrap preflight out of `start_platform()` so the top-level bootstrap flow focuses on assembly instead of low-level startup context wiring.
+
+## Tasks
+
+- [x] Extract exchange compatibility checks, Polymarket client setup, account/runtime target derivation, domain gating, and shared DB pool setup into a dedicated startup-context module.
+- [x] Rewire `start_platform()` to consume the extracted startup context instead of owning those steps inline.
+- [x] Re-run default + `rl` compile after the extraction.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer inlines exchange/client/account/shared-pool setup.
+- [x] Confirm the new startup-context module owns the initial startup logging and bootstrap preflight decisions.
+- [x] Confirm compile behavior is unchanged after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Added [startup_context.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/startup_context.rs) and moved exchange compatibility checks, Polymarket client setup, account/runtime-target derivation, domain gating, and shared DB pool creation there.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so `start_platform()` now consumes a `BootstrapStartupContext` instead of assembling those prerequisites inline.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`

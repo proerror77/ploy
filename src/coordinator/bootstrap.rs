@@ -51,6 +51,7 @@ mod runtime_config;
 mod runtime_spawns;
 mod schema;
 mod sports_runtime_support;
+mod startup_context;
 mod strategy_deployments;
 mod support;
 
@@ -94,6 +95,7 @@ use self::support::{
     add_coins_from_selector, env_bool, env_i64, env_u64, env_usize, lob_levels_json,
 };
 use self::sports_runtime_support::prepare_sports_runtime_support;
+use self::startup_context::initialize_startup_context;
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
@@ -115,121 +117,13 @@ pub async fn start_platform(
     app_config: &AppConfig,
     control: PlatformStartControl,
 ) -> Result<()> {
-    let exchange_kind = parse_exchange_kind(&app_config.execution.exchange)?;
-    let exchange_client = build_exchange_client(app_config, config.dry_run).await?;
-    let non_pm_builtin_agents_enabled = exchange_kind != ExchangeKind::Polymarket
-        && (config.enable_crypto || config.enable_sports || config.enable_politics);
-    if non_pm_builtin_agents_enabled {
-        return Err(crate::error::PloyError::Validation(format!(
-            "execution.exchange={} is not yet supported with built-in runtime loops (crypto managed + legacy compatibility paths). Disable those runtime loops or set execution.exchange=polymarket",
-            exchange_kind
-        )));
-    }
-
-    // Polymarket client is required for:
-    // - crypto event discovery (Gamma)
-    // - settlement persistence (Gamma)
-    // - politics managed strategy runtime
-    // - sports settlement labeling (Gamma)
-    let needs_polymarket_client =
-        config.enable_crypto || config.enable_sports || config.enable_politics;
-    let pm_client = if needs_polymarket_client {
-        let rest_url = app_config
-            .market
-            .exchange_rest_url
-            .as_deref()
-            .unwrap_or(&app_config.market.rest_url);
-
-        if config.dry_run {
-            Some(PolymarketClient::new(rest_url, true)?)
-        } else {
-            let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
-            let funder = std::env::var("POLYMARKET_FUNDER").ok();
-            if let Some(funder_addr) = funder {
-                Some(
-                    PolymarketClient::new_authenticated_proxy(rest_url, wallet, &funder_addr, true)
-                        .await?,
-                )
-            } else {
-                Some(PolymarketClient::new_authenticated(rest_url, wallet, true).await?)
-            }
-        }
-    } else {
-        None
-    };
-
-    let account_id = if app_config.account.id.trim().is_empty() {
-        "default".to_string()
-    } else {
-        app_config.account.id.clone()
-    };
-    let runtime_crypto_targets =
-        collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
-    #[cfg(feature = "rl")]
-    let crypto_rl_policy_enabled = config.managed_crypto.enable_rl_policy;
-    #[cfg(not(feature = "rl"))]
-    let crypto_rl_policy_enabled = false;
-
-    info!(
-        account_id = %account_id,
-        crypto = config.enable_crypto,
-        crypto_momentum = config.enable_crypto_momentum,
-        crypto_pattern_memory = config.enable_crypto_pattern_memory,
-        crypto_split_arb = config.enable_crypto_split_arb,
-        crypto_lob_ml = config.managed_crypto.enable_lob_ml,
-        crypto_rl_policy = crypto_rl_policy_enabled,
-        sports = config.enable_sports,
-        politics = config.enable_politics,
-        economics = config.enable_economics,
-        openclaw = config.enable_openclaw || config.openclaw.enabled,
-        exchange = %exchange_kind,
-        dry_run = config.dry_run,
-        "starting multi-agent platform"
-    );
-    if config.enable_economics {
-        warn!(
-            "economics domain enabled, but no built-in economics agent is registered; coordinator-level risk and allocator gates remain active"
-        );
-    }
-
-    let mut allowed_domains: HashSet<Domain> = HashSet::new();
-    if config.enable_crypto {
-        allowed_domains.insert(Domain::Crypto);
-    }
-    if config.enable_sports {
-        allowed_domains.insert(Domain::Sports);
-    }
-    if config.enable_politics {
-        allowed_domains.insert(Domain::Politics);
-    }
-
-    let db_required = env_bool(
-        "PLOY_DB_REQUIRED",
-        env_bool("PLOY_REQUIRE_DB", !app_config.dry_run.enabled),
-    );
-
-    // Optional shared DB pool used for (a) coordinator execution logs and (b) market data persistence.
-    // Crypto runtimes can run without DB; sports runtime support still requires DB for calendar/stats.
-    let shared_pool = match PgPoolOptions::new()
-        .max_connections(app_config.database.max_connections)
-        .connect(&app_config.database.url)
-        .await
-    {
-        Ok(pool) => Some(pool),
-        Err(e) => {
-            if db_required {
-                return Err(crate::error::PloyError::Internal(format!(
-                    "database connection is required but failed at startup: {}",
-                    e
-                )));
-            }
-            warn!(
-                error = %e,
-                "failed to connect DB at startup; continuing without shared pool"
-            );
-            None
-        }
-    };
+    let startup = initialize_startup_context(&config, app_config).await?;
+    let exchange_client = startup.exchange_client;
+    let pm_client = startup.pm_client;
+    let account_id = startup.account_id;
+    let runtime_crypto_targets = startup.runtime_crypto_targets;
+    let allowed_domains = startup.allowed_domains;
+    let shared_pool = startup.shared_pool;
 
     let coordinator_bootstrap = initialize_coordinator_runtime(
         &config,
