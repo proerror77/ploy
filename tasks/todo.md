@@ -2905,3 +2905,33 @@ Finish the next large structural wave by shrinking the remaining core ownership 
   - `cargo test test_restore_runtime_counters_halts_when_daily_loss_exceeded --lib -- --nocapture`
   - `cargo test strategy::adapters::tests --lib -- --nocapture`
   - `cargo test strategy::adapters::split_arb_adapter::tests --lib -- --nocapture`
+
+# CLI Strategy Runtime Ops Extraction (2026-03-10)
+
+## Goal
+Move the standalone strategy runtime/process-management surface out of `src/cli/strategy.rs` so the CLI file keeps command definitions while runtime ownership lives in a dedicated submodule.
+
+## Tasks
+
+- [x] Extract the standalone runtime/process-management block from `src/cli/strategy.rs` into `src/cli/strategy/runtime_ops.rs`.
+- [x] Rewire `StrategyCommands::run` call sites to import runtime/process-management helpers from the new module.
+- [x] Preserve foreground runtime, daemon management, status/logs, and default-config behavior without changing semantics.
+- [x] Re-run compile and focused strategy-manager regressions after the extraction.
+
+## Review
+
+- [x] Confirm `src/cli/strategy.rs` no longer owns config-dir/run-dir/log-dir helpers, standalone runtime execution, or process-management status helpers.
+- [x] Confirm the new `runtime_ops` module retains strategy start/stop/status/log/reload behavior and order-action handling.
+
+## Progress notes
+
+- 2026-03-10: Added [runtime_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/runtime_ops.rs) and moved config/run/log path helpers, foreground runtime execution, daemon management, action handling, status/log helpers, and default-config creation out of [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs).
+- 2026-03-10: Rewired [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) to delegate `list/start/stop/status/logs/reload` commands through the new runtime-ops module instead of owning the full standalone runtime block inline.
+- 2026-03-10: File size delta:
+  - [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs): `6144 -> 5137` lines
+  - [runtime_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/runtime_ops.rs): `0 -> 952` lines
+- 2026-03-10: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_strategy_manager_creation --lib -- --nocapture`
+  - `cargo test test_available_strategies --lib -- --nocapture`
+  - `cargo test test_graceful_stop_reports_closed_action_channel --lib -- --nocapture`
