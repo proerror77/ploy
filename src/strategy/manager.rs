@@ -481,6 +481,22 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(adapter))
             }
+            "event_edge" => {
+                let strategy = super::event_edge::strategy::EventEdgeStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
+            "nba_comeback" => {
+                let strategy = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
@@ -508,6 +524,17 @@ impl StrategyFactory {
                 description: "Time-staggered two-leg arb on crypto UP/DOWN binary options; aliases: gamma_scalping, staggered-arb"
                     .to_string(),
                 config_template: "staggered_arb.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "event_edge".to_string(),
+                description: "Politics/event-driven edge strategy on Polymarket events"
+                    .to_string(),
+                config_template: "event_edge.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "nba_comeback".to_string(),
+                description: "NBA comeback strategy using ESPN/game-state inputs".to_string(),
+                config_template: "nba_comeback.toml".to_string(),
             },
         ]
     }
@@ -648,6 +675,8 @@ mod tests {
         let strategies = StrategyFactory::available_strategies();
         assert!(!strategies.is_empty());
         assert!(strategies.iter().any(|s| s.name == "momentum"));
+        assert!(strategies.iter().any(|s| s.name == "event_edge"));
+        assert!(strategies.iter().any(|s| s.name == "nba_comeback"));
     }
 
     #[tokio::test]

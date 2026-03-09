@@ -16,12 +16,10 @@ use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, P
 use crate::agents::{
     AgentContext, CryptoEntryMode, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
-    GovernanceAgent, GovernanceContext, PoliticsTradingAgent, PoliticsTradingConfig,
-    SportsTradingAgent, SportsTradingConfig, TradingAgent,
+    GovernanceAgent, GovernanceContext, PoliticsTradingConfig, SportsTradingConfig, TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
-use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
@@ -33,7 +31,6 @@ use crate::platform::{
     Domain, MarketSelector, PlatformDataPlane, StrategyDeployment,
 };
 use crate::signing::Wallet;
-use crate::strategy::event_edge::core::EventEdgeCore;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
@@ -65,9 +62,8 @@ use self::market_persistence::{
     spawn_polymarket_trade_persistence_from_collector_targets,
 };
 use self::runtime_spawns::{
-    spawn_managed_strategy_runtime_task, spawn_openclaw_governance_agent,
-    spawn_politics_trading_agent, spawn_sports_trading_agent, spawn_trading_agent_task,
-    ManagedStrategyRuntimeSpawn,
+    prepare_sports_runtime_support, spawn_managed_strategy_runtime_task,
+    spawn_openclaw_governance_agent, spawn_trading_agent_task, ManagedStrategyRuntimeSpawn,
 };
 pub(crate) use self::schema::{
     ensure_agent_order_executions_table, ensure_clob_orderbook_snapshots_table,
@@ -85,9 +81,10 @@ use self::support::{
     env_usize, load_strategy_deployments, lob_levels_json,
 };
 use self::strategy_deployments::{
-    apply_strategy_deployments, build_momentum_runtime_config,
-    build_pattern_memory_runtime_config, build_split_arb_runtime_config, coin_symbol_for,
-    collect_runtime_crypto_strategy_targets, crypto_series_id_for, symbol_for_crypto_series_id,
+    apply_strategy_deployments, build_event_edge_runtime_config, build_momentum_runtime_config,
+    build_nba_comeback_runtime_config, build_pattern_memory_runtime_config,
+    build_split_arb_runtime_config, coin_symbol_for, collect_runtime_crypto_strategy_targets,
+    crypto_series_id_for, symbol_for_crypto_series_id,
 };
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
@@ -1487,6 +1484,7 @@ pub async fn start_platform(
     // Shared per-symbol freshness tracker — attached to all WS adapters.
     let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
     let use_data_plane = env_bool("PLOY_DATA_PLANE", false);
+    let mut managed_runtime_data_plane: Option<Arc<PlatformDataPlane>> = None;
 
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
@@ -1654,6 +1652,7 @@ pub async fn start_platform(
             info!("data plane freshness tracker attached to WS adapters");
             (binance_ws, pm_ws)
         };
+        managed_runtime_data_plane = data_plane.clone();
         let crypto_market_data = CryptoDataPlaneHandle::new(binance_ws.clone(), pm_ws.clone());
 
         // Seed PM token → side mapping for data collection, so QuoteUpdates carry the correct
@@ -2199,14 +2198,14 @@ pub async fn start_platform(
                         },
                         &mut coordinator,
                         &shutdown_tx,
-                        &mut agent_handles,
-                        config.dry_run,
-                        pm_client.as_ref(),
-                        &app_config.market.ws_url,
-                        data_plane.clone(),
-                        shared_pool.clone(),
-                        &account_id,
-                    );
+                &mut agent_handles,
+                config.dry_run,
+                pm_client.as_ref(),
+                &app_config.market.ws_url,
+                managed_runtime_data_plane.clone(),
+                shared_pool.clone(),
+                &account_id,
+            );
                 }
                 Err(e) => {
                     warn!(
@@ -2274,7 +2273,7 @@ pub async fn start_platform(
                         config.dry_run,
                         pm_client.as_ref(),
                         &app_config.market.ws_url,
-                        data_plane.clone(),
+                        managed_runtime_data_plane.clone(),
                         shared_pool.clone(),
                         &account_id,
                     );
@@ -2451,28 +2450,73 @@ pub async fn start_platform(
     }
 
     if config.enable_sports {
-        spawn_sports_trading_agent(
-            &config,
-            &app_config,
-            shared_pool.as_ref(),
-            &freshness,
-            &mut coordinator,
-            &handle,
-            &mut agent_handles,
-        )
-        .await?;
+        prepare_sports_runtime_support(&config, &app_config, shared_pool.as_ref(), &freshness)
+            .await?;
+        if let Some(nba_cfg) = app_config.nba_comeback.as_ref() {
+            let toml_cfg = build_nba_comeback_runtime_config(nba_cfg, &app_config.database.url);
+            let _ = spawn_managed_strategy_runtime_task(
+                ManagedStrategyRuntimeSpawn {
+                    strategy_label: "nba_comeback",
+                    agent_id: config.sports.agent_id.clone(),
+                    domain: Domain::Sports,
+                    risk_params: config.sports.risk_params.clone(),
+                    strategy_config_toml: toml_cfg,
+                },
+                &mut coordinator,
+                &shutdown_tx,
+                &mut agent_handles,
+                config.dry_run,
+                pm_client.as_ref(),
+                &app_config.market.ws_url,
+                None,
+                shared_pool.clone(),
+                &account_id,
+            );
+        } else {
+            warn!(
+                agent = config.sports.agent_id,
+                "sports runtime enabled but nba_comeback config missing; skipping canonical managed runtime"
+            );
+        }
     }
 
     if config.enable_politics {
-        spawn_politics_trading_agent(
-            &config,
-            &app_config,
-            &mut coordinator,
-            &handle,
-            pm_client.as_ref(),
-            &mut agent_handles,
-        )
-        .await?;
+        if let Some(event_edge_cfg) = app_config.event_edge_agent.as_ref() {
+            match build_event_edge_runtime_config(event_edge_cfg) {
+                Ok(toml_cfg) => {
+                    let _ = spawn_managed_strategy_runtime_task(
+                        ManagedStrategyRuntimeSpawn {
+                            strategy_label: "event_edge",
+                            agent_id: config.politics.agent_id.clone(),
+                            domain: Domain::Politics,
+                            risk_params: config.politics.risk_params.clone(),
+                            strategy_config_toml: toml_cfg,
+                        },
+                        &mut coordinator,
+                        &shutdown_tx,
+                        &mut agent_handles,
+                        config.dry_run,
+                        pm_client.as_ref(),
+                        &app_config.market.ws_url,
+                        None,
+                        shared_pool.clone(),
+                        &account_id,
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        agent = config.politics.agent_id,
+                        error = %e,
+                        "politics runtime config unavailable; skipping canonical managed runtime"
+                    );
+                }
+            }
+        } else {
+            warn!(
+                agent = config.politics.agent_id,
+                "politics runtime enabled but event_edge config missing; skipping canonical managed runtime"
+            );
+        }
     }
 
     // --- OpenClaw meta-agent (Layer 3 orchestrator) ---
@@ -2827,6 +2871,126 @@ symbols = ["SOLUSDT"]
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn build_event_edge_runtime_config_renders_targets_and_limits() {
+        let cfg = crate::config::EventEdgeAgentConfig {
+            enabled: true,
+            framework: "event_driven".to_string(),
+            event_ids: vec!["1234".to_string()],
+            titles: vec!["OpenAI funding".to_string()],
+            interval_secs: 45,
+            min_edge: dec!(0.07),
+            max_entry: dec!(0.62),
+            shares: 33,
+            trade: false,
+            cooldown_secs: 180,
+            max_daily_spend_usd: dec!(75),
+            model: Some("claude-test".to_string()),
+            claude_max_turns: 9,
+        };
+
+        let rendered = build_event_edge_runtime_config(&cfg).expect("render event_edge config");
+        let value: toml::Value = toml::from_str(&rendered).expect("valid event_edge runtime toml");
+
+        assert_eq!(value["strategy"]["name"].as_str(), Some("event_edge"));
+        assert_eq!(
+            value["event_edge"]["event_ids"]
+                .as_array()
+                .expect("event_ids array")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1234"]
+        );
+        assert_eq!(
+            value["event_edge"]["titles"]
+                .as_array()
+                .expect("titles array")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            vec!["OpenAI funding"]
+        );
+        assert_eq!(value["event_edge"]["trade"].as_bool(), Some(true));
+        assert_eq!(value["event_edge"]["interval_secs"].as_integer(), Some(45));
+        assert_eq!(value["event_edge"]["shares"].as_integer(), Some(33));
+        assert_eq!(value["event_edge"]["model"].as_str(), Some("claude-test"));
+    }
+
+    #[test]
+    fn build_event_edge_runtime_config_rejects_empty_targets() {
+        let cfg = crate::config::EventEdgeAgentConfig {
+            event_ids: Vec::new(),
+            titles: Vec::new(),
+            ..Default::default()
+        };
+
+        let err =
+            build_event_edge_runtime_config(&cfg).expect_err("event_edge config without targets");
+        assert!(
+            err.to_string().contains("requires at least one event_id or title"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn build_nba_comeback_runtime_config_renders_risk_controls() {
+        let cfg = crate::config::NbaComebackConfig {
+            enabled: true,
+            min_edge: dec!(0.06),
+            max_entry_price: dec!(0.61),
+            shares: 42,
+            cooldown_secs: 90,
+            max_daily_spend_usd: dec!(120),
+            min_deficit: 2,
+            max_deficit: 18,
+            target_quarter: 3,
+            espn_poll_interval_secs: 20,
+            min_comeback_rate: 0.22,
+            season: "2026-27".to_string(),
+            grok_enabled: true,
+            grok_interval_secs: 180,
+            grok_min_edge: dec!(0.09),
+            grok_min_confidence: 0.7,
+            grok_decision_cooldown_secs: 30,
+            grok_fallback_enabled: false,
+            min_reward_risk_ratio: 5.0,
+            min_expected_value: 0.06,
+            kelly_fraction_cap: 0.20,
+            performance_daily_loss_limit_usd: dec!(40),
+            performance_min_settled_trades: 12,
+            performance_min_win_rate: 0.5,
+            performance_low_winrate_multiplier: 0.5,
+            performance_loss_streak_threshold: 4,
+            performance_loss_streak_multiplier: 0.4,
+            scaling_enabled: true,
+            scaling_max_adds: 2,
+            scaling_min_price_drop_pct: 4.0,
+            scaling_max_game_exposure_usd: dec!(80),
+            scaling_min_comeback_retention: 0.75,
+            scaling_min_time_remaining_mins: 9.0,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 12.0,
+            early_exit_stop_loss_pct: 18.0,
+        };
+
+        let rendered = build_nba_comeback_runtime_config(&cfg, "postgres://localhost/unused");
+        let value: toml::Value =
+            toml::from_str(&rendered).expect("valid nba_comeback runtime toml");
+
+        assert_eq!(value["strategy"]["name"].as_str(), Some("nba_comeback"));
+        assert_eq!(value["nba_comeback"]["shares"].as_integer(), Some(42));
+        assert_eq!(value["nba_comeback"]["season"].as_str(), Some("2026-27"));
+        assert_eq!(value["nba_comeback"]["grok_enabled"].as_bool(), Some(true));
+        assert_eq!(
+            value["nba_comeback"]["performance_min_settled_trades"].as_integer(),
+            Some(12)
+        );
+        assert_eq!(value["nba_comeback"]["scaling_enabled"].as_bool(), Some(true));
+        assert_eq!(value["nba_comeback"]["early_exit_enabled"].as_bool(), Some(true));
     }
 
     #[tokio::test]

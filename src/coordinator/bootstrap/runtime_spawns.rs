@@ -45,6 +45,7 @@ pub(super) fn spawn_managed_strategy_runtime_task(
         if let Err(e) = run_managed_strategy_runtime(
             strategy_label,
             &runtime_agent_id,
+            spec.domain,
             strategy_config_toml,
             dry_run,
             strategy_pm_client,
@@ -162,18 +163,15 @@ pub(super) fn spawn_openclaw_governance_agent(
     );
 }
 
-pub(super) async fn spawn_sports_trading_agent(
+pub(super) async fn prepare_sports_runtime_support(
     config: &PlatformBootstrapConfig,
     app_config: &AppConfig,
     shared_pool: Option<&PgPool>,
     freshness: &Arc<crate::platform::DataPlaneFreshness>,
-    coordinator: &mut Coordinator,
-    handle: &CoordinatorHandle,
-    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
 ) -> Result<()> {
-    let Some(nba_cfg) = app_config.nba_comeback.as_ref() else {
+    if app_config.nba_comeback.is_none() {
         return Ok(());
-    };
+    }
 
     let sports_cfg = config.sports.clone();
 
@@ -397,72 +395,5 @@ pub(super) async fn spawn_sports_trading_agent(
             "sports PM WS L2 data collection started"
         );
     }
-
-    let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
-    let stats =
-        crate::strategy::nba_comeback::ComebackStatsProvider::new(pool.clone(), nba_cfg.season.clone());
-    let core = crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
-    let mut agent = SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
-    match PolymarketSportsClient::new() {
-        Ok(pm_sports) => {
-            agent = agent.with_pm_sports(pm_sports);
-        }
-        Err(e) => {
-            warn!(
-                agent = sports_cfg.agent_id,
-                error = %e,
-                "failed to initialize PolymarketSportsClient; continuing without PM market observations"
-            );
-        }
-    }
-    if nba_cfg.grok_enabled {
-        match crate::ai_clients::grok::GrokClient::from_env() {
-            Ok(grok) if grok.is_configured() => {
-                info!(
-                    agent = sports_cfg.agent_id,
-                    "grok live search enabled for sports agent"
-                );
-                agent = agent.with_grok(grok);
-            }
-            Ok(_) => {
-                warn!(
-                    agent = sports_cfg.agent_id,
-                    "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    agent = sports_cfg.agent_id,
-                    error = %e,
-                    "failed to initialize GrokClient; continuing without Grok"
-                );
-            }
-        }
-    }
-    spawn_trading_agent_task(agent, coordinator, handle, agent_handles, "sports");
-    Ok(())
-}
-
-pub(super) async fn spawn_politics_trading_agent(
-    config: &PlatformBootstrapConfig,
-    app_config: &AppConfig,
-    coordinator: &mut Coordinator,
-    handle: &CoordinatorHandle,
-    pm_client: Option<&PolymarketClient>,
-    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
-) -> Result<()> {
-    let Some(ee_cfg) = app_config.event_edge_agent.as_ref() else {
-        return Ok(());
-    };
-
-    let politics_cfg = config.politics.clone();
-    let pm_client_ref = pm_client.ok_or_else(|| {
-        crate::error::PloyError::Validation(
-            "politics domain requires a Polymarket client, but none was initialized".to_string(),
-        )
-    })?;
-    let core = EventEdgeCore::new(pm_client_ref.clone(), ee_cfg.clone());
-    let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);
-    spawn_trading_agent_task(agent, coordinator, handle, agent_handles, "politics");
     Ok(())
 }

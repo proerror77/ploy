@@ -950,6 +950,7 @@ async fn handle_strategy_actions_runtime(
 pub(crate) async fn run_managed_strategy_runtime(
     strategy_label: &str,
     agent_id: &str,
+    domain: Domain,
     strategy_config_toml: String,
     dry_run: bool,
     pm_client: PolymarketClient,
@@ -1168,7 +1169,7 @@ pub(crate) async fn run_managed_strategy_runtime(
                         let snapshot = AgentSnapshot {
                             agent_id: agent_id.to_string(),
                             name: strategy_label.to_string(),
-                            domain: Domain::Crypto,
+                            domain,
                             status,
                             position_count,
                             exposure: rust_decimal::Decimal::ZERO,

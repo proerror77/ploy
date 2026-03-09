@@ -48,6 +48,40 @@ Wrap `EventEdgeCore` behind the canonical `Strategy` trait inside `src/strategy/
 - 2026-03-09: Validation attempted:
   - `cargo test strategy::event_edge::strategy::tests --lib -- --nocapture`
   - `cargo check --lib`
+
+# Canonical Sports And Politics Runtime Cutover (2026-03-09)
+
+## Goal
+Retire the legacy `SportsTradingAgent` / `PoliticsTradingAgent` startup paths from platform bootstrap, move both domains onto canonical managed strategy runtime entrypoints, and wire `event_edge` + `nba_comeback` into `StrategyFactory`.
+
+## Tasks
+
+- [x] Add canonical runtime config builders for `event_edge` and `nba_comeback` under `bootstrap/strategy_deployments.rs`.
+- [x] Rewire `bootstrap.rs` so sports and politics spawn through `spawn_managed_strategy_runtime_task(...)` instead of legacy trading-agent startup.
+- [x] Keep sports quote/orderbook collector support alive by downgrading the old sports bootstrap helper into a runtime-support helper instead of deleting the whole support slice.
+- [x] Register `event_edge` and `nba_comeback` in `StrategyFactory` and strategy availability metadata.
+- [x] Re-open politics in `platform_mode` when no explicit domain filter is applied, while still filtering it out when the CLI only selects crypto/sports.
+- [x] Add or update targeted tests for the new runtime config builders and platform-mode gating.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer calls legacy sports/politics agent spawners.
+- [x] Confirm `event_edge` and `nba_comeback` now have canonical `StrategyFactory` entries.
+- [x] Confirm sports-specific market-data persistence support still initializes separately from strategy runtime ownership.
+- [x] Confirm the new builders emit canonical `[strategy] + [event_edge|nba_comeback]` TOML.
+
+## Progress notes
+
+- 2026-03-09: Added canonical runtime builders for `event_edge` and `nba_comeback` in [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs).
+- 2026-03-09: Rewired [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so `Domain::Sports` and `Domain::Politics` now use managed strategy runtime spawns instead of `SportsTradingAgent` / `PoliticsTradingAgent`.
+- 2026-03-09: Downgraded the old sports runtime helper into [runtime_spawns.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_spawns.rs) `prepare_sports_runtime_support(...)`, preserving PM WS/collector/persistence setup while removing strategy ownership.
+- 2026-03-09: Registered `event_edge` and `nba_comeback` in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs) and exported `NbaComebackStrategy` from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/mod.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test strategy::event_edge::strategy --lib -- --nocapture`
+  - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
+  - `cargo test build_event_edge_runtime_config_ --lib -- --nocapture`
+  - `cargo test build_nba_comeback_runtime_config_ --lib -- --nocapture`
 - 2026-03-09: Both validations were blocked by unrelated in-flight errors outside this slice, currently in `src/coordinator/bootstrap.rs` and `src/strategy/nba_comeback/*`. The latest `cargo check --lib` output no longer reported `event_edge` compile errors after fixing the local wrapper issues.
 
 # Strategy Metadata And Momentum State Cleanup (2026-03-09)
