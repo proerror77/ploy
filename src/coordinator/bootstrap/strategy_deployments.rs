@@ -861,10 +861,10 @@ pub(super) fn apply_strategy_deployments(
     cfg.enable_crypto_momentum = false;
     cfg.enable_crypto_pattern_memory = false;
     cfg.enable_crypto_split_arb = false;
-    cfg.legacy_crypto.enable_lob_ml = false;
+    cfg.managed_crypto.enable_lob_ml = false;
     #[cfg(feature = "rl")]
     {
-        cfg.legacy_crypto.enable_rl_policy = false;
+        cfg.managed_crypto.enable_rl_policy = false;
     }
     cfg.enable_sports = false;
     cfg.enable_politics = false;
@@ -895,12 +895,12 @@ pub(super) fn apply_strategy_deployments(
                         true
                     }
                     CryptoStrategyKind::LobMl => {
-                        cfg.legacy_crypto.enable_lob_ml = true;
+                        cfg.managed_crypto.enable_lob_ml = true;
                         true
                     }
                     #[cfg(feature = "rl")]
                     CryptoStrategyKind::RlPolicy => {
-                        cfg.legacy_crypto.enable_rl_policy = true;
+                        cfg.managed_crypto.enable_rl_policy = true;
                         true
                     }
                     CryptoStrategyKind::Unknown => {
@@ -931,10 +931,10 @@ pub(super) fn apply_strategy_deployments(
         let mut sorted: Vec<String> = coins.into_iter().collect();
         sorted.sort();
         cfg.crypto.coins = sorted.clone();
-        cfg.legacy_crypto.lob_ml.coins = sorted.clone();
+        cfg.managed_crypto.lob_ml.coins = sorted.clone();
         #[cfg(feature = "rl")]
         {
-            cfg.legacy_crypto.rl_policy.coins = sorted.clone();
+            cfg.managed_crypto.rl_policy.coins = sorted.clone();
         }
     }
 
@@ -952,7 +952,7 @@ pub(super) fn apply_strategy_deployments(
         );
     }
     #[cfg(feature = "rl")]
-    let crypto_rl_policy_enabled = cfg.legacy_crypto.enable_rl_policy;
+    let crypto_rl_policy_enabled = cfg.managed_crypto.enable_rl_policy;
     #[cfg(not(feature = "rl"))]
     let crypto_rl_policy_enabled = false;
 
@@ -966,7 +966,7 @@ pub(super) fn apply_strategy_deployments(
         crypto_momentum = cfg.enable_crypto_momentum,
         crypto_pattern_memory = cfg.enable_crypto_pattern_memory,
         crypto_split_arb = cfg.enable_crypto_split_arb,
-        crypto_lob_ml = cfg.legacy_crypto.enable_lob_ml,
+        crypto_lob_ml = cfg.managed_crypto.enable_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = cfg.enable_sports,
         politics = cfg.enable_politics,

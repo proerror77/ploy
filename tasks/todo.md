@@ -1,3 +1,34 @@
+# Managed Crypto Bootstrap Config Rename (2026-03-09)
+
+## Goal
+Remove the last `legacy_crypto` ownership surface from bootstrap config now that `crypto_lob_ml` and `crypto_rl_policy` launch through canonical managed strategy runtimes.
+
+## Tasks
+
+- [x] Rename the bootstrap module from `legacy_crypto.rs` to `managed_crypto.rs`.
+- [x] Rename `PlatformBootstrapConfig.legacy_crypto` to `managed_crypto` while preserving a serde alias for backward compatibility.
+- [x] Rewire deployment mapping, bootstrap startup, and `platform_mode` filtering to use `managed_crypto`.
+- [x] Re-run compile plus focused bootstrap/platform-mode regressions after the config ownership rename.
+
+## Review
+
+- [x] Confirm code references no longer use `legacy_crypto` as an active runtime/config owner.
+- [x] Confirm `managed_crypto.rs` now owns the crypto preview runtime env hydration.
+- [x] Confirm compile/tests pass and only the serde alias remains for backward compatibility.
+
+## Progress notes
+
+- 2026-03-09: Renamed [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs) to [managed_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto.rs) and updated the env hydration entrypoint to `apply_managed_crypto_runtime_env(...)`.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs), [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs), and [platform_mode.rs](/Users/proerror/Documents/ploy/src/main_modes/platform_mode.rs) so the canonical preview wrappers no longer sit behind a `legacy_crypto` field name.
+- 2026-03-09: Preserved `#[serde(alias = "legacy_crypto")]` on [PlatformBootstrapConfig](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so any serialized bootstrap config using the old field can still deserialize during the transition.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_deprecated_price_exits_env --lib -- --nocapture`
+  - `cargo test pattern_memory_deployment_does_not_enable_lob_ml -- --nocapture`
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl build_crypto_rl_policy_runtime_config_preserves_model_controls --lib -- --nocapture`
+
 # Crypto Preview Managed Runtime Launch (2026-03-09)
 
 ## Goal
