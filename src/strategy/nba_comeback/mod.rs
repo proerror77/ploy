@@ -16,6 +16,7 @@ pub mod nba_entry;
 pub mod nba_exit;
 pub mod nba_filters;
 pub mod nba_state_machine;
+pub mod strategy;
 pub mod nba_winprob;
 
 pub use comeback_stats::{ComebackStatsProvider, TeamComebackProfile};
@@ -25,3 +26,4 @@ pub use core::{
 pub use espn::{EspnClient, GameStatus, LiveGame, QuarterScore};
 pub use grok_decision::{GrokDecision, RiskMetrics, UnifiedDecisionRequest};
 pub use grok_intel::{GrokGameIntel, GrokSignalEvaluator, GrokTradeSignal};
+pub use strategy::{NbaComebackAdapter, NbaComebackMarketRegistration, NbaComebackStrategy};
