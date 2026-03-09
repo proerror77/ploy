@@ -166,7 +166,6 @@ pub use dump_hedge::{
     PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
 };
 pub use event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
-pub use event_edge::{run_event_edge, EventEdgeConfig};
 pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
 pub use gamma_scalping::{
@@ -272,4 +271,4 @@ pub use core::{
 pub use crypto::{run_crypto_split_arb, CryptoMarketDiscovery, CryptoSplitArbConfig};
 
 // Sports strategies
-pub use sports::{run_sports_split_arb, SportsLeague, SportsMarketDiscovery, SportsSplitArbConfig};
+pub use sports::{SportsLeague, SportsMarketDiscovery};

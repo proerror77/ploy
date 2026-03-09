@@ -1,3 +1,34 @@
+# Standalone Domain Runtime Retirement (2026-03-09)
+
+## Goal
+Retire the remaining standalone domain runtime entrypoints so `event_edge`, `nba_comeback`, and sports split-arb no longer present alternate live/runtime paths beside the managed strategy runtime.
+
+## Tasks
+
+- [x] Remove the standalone `event_edge` runner/config surface and keep only the canonical `EventEdgeStrategy`.
+- [x] Retire the standalone `ploy strategy nba-comeback` loop and replace it with a compatibility error that points operators to managed deployments.
+- [x] Retire the standalone `ploy sports split-arb` loop and delete the old sports runner module.
+- [x] Re-run compile and focused canonical strategy tests after the entrypoint cleanup.
+
+## Review
+
+- [x] Confirm there are no remaining source references to `run_event_edge`, `EventEdgeConfig`, `run_sports_split_arb`, or `SportsSplitArbConfig`.
+- [x] Confirm `event_edge` and `nba_comeback` canonical `Strategy` implementations still compile and pass focused tests.
+- [x] Confirm the remaining CLI entrypoints fail fast with explicit retirement guidance instead of spinning their own live loops.
+
+## Progress notes
+
+- 2026-03-09: Removed the standalone `EventEdgeConfig` + `run_event_edge(...)` surface from [event_edge/mod.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/mod.rs) and stopped re-exporting it from [strategy/mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-09: Deleted [runner.rs](/Users/proerror/Documents/ploy/src/strategy/sports/runner.rs), shrank [sports/mod.rs](/Users/proerror/Documents/ploy/src/strategy/sports/mod.rs) to discovery-only exports, and changed [sports.rs](/Users/proerror/Documents/ploy/src/main_commands/sports.rs) to return an explicit retirement error instead of running a standalone sports split-arb loop.
+- 2026-03-09: Replaced the standalone NBA CLI loop in [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) with a direct retirement error and marked the CLI/runtime help text as deprecated in [runtime.rs](/Users/proerror/Documents/ploy/src/cli/runtime.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo check`
+  - `cargo test test_strategy_manager_creation --lib -- --nocapture`
+  - `cargo test strategy::event_edge::strategy::tests --lib -- --nocapture`
+  - `cargo test strategy::nba_comeback::strategy::tests --lib -- --nocapture`
+
 # Bootstrap Config Extraction (2026-03-09)
 
 ## Goal

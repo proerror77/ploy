@@ -322,7 +322,7 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
-    /// Run the NBA Q3→Q4 comeback trading agent standalone
+    /// Deprecated: standalone NBA comeback runtime (use managed deployments)
     NbaComeback {
         /// Config file path
         #[arg(short, long)]
@@ -3495,148 +3495,11 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
     winners == 1 && losers == prices.len().saturating_sub(1)
 }
 
-/// Run the NBA comeback agent standalone
-async fn run_nba_comeback(config: Option<PathBuf>, dry_run: bool) -> Result<()> {
-    use crate::strategy::nba_comeback::NbaComebackStrategy;
-    use crate::strategy::{AlertLevel, Strategy, StrategyAction, StrategyEventType};
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  NBA Q3→Q4 Comeback Strategy                                 ║\x1b[0m");
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-
-    let app_config = match config.as_ref() {
-        Some(path) => crate::config::AppConfig::load_from(path),
-        None => crate::config::AppConfig::load(),
-    }
-    .context("Failed to load config")?;
-
-    let nba_cfg = app_config.nba_comeback.unwrap_or_else(|| {
-        info!("No [nba_comeback] in config, using defaults");
-        crate::config::NbaComebackConfig {
-            enabled: true,
-            min_edge: rust_decimal::Decimal::new(5, 2),
-            max_entry_price: rust_decimal::Decimal::new(75, 2),
-            shares: 50,
-            cooldown_secs: 300,
-            max_daily_spend_usd: rust_decimal::Decimal::new(100, 0),
-            min_deficit: 1,
-            max_deficit: 15,
-            target_quarter: 3,
-            espn_poll_interval_secs: 30,
-            min_comeback_rate: 0.15,
-            season: "2025-26".to_string(),
-            grok_enabled: false,
-            grok_interval_secs: 300,
-            grok_min_edge: rust_decimal::Decimal::new(8, 2),
-            grok_min_confidence: 0.6,
-            grok_decision_cooldown_secs: 60,
-            grok_fallback_enabled: true,
-            min_reward_risk_ratio: 4.0,
-            min_expected_value: 0.05,
-            kelly_fraction_cap: 0.25,
-            performance_daily_loss_limit_usd: rust_decimal::Decimal::new(30, 0),
-            performance_min_settled_trades: 10,
-            performance_min_win_rate: 0.45,
-            performance_low_winrate_multiplier: 0.60,
-            performance_loss_streak_threshold: 3,
-            performance_loss_streak_multiplier: 0.50,
-            scaling_enabled: false,
-            scaling_max_adds: 3,
-            scaling_min_price_drop_pct: 5.0,
-            scaling_max_game_exposure_usd: rust_decimal::Decimal::new(50, 0),
-            scaling_min_comeback_retention: 0.70,
-            scaling_min_time_remaining_mins: 8.0,
-            early_exit_enabled: true,
-            early_exit_take_profit_pct: 15.0,
-            early_exit_stop_loss_pct: 20.0,
-        }
-    });
-
-    println!("  Season: {}", nba_cfg.season);
-    println!("  Min edge: {}", nba_cfg.min_edge);
-    println!("  Max entry: {}", nba_cfg.max_entry_price);
-    println!("  Shares: {}", nba_cfg.shares);
-    println!("  Target quarter: Q{}", nba_cfg.target_quarter);
-    println!("  ESPN poll interval: {}s", nba_cfg.espn_poll_interval_secs);
-    println!(
-        "  Min comeback rate: {:.0}%",
-        nba_cfg.min_comeback_rate * 100.0
-    );
-    println!("  Dry run: {}", dry_run);
-    println!();
-
-    let mut strategy = NbaComebackStrategy::from_config(
-        "nba_cli".to_string(),
-        nba_cfg.clone(),
-        dry_run,
-        Some(app_config.database.url.as_str()),
+/// The standalone NBA comeback runtime has been retired in favor of managed deployments.
+async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
+    anyhow::bail!(
+        "standalone `ploy strategy nba-comeback` runtime is retired; use canonical managed strategy deployments via `ploy platform start`"
     )
-    .context("Failed to build NBA comeback strategy")?;
-
-    println!(
-        "  \x1b[32m✓\x1b[0m Strategy ready — scanning every {}s",
-        nba_cfg.espn_poll_interval_secs
-    );
-    println!("\nPress Ctrl+C to stop...\n");
-
-    let interval = std::time::Duration::from_secs(nba_cfg.espn_poll_interval_secs);
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n\x1b[33m⚠ Shutdown signal received\x1b[0m");
-                for action in strategy.shutdown().await? {
-                    if let StrategyAction::Alert { level, message } = action {
-                        let level = match level {
-                            AlertLevel::Info => "info",
-                            AlertLevel::Warning => "warn",
-                            AlertLevel::Error => "error",
-                            AlertLevel::Critical => "critical",
-                        };
-                        println!("  [{}] {}", level, message);
-                    }
-                }
-                println!("\x1b[32m✓ Strategy stopped\x1b[0m");
-                break;
-            }
-            _ = tokio::time::sleep(interval) => {
-                let actions = strategy.on_tick(chrono::Utc::now()).await?;
-                if !actions.is_empty() {
-                    for action in actions {
-                        match action {
-                            StrategyAction::LogEvent { event } => {
-                                let prefix = match event.event_type {
-                                    StrategyEventType::SignalDetected => "📡 SIGNAL",
-                                    StrategyEventType::OrderFilled => "✅ FILL",
-                                    _ => "ℹ EVENT",
-                                };
-                                println!("  \x1b[36m{}: {}\x1b[0m", prefix, event.message);
-                            }
-                            StrategyAction::SubmitIntent { intent } => {
-                                println!(
-                                    "  \x1b[36m📤 ORDER: {} shares @ {} token={} client_id={}\x1b[0m",
-                                    intent.shares,
-                                    intent.limit_price,
-                                    intent.token_id,
-                                    intent.client_order_id,
-                                );
-                            }
-                            StrategyAction::Alert { level, message } => {
-                                let level = match level {
-                                    AlertLevel::Info => "info",
-                                    AlertLevel::Warning => "warn",
-                                    AlertLevel::Error => "error",
-                                    AlertLevel::Critical => "critical",
-                                };
-                                println!("  [{}] {}", level, message);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────
