@@ -2890,6 +2890,7 @@ Finish the next large structural wave by shrinking the remaining core ownership 
 
 - 2026-03-10: Reserved mainline ownership for `src/coordinator/strategy_runtime.rs`; parallel sidecar ownership goes to `src/platform/risk.rs` and `src/strategy/adapters.rs`.
 - 2026-03-10: Added [observability.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/observability.rs) and [order_store.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/order_store.rs), moving managed-runtime signal-history persistence plus runtime order store/normalization helpers out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs).
+- 2026-03-10: Added [actions.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions.rs) and moved the managed runtime action-dispatch / poll-update loop out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), leaving the top-level file focused on runtime assembly, feed wiring, and command handling.
 - 2026-03-10: Validation passed:
   - `cargo check --lib`
   - `cargo test persist_runtime_order_ --lib -- --nocapture`
