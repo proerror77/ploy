@@ -1,3 +1,33 @@
+# Legacy Crypto Bootstrap Config Collapse (2026-03-09)
+
+## Goal
+Move the remaining legacy crypto runtime knobs under one explicit compatibility subtree so `PlatformBootstrapConfig` no longer owns `lob_ml` / `rl_policy` as top-level bootstrap fields, and `legacy_crypto.rs` no longer needs the entire bootstrap config just to hydrate env vars or spawn compatibility runtimes.
+
+## Tasks
+
+- [x] Introduce a dedicated `LegacyCryptoRuntimeConfig` under `bootstrap/legacy_crypto.rs`.
+- [x] Rewire `PlatformBootstrapConfig` to hold `legacy_crypto` instead of top-level `enable_crypto_lob_ml` / `enable_crypto_rl_policy` / config fields.
+- [x] Change legacy crypto env hydration to take `&CryptoTradingConfig` plus `&mut LegacyCryptoRuntimeConfig` instead of the whole bootstrap config.
+- [x] Change legacy crypto runtime spawning to take `&LegacyCryptoRuntimeConfig` instead of the whole bootstrap config.
+- [x] Update platform-mode filters and bootstrap tests to use the nested compatibility config.
+- [x] Re-run compile plus the narrow bootstrap/platform regression tests for the moved ownership.
+
+## Review
+
+- [x] Confirm `PlatformBootstrapConfig` no longer exposes legacy crypto runtime knobs as top-level fields.
+- [x] Confirm `legacy_crypto.rs` no longer depends on the entire bootstrap config for env parsing or runtime spawn decisions.
+- [x] Confirm deployment routing still toggles legacy crypto compatibility through `cfg.legacy_crypto.*`.
+- [x] Confirm compile and narrow regression tests pass after the move.
+
+## Progress notes
+
+- 2026-03-09: Added nested legacy-crypto ownership in [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) and rewired [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs) to hydrate/spawn from `CryptoTradingConfig + LegacyCryptoRuntimeConfig` instead of the full bootstrap config.
+- 2026-03-09: Updated [platform_mode.rs](/Users/proerror/Documents/ploy/src/main_modes/platform_mode.rs) and bootstrap tests so crypto domain filtering and legacy env assertions now target `cfg.legacy_crypto`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test pattern_memory_deployment_does_not_enable_lob_ml -- --nocapture`
+
 # Bootstrap Support Helper Extraction (2026-03-09)
 
 ## Goal

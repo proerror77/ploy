@@ -213,3 +213,8 @@
 
 - Pattern: Managed runtime orders can silently lose gateway/idempotency guarantees if the strategy-generated `client_order_id` is not propagated into the actual `OrderRequest`.
 - Rule: For coordinator-managed order submission, the strategy-generated action ID must be copied into both `client_order_id` and `idempotency_key` before execution or persistence. Add a regression test for that normalization path.
+
+## 2026-03-09
+
+- Pattern: During architectural cleanup, the user does not want a stream of tiny isolated refactors with frequent stop-and-report pauses; that makes structural progress look smaller than it is and slows down legacy retirement.
+- Rule: For active refactor sessions, batch work into larger ownership cuts, keep multiple agents busy on non-overlapping slices, and only stop at natural atomic checkpoints (validated commit boundaries), not after every small extraction.
