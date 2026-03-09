@@ -1,3 +1,30 @@
+# Bootstrap OpenClaw Spawn Extraction (2026-03-09)
+
+## Goal
+Move the OpenClaw-specific startup branch out of the main bootstrap flow so `bootstrap.rs` delegates governance-plane wiring instead of inlining it.
+
+## Tasks
+
+- [x] Extract the OpenClaw enable/register/spawn block into a dedicated helper.
+- [x] Keep the helper scoped to OpenClaw only, without changing other bootstrap runtime branches.
+- [x] Run targeted compile/test validation for bootstrap config handling and coordinator governance state.
+
+## Review
+
+- [x] Confirm the main bootstrap flow no longer inlines OpenClaw websocket/register/spawn wiring.
+- [x] Confirm OpenClaw startup behavior and logging remain unchanged after extraction.
+- [x] Confirm no other bootstrap runtime branch is altered by this slice.
+
+## Progress notes
+
+- 2026-03-09: After moving OpenClaw onto `GovernanceContext`, its bootstrap branch became a clean extraction seam inside `bootstrap.rs`.
+- 2026-03-09: Added `spawn_openclaw_governance_agent(...)` to encapsulate OpenClaw websocket setup, coordinator registration, governance-context construction, and task spawn.
+- 2026-03-09: Replaced the inline OpenClaw branch in the main bootstrap flow with a single helper call, leaving other bootstrap runtime branches untouched.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+
 # Trading Agent Context Governance Trim (2026-03-09)
 
 ## Goal

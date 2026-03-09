@@ -24,7 +24,7 @@ use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 use crate::ai_clients::PolymarketSportsClient;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
-use crate::coordinator::{Coordinator, CoordinatorConfig, GlobalState};
+use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
@@ -67,6 +67,60 @@ async fn ensure_binance_price_ticks_table(pool: &PgPool) -> Result<()> {
 
 async fn ensure_binance_lob_ticks_table(pool: &PgPool) -> Result<()> {
     crate::platform::persistence_schema::ensure_binance_lob_ticks_table(pool).await
+}
+
+fn spawn_openclaw_governance_agent(
+    config: &PlatformBootstrapConfig,
+    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    let openclaw_enabled = env_bool(
+        "PLOY_OPENCLAW__ENABLED",
+        config.enable_openclaw || config.openclaw.enabled,
+    );
+    if !openclaw_enabled {
+        return;
+    }
+
+    let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
+    let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
+    oc_binance_ws.set_freshness(Arc::clone(freshness));
+
+    let oc_ws = oc_binance_ws.clone();
+    tokio::spawn(async move {
+        if let Err(e) = oc_ws.run().await {
+            tracing::error!(error = %e, "openclaw binance ws exited");
+        }
+    });
+
+    let oc_risk_params = AgentRiskParams {
+        max_order_value: Decimal::ZERO,
+        max_total_exposure: Decimal::ZERO,
+        max_unhedged_positions: 0,
+        max_daily_loss: Decimal::ZERO,
+        allow_overnight: false,
+        allowed_markets: vec![],
+    };
+    let oc_agent_id = config.openclaw.agent_id.clone();
+    let cmd_rx = coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
+
+    let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);
+    let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
+    let ctx = GovernanceContext::new(oc_agent_id.clone(), Domain::Custom(0), handle.clone(), cmd_rx);
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = agent.run(ctx).await {
+            tracing::error!(agent = "openclaw", error = %e, "openclaw meta-agent exited with error");
+        }
+    });
+    agent_handles.push(jh);
+    info!(
+        agent_id = %oc_agent_id,
+        regime_tick = config.openclaw.regime_tick_secs,
+        "openclaw meta-agent spawned"
+    );
 }
 
 pub(crate) async fn ensure_clob_orderbook_snapshots_table(pool: &PgPool) -> Result<()> {
@@ -5810,59 +5864,13 @@ pub async fn start_platform(
     }
 
     // --- OpenClaw meta-agent (Layer 3 orchestrator) ---
-    let openclaw_enabled = env_bool(
-        "PLOY_OPENCLAW__ENABLED",
-        config.enable_openclaw || config.openclaw.enabled,
+    spawn_openclaw_governance_agent(
+        &config,
+        &freshness,
+        &mut coordinator,
+        &handle,
+        &mut agent_handles,
     );
-    if openclaw_enabled {
-        // OpenClaw needs a BinanceWebSocket for regime detection.
-        // If crypto is enabled, a binance_ws was already created above and lives in a local scope.
-        // We create a dedicated one for OpenClaw using the configured BTC symbol.
-        let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
-        let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
-        oc_binance_ws.set_freshness(Arc::clone(&freshness));
-
-        // Spawn Binance WS feed for OpenClaw
-        let oc_ws = oc_binance_ws.clone();
-        tokio::spawn(async move {
-            if let Err(e) = oc_ws.run().await {
-                tracing::error!(error = %e, "openclaw binance ws exited");
-            }
-        });
-
-        let oc_risk_params = AgentRiskParams {
-            max_order_value: Decimal::ZERO,
-            max_total_exposure: Decimal::ZERO,
-            max_unhedged_positions: 0,
-            max_daily_loss: Decimal::ZERO,
-            allow_overnight: false,
-            allowed_markets: vec![],
-        };
-        let oc_agent_id = config.openclaw.agent_id.clone();
-        let cmd_rx =
-            coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
-
-        let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws.clone());
-        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
-        let ctx = GovernanceContext::new(
-            oc_agent_id.clone(),
-            Domain::Custom(0),
-            handle.clone(),
-            cmd_rx,
-        );
-
-        let jh = tokio::spawn(async move {
-            if let Err(e) = agent.run(ctx).await {
-                tracing::error!(agent = "openclaw", error = %e, "openclaw meta-agent exited with error");
-            }
-        });
-        agent_handles.push(jh);
-        info!(
-            agent_id = %oc_agent_id,
-            regime_tick = config.openclaw.regime_tick_secs,
-            "openclaw meta-agent spawned"
-        );
-    }
 
     // ── Auto-claimer background task ──
     // Ensure single account-level daemon (deduped) and avoid spawning a second
