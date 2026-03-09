@@ -11,6 +11,7 @@ pub mod command;
 pub mod config;
 pub mod coordinator;
 mod governance;
+mod journal;
 pub mod state;
 pub mod strategy_runtime;
 

@@ -11,15 +11,13 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
-use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
     AgentRiskParams, Domain, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult,
@@ -42,261 +40,13 @@ use super::governance::{
     load_governance_policy_history, persist_governance_policy, GovernanceController,
     GovernancePolicy, IngressMode,
 };
+use super::journal::ExecutionJournal;
 use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
 #[derive(Debug, Clone)]
 struct AgentCommandChannel {
     domain: Domain,
     tx: mpsc::Sender<CoordinatorCommand>,
-}
-
-fn parse_persisted_domain(raw: &str) -> Option<Domain> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return None;
-    }
-    match normalized.as_str() {
-        "sports" => Some(Domain::Sports),
-        "crypto" => Some(Domain::Crypto),
-        "politics" => Some(Domain::Politics),
-        "economics" => Some(Domain::Economics),
-        _ => {
-            if let Some(raw_id) = normalized.strip_prefix("custom:") {
-                return raw_id.trim().parse::<u32>().ok().map(Domain::Custom);
-            }
-            if let Some(raw_id) = normalized
-                .strip_prefix("custom(")
-                .and_then(|v| v.strip_suffix(')'))
-            {
-                return raw_id.trim().parse::<u32>().ok().map(Domain::Custom);
-            }
-            None
-        }
-    }
-}
-
-fn parse_persisted_side(raw: &str) -> Option<Side> {
-    match raw.trim().to_ascii_uppercase().as_str() {
-        "UP" | "YES" => Some(Side::Up),
-        "DOWN" | "NO" => Some(Side::Down),
-        _ => None,
-    }
-}
-
-fn string_metadata_from_json(
-    raw: Option<sqlx::types::Json<serde_json::Value>>,
-) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    let Some(sqlx::types::Json(value)) = raw else {
-        return metadata;
-    };
-    let Some(object) = value.as_object() else {
-        return metadata;
-    };
-
-    for (key, value) in object {
-        if value.is_null() {
-            continue;
-        }
-        if let Some(v) = value.as_str() {
-            metadata.insert(key.clone(), v.to_string());
-        } else {
-            metadata.insert(key.clone(), value.to_string());
-        }
-    }
-
-    metadata
-}
-
-#[derive(Debug)]
-struct PersistedExecutionFill {
-    intent_id: Uuid,
-    agent_id: String,
-    domain: Domain,
-    market_slug: String,
-    token_id: String,
-    side: Side,
-    is_buy: bool,
-    filled_shares: u64,
-    fill_price: Decimal,
-    executed_at: DateTime<Utc>,
-    metadata: HashMap<String, String>,
-}
-
-#[derive(Debug)]
-struct PersistedExecutionOutcome {
-    agent_id: String,
-    executed_at: DateTime<Utc>,
-    is_failure: bool,
-}
-
-fn execution_error_is_failure(error: Option<&str>) -> bool {
-    error.map(str::trim).map(|v| !v.is_empty()).unwrap_or(false)
-}
-
-async fn load_execution_log_fills(
-    pool: &PgPool,
-    account_id: &str,
-    dry_run: bool,
-) -> Result<Vec<PersistedExecutionFill>> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            String,
-            String,
-            String,
-            bool,
-            i64,
-            Option<Decimal>,
-            Decimal,
-            DateTime<Utc>,
-            Option<sqlx::types::Json<serde_json::Value>>,
-        ),
-    >(
-        r#"
-        SELECT
-            intent_id,
-            agent_id,
-            domain,
-            market_slug,
-            token_id,
-            market_side,
-            is_buy,
-            filled_shares,
-            avg_fill_price,
-            limit_price,
-            executed_at,
-            metadata
-        FROM agent_order_executions
-        WHERE account_id = $1
-          AND dry_run = $2
-          AND filled_shares > 0
-        ORDER BY executed_at ASC, id ASC
-        "#,
-    )
-    .bind(account_id)
-    .bind(dry_run)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| crate::error::PloyError::Internal(format!("load execution log fills: {}", e)))?;
-
-    let mut fills = Vec::new();
-    for (
-        intent_id,
-        agent_id,
-        domain_raw,
-        market_slug,
-        token_id,
-        side_raw,
-        is_buy,
-        filled_shares_raw,
-        avg_fill_price,
-        limit_price,
-        executed_at,
-        metadata_raw,
-    ) in rows
-    {
-        let Some(domain) = parse_persisted_domain(&domain_raw) else {
-            warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                domain = %domain_raw,
-                "skipping execution-log row with unknown domain during restore"
-            );
-            continue;
-        };
-        let Some(side) = parse_persisted_side(&side_raw) else {
-            warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                side = %side_raw,
-                "skipping execution-log row with unknown side during restore"
-            );
-            continue;
-        };
-        let Ok(filled_shares) = u64::try_from(filled_shares_raw) else {
-            warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                filled_shares = filled_shares_raw,
-                "skipping execution-log row with invalid filled_shares during restore"
-            );
-            continue;
-        };
-        if filled_shares == 0 {
-            continue;
-        }
-        let fill_price = avg_fill_price.unwrap_or(limit_price);
-        if fill_price <= Decimal::ZERO {
-            warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                fill_price = %fill_price,
-                "skipping execution-log row with non-positive fill price during restore"
-            );
-            continue;
-        }
-
-        fills.push(PersistedExecutionFill {
-            intent_id,
-            agent_id,
-            domain,
-            market_slug,
-            token_id,
-            side,
-            is_buy,
-            filled_shares,
-            fill_price,
-            executed_at,
-            metadata: string_metadata_from_json(metadata_raw),
-        });
-    }
-
-    Ok(fills)
-}
-
-async fn load_execution_log_outcomes(
-    pool: &PgPool,
-    account_id: &str,
-    dry_run: bool,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-) -> Result<Vec<PersistedExecutionOutcome>> {
-    let rows = sqlx::query_as::<_, (String, DateTime<Utc>, Option<String>)>(
-        r#"
-        SELECT
-            agent_id,
-            executed_at,
-            error
-        FROM agent_order_executions
-        WHERE account_id = $1
-          AND dry_run = $2
-          AND executed_at >= $3
-          AND executed_at < $4
-        ORDER BY executed_at ASC, id ASC
-        "#,
-    )
-    .bind(account_id)
-    .bind(dry_run)
-    .bind(window_start)
-    .bind(window_end)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        crate::error::PloyError::Internal(format!("load execution log outcomes: {}", e))
-    })?;
-
-    Ok(rows
-        .into_iter()
-        .map(|(agent_id, executed_at, error)| PersistedExecutionOutcome {
-            agent_id,
-            executed_at,
-            is_failure: execution_error_is_failure(error.as_deref()),
-        })
-        .collect())
 }
 
 /// Clonable handle given to agents for submitting orders and state updates
@@ -639,7 +389,7 @@ pub struct Coordinator {
     positions: Arc<PositionAggregator>,
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
-    execution_log_pool: Option<PgPool>,
+    journal: ExecutionJournal,
     governance_store_pool: Option<PgPool>,
     governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
@@ -682,6 +432,7 @@ impl Coordinator {
         } else {
             account_id
         };
+        let journal = ExecutionJournal::new(account_id.clone());
 
         Self {
             config,
@@ -695,7 +446,7 @@ impl Coordinator {
             positions,
             executor,
             global_state,
-            execution_log_pool: None,
+            journal,
             governance_store_pool: None,
             governance,
             stale_heartbeat_warn_at,
@@ -711,55 +462,26 @@ impl Coordinator {
 
     /// Enable DB logging for order execution outcomes (including dry-run).
     pub fn set_execution_log_pool(&mut self, pool: PgPool) {
-        self.execution_log_pool = Some(pool);
+        self.journal.set_pool(pool);
     }
 
     /// Restore persisted risk runtime state (drawdown + daily pnl continuity).
     pub async fn restore_risk_runtime_state(&self) -> Result<()> {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
+        let Some(snapshot) = self.journal.load_risk_runtime_state().await? else {
             return Ok(());
         };
 
-        let row = sqlx::query(
-            r#"
-            SELECT
-                current_equity,
-                equity_peak,
-                current_drawdown,
-                max_drawdown_observed,
-                daily_pnl,
-                daily_date,
-                risk_state
-            FROM risk_runtime_state
-            WHERE account_id = $1
-            "#,
-        )
-        .bind(&self.account_id)
-        .fetch_optional(pool)
-        .await?;
+        self.risk_gate
+            .restore_drawdown_snapshot(snapshot.drawdown)
+            .await;
 
-        let Some(row) = row else {
-            return Ok(());
-        };
-
-        let snapshot = crate::platform::DrawdownSnapshot {
-            current_equity: row.try_get("current_equity").unwrap_or(Decimal::ZERO),
-            equity_peak: row.try_get("equity_peak").unwrap_or(Decimal::ZERO),
-            current_drawdown: row.try_get("current_drawdown").unwrap_or(Decimal::ZERO),
-            max_drawdown_observed: row
-                .try_get("max_drawdown_observed")
-                .unwrap_or(Decimal::ZERO),
-        };
-        self.risk_gate.restore_drawdown_snapshot(snapshot).await;
-
-        let daily_date: Option<chrono::NaiveDate> = row.try_get("daily_date").ok();
-        let daily_pnl: Decimal = row.try_get("daily_pnl").unwrap_or(Decimal::ZERO);
-        if daily_date == Some(Utc::now().date_naive()) {
-            self.risk_gate.restore_daily_pnl_for_today(daily_pnl).await;
+        if snapshot.daily_date == Some(Utc::now().date_naive()) {
+            self.risk_gate
+                .restore_daily_pnl_for_today(snapshot.daily_pnl)
+                .await;
         }
 
-        let risk_state_raw: String = row.try_get("risk_state").unwrap_or_default();
-        if risk_state_raw.eq_ignore_ascii_case("halted") {
+        if snapshot.risk_state_raw.eq_ignore_ascii_case("halted") {
             self.risk_gate
                 .trigger_circuit_breaker("restored persisted halted risk state")
                 .await;
@@ -767,8 +489,8 @@ impl Coordinator {
 
         info!(
             account_id = %self.account_id,
-            daily_pnl = %daily_pnl,
-            risk_state = %risk_state_raw,
+            daily_pnl = %snapshot.daily_pnl,
+            risk_state = %snapshot.risk_state_raw,
             "restored persisted risk runtime state"
         );
         Ok(())
@@ -803,10 +525,6 @@ impl Coordinator {
     ///
     /// This prevents cold-start underestimation of account exposure when a process restarts.
     pub async fn restore_runtime_state_from_execution_log(&self) -> Result<()> {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return Ok(());
-        };
-
         let today = Utc::now().date_naive();
         let window_start = DateTime::<Utc>::from_naive_utc_and_offset(
             today
@@ -817,10 +535,15 @@ impl Coordinator {
         let window_end = window_start + ChronoDuration::days(1);
         let dry_run = self.executor.is_dry_run();
 
-        let fills = load_execution_log_fills(pool, &self.account_id, dry_run).await?;
-        let outcomes_today =
-            load_execution_log_outcomes(pool, &self.account_id, dry_run, window_start, window_end)
-                .await?;
+        let Some(restore_data) = self
+            .journal
+            .load_execution_restore_data(dry_run, window_start, window_end)
+            .await?
+        else {
+            return Ok(());
+        };
+        let fills = restore_data.fills;
+        let outcomes_today = restore_data.outcomes_today;
 
         if fills.is_empty() && outcomes_today.is_empty() {
             return Ok(());
@@ -1051,7 +774,8 @@ impl Coordinator {
         }
 
         for intent in dropped {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
                 .await;
             self.settle_domain_failure(&intent).await;
         }
@@ -1251,7 +975,8 @@ impl Coordinator {
 
         if !self.is_domain_allowed(intent.domain) {
             let reason = format!("domain {} is not enabled for this runtime", intent.domain);
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1261,7 +986,8 @@ impl Coordinator {
         }
 
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1290,7 +1016,8 @@ impl Coordinator {
             if let Some(reason) =
                 sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
             {
-                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                self.journal
+                    .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                     .await;
                 warn!(
                     %agent_id, %intent_id, reason = %reason,
@@ -1305,7 +1032,8 @@ impl Coordinator {
                 "Coordinator ingress is {:?}; blocking BUY intent while paused/halted",
                 ingress_mode
             );
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1319,7 +1047,8 @@ impl Coordinator {
                     "Domain {:?} ingress is {:?}; blocking BUY intent while paused/halted",
                     intent.domain, domain_mode
                 );
-                self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                self.journal
+                    .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                     .await;
                 warn!(
                     %agent_id, %intent_id, reason = %reason,
@@ -1331,7 +1060,8 @@ impl Coordinator {
         // Per-agent pause check
         if intent.is_buy && self.governance.is_agent_paused(&intent.agent_id).await {
             let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1341,7 +1071,8 @@ impl Coordinator {
         }
 
         if let Some(reason) = self.check_governance_policy(&intent).await {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1360,7 +1091,8 @@ impl Coordinator {
             )
             .await
         {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1369,13 +1101,14 @@ impl Coordinator {
             return;
         }
 
-        self.persist_signal_from_intent(&intent).await;
+        self.journal.persist_signal_from_intent(&intent).await;
         if !intent.is_buy {
-            self.persist_exit_reason_intent(&intent).await;
+            self.journal.persist_exit_reason_intent(&intent).await;
         }
 
         if let Some(reason) = self.admission.check_duplicate_intent(&intent).await {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1389,7 +1122,8 @@ impl Coordinator {
             .apply_kelly_sizing(&self.capital_policy, &mut intent)
             .await
         {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1402,7 +1136,8 @@ impl Coordinator {
             .admission
             .apply_min_order_constraints(&mut intent, strategy_max_shares)
         {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+            self.journal
+                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
                 .await;
             warn!(
                 %agent_id, %intent_id, reason = %reason,
@@ -1417,13 +1152,14 @@ impl Coordinator {
             match self.risk_gate.check_order(&evaluated).await {
                 RiskCheckResult::Passed => {
                     if let Some(reason) = self.reserve_domain_capital(&evaluated).await {
-                        self.persist_risk_decision(
-                            &evaluated,
-                            "BLOCKED",
-                            Some(reason.clone()),
-                            adjusted.clone(),
-                        )
-                        .await;
+                        self.journal
+                            .persist_risk_decision(
+                                &evaluated,
+                                "BLOCKED",
+                                Some(reason.clone()),
+                                adjusted.clone(),
+                            )
+                            .await;
                         warn!(
                             %agent_id, %intent_id, reason = %reason,
                             "order blocked by domain allocator"
@@ -1431,7 +1167,8 @@ impl Coordinator {
                         return;
                     }
 
-                    self.persist_risk_decision(&evaluated, "PASSED", None, adjusted.clone())
+                    self.journal
+                        .persist_risk_decision(&evaluated, "PASSED", None, adjusted.clone())
                         .await;
                     let mut queue = self.order_queue.write().await;
                     match queue.enqueue(evaluated) {
@@ -1449,13 +1186,14 @@ impl Coordinator {
                     return;
                 }
                 RiskCheckResult::Blocked(reason) => {
-                    self.persist_risk_decision(
-                        &evaluated,
-                        "BLOCKED",
-                        Some(reason.to_string()),
-                        adjusted.clone(),
-                    )
-                    .await;
+                    self.journal
+                        .persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.to_string()),
+                            adjusted.clone(),
+                        )
+                        .await;
                     warn!(
                         %agent_id, %intent_id,
                         reason = ?reason,
@@ -1468,13 +1206,14 @@ impl Coordinator {
                     if suggestion.max_shares == 0 {
                         let reason =
                             format!("risk-gate suggested max_shares=0: {}", suggestion.reason);
-                        self.persist_risk_decision(
-                            &evaluated,
-                            "BLOCKED",
-                            Some(reason.clone()),
-                            adjusted.clone(),
-                        )
-                        .await;
+                        self.journal
+                            .persist_risk_decision(
+                                &evaluated,
+                                "BLOCKED",
+                                Some(reason.clone()),
+                                adjusted.clone(),
+                            )
+                            .await;
                         warn!(%agent_id, %intent_id, reason = %reason, "order blocked after risk adjustment");
                         return;
                     }
@@ -1493,7 +1232,8 @@ impl Coordinator {
         }
 
         let reason = "risk-gate adjustment loop exceeded max attempts".to_string();
-        self.persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
+        self.journal
+            .persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
             .await;
         warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
     }
@@ -1610,14 +1350,16 @@ impl Coordinator {
                         "order executed successfully"
                     );
 
-                    self.persist_execution(
-                        &intent,
-                        &request,
-                        Some(&result),
-                        None,
-                        Some(queue_delay_ms),
-                    )
-                    .await;
+                    self.journal
+                        .persist_execution(
+                            self.executor.is_dry_run(),
+                            &intent,
+                            &request,
+                            Some(&result),
+                            None,
+                            Some(queue_delay_ms),
+                        )
+                        .await;
 
                     let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
                     self.settle_domain_success(&intent, result.filled_shares, fill_price)
@@ -1679,14 +1421,16 @@ impl Coordinator {
                         "order execution failed"
                     );
 
-                    self.persist_execution(
-                        &intent,
-                        &request,
-                        None,
-                        Some(e.to_string()),
-                        Some(queue_delay_ms),
-                    )
-                    .await;
+                    self.journal
+                        .persist_execution(
+                            self.executor.is_dry_run(),
+                            &intent,
+                            &request,
+                            None,
+                            Some(e.to_string()),
+                            Some(queue_delay_ms),
+                        )
+                        .await;
 
                     self.risk_gate
                         .record_failure(&agent_id, &e.to_string())
@@ -1752,694 +1496,22 @@ impl Coordinator {
         realized_pnl
     }
 
-    async fn persist_execution(
-        &self,
-        intent: &OrderIntent,
-        request: &OrderRequest,
-        result: Option<&crate::strategy::executor::ExecutionResult>,
-        error_message: Option<String>,
-        queue_delay_ms: Option<i64>,
-    ) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let dry_run = self.executor.is_dry_run();
-
-        let (order_id, status, filled_shares, avg_fill_price, elapsed_ms) = match result {
-            Some(r) => (
-                Some(r.order_id.clone()),
-                format!("{:?}", r.status),
-                r.filled_shares as i64,
-                r.avg_fill_price,
-                Some(r.elapsed_ms as i64),
-            ),
-            None => (
-                None,
-                format!("{:?}", crate::domain::OrderStatus::Failed),
-                0,
-                None,
-                None,
-            ),
-        };
-
-        let metadata =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-        let config_hash = intent.metadata.get("config_hash").cloned();
-
-        let query = sqlx::query(
-            r#"
-            INSERT INTO agent_order_executions (
-                account_id,
-                agent_id,
-                intent_id,
-                domain,
-                market_slug,
-                token_id,
-                market_side,
-                is_buy,
-                shares,
-                limit_price,
-                order_id,
-                status,
-                filled_shares,
-                avg_fill_price,
-                elapsed_ms,
-                dry_run,
-                error,
-                intent_created_at,
-                metadata
-            )
-            VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
-            )
-            ON CONFLICT (intent_id) DO UPDATE SET
-                order_id = EXCLUDED.order_id,
-                status = EXCLUDED.status,
-                filled_shares = EXCLUDED.filled_shares,
-                avg_fill_price = EXCLUDED.avg_fill_price,
-                elapsed_ms = EXCLUDED.elapsed_ms,
-                dry_run = EXCLUDED.dry_run,
-                error = EXCLUDED.error,
-                metadata = EXCLUDED.metadata,
-                executed_at = NOW()
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(&intent.agent_id)
-        .bind(intent.intent_id)
-        .bind(intent.domain.to_string())
-        .bind(&intent.market_slug)
-        .bind(&intent.token_id)
-        .bind(intent.side.as_str())
-        .bind(intent.is_buy)
-        .bind(intent.shares as i64)
-        .bind(request.limit_price)
-        .bind(order_id)
-        .bind(status)
-        .bind(filled_shares)
-        .bind(avg_fill_price)
-        .bind(elapsed_ms)
-        .bind(dry_run)
-        .bind(error_message.clone())
-        .bind(intent.created_at)
-        .bind(sqlx::types::Json(metadata));
-
-        if let Err(e) = query.execute(pool).await {
-            warn!(
-                agent_id = %intent.agent_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist agent order execution"
-            );
-        }
-
-        self.persist_execution_analysis(intent, request, result, queue_delay_ms, config_hash)
-            .await;
-
-        if !intent.is_buy {
-            self.persist_exit_reason_execution(intent, result, error_message)
-                .await;
-        }
-    }
-
-    fn metadata_decimal(intent: &OrderIntent, key: &str) -> Option<Decimal> {
-        intent
-            .metadata
-            .get(key)
-            .and_then(|v| Decimal::from_str(v).ok())
-    }
-
-    async fn persist_signal_from_intent(&self, intent: &OrderIntent) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let strategy_id = intent
-            .metadata
-            .get("strategy")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let signal_type = intent
-            .metadata
-            .get("signal_type")
-            .cloned()
-            .unwrap_or_else(|| {
-                if intent.is_buy {
-                    "entry_intent".to_string()
-                } else {
-                    "exit_intent".to_string()
-                }
-            });
-        let symbol = intent.metadata.get("symbol").cloned();
-        let confidence = Self::metadata_decimal(intent, "signal_confidence");
-        let momentum_value = Self::metadata_decimal(intent, "signal_momentum_value");
-        let short_ma = Self::metadata_decimal(intent, "signal_short_ma");
-        let long_ma = Self::metadata_decimal(intent, "signal_long_ma");
-        let rolling_volatility = Self::metadata_decimal(intent, "signal_rolling_volatility");
-        let fair_value = Self::metadata_decimal(intent, "signal_fair_value");
-        let market_price = Self::metadata_decimal(intent, "signal_market_price");
-        let edge = Self::metadata_decimal(intent, "signal_edge");
-        let config_hash = intent.metadata.get("config_hash").cloned();
-        let context =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-
-        let result = sqlx::query(
-            r#"
-            INSERT INTO signal_history (
-                account_id, intent_id, agent_id, strategy_id, domain, signal_type, market_slug, token_id,
-                symbol, side, confidence, momentum_value, short_ma, long_ma, rolling_volatility,
-                fair_value, market_price, edge, config_hash, context
-            )
-            VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,
-                $9,$10,$11,$12,$13,$14,$15,
-                $16,$17,$18,$19,$20
-            )
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(intent.intent_id)
-        .bind(&intent.agent_id)
-        .bind(&strategy_id)
-        .bind(intent.domain.to_string())
-        .bind(&signal_type)
-        .bind(&intent.market_slug)
-        .bind(&intent.token_id)
-        .bind(symbol)
-        .bind(intent.side.as_str())
-        .bind(confidence)
-        .bind(momentum_value)
-        .bind(short_ma)
-        .bind(long_ma)
-        .bind(rolling_volatility)
-        .bind(fair_value)
-        .bind(market_price)
-        .bind(edge)
-        .bind(config_hash)
-        .bind(sqlx::types::Json(context))
-        .execute(pool)
-        .await;
-
-        if let Err(e) = result {
-            warn!(
-                agent_id = %intent.agent_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist signal history"
-            );
-        }
-    }
-
-    async fn persist_risk_decision(
-        &self,
-        intent: &OrderIntent,
-        decision: &str,
-        block_reason: Option<String>,
-        adjusted: Option<(u64, String)>,
-    ) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let (suggestion_max_shares, suggestion_reason) = adjusted
-            .map(|(shares, reason)| (Some(shares as i64), Some(reason)))
-            .unwrap_or((None, None));
-        let config_hash = intent.metadata.get("config_hash").cloned();
-        let metadata =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-
-        let result = sqlx::query(
-            r#"
-            INSERT INTO risk_gate_decisions (
-                account_id, intent_id, agent_id, domain, decision, block_reason, suggestion_max_shares,
-                suggestion_reason, notional_value, config_hash, metadata
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            ON CONFLICT (intent_id) DO UPDATE SET
-                decision = EXCLUDED.decision,
-                block_reason = EXCLUDED.block_reason,
-                suggestion_max_shares = EXCLUDED.suggestion_max_shares,
-                suggestion_reason = EXCLUDED.suggestion_reason,
-                notional_value = EXCLUDED.notional_value,
-                config_hash = EXCLUDED.config_hash,
-                metadata = EXCLUDED.metadata,
-                decided_at = NOW()
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(intent.intent_id)
-        .bind(&intent.agent_id)
-        .bind(intent.domain.to_string())
-        .bind(decision)
-        .bind(block_reason)
-        .bind(suggestion_max_shares)
-        .bind(suggestion_reason)
-        .bind(intent.notional_value())
-        .bind(config_hash)
-        .bind(sqlx::types::Json(metadata))
-        .execute(pool)
-        .await;
-
-        if let Err(e) = result {
-            warn!(
-                agent_id = %intent.agent_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist risk gate decision"
-            );
-        }
-    }
-
-    async fn persist_exit_reason_intent(&self, intent: &OrderIntent) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let reason_code = intent
-            .metadata
-            .get("exit_reason")
-            .or_else(|| intent.metadata.get("reason_code"))
-            .cloned()
-            .unwrap_or_else(|| "UNKNOWN".to_string());
-        let reason_detail = intent.metadata.get("exit_detail").cloned();
-        let entry_price = Self::metadata_decimal(intent, "entry_price");
-        let pnl_pct = Self::metadata_decimal(intent, "pnl_pct");
-        let config_hash = intent.metadata.get("config_hash").cloned();
-        let metadata =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-
-        let result = sqlx::query(
-            r#"
-            INSERT INTO exit_reasons (
-                account_id, intent_id, agent_id, domain, market_slug, token_id, market_side, reason_code,
-                reason_detail, entry_price, pnl_pct, status, config_hash, metadata
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'INTENT_SUBMITTED',$12,$13)
-            ON CONFLICT (intent_id) DO UPDATE SET
-                reason_code = EXCLUDED.reason_code,
-                reason_detail = EXCLUDED.reason_detail,
-                entry_price = COALESCE(EXCLUDED.entry_price, exit_reasons.entry_price),
-                pnl_pct = COALESCE(EXCLUDED.pnl_pct, exit_reasons.pnl_pct),
-                status = EXCLUDED.status,
-                config_hash = EXCLUDED.config_hash,
-                metadata = EXCLUDED.metadata,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(intent.intent_id)
-        .bind(&intent.agent_id)
-        .bind(intent.domain.to_string())
-        .bind(&intent.market_slug)
-        .bind(&intent.token_id)
-        .bind(intent.side.as_str())
-        .bind(reason_code)
-        .bind(reason_detail)
-        .bind(entry_price)
-        .bind(pnl_pct)
-        .bind(config_hash)
-        .bind(sqlx::types::Json(metadata))
-        .execute(pool)
-        .await;
-
-        if let Err(e) = result {
-            warn!(
-                agent_id = %intent.agent_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist exit reason intent"
-            );
-        }
-    }
-
-    async fn persist_exit_reason_execution(
-        &self,
-        intent: &OrderIntent,
-        result: Option<&crate::strategy::executor::ExecutionResult>,
-        error_message: Option<String>,
-    ) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let executed_price = result.and_then(|r| r.avg_fill_price);
-        let status = result
-            .map(|r| format!("{:?}", r.status))
-            .unwrap_or_else(|| "Failed".to_string());
-        let reason_detail = error_message.or_else(|| {
-            intent
-                .metadata
-                .get("exit_detail")
-                .cloned()
-                .or_else(|| intent.metadata.get("error").cloned())
-        });
-        let metadata =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-
-        let result = sqlx::query(
-            r#"
-            INSERT INTO exit_reasons (
-                account_id, intent_id, agent_id, domain, market_slug, token_id, market_side, reason_code,
-                reason_detail, entry_price, exit_price, pnl_pct, status, config_hash, metadata
-            )
-            VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,
-                $9,$10,$11,$12,$13,$14,$15
-            )
-            ON CONFLICT (intent_id) DO UPDATE SET
-                reason_detail = COALESCE(EXCLUDED.reason_detail, exit_reasons.reason_detail),
-                exit_price = COALESCE(EXCLUDED.exit_price, exit_reasons.exit_price),
-                pnl_pct = COALESCE(EXCLUDED.pnl_pct, exit_reasons.pnl_pct),
-                status = EXCLUDED.status,
-                config_hash = COALESCE(EXCLUDED.config_hash, exit_reasons.config_hash),
-                metadata = EXCLUDED.metadata,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(intent.intent_id)
-        .bind(&intent.agent_id)
-        .bind(intent.domain.to_string())
-        .bind(&intent.market_slug)
-        .bind(&intent.token_id)
-        .bind(intent.side.as_str())
-        .bind(
-            intent
-                .metadata
-                .get("exit_reason")
-                .or_else(|| intent.metadata.get("reason_code"))
-                .cloned()
-                .unwrap_or_else(|| "UNKNOWN".to_string()),
-        )
-        .bind(reason_detail)
-        .bind(Self::metadata_decimal(intent, "entry_price"))
-        .bind(executed_price)
-        .bind(Self::metadata_decimal(intent, "pnl_pct"))
-        .bind(status)
-        .bind(intent.metadata.get("config_hash").cloned())
-        .bind(sqlx::types::Json(metadata))
-        .execute(pool)
-        .await;
-
-        if let Err(e) = result {
-            warn!(
-                agent_id = %intent.agent_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist exit reason execution"
-            );
-        }
-    }
-
-    async fn persist_execution_analysis(
-        &self,
-        intent: &OrderIntent,
-        request: &OrderRequest,
-        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
-        queue_delay_ms: Option<i64>,
-        config_hash: Option<String>,
-    ) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let expected_price = request.limit_price;
-        let executed_price = execution_result.and_then(|r| r.avg_fill_price);
-        let execution_latency_ms = execution_result.map(|r| r.elapsed_ms as i64);
-        let total_latency_ms = match (queue_delay_ms, execution_latency_ms) {
-            (Some(q), Some(e)) => Some(q + e),
-            (Some(q), None) => Some(q),
-            (None, Some(e)) => Some(e),
-            (None, None) => None,
-        };
-
-        let actual_slippage_bps = executed_price.and_then(|fill| {
-            if expected_price.is_zero() {
-                return None;
-            }
-            let signed = if intent.is_buy {
-                (fill - expected_price) / expected_price
-            } else {
-                (expected_price - fill) / expected_price
-            };
-            Some(signed * Decimal::from(10_000))
-        });
-
-        let expected_slippage_bps = Self::metadata_decimal(intent, "expected_slippage_bps")
-            .or_else(|| Self::metadata_decimal(intent, "signal_expected_slippage_bps"));
-        let metadata =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-        let status = execution_result
-            .map(|r| format!("{:?}", r.status))
-            .unwrap_or_else(|| "Failed".to_string());
-
-        let persist_result = sqlx::query(
-            r#"
-            INSERT INTO execution_analysis (
-                account_id, intent_id, agent_id, domain, market_slug, token_id, is_buy,
-                expected_price, executed_price, expected_slippage_bps, actual_slippage_bps,
-                queue_delay_ms, execution_latency_ms, total_latency_ms,
-                status, dry_run, config_hash, metadata
-            )
-            VALUES (
-                $1,$2,$3,$4,$5,$6,$7,
-                $8,$9,$10,$11,
-                $12,$13,$14,
-                $15,$16,$17,$18
-            )
-            ON CONFLICT (intent_id) DO UPDATE SET
-                executed_price = EXCLUDED.executed_price,
-                expected_slippage_bps = EXCLUDED.expected_slippage_bps,
-                actual_slippage_bps = EXCLUDED.actual_slippage_bps,
-                queue_delay_ms = EXCLUDED.queue_delay_ms,
-                execution_latency_ms = EXCLUDED.execution_latency_ms,
-                total_latency_ms = EXCLUDED.total_latency_ms,
-                status = EXCLUDED.status,
-                dry_run = EXCLUDED.dry_run,
-                config_hash = EXCLUDED.config_hash,
-                metadata = EXCLUDED.metadata,
-                recorded_at = NOW()
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(intent.intent_id)
-        .bind(&intent.agent_id)
-        .bind(intent.domain.to_string())
-        .bind(&intent.market_slug)
-        .bind(&intent.token_id)
-        .bind(intent.is_buy)
-        .bind(expected_price)
-        .bind(executed_price)
-        .bind(expected_slippage_bps)
-        .bind(actual_slippage_bps)
-        .bind(queue_delay_ms)
-        .bind(execution_latency_ms)
-        .bind(total_latency_ms)
-        .bind(status)
-        .bind(self.executor.is_dry_run())
-        .bind(config_hash)
-        .bind(sqlx::types::Json(metadata))
-        .execute(pool)
-        .await;
-
-        if let Err(e) = persist_result {
-            warn!(
-                agent_id = %intent.agent_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist execution analysis"
-            );
-        }
-
-        self.persist_live_strategy_evaluation(
-            intent,
-            request,
-            execution_result,
-            expected_slippage_bps,
-            actual_slippage_bps,
-            total_latency_ms,
-        )
-        .await;
-    }
-
-    async fn persist_live_strategy_evaluation(
-        &self,
-        intent: &OrderIntent,
-        request: &OrderRequest,
-        execution_result: Option<&crate::strategy::executor::ExecutionResult>,
-        expected_slippage_bps: Option<Decimal>,
-        actual_slippage_bps: Option<Decimal>,
-        total_latency_ms: Option<i64>,
-    ) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
-        let strategy_id = intent
-            .metadata
-            .get("strategy")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let deployment_id = intent
-            .metadata
-            .get("deployment_id")
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(ToString::to_string);
-        let timeframe = intent
-            .metadata
-            .get("timeframe")
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(ToString::to_string);
-        let score = Self::metadata_decimal(intent, "signal_confidence")
-            .or_else(|| Self::metadata_decimal(intent, "signal_edge"));
-
-        let status = match execution_result {
-            Some(result) => match result.status {
-                crate::domain::OrderStatus::Submitted
-                | crate::domain::OrderStatus::PartiallyFilled
-                | crate::domain::OrderStatus::Filled => "PASS",
-                crate::domain::OrderStatus::Cancelled => "WARN",
-                crate::domain::OrderStatus::Pending
-                | crate::domain::OrderStatus::Rejected
-                | crate::domain::OrderStatus::Expired
-                | crate::domain::OrderStatus::Failed => "FAIL",
-            },
-            None => "FAIL",
-        };
-
-        let evidence_hash = intent.intent_id.to_string();
-        let evidence_payload = serde_json::json!({
-            "intent_id": intent.intent_id.to_string(),
-            "agent_id": intent.agent_id.clone(),
-            "is_buy": intent.is_buy,
-            "shares": intent.shares,
-            "request_limit_price": request.limit_price.to_string(),
-            "order_side": request.order_side.to_string(),
-            "expected_slippage_bps": expected_slippage_bps.map(|v| v.to_string()),
-            "actual_slippage_bps": actual_slippage_bps.map(|v| v.to_string()),
-            "total_latency_ms": total_latency_ms,
-            "dry_run": self.executor.is_dry_run(),
-            "execution": execution_result.map(|r| serde_json::json!({
-                "order_id": r.order_id.clone(),
-                "status": format!("{:?}", r.status),
-                "filled_shares": r.filled_shares,
-                "avg_fill_price": r.avg_fill_price.map(|p| p.to_string()),
-                "elapsed_ms": r.elapsed_ms
-            })),
-        });
-        let metadata =
-            serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-
-        let insert = sqlx::query(
-            r#"
-            INSERT INTO strategy_evaluations (
-                account_id,
-                strategy_id,
-                deployment_id,
-                domain,
-                stage,
-                status,
-                score,
-                timeframe,
-                sample_size,
-                evidence_kind,
-                evidence_ref,
-                evidence_hash,
-                evidence_payload,
-                metadata
-            )
-            VALUES (
-                $1,$2,$3,$4,'LIVE',$5,$6,$7,1,
-                'execution_analysis',$8,$9,$10,$11
-            )
-            ON CONFLICT (account_id, strategy_id, stage, evidence_hash) DO NOTHING
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(strategy_id)
-        .bind(deployment_id)
-        .bind(intent.domain.to_string())
-        .bind(status)
-        .bind(score)
-        .bind(timeframe)
-        .bind(intent.intent_id.to_string())
-        .bind(evidence_hash)
-        .bind(sqlx::types::Json(evidence_payload))
-        .bind(sqlx::types::Json(metadata))
-        .execute(pool)
-        .await;
-
-        if let Err(e) = insert {
-            warn!(
-                account_id = %self.account_id,
-                intent_id = %intent.intent_id,
-                error = %e,
-                "failed to persist live strategy evaluation evidence"
-            );
-        }
-    }
-
     async fn persist_risk_runtime_state(&self) {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return;
-        };
-
         let risk_state = self.risk_gate.state().await;
         let (daily_pnl, _, _) = self.risk_gate.daily_stats().await;
         let daily_loss_limit = self.risk_gate.daily_loss_limit();
         let drawdown = self.risk_gate.drawdown_snapshot().await;
         let daily_date = Utc::now().date_naive();
 
-        let result = sqlx::query(
-            r#"
-            INSERT INTO risk_runtime_state (
-                account_id,
-                risk_state,
+        self.journal
+            .persist_risk_runtime_state(
+                format!("{:?}", risk_state),
                 daily_date,
                 daily_pnl,
                 daily_loss_limit,
-                current_equity,
-                equity_peak,
-                current_drawdown,
-                max_drawdown_observed
+                drawdown,
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (account_id) DO UPDATE SET
-                risk_state = EXCLUDED.risk_state,
-                daily_date = EXCLUDED.daily_date,
-                daily_pnl = EXCLUDED.daily_pnl,
-                daily_loss_limit = EXCLUDED.daily_loss_limit,
-                current_equity = EXCLUDED.current_equity,
-                equity_peak = EXCLUDED.equity_peak,
-                current_drawdown = EXCLUDED.current_drawdown,
-                max_drawdown_observed = EXCLUDED.max_drawdown_observed,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(&self.account_id)
-        .bind(format!("{:?}", risk_state))
-        .bind(daily_date)
-        .bind(daily_pnl)
-        .bind(daily_loss_limit)
-        .bind(drawdown.current_equity)
-        .bind(drawdown.equity_peak)
-        .bind(drawdown.current_drawdown)
-        .bind(drawdown.max_drawdown_observed)
-        .execute(pool)
-        .await;
-
-        if let Err(e) = result {
-            warn!(
-                account_id = %self.account_id,
-                error = %e,
-                "failed to persist risk runtime state"
-            );
-        }
+            .await;
     }
 
     /// Refresh GlobalState from aggregators
@@ -2775,51 +1847,5 @@ mod tests {
             .any(|agent| agent.agent_id == "sports_agent"
                 && agent.domain == "sports"
                 && agent.status == "running"));
-    }
-
-    #[test]
-    fn test_parse_persisted_domain_supports_runtime_and_custom_encodings() {
-        assert_eq!(parse_persisted_domain("Crypto"), Some(Domain::Crypto));
-        assert_eq!(
-            parse_persisted_domain("custom:42"),
-            Some(Domain::Custom(42))
-        );
-        assert_eq!(parse_persisted_domain("Custom(7)"), Some(Domain::Custom(7)));
-        assert_eq!(parse_persisted_domain(""), None);
-        assert_eq!(parse_persisted_domain("custom:oops"), None);
-    }
-
-    #[test]
-    fn test_parse_persisted_side_accepts_yes_no_aliases() {
-        assert_eq!(parse_persisted_side("UP"), Some(crate::domain::Side::Up));
-        assert_eq!(parse_persisted_side("NO"), Some(crate::domain::Side::Down));
-        assert_eq!(parse_persisted_side("flat"), None);
-    }
-
-    #[test]
-    fn test_string_metadata_from_json_normalizes_scalar_values() {
-        let metadata = string_metadata_from_json(Some(sqlx::types::Json(serde_json::json!({
-            "deployment_id": "deploy.crypto.15m",
-            "signal_confidence": 0.73,
-            "flag": true,
-            "skip": null
-        }))));
-        assert_eq!(
-            metadata.get("deployment_id").map(String::as_str),
-            Some("deploy.crypto.15m")
-        );
-        assert_eq!(
-            metadata.get("signal_confidence").map(String::as_str),
-            Some("0.73")
-        );
-        assert_eq!(metadata.get("flag").map(String::as_str), Some("true"));
-        assert!(!metadata.contains_key("skip"));
-    }
-
-    #[test]
-    fn test_execution_error_is_failure_treats_blank_as_success() {
-        assert!(execution_error_is_failure(Some("transport timeout")));
-        assert!(!execution_error_is_failure(Some("   ")));
-        assert!(!execution_error_is_failure(None));
     }
 }

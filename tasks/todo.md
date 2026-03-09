@@ -1,3 +1,35 @@
+# Coordinator Execution Journal Extraction (2026-03-09)
+
+## Goal
+Move execution-log ownership and SQL persistence out of `src/coordinator/coordinator.rs` so coordinator keeps orchestration while restore/persistence logic lives behind one journal module.
+
+## Tasks
+
+- [x] Inventory the execution journal seam: execution log pool, restore loaders, and execution/signal/risk/exit persistence helpers.
+- [x] Add `src/coordinator/journal.rs` with `ExecutionJournal`, restore payload loaders, and persistence methods.
+- [x] Rewire `Coordinator` to use the shared journal owner instead of directly owning `execution_log_pool`.
+- [x] Keep runtime restore behavior unchanged by delegating restore/load calls through the journal.
+- [x] Run targeted compile/test validation for restore, persistence, and execution accounting.
+
+## Review
+
+- [x] Confirm execution-log pool ownership no longer lives directly on `Coordinator`.
+- [x] Confirm `restore_runtime_state_from_execution_log()` still rebuilds positions, allocator state, and counters from the same persisted records.
+- [x] Confirm signal/risk/execution persistence still fires on the same ingress and execution paths.
+
+## Progress notes
+
+- 2026-03-09: Planned after admission extraction. The next large cohesive seam is execution journal ownership: execution-log pool + restore loaders + signal/risk/execution/exit persistence.
+- 2026-03-09: Added `src/coordinator/journal.rs` and moved execution-log restore helpers, risk-runtime snapshot loading, signal/risk/exit persistence, execution analysis, and live strategy evaluation writes behind `ExecutionJournal`.
+- 2026-03-09: `Coordinator` now owns an `ExecutionJournal` instead of an `execution_log_pool`; restore paths delegate to the journal and execution/ingress persistence calls route through the same owner.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_execution_error_is_failure_treats_blank_as_success --lib -- --nocapture`
+  - `cargo test test_string_metadata_from_json_normalizes_scalar_values --lib -- --nocapture`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+
+---
+
 # Coordinator Admission Extraction (2026-03-09)
 
 ## Goal
