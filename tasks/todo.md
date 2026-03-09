@@ -1,3 +1,30 @@
+# Binance L2 Feed Contract Expansion (2026-03-09)
+
+## Goal
+Expand the strategy-side `BinanceL2` market-update contract to expose the additional OBI levels (`1/2/3/20`) that still only exist inside the legacy crypto runtime, so `lob_ml` and `rl_policy` wrappers stop being blocked on missing L2 feature surface.
+
+## Tasks
+
+- [x] Extend `collector/binance_depth.rs` snapshots to compute and carry `obi_1`, `obi_2`, `obi_3`, and `obi_20`.
+- [x] Extend `MarketUpdate::BinanceL2` to expose the extra OBI levels to strategy callers.
+- [x] Rewire `DataFeedManager` Binance L2 forwarding to populate the expanded contract.
+- [x] Add or update a narrow collector regression test to assert the new snapshot fields.
+- [x] Re-run compile and the narrow L2 snapshot regression test.
+
+## Review
+
+- [x] Confirm the new OBI levels are available at the strategy feed boundary, not only inside the legacy `LobCache`.
+- [x] Confirm the collector still builds snapshots correctly after the field expansion.
+- [x] Confirm the expanded feed contract compiles without forcing downstream strategy rewrites in this slice.
+
+## Progress notes
+
+- 2026-03-09: Expanded [binance_depth.rs](/Users/proerror/Documents/ploy/src/collector/binance_depth.rs) `LobSnapshot` with `obi_1`, `obi_2`, `obi_3`, and `obi_20`, and updated snapshot construction in both cache read paths.
+- 2026-03-09: Expanded [traits.rs](/Users/proerror/Documents/ploy/src/strategy/traits.rs) `MarketUpdate::BinanceL2` plus [feeds.rs](/Users/proerror/Documents/ploy/src/strategy/feeds.rs) forwarding, so canonical strategy consumers can now observe the same extra OBI levels the legacy `lob_ml` / `rl_policy` agents use.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_apply_depth_snapshot_replaces_book_state --lib -- --nocapture`
+
 # Legacy Crypto Bootstrap Config Collapse (2026-03-09)
 
 ## Goal

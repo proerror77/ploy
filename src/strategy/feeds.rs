@@ -1019,8 +1019,12 @@ impl DataFeedManager {
                     Ok(update) => {
                         let market_update = MarketUpdate::BinanceL2 {
                             symbol: update.symbol,
+                            obi_1: update.snapshot.obi_1,
+                            obi_2: update.snapshot.obi_2,
+                            obi_3: update.snapshot.obi_3,
                             obi_5: update.snapshot.obi_5,
                             obi_10: update.snapshot.obi_10,
+                            obi_20: update.snapshot.obi_20,
                             bid_volume_5: update.snapshot.bid_volume_5,
                             ask_volume_5: update.snapshot.ask_volume_5,
                             spread_bps: update.snapshot.spread_bps,

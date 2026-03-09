@@ -125,8 +125,12 @@ pub enum MarketUpdate {
     /// Binance L2 orderbook snapshot features
     BinanceL2 {
         symbol: String,
+        obi_1: Decimal,
+        obi_2: Decimal,
+        obi_3: Decimal,
         obi_5: Decimal,
         obi_10: Decimal,
+        obi_20: Decimal,
         bid_volume_5: Decimal,
         ask_volume_5: Decimal,
         spread_bps: Decimal,

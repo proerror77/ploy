@@ -115,8 +115,12 @@ pub struct LobSnapshot {
     pub best_ask: Decimal,
     pub mid_price: Decimal,
     pub spread_bps: Decimal,
+    pub obi_1: Decimal,  // OBI with top 1 level
+    pub obi_2: Decimal,  // OBI with top 2 levels
+    pub obi_3: Decimal,  // OBI with top 3 levels
     pub obi_5: Decimal,  // OBI with top 5 levels
     pub obi_10: Decimal, // OBI with top 10 levels
+    pub obi_20: Decimal, // OBI with top 20 levels
     pub bid_volume_5: Decimal,
     pub ask_volume_5: Decimal,
     pub update_id: i64,
@@ -164,8 +168,12 @@ impl LobCache {
         let best_ask = book.best_ask()?;
         let mid_price = book.mid_price()?;
         let spread_bps = book.spread_bps()?;
+        let obi_1 = book.calculate_obi(1)?;
+        let obi_2 = book.calculate_obi(2)?;
+        let obi_3 = book.calculate_obi(3)?;
         let obi_5 = book.calculate_obi(5)?;
         let obi_10 = book.calculate_obi(10)?;
+        let obi_20 = book.calculate_obi(20)?;
 
         let bid_volume_5: Decimal = book.bids.iter().rev().take(5).map(|(_, q)| *q).sum();
         let ask_volume_5: Decimal = book.asks.iter().take(5).map(|(_, q)| *q).sum();
@@ -177,8 +185,12 @@ impl LobCache {
             best_ask,
             mid_price,
             spread_bps,
+            obi_1,
+            obi_2,
+            obi_3,
             obi_5,
             obi_10,
+            obi_20,
             bid_volume_5,
             ask_volume_5,
             update_id: book.last_update_id,
@@ -241,8 +253,12 @@ impl LobCache {
         let best_ask = book.best_ask()?;
         let mid_price = book.mid_price()?;
         let spread_bps = book.spread_bps()?;
+        let obi_1 = book.calculate_obi(1)?;
+        let obi_2 = book.calculate_obi(2)?;
+        let obi_3 = book.calculate_obi(3)?;
         let obi_5 = book.calculate_obi(5)?;
         let obi_10 = book.calculate_obi(10)?;
+        let obi_20 = book.calculate_obi(20)?;
 
         let bid_volume_5: Decimal = book.bids.iter().rev().take(5).map(|(_, q)| *q).sum();
         let ask_volume_5: Decimal = book.asks.iter().take(5).map(|(_, q)| *q).sum();
@@ -254,8 +270,12 @@ impl LobCache {
             best_ask,
             mid_price,
             spread_bps,
+            obi_1,
+            obi_2,
+            obi_3,
             obi_5,
             obi_10,
+            obi_20,
             bid_volume_5,
             ask_volume_5,
             update_id,
@@ -568,6 +588,10 @@ mod tests {
 
         assert_eq!(snapshot.best_bid, dec!(101));
         assert_eq!(snapshot.best_ask, dec!(101.1));
+        assert_eq!(snapshot.obi_1, dec!(-1) / dec!(9));
+        assert_eq!(snapshot.obi_2, dec!(-1) / dec!(9));
+        assert_eq!(snapshot.obi_3, dec!(-1) / dec!(9));
+        assert_eq!(snapshot.obi_20, dec!(-1) / dec!(9));
         let state = cache.get("BTCUSDT").await.expect("book state");
         assert_eq!(state.bids.len(), 1);
         assert_eq!(state.asks.len(), 1);
