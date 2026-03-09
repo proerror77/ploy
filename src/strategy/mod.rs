@@ -49,6 +49,7 @@ pub use staggered_arb_live::StaggeredArbAdapter;
 pub mod core;
 pub mod crypto;
 pub mod crypto_lob_ml;
+pub mod crypto_rl_policy;
 pub mod nba_comeback;
 pub mod pattern_memory;
 pub mod sports;

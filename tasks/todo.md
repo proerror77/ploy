@@ -1,3 +1,33 @@
+# Crypto RL Policy Core Extraction (2026-03-09)
+
+## Goal
+Move the pure policy interpretation, observation building, position tracking types, and sizing helpers out of the legacy `CryptoRlPolicyAgent` shell into a strategy-side module so the remaining live runtime code becomes a thin wrapper around canonical strategy-owned logic.
+
+## Tasks
+
+- [x] Create a strategy-side `crypto_rl_policy` module that owns the extracted action/observation/state helpers.
+- [x] Rewire the legacy `CryptoRlPolicyAgent` to delegate ONNX output interpretation, observation assembly, sizing, and rule-based fallback logic to the new strategy-side core.
+- [x] Add narrow regression tests for the extracted helper behavior under the new strategy module.
+- [x] Re-run compile plus targeted core helper tests after the ownership move.
+
+## Review
+
+- [x] Confirm `DiscreteAction`, `ContinuousAction`, tracked-position types, deployment metadata helpers, and observation builders now live under `src/strategy/crypto_rl_policy/`.
+- [x] Confirm the legacy agent compiles while delegating its pure policy logic to the new strategy-side core instead of owning duplicate implementations.
+- [x] Confirm the extracted core owns regression coverage for action mapping, sizing, deployment-id normalization, and rule-based exit behavior.
+
+## Progress notes
+
+- 2026-03-09: Added [core.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/core.rs) and [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/mod.rs), and exported the new module from [strategy/mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-09: Updated [crypto_rl_policy.rs](/Users/proerror/Documents/ploy/src/agents/crypto_rl_policy.rs) so the legacy agent now delegates ONNX output decoding, observation building, rule-based fallback policy, sizing, and deployment metadata to the extracted strategy-side core.
+- 2026-03-09: Added new helper regressions in the extracted core for discrete-action mapping, share sizing, deployment-id normalization, and forced-loss sell behavior.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test continuous_action_maps_to_expected_discrete_action --lib -- --nocapture`
+  - `cargo test compute_shares_scales_with_position_delta --lib -- --nocapture`
+  - `cargo test deployment_id_for_symbol_normalizes_case --lib -- --nocapture`
+  - `cargo test rule_based_policy_sells_on_deep_loss --lib -- --nocapture`
+
 # Crypto LOB ML Canonical Wrapper (2026-03-09)
 
 ## Goal
@@ -1833,6 +1863,7 @@ Move the remaining `RLCryptoAgent` compatibility runtime out of the shared `plat
 ## Progress notes
 
 - 2026-03-09: Started the cutover after confirming `RLCryptoAgent` is no longer a live runtime entrypoint and only the RL CLI still instantiates it.
+
 - 2026-03-09: Moved `RLCryptoAgent` into [cli_agent.rs](/Users/proerror/Documents/ploy/src/rl/cli_agent.rs), rewired the RL command to import it from the RL module, and deleted `src/platform/agents/`.
 - 2026-03-09: Validation passed:
   - `cargo check --features rl --bin ploy`
