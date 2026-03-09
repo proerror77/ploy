@@ -2433,3 +2433,30 @@ Stop `bootstrap.rs` from owning seven separate managed-strategy spawn branches b
   - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
   - `cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --nocapture`
   - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+
+# Bootstrap Sports Runtime Support Extraction (2026-03-09)
+
+## Goal
+Move the remaining sports/NBA websocket + persistence bootstrap special-case out of `runtime_spawns.rs` so spawn ownership stays focused on task launch and bootstrap support logic lives in dedicated modules.
+
+## Tasks
+
+- [x] Extract `prepare_sports_runtime_support(...)` into a dedicated bootstrap support module.
+- [x] Remove the sports support implementation from `runtime_spawns.rs` so that file only owns spawn helpers.
+- [x] Rewire `bootstrap.rs` imports to source sports support from the new module.
+- [x] Re-run default + `rl` compile after the extraction.
+
+## Review
+
+- [x] Confirm sports support no longer lives in `runtime_spawns.rs`.
+- [x] Confirm `bootstrap.rs` still invokes the same `prepare_sports_runtime_support(...)` entrypoint.
+- [x] Confirm the extraction does not change bootstrap compile behavior.
+
+## Progress notes
+
+- 2026-03-09: Added [sports_runtime_support.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/sports_runtime_support.rs) and moved the NBA/sports websocket subscription + persistence preparation path there.
+- 2026-03-09: Removed `prepare_sports_runtime_support(...)` from [runtime_spawns.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_spawns.rs) so spawn ownership stays limited to runtime task launch helpers.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to import sports support from the new module.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`

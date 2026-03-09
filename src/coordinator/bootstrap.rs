@@ -48,6 +48,7 @@ mod market_persistence;
 mod runtime_config;
 mod runtime_spawns;
 mod schema;
+mod sports_runtime_support;
 mod strategy_deployments;
 mod support;
 
@@ -58,8 +59,7 @@ use self::market_persistence::{
 };
 use self::crypto_runtime_support::initialize_crypto_runtime_support;
 use self::runtime_spawns::{
-    prepare_sports_runtime_support, spawn_managed_strategy_runtime_task,
-    spawn_openclaw_governance_agent,
+    spawn_managed_strategy_runtime_task, spawn_openclaw_governance_agent,
 };
 use self::schema::{
     ensure_accounts_table, ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,
@@ -87,6 +87,7 @@ use self::strategy_deployments::{
 use self::support::{
     add_coins_from_selector, env_bool, env_i64, env_u64, env_usize, lob_levels_json,
 };
+use self::sports_runtime_support::prepare_sports_runtime_support;
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
