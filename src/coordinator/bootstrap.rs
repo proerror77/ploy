@@ -2179,7 +2179,7 @@ pub fn print_platform_status(state: &GlobalState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode};
+    use crate::agents::crypto_lob_ml::{CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode};
     use crate::platform::{
         DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
     };

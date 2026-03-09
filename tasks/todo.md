@@ -24,6 +24,56 @@ Shrink the remaining raw `SubmitOrder` surface inside canonical strategy code by
   - `cargo check --lib`
   - `cargo test evaluate_entry_emits_submit_intents --lib -- --nocapture`
 
+# Legacy Agent Surface Narrowing (2026-03-09)
+
+## Goal
+Collapse the remaining legacy trading-agent compatibility surface so `CryptoLobMlAgent`, `CryptoRlPolicyAgent`, and `TradingAgent` are no longer casually re-exported from `crate::agents`; only the explicit `legacy_crypto` bootstrap path should depend on them.
+
+## Tasks
+
+- [x] Stop re-exporting legacy crypto agent types and the `TradingAgent` trait from `src/agents/mod.rs`.
+- [x] Update the remaining compatibility callers to use explicit legacy module paths.
+- [x] Keep governance-plane exports available so `OpenClaw` startup remains unaffected.
+- [x] Re-run compile plus a narrow bootstrap env/config regression after the surface reduction.
+
+## Review
+
+- [x] Confirm `crate::agents` root now exposes governance/runtime essentials but not the legacy crypto agent implementations.
+- [x] Confirm `legacy_crypto.rs` still compiles as the only explicit compatibility owner of `CryptoLobMlAgent` / `CryptoRlPolicyAgent`.
+- [x] Confirm bootstrap tests still resolve the legacy crypto config enums via explicit module paths.
+
+## Progress notes
+
+- 2026-03-09: Narrowed [agents/mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) so legacy trading-agent implementations are no longer re-exported from the root agents module.
+- 2026-03-09: Updated [crypto_lob_ml.rs](/Users/proerror/Documents/ploy/src/agents/crypto_lob_ml.rs), [crypto_rl_policy.rs](/Users/proerror/Documents/ploy/src/agents/crypto_rl_policy.rs), [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs), and [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to use explicit compatibility paths.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+
+# Legacy Agent Public Surface Quarantine (2026-03-09)
+
+## Goal
+Narrow the last remaining legacy crypto runtime surface so the compatibility-only `TradingAgent` implementations stop leaking through the main `agents` module root, making the surviving legacy ownership explicit in `bootstrap/legacy_crypto.rs` instead of feeling like first-class runtime APIs.
+
+## Tasks
+
+- [x] Stop re-exporting `CryptoLobMlAgent`, `CryptoRlPolicyAgent`, and `TradingAgent` from `src/agents/mod.rs`.
+- [x] Update remaining legacy runtime imports to use explicit compatibility module paths.
+- [x] Keep governance-facing exports (`GovernanceContext`, `OpenClawAgent`, `GovernanceAgent`) intact.
+- [x] Re-run compile after shrinking the public surface.
+
+## Review
+
+- [x] Confirm only the legacy bootstrap compatibility path imports the legacy trading-agent types directly.
+- [x] Confirm non-legacy callers can still reach governance agent types through `crate::agents`.
+- [x] Confirm the public-surface shrink compiles without runtime behavior changes.
+
+## Progress notes
+
+- 2026-03-09: Removed the legacy crypto agent and `TradingAgent` root re-exports from [agents/mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs), and rewired [bootstrap/legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs) plus legacy agent modules to import explicit compatibility paths.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+
 # Canonical SubmitIntent Batch Conversion (2026-03-09)
 
 ## Goal

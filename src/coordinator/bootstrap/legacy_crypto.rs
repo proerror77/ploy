@@ -1,12 +1,13 @@
 use super::*;
 
-use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, TradingAgent,
+use crate::agents::CryptoTradingConfig;
+use crate::agents::context::AgentContext;
+use crate::agents::crypto_lob_ml::{
+    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 #[cfg(feature = "rl")]
-use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
-use crate::agents::CryptoTradingConfig;
+use crate::agents::crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+use crate::agents::traits::TradingAgent;
 use crate::collector::LobCache;
 use crate::strategy::momentum::EventMatcher;
 use serde::{Deserialize, Serialize};

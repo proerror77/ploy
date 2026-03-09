@@ -6,6 +6,10 @@
 //! through the canonical managed strategy runtime; their modules remain only as
 //! config compatibility shims for bootstrap deserialization.
 //! Agents communicate with the Coordinator via `AgentContext`.
+//!
+//! Legacy crypto trading-agent types are intentionally not re-exported from
+//! this module root. Callers should use explicit module paths so the remaining
+//! compatibility surface stays narrow and obvious.
 
 pub mod context;
 pub mod crypto;
@@ -17,10 +21,6 @@ pub mod traits;
 
 pub use context::AgentContext;
 pub use crypto::{CryptoEntryMode, CryptoTradingConfig};
-pub use crypto_lob_ml::{
-    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
-};
-pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
 pub use governance_context::GovernanceContext;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
-pub use traits::{AgentConfig, GovernanceAgent, TradingAgent};
+pub use traits::GovernanceAgent;
