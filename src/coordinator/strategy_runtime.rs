@@ -26,8 +26,7 @@ use crate::error::Result;
 use crate::platform::{AgentStatus, Domain, PlatformDataPlane};
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{
-    DataFeed, DataFeedManager, StrategyAction, StrategyControlAction, StrategyFactory,
-    StrategyManager,
+    DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,
 };
 
 fn split_arb_status_key(status: OrderStatus) -> &'static str {
@@ -914,33 +913,6 @@ async fn handle_strategy_actions_runtime(
                     }
                 }
             }
-            StrategyAction::LegacyControl(control) => match control {
-                StrategyControlAction::UpdateRisk { level, reason } => {
-                    info!(
-                        strategy = strategy_label,
-                        strategy_id = %strategy_id,
-                        risk_level = ?level,
-                        reason = reason,
-                        "legacy strategy risk update"
-                    );
-                }
-                StrategyControlAction::SubscribeFeed { feed } => {
-                    warn!(
-                        strategy = strategy_label,
-                        strategy_id = %strategy_id,
-                        feed = ?feed,
-                        "legacy dynamic subscribe-feed action is not implemented in managed runtime"
-                    );
-                }
-                StrategyControlAction::UnsubscribeFeed { feed } => {
-                    warn!(
-                        strategy = strategy_label,
-                        strategy_id = %strategy_id,
-                        feed = ?feed,
-                        "legacy dynamic unsubscribe-feed action is not implemented in managed runtime"
-                    );
-                }
-            },
         }
     }
 }

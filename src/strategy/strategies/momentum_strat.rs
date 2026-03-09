@@ -22,9 +22,8 @@ use crate::strategy::detectors::{
     MomentumDetector, MomentumDetectorConfig, MomentumSignal, TrendDirection,
 };
 use crate::strategy::traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyControlAction, StrategyEvent, StrategyEventType, StrategyOrderIntent,
-    StrategyStateInfo,
+    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 
 /// Momentum strategy configuration
@@ -701,15 +700,6 @@ impl Strategy for MomentumStrategy {
                         };
 
                         self.active_events.insert(event_id.clone(), event);
-
-                        // Subscribe to token quotes
-                        actions.push(StrategyAction::LegacyControl(
-                            StrategyControlAction::SubscribeFeed {
-                                feed: DataFeed::PolymarketQuotes {
-                                    tokens: vec![up_token.clone(), down_token.clone()],
-                                },
-                            },
-                        ));
 
                         info!("Discovered event for {}: {}", mapping.symbol, event_id);
                         break;

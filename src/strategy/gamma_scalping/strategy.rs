@@ -16,9 +16,8 @@ use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyControlAction, StrategyEvent, StrategyEventType, StrategyOrderIntent,
-    StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
+    StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use crate::strategy::volatility_arb::calculate_implied_volatility;
 
@@ -529,16 +528,8 @@ impl Strategy for GammaScalpingStrategy {
                     price_to_beat: *price_to_beat,
                 };
 
-                let actions = vec![StrategyAction::LegacyControl(
-                    StrategyControlAction::SubscribeFeed {
-                        feed: DataFeed::PolymarketQuotes {
-                            tokens: vec![up_token.clone(), down_token.clone()],
-                        },
-                    },
-                )];
-
                 self.active_events.insert(event_id.clone(), ctx);
-                Ok(actions)
+                Ok(vec![])
             }
 
             MarketUpdate::EventExpired { event_id } => {

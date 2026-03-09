@@ -16,10 +16,7 @@ use crate::error::Result;
 use super::core::{ExecutionConfig, OrderExecutor, PositionManager, RiskCheck, RiskConfig, RiskManager};
 use super::multi_event::MultiEventMonitor;
 use super::reconciliation::ReconciliationService;
-use super::traits::{
-    DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction, StrategyControlAction,
-    StrategyStateInfo,
-};
+use super::traits::{DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction, StrategyStateInfo};
 
 /// Orchestrator configuration
 #[derive(Debug, Clone)]
@@ -329,27 +326,6 @@ impl StrategyOrchestrator {
                         super::traits::AlertLevel::Critical => error!("[CRITICAL] {}: {}", strategy_id, message),
                     }
                 }
-                StrategyAction::LegacyControl(control) => match control {
-                    StrategyControlAction::UpdateRisk { level, reason } => {
-                        info!("Strategy {} risk update: {:?} - {}", strategy_id, level, reason);
-                        // Could trigger circuit breaker based on level
-                    }
-                    StrategyControlAction::SubscribeFeed { feed } => {
-                        let mut active_feeds = self.active_feeds.write().await;
-                        active_feeds
-                            .entry(feed.clone())
-                            .or_default()
-                            .push(strategy_id.to_string());
-                        debug!("Strategy {} subscribed to {:?}", strategy_id, feed);
-                    }
-                    StrategyControlAction::UnsubscribeFeed { feed } => {
-                        let mut active_feeds = self.active_feeds.write().await;
-                        if let Some(subscribers) = active_feeds.get_mut(&feed) {
-                            subscribers.retain(|id| id != strategy_id);
-                        }
-                        debug!("Strategy {} unsubscribed from {:?}", strategy_id, feed);
-                    }
-                },
             }
         }
 

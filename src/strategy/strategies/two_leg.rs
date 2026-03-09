@@ -19,9 +19,8 @@ use crate::platform::Domain;
 
 use crate::strategy::detectors::{DumpDetector, DumpDetectorConfig, DumpSignal};
 use crate::strategy::traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyConfig, StrategyControlAction, StrategyEvent, StrategyEventType,
-    StrategyOrderIntent, StrategyStateInfo,
+    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyConfig, StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 
 /// Two-leg strategy configuration
@@ -501,14 +500,6 @@ impl Strategy for TwoLegStrategy {
 
                     info!("Started monitoring event: {}", event_id);
 
-                    // Subscribe to token feeds
-                    actions.push(StrategyAction::LegacyControl(
-                        StrategyControlAction::SubscribeFeed {
-                            feed: DataFeed::PolymarketQuotes {
-                                tokens: vec![up_token.clone(), down_token.clone()],
-                            },
-                        },
-                    ));
                 }
             }
             MarketUpdate::EventExpired { event_id } => {
@@ -520,12 +511,10 @@ impl Strategy for TwoLegStrategy {
                 {
                     if self.is_in_cycle() {
                         self.abort_cycle("Event expired");
-                        actions.push(StrategyAction::LegacyControl(
-                            StrategyControlAction::UpdateRisk {
-                                level: RiskLevel::Elevated,
-                                reason: "Cycle aborted due to event expiration".to_string(),
-                            },
-                        ));
+                        actions.push(StrategyAction::Alert {
+                            level: AlertLevel::Warning,
+                            message: "Cycle aborted due to event expiration".to_string(),
+                        });
                     }
                     self.transition_to_idle();
                 }
@@ -631,12 +620,6 @@ impl Strategy for TwoLegStrategy {
                         level: AlertLevel::Critical,
                         message: format!("Leg2 order failed: {:?} - OPEN EXPOSURE", update.status),
                     });
-                    actions.push(StrategyAction::LegacyControl(
-                        StrategyControlAction::UpdateRisk {
-                            level: RiskLevel::Critical,
-                            reason: "Leg2 failed with open position".to_string(),
-                        },
-                    ));
                     self.state = TwoLegState::Abort;
                 }
 

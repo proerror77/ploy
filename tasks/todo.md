@@ -2515,3 +2515,33 @@ Move `OpenClawConfig` ownership out of `src/agents` and into bootstrap/governanc
   - `cargo check --lib`
   - `cargo check --lib --features rl`
   - `rg "crate::agents::OpenClawConfig|pub use config::OpenClawConfig|pub use regime::\\{MarketRegime, RegimeSnapshot\\}" src`
+
+# LegacyControl Retirement (2026-03-09)
+
+## Goal
+Delete the `StrategyAction::LegacyControl` compatibility path so strategies stop emitting governance/feed-control actions and the canonical strategy contract is reduced to decision/execution/logging concerns only.
+
+## Tasks
+
+- [x] Remove `StrategyAction::LegacyControl` and `StrategyControlAction` from the strategy trait surface.
+- [x] Remove all remaining `LegacyControl` emitters from momentum, two-leg, and gamma-scalping strategies.
+- [x] Delete legacy-control handlers from managed runtime, orchestrator, and CLI strategy loops.
+- [x] Re-run compile and focused strategy tests after the retirement.
+
+## Review
+
+- [x] Confirm there are no remaining source references to `LegacyControl` or `StrategyControlAction`.
+- [x] Confirm two-leg risk escalation semantics still surface through `Alert` after removing risk-control actions.
+- [x] Confirm the touched strategies still compile, and the available focused tests still pass.
+
+## Progress notes
+
+- 2026-03-09: Removed `StrategyAction::LegacyControl` and `StrategyControlAction` from [traits.rs](/Users/proerror/Documents/ploy/src/strategy/traits.rs), and stopped re-exporting the deleted compatibility type from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-09: Deleted the remaining legacy-control emitters from [momentum_strat.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/momentum_strat.rs), [two_leg.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/two_leg.rs), and [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/gamma_scalping/strategy.rs). The two-leg risk path now reports through `Alert` instead of a dead control-plane action.
+- 2026-03-09: Removed legacy-control handling from [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), [orchestrator.rs](/Users/proerror/Documents/ploy/src/strategy/orchestrator.rs), and [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --lib test_strategy_manager_creation -- --nocapture`
+  - `cargo test --lib gamma_scalping::strategy::tests -- --nocapture`
+  - `rg "StrategyControlAction|LegacyControl" src`
