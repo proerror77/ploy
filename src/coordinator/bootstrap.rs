@@ -16,7 +16,7 @@ use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, P
 use crate::agents::{
     AgentContext, CryptoEntryMode, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
-    GovernanceAgent, GovernanceContext, PoliticsTradingConfig, SportsTradingConfig, TradingAgent,
+    GovernanceAgent, GovernanceContext, TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -51,6 +51,7 @@ use tracing::instrument;
 use super::strategy_runtime::run_managed_strategy_runtime;
 
 mod runtime_spawns;
+mod runtime_config;
 mod market_persistence;
 mod schema;
 mod support;
@@ -61,6 +62,7 @@ use self::market_persistence::{
     spawn_polymarket_trade_persistence,
     spawn_polymarket_trade_persistence_from_collector_targets,
 };
+use self::runtime_config::{PoliticsRuntimeConfig, SportsRuntimeConfig};
 use self::runtime_spawns::{
     prepare_sports_runtime_support, spawn_managed_strategy_runtime_task,
     spawn_openclaw_governance_agent, spawn_trading_agent_task, ManagedStrategyRuntimeSpawn,
@@ -120,8 +122,8 @@ pub struct PlatformBootstrapConfig {
     #[serde(default)]
     #[cfg(feature = "rl")]
     pub crypto_rl_policy: CryptoRlPolicyConfig,
-    pub sports: SportsTradingConfig,
-    pub politics: PoliticsTradingConfig,
+    pub sports: SportsRuntimeConfig,
+    pub politics: PoliticsRuntimeConfig,
     /// OpenClaw meta-agent configuration
     #[serde(default)]
     pub openclaw: OpenClawConfig,
@@ -147,8 +149,8 @@ impl Default for PlatformBootstrapConfig {
             crypto_lob_ml: CryptoLobMlConfig::default(),
             #[cfg(feature = "rl")]
             crypto_rl_policy: CryptoRlPolicyConfig::default(),
-            sports: SportsTradingConfig::default(),
-            politics: PoliticsTradingConfig::default(),
+            sports: SportsRuntimeConfig::default(),
+            politics: PoliticsRuntimeConfig::default(),
             openclaw: OpenClawConfig::default(),
         }
     }
