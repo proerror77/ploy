@@ -566,7 +566,7 @@ pub(super) fn build_nba_comeback_runtime_config(
 
 fn render_momentum_runtime_config(
     mut config: toml::Value,
-    crypto_cfg: &CryptoTradingConfig,
+    crypto_cfg: &crate::strategy::CryptoTradingConfig,
     symbols: &[String],
 ) -> String {
     let root = config
@@ -623,7 +623,10 @@ fn render_momentum_runtime_config(
     );
     entry.insert(
         "directional_mode".to_string(),
-        toml::Value::Boolean(matches!(crypto_cfg.entry_mode, CryptoEntryMode::Directional)),
+        toml::Value::Boolean(matches!(
+            crypto_cfg.entry_mode,
+            crate::strategy::CryptoEntryMode::Directional
+        )),
     );
     entry.insert(
         "directional_entry_threshold".to_string(),
@@ -699,7 +702,7 @@ fn render_momentum_runtime_config(
 }
 
 fn load_momentum_config_file(
-    crypto_cfg: &CryptoTradingConfig,
+    crypto_cfg: &crate::strategy::CryptoTradingConfig,
     symbols: &[String],
 ) -> Option<String> {
     let candidates = [
@@ -722,8 +725,13 @@ fn load_momentum_config_file(
     None
 }
 
-pub(super) fn build_momentum_runtime_config(crypto_cfg: &CryptoTradingConfig) -> Result<String> {
-    if !matches!(crypto_cfg.entry_mode, CryptoEntryMode::Directional) {
+pub(super) fn build_momentum_runtime_config(
+    crypto_cfg: &crate::strategy::CryptoTradingConfig,
+) -> Result<String> {
+    if !matches!(
+        crypto_cfg.entry_mode,
+        crate::strategy::CryptoEntryMode::Directional
+    ) {
         return Err(crate::error::PloyError::Validation(format!(
             "momentum managed runtime only supports directional entry_mode for now; got {:?}",
             crypto_cfg.entry_mode

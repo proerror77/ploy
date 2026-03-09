@@ -1,9 +1,9 @@
 use super::*;
 
-use crate::agents::CryptoTradingConfig;
 use crate::strategy::crypto_lob_ml::{
     CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
+use crate::strategy::CryptoTradingConfig;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "rl")]
 use crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig;

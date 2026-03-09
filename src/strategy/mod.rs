@@ -77,6 +77,7 @@ pub mod integrity;
 pub mod liquidity_vacuum_backtest;
 pub mod momentum;
 pub mod momentum_backtest;
+pub mod momentum_runtime_config;
 pub mod multi_event;
 pub mod multi_outcome;
 pub mod paper_runner;
@@ -181,6 +182,7 @@ pub use momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
     MomentumDetector, MomentumEngine, MomentumSignal, Position,
 };
+pub use momentum_runtime_config::{CryptoEntryMode, CryptoTradingConfig};
 pub use nba_comeback::nba_data_collector::{
     CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,
     GameState as NbaGameState, MarketSnapshot as NbaMarketSnapshot, OrderbookData, TeamStats,

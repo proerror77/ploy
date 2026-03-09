@@ -13,7 +13,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agents::{CryptoEntryMode, CryptoTradingConfig, OpenClawConfig};
+use crate::agents::OpenClawConfig;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
@@ -28,7 +28,7 @@ use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
-use crate::strategy::DataFeed;
+use crate::strategy::{CryptoTradingConfig, DataFeed};
 use chrono::Utc;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -547,13 +547,13 @@ impl PlatformBootstrapConfig {
         if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENTRY_MODE") {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "arb_only" | "arb" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::ArbOnly
+                    cfg.crypto.entry_mode = crate::strategy::CryptoEntryMode::ArbOnly
                 }
                 "directional" | "dir" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::Directional
+                    cfg.crypto.entry_mode = crate::strategy::CryptoEntryMode::Directional
                 }
                 "vol_straddle" | "straddle" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::VolStraddle
+                    cfg.crypto.entry_mode = crate::strategy::CryptoEntryMode::VolStraddle
                 }
                 _ => {}
             }
@@ -2460,7 +2460,7 @@ symbols = ["SOLUSDT"]
     #[test]
     fn build_momentum_runtime_config_rejects_non_directional_modes() {
         let mut cfg = CryptoTradingConfig::default();
-        cfg.entry_mode = CryptoEntryMode::VolStraddle;
+        cfg.entry_mode = crate::strategy::CryptoEntryMode::VolStraddle;
 
         let err = build_momentum_runtime_config(&cfg).expect_err("non-directional mode rejected");
         assert!(

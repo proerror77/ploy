@@ -1,3 +1,31 @@
+# Momentum Config Namespace Migration (2026-03-09)
+
+## Goal
+Move the last trading bootstrap config DTO out of `src/agents` so the agents namespace contains only governance-plane code.
+
+## Tasks
+
+- [x] Move `CryptoTradingConfig` and `CryptoEntryMode` into a strategy-side runtime-config module.
+- [x] Rewire bootstrap and momentum runtime-config builders to use the strategy-side config types.
+- [x] Delete `src/agents/crypto.rs` and stop re-exporting trading config from `src/agents/mod.rs`.
+- [x] Re-run compile and momentum bootstrap-config regressions after the namespace move.
+
+## Review
+
+- [x] Confirm there are no remaining references to `crate::agents::crypto` or agent-side momentum config types.
+- [x] Confirm `src/agents` now exposes only governance-plane modules.
+- [x] Confirm bootstrap momentum config rendering still passes with the new strategy-side config module.
+
+## Progress notes
+
+- 2026-03-09: Added [momentum_runtime_config.rs](/Users/proerror/Documents/ploy/src/strategy/momentum_runtime_config.rs) and re-exported `CryptoTradingConfig` / `CryptoEntryMode` from [strategy/mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs), [managed_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto.rs), and [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs) to consume the strategy-side momentum config types.
+- 2026-03-09: Deleted [src/agents/crypto.rs](/Users/proerror/Documents/ploy/src/agents/crypto.rs) and removed its export from [src/agents/mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs), leaving `src/agents` governance-only.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
+
 # Trading Agent Contract Retirement (2026-03-09)
 
 ## Goal
