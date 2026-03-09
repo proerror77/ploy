@@ -415,6 +415,28 @@ Replace the default directional crypto momentum live branch in `bootstrap.rs` wi
   - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
   - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
 
+# Momentum Legacy Fallback Retirement (2026-03-09)
+
+## Goal
+Finish the momentum cutover by removing the last bootstrap fallback to `CryptoTradingAgent`, so a bad managed runtime config now fails closed instead of silently reviving the legacy runtime.
+
+## Tasks
+
+- [x] Remove the `CryptoTradingAgent` fallback from the momentum startup branch in `bootstrap.rs`.
+- [x] Stop publicly re-exporting `CryptoTradingAgent` once bootstrap no longer instantiates it.
+- [ ] Re-run momentum bootstrap compile/tests after the fallback removal.
+
+## Review
+
+- [x] Confirm bootstrap no longer instantiates `CryptoTradingAgent`.
+- [x] Confirm non-directional / invalid momentum runtime config now skips startup instead of reviving a second runtime contract.
+- [x] Confirm `src/agents/mod.rs` no longer exposes `CryptoTradingAgent` as a live runtime entrypoint.
+
+## Progress notes
+
+- 2026-03-09: Removed the `CryptoTradingAgent::new(...)` fallback from the `enable_crypto_momentum` bootstrap branch; invalid managed momentum configs now warn and skip startup.
+- 2026-03-09: Trimmed [mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) so only `CryptoTradingConfig` / `CryptoEntryMode` stay public from [crypto.rs](/Users/proerror/Documents/ploy/src/agents/crypto.rs).
+
 # Bootstrap OpenClaw Spawn Extraction (2026-03-09)
 
 ## Goal

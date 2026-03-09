@@ -1,7 +1,9 @@
-//! CryptoTradingAgent — pull-based agent for crypto 5m/15m UP/DOWN markets
+//! Legacy CryptoTradingAgent compatibility implementation.
 //!
-//! Owns Binance + Polymarket WebSocket feeds and applies the
-//! sum-of-asks plus momentum entry logic directly.
+//! The canonical live momentum path now runs through the managed `Strategy`
+//! runtime. This module remains only as a compatibility holder for
+//! `CryptoTradingConfig` / `CryptoEntryMode` and can be removed once the last
+//! non-canonical callers are retired.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

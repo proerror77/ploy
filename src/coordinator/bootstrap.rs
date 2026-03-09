@@ -15,7 +15,7 @@ use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::agents::{
     AgentContext, CryptoEntryMode, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
+    CryptoLobMlExitMode, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
     GovernanceAgent, GovernanceContext, TradingAgent,
 };
 #[cfg(feature = "rl")]
@@ -2214,19 +2214,7 @@ pub async fn start_platform(
                         agent = crypto_cfg.agent_id,
                         error = %e,
                         entry_mode = ?crypto_cfg.entry_mode,
-                        "momentum runtime config unavailable; falling back to legacy trading agent"
-                    );
-                    let agent = CryptoTradingAgent::new(
-                        crypto_cfg.clone(),
-                        crypto_market_data.clone(),
-                        event_matcher.clone(),
-                    );
-                    spawn_trading_agent_task(
-                        agent,
-                        &mut coordinator,
-                        &handle,
-                        &mut agent_handles,
-                        "crypto_momentum_legacy",
+                        "momentum runtime config unavailable; skipping managed momentum startup"
                     );
                 }
             }
