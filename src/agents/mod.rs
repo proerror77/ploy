@@ -11,4 +11,4 @@ pub mod openclaw;
 
 pub use governance_agent::GovernanceAgent;
 pub use governance_context::GovernanceContext;
-pub use openclaw::{OpenClawAgent, OpenClawConfig};
+pub use openclaw::OpenClawAgent;

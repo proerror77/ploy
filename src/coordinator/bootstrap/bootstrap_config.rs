@@ -1,13 +1,13 @@
 use rust_decimal::Decimal;
 use tracing::info;
 
-use crate::agents::OpenClawConfig;
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::CoordinatorConfig;
 use crate::strategy::CryptoTradingConfig;
 
 use super::managed_crypto::{apply_managed_crypto_runtime_env, ManagedCryptoRuntimeConfig};
+use super::OpenClawConfig;
 use super::runtime_config::{PoliticsRuntimeConfig, SportsRuntimeConfig};
 use super::strategy_deployments::apply_strategy_deployments;
 use super::support::{env_bool, env_decimal, env_decimal_opt, env_u64, load_strategy_deployments};

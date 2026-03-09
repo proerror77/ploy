@@ -1,5 +1,6 @@
 use super::*;
-use crate::agents::{GovernanceAgent, GovernanceContext, OpenClawAgent};
+use crate::agents::openclaw::OpenClawAgent;
+use crate::agents::{GovernanceAgent, GovernanceContext};
 
 #[derive(Debug, Clone)]
 pub(super) struct ManagedStrategyRuntimeSpawn {

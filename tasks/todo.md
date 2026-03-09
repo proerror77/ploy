@@ -2460,3 +2460,58 @@ Move the remaining sports/NBA websocket + persistence bootstrap special-case out
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo check --lib --features rl`
+
+# Bootstrap Coordinator Control-Plane Extraction (2026-03-09)
+
+## Goal
+Move executor/coordinator/schema/API startup ownership out of `start_platform()` so `bootstrap.rs` stops directly owning the control-plane bootstrap path and focuses on runtime assembly.
+
+## Tasks
+
+- [x] Extract the executor + coordinator + schema restore path into a dedicated bootstrap module.
+- [x] Extract API startup alongside that control-plane bootstrap path so the caller only receives initialized artifacts.
+- [x] Rewire `start_platform()` to consume the extracted coordinator bootstrap artifacts instead of inlining the entire block.
+- [x] Re-run default + `rl` compile after the extraction.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer inlines the executor/idempotency, schema migration, governance restore, and API startup block.
+- [x] Confirm the new bootstrap module returns initialized `Coordinator`, `CoordinatorHandle`, and API handle ownership to the caller.
+- [x] Confirm the extraction does not change compile behavior.
+
+## Progress notes
+
+- 2026-03-09: Added [coordinator_bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/coordinator_bootstrap.rs) and moved executor initialization, idempotency cleanup, schema/migration setup, governance/execution/risk restore, ingress authorization, and API startup there.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so `start_platform()` now delegates control-plane bootstrap to `initialize_coordinator_runtime(...)` and keeps only top-level startup orchestration.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+
+# OpenClaw Config Ownership Migration (2026-03-09)
+
+## Goal
+Move `OpenClawConfig` ownership out of `src/agents` and into bootstrap/governance assembly so `src/agents` trends toward runtime implementation only instead of exposing bootstrap config surface.
+
+## Tasks
+
+- [x] Add a bootstrap-owned OpenClaw config module and have bootstrap config consume it directly.
+- [x] Convert `src/agents/openclaw/config.rs` into a compatibility shim instead of the canonical owner.
+- [x] Remove unused public OpenClaw config/regime re-exports from `src/agents/openclaw/mod.rs`.
+- [x] Re-run default + `rl` compile after the ownership migration.
+
+## Review
+
+- [x] Confirm `PlatformBootstrapConfig` no longer imports `OpenClawConfig` from `crate::agents`.
+- [x] Confirm bootstrap now re-exports the OpenClaw config types from its own module.
+- [x] Confirm `src/agents/openclaw/mod.rs` no longer exposes unused config/regime types.
+- [x] Confirm the compatibility shim still compiles for OpenClaw runtime internals.
+
+## Progress notes
+
+- 2026-03-09: Added [openclaw_config.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/openclaw_config.rs) and made [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) re-export the OpenClaw config types from bootstrap ownership.
+- 2026-03-09: Updated [bootstrap_config.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/bootstrap_config.rs) so `PlatformBootstrapConfig` depends on bootstrap-owned `OpenClawConfig` instead of `crate::agents`.
+- 2026-03-09: Reduced [config.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/config.rs) to a compatibility shim and removed the unused `OpenClawConfig` / `MarketRegime` / `RegimeSnapshot` public exports from [mod.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/mod.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `rg "crate::agents::OpenClawConfig|pub use config::OpenClawConfig|pub use regime::\\{MarketRegime, RegimeSnapshot\\}" src`
