@@ -29,20 +29,20 @@ pub mod event_models;
 pub mod feeds;
 pub mod manager;
 pub mod registry;
-pub mod runtime_specs;
+mod runtime_facade;
 pub mod runtime_order;
+pub mod runtime_specs;
 pub mod traits;
 
-pub use traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
+pub use runtime_facade::{
+    engine, engine_store, executor, fund_manager, idempotency, order_request_from_intent,
+    AlertLevel, DataFeed, DataFeedBuilder, DataFeedManager, FundManager, FundStatus,
+    IdempotencyManager, IdempotencyResult, MarketUpdate, MomentumStrategyAdapter, OrderExecutor,
+    OrderUpdate, PositionInfo, PositionSizeResult, RiskLevel, SplitArbStrategyAdapter,
+    StaggeredArbAdapter, Strategy, StrategyAction, StrategyConfig, StrategyEngine, StrategyEvent,
+    StrategyEventType, StrategyFactory, StrategyInfo, StrategyManager, StrategyStateInfo,
+    StrategyStatus,
 };
-
-pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};
-pub use feeds::{DataFeedBuilder, DataFeedManager};
-pub use manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus};
-pub use runtime_order::order_request_from_intent;
-pub use staggered_arb_live::StaggeredArbAdapter;
 
 // =============================================================================
 // New modular architecture
@@ -104,17 +104,6 @@ pub mod volatility_arb;
 pub use claimer::{
     ensure_account_claimer_daemon, AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition,
 };
-pub use execution::engine::StrategyEngine;
-pub use execution::engine_store;
-pub use execution::executor::OrderExecutor;
-pub use execution::fund_manager::{FundManager, FundStatus, PositionSizeResult};
-pub use execution::idempotency::{IdempotencyManager, IdempotencyResult};
-
-// Backward-compat module aliases (external code uses crate::strategy::executor::X)
-pub use execution::engine;
-pub use execution::executor;
-pub use execution::fund_manager;
-pub use execution::idempotency;
 pub use multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use multi_outcome::{
     analyze_market_making_opportunity,
