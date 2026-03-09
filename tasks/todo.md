@@ -1,3 +1,29 @@
+# OpenClaw Config Shim Retirement (2026-03-09)
+
+## Goal
+Delete the leftover `agents/openclaw/config.rs` shim so OpenClaw modules stop pretending they own config types that were already moved under bootstrap ownership.
+
+## Tasks
+
+- [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
+- [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
+- [x] Re-run focused OpenClaw compile/tests after the shim removal.
+
+## Review
+
+- [x] Confirm repo-wide search shows no remaining imports from `agents::openclaw::config`.
+- [x] Confirm `agents/openclaw` no longer defines any config ownership layer and compiles directly against bootstrap-owned config types.
+
+## Progress notes
+
+- 2026-03-09: Rewired [agent.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/agent.rs), [allocator.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/allocator.rs), [performance.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/performance.rs), [regime.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/regime.rs), and [straddle.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/straddle.rs) to import config types directly from `crate::coordinator::bootstrap`.
+- 2026-03-09: Deleted [config.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/config.rs) and removed the dead `mod config;` line from [mod.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/mod.rs).
+- 2026-03-09: Validation passed:
+  - repo-wide search for `agents::openclaw::config` and `super::config::(OpenClawConfig|AllocatorConfig|RegimeConfig|StraddleConfig)` returned no remaining source matches
+  - `cargo check --lib`
+  - `cargo test regime_policy --lib -- --nocapture`
+  - `cargo test regime_display --lib -- --nocapture`
+
 # RL Compatibility Runtime Surface Pruning (2026-03-09)
 
 ## Goal

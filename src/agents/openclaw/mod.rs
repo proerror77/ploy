@@ -7,7 +7,6 @@
 
 pub mod agent;
 pub mod allocator;
-pub mod config;
 pub mod conflict;
 pub mod performance;
 pub mod regime;

@@ -11,7 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use super::config::AllocatorConfig;
+use crate::coordinator::bootstrap::AllocatorConfig;
+
 use super::performance::AgentPerformance;
 use super::regime::MarketRegime;
 

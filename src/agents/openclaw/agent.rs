@@ -15,11 +15,11 @@ use tracing::{debug, info, warn};
 use crate::agents::governance_agent::GovernanceAgent;
 use crate::agents::governance_context::GovernanceContext;
 use crate::agent_runtime::AgentStatus;
+use crate::coordinator::bootstrap::OpenClawConfig;
 use crate::coordinator::CoordinatorCommand;
 use crate::platform::{BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
-use super::config::OpenClawConfig;
 use super::conflict::ConflictDetector;
 use super::performance::PerformanceTracker;
 use super::regime::{RegimeDetector, RegimeSnapshot};

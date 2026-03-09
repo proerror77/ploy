@@ -10,8 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::coordinator::GlobalState;
-
-use super::config::AllocatorConfig;
+use crate::coordinator::bootstrap::AllocatorConfig;
 
 /// Rolling performance metrics for one agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
