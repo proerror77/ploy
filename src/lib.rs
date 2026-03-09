@@ -30,15 +30,16 @@ pub mod validation;
 #[cfg(feature = "rl")]
 pub mod rl;
 
+pub use agent_runtime::{AgentRiskParams, AgentStatus};
 pub use ai_clients::{AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
 pub use collector::{
     BinanceDepthStream, LobCache, LobSnapshot, SyncCollector, SyncCollectorConfig,
 };
 pub use config::AppConfig;
 pub use control_plane::{
-    DeploymentExecutionMode, MarketSelector, RiskDecision, RiskDecisionStatus,
-    StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
-    StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
+    DeploymentExecutionMode, MarketSelector, RiskDecision, RiskDecisionStatus, StrategyDeployment,
+    StrategyEvaluationEvidence, StrategyEvaluationMetrics, StrategyEvaluationStage,
+    StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
 };
 pub use coordination::{
     CircuitState, ComponentState, GracefulShutdown, LifecycleEvent, LifecycleManager,
@@ -49,7 +50,6 @@ pub use persistence::{
     CheckpointConfig, CheckpointService, Checkpointable, DLQHandler, DLQProcessor,
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
-pub use agent_runtime::{AgentRiskParams, AgentStatus};
 pub use platform::{Domain, OrderIntent, RiskGate};
 pub use signing::Wallet;
 pub use supervisor::{
@@ -59,4 +59,7 @@ pub use supervisor::{
 
 // RL exports (when feature enabled)
 #[cfg(feature = "rl")]
-pub use rl::{ExecutionReport, ExecutionStatus, RLConfig, RLStrategy};
+pub use rl::{
+    ExecutionReport, ExecutionStatus, RLConfig, RLStrategy, RlOrderRuntime, RlOrderRuntimeConfig,
+    RlRuntimeStats,
+};
