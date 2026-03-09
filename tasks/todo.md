@@ -103,16 +103,19 @@ Delete the remaining `platform::NbaComebackAgent` compatibility path by moving t
 
 - [x] Confirm no code instantiates `platform::NbaComebackAgent`.
 - [x] Confirm `src/platform/mod.rs` no longer re-exports the deleted agent.
-- [ ] Confirm the CLI command still prints NBA comeback signals in dry-run mode.
+- [x] Confirm the CLI command still prints NBA comeback signals in dry-run mode.
 
 ## Progress notes
 
 - 2026-03-09: Reworked [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) so the `nba_comeback` CLI command now drives [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/strategy.rs) directly instead of instantiating `platform::NbaComebackAgent`.
 - 2026-03-09: Added `NbaComebackStrategy::from_config(...)` plus a direct-config unit test so canonical callers no longer need a TOML round trip.
 - 2026-03-09: Deleted [nba_agent.rs](/Users/proerror/Documents/ploy/src/platform/agents/nba_agent.rs) and removed the dead `NbaComebackAgent` exports from [mod.rs](/Users/proerror/Documents/ploy/src/platform/agents/mod.rs) and [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-09: Deleted [sports.rs](/Users/proerror/Documents/ploy/src/agents/sports.rs) and [politics.rs](/Users/proerror/Documents/ploy/src/agents/politics.rs) once bootstrap-owned runtime config types made those legacy shims unnecessary.
 - 2026-03-09: Validation passed:
-  - `cargo check --bin ploy`
+  - `cargo check --lib`
   - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
+  - `cargo test sports_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
+  - `cargo test politics_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
 
 # Canonical Strategy Handoff Unification (2026-03-09)
 

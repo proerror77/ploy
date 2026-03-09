@@ -191,7 +191,10 @@ impl NbaComebackStrategy {
             .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_string());
 
         let pool = PgPoolOptions::new()
+            .min_connections(0)
             .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
             .connect_lazy(&database_url)
             .map_err(|e| anyhow!("invalid nba_comeback database_url: {}", e))?;
         let stats = ComebackStatsProvider::new(pool, cfg.season.clone());
