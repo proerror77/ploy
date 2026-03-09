@@ -1,7 +1,7 @@
-//! Order Platform - legacy compatibility runtime
+//! Order Platform - legacy execution runtime
 //!
-//! 保留舊的 `DomainAgent` / `EventRouter` / queue-driven 下單流程，主要
-//! 供 RL CLI 與其他兼容層使用。正式 live runtime 已由 coordinator 接管。
+//! 保留舊的 queue-driven 風控與執行流程，主要供 RL CLI 兼容路徑使用。
+//! 正式 live runtime 已由 coordinator 接管。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,9 +19,7 @@ use crate::strategy::executor::OrderExecutor;
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;
 use super::risk::{RiskCheckResult, RiskConfig, RiskGate};
-use super::router::{AgentSubscription, EventRouter};
-use super::traits::{AgentRiskParams, DomainAgent};
-use super::types::{DomainEvent, ExecutionReport, OrderIntent};
+use super::types::{ExecutionReport, OrderIntent};
 
 /// 平台配置
 #[derive(Debug, Clone)]
@@ -77,10 +75,8 @@ pub struct PlatformStats {
 
 /// 舊版下單平台主結構。
 ///
-/// 這層保留給 legacy `DomainAgent` 兼容路徑，並不是 canonical live runtime。
+/// 這層保留給 legacy CLI/compatibility 路徑，並不是 canonical live runtime。
 pub struct OrderPlatform {
-    /// 事件路由器
-    router: Arc<EventRouter>,
     /// 風控閘門
     risk_gate: Arc<RiskGate>,
     /// 訂單隊列
@@ -120,7 +116,6 @@ impl OrderPlatform {
         ));
 
         Self {
-            router: Arc::new(EventRouter::new()),
             risk_gate: Arc::new(RiskGate::new(config.risk_config.clone())),
             queue: Arc::new(RwLock::new(OrderQueue::new(config.queue_size))),
             positions: Arc::new(PositionAggregator::new()),
@@ -134,7 +129,6 @@ impl OrderPlatform {
     /// 使用自定義執行器創建
     pub fn with_executor(executor: Arc<OrderExecutor>, config: PlatformConfig) -> Self {
         Self {
-            router: Arc::new(EventRouter::new()),
             risk_gate: Arc::new(RiskGate::new(config.risk_config.clone())),
             queue: Arc::new(RwLock::new(OrderQueue::new(config.queue_size))),
             positions: Arc::new(PositionAggregator::new()),
@@ -145,97 +139,9 @@ impl OrderPlatform {
         }
     }
 
-    // ==================== Agent 管理 ====================
+    // ==================== 訂單入隊 ====================
 
-    /// 註冊 Agent
-    pub async fn register_agent(
-        &self,
-        agent: Box<dyn DomainAgent>,
-        subscription: AgentSubscription,
-    ) {
-        let agent_id = agent.id().to_string();
-        let domain = agent.domain();
-        let risk_params = agent.risk_params().clone();
-
-        // 註冊到路由器
-        self.router.register_agent(agent, subscription).await;
-
-        // 註冊風控參數
-        self.risk_gate
-            .register_agent_with_domain(&agent_id, domain, risk_params)
-            .await;
-
-        info!("Platform registered agent: {}", agent_id);
-    }
-
-    /// 註冊 Agent (使用自定義風控參數)
-    pub async fn register_agent_with_risk(
-        &self,
-        agent: Box<dyn DomainAgent>,
-        subscription: AgentSubscription,
-        risk_params: AgentRiskParams,
-    ) {
-        let agent_id = agent.id().to_string();
-        let domain = agent.domain();
-
-        self.router.register_agent(agent, subscription).await;
-        self.risk_gate
-            .register_agent_with_domain(&agent_id, domain, risk_params)
-            .await;
-
-        info!("Platform registered agent with custom risk: {}", agent_id);
-    }
-
-    /// 取消註冊 Agent
-    pub async fn unregister_agent(&self, agent_id: &str) {
-        self.router.unregister_agent(agent_id).await;
-        self.risk_gate.unregister_agent(agent_id).await;
-        self.positions.clear_agent(agent_id).await;
-
-        info!("Platform unregistered agent: {}", agent_id);
-    }
-
-    // ==================== 事件處理 ====================
-
-    /// 處理領域事件
-    ///
-    /// 1. 路由事件到相關 Agent
-    /// 2. 收集訂單意圖
-    /// 3. 加入優先隊列
-    pub async fn process_event(&self, event: DomainEvent) -> Result<usize> {
-        // 路由事件並收集意圖
-        let intents = self.router.dispatch(event).await?;
-        let intent_count = intents.len();
-
-        // 更新統計
-        {
-            let mut stats = self.stats.write().await;
-            stats.events_processed += 1;
-        }
-
-        // 加入隊列
-        let mut queue = self.queue.write().await;
-        for intent in intents {
-            if let Err(e) = queue.enqueue(intent.clone()) {
-                warn!("Failed to enqueue intent {}: {}", intent.intent_id, e);
-            }
-        }
-
-        Ok(intent_count)
-    }
-
-    /// 批量處理事件
-    pub async fn process_events(&self, events: Vec<DomainEvent>) -> Result<usize> {
-        let mut total_intents = 0;
-        for event in events {
-            total_intents += self.process_event(event).await?;
-        }
-        Ok(total_intents)
-    }
-
-    /// 直接入隊訂單意圖 (用於外部 Agent 提交)
-    ///
-    /// 允許外部 legacy DomainAgent 兼容層直接提交訂單意圖到隊列
+    /// 直接入隊訂單意圖
     pub async fn enqueue_intent(&self, intent: OrderIntent) -> Result<()> {
         let mut queue = self.queue.write().await;
         queue.enqueue(intent.clone()).map_err(|e| {
@@ -270,10 +176,8 @@ impl OrderPlatform {
     /// 處理隊列中的訂單
     ///
     /// 從優先隊列取出訂單，進行風控檢查，然後執行。
-    pub async fn process_queue(&self) -> Result<usize> {
+    pub async fn process_queue(&self) -> Result<Vec<ExecutionReport>> {
         self.enforce_coordinator_only_live()?;
-
-        let mut processed = 0;
 
         // 批量取出訂單
         let batch_size = if self.config.parallel_execution {
@@ -283,25 +187,26 @@ impl OrderPlatform {
         };
 
         let intents = self.queue.write().await.dequeue_batch(batch_size);
+        let mut reports = Vec::with_capacity(intents.len());
 
         for intent in intents {
-            if let Err(e) = self.process_intent(intent).await {
-                warn!("Failed to process intent: {}", e);
+            match self.process_intent(intent).await {
+                Ok(report) => reports.push(report),
+                Err(e) => warn!("Failed to process intent: {}", e),
             }
-            processed += 1;
         }
 
         // 更新統計
         {
             let mut stats = self.stats.write().await;
-            stats.intents_processed += processed as u64;
+            stats.intents_processed += reports.len() as u64;
         }
 
-        Ok(processed)
+        Ok(reports)
     }
 
     /// 處理單個訂單意圖
-    async fn process_intent(&self, intent: OrderIntent) -> Result<()> {
+    async fn process_intent(&self, intent: OrderIntent) -> Result<ExecutionReport> {
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
 
@@ -316,17 +221,15 @@ impl OrderPlatform {
                 self.stats.write().await.risk_passed += 1;
 
                 // 執行訂單
-                self.execute_intent(&intent).await?;
+                self.execute_intent(&intent).await
             }
             RiskCheckResult::Blocked(reason) => {
                 // 更新統計
                 self.stats.write().await.risk_blocked += 1;
 
-                // 發送被攔截報告
                 let report = ExecutionReport::risk_blocked(&intent, reason.to_string());
-                self.send_execution_report(&report).await;
-
                 warn!("Intent {} blocked: {}", intent_id, reason);
+                Ok(report)
             }
             RiskCheckResult::Adjusted(suggestion) => {
                 // 更新統計
@@ -341,15 +244,13 @@ impl OrderPlatform {
                     intent_id, intent.shares, suggestion.max_shares, suggestion.reason
                 );
 
-                self.execute_intent(&adjusted_intent).await?;
+                self.execute_intent(&adjusted_intent).await
             }
         }
-
-        Ok(())
     }
 
     /// 執行訂單
-    async fn execute_intent(&self, intent: &OrderIntent) -> Result<()> {
+    async fn execute_intent(&self, intent: &OrderIntent) -> Result<ExecutionReport> {
         let agent_id = &intent.agent_id;
         let intent_id = intent.intent_id;
 
@@ -382,9 +283,7 @@ impl OrderPlatform {
                 );
                 let has_fill = result.filled_shares > 0;
 
-                // 創建執行報告
                 let report = if is_filled || has_fill {
-                    // 更新倉位
                     if intent.is_buy && has_fill {
                         self.positions
                             .open_position(
@@ -399,12 +298,10 @@ impl OrderPlatform {
                             .await;
                     }
 
-                    // 更新風控統計
                     self.risk_gate
                         .record_success(agent_id, rust_decimal::Decimal::ZERO)
                         .await;
 
-                    // 更新平台統計
                     self.stats.write().await.executions_success += 1;
 
                     ExecutionReport::success(
@@ -422,54 +319,21 @@ impl OrderPlatform {
                     ExecutionReport::rejected(intent, reason)
                 };
 
-                // 發送報告給 Agent
-                self.send_execution_report(&report).await;
-
                 info!(
                     "Intent {} executed: {} shares filled",
                     intent_id, report.filled_shares
                 );
+                Ok(report)
             }
             Err(e) => {
-                // 執行錯誤
                 self.risk_gate
                     .record_failure(agent_id, &e.to_string())
                     .await;
                 self.stats.write().await.executions_failed += 1;
 
-                let report = ExecutionReport::rejected(intent, e.to_string());
-                self.send_execution_report(&report).await;
-
                 error!("Intent {} failed: {}", intent_id, e);
+                Ok(ExecutionReport::rejected(intent, e.to_string()))
             }
-        }
-
-        Ok(())
-    }
-
-    /// 發送執行報告給 Agent
-    async fn send_execution_report(&self, report: &ExecutionReport) {
-        // 通過路由器發送給對應的 Agent
-        if let Err(e) = self
-            .router
-            .dispatch_to_agent(
-                &report.agent_id,
-                DomainEvent::OrderUpdate(super::types::OrderUpdateEvent {
-                    domain: super::types::Domain::Crypto, // TODO: 從 report 獲取
-                    order_id: report.order_id.clone().unwrap_or_default(),
-                    client_order_id: report.intent_id.to_string(),
-                    status: format!("{:?}", report.status),
-                    filled_shares: report.filled_shares,
-                    avg_price: report.avg_fill_price,
-                    timestamp: report.executed_at,
-                }),
-            )
-            .await
-        {
-            warn!(
-                "Failed to send execution report to agent {}: {}",
-                report.agent_id, e
-            );
         }
     }
 
@@ -480,9 +344,6 @@ impl OrderPlatform {
         self.enforce_coordinator_only_live()?;
         *self.running.write().await = true;
 
-        // 啟動所有 Agent
-        self.router.start_all_agents().await?;
-
         info!("Order platform started");
         Ok(())
     }
@@ -490,9 +351,6 @@ impl OrderPlatform {
     /// 停止平台
     pub async fn stop(&self) -> Result<()> {
         *self.running.write().await = false;
-
-        // 停止所有 Agent
-        self.router.stop_all_agents().await?;
 
         info!("Order platform stopped");
         Ok(())
@@ -570,11 +428,6 @@ impl OrderPlatform {
         self.positions.get_agent_positions(agent_id).await
     }
 
-    /// 獲取路由統計
-    pub async fn router_stats(&self) -> super::router::RouterStats {
-        self.router.stats().await
-    }
-
     /// 是否運行中
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
@@ -591,11 +444,6 @@ impl OrderPlatform {
     }
 
     // ==================== 組件訪問 ====================
-
-    /// 獲取路由器引用
-    pub fn router(&self) -> &Arc<EventRouter> {
-        &self.router
-    }
 
     /// 獲取風控閘門引用
     pub fn risk_gate(&self) -> &Arc<RiskGate> {

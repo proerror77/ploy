@@ -1596,21 +1596,57 @@ Move the remaining `RLCryptoAgent` compatibility runtime out of the shared `plat
 
 ## Tasks
 
-- [ ] Move `RLCryptoAgent` / `RLCryptoAgentConfig` under `src/main_commands/rl/` as a CLI-local compatibility module.
-- [ ] Rewire `src/main_commands/rl/agent.rs` to use the local compatibility module instead of `ploy::platform::{RLCryptoAgent, RLCryptoAgentConfig}`.
-- [ ] Delete `src/platform/agents/` and remove `RLCryptoAgent` re-exports from `src/platform/mod.rs`.
-- [ ] Delete the unused `SimpleAgent` trait/export if nothing still implements or imports it.
-- [ ] Re-run compile plus narrow RL/bootstrap regressions after the cutover.
+- [x] Move `RLCryptoAgent` / `RLCryptoAgentConfig` into the RL module as a CLI-local compatibility module.
+- [x] Rewire `src/main_commands/rl/agent.rs` to use the local compatibility module instead of `ploy::platform::{RLCryptoAgent, RLCryptoAgentConfig}`.
+- [x] Delete `src/platform/agents/` and remove `RLCryptoAgent` re-exports from `src/platform/mod.rs`.
+- [x] Delete the unused `SimpleAgent` trait/export if nothing still implements or imports it.
+- [x] Re-run compile plus narrow RL/bootstrap regressions after the cutover.
 
 ## Review
 
-- [ ] Confirm `src/platform/mod.rs` no longer re-exports `RLCryptoAgent`.
-- [ ] Confirm `src/main_commands/rl/agent.rs` still runs through the legacy RL CLI path without touching the shared `platform` API surface.
-- [ ] Confirm `src/platform/agents/` is gone and `SimpleAgent` is no longer defined/exported.
+- [x] Confirm `src/platform/mod.rs` no longer re-exports `RLCryptoAgent`.
+- [x] Confirm `src/main_commands/rl/agent.rs` still runs through the legacy RL CLI path without touching the shared `platform` API surface.
+- [x] Confirm `src/platform/agents/` is gone and `SimpleAgent` is no longer defined/exported.
 
 ## Progress notes
 
 - 2026-03-09: Started the cutover after confirming `RLCryptoAgent` is no longer a live runtime entrypoint and only the RL CLI still instantiates it.
+- 2026-03-09: Moved `RLCryptoAgent` into [cli_agent.rs](/Users/proerror/Documents/ploy/src/rl/cli_agent.rs), rewired the RL command to import it from the RL module, and deleted `src/platform/agents/`.
+- 2026-03-09: Validation passed:
+  - `cargo check --features rl --bin ploy`
+  - `cargo test rl::cli_agent --lib --features rl -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+
+# DomainAgent Runtime Retirement (2026-03-09)
+
+## Goal
+Delete the last actual `DomainAgent`/`EventRouter` runtime path by rewriting the RL CLI to drive `RLCryptoAgent` directly and shrinking `OrderPlatform` down to pure risk/queue/execution ownership.
+
+## Tasks
+
+- [x] Rework `src/rl/cli_agent.rs` so `RLCryptoAgent` exposes inherent lifecycle/event/execution methods instead of only a `DomainAgent` impl.
+- [x] Rewrite `src/main_commands/rl/agent.rs` to remove `EventRouter` / `AgentSubscription` and call the agent directly.
+- [x] Simplify `src/platform/platform.rs` so it no longer owns router-based agent management or execution-report callbacks.
+- [x] Delete `src/platform/router.rs` plus the `DomainAgent`, `AgentHealthStatus`, `AgentSubscription`, and `RouterStats` surfaces if nothing still imports them.
+- [x] Re-run RL CLI compile/tests after the retirement.
+
+## Review
+
+- [x] Confirm `src/main_commands/rl/agent.rs` no longer imports `EventRouter`, `AgentSubscription`, or `DomainAgent`.
+- [x] Confirm `src/platform/router.rs` is deleted and no code still references `RouterStats`.
+- [x] Confirm the RL CLI still updates agent state from execution reports after live/dry-run order processing.
+
+## Progress notes
+
+- 2026-03-09: Started after confirming `RLCryptoAgent` is now the only remaining `DomainAgent` implementation in the repo.
+- 2026-03-09: Reworked [cli_agent.rs](/Users/proerror/Documents/ploy/src/rl/cli_agent.rs) so `RLCryptoAgent` exposes inherent lifecycle/event/execution methods, then rewired [agent.rs](/Users/proerror/Documents/ploy/src/main_commands/rl/agent.rs) to drive the agent directly without `EventRouter`.
+- 2026-03-09: Simplified [platform.rs](/Users/proerror/Documents/ploy/src/platform/platform.rs) down to queue/risk/execution ownership, removed router-based callbacks, and deleted the dead [router.rs](/Users/proerror/Documents/ploy/src/platform/router.rs) / [legacy_runtime.rs](/Users/proerror/Documents/ploy/src/platform/legacy_runtime.rs) compatibility layer files.
+- 2026-03-09: Validation passed:
+  - `cargo check`
+  - `cargo test test_order_platform_start_blocks_live_runtime --lib -- --nocapture`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+  - `cargo test --features rl test_position_tracking --lib -- --nocapture`
   - `cargo test runtime_scope_keeps_politics_when_no_explicit_selection -- --nocapture`
   - `cargo test explicit_selection_disables_politics_without_politics_flag -- --nocapture`
   - `cargo test sports_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`

@@ -1,11 +1,5 @@
-//! RL-Powered Crypto Agent
-//!
-//! A crypto trading agent that uses reinforcement learning for decision making.
-//! Connects the Order Platform's DomainAgent interface with RLStrategy.
+//! RL-powered crypto agent used by the legacy RL CLI runtime.
 
-//! Legacy RL DomainAgent compatibility runtime used only by the RL CLI.
-
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -18,7 +12,6 @@ use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::platform::legacy_runtime::DomainAgent;
 use crate::platform::{
     AgentRiskParams, AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
 };
@@ -143,7 +136,7 @@ struct InternalPosition {
 /// RL-Powered Crypto Agent
 ///
 /// Uses reinforcement learning to make trading decisions for crypto markets.
-/// Implements DomainAgent trait for Order Platform integration.
+/// The legacy RL CLI drives it directly instead of routing through a shared agent runtime.
 pub struct RLCryptoAgent {
     config: RLCryptoAgentConfig,
     status: AgentStatus,
@@ -831,30 +824,28 @@ impl RLCryptoAgent {
 use chrono::Datelike;
 use chrono::Timelike;
 
-#[async_trait]
-impl DomainAgent for RLCryptoAgent {
-    fn id(&self) -> &str {
+impl RLCryptoAgent {
+    pub fn id(&self) -> &str {
         &self.config.id
     }
 
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.config.name
     }
 
-    fn domain(&self) -> Domain {
+    pub fn domain(&self) -> Domain {
         Domain::Crypto
     }
 
-    fn status(&self) -> AgentStatus {
+    pub fn status(&self) -> AgentStatus {
         self.status
     }
 
-    fn risk_params(&self) -> &AgentRiskParams {
+    pub fn risk_params(&self) -> &AgentRiskParams {
         &self.config.risk_params
     }
 
-    async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {
-        // Only trade when running
+    pub async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {
         if !self.status.can_trade() {
             return Ok(vec![]);
         }
@@ -862,7 +853,6 @@ impl DomainAgent for RLCryptoAgent {
         match event {
             DomainEvent::Crypto(crypto_event) => Ok(self.process_crypto_event(&crypto_event)),
             DomainEvent::QuoteUpdate(update) => {
-                // Update quote cache
                 if update.domain == Domain::Crypto {
                     match update.side {
                         Side::Up => {
@@ -881,48 +871,44 @@ impl DomainAgent for RLCryptoAgent {
                 Ok(vec![])
             }
             DomainEvent::Tick(now) => {
-                // Update time features
                 self.current_obs
                     .update_time_features(now.hour(), now.weekday().num_days_from_monday());
-
-                // Update position prices
                 self.update_position_prices();
                 self.update_position_features();
-
                 Ok(vec![])
             }
             _ => Ok(vec![]),
         }
     }
 
-    async fn on_execution(&mut self, report: ExecutionReport) {
+    pub async fn on_execution(&mut self, report: ExecutionReport) {
         self.handle_execution(&report);
     }
 
-    async fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         info!("[{}] Starting RL Crypto Agent...", self.config.id);
         self.status = AgentStatus::Running;
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    pub async fn stop(&mut self) -> Result<()> {
         info!("[{}] Stopping RL Crypto Agent...", self.config.id);
         self.status = AgentStatus::Stopped;
         Ok(())
     }
 
-    fn pause(&mut self) {
+    pub fn pause(&mut self) {
         info!("[{}] Pausing...", self.config.id);
         self.status = AgentStatus::Paused;
     }
 
-    fn resume(&mut self) {
+    pub fn resume(&mut self) {
         info!("[{}] Resuming...", self.config.id);
         self.consecutive_failures = 0;
         self.status = AgentStatus::Running;
     }
 
-    fn position_count(&self) -> usize {
+    pub fn position_count(&self) -> usize {
         if self.position.is_some() {
             1
         } else {
@@ -930,11 +916,11 @@ impl DomainAgent for RLCryptoAgent {
         }
     }
 
-    fn total_exposure(&self) -> Decimal {
+    pub fn total_exposure(&self) -> Decimal {
         self.total_exposure
     }
 
-    fn daily_pnl(&self) -> Decimal {
+    pub fn daily_pnl(&self) -> Decimal {
         self.daily_pnl
     }
 }

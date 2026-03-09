@@ -25,12 +25,9 @@ pub(super) async fn run_agent(
     use ploy::adapters::{polymarket_clob::POLYGON_CHAIN_ID, PolymarketClient};
     use ploy::domain::Side;
     use ploy::error::PloyError;
-    use ploy::platform::legacy_runtime::{
-        AgentSubscription, DomainAgent, EventRouter, OrderPlatform, PlatformConfig,
-    };
     use ploy::platform::{
-        AgentRiskParams, CryptoEvent, DataPlaneConfig, DataPlaneFreshness, Domain, DomainEvent,
-        PlatformDataPlane, QuoteData,
+        AgentRiskParams, CryptoEvent, DataPlaneConfig, DataPlaneFreshness, DomainEvent,
+        OrderPlatform, PlatformConfig, PlatformDataPlane, QuoteData,
     };
     use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
     use ploy::rl::config::RLConfig;
@@ -38,7 +35,6 @@ pub(super) async fn run_agent(
     use rust_decimal::prelude::ToPrimitive;
     use rust_decimal::Decimal;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║           Ploy RL Agent - Order Platform                     ║");
@@ -110,14 +106,6 @@ pub(super) async fn run_agent(
     let mut agent = RLCryptoAgent::new(agent_config);
     agent.start().await?;
 
-    let router = Arc::new(EventRouter::new());
-    router
-        .register_agent(
-            Box::new(agent),
-            AgentSubscription::for_domain("rl-crypto-agent", Domain::Crypto),
-        )
-        .await;
-
     let symbol_upper = symbol.to_uppercase();
     let data_plane = Arc::new(PlatformDataPlane::new(
         DataPlaneConfig {
@@ -144,7 +132,7 @@ pub(super) async fn run_agent(
     println!("🚀 Agent started. Listening for market data...\n");
     println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
 
-    let platform: Option<Arc<RwLock<OrderPlatform>>> = if !dry_run {
+    let mut platform: Option<OrderPlatform> = if !dry_run {
         info!("Setting up live order execution...");
         let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
         info!("Wallet loaded: {:?}", wallet.address());
@@ -158,10 +146,7 @@ pub(super) async fn run_agent(
         info!("✅ Authenticated with Polymarket CLOB");
 
         let platform_config = PlatformConfig::default();
-        Some(Arc::new(RwLock::new(OrderPlatform::new(
-            client,
-            platform_config,
-        ))))
+        Some(OrderPlatform::new(client, platform_config))
     } else {
         None
     };
@@ -169,6 +154,8 @@ pub(super) async fn run_agent(
     let tick_duration = std::time::Duration::from_millis(tick_interval);
     let mut interval = tokio::time::interval(tick_duration);
     let mut step_count = 0u64;
+    let mut events_received = 0u64;
+    let mut intents_generated = 0u64;
     let mut quotes_received = false;
 
     loop {
@@ -244,9 +231,11 @@ pub(super) async fn run_agent(
                     quotes,
                     momentum,
                 });
+                events_received += 1;
 
-                match router.dispatch(event).await {
+                match agent.on_event(event).await {
                     Ok(intents) => {
+                        intents_generated += intents.len() as u64;
                         for intent in intents {
                             if dry_run {
                                 println!("📝 [DRY] Intent: {} {} {} @ {} ({})",
@@ -256,7 +245,7 @@ pub(super) async fn run_agent(
                                     intent.limit_price,
                                     intent.market_slug,
                                 );
-                            } else if let Some(ref p) = platform {
+                            } else if let Some(platform) = platform.as_mut() {
                                 println!("🔴 [LIVE] Executing: {} {} {} @ {} ({})",
                                     if intent.is_buy { "BUY" } else { "SELL" },
                                     intent.shares,
@@ -264,14 +253,20 @@ pub(super) async fn run_agent(
                                     intent.limit_price,
                                     intent.market_slug,
                                 );
-                                let platform_guard = p.write().await;
-                                if let Err(e) = platform_guard.enqueue_intent(intent.clone()).await {
+                                if let Err(e) = platform.enqueue_intent(intent.clone()).await {
                                     error!("Failed to enqueue intent: {}", e);
+                                    continue;
                                 }
-                                if let Err(e) = platform_guard.process_queue().await {
-                                    error!("Failed to process queue: {}", e);
+                                match platform.process_queue().await {
+                                    Ok(reports) => {
+                                        for report in reports {
+                                            agent.on_execution(report).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to process queue: {}", e);
+                                    }
                                 }
-                                drop(platform_guard);
                             } else {
                                 warn!("Live mode but no platform initialized");
                             }
@@ -283,7 +278,6 @@ pub(super) async fn run_agent(
                 }
 
                 if step_count % 30 == 0 {
-                    let _stats = router.stats().await;
                     let up_ask = up_quote.as_ref().and_then(|q| q.best_ask).unwrap_or(Decimal::ZERO);
                     let down_ask = down_quote.as_ref().and_then(|q| q.best_ask).unwrap_or(Decimal::ZERO);
                     let sum_asks = up_ask + down_ask;
@@ -302,16 +296,15 @@ pub(super) async fn run_agent(
                 println!("\n\n╔══════════════════════════════════════════════════════════════╗");
                 println!("║               Session Summary                                ║");
                 println!("╠══════════════════════════════════════════════════════════════╣");
-                let stats = router.stats().await;
                 println!("║  Total Steps:     {:>10}                                   ║", step_count);
-                println!("║  Events Received: {:>10}                                   ║", stats.events_received);
-                println!("║  Intents Gen:     {:>10}                                   ║", stats.intents_generated);
+                println!("║  Events Received: {:>10}                                   ║", events_received);
+                println!("║  Intents Gen:     {:>10}                                   ║", intents_generated);
                 println!("╚══════════════════════════════════════════════════════════════╝");
                 break;
             }
         }
     }
 
-    router.stop_all_agents().await?;
+    agent.stop().await?;
     Ok(())
 }
