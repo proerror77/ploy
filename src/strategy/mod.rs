@@ -29,6 +29,7 @@ pub mod event_models;
 pub mod feeds;
 pub mod manager;
 pub mod registry;
+mod research_facade;
 mod runtime_facade;
 pub mod runtime_order;
 pub mod runtime_specs;
@@ -104,6 +105,20 @@ pub mod volatility_arb;
 pub use claimer::{
     ensure_account_claimer_daemon, AutoClaimer, ClaimResult, ClaimerConfig, RedeemablePosition,
 };
+pub use dump_hedge::{
+    DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
+    PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
+};
+pub use event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
+pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
+pub use gamma_scalping::{
+    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer, Straddle,
+};
+pub use momentum::{
+    Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
+    MomentumDetector, MomentumEngine, MomentumSignal, Position,
+};
+pub use momentum_runtime_config::{CryptoEntryMode, CryptoTradingConfig};
 pub use multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use multi_outcome::{
     analyze_market_making_opportunity,
@@ -131,48 +146,6 @@ pub use multi_outcome::{
     SplitMergeType,
     POLYMARKET_FEE_RATE,
 };
-pub use trade_logger::{
-    BucketStats, SymbolStats, TradeContext, TradeLogger, TradeOutcome, TradeRecord, TradingStats,
-};
-
-pub use backtest::{
-    calculate_kline_volatility, load_klines_from_csv, load_pm_prices_from_csv, BacktestEngine,
-    BacktestResults, BacktestTrade, KlineRecord, MarketSnapshot, PMPriceRecord, PaperSignal,
-    PaperTrader, PaperTradingStats,
-};
-pub use backtest_recorder::{
-    BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, PgBacktestRecorder, SignalType,
-};
-pub use backtest_report::{load_report, BacktestReport, Suggestion, SuggestionPriority};
-pub use deribit_probability_arb::{
-    binary_call_prob_forward, interpolate_iv_linear, net_edge, norm_cdf, parse_polymarket_question,
-    run_deribit_probability_arb, DeribitProbabilityArbConfig, ParsedPolymarketQuestion,
-    SurfacePoint, VolSurfaceSnapshot,
-};
-pub use directional_backtest::{
-    DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade,
-};
-pub use dump_hedge::{
-    DumpHedgeConfig, DumpHedgeEngine, DumpHedgeStats, EnhancedDumpSignal, HedgeResult,
-    PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
-};
-pub use event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
-pub use execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
-pub use fee_model::{AllInCost, FeeModel, FeeRateCache};
-pub use gamma_scalping::{
-    BinaryGreeks, GammaScalpingConfig, GammaScalpingStrategy, RebalanceAction, Rebalancer, Straddle,
-};
-pub use garch_probability_backtest::{
-    GarchProbabilityBacktestConfig, GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade,
-};
-pub use liquidity_vacuum_backtest::{
-    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
-};
-pub use momentum::{
-    Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
-    MomentumDetector, MomentumEngine, MomentumSignal, Position,
-};
-pub use momentum_runtime_config::{CryptoEntryMode, CryptoTradingConfig};
 pub use nba_comeback::nba_data_collector::{
     CollectorConfig as NbaCollectorConfig, DataCollector as NbaDataCollector,
     GameState as NbaGameState, MarketSnapshot as NbaMarketSnapshot, OrderbookData, TeamStats,
@@ -190,7 +163,6 @@ pub use nba_comeback::nba_state_machine::{
 pub use nba_comeback::nba_winprob::{
     GameFeatures, LiveWinProbModel, ModelMetadata, WinProbCoefficients, WinProbPrediction,
 };
-pub use paper_runner::{run_paper_trading, PaperTradingConfig, PaperTradingRunner, TrackedMarket};
 pub use position_manager::{
     Position as PersistedPosition, PositionManager, PositionStatus as PersistedPositionStatus,
     PositionSummary,
@@ -201,10 +173,22 @@ pub use reconciliation::{
     ReconciliationService,
 };
 pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
-pub use reverse_engineered::{
-    extract_profile_snapshot, infer_strategy_params, run_reverse_engineered_profile_paper,
-    ProfileSnapshot as ReverseProfileSnapshot, ReverseDryRunResult, ReverseEngineeredConfig,
-    ReverseTradeEvent, StrategyParams as ReverseStrategyParams, REVERSE_PROFILE_STRATEGY_NAME,
+pub use research_facade::{
+    binary_call_prob_forward, calculate_kline_volatility, extract_profile_snapshot,
+    infer_strategy_params, interpolate_iv_linear, load_klines_from_csv, load_pm_prices_from_csv,
+    load_report, net_edge, norm_cdf, parse_polymarket_question, run_deribit_probability_arb,
+    run_paper_trading, run_reverse_engineered_profile_paper, BacktestEngine, BacktestRecorder,
+    BacktestReport, BacktestResults, BacktestSignal, BacktestTrade, DeribitProbabilityArbConfig,
+    DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade, ExecutionResult,
+    ExecutionSimConfig, ExecutionSimulator, GarchProbabilityBacktestConfig,
+    GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade, KlineRecord,
+    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
+    MarketSnapshot, NullRecorder, PMPriceRecord, PaperSignal, PaperTrader, PaperTradingConfig,
+    PaperTradingRunner, PaperTradingStats, ParsedPolymarketQuestion, PendingTrade,
+    PgBacktestRecorder, ReverseDryRunResult, ReverseEngineeredConfig, ReverseProfileSnapshot,
+    ReverseStrategyParams, ReverseTradeEvent, SignalType, StaggeredArbBacktestConfig,
+    StaggeredArbBacktestEngine, StaggeredArbClosedTrade, Suggestion, SuggestionPriority,
+    SurfacePoint, TrackedMarket, VolSurfaceSnapshot, REVERSE_PROFILE_STRATEGY_NAME,
     REVERSE_PROFILE_STRATEGY_SLUG,
 };
 pub use risk_mgmt::risk::RiskManager;
@@ -214,8 +198,8 @@ pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
     SplitArbConfig, SplitArbEngine,
 };
-pub use staggered_arb_backtest::{
-    StaggeredArbBacktestConfig, StaggeredArbBacktestEngine, StaggeredArbClosedTrade,
+pub use trade_logger::{
+    BucketStats, SymbolStats, TradeContext, TradeLogger, TradeOutcome, TradeRecord, TradingStats,
 };
 pub use trading_costs::{
     OrderType, TradingCostBreakdown, TradingCostCalculator, TradingCostConfig,
