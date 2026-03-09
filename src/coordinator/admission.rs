@@ -7,8 +7,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::control_plane::{MarketSelector, StrategyDeployment};
 use crate::domain::{OrderRequest, OrderSide, OrderType, TimeInForce};
-use crate::platform::{Domain, MarketSelector, OrderIntent, OrderPriority, StrategyDeployment};
+use crate::platform::{Domain, OrderIntent, OrderPriority};
 
 use super::capital::{
     intent_deployment_scope, intent_market_identity, CapitalPolicy, CryptoHorizon,
@@ -899,7 +900,7 @@ pub(super) fn sell_reduce_only_violation_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{
+    use crate::control_plane::{
         DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
     };
     use rust_decimal_macros::dec;

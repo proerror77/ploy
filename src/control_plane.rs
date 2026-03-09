@@ -9,9 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::domain::{OrderRequest, OrderStatus, Side};
-
-use super::types::{Domain, OrderIntent, OrderPriority};
+use crate::domain::Side;
+use crate::platform::{Domain, OrderIntent, OrderPriority};
 
 /// Timeframe for deployment / intent routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -376,29 +375,6 @@ pub enum RiskDecisionStatus {
     Allow,
     Deny,
     Throttle,
-}
-
-/// Normalized command sent to the execution gateway.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderCommand {
-    pub intent_id: Uuid,
-    pub deployment_id: String,
-    pub idempotency_key: String,
-    pub request: OrderRequest,
-}
-
-/// Normalized execution report emitted by the gateway.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrderExecutionReport {
-    pub intent_id: Uuid,
-    pub deployment_id: String,
-    pub order_id: Option<String>,
-    pub status: OrderStatus,
-    pub filled_shares: u64,
-    pub avg_fill_price: Option<Decimal>,
-    pub error_message: Option<String>,
-    pub executed_at: DateTime<Utc>,
-    pub latency_ms: Option<u64>,
 }
 
 #[cfg(test)]

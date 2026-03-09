@@ -11,9 +11,11 @@ use std::collections::HashMap;
 
 use crate::agent_runtime::AgentStatus;
 use crate::api::{auth::ensure_admin_authorized, state::AppState, types::RunningStrategy};
-use crate::platform::{
-    Domain, MarketSelector, StrategyDeployment, StrategyLifecycleStage, StrategyProductType,
+use crate::control_plane::{
+    MarketSelector, StrategyDeployment, StrategyEvaluationEvidence, StrategyLifecycleStage,
+    StrategyProductType,
 };
+use crate::platform::Domain;
 
 use super::deployment_gate::ensure_required_strategy_evidence;
 
@@ -311,7 +313,7 @@ pub async fn get_strategies_control(
 
     let latest_eval_by_key = {
         let rows = state.strategy_evaluations.read().await;
-        let mut map: HashMap<(String, String), crate::platform::StrategyEvaluationEvidence> =
+        let mut map: HashMap<(String, String), StrategyEvaluationEvidence> =
             HashMap::new();
         for row in rows.iter() {
             map.entry((row.deployment_id.clone(), row.strategy_version.clone()))

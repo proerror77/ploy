@@ -19,10 +19,10 @@ use uuid::Uuid;
 use sqlx::PgPool;
 
 use crate::agent_runtime::{AgentRiskParams, AgentStatus};
+use crate::control_plane::StrategyDeployment;
 use crate::error::Result;
 use crate::platform::{
     Domain, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult, RiskGate,
-    StrategyDeployment,
 };
 use crate::strategy::executor::OrderExecutor;
 

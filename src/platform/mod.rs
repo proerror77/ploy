@@ -3,7 +3,6 @@
 //! 提供舊版 queue/risk/execution 元件給 RL CLI 等兼容層使用。
 //! 正式 live trading runtime 已由 coordinator 接管。
 
-mod contracts;
 pub mod data_plane;
 pub mod freshness;
 pub mod persistence_pipeline;
@@ -14,11 +13,6 @@ mod risk;
 pub mod subscription_planner;
 mod types;
 
-pub use contracts::{
-    DeploymentExecutionMode, MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision,
-    RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
-    StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
-};
 pub use data_plane::{
     BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, DataPlaneHealth,
     PlatformDataPlane, SourceHealth,

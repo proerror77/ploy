@@ -14,13 +14,13 @@ use tracing::{debug, error, info, trace, warn};
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
 use crate::config::AppConfig;
+use crate::control_plane::{MarketSelector, StrategyDeployment};
 use crate::coordinator::{Coordinator, CoordinatorHandle, GlobalState};
 use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    BinanceDataPlaneHandle, DataPlaneConfig, Domain, MarketSelector, PlatformDataPlane,
-    StrategyDeployment,
+    BinanceDataPlaneHandle, DataPlaneConfig, Domain, PlatformDataPlane,
 };
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
@@ -193,7 +193,7 @@ pub fn print_platform_status(state: &GlobalState) {
 mod tests {
     use super::*;
     use crate::coordinator::bootstrap::strategy_deployments::apply_strategy_deployments;
-    use crate::platform::{
+    use crate::control_plane::{
         DeploymentExecutionMode, StrategyLifecycleStage, StrategyProductType, Timeframe,
     };
     use crate::strategy::crypto_lob_ml::{

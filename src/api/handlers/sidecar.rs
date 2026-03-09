@@ -31,9 +31,12 @@ use crate::api::{
     types::{MarketData, PositionResponse, TradeResponse, WsMessage},
 };
 use crate::config::AppConfig;
+use crate::control_plane::{
+    MarketSelector, StrategyDeployment, StrategyLifecycleStage, StrategyProductType, Timeframe,
+};
 use crate::domain::market::Side;
 use crate::error::PloyError;
-use crate::platform::{Domain, MarketSelector, OrderIntent, OrderPriority, StrategyDeployment};
+use crate::platform::{Domain, OrderIntent, OrderPriority};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
     build_unified_prompt, parse_decision_response, ComebackSnapshot, DecisionTrigger, GrokDecision,
@@ -1925,7 +1928,7 @@ async fn persist_sidecar_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{StrategyLifecycleStage, StrategyProductType, Timeframe};
+    use crate::control_plane::{StrategyLifecycleStage, StrategyProductType, Timeframe};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());

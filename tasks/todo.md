@@ -1,3 +1,32 @@
+# Control Plane Contract Extraction (2026-03-09)
+
+## Goal
+Move deployment/evidence/trade-intent contracts out of `src/platform` so `platform/` only owns runtime primitives, while removing the dead raw-order gateway types that no longer participate in behavior.
+
+## Tasks
+
+- [x] Move `platform/contracts.rs` into a top-level `control_plane` module.
+- [x] Rewire coordinator/API/CLI imports so deployment/evidence/trade-intent types stop coming from `crate::platform`.
+- [x] Remove dead `OrderCommand` / `OrderExecutionReport` types and stop exporting control-plane contracts from `platform::mod`.
+- [x] Re-run default + `rl` compile and focused control-plane tests after the ownership move.
+
+## Review
+
+- [x] Confirm `src/platform` no longer defines or re-exports deployment/evidence/trade-intent contracts.
+- [x] Confirm `TradeIntent`, `StrategyDeployment`, and strategy evaluation evidence all compile from the new `crate::control_plane` namespace.
+- [x] Confirm no source references to `platform::OrderCommand` or `platform::OrderExecutionReport` remain.
+
+## Progress notes
+
+- 2026-03-09: Renamed [contracts.rs](/Users/proerror/Documents/ploy/src/platform/contracts.rs) into the new top-level [control_plane.rs](/Users/proerror/Documents/ploy/src/control_plane.rs), making deployment/evidence/trade-intent ownership explicit instead of hiding it under `platform`.
+- 2026-03-09: Updated coordinator/API/CLI imports to consume `StrategyDeployment`, `MarketSelector`, `TradeIntent`, and strategy evaluation evidence from `crate::control_plane`; `platform::mod` now only re-exports runtime primitives.
+- 2026-03-09: Removed dead `OrderCommand` and `OrderExecutionReport` types during the extraction; repo-wide search now returns no remaining source references.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --lib control_plane::tests -- --nocapture`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+
 # Standalone Domain Runtime Retirement (2026-03-09)
 
 ## Goal

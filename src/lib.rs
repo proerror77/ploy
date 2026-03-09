@@ -9,6 +9,7 @@ pub mod api;
 pub mod cli;
 pub mod collector;
 pub mod config;
+pub mod control_plane;
 pub mod coordination;
 pub mod coordinator;
 pub mod domain;
@@ -34,6 +35,11 @@ pub use collector::{
     BinanceDepthStream, LobCache, LobSnapshot, SyncCollector, SyncCollectorConfig,
 };
 pub use config::AppConfig;
+pub use control_plane::{
+    DeploymentExecutionMode, MarketSelector, RiskDecision, RiskDecisionStatus,
+    StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
+    StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
+};
 pub use coordination::{
     CircuitState, ComponentState, GracefulShutdown, LifecycleEvent, LifecycleManager,
     ShutdownSignal, TradingCircuitBreaker, TradingCircuitBreakerConfig,
@@ -44,10 +50,7 @@ pub use persistence::{
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
 pub use agent_runtime::{AgentRiskParams, AgentStatus};
-pub use platform::{
-    Domain, MarketSelector, OrderCommand, OrderExecutionReport, OrderIntent, RiskDecision,
-    RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe, TradeIntent,
-};
+pub use platform::{Domain, OrderIntent, RiskGate};
 pub use signing::Wallet;
 pub use supervisor::{
     AlertLevel, AlertManager, AlertManagerConfig, ComponentHealth, RecoveryAction,
