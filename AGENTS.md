@@ -96,7 +96,14 @@ When using a skill:
 - Use planning for verification steps, not only implementation.
 - Write detailed specs upfront to reduce ambiguity.
 
-### 2. Subagent Strategy
+### 2. Execution Loop Default
+
+- Once a plan is explicit and approved, execute it continuously without waiting for step-by-step confirmation.
+- Default loop: plan -> execute -> verify -> update progress -> continue to the next planned item.
+- Do not stop just to ask whether to continue when the next step is already implied by the plan and current repo context.
+- Only stop for user confirmation when the next action is destructive, irreversible, production-impacting, materially changes the approved plan, requires unavailable credentials/permissions, or remains genuinely ambiguous after reasonable local discovery.
+
+### 3. Subagent Strategy
 
 - Prefer Agent team execution by default for non-trivial work.
 - Use subagents liberally to keep the main context window clean.
@@ -104,28 +111,28 @@ When using a skill:
 - For complex problems, use subagents to increase parallel compute.
 - Keep one task per subagent for focused execution.
 
-### 3. Self-Improvement Loop
+### 4. Self-Improvement Loop
 
 - After a substantive correction from the user that reveals a reusable repo-specific failure pattern, update `tasks/lessons.md` with the pattern.
 - Write explicit rules that prevent repeating the same mistake.
 - Iteratively refine lessons until error rate drops.
 - Review relevant lessons at session start.
 
-### 4. Verification Before Done
+### 5. Verification Before Done
 
 - Never mark a task complete without proving it works.
 - Diff behavior between main and your changes when relevant.
 - Ask yourself: "Would a staff engineer approve this?"
 - Run tests, check logs, and demonstrate correctness.
 
-### 5. Demand Elegance (Balanced)
+### 6. Demand Elegance (Balanced)
 
 - For non-trivial changes, pause and ask if there is a more elegant way.
 - If a fix feels hacky, re-implement the elegant solution using current understanding.
 - Skip this for simple, obvious fixes to avoid over-engineering.
 - Challenge your own work before presenting it.
 
-### 6. Autonomous Bug Fixing
+### 7. Autonomous Bug Fixing
 
 - When given a bug report, fix it directly without requiring hand-holding.
 - Start from logs, errors, and failing tests, then resolve root causes.
@@ -136,10 +143,11 @@ When using a skill:
 
 1. **Plan First**: For multi-step implementation work, write a plan in `tasks/todo.md` with checkable items.
 2. **Verify Plan**: Check in before starting implementation when the task has multiple moving parts.
-3. **Track Progress**: Mark items complete as you go when using `tasks/todo.md`.
-4. **Explain Changes**: Provide a high-level summary at each step for substantial work.
-5. **Document Results**: Add a review section to `tasks/todo.md` for substantial tracked work.
-6. **Capture Lessons**: Update `tasks/lessons.md` after substantive user corrections that expose a reusable repo-specific rule.
+3. **Execute Continuously**: Once the plan is clear, keep moving through planned steps without asking for confirmation at each checkpoint unless a listed stop condition is hit.
+4. **Track Progress**: Mark items complete as you go when using `tasks/todo.md`.
+5. **Explain Changes**: Provide a high-level summary at each step for substantial work.
+6. **Document Results**: Add a review section to `tasks/todo.md` for substantial tracked work.
+7. **Capture Lessons**: Update `tasks/lessons.md` after substantive user corrections that expose a reusable repo-specific rule.
 
 ## Issue Tracking
 

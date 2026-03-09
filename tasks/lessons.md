@@ -74,6 +74,17 @@
   - Use partial staging for mixed files; do not revert unrelated edits.
   - Report remaining unstaged files after commit.
 
+## 2026-03-09
+
+- Pattern: Repeated confirmation prompts after a plan is already clear slow execution and create unnecessary user overhead.
+- Rule: Once the user has approved or confirmed the plan, keep iterating through planned steps automatically. Only stop to ask when the next action is destructive, irreversible, production-impacting, materially changes plan scope, or is blocked by ambiguity/permissions that cannot be resolved locally.
+- Execution loop:
+  - Write or confirm the plan.
+  - Execute the next step.
+  - Verify the result.
+  - Update progress.
+  - Continue automatically until completion or a real stop condition appears.
+
 ## 2026-03-06
 
 - Pattern: Managed strategy bootstrap can silently drift from the checked-in live strategy template and override production sizing without touching host config files.
