@@ -1,3 +1,29 @@
+# Trading Agent Context Governance Trim (2026-03-09)
+
+## Goal
+Remove governance-only capabilities from `AgentContext` now that OpenClaw uses `GovernanceContext`, so trading agents no longer receive control-plane methods by default.
+
+## Tasks
+
+- [x] Verify no remaining trading agent uses governance-policy or pause/resume-peer helpers through `AgentContext`.
+- [x] Remove governance-only methods from `AgentContext` while leaving order submission and heartbeat/state reporting intact.
+- [x] Run targeted compile/test validation covering coordinator governance state after the context trim.
+
+## Review
+
+- [x] Confirm `AgentContext` no longer exposes peer pause/resume or governance-policy mutation methods.
+- [x] Confirm only `GovernanceContext` carries those methods after the cut.
+- [x] Confirm trading-agent implementations continue to compile unchanged.
+
+## Progress notes
+
+- 2026-03-09: Post-OpenClaw search showed `submit_pause_agent`, `submit_resume_agent`, `read_governance_policy`, and `update_governance_policy` were no longer referenced by any `TradingAgent` implementation.
+- 2026-03-09: Removed the last governance-only helper methods from `src/agents/context.rs`, leaving trading-agent context with order submission, state reporting, state reads, and command intake only.
+- 2026-03-09: Verified the governance helpers now exist only on `src/agents/governance_context.rs`, with `OpenClawAgent` as the only remaining caller.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+
 # OpenClaw Governance Context Extraction (2026-03-09)
 
 ## Goal
