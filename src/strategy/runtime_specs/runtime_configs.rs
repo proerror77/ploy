@@ -1,5 +1,14 @@
+use rust_decimal::prelude::ToPrimitive;
+use tracing::{info, warn};
+
+use crate::config::{EventEdgeAgentConfig, NbaComebackConfig};
+use crate::error::{PloyError, Result};
+use crate::strategy::crypto_lob_ml::CryptoLobMlConfig;
+#[cfg(feature = "rl")]
+use crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig;
+use crate::strategy::CryptoTradingConfig;
+
 use super::deployment_matrix::{coin_symbol_for, crypto_series_id_for};
-use super::*;
 
 fn set_integer(table: &mut toml::map::Map<String, toml::Value>, key: &str, value: i64) {
     table.insert(key.to_string(), toml::Value::Integer(value));
@@ -36,9 +45,7 @@ fn set_string_array(table: &mut toml::map::Map<String, toml::Value>, key: &str, 
     );
 }
 
-pub(in crate::coordinator::bootstrap) fn build_pattern_memory_runtime_config(
-    coins: &[String],
-) -> Result<String> {
+pub(crate) fn build_pattern_memory_runtime_config(coins: &[String]) -> Result<String> {
     let mut selected: Vec<String> = coins
         .iter()
         .filter_map(|c| {
@@ -57,13 +64,13 @@ pub(in crate::coordinator::bootstrap) fn build_pattern_memory_runtime_config(
             (coin_symbol_for(&coin), crypto_series_id_for(&coin, "5m"))
         {
             markets_block.push_str("\n[[markets]]\n");
-            markets_block.push_str(&format!("symbol = \"{}\"\n", symbol));
-            markets_block.push_str(&format!("series_id = \"{}\"\n", series_id));
+            markets_block.push_str(&format!("symbol = \"{symbol}\"\n"));
+            markets_block.push_str(&format!("series_id = \"{series_id}\"\n"));
         }
     }
 
     if markets_block.trim().is_empty() {
-        return Err(crate::error::PloyError::Validation(
+        return Err(PloyError::Validation(
             "pattern_memory runtime has no recognized crypto coins/series ids".to_string(),
         ));
     }
@@ -102,11 +109,9 @@ cooldown_secs = 30
     ))
 }
 
-pub(in crate::coordinator::bootstrap) fn build_crypto_lob_ml_runtime_config(
-    cfg: &crate::strategy::crypto_lob_ml::CryptoLobMlConfig,
-) -> Result<String> {
+pub(crate) fn build_crypto_lob_ml_runtime_config(cfg: &CryptoLobMlConfig) -> Result<String> {
     if cfg.coins.is_empty() {
-        return Err(crate::error::PloyError::Validation(
+        return Err(PloyError::Validation(
             "crypto_lob_ml runtime requires at least one configured coin".to_string(),
         ));
     }
@@ -162,18 +167,16 @@ pub(in crate::coordinator::bootstrap) fn build_crypto_lob_ml_runtime_config(
     root.insert("strategy".to_string(), toml::Value::Table(strategy));
     root.insert("crypto_lob_ml".to_string(), toml::Value::Table(lob_ml));
     toml::to_string_pretty(&toml::Value::Table(root)).map_err(|e| {
-        crate::error::PloyError::Internal(format!(
+        PloyError::Internal(format!(
             "failed to render crypto_lob_ml runtime config: {e}"
         ))
     })
 }
 
 #[cfg(feature = "rl")]
-pub(in crate::coordinator::bootstrap) fn build_crypto_rl_policy_runtime_config(
-    cfg: &crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig,
-) -> Result<String> {
+pub(crate) fn build_crypto_rl_policy_runtime_config(cfg: &CryptoRlPolicyConfig) -> Result<String> {
     if cfg.coins.is_empty() {
-        return Err(crate::error::PloyError::Validation(
+        return Err(PloyError::Validation(
             "crypto_rl_policy runtime requires at least one configured coin".to_string(),
         ));
     }
@@ -243,17 +246,15 @@ pub(in crate::coordinator::bootstrap) fn build_crypto_rl_policy_runtime_config(
         toml::Value::Table(rl_policy),
     );
     toml::to_string_pretty(&toml::Value::Table(root)).map_err(|e| {
-        crate::error::PloyError::Internal(format!(
+        PloyError::Internal(format!(
             "failed to render crypto_rl_policy runtime config: {e}"
         ))
     })
 }
 
-pub(in crate::coordinator::bootstrap) fn build_event_edge_runtime_config(
-    cfg: &crate::config::EventEdgeAgentConfig,
-) -> Result<String> {
+pub(crate) fn build_event_edge_runtime_config(cfg: &EventEdgeAgentConfig) -> Result<String> {
     if cfg.event_ids.is_empty() && cfg.titles.is_empty() {
-        return Err(crate::error::PloyError::Validation(
+        return Err(PloyError::Validation(
             "event_edge runtime requires at least one event_id or title target".to_string(),
         ));
     }
@@ -315,8 +316,8 @@ pub(in crate::coordinator::bootstrap) fn build_event_edge_runtime_config(
     ))
 }
 
-pub(in crate::coordinator::bootstrap) fn build_nba_comeback_runtime_config(
-    cfg: &crate::config::NbaComebackConfig,
+pub(crate) fn build_nba_comeback_runtime_config(
+    cfg: &NbaComebackConfig,
     database_url: &str,
 ) -> String {
     let mut root = toml::map::Map::new();
@@ -443,7 +444,7 @@ pub(in crate::coordinator::bootstrap) fn build_nba_comeback_runtime_config(
 
 fn render_momentum_runtime_config(
     mut config: toml::Value,
-    crypto_cfg: &crate::strategy::CryptoTradingConfig,
+    crypto_cfg: &CryptoTradingConfig,
     symbols: &[String],
 ) -> String {
     let root = config
@@ -582,7 +583,7 @@ fn render_momentum_runtime_config(
 }
 
 fn load_momentum_config_file(
-    crypto_cfg: &crate::strategy::CryptoTradingConfig,
+    crypto_cfg: &CryptoTradingConfig,
     symbols: &[String],
 ) -> Option<String> {
     let candidates = [
@@ -605,14 +606,12 @@ fn load_momentum_config_file(
     None
 }
 
-pub(in crate::coordinator::bootstrap) fn build_momentum_runtime_config(
-    crypto_cfg: &crate::strategy::CryptoTradingConfig,
-) -> Result<String> {
+pub(crate) fn build_momentum_runtime_config(crypto_cfg: &CryptoTradingConfig) -> Result<String> {
     if !matches!(
         crypto_cfg.entry_mode,
         crate::strategy::CryptoEntryMode::Directional
     ) {
-        return Err(crate::error::PloyError::Validation(format!(
+        return Err(PloyError::Validation(format!(
             "momentum managed runtime only supports directional entry_mode for now; got {:?}",
             crypto_cfg.entry_mode
         )));
@@ -627,7 +626,7 @@ pub(in crate::coordinator::bootstrap) fn build_momentum_runtime_config(
     symbols.dedup();
 
     if symbols.is_empty() {
-        return Err(crate::error::PloyError::Validation(
+        return Err(PloyError::Validation(
             "momentum runtime has no recognized crypto symbols".to_string(),
         ));
     }
@@ -637,7 +636,7 @@ pub(in crate::coordinator::bootstrap) fn build_momentum_runtime_config(
     }
 
     let config: toml::Value =
-        toml::from_str(include_str!("../../../../config/strategies/momentum.toml"))
+        toml::from_str(include_str!("../../../config/strategies/momentum.toml"))
             .expect("embedded momentum runtime config must stay valid TOML");
     Ok(render_momentum_runtime_config(config, crypto_cfg, &symbols))
 }
@@ -713,16 +712,13 @@ fn load_split_arb_config_file(symbols: &[String], series_ids: &[String]) -> Opti
     None
 }
 
-pub(in crate::coordinator::bootstrap) fn build_split_arb_runtime_config(
-    symbols: &[String],
-    series_ids: &[String],
-) -> String {
+pub(crate) fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[String]) -> String {
     if let Some(cfg) = load_split_arb_config_file(symbols, series_ids) {
         return cfg;
     }
 
     let config: toml::Value = toml::from_str(include_str!(
-        "../../../../config/strategies/staggered_arb.toml"
+        "../../../config/strategies/staggered_arb.toml"
     ))
     .expect("embedded staggered_arb runtime config must stay valid TOML");
     render_split_arb_runtime_config(config, symbols, series_ids)

@@ -29,6 +29,7 @@ pub mod event_models;
 pub mod feeds;
 pub mod manager;
 pub mod registry;
+pub mod runtime_specs;
 pub mod runtime_order;
 pub mod traits;
 

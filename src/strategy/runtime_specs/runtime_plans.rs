@@ -1,35 +1,45 @@
+use std::collections::HashSet;
+
+use tracing::{info, warn};
+
+use crate::config::AppConfig;
+use crate::strategy::CryptoTradingConfig;
+use crate::{AgentRiskParams, Domain};
+
 use super::deployment_matrix::{
     coin_symbol_for, crypto_series_id_for, symbol_for_crypto_series_id,
     RuntimeCryptoStrategyTargets,
 };
+#[cfg(feature = "rl")]
+use super::runtime_configs::build_crypto_rl_policy_runtime_config;
 use super::runtime_configs::{
     build_crypto_lob_ml_runtime_config, build_event_edge_runtime_config,
     build_momentum_runtime_config, build_nba_comeback_runtime_config,
     build_pattern_memory_runtime_config, build_split_arb_runtime_config,
 };
-use super::*;
-
-#[cfg(feature = "rl")]
-use super::runtime_configs::build_crypto_rl_policy_runtime_config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::coordinator::bootstrap) enum ManagedRuntimeDataPlaneKind {
+pub(crate) enum ManagedRuntimeDataPlaneKind {
     ManagedCrypto,
     SharedCrypto,
     None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::coordinator::bootstrap) enum ManagedRuntimeBootstrapStep {
+pub(crate) enum ManagedRuntimeBootstrapStep {
     None,
     EnsurePatternMemoryTable,
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::coordinator::bootstrap) struct ManagedStrategyRuntimePlan {
-    pub(in crate::coordinator::bootstrap) spawn: ManagedStrategyRuntimeSpawn,
-    pub(in crate::coordinator::bootstrap) data_plane: ManagedRuntimeDataPlaneKind,
-    pub(in crate::coordinator::bootstrap) bootstrap_step: ManagedRuntimeBootstrapStep,
+pub(crate) struct ManagedRuntimeSpec {
+    pub(crate) strategy_label: &'static str,
+    pub(crate) agent_id: String,
+    pub(crate) domain: Domain,
+    pub(crate) risk_params: AgentRiskParams,
+    pub(crate) strategy_config_toml: String,
+    pub(crate) data_plane: ManagedRuntimeDataPlaneKind,
+    pub(crate) bootstrap_step: ManagedRuntimeBootstrapStep,
 }
 
 fn pattern_memory_runtime_coins(
@@ -114,25 +124,23 @@ fn split_arb_runtime_symbols_and_series(
     Some((symbols, series_ids))
 }
 
-pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
-    config: &PlatformBootstrapConfig,
+pub(crate) fn collect_managed_runtime_specs(
+    config: &crate::coordinator::bootstrap::PlatformBootstrapConfig,
     app_config: &AppConfig,
     runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
-) -> Vec<ManagedStrategyRuntimePlan> {
-    let mut plans = Vec::new();
+) -> Vec<ManagedRuntimeSpec> {
+    let mut specs = Vec::new();
 
     if config.enable_crypto {
         let crypto_cfg = config.crypto.clone();
         if config.enable_crypto_momentum {
             match build_momentum_runtime_config(&crypto_cfg) {
-                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
-                    spawn: ManagedStrategyRuntimeSpawn {
-                        strategy_label: "momentum",
-                        agent_id: crypto_cfg.agent_id.clone(),
-                        domain: Domain::Crypto,
-                        risk_params: crypto_cfg.risk_params.clone(),
-                        strategy_config_toml,
-                    },
+                Ok(strategy_config_toml) => specs.push(ManagedRuntimeSpec {
+                    strategy_label: "momentum",
+                    agent_id: crypto_cfg.agent_id.clone(),
+                    domain: Domain::Crypto,
+                    risk_params: crypto_cfg.risk_params.clone(),
+                    strategy_config_toml,
                     data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
                     bootstrap_step: ManagedRuntimeBootstrapStep::None,
                 }),
@@ -153,14 +161,12 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
         if config.enable_crypto_pattern_memory {
             let coins = pattern_memory_runtime_coins(&crypto_cfg, runtime_crypto_targets);
             match build_pattern_memory_runtime_config(&coins) {
-                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
-                    spawn: ManagedStrategyRuntimeSpawn {
-                        strategy_label: "pattern_memory",
-                        agent_id: "pattern_memory".to_string(),
-                        domain: Domain::Crypto,
-                        risk_params: crypto_cfg.risk_params.clone(),
-                        strategy_config_toml,
-                    },
+                Ok(strategy_config_toml) => specs.push(ManagedRuntimeSpec {
+                    strategy_label: "pattern_memory",
+                    agent_id: "pattern_memory".to_string(),
+                    domain: Domain::Crypto,
+                    risk_params: crypto_cfg.risk_params.clone(),
+                    strategy_config_toml,
                     data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
                     bootstrap_step: ManagedRuntimeBootstrapStep::EnsurePatternMemoryTable,
                 }),
@@ -176,14 +182,12 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
             if let Some((symbols, series_ids)) =
                 split_arb_runtime_symbols_and_series(&crypto_cfg, runtime_crypto_targets)
             {
-                plans.push(ManagedStrategyRuntimePlan {
-                    spawn: ManagedStrategyRuntimeSpawn {
-                        strategy_label: "staggered_arb",
-                        agent_id: "staggered_arb".to_string(),
-                        domain: Domain::Crypto,
-                        risk_params: crypto_cfg.risk_params.clone(),
-                        strategy_config_toml: build_split_arb_runtime_config(&symbols, &series_ids),
-                    },
+                specs.push(ManagedRuntimeSpec {
+                    strategy_label: "staggered_arb",
+                    agent_id: "staggered_arb".to_string(),
+                    domain: Domain::Crypto,
+                    risk_params: crypto_cfg.risk_params.clone(),
+                    strategy_config_toml: build_split_arb_runtime_config(&symbols, &series_ids),
                     data_plane: ManagedRuntimeDataPlaneKind::SharedCrypto,
                     bootstrap_step: ManagedRuntimeBootstrapStep::None,
                 });
@@ -198,14 +202,12 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
         if config.managed_crypto.enable_lob_ml {
             let lob_cfg = config.managed_crypto.lob_ml.clone();
             match build_crypto_lob_ml_runtime_config(&lob_cfg) {
-                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
-                    spawn: ManagedStrategyRuntimeSpawn {
-                        strategy_label: "crypto_lob_ml",
-                        agent_id: format!("{}_strategy", lob_cfg.agent_id),
-                        domain: Domain::Crypto,
-                        risk_params: lob_cfg.risk_params.clone(),
-                        strategy_config_toml,
-                    },
+                Ok(strategy_config_toml) => specs.push(ManagedRuntimeSpec {
+                    strategy_label: "crypto_lob_ml",
+                    agent_id: format!("{}_strategy", lob_cfg.agent_id),
+                    domain: Domain::Crypto,
+                    risk_params: lob_cfg.risk_params.clone(),
+                    strategy_config_toml,
                     data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
                     bootstrap_step: ManagedRuntimeBootstrapStep::None,
                 }),
@@ -221,14 +223,12 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
         if config.managed_crypto.enable_rl_policy {
             let rl_cfg = config.managed_crypto.rl_policy.clone();
             match build_crypto_rl_policy_runtime_config(&rl_cfg) {
-                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
-                    spawn: ManagedStrategyRuntimeSpawn {
-                        strategy_label: "crypto_rl_policy",
-                        agent_id: format!("{}_strategy", rl_cfg.agent_id),
-                        domain: Domain::Crypto,
-                        risk_params: rl_cfg.risk_params.clone(),
-                        strategy_config_toml,
-                    },
+                Ok(strategy_config_toml) => specs.push(ManagedRuntimeSpec {
+                    strategy_label: "crypto_rl_policy",
+                    agent_id: format!("{}_strategy", rl_cfg.agent_id),
+                    domain: Domain::Crypto,
+                    risk_params: rl_cfg.risk_params.clone(),
+                    strategy_config_toml,
                     data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
                     bootstrap_step: ManagedRuntimeBootstrapStep::None,
                 }),
@@ -243,17 +243,15 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
 
     if config.enable_sports {
         if let Some(nba_cfg) = app_config.nba_comeback.as_ref() {
-            plans.push(ManagedStrategyRuntimePlan {
-                spawn: ManagedStrategyRuntimeSpawn {
-                    strategy_label: "nba_comeback",
-                    agent_id: config.sports.agent_id.clone(),
-                    domain: Domain::Sports,
-                    risk_params: config.sports.risk_params.clone(),
-                    strategy_config_toml: build_nba_comeback_runtime_config(
-                        nba_cfg,
-                        &app_config.database.url,
-                    ),
-                },
+            specs.push(ManagedRuntimeSpec {
+                strategy_label: "nba_comeback",
+                agent_id: config.sports.agent_id.clone(),
+                domain: Domain::Sports,
+                risk_params: config.sports.risk_params.clone(),
+                strategy_config_toml: build_nba_comeback_runtime_config(
+                    nba_cfg,
+                    &app_config.database.url,
+                ),
                 data_plane: ManagedRuntimeDataPlaneKind::None,
                 bootstrap_step: ManagedRuntimeBootstrapStep::None,
             });
@@ -268,14 +266,12 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
     if config.enable_politics {
         if let Some(event_edge_cfg) = app_config.event_edge_agent.as_ref() {
             match build_event_edge_runtime_config(event_edge_cfg) {
-                Ok(strategy_config_toml) => plans.push(ManagedStrategyRuntimePlan {
-                    spawn: ManagedStrategyRuntimeSpawn {
-                        strategy_label: "event_edge",
-                        agent_id: config.politics.agent_id.clone(),
-                        domain: Domain::Politics,
-                        risk_params: config.politics.risk_params.clone(),
-                        strategy_config_toml,
-                    },
+                Ok(strategy_config_toml) => specs.push(ManagedRuntimeSpec {
+                    strategy_label: "event_edge",
+                    agent_id: config.politics.agent_id.clone(),
+                    domain: Domain::Politics,
+                    risk_params: config.politics.risk_params.clone(),
+                    strategy_config_toml,
                     data_plane: ManagedRuntimeDataPlaneKind::None,
                     bootstrap_step: ManagedRuntimeBootstrapStep::None,
                 }),
@@ -293,5 +289,5 @@ pub(in crate::coordinator::bootstrap) fn collect_managed_strategy_runtime_plans(
         }
     }
 
-    plans
+    specs
 }

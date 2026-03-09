@@ -1,4 +1,9 @@
-use super::*;
+use std::collections::{HashMap, HashSet};
+
+use tracing::{info, warn};
+
+use crate::coordinator::bootstrap::PlatformBootstrapConfig;
+use crate::{Domain, MarketSelector, StrategyDeployment};
 
 fn normalize_strategy_key(strategy: &str) -> String {
     strategy.to_ascii_lowercase().replace(['-', '_', ' '], "")
@@ -62,10 +67,7 @@ fn normalize_horizon(value: &str) -> Option<&'static str> {
     None
 }
 
-pub(in crate::coordinator::bootstrap) fn crypto_series_id_for(
-    coin: &str,
-    horizon: &str,
-) -> Option<&'static str> {
+pub(crate) fn crypto_series_id_for(coin: &str, horizon: &str) -> Option<&'static str> {
     let c = coin.to_ascii_uppercase();
     match (c.as_str(), horizon) {
         ("BTC", "5m") => Some("10684"),
@@ -80,17 +82,15 @@ pub(in crate::coordinator::bootstrap) fn crypto_series_id_for(
     }
 }
 
-pub(in crate::coordinator::bootstrap) fn coin_symbol_for(coin: &str) -> Option<String> {
+pub(crate) fn coin_symbol_for(coin: &str) -> Option<String> {
     let c = coin.to_ascii_uppercase();
     if c.is_empty() {
         return None;
     }
-    Some(format!("{}USDT", c))
+    Some(format!("{c}USDT"))
 }
 
-pub(in crate::coordinator::bootstrap) fn symbol_for_crypto_series_id(
-    series_id: &str,
-) -> Option<&'static str> {
+pub(crate) fn symbol_for_crypto_series_id(series_id: &str) -> Option<&'static str> {
     match series_id {
         "10684" | "10192" => Some("BTCUSDT"),
         "10683" | "10191" => Some("ETHUSDT"),
@@ -100,18 +100,52 @@ pub(in crate::coordinator::bootstrap) fn symbol_for_crypto_series_id(
     }
 }
 
-#[derive(Debug, Default)]
-pub(in crate::coordinator::bootstrap) struct RuntimeCryptoStrategyTargets {
-    pub(in crate::coordinator::bootstrap) pattern_memory_coins: HashSet<String>,
-    pub(in crate::coordinator::bootstrap) split_arb_coins: HashSet<String>,
-    pub(in crate::coordinator::bootstrap) split_arb_horizons: HashSet<String>,
+fn add_coin_from_text(raw: &str, coins: &mut HashSet<String>) {
+    let upper = raw.to_ascii_uppercase();
+    for coin in ["BTC", "ETH", "SOL", "XRP"] {
+        if upper.contains(coin) {
+            coins.insert(coin.to_string());
+        }
+    }
 }
 
-pub(in crate::coordinator::bootstrap) fn collect_runtime_crypto_strategy_targets(
+fn add_coins_from_selector(selector: &MarketSelector, coins: &mut HashSet<String>) {
+    match selector {
+        MarketSelector::Static {
+            symbol,
+            series_id,
+            market_slug,
+        } => {
+            if let Some(raw) = symbol.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+            if let Some(raw) = series_id.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+            if let Some(raw) = market_slug.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+        }
+        MarketSelector::Dynamic { query, .. } => {
+            if let Some(raw) = query.as_deref() {
+                add_coin_from_text(raw, coins);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RuntimeCryptoStrategyTargets {
+    pub(crate) pattern_memory_coins: HashSet<String>,
+    pub(crate) split_arb_coins: HashSet<String>,
+    pub(crate) split_arb_horizons: HashSet<String>,
+}
+
+pub(crate) fn collect_runtime_crypto_strategy_targets(
+    deployments: &[StrategyDeployment],
     runtime_account_id: &str,
     runtime_dry_run: bool,
 ) -> RuntimeCryptoStrategyTargets {
-    let deployments = load_strategy_deployments();
     let mut out = RuntimeCryptoStrategyTargets::default();
 
     for dep in deployments
@@ -141,7 +175,7 @@ pub(in crate::coordinator::bootstrap) fn collect_runtime_crypto_strategy_targets
     out
 }
 
-pub(in crate::coordinator::bootstrap) fn apply_strategy_deployments(
+pub(crate) fn apply_strategy_deployments(
     cfg: &mut PlatformBootstrapConfig,
     deployments: &[StrategyDeployment],
     runtime_account_id: &str,
@@ -227,7 +261,7 @@ pub(in crate::coordinator::bootstrap) fn apply_strategy_deployments(
             Domain::Politics => cfg.enable_politics = true,
             Domain::Economics => cfg.enable_economics = true,
             Domain::Custom(ref custom_domain) => {
-                custom_domains.insert(format!("custom:{}", custom_domain));
+                custom_domains.insert(format!("custom:{custom_domain}"));
             }
         }
     }
@@ -245,7 +279,7 @@ pub(in crate::coordinator::bootstrap) fn apply_strategy_deployments(
 
     let mut tf: Vec<String> = timeframe_summary
         .into_iter()
-        .map(|(k, v)| format!("{}={}", k, v))
+        .map(|(k, v)| format!("{k}={v}"))
         .collect();
     tf.sort();
     if !custom_domains.is_empty() {
