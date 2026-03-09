@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::domain::{OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::fee_model::FeeModel;
@@ -445,6 +445,8 @@ impl GammaScalpingStrategy {
             is_buy,
             shares,
             limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
             priority,
             metadata: HashMap::new(),
         }

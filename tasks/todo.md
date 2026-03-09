@@ -2186,3 +2186,35 @@ Switch `PatternMemoryStrategy` to emit canonical `StrategyAction::SubmitIntent` 
 
 - [ ] Confirm `src/strategy/pattern_memory/strategy.rs` no longer emits `StrategyAction::SubmitOrder`.
 - [ ] Confirm behavior-equivalent intent fields are still present on entry actions.
+
+# Canonical Submit Intent Unification (2026-03-09)
+
+## Goal
+Retire `StrategyAction::SubmitOrder` completely by extending the canonical `StrategyOrderIntent` to carry full order semantics, then migrate the remaining RL compatibility emitter plus all runtime handlers onto `SubmitIntent` only.
+
+## Tasks
+
+- [x] Extend `StrategyOrderIntent` with `order_type` and `time_in_force` so canonical intents can represent the remaining RL market/IOC paths.
+- [x] Convert `src/rl/integration/rl_strategy.rs` to emit only `StrategyAction::SubmitIntent`, including exit/shutdown actions.
+- [x] Delete `StrategyAction::SubmitOrder` and the raw-order normalization helper from `src/strategy/traits.rs`.
+- [x] Rewire `strategy_runtime`, `orchestrator`, and CLI action handling/printing to operate on `SubmitIntent` only.
+- [x] Re-run focused compile and RL/strategy regressions after the single-handoff cutover.
+
+## Review
+
+- [x] Confirm `rg "SubmitOrder|into_submit_order\\(" src` returns no source hits.
+- [x] Confirm canonical intents preserve RL `OrderType` / `TimeInForce` semantics instead of silently downgrading them to `Limit/GTC`.
+- [x] Confirm the remaining strategy emitters all still compile and route through `StrategyAction::SubmitIntent`.
+
+## Progress notes
+
+- 2026-03-09: Extended [traits.rs](/Users/proerror/Documents/ploy/src/strategy/traits.rs) so `StrategyOrderIntent` now carries `order_type` and `time_in_force`, and `into_order_request()` preserves those fields while still normalizing `client_order_id` + `idempotency_key`.
+- 2026-03-09: Converted [rl_strategy.rs](/Users/proerror/Documents/ploy/src/rl/integration/rl_strategy.rs) to build canonical submit intents for buy, sell, and shutdown flows; added `market_slug` to `RLStrategy` so the intent path has complete metadata.
+- 2026-03-09: Removed the `SubmitOrder` compatibility branch from [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), [orchestrator.rs](/Users/proerror/Documents/ploy/src/strategy/orchestrator.rs), and [cli/strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs), leaving `SubmitIntent` as the only strategy-side submit action.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test strategy_order_intent_into_order_request_preserves_action_id --lib -- --nocapture`
+  - `cargo test --features rl test_rl_strategy_creation --lib -- --nocapture`
+  - `cargo test --features rl test_rule_based_action --lib -- --nocapture`
+  - `rg "SubmitOrder|into_submit_order\\(" src`

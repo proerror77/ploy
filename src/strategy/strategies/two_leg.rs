@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::{OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 
@@ -358,6 +358,8 @@ impl TwoLegStrategy {
             is_buy,
             shares,
             limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
             priority,
             metadata: HashMap::new(),
         }

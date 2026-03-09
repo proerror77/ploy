@@ -31,7 +31,7 @@ use super::traits::{
     StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use crate::adapters::SpotPrice;
-use crate::domain::{OrderStatus, Side};
+use crate::domain::{OrderStatus, OrderType, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
@@ -55,6 +55,8 @@ fn crypto_submit_intent(
             is_buy: true,
             shares,
             limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
             priority,
             metadata: HashMap::new(),
         },

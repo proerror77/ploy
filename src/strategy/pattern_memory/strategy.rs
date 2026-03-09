@@ -4,14 +4,14 @@
 //! associative memory over recent kline return patterns.
 
 use super::engine::{PatternMemory, Posterior};
-use crate::domain::{Quote, Side};
+use crate::domain::{OrderType, Quote, Side, TimeInForce};
 use crate::error::{PloyError, Result};
+use crate::platform::Domain;
 use crate::strategy::multi_outcome::{ExpectedValue, POLYMARKET_FEE_RATE};
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
-use crate::platform::Domain;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
@@ -758,6 +758,8 @@ impl PatternMemoryStrategy {
                 is_buy: true,
                 shares: self.cfg.trade.shares,
                 limit_price: ask,
+                order_type: OrderType::Limit,
+                time_in_force: TimeInForce::GTC,
                 priority: 7,
                 metadata: HashMap::new(),
             },
@@ -1043,11 +1045,9 @@ min_net_ev = 0.0
             other => panic!("expected submit intent, got {other:?}"),
         };
 
-        assert!(
-            intent
-                .client_order_id
-                .starts_with("pattern-memory-test_BTC_event-1_up_")
-        );
+        assert!(intent
+            .client_order_id
+            .starts_with("pattern-memory-test_BTC_event-1_up_"));
         assert_eq!(intent.domain, Domain::Crypto);
         assert_eq!(intent.market_slug, "event-1");
         assert_eq!(intent.token_id, "token-up");

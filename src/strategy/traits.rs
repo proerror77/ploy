@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderRequest, OrderSide, OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 
@@ -210,19 +210,6 @@ pub enum StrategyAction {
     /// Canonical strategy-side submit payload.
     SubmitIntent { intent: StrategyOrderIntent },
 
-    /// Submit a new order
-    ///
-    /// Compatibility action kept for runtimes/strategies that still emit raw
-    /// `OrderRequest`s directly.
-    SubmitOrder {
-        /// Strategy-assigned ID for tracking
-        client_order_id: String,
-        /// Order details
-        order: OrderRequest,
-        /// Priority (higher = more urgent)
-        priority: u8,
-    },
-
     /// Cancel an existing order
     CancelOrder { order_id: String },
 
@@ -253,48 +240,29 @@ pub struct StrategyOrderIntent {
     pub is_buy: bool,
     pub shares: u64,
     pub limit_price: Decimal,
+    pub order_type: OrderType,
+    pub time_in_force: TimeInForce,
     pub priority: u8,
     pub metadata: HashMap<String, String>,
 }
 
 impl StrategyOrderIntent {
     pub fn into_order_request(self) -> OrderRequest {
-        let mut order = if self.is_buy {
-            OrderRequest::buy_limit(
-                self.token_id.clone(),
-                self.side,
-                self.shares,
-                self.limit_price,
-            )
-        } else {
-            OrderRequest::sell_limit(
-                self.token_id.clone(),
-                self.side,
-                self.shares,
-                self.limit_price,
-            )
-        };
-        order.client_order_id = self.client_order_id.clone();
-        order.idempotency_key = Some(self.client_order_id);
-        order
-    }
-}
-
-impl StrategyAction {
-    pub fn into_submit_order(self) -> Option<(String, OrderRequest, u8)> {
-        match self {
-            StrategyAction::SubmitIntent { intent } => {
-                let priority = intent.priority;
-                let client_order_id = intent.client_order_id.clone();
-                let order = intent.into_order_request();
-                Some((client_order_id, order, priority))
-            }
-            StrategyAction::SubmitOrder {
-                client_order_id,
-                order,
-                priority,
-            } => Some((client_order_id, order, priority)),
-            _ => None,
+        let client_order_id = self.client_order_id.clone();
+        OrderRequest {
+            client_order_id: client_order_id.clone(),
+            idempotency_key: Some(client_order_id),
+            token_id: self.token_id,
+            market_side: self.side,
+            order_side: if self.is_buy {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            },
+            shares: self.shares,
+            limit_price: self.limit_price,
+            order_type: self.order_type,
+            time_in_force: self.time_in_force,
         }
     }
 }
@@ -533,7 +501,7 @@ impl Default for StrategyConfig {
 #[cfg(test)]
 mod tests {
     use super::StrategyOrderIntent;
-    use crate::domain::OrderSide;
+    use crate::domain::{OrderSide, OrderType, TimeInForce};
     use crate::platform::Domain;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
@@ -549,6 +517,8 @@ mod tests {
             is_buy: true,
             shares: 25,
             limit_price: dec!(0.44),
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::IOC,
             priority: 7,
             metadata: HashMap::new(),
         }
@@ -560,5 +530,7 @@ mod tests {
         assert_eq!(request.market_side, crate::domain::Side::Up);
         assert_eq!(request.shares, 25);
         assert_eq!(request.limit_price, dec!(0.44));
+        assert_eq!(request.order_type, OrderType::Market);
+        assert_eq!(request.time_in_force, TimeInForce::IOC);
     }
 }

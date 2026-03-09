@@ -1,6 +1,6 @@
 use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
-use crate::domain::{OrderStatus, Side};
+use crate::domain::{OrderStatus, OrderType, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
@@ -320,6 +320,8 @@ impl EventEdgeStrategy {
                     is_buy: true,
                     shares: decision.shares,
                     limit_price: decision.limit_price,
+                    order_type: OrderType::Limit,
+                    time_in_force: TimeInForce::GTC,
                     priority: EVENT_EDGE_PRIORITY,
                     metadata: HashMap::from([
                         ("event_id".to_string(), decision.event_id.clone()),

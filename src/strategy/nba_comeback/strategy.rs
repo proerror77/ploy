@@ -1,6 +1,6 @@
 use crate::ai_clients::{EventDetails, LiveGameMarket, PolymarketSportsClient};
 use crate::config::NbaComebackConfig;
-use crate::domain::{OrderStatus, Side};
+use crate::domain::{OrderStatus, OrderType, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::nba_comeback::comeback_stats::ComebackStatsProvider;
@@ -201,7 +201,11 @@ impl NbaComebackStrategy {
         let stats = ComebackStatsProvider::new(pool, cfg.season.clone());
         let espn = crate::strategy::nba_comeback::EspnClient::new();
 
-        Ok(Self::new(id, NbaComebackCore::new(espn, stats, cfg), dry_run))
+        Ok(Self::new(
+            id,
+            NbaComebackCore::new(espn, stats, cfg),
+            dry_run,
+        ))
     }
 
     pub fn from_toml(id: String, config_str: &str, dry_run: bool) -> Result<Self> {
@@ -278,9 +282,7 @@ impl NbaComebackStrategy {
         if let Some(grok_enabled) = nba.get("grok_enabled").and_then(|v| v.as_bool()) {
             cfg.grok_enabled = grok_enabled;
         }
-        if let Some(grok_interval_secs) = nba
-            .get("grok_interval_secs")
-            .and_then(|v| v.as_integer())
+        if let Some(grok_interval_secs) = nba.get("grok_interval_secs").and_then(|v| v.as_integer())
         {
             cfg.grok_interval_secs = grok_interval_secs.max(1) as u64;
         }
@@ -296,9 +298,8 @@ impl NbaComebackStrategy {
         {
             cfg.grok_decision_cooldown_secs = grok_decision_cooldown_secs.max(0) as u64;
         }
-        if let Some(grok_fallback_enabled) = nba
-            .get("grok_fallback_enabled")
-            .and_then(|v| v.as_bool())
+        if let Some(grok_fallback_enabled) =
+            nba.get("grok_fallback_enabled").and_then(|v| v.as_bool())
         {
             cfg.grok_fallback_enabled = grok_fallback_enabled;
         }
@@ -435,13 +436,18 @@ impl NbaComebackStrategy {
         let Some(pm_sports) = self.pm_sports.as_ref() else {
             return Ok(None);
         };
-        let Some(event) = pm_sports.find_live_game(&game.home_team, &game.away_team).await? else {
+        let Some(event) = pm_sports
+            .find_live_game(&game.home_team, &game.away_team)
+            .await?
+        else {
             return Ok(None);
         };
         Ok(registration_from_event(game, &event))
     }
 
-    async fn collect_opportunities(&mut self) -> Result<Vec<(ComebackOpportunity, Option<String>)>> {
+    async fn collect_opportunities(
+        &mut self,
+    ) -> Result<Vec<(ComebackOpportunity, Option<String>)>> {
         self.ensure_stats_loaded().await?;
         let games = self.core.espn.fetch_live_games().await?;
         let candidates = self.core.scan_games(&games);
@@ -452,7 +458,8 @@ impl NbaComebackStrategy {
                 continue;
             }
 
-            let Some(registration) = self.resolve_market_registration(&candidate.game).await? else {
+            let Some(registration) = self.resolve_market_registration(&candidate.game).await?
+            else {
                 continue;
             };
             let Some((token_id, market_price, market_slug, condition_id)) =
@@ -466,9 +473,7 @@ impl NbaComebackStrategy {
                 continue;
             }
 
-            if self
-                .positions
-                .contains_key(&token_id)
+            if self.positions.contains_key(&token_id)
                 || self
                     .pending_orders
                     .values()
@@ -477,12 +482,10 @@ impl NbaComebackStrategy {
                 continue;
             }
 
-            if let Some(opp) = self.core.evaluate_opportunity(
-                &candidate,
-                market_price,
-                market_slug,
-                token_id,
-            ) {
+            if let Some(opp) =
+                self.core
+                    .evaluate_opportunity(&candidate, market_price, market_slug, token_id)
+            {
                 out.push((opp, condition_id));
             }
         }
@@ -502,7 +505,8 @@ impl NbaComebackStrategy {
             sanitize_component(&opp.game.espn_game_id),
             now.timestamp_millis()
         );
-        let pending = self.reserve_pending_order(opp, client_order_id.clone(), condition_id.clone());
+        let pending =
+            self.reserve_pending_order(opp, client_order_id.clone(), condition_id.clone());
 
         let mut signal_event = StrategyEvent::new(
             StrategyEventType::SignalDetected,
@@ -527,7 +531,9 @@ impl NbaComebackStrategy {
         self.last_scan_at = Some(now);
 
         vec![
-            StrategyAction::LogEvent { event: signal_event },
+            StrategyAction::LogEvent {
+                event: signal_event,
+            },
             StrategyAction::SubmitIntent {
                 intent: StrategyOrderIntent {
                     client_order_id: pending.client_order_id,
@@ -538,6 +544,8 @@ impl NbaComebackStrategy {
                     is_buy: true,
                     shares: self.core.cfg.shares,
                     limit_price: opp.market_price,
+                    order_type: OrderType::Limit,
+                    time_in_force: TimeInForce::GTC,
                     priority: NBA_COMEBACK_PRIORITY,
                     metadata: HashMap::from([
                         ("game_id".to_string(), opp.game.espn_game_id.clone()),
@@ -615,28 +623,29 @@ impl Strategy for NbaComebackStrategy {
                 0.0,
             );
 
-            let position = self.positions.entry(pending.token_id.clone()).or_insert_with(|| {
-                let mut info = PositionInfo::new(
-                    pending.token_id.clone(),
-                    Side::Up,
-                    0,
-                    fill_price,
-                    self.id.clone(),
-                );
-                info.metadata
-                    .insert("game_id".to_string(), pending.game_id.clone());
-                info.metadata.insert(
-                    "trailing_team".to_string(),
-                    pending.trailing_abbrev.clone(),
-                );
-                info.metadata
-                    .insert("market_slug".to_string(), pending.market_slug.clone());
-                if let Some(condition_id) = pending.condition_id.clone() {
+            let position = self
+                .positions
+                .entry(pending.token_id.clone())
+                .or_insert_with(|| {
+                    let mut info = PositionInfo::new(
+                        pending.token_id.clone(),
+                        Side::Up,
+                        0,
+                        fill_price,
+                        self.id.clone(),
+                    );
                     info.metadata
-                        .insert("condition_id".to_string(), condition_id);
-                }
-                info
-            });
+                        .insert("game_id".to_string(), pending.game_id.clone());
+                    info.metadata
+                        .insert("trailing_team".to_string(), pending.trailing_abbrev.clone());
+                    info.metadata
+                        .insert("market_slug".to_string(), pending.market_slug.clone());
+                    if let Some(condition_id) = pending.condition_id.clone() {
+                        info.metadata
+                            .insert("condition_id".to_string(), condition_id);
+                    }
+                    info
+                });
             let total_cost = position.entry_price * Decimal::from(position.shares)
                 + fill_price * Decimal::from(delta);
             position.shares += delta;
@@ -980,7 +989,9 @@ database_url = "postgres://localhost/unused"
         assert_eq!(strategy.name(), "nba_comeback");
         assert!(matches!(
             strategy.required_feeds().as_slice(),
-            [DataFeed::Tick { interval_ms: 45_000 }]
+            [DataFeed::Tick {
+                interval_ms: 45_000
+            }]
         ));
         assert_eq!(strategy.core.cfg.min_edge, dec!(0.12));
         assert_eq!(strategy.core.cfg.max_entry_price, dec!(0.63));
@@ -1024,7 +1035,8 @@ database_url = "postgres://localhost/unused"
         let opp = sample_opportunity();
         let now = Utc::now();
 
-        let actions = strategy.build_actions_for_opportunity_for_test(&opp, Some("cond-1".into()), now);
+        let actions =
+            strategy.build_actions_for_opportunity_for_test(&opp, Some("cond-1".into()), now);
 
         let client_order_id = actions
             .iter()
