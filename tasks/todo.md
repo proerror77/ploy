@@ -424,7 +424,7 @@ Finish the momentum cutover by removing the last bootstrap fallback to `CryptoTr
 
 - [x] Remove the `CryptoTradingAgent` fallback from the momentum startup branch in `bootstrap.rs`.
 - [x] Stop publicly re-exporting `CryptoTradingAgent` once bootstrap no longer instantiates it.
-- [ ] Re-run momentum bootstrap compile/tests after the fallback removal.
+- [x] Re-run momentum bootstrap compile/tests after the fallback removal.
 
 ## Review
 
@@ -436,6 +436,10 @@ Finish the momentum cutover by removing the last bootstrap fallback to `CryptoTr
 
 - 2026-03-09: Removed the `CryptoTradingAgent::new(...)` fallback from the `enable_crypto_momentum` bootstrap branch; invalid managed momentum configs now warn and skip startup.
 - 2026-03-09: Trimmed [mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) so only `CryptoTradingConfig` / `CryptoEntryMode` stay public from [crypto.rs](/Users/proerror/Documents/ploy/src/agents/crypto.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
 
 # Bootstrap OpenClaw Spawn Extraction (2026-03-09)
 
