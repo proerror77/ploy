@@ -424,6 +424,7 @@ Finish the momentum cutover by removing the last bootstrap fallback to `CryptoTr
 
 - [x] Remove the `CryptoTradingAgent` fallback from the momentum startup branch in `bootstrap.rs`.
 - [x] Stop publicly re-exporting `CryptoTradingAgent` once bootstrap no longer instantiates it.
+- [x] Collapse `src/agents/crypto.rs` into a config-only compatibility shim once no live runtime still instantiates it.
 - [x] Re-run momentum bootstrap compile/tests after the fallback removal.
 
 ## Review
@@ -431,11 +432,13 @@ Finish the momentum cutover by removing the last bootstrap fallback to `CryptoTr
 - [x] Confirm bootstrap no longer instantiates `CryptoTradingAgent`.
 - [x] Confirm non-directional / invalid momentum runtime config now skips startup instead of reviving a second runtime contract.
 - [x] Confirm `src/agents/mod.rs` no longer exposes `CryptoTradingAgent` as a live runtime entrypoint.
+- [x] Confirm `src/agents/crypto.rs` no longer contains the dead `TradingAgent` runtime implementation.
 
 ## Progress notes
 
 - 2026-03-09: Removed the `CryptoTradingAgent::new(...)` fallback from the `enable_crypto_momentum` bootstrap branch; invalid managed momentum configs now warn and skip startup.
 - 2026-03-09: Trimmed [mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) so only `CryptoTradingConfig` / `CryptoEntryMode` stay public from [crypto.rs](/Users/proerror/Documents/ploy/src/agents/crypto.rs).
+- 2026-03-09: Replaced [crypto.rs](/Users/proerror/Documents/ploy/src/agents/crypto.rs) with a config-only compatibility shim after `CryptoTradingAgent` lost its last live bootstrap entrypoint.
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
