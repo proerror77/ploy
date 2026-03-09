@@ -22,9 +22,9 @@ use crate::platform::{
 use crate::rl::ExecutionReport;
 use crate::strategy::executor::OrderExecutor;
 
-/// Legacy RL CLI order-platform config.
+/// Legacy RL CLI order-runtime config.
 #[derive(Debug, Clone)]
-pub struct PlatformConfig {
+pub struct RlOrderRuntimeConfig {
     pub queue_size: usize,
     pub risk_config: RiskConfig,
     pub execution_config: ExecutionConfig,
@@ -34,7 +34,7 @@ pub struct PlatformConfig {
     pub max_parallel_orders: usize,
 }
 
-impl Default for PlatformConfig {
+impl Default for RlOrderRuntimeConfig {
     fn default() -> Self {
         Self {
             queue_size: 1000,
@@ -49,7 +49,7 @@ impl Default for PlatformConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PlatformStats {
+pub struct RlRuntimeStats {
     pub intents_processed: u64,
     pub risk_passed: u64,
     pub risk_blocked: u64,
@@ -60,31 +60,34 @@ pub struct PlatformStats {
 }
 
 /// Legacy queue-driven execution surface retained only for the RL CLI path.
-pub struct OrderPlatform {
+pub struct RlOrderRuntime {
     risk_gate: Arc<RiskGate>,
     queue: Arc<RwLock<OrderQueue>>,
     positions: Arc<PositionAggregator>,
     executor: Arc<OrderExecutor>,
-    config: PlatformConfig,
-    stats: Arc<RwLock<PlatformStats>>,
+    config: RlOrderRuntimeConfig,
+    stats: Arc<RwLock<RlRuntimeStats>>,
     running: Arc<RwLock<bool>>,
 }
 
-impl OrderPlatform {
+impl RlOrderRuntime {
     fn enforce_coordinator_only_live(&self) -> Result<()> {
         if self.executor.is_dry_run() {
             return Ok(());
         }
         Err(PloyError::Validation(
-            "legacy OrderPlatform live runtime is disabled; use coordinator runtime (`ploy platform start`)".to_string(),
+            "legacy RL order runtime live execution is disabled; use coordinator runtime (`ploy platform start`)".to_string(),
         ))
     }
 
-    pub fn new(client: PolymarketClient, config: PlatformConfig) -> Self {
+    pub fn new(client: PolymarketClient, config: RlOrderRuntimeConfig) -> Self {
         Self::new_with_exchange(Arc::new(client), config)
     }
 
-    pub fn new_with_exchange(client: Arc<dyn ExchangeClient>, config: PlatformConfig) -> Self {
+    pub fn new_with_exchange(
+        client: Arc<dyn ExchangeClient>,
+        config: RlOrderRuntimeConfig,
+    ) -> Self {
         let executor = Arc::new(OrderExecutor::new_with_exchange(
             client,
             config.execution_config.clone(),
@@ -96,19 +99,19 @@ impl OrderPlatform {
             positions: Arc::new(PositionAggregator::new()),
             executor,
             config,
-            stats: Arc::new(RwLock::new(PlatformStats::default())),
+            stats: Arc::new(RwLock::new(RlRuntimeStats::default())),
             running: Arc::new(RwLock::new(false)),
         }
     }
 
-    pub fn with_executor(executor: Arc<OrderExecutor>, config: PlatformConfig) -> Self {
+    pub fn with_executor(executor: Arc<OrderExecutor>, config: RlOrderRuntimeConfig) -> Self {
         Self {
             risk_gate: Arc::new(RiskGate::new(config.risk_config.clone())),
             queue: Arc::new(RwLock::new(OrderQueue::new(config.queue_size))),
             positions: Arc::new(PositionAggregator::new()),
             executor,
             config,
-            stats: Arc::new(RwLock::new(PlatformStats::default())),
+            stats: Arc::new(RwLock::new(RlRuntimeStats::default())),
             running: Arc::new(RwLock::new(false)),
         }
     }
@@ -287,13 +290,13 @@ impl OrderPlatform {
     pub async fn start(&self) -> Result<()> {
         self.enforce_coordinator_only_live()?;
         *self.running.write().await = true;
-        info!("Order platform started");
+        info!("RL order runtime started");
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
         *self.running.write().await = false;
-        info!("Order platform stopped");
+        info!("RL order runtime stopped");
         Ok(())
     }
 
@@ -318,7 +321,7 @@ impl OrderPlatform {
             }
         }
 
-        info!("Platform run loop exited");
+        info!("RL order runtime loop exited");
     }
 
     async fn cleanup(&self) {
@@ -345,7 +348,7 @@ impl OrderPlatform {
         self.risk_gate.state().await
     }
 
-    pub async fn stats(&self) -> PlatformStats {
+    pub async fn stats(&self) -> RlRuntimeStats {
         self.stats.read().await.clone()
     }
 
@@ -388,41 +391,41 @@ mod tests {
     use crate::adapters::PolymarketClient;
 
     #[test]
-    fn test_platform_config_default() {
-        let config = PlatformConfig::default();
+    fn test_rl_order_runtime_config_default() {
+        let config = RlOrderRuntimeConfig::default();
         assert_eq!(config.queue_size, 1000);
         assert_eq!(config.process_interval_ms, 100);
         assert!(!config.parallel_execution);
     }
 
     #[test]
-    fn test_platform_stats_default() {
-        let stats = PlatformStats::default();
+    fn test_rl_runtime_stats_default() {
+        let stats = RlRuntimeStats::default();
         assert_eq!(stats.intents_processed, 0);
         assert_eq!(stats.executions_success, 0);
     }
 
-    fn build_platform(dry_run: bool) -> OrderPlatform {
+    fn build_runtime(dry_run: bool) -> RlOrderRuntime {
         let client = PolymarketClient::new("https://clob.polymarket.com", dry_run)
             .expect("build polymarket client");
-        OrderPlatform::new(client, PlatformConfig::default())
+        RlOrderRuntime::new(client, RlOrderRuntimeConfig::default())
     }
 
     #[tokio::test]
-    async fn test_order_platform_start_allows_dry_run() {
-        let platform = build_platform(true);
-        assert!(platform.start().await.is_ok());
-        assert!(platform.is_running().await);
-        assert!(platform.stop().await.is_ok());
+    async fn test_rl_order_runtime_start_allows_dry_run() {
+        let runtime = build_runtime(true);
+        assert!(runtime.start().await.is_ok());
+        assert!(runtime.is_running().await);
+        assert!(runtime.stop().await.is_ok());
     }
 
     #[tokio::test]
-    async fn test_order_platform_start_blocks_live_runtime() {
-        let platform = build_platform(false);
-        let err = platform.start().await.expect_err("live start must fail");
+    async fn test_rl_order_runtime_start_blocks_live_runtime() {
+        let runtime = build_runtime(false);
+        let err = runtime.start().await.expect_err("live start must fail");
         assert!(err
             .to_string()
-            .contains("legacy OrderPlatform live runtime is disabled"));
-        assert!(!platform.is_running().await);
+            .contains("legacy RL order runtime live execution is disabled"));
+        assert!(!runtime.is_running().await);
     }
 }

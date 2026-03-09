@@ -276,9 +276,7 @@ impl MomentumStrategyAdapter {
             return;
         }
 
-        if let Err(e) =
-            crate::coordinator::bootstrap::ensure_strategy_observability_tables(pool).await
-        {
+        if let Err(e) = crate::persistence::ensure_strategy_observability_tables(pool).await {
             warn!(error = %e, "signal recorder: failed to ensure observability tables");
             return;
         }

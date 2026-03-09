@@ -2130,7 +2130,7 @@ async fn report_accuracy_pm_settlement(
         .await
         .context("Failed to connect to database")?;
 
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
+    crate::persistence::ensure_pm_token_settlements_table(store.pool())
         .await
         .context("Failed to ensure pm_token_settlements table")?;
 
@@ -2634,10 +2634,10 @@ async fn backtest_directional_signals_pm_settlement(
         .await
         .context("Failed to connect to database")?;
 
-    crate::coordinator::bootstrap::ensure_strategy_observability_tables(store.pool())
+    crate::persistence::ensure_strategy_observability_tables(store.pool())
         .await
         .context("Failed to ensure strategy observability tables")?;
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
+    crate::persistence::ensure_pm_token_settlements_table(store.pool())
         .await
         .context("Failed to ensure pm_token_settlements table")?;
 
@@ -3061,7 +3061,7 @@ async fn export_crypto_lob_dataset(
         .await
         .context("Failed to connect to database")?;
 
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
+    crate::persistence::ensure_pm_token_settlements_table(store.pool())
         .await
         .context("Failed to ensure pm_token_settlements table")?;
 
@@ -4497,7 +4497,7 @@ async fn verify_backtest_trades_gamma(pool: &sqlx::PgPool, run_id: uuid::Uuid) -
     use sqlx::Row;
     use std::collections::{HashMap, HashSet};
 
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(pool)
+    crate::persistence::ensure_pm_token_settlements_table(pool)
         .await
         .context("Failed to ensure pm_token_settlements table")?;
 
@@ -5017,7 +5017,7 @@ async fn run_live_backtest_compare(
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
     });
     let store = PostgresStore::new(&db_url, 5).await?;
-    crate::coordinator::bootstrap::ensure_strategy_observability_tables(store.pool())
+    crate::persistence::ensure_strategy_observability_tables(store.pool())
         .await
         .context("Failed to ensure strategy observability tables")?;
 
@@ -5831,7 +5831,7 @@ async fn backfill_pm_token_settlements(
     let store = PostgresStore::new(&db_url, 5).await?;
     let pool = store.pool();
 
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(pool)
+    crate::persistence::ensure_pm_token_settlements_table(pool)
         .await
         .context("Failed to ensure pm_token_settlements table")?;
 

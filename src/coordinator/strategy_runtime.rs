@@ -951,7 +951,7 @@ pub(crate) async fn run_managed_strategy_runtime(
 
     if is_managed_staggered_arb_label(strategy_label) {
         if let Some(pool) = observability_pool.as_ref() {
-            if let Err(e) = super::bootstrap::ensure_strategy_observability_tables(pool).await {
+            if let Err(e) = crate::persistence::ensure_strategy_observability_tables(pool).await {
                 warn!(
                     strategy = strategy_label,
                     error = %e,

@@ -43,9 +43,9 @@ pub use core::{
 pub use memory::ReplayBuffer;
 
 // Integration exports
-pub use integration::RLStrategy;
 pub use execution_types::{ExecutionReport, ExecutionStatus};
-pub use order_platform::{OrderPlatform, PlatformConfig, PlatformStats};
+pub use integration::RLStrategy;
+pub use order_platform::{RlOrderRuntime, RlOrderRuntimeConfig, RlRuntimeStats};
 pub use runtime_types::{CryptoEvent, DomainEvent, QuoteData};
 
 // Environment exports

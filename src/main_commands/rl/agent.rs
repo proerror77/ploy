@@ -28,7 +28,7 @@ pub(super) async fn run_agent(
     use ploy::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
     use ploy::rl::config::RLConfig;
-    use ploy::rl::{CryptoEvent, DomainEvent, OrderPlatform, PlatformConfig, QuoteData};
+    use ploy::rl::{CryptoEvent, DomainEvent, QuoteData, RlOrderRuntime, RlOrderRuntimeConfig};
     use ploy::signing::Wallet;
     use ploy::AgentRiskParams;
     use rust_decimal::prelude::ToPrimitive;
@@ -36,7 +36,7 @@ pub(super) async fn run_agent(
     use std::sync::Arc;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║           Ploy RL Agent - Order Platform                     ║");
+    println!("║            Ploy RL Agent - Order Runtime                     ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!(
         "║  Symbol:         {:>10}                                    ║",
@@ -131,7 +131,7 @@ pub(super) async fn run_agent(
     println!("🚀 Agent started. Listening for market data...\n");
     println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
 
-    let mut platform: Option<OrderPlatform> = if !dry_run {
+    let mut runtime: Option<RlOrderRuntime> = if !dry_run {
         info!("Setting up live order execution...");
         let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
         info!("Wallet loaded: {:?}", wallet.address());
@@ -144,8 +144,8 @@ pub(super) async fn run_agent(
         .await?;
         info!("✅ Authenticated with Polymarket CLOB");
 
-        let platform_config = PlatformConfig::default();
-        Some(OrderPlatform::new(client, platform_config))
+        let runtime_config = RlOrderRuntimeConfig::default();
+        Some(RlOrderRuntime::new(client, runtime_config))
     } else {
         None
     };
@@ -244,7 +244,7 @@ pub(super) async fn run_agent(
                                     intent.limit_price,
                                     intent.market_slug,
                                 );
-                            } else if let Some(platform) = platform.as_mut() {
+                            } else if let Some(runtime) = runtime.as_mut() {
                                 println!("🔴 [LIVE] Executing: {} {} {} @ {} ({})",
                                     if intent.is_buy { "BUY" } else { "SELL" },
                                     intent.shares,
@@ -252,11 +252,11 @@ pub(super) async fn run_agent(
                                     intent.limit_price,
                                     intent.market_slug,
                                 );
-                                if let Err(e) = platform.enqueue_intent(intent.clone()).await {
+                                if let Err(e) = runtime.enqueue_intent(intent.clone()).await {
                                     error!("Failed to enqueue intent: {}", e);
                                     continue;
                                 }
-                                match platform.process_queue().await {
+                                match runtime.process_queue().await {
                                     Ok(reports) => {
                                         for report in reports {
                                             agent.on_execution(report).await;
@@ -267,7 +267,7 @@ pub(super) async fn run_agent(
                                     }
                                 }
                             } else {
-                                warn!("Live mode but no platform initialized");
+                                warn!("Live mode but no RL runtime initialized");
                             }
                         }
                     }
