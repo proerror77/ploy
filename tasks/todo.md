@@ -142,10 +142,10 @@ Start collapsing the duplicate `StrategyAction::SubmitOrder { OrderRequest }` vs
 - 2026-03-09: Updated [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy.rs) and [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/strategy.rs) so the current canonical domain strategies emit `SubmitIntent` instead of raw `OrderRequest`.
 - 2026-03-09: Added compatibility normalization in [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), [orchestrator.rs](/Users/proerror/Documents/ploy/src/strategy/orchestrator.rs), and [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) so existing execution paths still accept the new canonical payload without breaking older strategies.
 - 2026-03-09: Validation passed:
-  - `cargo check`
+  - `cargo check --lib`
   - `cargo test strategy::event_edge::strategy --lib -- --nocapture`
   - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
-  - `cargo test strategy::traits --lib -- --nocapture`
+  - `cargo test strategy_order_intent_into_order_request_preserves_action_id --lib -- --nocapture`
 
 # Strategy Metadata And Momentum State Cleanup (2026-03-09)
 
