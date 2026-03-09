@@ -22,8 +22,8 @@ use crate::rl::core::{
     RewardFunction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
 };
 use crate::rl::memory::ReplayBuffer;
-use crate::rl::{CryptoEvent, DomainEvent};
-use crate::{AgentStatus, Domain, ExecutionReport, OrderIntent};
+use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
+use crate::{AgentStatus, Domain, OrderIntent};
 
 fn default_policy_output() -> String {
     "continuous".to_string()
@@ -926,8 +926,7 @@ impl RLCryptoAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::ExecutionStatus;
-    use crate::rl::QuoteData;
+    use crate::rl::{ExecutionStatus, QuoteData};
 
     fn make_crypto_event(
         symbol: &str,

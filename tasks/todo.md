@@ -92,6 +92,36 @@ Move the RL-only compatibility runtime surface out of `src/platform` into `src/r
   - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
   - `cargo test --features rl test_rl_signal_on_good_sum --lib -- --nocapture`
 
+# RL Execution Report Namespace Migration (2026-03-09)
+
+## Goal
+Move the RL-only `ExecutionStatus` / `ExecutionReport` compatibility types out of `platform` and into `rl` so `platform` stops exporting RL-specific execution results as if they were shared live-runtime primitives.
+
+## Tasks
+
+- [x] Add an `rl`-owned execution types module for `ExecutionStatus` and `ExecutionReport`.
+- [x] Rewire RL order-platform and CLI agent code to import execution types from `crate::rl`.
+- [x] Remove the RL execution-type exports/definitions from `platform` and update the root lib re-export surface.
+- [x] Re-run default + `rl` compile plus focused RL compatibility tests.
+
+## Review
+
+- [x] Confirm `src/platform/types.rs` no longer defines `ExecutionStatus` or `ExecutionReport`.
+- [x] Confirm the remaining `ExecutionReport` references live under `src/rl` plus the feature-gated root lib export.
+- [x] Confirm the RL compatibility runtime tests still pass after the namespace move.
+
+## Progress notes
+
+- 2026-03-09: Added [execution_types.rs](/Users/proerror/Documents/ploy/src/rl/execution_types.rs) and moved the RL compatibility execution result types there.
+- 2026-03-09: Updated [order_platform.rs](/Users/proerror/Documents/ploy/src/rl/order_platform.rs) and [cli_agent.rs](/Users/proerror/Documents/ploy/src/rl/cli_agent.rs) to consume the execution result types from `crate::rl` instead of `crate::platform`.
+- 2026-03-09: Removed the old execution result definitions from [types.rs](/Users/proerror/Documents/ploy/src/platform/types.rs), shrank [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs) accordingly, and made the root [lib.rs](/Users/proerror/Documents/ploy/src/lib.rs) export them only behind the `rl` feature.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl test_order_platform_start_blocks_live_runtime --lib -- --nocapture`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+  - `cargo test --features rl test_position_tracking --lib -- --nocapture`
+
 # Momentum Config Namespace Migration (2026-03-09)
 
 ## Goal

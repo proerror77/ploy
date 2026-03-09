@@ -21,6 +21,7 @@ pub mod cli_agent;
 pub mod config;
 pub mod core;
 pub mod environment;
+pub mod execution_types;
 pub mod integration;
 pub mod memory;
 pub mod networks;
@@ -43,6 +44,7 @@ pub use memory::ReplayBuffer;
 
 // Integration exports
 pub use integration::RLStrategy;
+pub use execution_types::{ExecutionReport, ExecutionStatus};
 pub use order_platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use runtime_types::{
     CryptoEvent, DomainEvent, OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent,

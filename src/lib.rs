@@ -43,9 +43,8 @@ pub use persistence::{
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
 pub use platform::{
-    AgentStatus, Domain, ExecutionReport, MarketSelector, OrderCommand, OrderExecutionReport,
-    OrderIntent, RiskDecision, RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe,
-    TradeIntent,
+    AgentStatus, Domain, MarketSelector, OrderCommand, OrderExecutionReport, OrderIntent,
+    RiskDecision, RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe, TradeIntent,
 };
 pub use signing::Wallet;
 pub use supervisor::{
@@ -55,4 +54,4 @@ pub use supervisor::{
 
 // RL exports (when feature enabled)
 #[cfg(feature = "rl")]
-pub use rl::{RLConfig, RLStrategy};
+pub use rl::{ExecutionReport, ExecutionStatus, RLConfig, RLStrategy};

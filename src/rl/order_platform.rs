@@ -16,9 +16,10 @@ use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
 use crate::exchange::ExchangeClient;
 use crate::platform::{
-    AggregatedPosition, ExecutionReport, OrderIntent, OrderQueue, PlatformRiskState, Position,
-    PositionAggregator, QueueStats, RiskCheckResult, RiskConfig, RiskGate,
+    AggregatedPosition, OrderIntent, OrderQueue, PlatformRiskState, Position, PositionAggregator,
+    QueueStats, RiskCheckResult, RiskConfig, RiskGate,
 };
+use crate::rl::ExecutionReport;
 use crate::strategy::executor::OrderExecutor;
 
 /// Legacy RL CLI order-platform config.
