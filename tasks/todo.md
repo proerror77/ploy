@@ -2893,7 +2893,9 @@ Finish the next large structural wave by shrinking the remaining core ownership 
 - 2026-03-10: Added [observability.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/observability.rs) and [order_store.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/order_store.rs), moving managed-runtime signal-history persistence plus runtime order store/normalization helpers out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs).
 - 2026-03-10: Added [actions.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions.rs) and moved the managed runtime action-dispatch / poll-update loop out of [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs), leaving the top-level file focused on runtime assembly, feed wiring, and command handling.
 - 2026-03-10: Added [config.rs](/Users/proerror/Documents/ploy/src/platform/risk/config.rs), [types.rs](/Users/proerror/Documents/ploy/src/platform/risk/types.rs), and [stats.rs](/Users/proerror/Documents/ploy/src/platform/risk/stats.rs), moving `RiskConfig`, public risk result/state types, and internal stats structs out of [risk.rs](/Users/proerror/Documents/ploy/src/platform/risk.rs).
+- 2026-03-10: Added [transitions.rs](/Users/proerror/Documents/ploy/src/platform/risk/transitions.rs), moving the heavy `RiskGate` state-transition ownership (`record_success`, `record_failure`, `record_loss`, circuit-breaker transitions, runtime restore helpers) out of [risk.rs](/Users/proerror/Documents/ploy/src/platform/risk.rs).
 - 2026-03-10: Added [momentum_adapter.rs](/Users/proerror/Documents/ploy/src/strategy/adapters/momentum_adapter.rs) and moved the full `MomentumStrategyAdapter` ownership out of [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs), leaving the top-level file focused on shared helpers plus split-arb ownership.
+- 2026-03-10: Added [split_arb_adapter.rs](/Users/proerror/Documents/ploy/src/strategy/adapters/split_arb_adapter.rs) and moved the full `SplitArbStrategyAdapter` ownership out of [adapters.rs](/Users/proerror/Documents/ploy/src/strategy/adapters.rs), shrinking the top-level adapter file down to a thin facade plus shared `crypto_submit_intent` helper.
 - 2026-03-10: Validation passed:
   - `cargo check --lib`
   - `cargo test persist_runtime_order_ --lib -- --nocapture`
@@ -2902,3 +2904,4 @@ Finish the next large structural wave by shrinking the remaining core ownership 
   - `cargo test test_drawdown_limit_triggers_circuit_breaker --lib -- --nocapture`
   - `cargo test test_restore_runtime_counters_halts_when_daily_loss_exceeded --lib -- --nocapture`
   - `cargo test strategy::adapters::tests --lib -- --nocapture`
+  - `cargo test strategy::adapters::split_arb_adapter::tests --lib -- --nocapture`
