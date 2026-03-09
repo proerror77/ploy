@@ -28,8 +28,9 @@ pub(super) async fn run_agent(
     use ploy::platform::{
         AgentRiskParams, AgentSubscription, CryptoEvent, DataPlaneConfig, DataPlaneFreshness,
         Domain, DomainAgent, DomainEvent, EventRouter, OrderPlatform, PlatformConfig,
-        PlatformDataPlane, QuoteData, RLCryptoAgent, RLCryptoAgentConfig,
+        PlatformDataPlane, QuoteData,
     };
+    use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
     use ploy::rl::config::RLConfig;
     use ploy::signing::Wallet;
     use rust_decimal::prelude::ToPrimitive;

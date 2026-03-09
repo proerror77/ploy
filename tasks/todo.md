@@ -1557,6 +1557,29 @@ Break `bootstrap.rs`'s remaining type-level dependency on the legacy sports/poli
   - `cargo check --lib`
   - `cargo test build_event_edge_runtime_config_ --lib -- --nocapture`
   - `cargo test build_nba_comeback_runtime_config_ --lib -- --nocapture`
+
+# RL DomainAgent Surface Retirement (2026-03-09)
+
+## Goal
+Move the remaining `RLCryptoAgent` compatibility runtime out of the shared `platform` surface so `DomainAgent` stops leaking into live/runtime module boundaries and the RL CLI becomes the only owner of that legacy path.
+
+## Tasks
+
+- [ ] Move `RLCryptoAgent` / `RLCryptoAgentConfig` under `src/main_commands/rl/` as a CLI-local compatibility module.
+- [ ] Rewire `src/main_commands/rl/agent.rs` to use the local compatibility module instead of `ploy::platform::{RLCryptoAgent, RLCryptoAgentConfig}`.
+- [ ] Delete `src/platform/agents/` and remove `RLCryptoAgent` re-exports from `src/platform/mod.rs`.
+- [ ] Delete the unused `SimpleAgent` trait/export if nothing still implements or imports it.
+- [ ] Re-run compile plus narrow RL/bootstrap regressions after the cutover.
+
+## Review
+
+- [ ] Confirm `src/platform/mod.rs` no longer re-exports `RLCryptoAgent`.
+- [ ] Confirm `src/main_commands/rl/agent.rs` still runs through the legacy RL CLI path without touching the shared `platform` API surface.
+- [ ] Confirm `src/platform/agents/` is gone and `SimpleAgent` is no longer defined/exported.
+
+## Progress notes
+
+- 2026-03-09: Started the cutover after confirming `RLCryptoAgent` is no longer a live runtime entrypoint and only the RL CLI still instantiates it.
   - `cargo test runtime_scope_keeps_politics_when_no_explicit_selection -- --nocapture`
   - `cargo test explicit_selection_disables_politics_without_politics_flag -- --nocapture`
   - `cargo test sports_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`

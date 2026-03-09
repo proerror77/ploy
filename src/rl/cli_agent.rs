@@ -3,6 +3,8 @@
 //! A crypto trading agent that uses reinforcement learning for decision making.
 //! Connects the Order Platform's DomainAgent interface with RLStrategy.
 
+//! Legacy RL DomainAgent compatibility runtime used only by the RL CLI.
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -244,7 +246,7 @@ impl RLCryptoAgent {
     }
 
     /// Update observation from crypto event
-    fn update_from_crypto_event(&mut self, event: &super::super::types::CryptoEvent) {
+    fn update_from_crypto_event(&mut self, event: &crate::platform::CryptoEvent) {
         // Update spot price
         self.current_obs.spot_price = Some(event.spot_price);
 
@@ -686,7 +688,7 @@ impl RLCryptoAgent {
     /// Process crypto event and generate intents
     fn process_crypto_event(
         &mut self,
-        event: &super::super::types::CryptoEvent,
+        event: &crate::platform::CryptoEvent,
     ) -> Vec<OrderIntent> {
         // Check if this is a coin we're monitoring
         let coin = event.symbol.replace("USDT", "");
