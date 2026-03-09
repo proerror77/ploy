@@ -1,3 +1,34 @@
+# Coordinator Execution Runner Extraction (2026-03-09)
+
+## Goal
+Move the execution runner out of `src/coordinator/coordinator.rs` so queue drain, fill application, and execution-side capital/risk refresh live behind one dedicated execution module while preserving current behavior.
+
+## Tasks
+
+- [x] Inventory the execution seam: queue drain, executor submit loop, fill application, and post-fill risk/capital updates.
+- [x] Add a dedicated execution module that owns `drain_and_execute()` and the tightly coupled helper methods it needs.
+- [x] Rewire `Coordinator` to keep orchestration ownership while delegating the execution runner path through the extracted module.
+- [x] Move execution-focused regression tests next to the extracted module when it improves cohesion.
+- [x] Run targeted compile/test validation for queue draining, BUY/SELL fill tracking, and global state refresh behavior.
+
+## Review
+
+- [x] Confirm `Coordinator` no longer stores the execution runner body inline in `coordinator.rs`.
+- [x] Confirm queue expiry/failure settlement and successful execution persistence still happen on the same paths.
+- [x] Confirm BUY fills still open tracked positions, SELL fills still reduce them FIFO, and risk-gate accounting remains unchanged.
+
+## Progress notes
+
+- 2026-03-09: Planned after journal extraction. The next cohesive seam is the execution runner body: queue drain + executor submit loop + sell-fill application + post-fill risk refresh.
+- 2026-03-09: Added `src/coordinator/coordinator/execution.rs` as a private coordinator submodule and moved execution-runner helpers (`drain_and_execute`, domain settlement, sell-fill reduction, post-fill exposure refresh) out of the main `coordinator.rs` body.
+- 2026-03-09: Kept behavior unchanged by leaving restore paths and run-loop call sites on `Coordinator` while exposing the extracted methods as `pub(super)` only within the coordinator module tree.
+- 2026-03-09: Added a SELL execution regression to prove execution extraction still reduces tracked positions and realizes FIFO PnL after a BUY fill.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+  - `cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --nocapture`
+  - `cargo test test_queue_stats_snapshot_from --lib -- --nocapture`
+
 # Coordinator Execution Journal Extraction (2026-03-09)
 
 ## Goal
