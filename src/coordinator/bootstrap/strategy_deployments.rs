@@ -9,9 +9,8 @@ mod runtime_plans;
 
 pub(super) use self::deployment_matrix::{
     apply_strategy_deployments, collect_runtime_crypto_strategy_targets,
+    RuntimeCryptoStrategyTargets,
 };
-#[cfg(test)]
-pub(super) use self::deployment_matrix::RuntimeCryptoStrategyTargets;
 #[cfg(test)]
 pub(super) use self::runtime_configs::{
     build_crypto_lob_ml_runtime_config, build_event_edge_runtime_config,

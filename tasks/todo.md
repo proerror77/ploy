@@ -942,6 +942,32 @@ Move bootstrap runtime/domain spawn ownership out of `bootstrap.rs` into a dedic
   - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
   - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
 
+# Bootstrap Crypto Runtime Support Extraction (2026-03-09)
+
+## Goal
+Move the giant crypto runtime support block out of `start_platform()` so bootstrap stops owning event matcher discovery, PM collector refresh, market-data persistence bridges, and Binance LOB wiring inline.
+
+## Tasks
+
+- [x] Add a dedicated crypto bootstrap support module and move the crypto runtime/data-plane startup block there.
+- [x] Replace the inline `if config.enable_crypto { ... }` block in `start_platform()` with a helper call that returns the managed/shared crypto data-plane handles.
+- [x] Keep the managed runtime handoff contract unchanged in this slice; this is ownership migration, not behavior redesign.
+- [x] Re-run default + `rl` compile after the extraction.
+
+## Review
+
+- [x] Confirm `start_platform()` no longer owns the giant crypto runtime setup block inline.
+- [x] Confirm PM token seeding/refresh, WS/data-plane setup, persistence pipeline wiring, and Binance LOB startup now live in the dedicated crypto support module.
+- [x] Confirm compile still passes in default and `rl` builds after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Added [crypto_runtime_support.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support.rs) with `initialize_crypto_runtime_support(...)` and a small `CryptoRuntimeSupport` return object for the managed/shared data-plane handles.
+- 2026-03-09: Replaced the giant inline crypto block in [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) with a single helper call, leaving bootstrap responsible only for orchestration and the later managed-runtime spawn loop.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+
 # Bootstrap Legacy TradingAgent Spawn Consolidation (2026-03-09)
 
 ## Goal
