@@ -2,7 +2,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use crate::platform::AgentRiskParams;
+use crate::agent_runtime::AgentRiskParams;
 
 fn default_exit_edge_floor() -> Decimal {
     dec!(0.15)

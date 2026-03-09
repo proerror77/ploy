@@ -8,7 +8,8 @@ use crate::coordinator::{
     GovernancePolicyUpdate,
 };
 use crate::error::Result;
-use crate::platform::{AgentStatus, Domain};
+use crate::agent_runtime::AgentStatus;
+use crate::platform::Domain;
 
 /// Governance-only context given to non-trading control-plane agents.
 ///

@@ -1,22 +1,13 @@
-//! Core types for the legacy order platform compatibility layer.
-
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-/// Agent 狀態
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
-    /// 初始化中
     Initializing,
-    /// 運行中
     Running,
-    /// 暫停
     Paused,
-    /// 僅監控 (不下單)
     Observing,
-    /// 已停止
     Stopped,
-    /// 錯誤狀態
     Error,
 }
 
@@ -46,20 +37,13 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
-/// Agent 風險參數
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRiskParams {
-    /// 單筆最大下單金額 (USD)
     pub max_order_value: Decimal,
-    /// 最大總倉位 (USD)
     pub max_total_exposure: Decimal,
-    /// 最大未對沖倉位數量
     pub max_unhedged_positions: u32,
-    /// 單日最大虧損 (USD)
     pub max_daily_loss: Decimal,
-    /// 是否允許隔夜持倉
     pub allow_overnight: bool,
-    /// 允許的市場 slugs (空 = 全部允許)
     pub allowed_markets: Vec<String>,
 }
 
@@ -99,7 +83,6 @@ impl AgentRiskParams {
         }
     }
 
-    /// 檢查市場是否被允許
     pub fn is_market_allowed(&self, market_slug: &str) -> bool {
         self.allowed_markets.is_empty() || self.allowed_markets.contains(&market_slug.to_string())
     }

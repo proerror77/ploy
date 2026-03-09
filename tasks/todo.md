@@ -2625,3 +2625,32 @@ Move runtime support setup, managed runtime spawning, startup control applicatio
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo check --lib --features rl`
+
+# Agent Runtime Type Ownership Extraction (2026-03-09)
+
+## Goal
+Move `AgentStatus` and `AgentRiskParams` out of `platform` so those agent-centric compatibility types stop making `platform` look like the canonical runtime owner.
+
+## Tasks
+
+- [x] Add a dedicated `agent_runtime` module as the authoritative owner of `AgentStatus` and `AgentRiskParams`.
+- [x] Rewire coordinator, bootstrap, agents, RL, strategy runtime configs, API handlers, and platform risk code to import the types from the new owner.
+- [x] Remove the old `platform/traits.rs` owner and stop re-exporting the agent runtime types from `platform`.
+- [x] Re-run default + `rl` compile plus focused agent-runtime tests after the migration.
+
+## Review
+
+- [x] Confirm `platform/mod.rs` no longer re-exports `AgentStatus` or `AgentRiskParams`.
+- [x] Confirm `platform/traits.rs` is gone and `lib.rs` now re-exports the agent runtime types from `agent_runtime`.
+- [x] Confirm compile behavior is unchanged after the ownership move.
+
+## Progress notes
+
+- 2026-03-09: Added [agent_runtime.rs](/Users/proerror/Documents/ploy/src/agent_runtime.rs) as the authoritative owner of `AgentStatus` and `AgentRiskParams`, including their focused tests.
+- 2026-03-09: Rewired coordinator, bootstrap, governance agents, RL, API handlers, strategy runtime configs, and platform risk code to import the types from `crate::agent_runtime` or root re-exports instead of `crate::platform`.
+- 2026-03-09: Deleted [traits.rs](/Users/proerror/Documents/ploy/src/platform/traits.rs) and removed the old `AgentStatus` / `AgentRiskParams` re-export from [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --lib agent_runtime::tests -- --nocapture`
+  - `rg "AgentRiskParams|AgentStatus" src/platform src/lib.rs`

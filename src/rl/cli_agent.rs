@@ -12,7 +12,7 @@ use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::platform::AgentRiskParams;
+use crate::agent_runtime::AgentRiskParams;
 use crate::platform::OrderPriority;
 use crate::rl::config::RLConfig;
 #[cfg(feature = "onnx")]

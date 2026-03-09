@@ -20,10 +20,11 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::adapters::{PolymarketClient, PolymarketWebSocket, PostgresStore};
+use crate::agent_runtime::AgentStatus;
 use crate::coordinator::{AgentHealthResponse, AgentSnapshot, CoordinatorCommand};
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::Result;
-use crate::platform::{AgentStatus, Domain, PlatformDataPlane};
+use crate::platform::{Domain, PlatformDataPlane};
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{
     DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,

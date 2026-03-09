@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod agent_runtime;
 pub mod agents;
 pub mod ai_clients;
 #[cfg(feature = "analysis_tools")]
@@ -42,9 +43,10 @@ pub use persistence::{
     CheckpointConfig, CheckpointService, Checkpointable, DLQHandler, DLQProcessor,
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
+pub use agent_runtime::{AgentRiskParams, AgentStatus};
 pub use platform::{
-    AgentStatus, Domain, MarketSelector, OrderCommand, OrderExecutionReport, OrderIntent,
-    RiskDecision, RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe, TradeIntent,
+    Domain, MarketSelector, OrderCommand, OrderExecutionReport, OrderIntent, RiskDecision,
+    RiskDecisionStatus, RiskGate, StrategyDeployment, Timeframe, TradeIntent,
 };
 pub use signing::Wallet;
 pub use supervisor::{

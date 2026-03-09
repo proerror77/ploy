@@ -18,10 +18,11 @@ use uuid::Uuid;
 
 use sqlx::PgPool;
 
+use crate::agent_runtime::{AgentRiskParams, AgentStatus};
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, Domain, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult,
-    RiskGate, StrategyDeployment,
+    Domain, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult, RiskGate,
+    StrategyDeployment,
 };
 use crate::strategy::executor::OrderExecutor;
 
@@ -1339,7 +1340,7 @@ impl Coordinator {
         let mut stale_warn_at = self.stale_heartbeat_warn_at.write().await;
         for (id, agent) in state.agents.iter_mut() {
             if now - agent.last_heartbeat > timeout
-                && matches!(agent.status, crate::platform::AgentStatus::Running)
+                && matches!(agent.status, AgentStatus::Running)
             {
                 let should_warn = stale_warn_at
                     .get(id)
@@ -1370,7 +1371,8 @@ mod tests {
     use super::*;
     use crate::adapters::PolymarketClient;
     use crate::config::ExecutionConfig;
-    use crate::platform::{AgentStatus, Domain, OrderPriority, QueueStats};
+    use crate::agent_runtime::AgentStatus;
+    use crate::platform::{Domain, OrderPriority, QueueStats};
     use crate::strategy::executor::OrderExecutor;
     use rust_decimal_macros::dec;
     use std::collections::{HashMap, HashSet};

@@ -14,8 +14,9 @@ use tracing::{debug, info, warn};
 
 use crate::agents::governance_agent::GovernanceAgent;
 use crate::agents::governance_context::GovernanceContext;
+use crate::agent_runtime::AgentStatus;
 use crate::coordinator::CoordinatorCommand;
-use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
+use crate::platform::{BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
 use super::config::OpenClawConfig;

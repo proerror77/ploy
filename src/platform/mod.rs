@@ -12,7 +12,6 @@ mod position;
 mod queue;
 mod risk;
 pub mod subscription_planner;
-mod traits;
 mod types;
 
 pub use contracts::{
@@ -39,5 +38,4 @@ pub use risk::{
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
-pub use traits::{AgentRiskParams, AgentStatus};
 pub use types::{Domain, OrderIntent, OrderPriority};

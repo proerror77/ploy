@@ -5,9 +5,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::agent_runtime::AgentStatus;
 use crate::platform::{
-    AgentStatus, AggregatedPosition, CircuitBreakerEvent, Domain, PlatformRiskState, Position,
-    QueueStats,
+    AggregatedPosition, CircuitBreakerEvent, Domain, PlatformRiskState, Position, QueueStats,
 };
 
 /// Per-agent snapshot visible to the coordinator and TUI

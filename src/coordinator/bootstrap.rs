@@ -19,8 +19,8 @@ use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    AgentRiskParams, BinanceDataPlaneHandle, DataPlaneConfig, Domain, MarketSelector,
-    PlatformDataPlane, StrategyDeployment,
+    BinanceDataPlaneHandle, DataPlaneConfig, Domain, MarketSelector, PlatformDataPlane,
+    StrategyDeployment,
 };
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
