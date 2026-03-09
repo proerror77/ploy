@@ -60,6 +60,13 @@
   - Re-anchor analysis/search to the corrected term.
   - Avoid carrying forward assumptions from the wrong term.
 
+- Pattern: When the user asks for a large structural cleanup, repeated in-file helper extractions can still feel like local patching rather than plan-driven refactoring.
+- Rule: For architecture refactors on this repo, execute the approved plan in large slices that cross file boundaries. Prefer module extraction, ownership moves, and old-path retirement over more micro-refactors inside the same oversized file.
+- Execution guardrail:
+  - Re-anchor on the written implementation plan before each batch.
+  - Choose the highest-leverage structural slice, not the easiest local edit.
+  - End each batch with compile/tests plus an atomic commit.
+
 - Pattern: Multi-file fixes often happen in dirty worktrees.
 - Rule: In dirty worktree sessions, keep progressing after explicit user approval, and isolate commits by staging only request-related files/hunks.
 - Commit safety:
