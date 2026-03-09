@@ -12,9 +12,8 @@ use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
-};
+use crate::platform::AgentRiskParams;
+use crate::platform::OrderPriority;
 use crate::rl::config::RLConfig;
 #[cfg(feature = "onnx")]
 use crate::rl::core::TOTAL_FEATURES;
@@ -23,6 +22,8 @@ use crate::rl::core::{
     RewardFunction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
 };
 use crate::rl::memory::ReplayBuffer;
+use crate::rl::{CryptoEvent, DomainEvent};
+use crate::{AgentStatus, Domain, ExecutionReport, OrderIntent};
 
 fn default_policy_output() -> String {
     "continuous".to_string()
@@ -239,7 +240,7 @@ impl RLCryptoAgent {
     }
 
     /// Update observation from crypto event
-    fn update_from_crypto_event(&mut self, event: &crate::platform::CryptoEvent) {
+    fn update_from_crypto_event(&mut self, event: &CryptoEvent) {
         // Update spot price
         self.current_obs.spot_price = Some(event.spot_price);
 
@@ -679,10 +680,7 @@ impl RLCryptoAgent {
     }
 
     /// Process crypto event and generate intents
-    fn process_crypto_event(
-        &mut self,
-        event: &crate::platform::CryptoEvent,
-    ) -> Vec<OrderIntent> {
+    fn process_crypto_event(&mut self, event: &CryptoEvent) -> Vec<OrderIntent> {
         // Check if this is a coin we're monitoring
         let coin = event.symbol.replace("USDT", "");
         if !self.config.coins.iter().any(|c| c == &coin) {
@@ -928,7 +926,8 @@ impl RLCryptoAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{CryptoEvent, ExecutionStatus, QuoteData};
+    use crate::platform::ExecutionStatus;
+    use crate::rl::QuoteData;
 
     fn make_crypto_event(
         symbol: &str,

@@ -1,10 +1,11 @@
-//! Order Platform - legacy execution runtime
+//! RL compatibility execution runtime.
 //!
-//! 保留舊的 queue-driven 風控與執行流程，主要供 RL CLI 兼容路徑使用。
-//! 正式 live runtime 已由 coordinator 接管。
+//! This preserves the old queue/risk/execution loop only for RL CLI flows. Canonical
+//! live trading continues to run exclusively through the coordinator.
 
 use std::sync::Arc;
 use std::time::Duration;
+
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -14,29 +15,21 @@ use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
 use crate::exchange::ExchangeClient;
+use crate::platform::{
+    AggregatedPosition, ExecutionReport, OrderIntent, OrderQueue, PlatformRiskState, Position,
+    PositionAggregator, QueueStats, RiskCheckResult, RiskConfig, RiskGate,
+};
 use crate::strategy::executor::OrderExecutor;
 
-use super::position::PositionAggregator;
-use super::queue::OrderQueue;
-use super::risk::{RiskCheckResult, RiskConfig, RiskGate};
-use super::types::{ExecutionReport, OrderIntent};
-
-/// 平台配置
+/// Legacy RL CLI order-platform config.
 #[derive(Debug, Clone)]
 pub struct PlatformConfig {
-    /// 訂單隊列大小
     pub queue_size: usize,
-    /// 風控配置
     pub risk_config: RiskConfig,
-    /// 執行配置
     pub execution_config: ExecutionConfig,
-    /// 隊列處理間隔 (毫秒)
     pub process_interval_ms: u64,
-    /// 過期清理間隔 (秒)
     pub cleanup_interval_secs: u64,
-    /// 是否啟用並行執行
     pub parallel_execution: bool,
-    /// 最大並行訂單數
     pub max_parallel_orders: usize,
 }
 
@@ -54,42 +47,25 @@ impl Default for PlatformConfig {
     }
 }
 
-/// 平台統計
 #[derive(Debug, Clone, Default)]
 pub struct PlatformStats {
-    /// 處理的訂單意圖數
     pub intents_processed: u64,
-    /// 通過風控的訂單數
     pub risk_passed: u64,
-    /// 被風控攔截的訂單數
     pub risk_blocked: u64,
-    /// 被調整的訂單數
     pub risk_adjusted: u64,
-    /// 執行成功數
     pub executions_success: u64,
-    /// 執行失敗數
     pub executions_failed: u64,
-    /// 事件處理數
     pub events_processed: u64,
 }
 
-/// 舊版下單平台主結構。
-///
-/// 這層保留給 legacy CLI/compatibility 路徑，並不是 canonical live runtime。
+/// Legacy queue-driven execution surface retained only for the RL CLI path.
 pub struct OrderPlatform {
-    /// 風控閘門
     risk_gate: Arc<RiskGate>,
-    /// 訂單隊列
     queue: Arc<RwLock<OrderQueue>>,
-    /// 倉位聚合器
     positions: Arc<PositionAggregator>,
-    /// 訂單執行器
     executor: Arc<OrderExecutor>,
-    /// 配置
     config: PlatformConfig,
-    /// 統計
     stats: Arc<RwLock<PlatformStats>>,
-    /// 是否運行中
     running: Arc<RwLock<bool>>,
 }
 
@@ -103,12 +79,10 @@ impl OrderPlatform {
         ))
     }
 
-    /// 創建新的下單平台
     pub fn new(client: PolymarketClient, config: PlatformConfig) -> Self {
         Self::new_with_exchange(Arc::new(client), config)
     }
 
-    /// 使用通用交易所客戶端建立平台
     pub fn new_with_exchange(client: Arc<dyn ExchangeClient>, config: PlatformConfig) -> Self {
         let executor = Arc::new(OrderExecutor::new_with_exchange(
             client,
@@ -126,7 +100,6 @@ impl OrderPlatform {
         }
     }
 
-    /// 使用自定義執行器創建
     pub fn with_executor(executor: Arc<OrderExecutor>, config: PlatformConfig) -> Self {
         Self {
             risk_gate: Arc::new(RiskGate::new(config.risk_config.clone())),
@@ -139,9 +112,6 @@ impl OrderPlatform {
         }
     }
 
-    // ==================== 訂單入隊 ====================
-
-    /// 直接入隊訂單意圖
     pub async fn enqueue_intent(&self, intent: OrderIntent) -> Result<()> {
         let mut queue = self.queue.write().await;
         queue.enqueue(intent.clone()).map_err(|e| {
@@ -151,14 +121,12 @@ impl OrderPlatform {
             ))
         })?;
 
-        // 更新統計
         let mut stats = self.stats.write().await;
         stats.intents_processed += 1;
 
         Ok(())
     }
 
-    /// 批量入隊訂單意圖
     pub async fn enqueue_intents(&self, intents: Vec<OrderIntent>) -> Result<usize> {
         let mut queued = 0;
         for intent in intents {
@@ -171,15 +139,9 @@ impl OrderPlatform {
         Ok(queued)
     }
 
-    // ==================== 訂單處理 ====================
-
-    /// 處理隊列中的訂單
-    ///
-    /// 從優先隊列取出訂單，進行風控檢查，然後執行。
     pub async fn process_queue(&self) -> Result<Vec<ExecutionReport>> {
         self.enforce_coordinator_only_live()?;
 
-        // 批量取出訂單
         let batch_size = if self.config.parallel_execution {
             self.config.max_parallel_orders
         } else {
@@ -196,7 +158,6 @@ impl OrderPlatform {
             }
         }
 
-        // 更新統計
         {
             let mut stats = self.stats.write().await;
             stats.intents_processed += reports.len() as u64;
@@ -205,37 +166,28 @@ impl OrderPlatform {
         Ok(reports)
     }
 
-    /// 處理單個訂單意圖
     async fn process_intent(&self, intent: OrderIntent) -> Result<ExecutionReport> {
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
 
         debug!("Processing intent {} from agent {}", intent_id, agent_id);
 
-        // 風控檢查
         let risk_result = self.risk_gate.check_order(&intent).await;
 
         match risk_result {
             RiskCheckResult::Passed => {
-                // 更新統計
                 self.stats.write().await.risk_passed += 1;
-
-                // 執行訂單
                 self.execute_intent(&intent).await
             }
             RiskCheckResult::Blocked(reason) => {
-                // 更新統計
                 self.stats.write().await.risk_blocked += 1;
-
                 let report = ExecutionReport::risk_blocked(&intent, reason.to_string());
                 warn!("Intent {} blocked: {}", intent_id, reason);
                 Ok(report)
             }
             RiskCheckResult::Adjusted(suggestion) => {
-                // 更新統計
                 self.stats.write().await.risk_adjusted += 1;
 
-                // 調整後執行
                 let mut adjusted_intent = intent.clone();
                 adjusted_intent.shares = suggestion.max_shares;
 
@@ -249,12 +201,10 @@ impl OrderPlatform {
         }
     }
 
-    /// 執行訂單
     async fn execute_intent(&self, intent: &OrderIntent) -> Result<ExecutionReport> {
         let agent_id = &intent.agent_id;
         let intent_id = intent.intent_id;
 
-        // 構建訂單請求
         let mut request = if intent.is_buy {
             OrderRequest::buy_limit(
                 intent.token_id.clone(),
@@ -273,10 +223,8 @@ impl OrderPlatform {
         request.client_order_id = format!("intent:{}", intent.intent_id);
         request.idempotency_key = Some(format!("intent:{}", intent.intent_id));
 
-        // 執行訂單
         match self.executor.execute(&request).await {
             Ok(result) => {
-                // 檢查是否成交
                 let is_filled = matches!(
                     result.status,
                     OrderStatus::Filled | OrderStatus::PartiallyFilled
@@ -311,11 +259,9 @@ impl OrderPlatform {
                         result.avg_fill_price.unwrap_or(intent.limit_price),
                     )
                 } else {
-                    // 執行失敗
                     let reason = format!("Order status: {:?}", result.status);
                     self.risk_gate.record_failure(agent_id, &reason).await;
                     self.stats.write().await.executions_failed += 1;
-
                     ExecutionReport::rejected(intent, reason)
                 };
 
@@ -337,28 +283,19 @@ impl OrderPlatform {
         }
     }
 
-    // ==================== 運行控制 ====================
-
-    /// 啟動平台
     pub async fn start(&self) -> Result<()> {
         self.enforce_coordinator_only_live()?;
         *self.running.write().await = true;
-
         info!("Order platform started");
         Ok(())
     }
 
-    /// 停止平台
     pub async fn stop(&self) -> Result<()> {
         *self.running.write().await = false;
-
         info!("Order platform stopped");
         Ok(())
     }
 
-    /// 運行主循環
-    ///
-    /// 定期處理隊列和清理過期訂單。
     pub async fn run_loop(&self) {
         let mut process_interval = interval(Duration::from_millis(self.config.process_interval_ms));
         let mut cleanup_interval = interval(Duration::from_secs(self.config.cleanup_interval_secs));
@@ -383,7 +320,6 @@ impl OrderPlatform {
         info!("Platform run loop exited");
     }
 
-    /// 清理過期訂單和倉位
     async fn cleanup(&self) {
         let expired_orders = self.queue.write().await.cleanup_expired();
         let expired_positions = self.positions.cleanup_expired().await;
@@ -396,66 +332,50 @@ impl OrderPlatform {
         }
     }
 
-    // ==================== 查詢方法 ====================
-
-    /// 獲取隊列長度
     pub async fn queue_len(&self) -> usize {
         self.queue.read().await.len()
     }
 
-    /// 獲取隊列統計
-    pub async fn queue_stats(&self) -> super::queue::QueueStats {
+    pub async fn queue_stats(&self) -> QueueStats {
         self.queue.read().await.stats()
     }
 
-    /// 獲取風控狀態
-    pub async fn risk_state(&self) -> super::risk::PlatformRiskState {
+    pub async fn risk_state(&self) -> PlatformRiskState {
         self.risk_gate.state().await
     }
 
-    /// 獲取平台統計
     pub async fn stats(&self) -> PlatformStats {
         self.stats.read().await.clone()
     }
 
-    /// 獲取聚合倉位
-    pub async fn aggregated_positions(&self) -> super::position::AggregatedPosition {
+    pub async fn aggregated_positions(&self) -> AggregatedPosition {
         self.positions.aggregate().await
     }
 
-    /// 獲取 Agent 倉位
-    pub async fn agent_positions(&self, agent_id: &str) -> Vec<super::position::Position> {
+    pub async fn agent_positions(&self, agent_id: &str) -> Vec<Position> {
         self.positions.get_agent_positions(agent_id).await
     }
 
-    /// 是否運行中
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
     }
 
-    /// 是否可以交易
     pub async fn can_trade(&self) -> bool {
         self.risk_gate.can_trade().await
     }
 
-    /// 重置熔斷
     pub async fn reset_circuit_breaker(&self) {
         self.risk_gate.reset_circuit_breaker().await;
     }
 
-    // ==================== 組件訪問 ====================
-
-    /// 獲取風控閘門引用
     pub fn risk_gate(&self) -> &Arc<RiskGate> {
         &self.risk_gate
     }
 
-    /// 獲取倉位聚合器引用
     pub fn positions(&self) -> &Arc<PositionAggregator> {
         &self.positions
     }
 
-    /// 獲取執行器引用
     pub fn executor(&self) -> &Arc<OrderExecutor> {
         &self.executor
     }
@@ -465,9 +385,6 @@ impl OrderPlatform {
 mod tests {
     use super::*;
     use crate::adapters::PolymarketClient;
-
-    // 需要 mock PolymarketClient 進行測試
-    // 這裡只測試基本的結構和配置
 
     #[test]
     fn test_platform_config_default() {

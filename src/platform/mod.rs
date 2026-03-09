@@ -8,7 +8,6 @@ pub mod data_plane;
 pub mod freshness;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
-mod platform;
 mod position;
 mod queue;
 mod risk;
@@ -31,7 +30,6 @@ pub use persistence_pipeline::{
     PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
     PipelineStats,
 };
-pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
 pub use risk::{
@@ -42,7 +40,4 @@ pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
 pub use traits::{AgentRiskParams, AgentStatus};
-pub use types::{
-    CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
-    OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
-};
+pub use types::{Domain, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority};

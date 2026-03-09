@@ -24,6 +24,8 @@ pub mod environment;
 pub mod integration;
 pub mod memory;
 pub mod networks;
+pub mod order_platform;
+pub mod runtime_types;
 pub mod training;
 
 // Config exports
@@ -41,6 +43,11 @@ pub use memory::ReplayBuffer;
 
 // Integration exports
 pub use integration::RLStrategy;
+pub use order_platform::{OrderPlatform, PlatformConfig, PlatformStats};
+pub use runtime_types::{
+    CryptoEvent, DomainEvent, OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent,
+    SportsEvent,
+};
 
 // Environment exports
 pub use environment::{

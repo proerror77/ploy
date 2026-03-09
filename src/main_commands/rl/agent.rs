@@ -25,13 +25,12 @@ pub(super) async fn run_agent(
     use ploy::adapters::{polymarket_clob::POLYGON_CHAIN_ID, PolymarketClient};
     use ploy::domain::Side;
     use ploy::error::PloyError;
-    use ploy::platform::{
-        AgentRiskParams, CryptoEvent, DataPlaneConfig, DataPlaneFreshness, DomainEvent,
-        OrderPlatform, PlatformConfig, PlatformDataPlane, QuoteData,
-    };
+    use ploy::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
     use ploy::rl::config::RLConfig;
+    use ploy::rl::{CryptoEvent, DomainEvent, OrderPlatform, PlatformConfig, QuoteData};
     use ploy::signing::Wallet;
+    use ploy::AgentRiskParams;
     use rust_decimal::prelude::ToPrimitive;
     use rust_decimal::Decimal;
     use std::sync::Arc;

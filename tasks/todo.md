@@ -1,3 +1,35 @@
+# RL Compatibility Runtime Extraction (2026-03-09)
+
+## Goal
+Move the RL-only compatibility runtime surface out of `src/platform` into `src/rl` so `platform/` stops presenting a second live runtime alongside the coordinator path.
+
+## Tasks
+
+- [x] Extract the queue-driven RL runtime types from `platform::types` into `rl::runtime_types`.
+- [x] Move `OrderPlatform`, `PlatformConfig`, and `PlatformStats` out of `platform/platform.rs` into `rl::order_platform`.
+- [x] Rewire RL CLI entrypoints and tests to import the compatibility runtime from `crate::rl`.
+- [x] Remove the dead `src/platform/platform.rs` module and shrink `platform::mod` exports back to shared platform primitives.
+- [x] Re-run default + `rl` feature validation after the namespace move.
+
+## Review
+
+- [x] Confirm `OrderPlatform`, `PlatformConfig`, `PlatformStats`, and the RL-only event structs are no longer exported from `crate::platform`.
+- [x] Confirm the remaining `src/platform` surface is limited to shared queue/risk/position/data-plane/contracts primitives plus canonical execution types.
+- [x] Confirm the RL CLI still compiles and its compatibility runtime tests pass after the extraction.
+
+## Progress notes
+
+- 2026-03-09: Added [runtime_types.rs](/Users/proerror/Documents/ploy/src/rl/runtime_types.rs) and moved `DomainEvent`, `CryptoEvent`, `PoliticsEvent`, `SportsEvent`, `QuoteData`, `QuoteUpdateEvent`, and `OrderUpdateEvent` under the `rl` namespace.
+- 2026-03-09: Added [order_platform.rs](/Users/proerror/Documents/ploy/src/rl/order_platform.rs) and moved the queue-driven compatibility runtime there, preserving the dry-run/live-blocking tests for the RL CLI path.
+- 2026-03-09: Updated [rl/mod.rs](/Users/proerror/Documents/ploy/src/rl/mod.rs), [rl/cli_agent.rs](/Users/proerror/Documents/ploy/src/rl/cli_agent.rs), and [main_commands/rl/agent.rs](/Users/proerror/Documents/ploy/src/main_commands/rl/agent.rs) so RL imports the compatibility runtime from `crate::rl` instead of `crate::platform`.
+- 2026-03-09: Deleted [platform/platform.rs](/Users/proerror/Documents/ploy/src/platform/platform.rs) and shrank [platform/mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs) / [platform/types.rs](/Users/proerror/Documents/ploy/src/platform/types.rs) back to shared platform ownership.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl test_order_platform_start_blocks_live_runtime --lib -- --nocapture`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+  - `cargo test --features rl test_rl_signal_on_good_sum --lib -- --nocapture`
+
 # Momentum Config Namespace Migration (2026-03-09)
 
 ## Goal
