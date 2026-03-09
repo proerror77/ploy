@@ -848,6 +848,40 @@ Move crypto strategy classification, deployment mapping, and runtime config buil
   - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
   - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
 
+# Bootstrap Strategy Deployments Submodule Split (2026-03-09)
+
+## Goal
+Break the remaining `bootstrap/strategy_deployments.rs` god-module into focused ownership slices so deployment matrix application, managed-runtime planning, and runtime TOML rendering stop living in one file.
+
+## Tasks
+
+- [x] Split deployment matrix / crypto classification into a dedicated `deployment_matrix` submodule.
+- [x] Split managed runtime plan assembly into a dedicated `runtime_plans` submodule.
+- [x] Split TOML/runtime config rendering into a dedicated `runtime_configs` submodule.
+- [x] Re-run focused bootstrap compile/tests after the submodule split.
+
+## Review
+
+- [x] Confirm `strategy_deployments.rs` is now a thin module shell that only wires submodules/re-exports.
+- [x] Confirm deployment routing, managed plan assembly, and config rendering each have their own file under `bootstrap/strategy_deployments/`.
+- [x] Confirm bootstrap behavior remains unchanged via focused compile/tests.
+
+## Progress notes
+
+- 2026-03-09: Replaced the single-file [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs) implementation with a thin module shell plus:
+  - [deployment_matrix.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments/deployment_matrix.rs)
+  - [runtime_plans.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments/runtime_plans.rs)
+  - [runtime_configs.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments/runtime_configs.rs)
+- 2026-03-09: This slice keeps the old public helper surface intact for `bootstrap.rs` and bootstrap tests while moving the real ownership to dedicated files.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo check --lib --features rl`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+  - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
+  - `cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --nocapture`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+  - `cargo test --features rl build_crypto_rl_policy_runtime_config_preserves_model_controls --lib -- --nocapture`
+
 # Bootstrap Runtime Spawns Module Extraction (2026-03-09)
 
 ## Goal
