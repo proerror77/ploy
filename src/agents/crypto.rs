@@ -2,8 +2,8 @@
 //!
 //! The canonical live momentum path now runs through the managed `Strategy`
 //! runtime. This module intentionally keeps only the public config surface
-//! consumed by bootstrap/config builders while removing the dead
-//! `CryptoTradingAgent` runtime implementation.
+//! consumed by bootstrap/config builders after the trading-agent runtime was
+//! removed.
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -19,7 +19,7 @@ fn default_exit_price_band() -> Decimal {
     dec!(0.05)
 }
 
-/// Entry mode for the legacy crypto momentum config.
+/// Entry mode for the bootstrap crypto momentum config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CryptoEntryMode {

@@ -1,3 +1,31 @@
+# Trading Agent Contract Retirement (2026-03-09)
+
+## Goal
+Remove the dead pull-based trading agent contract now that no legacy `TradingAgent` implementations remain in `src/`.
+
+## Tasks
+
+- [x] Delete `src/agents/context.rs` and the unused `TradingAgent`/`AgentConfig` surface.
+- [x] Extract `GovernanceAgent` into its own module and keep OpenClaw on the governance path.
+- [x] Update `agents/mod.rs` and OpenClaw imports so `src/agents` only exposes governance and config compatibility surfaces.
+- [x] Re-run compile plus governance-focused regression tests after the contract cleanup.
+
+## Review
+
+- [x] Confirm there are no remaining `TradingAgent`, `AgentContext`, or `AgentConfig` references under `src/agents`.
+- [x] Confirm OpenClaw still runs through `GovernanceAgent` + `GovernanceContext`.
+- [x] Confirm `src/agents` now only contains governance-plane code and config compatibility DTOs.
+
+## Progress notes
+
+- 2026-03-09: Added [governance_agent.rs](/Users/proerror/Documents/ploy/src/agents/governance_agent.rs) and moved the surviving `GovernanceAgent` trait into that dedicated module.
+- 2026-03-09: Deleted [context.rs](/Users/proerror/Documents/ploy/src/agents/context.rs) and [traits.rs](/Users/proerror/Documents/ploy/src/agents/traits.rs), which had become dead after the legacy trading-agent implementations were removed.
+- 2026-03-09: Updated [agents/mod.rs](/Users/proerror/Documents/ploy/src/agents/mod.rs) and [openclaw/agent.rs](/Users/proerror/Documents/ploy/src/agents/openclaw/agent.rs) so `src/agents` now exports only governance/runtime-config compatibility surfaces.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_policy_blocks_domain --lib -- --nocapture`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+
 # Crypto LOB ML Legacy Agent Removal (2026-03-09)
 
 ## Goal
