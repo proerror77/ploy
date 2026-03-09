@@ -6,6 +6,7 @@
 mod contracts;
 pub mod data_plane;
 pub mod freshness;
+pub mod legacy_runtime;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
 mod platform;
@@ -32,18 +33,18 @@ pub use persistence_pipeline::{
     PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
     PipelineStats,
 };
-pub use platform::{OrderPlatform, PlatformConfig, PlatformStats};
+pub use platform::PlatformStats;
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
 pub use risk::{
     BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
     RiskConfig, RiskGate,
 };
-pub use router::{AgentSubscription, EventRouter, RouterStats};
+pub use router::RouterStats;
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
-pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus, DomainAgent};
+pub use traits::{AgentHealthStatus, AgentRiskParams, AgentStatus};
 pub use types::{
     CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, OrderIntent, OrderPriority,
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,

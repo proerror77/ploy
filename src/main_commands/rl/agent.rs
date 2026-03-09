@@ -25,9 +25,11 @@ pub(super) async fn run_agent(
     use ploy::adapters::{polymarket_clob::POLYGON_CHAIN_ID, PolymarketClient};
     use ploy::domain::Side;
     use ploy::error::PloyError;
+    use ploy::platform::legacy_runtime::{
+        AgentSubscription, DomainAgent, EventRouter, OrderPlatform, PlatformConfig,
+    };
     use ploy::platform::{
-        AgentRiskParams, AgentSubscription, CryptoEvent, DataPlaneConfig, DataPlaneFreshness,
-        Domain, DomainAgent, DomainEvent, EventRouter, OrderPlatform, PlatformConfig,
+        AgentRiskParams, CryptoEvent, DataPlaneConfig, DataPlaneFreshness, Domain, DomainEvent,
         PlatformDataPlane, QuoteData,
     };
     use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};

@@ -1,8 +1,9 @@
 //! TradingAgent trait — pull-based agent interface
 //!
-//! Unlike the existing `DomainAgent` (push-based, router calls `on_event()`),
-//! `TradingAgent` is pull-based: the agent owns its main loop via `run()`.
-//! This gives each agent full control over its data sources and concurrency.
+//! Unlike the legacy `DomainAgent` compatibility path (push-based, router
+//! calls `on_event()`), `TradingAgent` is pull-based: the agent owns its main
+//! loop via `run()`. This gives each agent full control over its data sources
+//! and concurrency.
 
 use async_trait::async_trait;
 

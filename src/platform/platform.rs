@@ -1,9 +1,7 @@
-//! Order Platform - 統一下單平台
+//! Order Platform - legacy compatibility runtime
 //!
-//! 整合所有組件提供完整的訂單管理：
-//! - 事件路由 → Agent 處理 → 訂單意圖
-//! - 風控檢查 → 優先隊列 → 執行
-//! - 倉位追蹤 → 執行報告 → Agent 回調
+//! 保留舊的 `DomainAgent` / `EventRouter` / queue-driven 下單流程，主要
+//! 供 RL CLI 與其他兼容層使用。正式 live runtime 已由 coordinator 接管。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,9 +75,9 @@ pub struct PlatformStats {
     pub events_processed: u64,
 }
 
-/// 下單平台主結構
+/// 舊版下單平台主結構。
 ///
-/// 統一管理所有策略 Agent 的訂單執行。
+/// 這層保留給 legacy `DomainAgent` 兼容路徑，並不是 canonical live runtime。
 pub struct OrderPlatform {
     /// 事件路由器
     router: Arc<EventRouter>,

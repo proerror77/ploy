@@ -647,7 +647,9 @@ impl PlatformBootstrapConfig {
             cfg.enable_sports = false;
             cfg.enable_politics = false;
             cfg.enable_economics = false;
-            info!("agent framework lockdown active (mode=openclaw): built-in agents are disabled");
+            info!(
+                "agent framework lockdown active (mode=openclaw): built-in managed/legacy runtime loops are disabled"
+            );
         }
 
         cfg
@@ -676,7 +678,7 @@ pub async fn start_platform(
         && (config.enable_crypto || config.enable_sports || config.enable_politics);
     if non_pm_builtin_agents_enabled {
         return Err(crate::error::PloyError::Validation(format!(
-            "execution.exchange={} is not yet supported with built-in agents (crypto/sports/politics). Disable built-in agents or set execution.exchange=polymarket",
+            "execution.exchange={} is not yet supported with built-in runtime loops (crypto managed + legacy compatibility paths). Disable those runtime loops or set execution.exchange=polymarket",
             exchange_kind
         )));
     }
@@ -684,7 +686,7 @@ pub async fn start_platform(
     // Polymarket client is required for:
     // - crypto event discovery (Gamma)
     // - settlement persistence (Gamma)
-    // - politics agent
+    // - politics managed strategy runtime
     // - sports settlement labeling (Gamma)
     let needs_polymarket_client =
         config.enable_crypto || config.enable_sports || config.enable_politics;
@@ -764,7 +766,7 @@ pub async fn start_platform(
     );
 
     // Optional shared DB pool used for (a) coordinator execution logs and (b) market data persistence.
-    // Crypto agents can run without DB; sports agent requires DB for calendar/stats.
+    // Crypto runtimes can run without DB; sports runtime support still requires DB for calendar/stats.
     let shared_pool = match PgPoolOptions::new()
         .max_connections(app_config.database.max_connections)
         .connect(&app_config.database.url)
