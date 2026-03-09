@@ -1,3 +1,63 @@
+# Crypto Preview Managed Runtime Launch (2026-03-09)
+
+## Goal
+Launch the `crypto_lob_ml` and `crypto_rl_policy` canonical preview wrappers from the managed strategy runtime in `bootstrap`, while shrinking `legacy_crypto.rs` back down to config/env ownership for the remaining live trading-agent path.
+
+## Tasks
+
+- [x] Add runtime-config builders for the canonical `crypto_lob_ml` and `crypto_rl_policy` wrappers under `strategy_deployments.rs`.
+- [x] Start the preview wrappers from `bootstrap.rs` through `spawn_managed_strategy_runtime_task(...)`.
+- [x] Move legacy crypto live-agent spawn ownership out of `legacy_crypto.rs` and keep that module focused on legacy config/env hydration.
+- [x] Remove the last `LegacyControl` quote-subscribe action from the canonical `crypto_rl_policy` wrapper.
+- [x] Re-run compile plus focused bootstrap/wrapper tests, including the `rl` feature gate for the RL runtime-config builder.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` now owns launching the canonical crypto preview wrappers directly.
+- [x] Confirm `legacy_crypto.rs` no longer owns the crypto live-agent spawn pipeline.
+- [x] Confirm the canonical `crypto_rl_policy` wrapper no longer emits `LegacyControl` actions in its event-discovery path.
+
+## Progress notes
+
+- 2026-03-09: Added `build_crypto_lob_ml_runtime_config(...)` and `build_crypto_rl_policy_runtime_config(...)` in [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs) so bootstrap can render managed runtime TOML for the crypto preview wrappers.
+- 2026-03-09: Updated [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so `crypto_lob_ml` and `crypto_rl_policy` now launch as managed strategy runtimes using their canonical wrappers, while the legacy live-agent path remains separate.
+- 2026-03-09: Shrunk [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs) back toward config/env ownership by removing the legacy spawn orchestration from that module.
+- 2026-03-09: Removed `LegacyControl(SubscribeFeed)` from [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/strategy.rs); the canonical RL wrapper now tracks discovered events without issuing compatibility control actions.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test build_crypto_lob_ml_runtime_config_renders_coin_filters --lib -- --nocapture`
+  - `cargo test from_toml_builds_expected_feeds --lib -- --nocapture`
+  - `cargo test event_discovered_tracks_event_without_legacy_control_actions --lib -- --nocapture`
+  - `cargo test on_tick_emits_buy_up_signal_log_when_rule_based_policy_triggers --lib -- --nocapture`
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl build_crypto_rl_policy_runtime_config_preserves_model_controls --lib -- --nocapture`
+
+# Legacy Crypto Spawn Retirement (2026-03-09)
+
+## Goal
+Stop `legacy_crypto.rs` from owning any live runtime spawn path now that `crypto_lob_ml` and `crypto_rl_policy` both have canonical managed-runtime wrappers.
+
+## Tasks
+
+- [x] Remove the legacy `spawn_legacy_crypto_agent_runtimes` path from bootstrap so `lob_ml / rl_policy` are no longer started twice.
+- [x] Delete the legacy trading-agent spawn helpers from `src/coordinator/bootstrap/legacy_crypto.rs`, leaving only config/env compatibility ownership.
+- [x] Re-run compile plus narrow bootstrap/wrapper regressions after the runtime ownership cut.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer calls a legacy crypto agent spawn helper.
+- [x] Confirm `legacy_crypto.rs` now only owns config/env translation for the compatibility surface.
+- [x] Confirm the canonical `crypto_rl_policy` wrapper tests and legacy env parsing regression still pass.
+
+## Progress notes
+
+- 2026-03-09: Removed the `spawn_legacy_crypto_agent_runtimes(...)` call from [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs), so `crypto_lob_ml` / `crypto_rl_policy` only start via managed strategy runtime spawn.
+- 2026-03-09: Deleted the legacy trading-agent spawn helpers from [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs); the module now stays as a config/env compatibility layer only.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test crypto_rl_policy::strategy --lib -- --nocapture`
+
 # Crypto RL Policy Canonical Wrapper (2026-03-09)
 
 ## Goal
@@ -21,10 +81,12 @@ Let `crypto_rl_policy` start running through the canonical `Strategy` runtime by
 
 - 2026-03-09: Added [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/strategy.rs) and exported it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_rl_policy/mod.rs).
 - 2026-03-09: Registered `crypto_rl_policy` in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs) so the managed runtime can instantiate it from TOML instead of depending solely on the legacy bootstrap path.
-- 2026-03-09: The wrapper stays observe-only, reuses the extracted RL policy core for inference/fallback logic, and currently uses `StrategyAction::LegacyControl(SubscribeFeed)` only to subscribe quotes for newly discovered event tokens.
+- 2026-03-09: The wrapper stays observe-only, reuses the extracted RL policy core for inference/fallback logic, and no longer emits `LegacyControl` actions in its canonical path.
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
-  - `cargo test crypto_rl_policy::strategy --lib -- --nocapture`
+  - `cargo test from_toml_builds_expected_feeds --lib -- --nocapture`
+  - `cargo test event_discovered_tracks_event_without_legacy_control_actions --lib -- --nocapture`
+  - `cargo test on_tick_emits_buy_up_signal_log_when_rule_based_policy_triggers --lib -- --nocapture`
   - `cargo check --lib --features onnx`
 
 # Crypto RL Policy Core Extraction (2026-03-09)
@@ -52,7 +114,10 @@ Move the pure policy interpretation, observation building, position tracking typ
 - 2026-03-09: Added new helper regressions in the extracted core for discrete-action mapping, share sizing, deployment-id normalization, and forced-loss sell behavior.
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
-  - `cargo test strategy::crypto_rl_policy::core --lib -- --nocapture`
+  - `cargo test continuous_action_maps_to_expected_discrete_action --lib -- --nocapture`
+  - `cargo test compute_shares_scales_with_position_delta --lib -- --nocapture`
+  - `cargo test deployment_id_for_symbol_normalizes_case --lib -- --nocapture`
+  - `cargo test rule_based_policy_sells_on_deep_loss --lib -- --nocapture`
   - `cargo check --lib --features onnx`
 
 # Crypto LOB ML Canonical Wrapper (2026-03-09)

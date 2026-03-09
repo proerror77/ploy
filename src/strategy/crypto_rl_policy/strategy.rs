@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::adapters::SpotPrice;
 use crate::collector::LobSnapshot;
@@ -14,8 +14,8 @@ use crate::ml::OnnxModel;
 use crate::strategy::crypto::{known_binance_symbols, series_ids_for_symbol, series_info};
 use crate::strategy::crypto_rl_policy::core;
 use crate::strategy::traits::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyControlAction, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
+    StrategyEventType, StrategyStateInfo,
 };
 
 const STRATEGY_NAME: &str = "crypto_rl_policy";
@@ -172,7 +172,6 @@ pub struct CryptoRlPolicyStrategy {
     cfg: CryptoRlPolicyStrategyConfig,
     symbols: Vec<String>,
     series_ids: Vec<String>,
-    quote_tokens: HashSet<String>,
     spot_prices: HashMap<String, SpotPrice>,
     l2_by_symbol: HashMap<String, LobSnapshot>,
     quotes: HashMap<String, Quote>,
@@ -221,7 +220,6 @@ impl CryptoRlPolicyStrategy {
             cfg,
             symbols,
             series_ids,
-            quote_tokens: HashSet::new(),
             spot_prices: HashMap::new(),
             l2_by_symbol: HashMap::new(),
             quotes: HashMap::new(),
@@ -235,7 +233,7 @@ impl CryptoRlPolicyStrategy {
         })
     }
 
-    fn track_event(&mut self, update: &MarketUpdate) -> Vec<StrategyAction> {
+    fn track_event(&mut self, update: &MarketUpdate) {
         let MarketUpdate::EventDiscovered {
             event_id,
             series_id,
@@ -247,14 +245,14 @@ impl CryptoRlPolicyStrategy {
             ..
         } = update
         else {
-            return Vec::new();
+            return;
         };
 
         let Some(info) = series_info(series_id) else {
-            return Vec::new();
+            return;
         };
         if !self.symbols.iter().any(|symbol| symbol == info.symbol) {
-            return Vec::new();
+            return;
         }
 
         self.active_events.insert(
@@ -270,23 +268,6 @@ impl CryptoRlPolicyStrategy {
                 title: title.clone(),
             },
         );
-
-        let mut new_tokens = Vec::new();
-        for token in [up_token, down_token] {
-            if self.quote_tokens.insert(token.clone()) {
-                new_tokens.push(token.clone());
-            }
-        }
-
-        if new_tokens.is_empty() {
-            Vec::new()
-        } else {
-            vec![StrategyAction::LegacyControl(
-                StrategyControlAction::SubscribeFeed {
-                    feed: DataFeed::PolymarketQuotes { tokens: new_tokens },
-                },
-            )]
-        }
     }
 
     fn should_emit_signal_log(&mut self, event_id: &str, now: DateTime<Utc>) -> bool {
@@ -680,7 +661,7 @@ impl Strategy for CryptoRlPolicyStrategy {
             } => {
                 self.quotes.insert(token_id.clone(), *quote);
             }
-            MarketUpdate::EventDiscovered { .. } => return Ok(self.track_event(update)),
+            MarketUpdate::EventDiscovered { .. } => self.track_event(update),
             MarketUpdate::EventExpired { event_id } => {
                 self.active_events.remove(event_id);
                 self.last_logged_at.remove(event_id);
@@ -750,10 +731,6 @@ impl Strategy for CryptoRlPolicyStrategy {
             self.active_events.len().to_string(),
         );
         metrics.insert("quote_count".to_string(), self.quotes.len().to_string());
-        metrics.insert(
-            "quote_token_count".to_string(),
-            self.quote_tokens.len().to_string(),
-        );
         metrics.insert("l2_symbols".to_string(), self.l2_by_symbol.len().to_string());
         if let Some(reason) = &self.last_reason {
             metrics.insert("last_reason".to_string(), reason.clone());
@@ -809,7 +786,6 @@ impl Strategy for CryptoRlPolicyStrategy {
     }
 
     fn reset(&mut self) {
-        self.quote_tokens.clear();
         self.spot_prices.clear();
         self.l2_by_symbol.clear();
         self.quotes.clear();
@@ -925,7 +901,7 @@ max_entry_price = 0.70
     }
 
     #[tokio::test]
-    async fn event_discovered_requests_quote_subscription() {
+    async fn event_discovered_tracks_event_without_legacy_control_actions() {
         let mut strategy =
             CryptoRlPolicyStrategy::from_toml("rl-test".to_string(), minimal_toml(), true)
                 .expect("strategy");
@@ -935,12 +911,8 @@ max_entry_price = 0.70
             .await
             .expect("event tracked");
 
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            StrategyAction::LegacyControl(StrategyControlAction::SubscribeFeed {
-                feed: DataFeed::PolymarketQuotes { tokens }
-            }) if tokens == &vec!["up-token".to_string(), "down-token".to_string()]
-        )));
+        assert!(actions.is_empty());
+        assert_eq!(strategy.active_events.len(), 1);
     }
 
     #[tokio::test]

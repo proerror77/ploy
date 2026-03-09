@@ -21,7 +21,7 @@ use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    AgentRiskParams, BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig,
+    AgentRiskParams, BinanceDataPlaneHandle, DataPlaneConfig,
     Domain, MarketSelector, PlatformDataPlane, StrategyDeployment,
 };
 use crate::signing::Wallet;
@@ -53,7 +53,7 @@ mod support;
 mod strategy_deployments;
 
 use self::legacy_crypto::{
-    apply_legacy_crypto_agent_env, spawn_legacy_crypto_agent_runtimes, LegacyCryptoRuntimeConfig,
+    apply_legacy_crypto_agent_env, LegacyCryptoRuntimeConfig,
 };
 use self::market_persistence::{
     ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
@@ -81,11 +81,14 @@ use self::support::{
     env_usize, load_strategy_deployments, lob_levels_json,
 };
 use self::strategy_deployments::{
-    apply_strategy_deployments, build_event_edge_runtime_config, build_momentum_runtime_config,
+    apply_strategy_deployments, build_crypto_lob_ml_runtime_config,
+    build_event_edge_runtime_config, build_momentum_runtime_config,
     build_nba_comeback_runtime_config, build_pattern_memory_runtime_config,
     build_split_arb_runtime_config, coin_symbol_for, collect_runtime_crypto_strategy_targets,
     crypto_series_id_for, symbol_for_crypto_series_id,
 };
+#[cfg(feature = "rl")]
+use self::strategy_deployments::build_crypto_rl_policy_runtime_config;
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
@@ -1272,8 +1275,6 @@ pub async fn start_platform(
             (binance_ws, pm_ws)
         };
         managed_runtime_data_plane = data_plane.clone();
-        let crypto_market_data = CryptoDataPlaneHandle::new(binance_ws.clone(), pm_ws.clone());
-
         // Seed PM token → side mapping for data collection, so QuoteUpdates carry the correct
         // UP/DOWN side and can be persisted to Postgres.
         //
@@ -1698,7 +1699,6 @@ pub async fn start_platform(
             }
         }
 
-        let mut lob_cache_opt: Option<crate::collector::LobCache> = None;
         if enable_binance_lob {
             let depth_symbols: Vec<String> = match std::env::var("PLOY_BINANCE_LOB__SYMBOLS") {
                 Ok(raw) => raw
@@ -1714,9 +1714,6 @@ pub async fn start_platform(
                 crate::collector::BinanceDepthStream::new(depth_symbols)
                     .with_freshness(Arc::clone(&freshness)),
             );
-            let lob_cache = depth_stream.cache().clone();
-            lob_cache_opt = Some(lob_cache.clone());
-
             if let Some(pool) = shared_pool.as_ref() {
                 match ensure_binance_lob_ticks_table(pool).await {
                     Ok(()) => {
@@ -1981,16 +1978,70 @@ pub async fn start_platform(
             }
         }
 
-        spawn_legacy_crypto_agent_runtimes(
-            &config.legacy_crypto,
-            shared_pool.is_some(),
-            crypto_market_data.clone(),
-            event_matcher.clone(),
-            lob_cache_opt.clone(),
-            &mut coordinator,
-            &handle,
-            &mut agent_handles,
-        )?;
+        if lob_agent_enabled {
+            match build_crypto_lob_ml_runtime_config(&lob_cfg) {
+                Ok(toml_cfg) => {
+                    let _ = spawn_managed_strategy_runtime_task(
+                        ManagedStrategyRuntimeSpawn {
+                            strategy_label: "crypto_lob_ml",
+                            agent_id: format!("{}_strategy", lob_cfg.agent_id),
+                            domain: Domain::Crypto,
+                            risk_params: lob_cfg.risk_params.clone(),
+                            strategy_config_toml: toml_cfg,
+                        },
+                        &mut coordinator,
+                        &shutdown_tx,
+                        &mut agent_handles,
+                        config.dry_run,
+                        pm_client.as_ref(),
+                        &app_config.market.ws_url,
+                        managed_runtime_data_plane.clone(),
+                        shared_pool.clone(),
+                        &account_id,
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        agent = lob_cfg.agent_id,
+                        error = %e,
+                        "crypto_lob_ml canonical runtime config unavailable; skipping managed wrapper startup"
+                    );
+                }
+            }
+        }
+
+        #[cfg(feature = "rl")]
+        if rl_agent_enabled {
+            match build_crypto_rl_policy_runtime_config(&rl_cfg) {
+                Ok(toml_cfg) => {
+                    let _ = spawn_managed_strategy_runtime_task(
+                        ManagedStrategyRuntimeSpawn {
+                            strategy_label: "crypto_rl_policy",
+                            agent_id: format!("{}_strategy", rl_cfg.agent_id),
+                            domain: Domain::Crypto,
+                            risk_params: rl_cfg.risk_params.clone(),
+                            strategy_config_toml: toml_cfg,
+                        },
+                        &mut coordinator,
+                        &shutdown_tx,
+                        &mut agent_handles,
+                        config.dry_run,
+                        pm_client.as_ref(),
+                        &app_config.market.ws_url,
+                        managed_runtime_data_plane.clone(),
+                        shared_pool.clone(),
+                        &account_id,
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        agent = rl_cfg.agent_id,
+                        error = %e,
+                        "crypto_rl_policy canonical runtime config unavailable; skipping managed wrapper startup"
+                    );
+                }
+            }
+        }
     }
 
     if config.enable_sports {
@@ -2414,6 +2465,82 @@ symbols = ["SOLUSDT"]
             err.to_string().contains("only supports directional entry_mode"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn build_crypto_lob_ml_runtime_config_renders_coin_filters() {
+        let mut cfg = crate::agents::crypto_lob_ml::CryptoLobMlConfig::default();
+        cfg.coins = vec!["btc".to_string(), "ETH".to_string()];
+        cfg.min_time_remaining_secs = 90;
+        cfg.max_time_remaining_secs = 600;
+        cfg.max_time_remaining_secs_5m = 180;
+        cfg.max_time_remaining_secs_15m = 300;
+        cfg.require_price_to_beat = true;
+        cfg.max_lob_snapshot_age_secs = 3;
+
+        let rendered =
+            build_crypto_lob_ml_runtime_config(&cfg).expect("render crypto_lob_ml config");
+        let value: toml::Value = toml::from_str(&rendered).expect("valid crypto_lob_ml runtime toml");
+
+        assert_eq!(value["strategy"]["name"].as_str(), Some("crypto_lob_ml"));
+        assert_eq!(
+            value["crypto_lob_ml"]["coins"]
+                .as_array()
+                .expect("coins array")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            vec!["BTC", "ETH"]
+        );
+        assert_eq!(
+            value["crypto_lob_ml"]["tick_interval_ms"].as_integer(),
+            Some(1000)
+        );
+    }
+
+    #[cfg(feature = "rl")]
+    #[test]
+    fn build_crypto_rl_policy_runtime_config_preserves_model_controls() {
+        let mut cfg = crate::agents::crypto_rl_policy::CryptoRlPolicyConfig::default();
+        cfg.coins = vec!["sol".to_string()];
+        cfg.min_time_remaining_secs = 75;
+        cfg.max_time_remaining_secs = 420;
+        cfg.default_shares = 25;
+        cfg.max_entry_price = dec!(0.62);
+        cfg.max_lob_snapshot_age_secs = 4;
+        cfg.decision_interval_ms = 1500;
+        cfg.observation_version = 1;
+        cfg.policy_output = "discrete_probs".to_string();
+        cfg.policy_model_path = Some("/tmp/model.onnx".to_string());
+        cfg.policy_model_version = Some("vtest".to_string());
+
+        let rendered =
+            build_crypto_rl_policy_runtime_config(&cfg).expect("render crypto_rl_policy config");
+        let value: toml::Value =
+            toml::from_str(&rendered).expect("valid crypto_rl_policy runtime toml");
+
+        assert_eq!(value["strategy"]["name"].as_str(), Some("crypto_rl_policy"));
+        assert_eq!(
+            value["crypto_rl_policy"]["coins"]
+                .as_array()
+                .expect("coins array")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SOL"]
+        );
+        assert_eq!(
+            value["crypto_rl_policy"]["policy_output"].as_str(),
+            Some("discrete_probs")
+        );
+        assert_eq!(
+            value["crypto_rl_policy"]["policy_model_path"].as_str(),
+            Some("/tmp/model.onnx")
+        );
+        assert_eq!(
+            value["crypto_rl_policy"]["tick_interval_ms"].as_integer(),
+            Some(1500)
         );
     }
 
