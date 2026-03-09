@@ -1,3 +1,29 @@
+# RL Compatibility Runtime Surface Pruning (2026-03-09)
+
+## Goal
+Delete dead RL compatibility event types that no longer have producers so the RL runtime surface reflects the remaining crypto-only CLI path instead of pretending to support unused domain/update event variants.
+
+## Tasks
+
+- [x] Remove dead `SportsEvent`, `PoliticsEvent`, `QuoteUpdateEvent`, and `OrderUpdateEvent` from `src/rl/runtime_types.rs`.
+- [x] Rewire `RLCryptoAgent` and `rl::mod` exports to only expose the surviving `CryptoEvent`, `DomainEvent`, and `QuoteData` surface.
+- [x] Re-run `rl` compile and focused RL compatibility tests after the pruning.
+
+## Review
+
+- [x] Confirm repo-wide search shows no remaining source references to the removed RL compatibility event types.
+- [x] Confirm `RLCryptoAgent::on_event` only handles event variants that can actually be produced by the current RL CLI/runtime path.
+
+## Progress notes
+
+- 2026-03-09: Removed dead `SportsEvent`, `PoliticsEvent`, `QuoteUpdateEvent`, and `OrderUpdateEvent` from [runtime_types.rs](/Users/proerror/Documents/ploy/src/rl/runtime_types.rs), leaving the RL compatibility runtime aligned with the surviving crypto-only CLI flow.
+- 2026-03-09: Updated [cli_agent.rs](/Users/proerror/Documents/ploy/src/rl/cli_agent.rs) to stop matching never-produced event variants and shrank [mod.rs](/Users/proerror/Documents/ploy/src/rl/mod.rs) exports to `CryptoEvent`, `DomainEvent`, and `QuoteData`.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib --features rl`
+  - `cargo test --features rl test_rl_agent_lifecycle --lib -- --nocapture`
+  - `cargo test --features rl test_position_tracking --lib -- --nocapture`
+  - repo-wide search for `SportsEvent|PoliticsEvent|OrderUpdateEvent|QuoteUpdateEvent|DomainEvent::Sports|DomainEvent::Politics|DomainEvent::OrderUpdate|DomainEvent::QuoteUpdate` returned no remaining source matches
+
 # Control Plane Contract Extraction (2026-03-09)
 
 ## Goal

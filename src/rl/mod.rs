@@ -46,10 +46,7 @@ pub use memory::ReplayBuffer;
 pub use integration::RLStrategy;
 pub use execution_types::{ExecutionReport, ExecutionStatus};
 pub use order_platform::{OrderPlatform, PlatformConfig, PlatformStats};
-pub use runtime_types::{
-    CryptoEvent, DomainEvent, OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent,
-    SportsEvent,
-};
+pub use runtime_types::{CryptoEvent, DomainEvent, QuoteData};
 
 // Environment exports
 pub use environment::{

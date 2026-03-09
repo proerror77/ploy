@@ -850,24 +850,6 @@ impl RLCryptoAgent {
 
         match event {
             DomainEvent::Crypto(crypto_event) => Ok(self.process_crypto_event(&crypto_event)),
-            DomainEvent::QuoteUpdate(update) => {
-                if update.domain == Domain::Crypto {
-                    match update.side {
-                        Side::Up => {
-                            self.current_obs.up_bid = Some(update.bid);
-                            self.current_obs.up_ask = Some(update.ask);
-                        }
-                        Side::Down => {
-                            self.current_obs.down_bid = Some(update.bid);
-                            self.current_obs.down_ask = Some(update.ask);
-                        }
-                    }
-                    self.current_obs.calculate_spreads();
-                    self.current_obs.calculate_sum_of_asks();
-                    self.update_position_prices();
-                }
-                Ok(vec![])
-            }
             DomainEvent::Tick(now) => {
                 self.current_obs
                     .update_time_features(now.hour(), now.weekday().num_days_from_monday());
@@ -875,7 +857,6 @@ impl RLCryptoAgent {
                 self.update_position_features();
                 Ok(vec![])
             }
-            _ => Ok(vec![]),
         }
     }
 
