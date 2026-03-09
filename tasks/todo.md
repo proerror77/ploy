@@ -1,3 +1,33 @@
+# Bootstrap Managed Runtime Spawn Consolidation (2026-03-09)
+
+## Goal
+Collapse the duplicated canonical managed-strategy bootstrap wiring into one helper so `bootstrap.rs` stops open-coding coordinator registration, shutdown plumbing, and runtime task spawning for each migrated strategy.
+
+## Tasks
+
+- [x] Add a bootstrap-local managed-runtime spawn helper that owns coordinator registration and task launch for canonical strategy runtimes.
+- [x] Migrate the `momentum`, `pattern_memory`, and `staggered_arb` bootstrap branches to the shared helper without changing their runtime configs or fallback behavior.
+- [x] Keep legacy-only agents (`lob_ml`, `rl`, `sports`, `politics`) untouched in this slice.
+- [x] Run targeted compile/tests for the migrated bootstrap paths and existing coordinator execution coverage.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer repeats the `register_agent -> shutdown_rx -> tokio::spawn(run_managed_strategy_runtime)` pattern across the three managed strategy branches.
+- [x] Confirm the migrated branches keep their current agent ids, risk registration, and observability wiring.
+- [x] Confirm unsupported momentum entry modes still fall back to the legacy trading-agent branch.
+
+## Progress notes
+
+- 2026-03-09: After migrating directional momentum, the canonical managed-runtime path was still duplicated three times across `momentum`, `pattern_memory`, and `staggered_arb`.
+- 2026-03-09: This slice focuses only on consolidating bootstrap-side spawn ownership so later legacy-to-managed migrations reuse one canonical launch path.
+- 2026-03-09: Added `ManagedStrategyRuntimeSpawn` plus `spawn_managed_strategy_runtime_task(...)` so bootstrap now has one canonical helper for coordinator registration, shutdown subscription, observability handoff, and managed-runtime task launch.
+- 2026-03-09: Migrated the `momentum`, `pattern_memory`, and `staggered_arb` branches to the shared helper without touching their config builders, ids, or momentum's legacy fallback behavior.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
+  - `cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --nocapture`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+
 # Momentum Managed Runtime Migration (2026-03-09)
 
 ## Goal

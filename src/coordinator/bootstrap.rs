@@ -69,6 +69,80 @@ async fn ensure_binance_lob_ticks_table(pool: &PgPool) -> Result<()> {
     crate::platform::persistence_schema::ensure_binance_lob_ticks_table(pool).await
 }
 
+struct ManagedStrategyRuntimeSpawn {
+    strategy_label: &'static str,
+    agent_id: String,
+    domain: Domain,
+    risk_params: AgentRiskParams,
+    strategy_config_toml: String,
+}
+
+fn spawn_managed_strategy_runtime_task(
+    spec: ManagedStrategyRuntimeSpawn,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    dry_run: bool,
+    pm_client: Option<&PolymarketClient>,
+    pm_ws_url: &str,
+    data_plane: Option<Arc<PlatformDataPlane>>,
+    observability_pool: Option<PgPool>,
+    observability_account_id: &str,
+) -> bool {
+    let Some(strategy_pm_client) = pm_client.cloned() else {
+        warn!(
+            agent = %spec.agent_id,
+            strategy = spec.strategy_label,
+            "managed strategy runtime requested but pm client not configured; skipping"
+        );
+        return false;
+    };
+
+    let strategy_label = spec.strategy_label;
+    let agent_id = spec.agent_id;
+    let strategy_cmd_rx =
+        coordinator.register_agent(agent_id.clone(), spec.domain, spec.risk_params);
+    let strategy_shutdown_rx = shutdown_tx.subscribe();
+    let strategy_ws_url = pm_ws_url.to_string();
+    let strategy_data_plane = data_plane;
+    let strategy_observability_pool = observability_pool;
+    let strategy_account_id = observability_account_id.to_string();
+    let strategy_config_toml = spec.strategy_config_toml;
+    let runtime_agent_id = agent_id.clone();
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = run_managed_strategy_runtime(
+            strategy_label,
+            &runtime_agent_id,
+            strategy_config_toml,
+            dry_run,
+            strategy_pm_client,
+            strategy_ws_url,
+            strategy_data_plane,
+            strategy_observability_pool,
+            strategy_account_id,
+            strategy_cmd_rx,
+            strategy_shutdown_rx,
+        )
+        .await
+        {
+            error!(
+                agent = strategy_label,
+                runtime_agent_id = %runtime_agent_id,
+                error = %e,
+                "managed strategy runtime exited with error"
+            );
+        }
+    });
+    agent_handles.push(jh);
+    info!(
+        agent = %agent_id,
+        strategy = strategy_label,
+        "managed strategy runtime spawned"
+    );
+    true
+}
+
 fn spawn_openclaw_governance_agent(
     config: &PlatformBootstrapConfig,
     freshness: &Arc<crate::platform::DataPlaneFreshness>,
@@ -5382,49 +5456,24 @@ pub async fn start_platform(
         if momentum_enabled {
             match build_momentum_runtime_config(&crypto_cfg) {
                 Ok(toml_cfg) => {
-                    if let Some(strategy_pm_client) = pm_client.clone() {
-                        let strategy_agent_id = crypto_cfg.agent_id.clone();
-                        let strategy_cmd_rx = coordinator.register_agent(
-                            strategy_agent_id.clone(),
-                            Domain::Crypto,
-                            crypto_cfg.risk_params.clone(),
-                        );
-                        let strategy_ws_url = app_config.market.ws_url.clone();
-                        let strategy_data_plane = data_plane.clone();
-                        let strategy_shutdown_rx = shutdown_tx.subscribe();
-                        let strategy_dry_run = config.dry_run;
-                        let strategy_observability_pool = shared_pool.clone();
-                        let strategy_account_id = account_id.clone();
-                        let jh = tokio::spawn(async move {
-                            if let Err(e) = run_managed_strategy_runtime(
-                                "momentum",
-                                &strategy_agent_id,
-                                toml_cfg,
-                                strategy_dry_run,
-                                strategy_pm_client,
-                                strategy_ws_url,
-                                strategy_data_plane,
-                                strategy_observability_pool,
-                                strategy_account_id,
-                                strategy_cmd_rx,
-                                strategy_shutdown_rx,
-                            )
-                            .await
-                            {
-                                error!(agent = "momentum", error = %e, "managed strategy runtime exited with error");
-                            }
-                        });
-                        agent_handles.push(jh);
-                        info!(
-                            agent = crypto_cfg.agent_id,
-                            "crypto momentum managed strategy runtime spawned"
-                        );
-                    } else {
-                        warn!(
-                            agent = crypto_cfg.agent_id,
-                            "momentum enabled but pm client not configured; skipping"
-                        );
-                    }
+                    let _ = spawn_managed_strategy_runtime_task(
+                        ManagedStrategyRuntimeSpawn {
+                            strategy_label: "momentum",
+                            agent_id: crypto_cfg.agent_id.clone(),
+                            domain: Domain::Crypto,
+                            risk_params: crypto_cfg.risk_params.clone(),
+                            strategy_config_toml: toml_cfg,
+                        },
+                        &mut coordinator,
+                        &shutdown_tx,
+                        &mut agent_handles,
+                        config.dry_run,
+                        pm_client.as_ref(),
+                        &app_config.market.ws_url,
+                        data_plane.clone(),
+                        shared_pool.clone(),
+                        &account_id,
+                    );
                 }
                 Err(e) => {
                     warn!(
@@ -5493,46 +5542,24 @@ pub async fn start_platform(
 
             match build_pattern_memory_runtime_config(&coins) {
                 Ok(toml_cfg) => {
-                    if let Some(strategy_pm_client) = pm_client.clone() {
-                        let strategy_agent_id = "pattern_memory".to_string();
-                        let strategy_cmd_rx = coordinator.register_agent(
-                            strategy_agent_id.clone(),
-                            Domain::Crypto,
-                            crypto_cfg.risk_params.clone(),
-                        );
-                        let strategy_ws_url = app_config.market.ws_url.clone();
-                        let strategy_data_plane = data_plane.clone();
-                        let strategy_shutdown_rx = shutdown_tx.subscribe();
-                        let strategy_dry_run = config.dry_run;
-                        let strategy_observability_pool = shared_pool.clone();
-                        let strategy_account_id = account_id.clone();
-                        let jh = tokio::spawn(async move {
-                            if let Err(e) = run_managed_strategy_runtime(
-                                "pattern_memory",
-                                &strategy_agent_id,
-                                toml_cfg,
-                                strategy_dry_run,
-                                strategy_pm_client,
-                                strategy_ws_url,
-                                strategy_data_plane,
-                                strategy_observability_pool,
-                                strategy_account_id,
-                                strategy_cmd_rx,
-                                strategy_shutdown_rx,
-                            )
-                            .await
-                            {
-                                error!(agent = "pattern_memory", error = %e, "managed strategy runtime exited with error");
-                            }
-                        });
-                        agent_handles.push(jh);
-                        info!("pattern_memory strategy runtime spawned");
-                    } else {
-                        warn!(
-                            agent = "pattern_memory",
-                            "pattern_memory enabled but pm client not configured; skipping"
-                        );
-                    }
+                    let _ = spawn_managed_strategy_runtime_task(
+                        ManagedStrategyRuntimeSpawn {
+                            strategy_label: "pattern_memory",
+                            agent_id: "pattern_memory".to_string(),
+                            domain: Domain::Crypto,
+                            risk_params: crypto_cfg.risk_params.clone(),
+                            strategy_config_toml: toml_cfg,
+                        },
+                        &mut coordinator,
+                        &shutdown_tx,
+                        &mut agent_handles,
+                        config.dry_run,
+                        pm_client.as_ref(),
+                        &app_config.market.ws_url,
+                        data_plane.clone(),
+                        shared_pool.clone(),
+                        &account_id,
+                    );
                 }
                 Err(e) => {
                     warn!(
@@ -5609,46 +5636,24 @@ pub async fn start_platform(
                 );
             } else {
                 let toml_cfg = build_split_arb_runtime_config(&symbols, &series_ids);
-                let strategy_agent_id = "staggered_arb".to_string();
-                if let Some(strategy_pm_client) = pm_client.clone() {
-                    let strategy_cmd_rx = coordinator.register_agent(
-                        strategy_agent_id.clone(),
-                        Domain::Crypto,
-                        crypto_cfg.risk_params.clone(),
-                    );
-                    let strategy_ws_url = app_config.market.ws_url.clone();
-                    let strategy_data_plane = data_plane.clone();
-                    let strategy_shutdown_rx = shutdown_tx.subscribe();
-                    let strategy_dry_run = config.dry_run;
-                    let strategy_observability_pool = shared_pool.clone();
-                    let strategy_account_id = account_id.clone();
-                    let jh = tokio::spawn(async move {
-                        if let Err(e) = run_managed_strategy_runtime(
-                            "staggered_arb",
-                            &strategy_agent_id,
-                            toml_cfg,
-                            strategy_dry_run,
-                            strategy_pm_client,
-                            strategy_ws_url,
-                            strategy_data_plane,
-                            strategy_observability_pool,
-                            strategy_account_id,
-                            strategy_cmd_rx,
-                            strategy_shutdown_rx,
-                        )
-                        .await
-                        {
-                            error!(agent = "staggered_arb", error = %e, "managed strategy runtime exited with error");
-                        }
-                    });
-                    agent_handles.push(jh);
-                    info!("staggered_arb strategy runtime spawned");
-                } else {
-                    warn!(
-                        agent = "staggered_arb",
-                        "staggered_arb enabled but pm client not configured; skipping"
-                    );
-                }
+                let _ = spawn_managed_strategy_runtime_task(
+                    ManagedStrategyRuntimeSpawn {
+                        strategy_label: "staggered_arb",
+                        agent_id: "staggered_arb".to_string(),
+                        domain: Domain::Crypto,
+                        risk_params: crypto_cfg.risk_params.clone(),
+                        strategy_config_toml: toml_cfg,
+                    },
+                    &mut coordinator,
+                    &shutdown_tx,
+                    &mut agent_handles,
+                    config.dry_run,
+                    pm_client.as_ref(),
+                    &app_config.market.ws_url,
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    &account_id,
+                );
             }
         }
 
