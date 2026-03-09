@@ -27,12 +27,12 @@ fn build_platform_config_for_runtime(
         if !crypto {
             platform_cfg.enable_crypto = false;
             platform_cfg.enable_crypto_momentum = false;
-            platform_cfg.enable_crypto_lob_ml = false;
+            platform_cfg.legacy_crypto.enable_lob_ml = false;
             platform_cfg.enable_crypto_pattern_memory = false;
             platform_cfg.enable_crypto_split_arb = false;
             #[cfg(feature = "rl")]
             {
-                platform_cfg.enable_crypto_rl_policy = false;
+                platform_cfg.legacy_crypto.enable_rl_policy = false;
             }
         }
         if !sports {
@@ -48,12 +48,12 @@ fn build_platform_config_for_runtime(
     if app_config.openclaw_runtime_lockdown() {
         platform_cfg.enable_crypto = false;
         platform_cfg.enable_crypto_momentum = false;
-        platform_cfg.enable_crypto_lob_ml = false;
+        platform_cfg.legacy_crypto.enable_lob_ml = false;
         platform_cfg.enable_crypto_pattern_memory = false;
         platform_cfg.enable_crypto_split_arb = false;
         #[cfg(feature = "rl")]
         {
-            platform_cfg.enable_crypto_rl_policy = false;
+            platform_cfg.legacy_crypto.enable_rl_policy = false;
         }
         platform_cfg.enable_sports = false;
         platform_cfg.enable_politics = false;
@@ -259,7 +259,7 @@ mod tests {
         assert!(cfg.enable_crypto);
         assert!(cfg.enable_crypto_pattern_memory);
         assert!(
-            !cfg.enable_crypto_lob_ml,
+            !cfg.legacy_crypto.enable_lob_ml,
             "pattern_memory deployment should not auto-route to crypto_lob_ml"
         );
     }

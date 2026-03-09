@@ -1651,3 +1651,47 @@ Delete the last actual `DomainAgent`/`EventRouter` runtime path by rewriting the
   - `cargo test explicit_selection_disables_politics_without_politics_flag -- --nocapture`
   - `cargo test sports_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
   - `cargo test politics_runtime_config_defaults_match_bootstrap_expectations --lib -- --nocapture`
+
+# Legacy Crypto Bootstrap Collapse (2026-03-09)
+
+## Goal
+Collapse the remaining `lob_ml` / `rl_policy` bootstrap ownership into a single legacy-crypto compatibility config surface instead of keeping agent-specific flags and configs at `PlatformBootstrapConfig` top level.
+
+## Tasks
+
+- [x] Introduce a bootstrap-local legacy crypto config wrapper that owns enable flags plus `lob_ml` / `rl_policy` settings.
+- [x] Rewire `PlatformBootstrapConfig`, `legacy_crypto.rs`, and `strategy_deployments.rs` to use the nested legacy config surface.
+- [x] Rewire `platform_mode.rs` and bootstrap tests to the nested fields without changing runtime behavior.
+- [x] Re-run compile plus the narrow bootstrap/platform-mode regressions touched by the move.
+
+## Review
+
+- [x] Confirm `PlatformBootstrapConfig` no longer exposes top-level `enable_crypto_lob_ml`, `enable_crypto_rl_policy`, `crypto_lob_ml`, or `crypto_rl_policy`.
+- [x] Confirm `legacy_crypto.rs` is now the only bootstrap module that understands the remaining legacy crypto runtime settings.
+- [x] Confirm deployment-matrix behavior for `lob_ml` / `rl_policy` remains unchanged in this slice.
+
+## Progress notes
+
+- 2026-03-09: Promoted `LegacyCryptoRuntimeConfig` to [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs) and made it the bootstrap-local owner of `lob_ml` / `rl_policy` enable flags plus runtime config payloads.
+- 2026-03-09: Rewired [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs), [strategy_deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/strategy_deployments.rs), and [platform_mode.rs](/Users/proerror/Documents/ploy/src/main_modes/platform_mode.rs) to use `cfg.legacy_crypto.*` instead of top-level legacy crypto fields.
+- 2026-03-09: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+  - `cargo test pattern_memory_deployment_does_not_enable_lob_ml --bin ploy -- --nocapture`
+
+# Pattern Memory Canonical Handoff (2026-03-09)
+
+## Goal
+Switch `PatternMemoryStrategy` to emit canonical `StrategyAction::SubmitIntent` payloads instead of raw `SubmitOrder`, reducing one more strategy's dependence on the legacy order handoff.
+
+## Tasks
+
+- [ ] Replace pattern-memory submit actions with `StrategyOrderIntent`.
+- [ ] Keep order IDs, limit prices, side, share sizing, and metadata behavior unchanged.
+- [ ] Re-run narrow pattern-memory compile/tests after the conversion.
+
+## Review
+
+- [ ] Confirm `src/strategy/pattern_memory/strategy.rs` no longer emits `StrategyAction::SubmitOrder`.
+- [ ] Confirm behavior-equivalent intent fields are still present on entry actions.

@@ -13,9 +13,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agents::{CryptoEntryMode, CryptoLobMlConfig, CryptoTradingConfig, OpenClawConfig};
-#[cfg(feature = "rl")]
-use crate::agents::CryptoRlPolicyConfig;
+use crate::agents::{CryptoEntryMode, CryptoTradingConfig, OpenClawConfig};
 use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
@@ -54,7 +52,9 @@ mod schema;
 mod support;
 mod strategy_deployments;
 
-use self::legacy_crypto::{apply_legacy_crypto_agent_env, spawn_legacy_crypto_agent_runtimes};
+use self::legacy_crypto::{
+    apply_legacy_crypto_agent_env, spawn_legacy_crypto_agent_runtimes, LegacyCryptoRuntimeConfig,
+};
 use self::market_persistence::{
     ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
     spawn_polymarket_trade_persistence,
@@ -102,11 +102,6 @@ pub struct PlatformBootstrapConfig {
     pub enable_crypto_pattern_memory: bool,
     #[serde(default)]
     pub enable_crypto_split_arb: bool,
-    #[serde(default)]
-    pub enable_crypto_lob_ml: bool,
-    #[serde(default)]
-    #[cfg(feature = "rl")]
-    pub enable_crypto_rl_policy: bool,
     pub enable_sports: bool,
     pub enable_politics: bool,
     #[serde(default)]
@@ -116,10 +111,8 @@ pub struct PlatformBootstrapConfig {
     pub enable_openclaw: bool,
     pub dry_run: bool,
     pub crypto: CryptoTradingConfig,
-    pub crypto_lob_ml: CryptoLobMlConfig,
     #[serde(default)]
-    #[cfg(feature = "rl")]
-    pub crypto_rl_policy: CryptoRlPolicyConfig,
+    pub legacy_crypto: LegacyCryptoRuntimeConfig,
     pub sports: SportsRuntimeConfig,
     pub politics: PoliticsRuntimeConfig,
     /// OpenClaw meta-agent configuration
@@ -135,18 +128,13 @@ impl Default for PlatformBootstrapConfig {
             enable_crypto_momentum: true,
             enable_crypto_pattern_memory: false,
             enable_crypto_split_arb: false,
-            enable_crypto_lob_ml: false,
-            #[cfg(feature = "rl")]
-            enable_crypto_rl_policy: false,
             enable_sports: false,
             enable_politics: false,
             enable_economics: false,
             enable_openclaw: false,
             dry_run: true,
             crypto: CryptoTradingConfig::default(),
-            crypto_lob_ml: CryptoLobMlConfig::default(),
-            #[cfg(feature = "rl")]
-            crypto_rl_policy: CryptoRlPolicyConfig::default(),
+            legacy_crypto: LegacyCryptoRuntimeConfig::default(),
             sports: SportsRuntimeConfig::default(),
             politics: PoliticsRuntimeConfig::default(),
             openclaw: OpenClawConfig::default(),
@@ -612,7 +600,7 @@ impl PlatformBootstrapConfig {
         )
         .max(1) as u32;
 
-        apply_legacy_crypto_agent_env(&mut cfg);
+        apply_legacy_crypto_agent_env(&cfg.crypto, &mut cfg.legacy_crypto);
 
         // Enable sports if NBA comeback config is present and enabled
         if let Some(ref nba) = app.nba_comeback {
@@ -639,10 +627,10 @@ impl PlatformBootstrapConfig {
             cfg.enable_crypto_momentum = false;
             cfg.enable_crypto_pattern_memory = false;
             cfg.enable_crypto_split_arb = false;
-            cfg.enable_crypto_lob_ml = false;
+            cfg.legacy_crypto.enable_lob_ml = false;
             #[cfg(feature = "rl")]
             {
-                cfg.enable_crypto_rl_policy = false;
+                cfg.legacy_crypto.enable_rl_policy = false;
             }
             cfg.enable_sports = false;
             cfg.enable_politics = false;
@@ -723,7 +711,7 @@ pub async fn start_platform(
     let runtime_crypto_targets =
         collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
     #[cfg(feature = "rl")]
-    let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
+    let crypto_rl_policy_enabled = config.legacy_crypto.enable_rl_policy;
     #[cfg(not(feature = "rl"))]
     let crypto_rl_policy_enabled = false;
 
@@ -733,7 +721,7 @@ pub async fn start_platform(
         crypto_momentum = config.enable_crypto_momentum,
         crypto_pattern_memory = config.enable_crypto_pattern_memory,
         crypto_split_arb = config.enable_crypto_split_arb,
-        crypto_lob_ml = config.enable_crypto_lob_ml,
+        crypto_lob_ml = config.legacy_crypto.enable_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
@@ -1122,12 +1110,12 @@ pub async fn start_platform(
         let momentum_enabled = config.enable_crypto_momentum;
         let pattern_memory_enabled = config.enable_crypto_pattern_memory;
         let split_arb_enabled = config.enable_crypto_split_arb;
-        let lob_cfg = config.crypto_lob_ml.clone();
-        let lob_agent_enabled = config.enable_crypto_lob_ml;
+        let lob_cfg = config.legacy_crypto.lob_ml.clone();
+        let lob_agent_enabled = config.legacy_crypto.enable_lob_ml;
         #[cfg(feature = "rl")]
-        let rl_cfg = config.crypto_rl_policy.clone();
+        let rl_cfg = config.legacy_crypto.rl_policy.clone();
         #[cfg(feature = "rl")]
-        let rl_agent_enabled = config.enable_crypto_rl_policy;
+        let rl_agent_enabled = config.legacy_crypto.enable_rl_policy;
         #[cfg(not(feature = "rl"))]
         let rl_agent_enabled = false;
 
@@ -1994,7 +1982,7 @@ pub async fn start_platform(
         }
 
         spawn_legacy_crypto_agent_runtimes(
-            &config,
+            &config.legacy_crypto,
             shared_pool.is_some(),
             crypto_market_data.clone(),
             event_matcher.clone(),
@@ -2300,7 +2288,7 @@ mod tests {
         );
         assert!(!cfg.enable_crypto_pattern_memory);
         assert!(!cfg.enable_crypto_split_arb);
-        assert!(!cfg.enable_crypto_lob_ml);
+        assert!(!cfg.legacy_crypto.enable_lob_ml);
     }
 
     #[test]
@@ -2664,48 +2652,48 @@ symbols = ["SOLUSDT"]
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
 
-        assert_eq!(cfg.crypto_lob_ml.model_type, "onnx");
+        assert_eq!(cfg.legacy_crypto.lob_ml.model_type, "onnx");
         assert_eq!(
-            cfg.crypto_lob_ml.model_path.as_deref(),
+            cfg.legacy_crypto.lob_ml.model_path.as_deref(),
             Some("/tmp/models/lob_tcn_v2.onnx")
         );
         assert_eq!(
-            cfg.crypto_lob_ml.model_version.as_deref(),
+            cfg.legacy_crypto.lob_ml.model_version.as_deref(),
             Some("lob_tcn_v2")
         );
         assert_eq!(
-            cfg.crypto_lob_ml.model_blend_weight,
+            cfg.legacy_crypto.lob_ml.model_blend_weight,
             rust_decimal::Decimal::new(75, 2)
         );
         assert_eq!(
-            cfg.crypto_lob_ml.min_direction_strength,
+            cfg.legacy_crypto.lob_ml.min_direction_strength,
             rust_decimal::Decimal::new(6, 2)
         );
         assert_eq!(
-            cfg.crypto_lob_ml.ev_exit_buffer,
+            cfg.legacy_crypto.lob_ml.ev_exit_buffer,
             rust_decimal::Decimal::new(1, 2)
         );
         assert_eq!(
-            cfg.crypto_lob_ml.ev_exit_vol_scale,
+            cfg.legacy_crypto.lob_ml.ev_exit_vol_scale,
             rust_decimal::Decimal::new(3, 2)
         );
         assert_eq!(
-            cfg.crypto_lob_ml.taker_fee_rate,
+            cfg.legacy_crypto.lob_ml.taker_fee_rate,
             rust_decimal::Decimal::new(3, 2)
         );
         assert_eq!(
-            cfg.crypto_lob_ml.entry_slippage_bps,
+            cfg.legacy_crypto.lob_ml.entry_slippage_bps,
             rust_decimal::Decimal::new(12, 0)
         );
-        assert!(cfg.crypto_lob_ml.use_price_to_beat);
-        assert!(!cfg.crypto_lob_ml.require_price_to_beat);
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert!(cfg.legacy_crypto.lob_ml.use_price_to_beat);
+        assert!(!cfg.legacy_crypto.lob_ml.require_price_to_beat);
+        assert_eq!(cfg.legacy_crypto.lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
         assert_eq!(
-            cfg.crypto_lob_ml.entry_side_policy,
+            cfg.legacy_crypto.lob_ml.entry_side_policy,
             CryptoLobMlEntrySidePolicy::LaggingOnly
         );
-        assert_eq!(cfg.crypto_lob_ml.entry_late_window_secs_5m, 170);
-        assert_eq!(cfg.crypto_lob_ml.entry_late_window_secs_15m, 180);
+        assert_eq!(cfg.legacy_crypto.lob_ml.entry_late_window_secs_5m, 170);
+        assert_eq!(cfg.legacy_crypto.lob_ml.entry_late_window_secs_15m, 180);
 
         match prev_model_type.as_deref() {
             Some(v) => set_env(model_type_key, Some(v)),
@@ -2828,7 +2816,7 @@ symbols = ["SOLUSDT"]
         let app = AppConfig::default_config(true, "btc-up-or-down-test");
         let cfg = PlatformBootstrapConfig::from_app_config(&app);
 
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
+        assert_eq!(cfg.legacy_crypto.lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
 
         match prev_exit_mode.as_deref() {
             Some(v) => set_env(exit_mode_key, Some(v)),
