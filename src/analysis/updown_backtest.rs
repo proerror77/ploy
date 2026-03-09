@@ -17,6 +17,10 @@ use crate::adapters::{GammaEventInfo, PolymarketClient};
 use crate::collector::{BinanceKlineClient, Kline};
 use crate::domain::Side;
 use crate::error::{PloyError, Result};
+use crate::strategy::crypto::{
+    horizon_for_series as crypto_horizon_for_series,
+    series_ids_for_symbol as crypto_series_ids_for_symbol,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpDownBacktestConfig {
@@ -136,21 +140,11 @@ fn normal_cdf(x: f64) -> f64 {
 }
 
 fn series_ids_for_symbol(symbol: &str) -> Vec<String> {
-    match symbol.trim().to_ascii_uppercase().as_str() {
-        "BTCUSDT" => vec!["10684".into(), "10192".into()],
-        "ETHUSDT" => vec!["10683".into(), "10191".into()],
-        "SOLUSDT" => vec!["10686".into(), "10423".into()],
-        "XRPUSDT" => vec!["10685".into(), "10422".into()],
-        _ => Vec::new(),
-    }
+    crypto_series_ids_for_symbol(symbol)
 }
 
 fn horizon_for_series(series_id: &str) -> &'static str {
-    match series_id {
-        "10684" | "10683" | "10686" | "10685" => "5m",
-        "10192" | "10191" | "10423" | "10422" => "15m",
-        _ => "other",
-    }
+    crypto_horizon_for_series(series_id)
 }
 
 fn parse_time(raw: &Option<String>) -> Option<DateTime<Utc>> {

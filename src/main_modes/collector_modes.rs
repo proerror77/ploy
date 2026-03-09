@@ -2,20 +2,13 @@ use chrono::Utc;
 use ploy::adapters::PostgresStore;
 use ploy::config::AppConfig;
 use ploy::error::{PloyError, Result};
+use ploy::strategy::crypto::all_updown_series_ids;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
-
-/// Crypto series IDs for "Up or Down" markets on Polymarket.
-/// 5m: BTC=10684, ETH=10683, SOL=10686, XRP=10685
-/// 15m: BTC=10192, ETH=10191, SOL=10423, XRP=10422
-const CRYPTO_SERIES_IDS: &[&str] = &[
-    "10684", "10683", "10686", "10685", // 5m
-    "10192", "10191", "10423", "10422", // 15m
-];
 
 const PM_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const PM_REST_URL: &str = "https://clob.polymarket.com";
@@ -168,8 +161,8 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
     let mut slug_token_map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut all_token_ids: Vec<String> = Vec::new();
 
-    for series_id in CRYPTO_SERIES_IDS {
-        match pm_client.get_all_active_events(series_id).await {
+    for series_id in all_updown_series_ids() {
+        match pm_client.get_all_active_events(&series_id).await {
             Ok(events) => {
                 let now = Utc::now();
                 let soon_cutoff = now + chrono::Duration::hours(1);

@@ -26,6 +26,10 @@ use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::CryptoDataPlaneHandle;
+use crate::strategy::crypto::{
+    horizon_for_series as crypto_horizon_for_series, known_binance_symbols,
+    series_ids_for_symbol as crypto_series_ids_for_symbol,
+};
 use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
@@ -342,44 +346,12 @@ impl EventMatcher {
     pub fn new(client: PolymarketClient) -> Self {
         let mut symbol_to_series = HashMap::new();
 
-        // Map each symbol to its series IDs (from Gamma API)
-        // Prefer 5m first, then 15m fallback.
-
-        // BTC: 10684 = 5m, 10192 = 15m
-        symbol_to_series.insert(
-            "BTCUSDT".into(),
-            vec![
-                "10684".into(), // btc-up-or-down-5m
-                "10192".into(), // btc-up-or-down-15m
-            ],
-        );
-
-        // ETH: 10683 = 5m, 10191 = 15m
-        symbol_to_series.insert(
-            "ETHUSDT".into(),
-            vec![
-                "10683".into(), // eth-up-or-down-5m
-                "10191".into(), // eth-up-or-down-15m
-            ],
-        );
-
-        // SOL: 10686 = 5m, 10423 = 15m
-        symbol_to_series.insert(
-            "SOLUSDT".into(),
-            vec![
-                "10686".into(), // sol-up-or-down-5m
-                "10423".into(), // sol-up-or-down-15m
-            ],
-        );
-
-        // XRP: 10685 = 5m, 10422 = 15m
-        symbol_to_series.insert(
-            "XRPUSDT".into(),
-            vec![
-                "10685".into(), // xrp-up-or-down-5m
-                "10422".into(), // xrp-up-or-down-15m
-            ],
-        );
+        for symbol in known_binance_symbols() {
+            let series_ids = crypto_series_ids_for_symbol(symbol);
+            if !series_ids.is_empty() {
+                symbol_to_series.insert((*symbol).to_string(), series_ids);
+            }
+        }
 
         Self {
             client,
@@ -389,11 +361,7 @@ impl EventMatcher {
     }
 
     fn horizon_for_series(series_id: &str) -> &'static str {
-        match series_id {
-            "10684" | "10683" | "10686" | "10685" => "5m",
-            "10192" | "10191" | "10423" | "10422" => "15m",
-            _ => "other",
-        }
+        crypto_horizon_for_series(series_id)
     }
 
     fn window_secs_for_horizon(horizon: &str) -> i64 {

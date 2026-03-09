@@ -34,6 +34,7 @@ use crate::adapters::SpotPrice;
 use crate::domain::order::OrderRequest;
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
+use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
 
 // ─────────────────────────────────────────────────────────────
 // Config
@@ -48,16 +49,7 @@ pub struct StaggeredArbLiveConfig {
 }
 
 fn default_staggered_series_ids() -> Vec<String> {
-    vec![
-        "10684".into(),
-        "10683".into(),
-        "10686".into(),
-        "10685".into(), // 5m
-        "10192".into(),
-        "10191".into(),
-        "10423".into(),
-        "10422".into(), // 15m
-    ]
+    all_updown_series_ids()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -377,17 +369,7 @@ impl StaggeredArbAdapter {
     // ─── Series ID mapping (same as MomentumStrategyAdapter) ──
 
     fn series_to_symbol(series_id: &str) -> Option<(&'static str, u64)> {
-        match series_id {
-            "10684" => Some(("BTCUSDT", 300)),
-            "10683" => Some(("ETHUSDT", 300)),
-            "10686" => Some(("SOLUSDT", 300)),
-            "10685" => Some(("XRPUSDT", 300)),
-            "10192" => Some(("BTCUSDT", 900)),
-            "10191" => Some(("ETHUSDT", 900)),
-            "10423" => Some(("SOLUSDT", 900)),
-            "10422" => Some(("XRPUSDT", 900)),
-            _ => None,
-        }
+        symbol_and_window_for_series(series_id)
     }
 
     fn estimated_live_locked_capital(&self) -> Decimal {
