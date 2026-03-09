@@ -1,3 +1,33 @@
+# Bootstrap Runtime Spawns Module Extraction (2026-03-09)
+
+## Goal
+Move bootstrap runtime/domain spawn ownership out of `bootstrap.rs` into a dedicated submodule so the main bootstrap file starts shedding file-level responsibility instead of only accumulating local helper extractions.
+
+## Tasks
+
+- [x] Create a dedicated `bootstrap/runtime_spawns.rs` submodule for managed-strategy, legacy-trading-agent, governance, sports, and politics spawn helpers.
+- [x] Rewire `bootstrap.rs` to import those helpers and delete the in-file helper bodies.
+- [x] Keep runtime behavior unchanged in this slice; this is a file-boundary cleanup, not a contract migration.
+- [x] Run targeted compile/tests for bootstrap config behavior and coordinator governance coverage.
+
+## Review
+
+- [x] Confirm the top of `bootstrap.rs` no longer contains the runtime spawn helper implementations.
+- [x] Confirm the new submodule owns the three runtime startup paths: managed strategy, legacy trading agent, and governance/domain wrappers.
+- [x] Confirm the main bootstrap flow still calls the same helper entry points after the move.
+
+## Progress notes
+
+- 2026-03-09: The implementation plan calls for reducing `bootstrap` back to pure assembly, and the current file still carried all spawn helper bodies inline.
+- 2026-03-09: This slice deliberately moves those helpers behind a real module boundary so later strategy/risk/contract cuts do not keep expanding `bootstrap.rs`.
+- 2026-03-09: Added [runtime_spawns.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_spawns.rs) and moved the managed-strategy, legacy-trading-agent, governance, sports, and politics startup helpers there.
+- 2026-03-09: `bootstrap.rs` now imports those helpers instead of owning their bodies inline; file length dropped from `6745` lines to `6269`.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+
 # Bootstrap Legacy TradingAgent Spawn Consolidation (2026-03-09)
 
 ## Goal
