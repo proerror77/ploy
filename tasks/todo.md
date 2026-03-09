@@ -1,3 +1,33 @@
+# Bootstrap Sports And Politics Spawn Extraction (2026-03-09)
+
+## Goal
+Move the legacy `sports` and `politics` bootstrap spawn branches behind dedicated helpers so the main bootstrap flow stops owning domain-specific pool setup, data-plane wiring, and agent construction details.
+
+## Tasks
+
+- [x] Extract the full `sports` branch into an async bootstrap helper without changing its PM WS persistence or Grok wiring.
+- [x] Extract the `politics` branch into an async bootstrap helper without changing its `EventEdgeCore` initialization or PM client requirement.
+- [x] Keep the actual `SportsTradingAgent` and `PoliticsTradingAgent` runtimes unchanged in this slice.
+- [x] Run targeted compile/tests for bootstrap config behavior and coordinator/governance coverage.
+
+## Review
+
+- [x] Confirm the main bootstrap flow now delegates sports/politics startup instead of inlining those branches.
+- [x] Confirm sports still creates its dedicated domain data plane and persistence bridges before agent spawn.
+- [x] Confirm politics still fails fast when the Polymarket client is unavailable.
+
+## Progress notes
+
+- 2026-03-09: After the managed-runtime consolidation, the thickest remaining bootstrap ownership blocks were the legacy `sports` and `politics` domain spawns.
+- 2026-03-09: This slice is structural only; it should reduce main-flow sprawl without changing domain runtime behavior.
+- 2026-03-09: Added `spawn_sports_trading_agent(...)` and `spawn_politics_trading_agent(...)` so the main bootstrap flow now delegates those domain-specific startup paths instead of open-coding pool setup, PM WS bridges, and agent construction.
+- 2026-03-09: Kept the sports PM L2 persistence wiring, Grok enrichment, and politics `EventEdgeCore` creation unchanged inside the extracted helpers.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+  - `cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --nocapture`
+
 # Bootstrap Managed Runtime Spawn Consolidation (2026-03-09)
 
 ## Goal

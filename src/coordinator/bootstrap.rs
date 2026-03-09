@@ -197,6 +197,353 @@ fn spawn_openclaw_governance_agent(
     );
 }
 
+async fn spawn_sports_trading_agent(
+    config: &PlatformBootstrapConfig,
+    app_config: &AppConfig,
+    shared_pool: Option<&PgPool>,
+    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    let Some(nba_cfg) = app_config.nba_comeback.as_ref() else {
+        return Ok(());
+    };
+
+    let sports_cfg = config.sports.clone();
+    let cmd_rx = coordinator.register_agent(
+        sports_cfg.agent_id.clone(),
+        Domain::Sports,
+        sports_cfg.risk_params.clone(),
+    );
+
+    let pool = match shared_pool {
+        Some(pool) => pool.clone(),
+        None => {
+            PgPoolOptions::new()
+                .max_connections(app_config.database.max_connections)
+                .connect(&app_config.database.url)
+                .await?
+        }
+    };
+    spawn_polymarket_trade_persistence_from_collector_targets(
+        pool.clone(),
+        sports_cfg.agent_id.clone(),
+        Domain::Sports,
+    );
+
+    // Sports L2 data collection: create a dedicated sports data plane so
+    // PM WS lifecycle stays domain-isolated from crypto.
+    {
+        let sports_data_plane_config = DataPlaneConfig {
+            polymarket_ws_url: app_config.market.ws_url.clone(),
+            ..DataPlaneConfig::default()
+        };
+        let sports_data_plane = Arc::new(PlatformDataPlane::new(
+            sports_data_plane_config,
+            Arc::clone(freshness),
+        ));
+        sports_data_plane.start(Vec::new()).await?;
+        let sports_pm_ws = sports_data_plane.polymarket_ws().ok_or_else(|| {
+            crate::error::PloyError::Validation(
+                "sports data plane misconfigured: missing Polymarket WS adapter".to_string(),
+            )
+        })?;
+
+        // Seed initial NBA tokens from collector_token_targets
+        let mut sports_desired: HashMap<String, Side> = HashMap::new();
+        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
+            r#"
+            SELECT token_id, metadata->>'side'
+            FROM collector_token_targets
+            WHERE domain = 'SPORTS_NBA'
+              AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
+              AND (expires_at IS NULL OR expires_at > NOW())
+            "#,
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            for (token_id, side_str) in rows {
+                let side = match side_str.as_deref() {
+                    Some("DOWN") | Some("NO") => Side::Down,
+                    _ => Side::Up,
+                };
+                sports_desired.insert(token_id, side);
+            }
+        }
+
+        let initial_count = sports_desired.len();
+        if initial_count > 0 {
+            sports_pm_ws.reconcile_token_sides(&sports_desired).await;
+            info!(
+                agent = sports_cfg.agent_id,
+                token_count = initial_count,
+                "seeded sports PM WS tokens for L2 data collection"
+            );
+        }
+
+        // Spawn periodic token refresh for sports WS
+        let refresh_ws = sports_pm_ws.clone();
+        let refresh_pool = pool.clone();
+        let refresh_agent = sports_cfg.agent_id.clone();
+        tokio::spawn(async move {
+            let secs = env_u64("PM_SPORTS_COLLECTOR_REFRESH_SECS", 300).max(30);
+            let mut tick = tokio::time::interval(Duration::from_secs(secs));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let mut desired: HashMap<String, Side> = HashMap::new();
+                if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
+                    r#"
+                    SELECT token_id, metadata->>'side'
+                    FROM collector_token_targets
+                    WHERE domain = 'SPORTS_NBA'
+                      AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                    "#,
+                )
+                .fetch_all(&refresh_pool)
+                .await
+                {
+                    for (token_id, side_str) in rows {
+                        let side = match side_str.as_deref() {
+                            Some("DOWN") | Some("NO") => Side::Down,
+                            _ => Side::Up,
+                        };
+                        desired.insert(token_id, side);
+                    }
+                }
+                let (_a, _r, _u, total) = refresh_ws.reconcile_token_sides(&desired).await;
+                trace!(
+                    agent = refresh_agent,
+                    total,
+                    "refreshed sports PM WS token subscriptions"
+                );
+            }
+        });
+
+        // Persistence: quotes + orderbook snapshots via unified pipeline.
+        let sports_quote_table_ready = match ensure_clob_quote_ticks_table(&pool).await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(
+                    agent = sports_cfg.agent_id,
+                    error = %e,
+                    "failed to ensure clob_quote_ticks table; sports quote persistence bridge disabled"
+                );
+                false
+            }
+        };
+        let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(&pool).await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(
+                    agent = sports_cfg.agent_id,
+                    error = %e,
+                    "failed to ensure clob_orderbook_snapshots table; sports orderbook persistence bridge disabled"
+                );
+                false
+            }
+        };
+        if sports_quote_table_ready || sports_orderbook_table_ready {
+            let sports_orderbook_levels = env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
+            let sports_orderbook_snapshot_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
+                Ok(raw) => raw.parse::<u64>().unwrap_or(0),
+                Err(_) => {
+                    (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64).saturating_mul(1000)
+                }
+            };
+            let sports_orderbook_require_hash_change =
+                env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
+            let sports_pipeline_config = crate::platform::PersistenceConfig {
+                clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
+                clob_orderbook_snapshot_interval_ms: sports_orderbook_snapshot_ms as i64,
+                clob_orderbook_max_levels: sports_orderbook_levels,
+                clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
+                ..Default::default()
+            };
+            let sports_pipeline = crate::platform::PersistencePipeline::spawn_with_freshness(
+                pool.clone(),
+                sports_pipeline_config,
+                Some(Arc::clone(freshness)),
+            );
+
+            if sports_quote_table_ready {
+                if let Some(quote_rx) = sports_data_plane.subscribe_quotes() {
+                    sports_pipeline.spawn_bridge(
+                        quote_rx,
+                        format!("{}.sports_quote", sports_cfg.agent_id),
+                        |update| {
+                            Some(crate::platform::PersistenceEvent::ClobQuote(
+                                crate::platform::ClobQuoteTick {
+                                    token_id: update.token_id.clone(),
+                                    side: update.side.as_str().to_string(),
+                                    best_bid: update.quote.best_bid,
+                                    best_ask: update.quote.best_ask,
+                                    bid_size: update.quote.bid_size,
+                                    ask_size: update.quote.ask_size,
+                                    domain: Domain::Sports,
+                                    received_at: Utc::now(),
+                                },
+                            ))
+                        },
+                    );
+                } else {
+                    warn!("sports quote bridge unavailable: no quote receiver");
+                }
+            }
+
+            if sports_orderbook_table_ready {
+                if let Some(book_rx) = sports_data_plane.subscribe_books() {
+                    sports_pipeline.spawn_bridge(
+                        book_rx,
+                        format!("{}.sports_orderbook", sports_cfg.agent_id),
+                        |book_msg| {
+                            use sha2::{Digest, Sha256};
+                            let bids_json = serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                            let asks_json = serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                            let mut hasher = Sha256::new();
+                            hasher.update(bids_json.to_string().as_bytes());
+                            hasher.update(asks_json.to_string().as_bytes());
+                            let hash = format!("{:x}", hasher.finalize());
+                            Some(crate::platform::PersistenceEvent::ClobOrderbook(
+                                crate::platform::ClobOrderbookSnapshot {
+                                    domain: Domain::Sports,
+                                    token_id: book_msg.asset_id.clone(),
+                                    market: Some(book_msg.market.clone()),
+                                    bids: bids_json,
+                                    asks: asks_json,
+                                    book_timestamp: book_msg
+                                        .timestamp
+                                        .as_deref()
+                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                        .map(|dt| dt.with_timezone(&Utc)),
+                                    hash,
+                                    source: "polymarket_ws".into(),
+                                    context: None,
+                                },
+                            ))
+                        },
+                    );
+                } else {
+                    warn!("sports orderbook bridge unavailable: no book receiver");
+                }
+            }
+        } else {
+            warn!(
+                agent = sports_cfg.agent_id,
+                "sports persistence tables unavailable; WS persistence bridges disabled"
+            );
+        }
+
+        info!(
+            agent = sports_cfg.agent_id,
+            "sports PM WS L2 data collection started"
+        );
+    }
+
+    let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
+    let stats =
+        crate::strategy::nba_comeback::ComebackStatsProvider::new(pool.clone(), nba_cfg.season.clone());
+    let core = crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
+    let mut agent = SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
+    match PolymarketSportsClient::new() {
+        Ok(pm_sports) => {
+            agent = agent.with_pm_sports(pm_sports);
+        }
+        Err(e) => {
+            warn!(
+                agent = sports_cfg.agent_id,
+                error = %e,
+                "failed to initialize PolymarketSportsClient; continuing without PM market observations"
+            );
+        }
+    }
+    if nba_cfg.grok_enabled {
+        match crate::ai_clients::grok::GrokClient::from_env() {
+            Ok(grok) if grok.is_configured() => {
+                info!(
+                    agent = sports_cfg.agent_id,
+                    "grok live search enabled for sports agent"
+                );
+                agent = agent.with_grok(grok);
+            }
+            Ok(_) => {
+                warn!(
+                    agent = sports_cfg.agent_id,
+                    "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    agent = sports_cfg.agent_id,
+                    error = %e,
+                    "failed to initialize GrokClient; continuing without Grok"
+                );
+            }
+        }
+    }
+    let ctx = AgentContext::new(
+        sports_cfg.agent_id.clone(),
+        Domain::Sports,
+        handle.clone(),
+        cmd_rx,
+    );
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = agent.run(ctx).await {
+            error!(agent = "sports", error = %e, "agent exited with error");
+        }
+    });
+    agent_handles.push(jh);
+    info!("sports agent spawned");
+    Ok(())
+}
+
+async fn spawn_politics_trading_agent(
+    config: &PlatformBootstrapConfig,
+    app_config: &AppConfig,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    pm_client: Option<&PolymarketClient>,
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    let Some(ee_cfg) = app_config.event_edge_agent.as_ref() else {
+        return Ok(());
+    };
+
+    let politics_cfg = config.politics.clone();
+    let cmd_rx = coordinator.register_agent(
+        politics_cfg.agent_id.clone(),
+        Domain::Politics,
+        politics_cfg.risk_params.clone(),
+    );
+
+    let pm_client_ref = pm_client.ok_or_else(|| {
+        crate::error::PloyError::Validation(
+            "politics domain requires a Polymarket client, but none was initialized".to_string(),
+        )
+    })?;
+    let core = EventEdgeCore::new(pm_client_ref.clone(), ee_cfg.clone());
+    let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);
+    let ctx = AgentContext::new(
+        politics_cfg.agent_id.clone(),
+        Domain::Politics,
+        handle.clone(),
+        cmd_rx,
+    );
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = agent.run(ctx).await {
+            error!(agent = "politics", error = %e, "agent exited with error");
+        }
+    });
+    agent_handles.push(jh);
+    info!("politics agent spawned");
+    Ok(())
+}
+
 pub(crate) async fn ensure_clob_orderbook_snapshots_table(pool: &PgPool) -> Result<()> {
     crate::platform::persistence_schema::ensure_clob_orderbook_snapshots_table(pool).await
 }
@@ -5760,347 +6107,28 @@ pub async fn start_platform(
     }
 
     if config.enable_sports {
-        if let Some(ref nba_cfg) = app_config.nba_comeback {
-            let sports_cfg = config.sports.clone();
-            let risk_params = sports_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-                risk_params,
-            );
-
-            let pool = match shared_pool.as_ref() {
-                Some(pool) => pool.clone(),
-                None => {
-                    PgPoolOptions::new()
-                        .max_connections(app_config.database.max_connections)
-                        .connect(&app_config.database.url)
-                        .await?
-                }
-            };
-            spawn_polymarket_trade_persistence_from_collector_targets(
-                pool.clone(),
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-            );
-
-            // Sports L2 data collection: create a dedicated sports data plane so
-            // PM WS lifecycle stays domain-isolated from crypto.
-            {
-                let sports_data_plane_config = DataPlaneConfig {
-                    polymarket_ws_url: app_config.market.ws_url.clone(),
-                    ..DataPlaneConfig::default()
-                };
-                let sports_data_plane = Arc::new(PlatformDataPlane::new(
-                    sports_data_plane_config,
-                    Arc::clone(&freshness),
-                ));
-                sports_data_plane.start(Vec::new()).await?;
-                let sports_pm_ws = sports_data_plane.polymarket_ws().ok_or_else(|| {
-                    crate::error::PloyError::Validation(
-                        "sports data plane misconfigured: missing Polymarket WS adapter"
-                            .to_string(),
-                    )
-                })?;
-
-                // Seed initial NBA tokens from collector_token_targets
-                let mut sports_desired: HashMap<String, Side> = HashMap::new();
-                if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
-                    r#"
-                    SELECT token_id, metadata->>'side'
-                    FROM collector_token_targets
-                    WHERE domain = 'SPORTS_NBA'
-                      AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
-                      AND (expires_at IS NULL OR expires_at > NOW())
-                    "#,
-                )
-                .fetch_all(&pool)
-                .await
-                {
-                    for (token_id, side_str) in rows {
-                        let side = match side_str.as_deref() {
-                            Some("DOWN") | Some("NO") => Side::Down,
-                            _ => Side::Up,
-                        };
-                        sports_desired.insert(token_id, side);
-                    }
-                }
-
-                let initial_count = sports_desired.len();
-                if initial_count > 0 {
-                    sports_pm_ws.reconcile_token_sides(&sports_desired).await;
-                    info!(
-                        agent = sports_cfg.agent_id,
-                        token_count = initial_count,
-                        "seeded sports PM WS tokens for L2 data collection"
-                    );
-                }
-
-                // Spawn periodic token refresh for sports WS
-                let refresh_ws = sports_pm_ws.clone();
-                let refresh_pool = pool.clone();
-                let refresh_agent = sports_cfg.agent_id.clone();
-                tokio::spawn(async move {
-                    let secs = env_u64("PM_SPORTS_COLLECTOR_REFRESH_SECS", 300).max(30);
-                    let mut tick = tokio::time::interval(Duration::from_secs(secs));
-                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    loop {
-                        tick.tick().await;
-                        let mut desired: HashMap<String, Side> = HashMap::new();
-                        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
-                            r#"
-                            SELECT token_id, metadata->>'side'
-                            FROM collector_token_targets
-                            WHERE domain = 'SPORTS_NBA'
-                              AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
-                              AND (expires_at IS NULL OR expires_at > NOW())
-                            "#,
-                        )
-                        .fetch_all(&refresh_pool)
-                        .await
-                        {
-                            for (token_id, side_str) in rows {
-                                let side = match side_str.as_deref() {
-                                    Some("DOWN") | Some("NO") => Side::Down,
-                                    _ => Side::Up,
-                                };
-                                desired.insert(token_id, side);
-                            }
-                        }
-                        let (_a, _r, _u, total) = refresh_ws.reconcile_token_sides(&desired).await;
-                        trace!(
-                            agent = refresh_agent,
-                            total,
-                            "refreshed sports PM WS token subscriptions"
-                        );
-                    }
-                });
-
-                // Persistence: quotes + orderbook snapshots via unified pipeline.
-                let sports_quote_table_ready = match ensure_clob_quote_ticks_table(&pool).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to ensure clob_quote_ticks table; sports quote persistence bridge disabled"
-                        );
-                        false
-                    }
-                };
-                let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(
-                    &pool,
-                )
-                .await
-                {
-                    Ok(()) => true,
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to ensure clob_orderbook_snapshots table; sports orderbook persistence bridge disabled"
-                        );
-                        false
-                    }
-                };
-                if sports_quote_table_ready || sports_orderbook_table_ready {
-                    let sports_orderbook_levels =
-                        env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
-                    let sports_orderbook_snapshot_ms =
-                        match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
-                            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-                            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64)
-                                .saturating_mul(1000),
-                        };
-                    let sports_orderbook_require_hash_change =
-                        env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
-                    let sports_pipeline_config = crate::platform::PersistenceConfig {
-                        clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
-                        clob_orderbook_snapshot_interval_ms: sports_orderbook_snapshot_ms as i64,
-                        clob_orderbook_max_levels: sports_orderbook_levels,
-                        clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
-                        ..Default::default()
-                    };
-                    let sports_pipeline =
-                        crate::platform::PersistencePipeline::spawn_with_freshness(
-                            pool.clone(),
-                            sports_pipeline_config,
-                            Some(Arc::clone(&freshness)),
-                        );
-
-                    if sports_quote_table_ready {
-                        if let Some(quote_rx) = sports_data_plane.subscribe_quotes() {
-                            sports_pipeline.spawn_bridge(
-                                quote_rx,
-                                format!("{}.sports_quote", sports_cfg.agent_id),
-                                |update| {
-                                    Some(crate::platform::PersistenceEvent::ClobQuote(
-                                        crate::platform::ClobQuoteTick {
-                                            token_id: update.token_id.clone(),
-                                            side: update.side.as_str().to_string(),
-                                            best_bid: update.quote.best_bid,
-                                            best_ask: update.quote.best_ask,
-                                            bid_size: update.quote.bid_size,
-                                            ask_size: update.quote.ask_size,
-                                            domain: Domain::Sports,
-                                            received_at: Utc::now(),
-                                        },
-                                    ))
-                                },
-                            );
-                        } else {
-                            warn!("sports quote bridge unavailable: no quote receiver");
-                        }
-                    }
-
-                    if sports_orderbook_table_ready {
-                        if let Some(book_rx) = sports_data_plane.subscribe_books() {
-                            sports_pipeline.spawn_bridge(
-                                book_rx,
-                                format!("{}.sports_orderbook", sports_cfg.agent_id),
-                                |book_msg| {
-                                    use sha2::{Digest, Sha256};
-                                    let bids_json =
-                                        serde_json::to_value(&book_msg.bids).unwrap_or_default();
-                                    let asks_json =
-                                        serde_json::to_value(&book_msg.asks).unwrap_or_default();
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(bids_json.to_string().as_bytes());
-                                    hasher.update(asks_json.to_string().as_bytes());
-                                    let hash = format!("{:x}", hasher.finalize());
-                                    Some(crate::platform::PersistenceEvent::ClobOrderbook(
-                                        crate::platform::ClobOrderbookSnapshot {
-                                            domain: Domain::Sports,
-                                            token_id: book_msg.asset_id.clone(),
-                                            market: Some(book_msg.market.clone()),
-                                            bids: bids_json,
-                                            asks: asks_json,
-                                            book_timestamp: book_msg
-                                                .timestamp
-                                                .as_deref()
-                                                .and_then(|s| {
-                                                    chrono::DateTime::parse_from_rfc3339(s).ok()
-                                                })
-                                                .map(|dt| dt.with_timezone(&Utc)),
-                                            hash,
-                                            source: "polymarket_ws".into(),
-                                            context: None,
-                                        },
-                                    ))
-                                },
-                            );
-                        } else {
-                            warn!("sports orderbook bridge unavailable: no book receiver");
-                        }
-                    }
-                } else {
-                    warn!(
-                        agent = sports_cfg.agent_id,
-                        "sports persistence tables unavailable; WS persistence bridges disabled"
-                    );
-                }
-
-                info!(
-                    agent = sports_cfg.agent_id,
-                    "sports PM WS L2 data collection started"
-                );
-            }
-
-            let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
-            let stats = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-                pool.clone(),
-                nba_cfg.season.clone(),
-            );
-            let core =
-                crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
-            let mut agent =
-                SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
-            match PolymarketSportsClient::new() {
-                Ok(pm_sports) => {
-                    agent = agent.with_pm_sports(pm_sports);
-                }
-                Err(e) => {
-                    warn!(
-                        agent = sports_cfg.agent_id,
-                        error = %e,
-                        "failed to initialize PolymarketSportsClient; continuing without PM market observations"
-                    );
-                }
-            }
-            if nba_cfg.grok_enabled {
-                match crate::ai_clients::grok::GrokClient::from_env() {
-                    Ok(grok) if grok.is_configured() => {
-                        info!(
-                            agent = sports_cfg.agent_id,
-                            "grok live search enabled for sports agent"
-                        );
-                        agent = agent.with_grok(grok);
-                    }
-                    Ok(_) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to initialize GrokClient; continuing without Grok"
-                        );
-                    }
-                }
-            }
-            let ctx = AgentContext::new(
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-                handle.clone(),
-                cmd_rx,
-            );
-
-            let jh = tokio::spawn(async move {
-                if let Err(e) = agent.run(ctx).await {
-                    error!(agent = "sports", error = %e, "agent exited with error");
-                }
-            });
-            agent_handles.push(jh);
-            info!("sports agent spawned");
-        }
+        spawn_sports_trading_agent(
+            &config,
+            &app_config,
+            shared_pool.as_ref(),
+            &freshness,
+            &mut coordinator,
+            &handle,
+            &mut agent_handles,
+        )
+        .await?;
     }
 
     if config.enable_politics {
-        if let Some(ref ee_cfg) = app_config.event_edge_agent {
-            let politics_cfg = config.politics.clone();
-            let risk_params = politics_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(
-                politics_cfg.agent_id.clone(),
-                Domain::Politics,
-                risk_params,
-            );
-
-            let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
-                crate::error::PloyError::Validation(
-                    "politics domain requires a Polymarket client, but none was initialized"
-                        .to_string(),
-                )
-            })?;
-            let core = EventEdgeCore::new(pm_client_ref.clone(), ee_cfg.clone());
-            let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);
-            let ctx = AgentContext::new(
-                politics_cfg.agent_id.clone(),
-                Domain::Politics,
-                handle.clone(),
-                cmd_rx,
-            );
-
-            let jh = tokio::spawn(async move {
-                if let Err(e) = agent.run(ctx).await {
-                    error!(agent = "politics", error = %e, "agent exited with error");
-                }
-            });
-            agent_handles.push(jh);
-            info!("politics agent spawned");
-        }
+        spawn_politics_trading_agent(
+            &config,
+            &app_config,
+            &mut coordinator,
+            &handle,
+            pm_client.as_ref(),
+            &mut agent_handles,
+        )
+        .await?;
     }
 
     // --- OpenClaw meta-agent (Layer 3 orchestrator) ---
