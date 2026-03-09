@@ -732,7 +732,9 @@ max_daily_spend_usd = 125
         assert_eq!(strategy.name(), "event_edge");
         assert!(matches!(
             strategy.required_feeds().as_slice(),
-            [DataFeed::Tick { interval_ms: 45_000 }]
+            [DataFeed::Tick {
+                interval_ms: 45_000
+            }]
         ));
         assert_eq!(strategy.core.cfg.event_ids, vec!["event-1"]);
         assert_eq!(strategy.core.cfg.titles, vec!["Who wins?"]);
@@ -841,13 +843,11 @@ event_ids = ["event-1"]
         let now = Utc::now();
         let actions = strategy.build_actions_for_scan_for_test(&scan, now);
 
-        assert!(
-            actions.iter().any(|action| matches!(
-                action,
-                StrategyAction::LogEvent { event }
-                    if matches!(event.event_type, StrategyEventType::SignalDetected)
-            ))
-        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            StrategyAction::LogEvent { event }
+                if matches!(event.event_type, StrategyEventType::SignalDetected)
+        )));
 
         let client_order_id = actions
             .iter()
@@ -858,7 +858,10 @@ event_ids = ["event-1"]
                     ..
                 } => {
                     assert_eq!(order.client_order_id, *client_order_id);
-                    assert_eq!(order.idempotency_key.as_deref(), Some(client_order_id.as_str()));
+                    assert_eq!(
+                        order.idempotency_key.as_deref(),
+                        Some(client_order_id.as_str())
+                    );
                     Some(client_order_id.clone())
                 }
                 _ => None,
