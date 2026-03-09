@@ -942,7 +942,7 @@ impl DomainAgent for RLCryptoAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::types::{CryptoEvent, QuoteData};
+    use crate::platform::{CryptoEvent, ExecutionStatus, QuoteData};
 
     fn make_crypto_event(
         symbol: &str,
@@ -1073,7 +1073,7 @@ mod tests {
             intent_id: uuid::Uuid::new_v4(),
             agent_id: agent.id().to_string(),
             order_id: Some("order-1".to_string()),
-            status: crate::platform::types::ExecutionStatus::Filled,
+            status: ExecutionStatus::Filled,
             filled_shares: 100,
             avg_fill_price: Some(dec!(0.50)),
             fees: Decimal::ZERO,
