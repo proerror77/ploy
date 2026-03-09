@@ -1,7 +1,7 @@
 //! CryptoTradingAgent — pull-based agent for crypto 5m/15m UP/DOWN markets
 //!
-//! Owns Binance + Polymarket WebSocket feeds. Reuses signal logic from
-//! the existing CryptoAgent (sum_of_asks threshold + momentum direction).
+//! Owns Binance + Polymarket WebSocket feeds and applies the
+//! sum-of-asks plus momentum entry logic directly.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

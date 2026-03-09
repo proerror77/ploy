@@ -50,7 +50,6 @@ pub use types::{
     OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
 };
 
-pub use agents::EventEdgePlatformAgent;
 pub use agents::NbaComebackAgent;
 
 // RL-powered agents (requires 'rl' feature)

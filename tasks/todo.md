@@ -1,3 +1,30 @@
+# Platform Dead DomainAgent Retirement (2026-03-09)
+
+## Goal
+Remove `DomainAgent` implementations that no longer have bootstrap, CLI, or main-command wiring so the legacy platform runtime surface shrinks before higher-risk runtime migrations.
+
+## Tasks
+
+- [x] Verify `CryptoAgent` and `EventEdgePlatformAgent` have no active runtime wiring outside their own module/export surface.
+- [x] Remove the dead modules and their public exports while keeping still-active NBA and RL platform paths intact.
+- [x] Run targeted compile/test validation to prove the remaining platform runtime still builds and keeps its current dry-run-only guardrails.
+
+## Review
+
+- [x] Confirm no bootstrap, CLI, or main-command path still references the removed dead agents.
+- [x] Confirm `platform/mod.rs` and `platform/agents/mod.rs` only export the still-supported legacy platform agents after the cut.
+- [x] Confirm `OrderPlatform` behavior remains unchanged after the surface-area reduction.
+
+## Progress notes
+
+- 2026-03-09: Agent inventory confirmed `CryptoAgent` and `EventEdgePlatformAgent` were only referenced by their own files and re-export layers, with no active bootstrap/runtime wiring.
+- 2026-03-09: Removed `src/platform/agents/crypto_agent.rs` and `src/platform/agents/event_edge_agent.rs`, and shrank platform exports to keep only still-supported NBA and RL legacy platform paths.
+- 2026-03-09: Cleaned the stale `CryptoTradingAgent` module comment that still referenced deleted `CryptoAgent` code.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_order_platform_start_allows_dry_run --lib -- --nocapture`
+  - `cargo test test_order_platform_start_blocks_live_runtime --lib -- --nocapture`
+
 # Coordinator Execution Runner Extraction (2026-03-09)
 
 ## Goal
