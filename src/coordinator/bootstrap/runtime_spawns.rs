@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::{GovernanceAgent, GovernanceContext, OpenClawAgent};
 
 pub(super) struct ManagedStrategyRuntimeSpawn {
     pub(super) strategy_label: &'static str,
@@ -73,40 +74,6 @@ pub(super) fn spawn_managed_strategy_runtime_task(
         "managed strategy runtime spawned"
     );
     true
-}
-
-pub(super) fn spawn_trading_agent_task<A>(
-    agent: A,
-    coordinator: &mut Coordinator,
-    handle: &CoordinatorHandle,
-    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
-    runtime_label: &'static str,
-) where
-    A: TradingAgent,
-{
-    let agent_id = agent.id().to_string();
-    let domain = agent.domain();
-    let risk_params = agent.risk_params();
-    let cmd_rx = coordinator.register_agent(agent_id.clone(), domain, risk_params);
-    let ctx = AgentContext::new(agent_id.clone(), domain, handle.clone(), cmd_rx);
-    let runtime_agent_id = agent_id.clone();
-
-    let jh = tokio::spawn(async move {
-        if let Err(e) = agent.run(ctx).await {
-            error!(
-                agent = runtime_label,
-                runtime_agent_id = %runtime_agent_id,
-                error = %e,
-                "legacy trading agent exited with error"
-            );
-        }
-    });
-    agent_handles.push(jh);
-    info!(
-        agent = %agent_id,
-        runtime = runtime_label,
-        "legacy trading agent spawned"
-    );
 }
 
 pub(super) fn spawn_openclaw_governance_agent(

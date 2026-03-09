@@ -196,14 +196,6 @@ pub struct AgentHealthStatus {
     pub is_healthy: bool,
 }
 
-/// 簡化的 Agent 實作輔助 trait
-///
-/// 提供一些默認實作，減少樣板代碼
-pub trait SimpleAgent: DomainAgent {
-    /// 更新狀態
-    fn set_status(&mut self, status: AgentStatus);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

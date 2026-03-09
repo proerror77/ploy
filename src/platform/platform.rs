@@ -237,7 +237,7 @@ impl OrderPlatform {
 
     /// 直接入隊訂單意圖 (用於外部 Agent 提交)
     ///
-    /// 允許外部 Agent (如 RLCryptoAgent) 直接提交訂單意圖到隊列
+    /// 允許外部 legacy DomainAgent 兼容層直接提交訂單意圖到隊列
     pub async fn enqueue_intent(&self, intent: OrderIntent) -> Result<()> {
         let mut queue = self.queue.write().await;
         queue.enqueue(intent.clone()).map_err(|e| {
