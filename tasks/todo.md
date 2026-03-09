@@ -444,6 +444,37 @@ Finish the momentum cutover by removing the last bootstrap fallback to `CryptoTr
   - `cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --nocapture`
   - `cargo test build_momentum_runtime_config_rejects_non_directional_modes --lib -- --nocapture`
 
+# Legacy Crypto Bootstrap Quarantine (2026-03-09)
+
+## Goal
+Move the last live `TradingAgent` bootstrap ownership for `crypto_lob_ml` and `crypto_rl_policy` out of `bootstrap.rs`, so managed strategy and governance paths stay in the main assembly flow while legacy crypto runtime remains isolated in one compatibility module.
+
+## Tasks
+
+- [x] Create a dedicated bootstrap submodule for legacy crypto agent env parsing and spawn logic.
+- [x] Rewire `PlatformBootstrapConfig::from_app_config` to call the extracted legacy crypto config helper instead of inlining the `PLOY_CRYPTO_LOB_ML__*` / `PLOY_CRYPTO_RL_POLICY__*` parsing block.
+- [x] Rewire the crypto startup path to delegate legacy `lob_ml` / `rl_policy` spawns to the extracted module.
+- [x] Move the generic legacy `spawn_trading_agent_task(...)` helper into the legacy crypto module so `runtime_spawns.rs` only owns managed/governance startup.
+- [x] Remove direct bootstrap imports of legacy crypto runtime traits/agent types once the helper move is complete.
+- [x] Re-run compile plus bootstrap config regressions after the extraction.
+
+## Review
+
+- [x] Confirm `bootstrap.rs` no longer inlines the `PLOY_CRYPTO_LOB_ML__*` / `PLOY_CRYPTO_RL_POLICY__*` env parsing block.
+- [x] Confirm `bootstrap.rs` no longer directly constructs `CryptoLobMlAgent` or `CryptoRlPolicyAgent`.
+- [x] Confirm `runtime_spawns.rs` no longer owns the generic legacy trading-agent spawn helper.
+- [x] Confirm the legacy crypto runtime surface is now concentrated in [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs).
+
+## Progress notes
+
+- 2026-03-09: Added [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs) to own the remaining `crypto_lob_ml` / `crypto_rl_policy` env parsing and runtime spawn paths.
+- 2026-03-09: Rewired [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) so the main assembly flow delegates both legacy crypto config hydration and legacy runtime startup to the new module.
+- 2026-03-09: Moved `spawn_trading_agent_task(...)` out of [runtime_spawns.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_spawns.rs) and into the legacy crypto module, which let bootstrap drop its direct `TradingAgent` / `AgentContext` / legacy-agent imports.
+- 2026-03-09: File sizes after the extraction:
+  - [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs): `2840` lines
+  - [legacy_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/legacy_crypto.rs): `544` lines
+  - [runtime_spawns.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_spawns.rs): `366` lines
+
 # Bootstrap OpenClaw Spawn Extraction (2026-03-09)
 
 ## Goal
