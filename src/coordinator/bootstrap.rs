@@ -16,8 +16,8 @@ use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, P
 use crate::agents::{
     AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
     CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
-    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
-    TradingAgent,
+    GovernanceAgent, GovernanceContext, PoliticsTradingAgent, PoliticsTradingConfig,
+    SportsTradingAgent, SportsTradingConfig, TradingAgent,
 };
 #[cfg(feature = "rl")]
 use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
@@ -5844,7 +5844,7 @@ pub async fn start_platform(
 
         let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws.clone());
         let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
-        let ctx = AgentContext::new(
+        let ctx = GovernanceContext::new(
             oc_agent_id.clone(),
             Domain::Custom(0),
             handle.clone(),

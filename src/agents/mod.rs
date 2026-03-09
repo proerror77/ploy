@@ -7,6 +7,7 @@ pub mod context;
 pub mod crypto;
 pub mod crypto_lob_ml;
 pub mod crypto_rl_policy;
+pub mod governance_context;
 pub mod openclaw;
 pub mod politics;
 pub mod sports;
@@ -18,7 +19,8 @@ pub use crypto_lob_ml::{
     CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
 pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
+pub use governance_context::GovernanceContext;
 pub use openclaw::{OpenClawAgent, OpenClawConfig};
 pub use politics::{PoliticsTradingAgent, PoliticsTradingConfig};
 pub use sports::{SportsTradingAgent, SportsTradingConfig};
-pub use traits::{AgentConfig, TradingAgent};
+pub use traits::{AgentConfig, GovernanceAgent, TradingAgent};

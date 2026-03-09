@@ -1,3 +1,32 @@
+# OpenClaw Governance Context Extraction (2026-03-09)
+
+## Goal
+Separate OpenClaw from the generic `TradingAgent` contract by giving it a governance-only context that cannot submit orders, while preserving its current pause/resume/policy authority.
+
+## Tasks
+
+- [x] Add a dedicated governance context with only state, governance, and coordinator-control capabilities.
+- [x] Introduce a governance-agent trait and move `OpenClawAgent` off the `TradingAgent` trait.
+- [x] Rewire only the OpenClaw bootstrap path to use the governance-specific context, leaving other trading agents unchanged.
+- [x] Run targeted compile/test validation around OpenClaw governance behavior and platform startup compilation.
+
+## Review
+
+- [x] Confirm `OpenClawAgent` no longer imports or receives `submit_order` capability through context.
+- [x] Confirm bootstrap spawns OpenClaw through the governance-specific path only.
+- [x] Confirm trading-agent paths for crypto/sports/politics remain unchanged by this slice.
+
+## Progress notes
+
+- 2026-03-09: Agent inventory showed OpenClaw is the safest first live runtime peel because it already behaves like governance-plane code while still hanging off `TradingAgent`.
+- 2026-03-09: Added `src/agents/governance_context.rs` and a new `GovernanceAgent` trait so governance-plane agents can observe state, update policy, and pause/resume peers without receiving order-submission capability.
+- 2026-03-09: Moved `OpenClawAgent` from `TradingAgent` to `GovernanceAgent` and rewired only the OpenClaw bootstrap branch to construct `GovernanceContext`.
+- 2026-03-09: Verified there are no remaining `TradingAgent for OpenClawAgent` or `submit_order` call sites under `src/agents/openclaw`.
+- 2026-03-09: Targeted validation passed:
+  - `cargo check --lib`
+  - `cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+  - `cargo test from_app_config_ignores_legacy_enable_price_exits_env --lib -- --nocapture`
+
 # Platform Dead DomainAgent Retirement (2026-03-09)
 
 ## Goal

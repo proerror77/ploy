@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::platform::{AgentRiskParams, Domain};
 
 use super::context::AgentContext;
+use super::governance_context::GovernanceContext;
 
 /// Risk parameters specific to a trading agent instance
 #[derive(Debug, Clone)]
@@ -45,4 +46,21 @@ pub trait TradingAgent: Send + Sync + 'static {
     /// Should handle CoordinatorCommands (Pause/Resume/Shutdown) from ctx.
     /// Returns when the agent is done (shutdown or fatal error).
     async fn run(self, ctx: AgentContext) -> Result<()>;
+}
+
+/// Governance-plane agent trait.
+///
+/// Governance agents can observe runtime state and issue coordinator control /
+/// policy updates, but they do not receive order-submission capability.
+#[async_trait]
+pub trait GovernanceAgent: Send + Sync + 'static {
+    /// Unique identifier for this governance agent instance
+    fn id(&self) -> &str;
+
+    /// Human-readable name
+    fn name(&self) -> &str;
+
+    /// Main governance loop. May update policy, pause/resume agents, and
+    /// report heartbeats, but cannot submit orders directly.
+    async fn run(self, ctx: GovernanceContext) -> Result<()>;
 }
