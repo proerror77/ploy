@@ -93,17 +93,26 @@ Delete the remaining `platform::NbaComebackAgent` compatibility path by moving t
 
 ## Tasks
 
-- [ ] Rework `src/cli/strategy.rs` `run_nba_comeback(...)` to drive `NbaComebackStrategy` instead of `platform::NbaComebackAgent`.
-- [ ] Keep the CLI output useful for dry-run signal inspection without reintroducing a second runtime contract.
-- [ ] Remove the dead NBA agent export/module from `src/platform/mod.rs` and `src/platform/agents/mod.rs`.
-- [ ] Delete `src/platform/agents/nba_agent.rs` if nothing still instantiates it.
-- [ ] Re-run the narrowest CLI/strategy compile tests after the cutover.
+- [x] Rework `src/cli/strategy.rs` `run_nba_comeback(...)` to drive `NbaComebackStrategy` instead of `platform::NbaComebackAgent`.
+- [x] Keep the CLI output useful for dry-run signal inspection without reintroducing a second runtime contract.
+- [x] Remove the dead NBA agent export/module from `src/platform/mod.rs` and `src/platform/agents/mod.rs`.
+- [x] Delete `src/platform/agents/nba_agent.rs` if nothing still instantiates it.
+- [x] Re-run the narrowest CLI/strategy compile tests after the cutover.
 
 ## Review
 
-- [ ] Confirm no code instantiates `platform::NbaComebackAgent`.
-- [ ] Confirm `src/platform/mod.rs` no longer re-exports the deleted agent.
+- [x] Confirm no code instantiates `platform::NbaComebackAgent`.
+- [x] Confirm `src/platform/mod.rs` no longer re-exports the deleted agent.
 - [ ] Confirm the CLI command still prints NBA comeback signals in dry-run mode.
+
+## Progress notes
+
+- 2026-03-09: Reworked [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) so the `nba_comeback` CLI command now drives [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/strategy.rs) directly instead of instantiating `platform::NbaComebackAgent`.
+- 2026-03-09: Added `NbaComebackStrategy::from_config(...)` plus a direct-config unit test so canonical callers no longer need a TOML round trip.
+- 2026-03-09: Deleted [nba_agent.rs](/Users/proerror/Documents/ploy/src/platform/agents/nba_agent.rs) and removed the dead `NbaComebackAgent` exports from [mod.rs](/Users/proerror/Documents/ploy/src/platform/agents/mod.rs) and [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-09: Validation passed:
+  - `cargo check --bin ploy`
+  - `cargo test strategy::nba_comeback::strategy --lib -- --nocapture`
 
 # Canonical Strategy Handoff Unification (2026-03-09)
 
@@ -1488,17 +1497,20 @@ Break `bootstrap.rs`'s remaining type-level dependency on the legacy sports/poli
 
 - [x] Add local bootstrap runtime-config structs for sports and politics.
 - [x] Switch `PlatformBootstrapConfig` to use the new local runtime-config types.
+- [x] Delete the dead sports/politics config shim files from `src/agents/`.
 - [x] Re-run compile and targeted bootstrap tests after the decoupling.
 
 ## Review
 
 - [x] Confirm `bootstrap.rs` no longer imports sports/politics config types from `src/agents/*`.
 - [x] Confirm the new runtime-config defaults preserve prior agent IDs and polling defaults.
+- [x] Confirm `src/agents/mod.rs` no longer re-exports sports/politics legacy config shims.
 - [x] Confirm bootstrap still compiles with the new local config module.
 
 ## Progress notes
 
 - 2026-03-09: Added [runtime_config.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/runtime_config.rs) so bootstrap owns the sports/politics runtime config types directly instead of importing them from legacy agent modules.
+- 2026-03-09: Deleted [sports.rs](/Users/proerror/Documents/ploy/src/agents/sports.rs) and [politics.rs](/Users/proerror/Documents/ploy/src/agents/politics.rs) after cutting bootstrap over to the new local runtime config types.
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo test build_event_edge_runtime_config_ --lib -- --nocapture`

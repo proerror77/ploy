@@ -3498,14 +3498,18 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
 }
 
 /// Run the NBA comeback agent standalone
-async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
-    use crate::platform::DomainAgent;
+async fn run_nba_comeback(config: Option<PathBuf>, dry_run: bool) -> Result<()> {
+    use crate::strategy::nba_comeback::NbaComebackStrategy;
+    use crate::strategy::{AlertLevel, Strategy, StrategyAction, StrategyEventType};
     println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  NBA Q3→Q4 Comeback Trading Agent                            ║\x1b[0m");
+    println!("\x1b[36m║  NBA Q3→Q4 Comeback Strategy                                 ║\x1b[0m");
     println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
-    // Load config
-    let app_config = crate::config::AppConfig::load().context("Failed to load config")?;
+    let app_config = match config.as_ref() {
+        Some(path) => crate::config::AppConfig::load_from(path),
+        None => crate::config::AppConfig::load(),
+    }
+    .context("Failed to load config")?;
 
     let nba_cfg = app_config.nba_comeback.unwrap_or_else(|| {
         info!("No [nba_comeback] in config, using defaults");
@@ -3559,63 +3563,79 @@ async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()
         "  Min comeback rate: {:.0}%",
         nba_cfg.min_comeback_rate * 100.0
     );
+    println!("  Dry run: {}", dry_run);
     println!();
 
-    // Connect to DB and load stats
-    let db_url = app_config.database.url;
-    let store = crate::adapters::PostgresStore::new(&db_url, 5)
-        .await
-        .context("Failed to connect to database")?;
-
-    let mut stats_provider = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-        store.pool().clone(),
-        nba_cfg.season.clone(),
-    );
-    stats_provider
-        .load_all()
-        .await
-        .context("Failed to load team stats — run 'ploy strategy nba-seed-stats' first")?;
+    let mut strategy = NbaComebackStrategy::from_config(
+        "nba_cli".to_string(),
+        nba_cfg.clone(),
+        dry_run,
+        Some(app_config.database.url.as_str()),
+    )
+    .context("Failed to build NBA comeback strategy")?;
 
     println!(
-        "  \x1b[32m✓\x1b[0m Loaded {} team profiles",
-        stats_provider.team_count()
-    );
-
-    // Create core + agent
-    let espn = crate::strategy::nba_comeback::EspnClient::new();
-    let core =
-        crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats_provider, nba_cfg.clone());
-
-    let mut agent = crate::platform::NbaComebackAgent::new(core);
-    agent.start().await?;
-
-    println!(
-        "  \x1b[32m✓\x1b[0m Agent running — scanning every {}s",
+        "  \x1b[32m✓\x1b[0m Strategy ready — scanning every {}s",
         nba_cfg.espn_poll_interval_secs
     );
     println!("\nPress Ctrl+C to stop...\n");
 
-    // Main loop: tick the agent
     let interval = std::time::Duration::from_secs(nba_cfg.espn_poll_interval_secs);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("\n\x1b[33m⚠ Shutdown signal received\x1b[0m");
-                agent.stop().await?;
-                println!("\x1b[32m✓ Agent stopped\x1b[0m");
+                for action in strategy.shutdown().await? {
+                    if let StrategyAction::Alert { level, message } = action {
+                        let level = match level {
+                            AlertLevel::Info => "info",
+                            AlertLevel::Warning => "warn",
+                            AlertLevel::Error => "error",
+                            AlertLevel::Critical => "critical",
+                        };
+                        println!("  [{}] {}", level, message);
+                    }
+                }
+                println!("\x1b[32m✓ Strategy stopped\x1b[0m");
                 break;
             }
             _ = tokio::time::sleep(interval) => {
-                use crate::platform::DomainAgent;
-                let intents = agent.on_event(crate::platform::DomainEvent::Tick(chrono::Utc::now())).await?;
-                if !intents.is_empty() {
-                    for intent in &intents {
-                        println!("  \x1b[36m📤 ORDER: {} {} shares @ {} (edge: {})\x1b[0m",
-                            intent.metadata.get("trailing_team").unwrap_or(&"?".to_string()),
-                            intent.shares,
-                            intent.limit_price,
-                            intent.metadata.get("edge").unwrap_or(&"?".to_string()),
-                        );
+                let actions = strategy.on_tick(chrono::Utc::now()).await?;
+                if !actions.is_empty() {
+                    for action in actions {
+                        match action {
+                            StrategyAction::LogEvent { event } => {
+                                let prefix = match event.event_type {
+                                    StrategyEventType::SignalDetected => "📡 SIGNAL",
+                                    StrategyEventType::OrderFilled => "✅ FILL",
+                                    _ => "ℹ EVENT",
+                                };
+                                println!("  \x1b[36m{}: {}\x1b[0m", prefix, event.message);
+                            }
+                            StrategyAction::SubmitOrder {
+                                client_order_id,
+                                order,
+                                ..
+                            } => {
+                                println!(
+                                    "  \x1b[36m📤 ORDER: {} shares @ {} token={} client_id={}\x1b[0m",
+                                    order.shares,
+                                    order.limit_price,
+                                    order.token_id,
+                                    client_order_id,
+                                );
+                            }
+                            StrategyAction::Alert { level, message } => {
+                                let level = match level {
+                                    AlertLevel::Info => "info",
+                                    AlertLevel::Warning => "warn",
+                                    AlertLevel::Error => "error",
+                                    AlertLevel::Critical => "critical",
+                                };
+                                println!("  [{}] {}", level, message);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }

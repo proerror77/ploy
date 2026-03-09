@@ -20,7 +20,7 @@ const NBA_COMEBACK_STRATEGY_NAME: &str = "nba_comeback";
 const DEFAULT_DATABASE_URL: &str = "postgres://localhost/unused";
 const NBA_COMEBACK_PRIORITY: u8 = 8;
 
-fn default_nba_comeback_config() -> NbaComebackConfig {
+pub(crate) fn default_nba_comeback_config() -> NbaComebackConfig {
     NbaComebackConfig {
         enabled: true,
         min_edge: Decimal::new(5, 2),
@@ -175,6 +175,29 @@ impl NbaComebackStrategy {
             last_error: None,
             stats_loaded: false,
         }
+    }
+
+    pub fn from_config(
+        id: String,
+        cfg: NbaComebackConfig,
+        dry_run: bool,
+        database_url: Option<&str>,
+    ) -> Result<Self> {
+        let database_url = database_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+            .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_string());
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&database_url)
+            .map_err(|e| anyhow!("invalid nba_comeback database_url: {}", e))?;
+        let stats = ComebackStatsProvider::new(pool, cfg.season.clone());
+        let espn = crate::strategy::nba_comeback::EspnClient::new();
+
+        Ok(Self::new(id, NbaComebackCore::new(espn, stats, cfg), dry_run))
     }
 
     pub fn from_toml(id: String, config_str: &str, dry_run: bool) -> Result<Self> {
@@ -336,23 +359,9 @@ impl NbaComebackStrategy {
             cfg.early_exit_stop_loss_pct = value;
         }
 
-        let database_url = nba
-            .get("database_url")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .or_else(|| std::env::var("DATABASE_URL").ok())
-            .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_string());
+        let database_url = nba.get("database_url").and_then(|v| v.as_str());
 
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy(&database_url)
-            .map_err(|e| anyhow!("invalid nba_comeback database_url: {}", e))?;
-        let stats = ComebackStatsProvider::new(pool, cfg.season.clone());
-        let espn = crate::strategy::nba_comeback::EspnClient::new();
-
-        Ok(Self::new(id, NbaComebackCore::new(espn, stats, cfg), dry_run))
+        Self::from_config(id, cfg, dry_run, database_url)
     }
 
     pub fn with_market_registration(mut self, registration: NbaComebackMarketRegistration) -> Self {
@@ -914,6 +923,20 @@ mod tests {
 
     fn strategy_from_toml(toml: &str) -> NbaComebackStrategy {
         NbaComebackStrategy::from_toml("nba-test".to_string(), toml, true).expect("strategy")
+    }
+
+    #[tokio::test]
+    async fn strategy_from_config_builds_strategy() {
+        let strategy = NbaComebackStrategy::from_config(
+            "nba-test".to_string(),
+            default_nba_comeback_config(),
+            true,
+            Some("postgres://localhost/unused"),
+        )
+        .expect("strategy");
+
+        assert_eq!(strategy.name(), "nba_comeback");
+        assert_eq!(strategy.id(), "nba-test");
     }
 
     #[tokio::test]
