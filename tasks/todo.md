@@ -440,6 +440,27 @@ Move `SubscriptionPlanner` and its runtime-planning contracts out of `src/platfo
   - `CARGO_TARGET_DIR=/tmp/ploy-subplan rtk cargo test build_plan_deduplicates_overlapping_tokens --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-subplan rtk cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --exact --nocapture`
 
+# Market Persistence Ownership Cut (2026-03-10)
+
+## Goal
+Move the Polymarket trade/settlement persistence runtime out of `src/platform` and into `src/persistence` so platform stops owning long-running persistence workers and trade-alert schema setup.
+
+## Tasks
+
+- [x] Move the `market_persistence` module tree under `src/persistence`.
+- [x] Rewire bootstrap imports to consume the persistence-owned worker entrypoints.
+- [x] Remove the `platform` export instead of leaving a compatibility shim.
+- [x] Re-run compile plus focused bootstrap regressions after the move.
+
+## Progress notes
+
+- 2026-03-10: Moved [market_persistence.rs](/Users/proerror/Documents/ploy/src/platform/market_persistence.rs) and its `collector_targets/trades/settlements` submodules under [market_persistence.rs](/Users/proerror/Documents/ploy/src/persistence/market_persistence.rs).
+- 2026-03-10: Updated [mod.rs](/Users/proerror/Documents/ploy/src/persistence/mod.rs) to expose the persistence-owned worker entrypoints and removed the old `platform` export from [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-10: Rewired [bootstrap.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap.rs) to import the trade/settlement persistence entrypoints from `crate::persistence`.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-market-persist rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-market-persist rtk cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --exact --nocapture`
+
 # Control Plane Contract Split (2026-03-10)
 
 ## Goal

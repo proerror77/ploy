@@ -19,9 +19,11 @@ use crate::coordinator::{Coordinator, CoordinatorHandle};
 use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
-use crate::platform::{
+use crate::persistence::{
     ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
     spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
+};
+use crate::platform::{
     BinanceDataPlaneHandle, DataPlaneConfig, Domain, PlatformDataPlane,
 };
 use crate::signing::Wallet;
