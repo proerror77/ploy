@@ -160,52 +160,6 @@ struct DynamicSubscribeRequest {
 }
 
 impl PolymarketWebSocket {
-    /// Request a WebSocket resubscription cycle.
-    ///
-    /// The current connection loop will reconnect and apply the latest token set.
-    pub fn request_resubscribe(&self) {
-        self.resubscribe_requested.store(true, Ordering::SeqCst);
-    }
-
-    /// Report the current subscription count to the freshness tracker.
-    pub(super) async fn report_subscription_count(&self) {
-        if let Some(f) = self.freshness.get() {
-            let sides = self.token_to_side.read().await.len();
-            let extras = self.extra_tokens.read().await.len();
-            f.set_subscription_count(
-                crate::platform::DataSource::PolymarketWs,
-                (sides + extras) as u64,
-            );
-        }
-    }
-
-    /// Build the current token subscription set from startup seed + dynamic registrations.
-    pub(super) async fn build_subscription_list(&self, seed_tokens: &[String]) -> Vec<String> {
-        let mut set = std::collections::HashSet::new();
-
-        for token in seed_tokens {
-            if !token.trim().is_empty() {
-                set.insert(token.clone());
-            }
-        }
-
-        {
-            let mapping = self.token_to_side.read().await;
-            for token in mapping.keys() {
-                set.insert(token.clone());
-            }
-        }
-
-        {
-            let extra = self.extra_tokens.read().await;
-            for token in extra.iter() {
-                set.insert(token.clone());
-            }
-        }
-
-        set.into_iter().collect()
-    }
-
     /// Connect and run the WebSocket client with circuit breaker and infinite reconnection
     pub async fn run(&self, token_ids: Vec<String>) -> Result<()> {
         let mut attempt: u32 = 0;
