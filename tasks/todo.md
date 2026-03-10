@@ -137,6 +137,16 @@ Delete the leftover `agents/openclaw/config.rs` shim so OpenClaw modules stop pr
 
 ## Tasks
 
+# Strategy Execution Engine Leg1 Extraction (2026-03-10)
+
+## Progress notes
+
+- 2026-03-10: Moved the heavy Leg1 submission/persistence/version-conflict flow out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs) into [leg1.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/leg1.rs), leaving `engine.rs` with a thin `enter_leg1` wrapper.
+- 2026-03-10: Validation passed:
+  - `rtk cargo check --lib`
+  - `rtk cargo test leg_updates_should_use_incrementing_cycle_versions --lib -- --nocapture`
+  - `rtk cargo test leg1_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
@@ -3391,3 +3401,9 @@ Move the read-only `pm.*` JSON-RPC method handling out of `src/cli/rpc.rs` so th
 ## Progress notes
 
 - 2026-03-10: Added [messages.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/messages.rs) and moved Polymarket websocket payload types, book-top normalization helpers, and inbound `handle_message` / `process_*` handling out of [polymarket_ws.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws.rs), leaving the root file focused on connection lifecycle, subscription state, cache ownership, and tests.
+
+# Sidecar Ingress Helper Extraction (2026-03-10)
+
+## Progress notes
+
+- 2026-03-10: Added [ingress.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar/ingress.rs) and moved sidecar ingress/account-scope/deployment-binding/broadcast helper ownership out of [sidecar.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar.rs), leaving the root file focused on request/response types, handler flow, persistence, and tests.
