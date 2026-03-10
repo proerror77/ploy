@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::super::types::Domain;
+use crate::platform::Domain;
 
 /// 風控配置
 #[derive(Debug, Clone, Serialize, Deserialize)]

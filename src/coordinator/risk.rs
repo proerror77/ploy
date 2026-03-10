@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::types::{Domain, OrderIntent, OrderPriority};
 use crate::agent_runtime::AgentRiskParams;
+use crate::platform::{Domain, OrderIntent, OrderPriority};
 mod checks;
 mod config;
 mod exposure;
@@ -103,8 +103,8 @@ impl Default for RiskGate {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::Domain;
     use super::*;
+    use crate::platform::Domain;
     use crate::domain::Side;
 
     fn make_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {

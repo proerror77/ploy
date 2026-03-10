@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::agent_runtime::AgentStatus;
-use crate::platform::{CircuitBreakerEvent, Domain, PlatformRiskState};
+use crate::platform::Domain;
 
-use super::{AggregatedPosition, Position};
+use super::{AggregatedPosition, CircuitBreakerEvent, PlatformRiskState, Position};
 use super::QueueStats;
 
 /// Per-agent snapshot visible to the coordinator and TUI

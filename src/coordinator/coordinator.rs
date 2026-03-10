@@ -31,8 +31,9 @@ use super::governance::{governance_block_reason, GovernanceController, IngressMo
 use super::journal::ExecutionJournal;
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;
+use super::risk::{RiskCheckResult, RiskGate};
 use super::state::{AgentSnapshot, GlobalState};
-use crate::platform::{Domain, OrderIntent, RiskCheckResult, RiskGate};
+use crate::platform::{Domain, OrderIntent};
 
 mod control_surface;
 mod execution;

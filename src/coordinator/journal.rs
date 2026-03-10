@@ -6,7 +6,8 @@ use sqlx::PgPool;
 
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::Result;
-use crate::platform::{Domain, DrawdownSnapshot, OrderIntent};
+use crate::coordinator::DrawdownSnapshot;
+use crate::platform::{Domain, OrderIntent};
 use crate::strategy::executor::ExecutionResult;
 
 #[path = "journal/restore.rs"]

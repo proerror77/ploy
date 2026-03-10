@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 
 use crate::config::AppConfig;
+use crate::coordinator::RiskConfig;
 use crate::coordinator::config::DuplicateGuardScope;
 
 use super::PlatformBootstrapConfig;
@@ -15,7 +16,7 @@ fn normalize_pct(v: Decimal) -> Option<Decimal> {
 }
 
 pub(super) fn apply_coordinator_runtime_env(cfg: &mut PlatformBootstrapConfig, app: &AppConfig) {
-    cfg.coordinator.risk = crate::platform::RiskConfig {
+    cfg.coordinator.risk = RiskConfig {
         max_platform_exposure: app.risk.max_single_exposure_usd,
         max_consecutive_failures: app.risk.max_consecutive_failures,
         daily_loss_limit: app.risk.daily_loss_limit_usd,

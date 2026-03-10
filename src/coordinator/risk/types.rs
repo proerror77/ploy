@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::super::types::Domain;
+use crate::platform::Domain;
 
 /// 風控檢查結果
 #[derive(Debug, Clone)]

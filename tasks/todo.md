@@ -413,6 +413,28 @@ Move `Position` / `AggregatedPosition` / `PositionAggregator` ownership out of `
   - `CARGO_TARGET_DIR=/tmp/ploy-position-cut rtk cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-position-cut-rl rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
 
+# Coordinator Risk Ownership Cut (2026-03-10)
+
+## Goal
+Move `RiskGate` and its related runtime contract/types out of `src/platform` and into `src/coordinator` so live risk state is owned by the same layer that owns order admission, queueing, and execution.
+
+## Tasks
+
+- [x] Move the risk implementation and submodules into coordinator-owned modules.
+- [x] Rewire coordinator, RL compatibility runtime, TUI, and bootstrap env wiring to the new risk owner.
+- [x] Remove the `platform` re-export instead of leaving a compatibility shim.
+- [x] Re-run compile plus focused risk / coordinator / RL regressions after the move.
+
+## Progress notes
+
+- 2026-03-10: Moved risk ownership from [risk.rs](/Users/proerror/Documents/ploy/src/platform/risk.rs) to [risk.rs](/Users/proerror/Documents/ploy/src/coordinator/risk.rs), including the `checks/config/exposure/queries/stats/transitions/types` submodules.
+- 2026-03-10: Updated [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs), [state.rs](/Users/proerror/Documents/ploy/src/coordinator/state.rs), [command.rs](/Users/proerror/Documents/ploy/src/coordinator/command.rs), [config.rs](/Users/proerror/Documents/ploy/src/coordinator/config.rs), [coordinator_env.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/bootstrap_config/coordinator_env.rs), [order_platform.rs](/Users/proerror/Documents/ploy/src/rl/order_platform.rs), [event.rs](/Users/proerror/Documents/ploy/src/tui/event.rs), [journal.rs](/Users/proerror/Documents/ploy/src/coordinator/journal.rs), and [lib.rs](/Users/proerror/Documents/ploy/src/lib.rs) to consume the new coordinator-owned risk types.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-risk-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-risk-cut rtk cargo test test_query_helpers_report_runtime_snapshots --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-risk-cut rtk cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-risk-cut-rl rtk cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --exact --nocapture`
+
 # Strategy And Adapter Wave 10 (2026-03-10)
 
 ## Goal

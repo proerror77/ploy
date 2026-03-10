@@ -14,6 +14,7 @@ mod governance;
 mod journal;
 mod position;
 mod queue;
+mod risk;
 pub mod state;
 pub mod strategy_runtime;
 
@@ -27,4 +28,8 @@ pub use config::CoordinatorConfig;
 pub use coordinator::{Coordinator, CoordinatorHandle};
 pub use position::{AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
+pub use risk::{
+    BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
+    RiskConfig, RiskGate,
+};
 pub use state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};

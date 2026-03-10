@@ -50,7 +50,8 @@ pub use persistence::{
     CheckpointConfig, CheckpointService, Checkpointable, DLQHandler, DLQProcessor,
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
-pub use platform::{Domain, OrderIntent, RiskGate};
+pub use coordinator::RiskGate;
+pub use platform::{Domain, OrderIntent};
 pub use signing::Wallet;
 pub use supervisor::{
     AlertLevel, AlertManager, AlertManagerConfig, ComponentHealth, RecoveryAction,

@@ -8,7 +8,6 @@ pub mod freshness;
 mod market_persistence;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
-mod risk;
 pub mod subscription_planner;
 mod types;
 
@@ -25,10 +24,6 @@ pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,
     PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
     PipelineStats,
-};
-pub use risk::{
-    BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
-    RiskConfig, RiskGate,
 };
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
