@@ -3385,3 +3385,9 @@ Move the read-only `pm.*` JSON-RPC method handling out of `src/cli/rpc.rs` so th
 - 2026-03-10: Added [pm_read_methods.rs](/Users/proerror/Documents/ploy/src/cli/rpc/pm_read_methods.rs) and moved the read-only `pm.*` RPC handlers out of [rpc.rs](/Users/proerror/Documents/ploy/src/cli/rpc.rs), including event resolution, balance/positions/open-orders/order lookup, market/event/orderbook/trade reads, and account summary handling.
 - 2026-03-10: Validation passed for the slice:
   - `rtk cargo check --lib`
+
+# Polymarket WS Message Handling Extraction (2026-03-10)
+
+## Progress notes
+
+- 2026-03-10: Added [messages.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/messages.rs) and moved Polymarket websocket payload types, book-top normalization helpers, and inbound `handle_message` / `process_*` handling out of [polymarket_ws.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws.rs), leaving the root file focused on connection lifecycle, subscription state, cache ownership, and tests.

@@ -4,22 +4,30 @@ use crate::services::HealthState;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, RwLock};
-use tokio::time::{interval, timeout, Instant};
+use tokio::sync::{RwLock, broadcast};
+use tokio::time::{Instant, interval, timeout};
 use tokio_tungstenite::{
-    client_async_tls_with_config, connect_async, tungstenite::Message, MaybeTlsStream,
-    WebSocketStream,
+    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async,
+    tungstenite::Message,
 };
 use tracing::{debug, error, info, warn};
 use url::Url;
+
+mod messages;
+
+#[cfg(test)]
+use self::messages::extract_book_top;
+pub use self::messages::{
+    BookMessage, PriceChangeEntry, PriceChangeItem, PriceChangesMessage, PriceLevel,
+};
 
 /// Get proxy URL from environment variables
 fn get_proxy_url() -> Option<String> {
@@ -296,102 +304,6 @@ impl CircuitBreaker {
         *self.last_failure_time.write().await = None;
         info!("Circuit breaker manually reset");
     }
-}
-
-/// Order book message from WebSocket
-#[derive(Debug, Clone, Deserialize)]
-pub struct BookMessage {
-    pub asset_id: String,
-    pub market: String,
-    #[serde(default)]
-    pub bids: Vec<PriceLevel>,
-    #[serde(default)]
-    pub asks: Vec<PriceLevel>,
-    pub timestamp: Option<String>,
-    pub hash: Option<String>,
-}
-
-/// Price change message from WebSocket
-#[derive(Debug, Clone, Deserialize)]
-pub struct PriceChangesMessage {
-    pub market: String,
-    pub price_changes: Vec<PriceChangeItem>,
-}
-
-/// Individual price change item
-#[derive(Debug, Clone, Deserialize)]
-pub struct PriceChangeItem {
-    pub asset_id: String,
-    pub price: String,
-}
-
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
-pub struct PriceLevel {
-    pub price: String,
-    pub size: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PriceChangeEntry {
-    pub interval: String,
-    pub change: String,
-}
-
-fn parse_price_level(level: &PriceLevel) -> Option<(Decimal, Decimal)> {
-    let price = level.price.parse::<Decimal>().ok()?;
-    let size = level.size.parse::<Decimal>().ok()?;
-    Some((price, size))
-}
-
-fn extract_best_and_total(
-    levels: &[PriceLevel],
-    pick_best: impl Fn(Decimal, Decimal) -> Decimal,
-) -> (Option<Decimal>, Decimal) {
-    let mut best: Option<Decimal> = None;
-    let mut total_size = Decimal::ZERO;
-
-    for lvl in levels {
-        let Some((price, size)) = parse_price_level(lvl) else {
-            continue;
-        };
-
-        total_size += size;
-        best = Some(match best {
-            Some(current) => pick_best(current, price),
-            None => price,
-        });
-    }
-
-    (best, total_size)
-}
-
-fn extract_book_top(
-    book: &BookMessage,
-) -> (
-    Option<Decimal>,
-    Option<Decimal>,
-    Option<Decimal>,
-    Option<Decimal>,
-) {
-    // Do not assume any ordering from the exchange. Always compute:
-    // - best_bid: max(bids.price)
-    // - best_ask: min(asks.price)
-    // Also compute total depth as the sum of sizes in the snapshot.
-    let (best_bid, bid_total) = extract_best_and_total(&book.bids, |a, b| a.max(b));
-    let (best_ask, ask_total) = extract_best_and_total(&book.asks, |a, b| a.min(b));
-
-    let bid_total = if bid_total > Decimal::ZERO {
-        Some(bid_total)
-    } else {
-        None
-    };
-    let ask_total = if ask_total > Decimal::ZERO {
-        Some(ask_total)
-    } else {
-        None
-    };
-
-    (best_bid, best_ask, bid_total, ask_total)
 }
 
 /// Initial subscription request
@@ -1067,144 +979,10 @@ impl PolymarketWebSocket {
         Ok(())
     }
 
-    /// Handle an incoming WebSocket message
-    ///
-    /// Returns `true` when the message contained market data updates.
-    async fn handle_message(&self, text: &str) -> bool {
-        // Log first few chars for debugging
-        let preview = &text[..text.len().min(200)];
-        debug!("WS message received: {}", preview);
-
-        // Try to parse as array of book messages (order book snapshots)
-        if let Ok(books) = serde_json::from_str::<Vec<BookMessage>>(text) {
-            if books.is_empty() {
-                debug!("Received empty book updates array");
-                return false;
-            }
-            debug!("Received {} book updates", books.len());
-            for book in books {
-                self.process_book_message(book).await;
-            }
-            return true;
-        }
-
-        // Try to parse as price changes message
-        if let Ok(price_msg) = serde_json::from_str::<PriceChangesMessage>(text) {
-            debug!("Received price changes for market: {}", price_msg.market);
-            let has_data = !price_msg.price_changes.is_empty();
-            self.process_price_changes(price_msg).await;
-            return has_data;
-        }
-
-        // Try to parse as single book message
-        if let Ok(book) = serde_json::from_str::<BookMessage>(text) {
-            debug!("Received single book update for: {}", book.asset_id);
-            self.process_book_message(book).await;
-            return true;
-        }
-
-        // Unknown format - log for debugging (include more of message)
-        warn!("Unknown WS message format: {}", preview);
-        false
-    }
-
     /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
     #[cfg(test)]
     pub async fn ingest_test_message(&self, text: &str) -> bool {
         self.handle_message(text).await
-    }
-
-    /// Process an order book message
-    async fn process_book_message(&self, book: BookMessage) {
-        // Avoid borrowing `book` across await points so we can move it into the broadcast channel.
-        let asset_id = book.asset_id.clone();
-
-        let (best_bid, best_ask, bid_size, ask_size) = extract_book_top(&book);
-
-        if let Some(side) = self.get_side(&asset_id).await {
-            self.quote_cache
-                .update_snapshot(&asset_id, side, best_bid, best_ask, bid_size, ask_size);
-
-            // Record per-symbol freshness for the data plane.
-            if let Some(f) = self.freshness.get() {
-                f.record_update(crate::platform::DataSource::PolymarketWs, &asset_id);
-            }
-
-            // Notify subscribers
-            if let Some(quote) = self.quote_cache.get(&asset_id) {
-                let update = QuoteUpdate {
-                    token_id: asset_id.clone(),
-                    side,
-                    quote,
-                };
-                match self.update_tx.send(update) {
-                    Ok(n) => debug!(
-                        "Quote broadcast to {} receivers: {} {:?} bid={:?} ask={:?}",
-                        n,
-                        side,
-                        &asset_id[..8.min(asset_id.len())],
-                        best_bid,
-                        best_ask
-                    ),
-                    Err(_) => warn!("No receivers for quote update - channel closed"),
-                }
-            }
-
-            debug!(
-                "Book update {}: bid={:?} ask={:?}",
-                side, best_bid, best_ask
-            );
-        } else {
-            // Token not registered: expected for `extra_tokens` subscriptions, and a signal for
-            // misconfiguration otherwise.
-            let is_extra = {
-                let extra = self.extra_tokens.read().await;
-                extra.contains(&asset_id)
-            };
-            if !is_extra {
-                let registered_count = self.token_to_side.read().await.len();
-                debug!(
-                    "Unregistered token in book update: {} (registered tokens: {})",
-                    &asset_id[..16.min(asset_id.len())],
-                    registered_count
-                );
-            }
-        }
-
-        // Broadcast the full book snapshot for downstream persistence/analytics.
-        // Best-effort: if no receivers are present, the send fails and we simply drop the snapshot.
-        let _ = self.book_tx.send(Arc::new(book));
-    }
-
-    /// Process price changes message
-    async fn process_price_changes(&self, msg: PriceChangesMessage) {
-        for change in msg.price_changes {
-            if let (Some(side), Ok(price)) = (
-                self.get_side(&change.asset_id).await,
-                change.price.parse::<Decimal>(),
-            ) {
-                debug!("Price change {}: {}", side, price);
-                // Price change messages carry a last-trade price, NOT a book quote.
-                // Passing it as both bid and ask would set spread=0 and corrupt
-                // downstream spread/arb calculations.  Pass None/None so the
-                // existing best_bid / best_ask from the last book snapshot are
-                // preserved while the entry timestamp is still refreshed.
-                self.quote_cache
-                    .update(&change.asset_id, side, None, None, None, None);
-
-                if let Some(quote) = self.quote_cache.get(&change.asset_id) {
-                    // Only broadcast if we have at least one side from a prior book snapshot
-                    if quote.best_bid.is_some() || quote.best_ask.is_some() {
-                        let update = QuoteUpdate {
-                            token_id: change.asset_id.clone(),
-                            side,
-                            quote,
-                        };
-                        let _ = self.update_tx.send(update);
-                    }
-                }
-            }
-        }
     }
 }
 
