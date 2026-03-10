@@ -1,5 +1,5 @@
 -- db_retention.sql — Tick table retention policy
--- clob_trade_ticks: 14 days, clob_quote_ticks: 14 days, deribit_iv_ticks: 30 days
+-- clob_trade_ticks: 7 days, clob_quote_ticks: 7 days, deribit_iv_ticks: 7 days
 -- Uses batched deletes (10k rows per batch) to avoid long locks.
 -- Run daily via cron at 04:00.
 
@@ -7,7 +7,7 @@
 \timing on
 
 -- ============================================================
--- 1. clob_trade_ticks — retain 14 days (batched)
+-- 1. clob_trade_ticks — retain 7 days (batched)
 -- ============================================================
 DO $retention$
 DECLARE
@@ -15,12 +15,12 @@ DECLARE
   deleted     int;
   total       bigint := 0;
 BEGIN
-  RAISE NOTICE '=== clob_trade_ticks: deleting rows older than 14 days ===';
+  RAISE NOTICE '=== clob_trade_ticks: deleting rows older than 7 days ===';
   LOOP
     DELETE FROM clob_trade_ticks
     WHERE id IN (
       SELECT id FROM clob_trade_ticks
-      WHERE trade_ts < now() - interval '14 days'
+      WHERE trade_ts < now() - interval '7 days'
       LIMIT batch_size
     );
     GET DIAGNOSTICS deleted = ROW_COUNT;
@@ -34,7 +34,7 @@ $retention$;
 VACUUM VERBOSE clob_trade_ticks;
 
 -- ============================================================
--- 2. clob_quote_ticks — retain 14 days (batched)
+-- 2. clob_quote_ticks — retain 7 days (batched)
 -- ============================================================
 DO $retention$
 DECLARE
@@ -42,12 +42,12 @@ DECLARE
   deleted     int;
   total       bigint := 0;
 BEGIN
-  RAISE NOTICE '=== clob_quote_ticks: deleting rows older than 14 days ===';
+  RAISE NOTICE '=== clob_quote_ticks: deleting rows older than 7 days ===';
   LOOP
     DELETE FROM clob_quote_ticks
     WHERE id IN (
       SELECT id FROM clob_quote_ticks
-      WHERE received_at < now() - interval '14 days'
+      WHERE received_at < now() - interval '7 days'
       LIMIT batch_size
     );
     GET DIAGNOSTICS deleted = ROW_COUNT;
@@ -61,7 +61,7 @@ $retention$;
 VACUUM VERBOSE clob_quote_ticks;
 
 -- ============================================================
--- 3. deribit_iv_ticks — retain 30 days (batched)
+-- 3. deribit_iv_ticks — retain 7 days (batched)
 -- ============================================================
 DO $retention$
 DECLARE
@@ -69,12 +69,12 @@ DECLARE
   deleted     int;
   total       bigint := 0;
 BEGIN
-  RAISE NOTICE '=== deribit_iv_ticks: deleting rows older than 30 days ===';
+  RAISE NOTICE '=== deribit_iv_ticks: deleting rows older than 7 days ===';
   LOOP
     DELETE FROM deribit_iv_ticks
     WHERE id IN (
       SELECT id FROM deribit_iv_ticks
-      WHERE fetched_at < now() - interval '30 days'
+      WHERE fetched_at < now() - interval '7 days'
       LIMIT batch_size
     );
     GET DIAGNOSTICS deleted = ROW_COUNT;

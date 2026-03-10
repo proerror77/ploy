@@ -287,12 +287,14 @@ impl PersistencePipeline {
         config: &PersistenceConfig,
     ) -> bool {
         let now = tick.event_time;
-        if let Some(prev) = dedup.lobs.get(&tick.symbol) {
-            let elapsed_ms = (now - prev.last_at).num_milliseconds();
-            if elapsed_ms < config.binance_lob_snapshot_interval_ms
-                || prev.last_update_id == tick.update_id
-            {
-                return false;
+        if config.binance_lob_snapshot_interval_ms > 0 {
+            if let Some(prev) = dedup.lobs.get(&tick.symbol) {
+                let elapsed_ms = (now - prev.last_at).num_milliseconds();
+                if elapsed_ms < config.binance_lob_snapshot_interval_ms
+                    || prev.last_update_id == tick.update_id
+                {
+                    return false;
+                }
             }
         }
 
@@ -582,6 +584,46 @@ mod tests {
         let mut l3 = l1.clone();
         l3.update_id = 101;
         l3.event_time = t0 + Duration::seconds(2);
+        assert!(PersistencePipeline::should_persist_lob(
+            &l3, &mut dedup, &config
+        ));
+    }
+
+    #[test]
+    fn lob_full_capture_mode_persists_every_update() {
+        let mut config = default_config();
+        config.binance_lob_snapshot_interval_ms = 0;
+        let mut dedup = DedupState::default();
+        let t0 = Utc::now();
+
+        let l1 = BinanceLobTick {
+            symbol: "BTCUSDT".into(),
+            update_id: 100,
+            best_bid: Some(Decimal::from(50000)),
+            best_ask: Some(Decimal::from(50001)),
+            mid_price: None,
+            spread_bps: None,
+            obi_5: None,
+            obi_10: None,
+            bid_volume_5: None,
+            ask_volume_5: None,
+            bids: serde_json::json!([]),
+            asks: serde_json::json!([]),
+            event_time: t0,
+        };
+        assert!(PersistencePipeline::should_persist_lob(
+            &l1, &mut dedup, &config
+        ));
+
+        let mut l2 = l1.clone();
+        l2.event_time = t0 + Duration::milliseconds(50);
+        assert!(PersistencePipeline::should_persist_lob(
+            &l2, &mut dedup, &config
+        ));
+
+        let mut l3 = l1.clone();
+        l3.update_id = 101;
+        l3.event_time = t0 + Duration::milliseconds(75);
         assert!(PersistencePipeline::should_persist_lob(
             &l3, &mut dedup, &config
         ));

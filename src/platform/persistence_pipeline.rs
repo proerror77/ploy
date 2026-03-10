@@ -37,6 +37,7 @@ pub struct PersistenceConfig {
     /// Minimum interval between Binance price persists (seconds).
     pub binance_price_min_interval_secs: i64,
     /// Minimum interval between Binance LOB snapshots (milliseconds).
+    /// Set to `0` to persist every received update without throttling.
     pub binance_lob_snapshot_interval_ms: i64,
     /// Maximum LOB depth levels to persist.
     pub binance_lob_max_levels: usize,
@@ -58,7 +59,7 @@ impl Default for PersistenceConfig {
             channel_capacity: 10_000,
             clob_quote_min_interval_secs: 2,
             binance_price_min_interval_secs: 1,
-            binance_lob_snapshot_interval_ms: 1_000,
+            binance_lob_snapshot_interval_ms: 0,
             binance_lob_max_levels: 20,
             clob_orderbook_snapshot_interval_ms: 2_000,
             clob_orderbook_max_levels: 50,

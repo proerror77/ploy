@@ -109,7 +109,7 @@ async fn initialize_crypto_persistence_pipeline(
         let pipeline_config = crate::platform::PersistenceConfig {
             clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
             binance_price_min_interval_secs: BINANCE_PERSIST_MIN_INTERVAL_SECS,
-            binance_lob_snapshot_interval_ms: env_u64("BN_LOB_SNAPSHOT_MS", 1000).max(100) as i64,
+            binance_lob_snapshot_interval_ms: env_u64("BN_LOB_SNAPSHOT_MS", 0) as i64,
             binance_lob_max_levels: env_usize("BN_LOB_LEVELS", 20).clamp(0, 200),
             clob_orderbook_snapshot_interval_ms: orderbook_snapshot_ms as i64,
             clob_orderbook_max_levels: orderbook_levels,
