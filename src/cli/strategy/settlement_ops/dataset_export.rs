@@ -1,7 +1,7 @@
 use super::is_market_resolved;
 use crate::adapters::{PolymarketClient, PostgresStore};
 use crate::cli::strategy::CryptoLobDatasetFormat;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, bail};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -48,7 +48,10 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
-fn write_crypto_lob_dataset_csv(output: &Path, rows: &[CryptoLobDatasetRow]) -> Result<()> {
+fn write_crypto_lob_dataset_csv(
+    output: &Path,
+    rows: &[CryptoLobDatasetRow],
+) -> anyhow::Result<()> {
     let mut f = std::fs::File::create(output).context("Failed to create output file")?;
     writeln!(
         f,
@@ -103,7 +106,10 @@ fn sanitize_duckdb_copy_path(path: &Path) -> std::result::Result<String, duckdb:
 }
 
 #[cfg(feature = "analysis")]
-fn write_crypto_lob_dataset_parquet(output: &Path, rows: &[CryptoLobDatasetRow]) -> Result<()> {
+fn write_crypto_lob_dataset_parquet(
+    output: &Path,
+    rows: &[CryptoLobDatasetRow],
+) -> anyhow::Result<()> {
     use duckdb::{params, Connection};
     use rust_decimal::prelude::ToPrimitive;
 
@@ -212,7 +218,7 @@ pub(super) async fn export_crypto_lob_dataset(
     format: CryptoLobDatasetFormat,
     output: Option<PathBuf>,
     database_url: Option<String>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     let db_url = database_url
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .unwrap_or_else(|| "postgres://localhost/ploy".to_string());
