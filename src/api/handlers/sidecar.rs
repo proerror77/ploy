@@ -12,9 +12,9 @@
 //! - GET  /api/sidecar/risk          — Risk state from Coordinator
 
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
+    Json,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
