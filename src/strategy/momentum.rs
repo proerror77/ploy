@@ -7,15 +7,15 @@
 //! 4. Exit via take-profit, stop-loss, trailing stop, or hold to resolution
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::{
@@ -26,6 +26,7 @@ use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::CryptoDataPlaneHandle;
+use crate::strategy::OrderExecutor;
 use crate::strategy::crypto::{
     horizon_for_series as crypto_horizon_for_series, known_binance_symbols,
     series_ids_for_symbol as crypto_series_ids_for_symbol,
@@ -35,11 +36,11 @@ use crate::strategy::fee_model::FeeModel;
 use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::probability;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
-use crate::strategy::OrderExecutor;
 
 mod detector;
 mod entry_runtime;
 mod matcher;
+mod pm_runtime;
 mod position_exit;
 mod trade_flow;
 
@@ -716,387 +717,6 @@ impl MomentumEngine {
     /// Get positions count
     pub async fn positions_count(&self) -> usize {
         self.positions.read().await.len()
-    }
-
-    /// Check for resolved positions and handle them
-    /// Returns (won_count, lost_count, total_payout)
-    pub async fn check_resolved_positions(&self) -> (u32, u32, Decimal) {
-        let now = Utc::now();
-        let mut won_count = 0u32;
-        let mut lost_count = 0u32;
-        let mut total_payout = Decimal::ZERO;
-
-        // Find positions that have passed their end time
-        let resolved_symbols: Vec<String> = {
-            let positions = self.positions.read().await;
-            positions
-                .iter()
-                .filter(|(_, pos)| pos.event_end_time < now)
-                .map(|(symbol, _)| symbol.clone())
-                .collect()
-        };
-
-        if resolved_symbols.is_empty() {
-            return (0, 0, Decimal::ZERO);
-        }
-
-        info!(
-            "🔍 Checking {} resolved positions...",
-            resolved_symbols.len()
-        );
-
-        for symbol in resolved_symbols {
-            // Get position details
-            let pos_opt = {
-                let positions = self.positions.read().await;
-                positions.get(&symbol).cloned()
-            };
-
-            let pos = match pos_opt {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Check market status via API
-            let market_result = self
-                .event_matcher
-                .client()
-                .get_market(&pos.condition_id)
-                .await;
-
-            match market_result {
-                Ok(market) => {
-                    if !market.closed {
-                        // Market not yet closed, wait
-                        debug!("{} market not closed yet, waiting...", symbol);
-                        continue;
-                    }
-
-                    if !self.market_is_settled(&market) {
-                        debug!(
-                            "{} market closed but not settled yet (outcome prices not 1/0), waiting...",
-                            symbol
-                        );
-                        continue;
-                    }
-
-                    // Determine win/loss by checking token prices
-                    // Winner token price = 1.0, loser = 0.0
-                    let won = self.check_if_won(&pos, &market);
-
-                    if won {
-                        let payout = Decimal::from(pos.shares); // Each winning share = $1
-                        let profit = payout - (pos.entry_price * Decimal::from(pos.shares));
-
-                        info!(
-                            "🎉 {} WON! {} {} | {} shares @ {:.2}¢ → ${:.2} payout (+${:.2} profit)",
-                            symbol,
-                            pos.direction,
-                            pos.event_slug,
-                            pos.shares,
-                            pos.entry_price * dec!(100),
-                            payout,
-                            profit
-                        );
-
-                        won_count += 1;
-                        total_payout += payout;
-
-                        #[cfg(feature = "claimer_daemon")]
-                        {
-                            // Trigger claimer to redeem winning position
-                            if let Some(ref claimer) = self.claimer {
-                                info!(
-                                    "📋 Triggering claimer for {}: condition_id={}, shares={}",
-                                    symbol,
-                                    &pos.condition_id[..16.min(pos.condition_id.len())],
-                                    pos.shares
-                                );
-                                match claimer.check_and_claim().await {
-                                    Ok(results) => {
-                                        for result in results {
-                                            if result.success {
-                                                info!(
-                                                    "✅ Claimed ${:.2} from {}: tx={}",
-                                                    result.amount_claimed,
-                                                    &result.condition_id
-                                                        [..16.min(result.condition_id.len())],
-                                                    result.tx_hash
-                                                );
-                                            } else if let Some(err) = result.error {
-                                                warn!(
-                                                    "❌ Failed to claim {}: {}",
-                                                    result.condition_id, err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to trigger claimer: {}", e);
-                                    }
-                                }
-                            } else {
-                                // No claimer configured - just log
-                                info!(
-                                    "📋 Position {} needs claiming (no claimer configured): condition_id={}, shares={}",
-                                    symbol,
-                                    &pos.condition_id[..16.min(pos.condition_id.len())],
-                                    pos.shares
-                                );
-                            }
-                        }
-
-                        #[cfg(not(feature = "claimer_daemon"))]
-                        {
-                            info!(
-                                "📋 Position {} needs claiming (claimer feature disabled): condition_id={}, shares={}",
-                                symbol,
-                                &pos.condition_id[..16.min(pos.condition_id.len())],
-                                pos.shares
-                            );
-                        }
-                    } else {
-                        let loss = pos.entry_price * Decimal::from(pos.shares);
-                        info!(
-                            "❌ {} LOST: {} {} | {} shares @ {:.2}¢ → -${:.2}",
-                            symbol,
-                            pos.direction,
-                            pos.event_slug,
-                            pos.shares,
-                            pos.entry_price * dec!(100),
-                            loss
-                        );
-                        lost_count += 1;
-                    }
-
-                    // Log trade resolution
-                    if let Some(ref logger) = self.trade_logger {
-                        logger.record_resolution(&pos.condition_id, won).await;
-                    }
-
-                    // Remove from positions
-                    {
-                        let mut positions = self.positions.write().await;
-                        positions.remove(&symbol);
-                    }
-
-                    // Update fund manager
-                    if let Some(ref fm) = self.fund_manager {
-                        let released_notional = if pos.entry_notional > Decimal::ZERO {
-                            pos.entry_notional
-                        } else {
-                            pos.entry_price * Decimal::from(pos.shares)
-                        };
-                        fm.record_position_closed_with_amount(
-                            &pos.condition_id,
-                            &pos.symbol,
-                            released_notional,
-                        )
-                        .await;
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to get market status for {}: {}", symbol, e);
-                }
-            }
-        }
-
-        if won_count > 0 || lost_count > 0 {
-            info!(
-                "📊 Resolution summary: {} won, {} lost, ${:.2} payout pending claim",
-                won_count, lost_count, total_payout
-            );
-        }
-
-        (won_count, lost_count, total_payout)
-    }
-
-    fn market_is_settled(&self, market: &crate::adapters::MarketResponse) -> bool {
-        use rust_decimal::Decimal;
-        use rust_decimal_macros::dec;
-
-        // Avoid prematurely treating a market as resolved just because prices move close to 1/0.
-        // We only accept settlement once the market is actually closed.
-        if !market.closed {
-            return false;
-        }
-
-        let mut prices = Vec::new();
-        for t in &market.tokens {
-            let Some(ref price_str) = t.price else {
-                continue;
-            };
-            if let Ok(p) = price_str.parse::<Decimal>() {
-                prices.push(p);
-            }
-        }
-
-        if prices.is_empty() {
-            return false;
-        }
-
-        // Official settlement: exactly one winner ~1, all losers ~0.
-        let winners = prices.iter().filter(|p| **p >= dec!(0.99)).count();
-        let losers = prices.iter().filter(|p| **p <= dec!(0.01)).count();
-        winners == 1 && losers == prices.len().saturating_sub(1)
-    }
-
-    /// Check if we won based on market outcome prices
-    fn check_if_won(&self, pos: &Position, market: &crate::adapters::MarketResponse) -> bool {
-        // Find our token in the market tokens
-        for token in &market.tokens {
-            if token.token_id == pos.token_id {
-                // Parse the price - winner has price = 1.0
-                if let Some(ref price_str) = token.price {
-                    if let Ok(price) = price_str.parse::<f64>() {
-                        return price >= 0.99; // Winner = 1.0, Loser = 0.0
-                    }
-                }
-            }
-        }
-
-        // Fallback: if we bought Up and price went up, we likely won
-        // This is a heuristic in case outcome_prices not available
-        warn!(
-            "Could not determine outcome from market data for {}, using heuristic",
-            pos.symbol
-        );
-        false
-    }
-
-    /// Handle Polymarket quote update - check exit conditions and dump signals
-    async fn on_pm_update(&self, update: &QuoteUpdate) -> Result<()> {
-        // Update dump hedge price tracker if enabled
-        if let Some(ref dump_hedge) = self.dump_hedge {
-            if let Some(ask) = update.quote.best_ask {
-                dump_hedge
-                    .on_simple_price_update(&update.token_id, ask)
-                    .await;
-            }
-        }
-
-        // Probability-driven exit check for directional mode positions
-        if let Some(ref cl_cache) = self.chainlink_cache {
-            let positions = self.positions.read().await;
-            if let Some((key, pos)) = positions
-                .iter()
-                .find(|(_, p)| p.token_id == update.token_id)
-            {
-                if let (Some(entry_p), Some(s0)) = (pos.entry_p_hat, pos.window_open_price) {
-                    let key = key.clone();
-                    let direction = pos.direction;
-                    let time_remaining = pos.time_to_resolution().num_seconds() as f64;
-
-                    // Map Binance symbol back to Chainlink
-                    if let Some(cl_symbol) =
-                        crate::adapters::chainlink_rtds::to_chainlink_symbol(&pos.symbol)
-                    {
-                        if let Some(cl_spot) = cl_cache.get(cl_symbol).await {
-                            let sigma = cl_spot
-                                .volatility(300)
-                                .and_then(|v| v.to_f64())
-                                .unwrap_or(0.001);
-                            let current_p_hat = probability::estimate_probability(
-                                s0,
-                                cl_spot.price,
-                                sigma,
-                                time_remaining,
-                                0.0,
-                            );
-                            let effective_p = if direction == Direction::Up {
-                                current_p_hat
-                            } else {
-                                1.0 - current_p_hat
-                            };
-                            let entry_effective = if direction == Direction::Up {
-                                entry_p
-                            } else {
-                                1.0 - entry_p
-                            };
-
-                            // Probability stop: p_hat drops below 60% of entry
-                            if effective_p < entry_effective * 0.6 {
-                                if let Some(bid) = update.quote.best_bid {
-                                    drop(positions);
-                                    let reason = ExitReason::ProbabilityStop {
-                                        entry_p_hat: entry_effective,
-                                        current_p_hat: effective_p,
-                                    };
-                                    self.execute_exit(&key, bid, reason).await?;
-                                    return Ok(());
-                                }
-                            }
-
-                            // Time stop: < 30s remaining AND negative EV
-                            if time_remaining < 30.0 {
-                                let ask_f64 = update
-                                    .quote
-                                    .best_ask
-                                    .and_then(|a| a.to_f64())
-                                    .unwrap_or(0.5);
-                                let cost = self
-                                    .fee_model
-                                    .effective_rate(update.quote.best_ask.unwrap_or(dec!(0.5)))
-                                    .to_f64()
-                                    .unwrap_or(0.015);
-                                let ev_net = effective_p - ask_f64 - cost;
-                                if ev_net < 0.0 {
-                                    if let Some(bid) = update.quote.best_bid {
-                                        drop(positions);
-                                        self.execute_exit(&key, bid, ExitReason::TimeExit).await?;
-                                        return Ok(());
-                                    }
-                                }
-                            }
-
-                            // Hard stop: unrealized loss > $5
-                            if let Some(bid) = update.quote.best_bid {
-                                let unrealized_pnl =
-                                    (bid - pos.entry_price) * Decimal::from(pos.shares);
-                                if unrealized_pnl < dec!(-5) {
-                                    drop(positions);
-                                    let reason = ExitReason::HardStop {
-                                        loss_usd: -unrealized_pnl,
-                                    };
-                                    self.execute_exit(&key, bid, reason).await?;
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // CRYINGLITTLEBABY mode: skip traditional exit checks, hold to resolution for $1
-        if self.config.hold_to_resolution && self.chainlink_cache.is_none() {
-            return Ok(()); // No early exits - positions resolve automatically
-        }
-
-        let mut positions = self.positions.write().await;
-
-        // Find position matching this token
-        let pos_key = positions
-            .iter()
-            .find(|(_, p)| p.token_id == update.token_id)
-            .map(|(k, _)| k.clone());
-
-        if let Some(key) = pos_key {
-            if let Some(pos) = positions.get_mut(&key) {
-                // Update highest price
-                if let Some(bid) = update.quote.best_bid {
-                    pos.update_high(bid);
-
-                    // Check exit conditions
-                    if let Some(reason) = self.exit_manager.check_exit(pos, bid) {
-                        drop(positions); // Release lock before executing
-                        self.execute_exit(&key, bid, reason).await?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
