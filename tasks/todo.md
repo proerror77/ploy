@@ -1,3 +1,29 @@
+# Journal Execution Writes Cut (2026-03-10)
+
+## Goal
+Move execution-side journal writes out of `src/coordinator/journal.rs` so the root journal owner keeps restore plus ingress/risk writes, while execution persistence/evaluation behavior lives in a dedicated submodule.
+
+## Tasks
+
+- [x] Add a journal submodule for execution persistence, analysis, and live-evaluation writes.
+- [x] Move `persist_execution`, `persist_exit_reason_execution`, `persist_execution_analysis`, and `persist_live_strategy_evaluation` out of `journal.rs`.
+- [x] Keep restore and ingress/risk write paths in the root journal owner.
+- [x] Re-run compile plus focused execution/restore regressions after the cut.
+
+## Review
+
+- [x] Confirm `coordinator` callers still hit the same `persist_execution` surface.
+- [x] Confirm restore parsing still compiles after the journal import boundary changed.
+
+## Progress notes
+
+- 2026-03-10: Added [execution_writes.rs](/Users/proerror/Documents/ploy/src/coordinator/journal/execution_writes.rs) for execution persistence, exit-reason execution writes, execution analysis, and live strategy evaluation evidence.
+- 2026-03-10: Reduced [journal.rs](/Users/proerror/Documents/ploy/src/coordinator/journal.rs) to the journal shell, restore reads, ingress/risk writes, and shared metadata parsing.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-cut-buy rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-cut-restore rtk cargo test test_execution_error_is_failure_treats_blank_as_success --lib -- --exact --nocapture`
+
 # Coordinator Ingress Admission Cut (2026-03-10)
 
 ## Goal

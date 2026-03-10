@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::{Domain, Side};
 use sqlx::Row;
 use std::collections::HashMap;
 
