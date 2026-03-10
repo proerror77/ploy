@@ -1,3 +1,29 @@
+# Persistence Pipeline Ownership Cut (2026-03-10)
+
+## Goal
+Move the remaining platform-owned persistence pipeline/schema surface under `src/persistence` so bootstrap and other runtime callers stop treating `src/platform` as the canonical owner.
+
+## Tasks
+
+- [x] Add a regression test that proves `crate::persistence` exposes the pipeline/schema surface.
+- [x] Move pipeline ownership into `src/persistence` and reduce `src/platform/persistence_pipeline.rs` to a compatibility shim.
+- [x] Rewire bootstrap/support and other direct schema callers to `crate::persistence`.
+- [x] Re-run focused compile/tests and confirm the platform module is only a legacy bridge.
+
+## Review
+
+- [x] Confirm persistence callers no longer import pipeline/schema directly from `crate::platform`.
+- [x] Confirm the persistence pipeline dedup tests still run from the persistence-owned module.
+
+## Progress notes
+
+- 2026-03-10: Added [pipeline.rs](/Users/proerror/Documents/ploy/src/persistence/pipeline.rs) and [runtime.rs](/Users/proerror/Documents/ploy/src/persistence/pipeline/runtime.rs) so the persistence pipeline implementation now lives under `src/persistence`.
+- 2026-03-10: Reduced [persistence_pipeline.rs](/Users/proerror/Documents/ploy/src/platform/persistence_pipeline.rs) to a compatibility shim and rewired bootstrap/runtime callers to import pipeline ownership from `crate::persistence`.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-worker rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-worker rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-worker rtk cargo test quote_dedup_skips_unchanged_within_interval --lib -- --exact --nocapture`
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal
