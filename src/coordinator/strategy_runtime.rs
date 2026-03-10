@@ -21,10 +21,10 @@ mod control;
 mod observability;
 mod order_store;
 mod session;
-mod setup;
+mod startup;
 
 use control::drive_managed_runtime_control_loop;
-use session::start_managed_runtime_session;
+use startup::start_managed_runtime_session;
 
 pub(crate) async fn run_managed_strategy_runtime(
     strategy_label: &str,
