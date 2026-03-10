@@ -32,7 +32,11 @@ pub(super) async fn initialize_crypto_runtime_preflight(
     let rl_agent_enabled = false;
 
     let mut all_coins: Vec<String> = Vec::new();
-    let mut planner_requirements: Vec<(crate::platform::ConsumerId, Domain, Vec<DataFeed>)> =
+    let mut planner_requirements: Vec<(
+        crate::coordinator::subscription_planner::ConsumerId,
+        Domain,
+        Vec<DataFeed>,
+    )> =
         Vec::new();
     if momentum_enabled {
         let symbols: Vec<String> = crypto_cfg
@@ -41,7 +45,10 @@ pub(super) async fn initialize_crypto_runtime_preflight(
             .map(|c| format!("{}USDT", c))
             .collect();
         planner_requirements.push((
-            crate::platform::ConsumerId::from(format!("momentum-{}", crypto_cfg.agent_id)),
+            crate::coordinator::subscription_planner::ConsumerId::from(format!(
+                "momentum-{}",
+                crypto_cfg.agent_id
+            )),
             Domain::Crypto,
             vec![DataFeed::BinanceSpot { symbols }],
         ));
@@ -54,7 +61,7 @@ pub(super) async fn initialize_crypto_runtime_preflight(
     if lob_agent_enabled {
         let symbols: Vec<String> = lob_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
         planner_requirements.push((
-            crate::platform::ConsumerId::from("lob-ml"),
+            crate::coordinator::subscription_planner::ConsumerId::from("lob-ml"),
             Domain::Crypto,
             vec![DataFeed::BinanceSpot { symbols }],
         ));
@@ -68,7 +75,7 @@ pub(super) async fn initialize_crypto_runtime_preflight(
     if rl_agent_enabled {
         let symbols: Vec<String> = rl_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
         planner_requirements.push((
-            crate::platform::ConsumerId::from("rl-policy"),
+            crate::coordinator::subscription_planner::ConsumerId::from("rl-policy"),
             Domain::Crypto,
             vec![DataFeed::BinanceSpot { symbols }],
         ));
@@ -118,7 +125,10 @@ pub(super) async fn initialize_crypto_runtime_preflight(
         warn!("crypto domain enabled but no crypto agents are active (coins set is empty)");
     }
 
-    let subscription_plan = crate::platform::SubscriptionPlanner::build_plan(planner_requirements);
+    let subscription_plan =
+        crate::coordinator::subscription_planner::SubscriptionPlanner::build_plan(
+            planner_requirements,
+        );
     info!(
         unique_keys = subscription_plan.key_count(),
         total_refs = subscription_plan.ref_count(),

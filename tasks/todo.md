@@ -418,6 +418,28 @@ Split `src/control_plane.rs` into contract-owned submodules so deployment metada
   - `CARGO_TARGET_DIR=/tmp/ploy-cp-main rtk cargo test trade_intent_into_order_intent_normalizes_blank_deployment_metadata --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-cp-main rtk cargo test deployment_runtime_scope_matching --lib -- --exact --nocapture`
 
+# Subscription Planner Ownership Cut (2026-03-10)
+
+## Goal
+Move `SubscriptionPlanner` and its runtime-planning contracts out of `src/platform` and into `src/coordinator` so platform stops presenting strategy subscription orchestration as a platform primitive.
+
+## Tasks
+
+- [x] Move the subscription planner implementation into a coordinator-owned module.
+- [x] Rewire bootstrap crypto-runtime preflight to consume the coordinator-owned planner types.
+- [x] Remove the `platform` export instead of leaving a compatibility shim.
+- [x] Re-run compile plus focused planner/bootstrap regressions after the move.
+
+## Progress notes
+
+- 2026-03-10: Moved planner ownership from [subscription_planner.rs](/Users/proerror/Documents/ploy/src/platform/subscription_planner.rs) to [subscription_planner.rs](/Users/proerror/Documents/ploy/src/coordinator/subscription_planner.rs).
+- 2026-03-10: Updated [mod.rs](/Users/proerror/Documents/ploy/src/coordinator/mod.rs) to expose the new owner and removed the `platform` export from [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-10: Rewired [preflight.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support/preflight.rs) to use `crate::coordinator::subscription_planner`.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-subplan rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-subplan rtk cargo test build_plan_deduplicates_overlapping_tokens --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-subplan rtk cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --exact --nocapture`
+
 # Control Plane Contract Split (2026-03-10)
 
 ## Goal
