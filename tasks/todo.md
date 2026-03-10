@@ -461,6 +461,31 @@ Move the Polymarket trade/settlement persistence runtime out of `src/platform` a
   - `CARGO_TARGET_DIR=/tmp/ploy-market-persist rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-market-persist rtk cargo test apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum --lib -- --exact --nocapture`
 
+# Coordinator Ingress Pipeline Extraction (2026-03-10)
+
+## Goal
+Extract shared ingress preflight and rejection choreography out of `control_surface.rs` and `ingress.rs` so the live order-admission path stops duplicating gate logic and reject-side effects.
+
+## Tasks
+
+- [x] Add a shared ingress-preflight owner for domain/deployment/reduce-only/ingress-mode checks.
+- [x] Rewire `CoordinatorHandle::submit_order(...)` to use the shared preflight instead of inlining checks.
+- [x] Add a shared ingress-rejection owner for `persist_risk_decision + emit_rejected_intent_update + warn`.
+- [x] Rewire `handle_order_intent(...)` to use the shared helpers while keeping admission behavior unchanged.
+- [x] Re-run compile plus focused coordinator regressions after the extraction.
+
+## Progress notes
+
+- 2026-03-10: Added [ingress_preflight.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/ingress_preflight.rs) to own the shared domain/deployment/reduce-only/ingress-mode validation used by both coordinator handle ingress and runtime ingress.
+- 2026-03-10: Added [ingress_rejections.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/ingress_rejections.rs) to own the common blocked-intent persistence/update/logging choreography.
+- 2026-03-10: Reduced [control_surface.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/control_surface.rs) so `submit_order(...)` now delegates to the shared preflight owner.
+- 2026-03-10: Reduced [ingress.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/ingress.rs) by replacing repeated reject paths with `reject_order_intent(...)` and the shared preflight owner.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
+
 # Control Plane Contract Split (2026-03-10)
 
 ## Goal

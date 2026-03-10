@@ -39,6 +39,8 @@ use crate::platform::Domain;
 mod control_surface;
 mod execution;
 mod ingress;
+mod ingress_preflight;
+mod ingress_rejections;
 mod order_updates;
 mod recovery;
 mod runtime_status;

@@ -2,132 +2,50 @@ use super::*;
 use crate::domain::OrderStatus;
 
 impl Coordinator {
-    /// Risk-check an incoming order intent and enqueue if passed
+    /// Risk-check an incoming order intent and enqueue if passed.
     pub(super) async fn handle_order_intent(&self, intent: OrderIntent) {
         let mut intent = intent;
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
         let strategy_max_shares = intent.shares;
 
-        if !self.is_domain_allowed(intent.domain) {
-            let reason = format!("domain {} is not enabled for this runtime", intent.domain);
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by runtime domain allowlist"
-            );
-            return;
-        }
-
-        if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked due to missing deployment identity"
-            );
-            return;
-        }
-
-        if !intent.is_buy {
-            let tracked_open_shares = self
-                .positions
-                .agent_open_shares_for_token_side(
-                    &intent.agent_id,
-                    intent.domain,
-                    &intent.token_id,
-                    intent.side,
-                )
-                .await;
-            let pending_sell_shares = self.order_queue.read().await.pending_sell_shares_for(
-                &intent.agent_id,
-                intent.domain,
-                &intent.token_id,
-                intent.side,
-            );
-
-            if let Some(reason) =
-                sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
-            {
-                self.journal
-                    .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                    .await;
-                self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                    .await;
-                warn!(
-                    %agent_id, %intent_id, reason = %reason,
-                    "order blocked by reduce-only sell guard"
-                );
-                return;
-            }
-        }
-
-        let (ingress_mode, domain_mode) = self.governance.ingress_modes(intent.domain).await;
-        if intent.is_buy && ingress_mode != IngressMode::Running {
-            let reason = format!(
-                "Coordinator ingress is {:?}; blocking BUY intent while paused/halted",
-                ingress_mode
-            );
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by coordinator ingress state"
-            );
-            return;
-        }
-
-        if intent.is_buy && domain_mode != IngressMode::Running {
-            let reason = format!(
-                "Domain {:?} ingress is {:?}; blocking BUY intent while paused/halted",
-                intent.domain, domain_mode
-            );
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by coordinator domain ingress state"
-            );
+        if let Some((reason, log_message)) = self.validate_runtime_order_intent(&intent).await {
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                log_message,
+            )
+            .await;
             return;
         }
 
         if intent.is_buy && self.governance.is_agent_paused(&intent.agent_id).await {
             let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by per-agent pause"
-            );
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                "order blocked by per-agent pause",
+            )
+            .await;
             return;
         }
 
         if let Some(reason) = self.check_governance_policy(&intent).await {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by global governance policy"
-            );
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                "order blocked by global governance policy",
+            )
+            .await;
             return;
         }
 
@@ -141,15 +59,15 @@ impl Coordinator {
             )
             .await
         {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by deployment gate"
-            );
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                "order blocked by deployment gate",
+            )
+            .await;
             return;
         }
 
@@ -159,15 +77,15 @@ impl Coordinator {
         }
 
         if let Some(reason) = self.admission.check_duplicate_intent(&intent).await {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by duplicate-intent guard"
-            );
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                "order blocked by duplicate-intent guard",
+            )
+            .await;
             return;
         }
 
@@ -176,15 +94,15 @@ impl Coordinator {
             .apply_kelly_sizing(&self.capital_policy, &mut intent)
             .await
         {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by kelly sizing policy"
-            );
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                "order blocked by kelly sizing policy",
+            )
+            .await;
             return;
         }
 
@@ -192,15 +110,15 @@ impl Coordinator {
             .admission
             .apply_min_order_constraints(&mut intent, strategy_max_shares)
         {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
-            self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
-                .await;
-            warn!(
-                %agent_id, %intent_id, reason = %reason,
-                "order blocked by venue minimum constraints"
-            );
+            self.reject_order_intent(
+                &intent,
+                OrderStatus::Rejected,
+                "BLOCKED",
+                reason,
+                None,
+                "order blocked by venue minimum constraints",
+            )
+            .await;
             return;
         }
 
@@ -210,24 +128,15 @@ impl Coordinator {
             match self.risk_gate.check_order(&evaluated).await {
                 RiskCheckResult::Passed => {
                     if let Some(reason) = self.reserve_domain_capital(&evaluated).await {
-                        self.journal
-                            .persist_risk_decision(
-                                &evaluated,
-                                "BLOCKED",
-                                Some(reason.clone()),
-                                adjusted.clone(),
-                            )
-                            .await;
-                        self.emit_rejected_intent_update(
+                        self.reject_order_intent(
                             &evaluated,
                             OrderStatus::Rejected,
-                            reason.clone(),
+                            "BLOCKED",
+                            reason,
+                            adjusted.clone(),
+                            "order blocked by domain allocator",
                         )
                         .await;
-                        warn!(
-                            %agent_id, %intent_id, reason = %reason,
-                            "order blocked by domain allocator"
-                        );
                         return;
                     }
 
@@ -257,51 +166,30 @@ impl Coordinator {
                     return;
                 }
                 RiskCheckResult::Blocked(reason) => {
-                    self.journal
-                        .persist_risk_decision(
-                            &evaluated,
-                            "BLOCKED",
-                            Some(reason.to_string()),
-                            adjusted.clone(),
-                        )
-                        .await;
-                    self.emit_rejected_intent_update(
+                    self.reject_order_intent(
                         &evaluated,
                         OrderStatus::Rejected,
+                        "BLOCKED",
                         reason.to_string(),
+                        adjusted.clone(),
+                        "order blocked by risk gate",
                     )
                     .await;
-                    warn!(
-                        %agent_id, %intent_id,
-                        reason = ?reason,
-                        "order blocked by risk gate"
-                    );
                     return;
                 }
                 RiskCheckResult::Adjusted(suggestion) => {
                     if suggestion.max_shares == 0 {
                         let reason =
                             format!("risk-gate suggested max_shares=0: {}", suggestion.reason);
-                        self.journal
-                            .persist_risk_decision(
-                                &evaluated,
-                                "BLOCKED",
-                                Some(reason.clone()),
-                                adjusted.clone(),
-                            )
-                            .await;
-                        self.emit_rejected_intent_update(
+                        self.reject_order_intent(
                             &evaluated,
                             OrderStatus::Rejected,
-                            reason.clone(),
+                            "BLOCKED",
+                            reason,
+                            adjusted.clone(),
+                            "order blocked after risk adjustment",
                         )
                         .await;
-                        warn!(
-                            %agent_id,
-                            %intent_id,
-                            reason = %reason,
-                            "order blocked after risk adjustment"
-                        );
                         return;
                     }
 
@@ -319,12 +207,15 @@ impl Coordinator {
         }
 
         let reason = "risk-gate adjustment loop exceeded max attempts".to_string();
-        self.journal
-            .persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
-            .await;
-        self.emit_rejected_intent_update(&evaluated, OrderStatus::Rejected, reason.clone())
-            .await;
-        warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
+        self.reject_order_intent(
+            &evaluated,
+            OrderStatus::Rejected,
+            "BLOCKED",
+            reason,
+            adjusted,
+            "order blocked",
+        )
+        .await;
     }
 
     pub(super) async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {

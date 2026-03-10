@@ -10,9 +10,6 @@ use crate::error::Result;
 use crate::coordinator::OrderIntent;
 use crate::platform::Domain;
 
-use super::super::admission::{
-    buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason,
-};
 use super::super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::super::governance::IngressMode;
 use super::{AgentCommandChannel, Coordinator, CoordinatorHandle};
@@ -20,58 +17,7 @@ use super::{AgentCommandChannel, Coordinator, CoordinatorHandle};
 impl CoordinatorHandle {
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
-        if !self.allowed_domains.contains(&intent.domain) {
-            return Err(crate::error::PloyError::Validation(format!(
-                "domain {} is not enabled for this runtime",
-                intent.domain
-            )));
-        }
-        if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
-            return Err(crate::error::PloyError::Validation(reason));
-        }
-
-        if !intent.is_buy {
-            let tracked_open_shares = self
-                .positions
-                .agent_open_shares_for_token_side(
-                    &intent.agent_id,
-                    intent.domain,
-                    &intent.token_id,
-                    intent.side,
-                )
-                .await;
-            let pending_sell_shares = self.order_queue.read().await.pending_sell_shares_for(
-                &intent.agent_id,
-                intent.domain,
-                &intent.token_id,
-                intent.side,
-            );
-            if let Some(reason) =
-                sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
-            {
-                return Err(crate::error::PloyError::Validation(reason));
-            }
-        }
-
-        // Binary-options semantics (Polymarket): SELL intents are treated as
-        // reduce-only exits and must remain allowed during pause/halt.
-        if intent.is_buy {
-            let (global_mode, domain_mode) = self.governance.ingress_modes(intent.domain).await;
-
-            if global_mode != IngressMode::Running {
-                return Err(crate::error::PloyError::Validation(format!(
-                    "coordinator global ingress is {:?}; new intents are blocked",
-                    global_mode
-                )));
-            }
-
-            if domain_mode != IngressMode::Running {
-                return Err(crate::error::PloyError::Validation(format!(
-                    "coordinator {:?} ingress is {:?}; new intents are blocked",
-                    intent.domain, domain_mode
-                )));
-            }
-        }
+        self.validate_submit_order_intent(&intent).await?;
         self.order_tx.send(intent).await.map_err(|_| {
             crate::error::PloyError::Internal("coordinator order channel closed".into())
         })
