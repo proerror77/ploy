@@ -1,6 +1,8 @@
 use super::*;
 use crate::adapters::PolymarketWebSocket;
 use crate::strategy::{DataFeed, DataFeedManager, StrategyAction};
+#[path = "foreground_submit.rs"]
+mod foreground_submit;
 
 pub(super) async fn run_strategy_foreground(
     name: &str,
@@ -161,7 +163,8 @@ pub(super) async fn run_strategy_foreground(
     if has_polymarket_feed {
         println!("  \x1b[36mConfiguring Polymarket feed\x1b[0m");
         let pm_client = PolymarketClient::new("https://clob.polymarket.com", dry_run)?;
-        let pm_ws = PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+        let pm_ws =
+            PolymarketWebSocket::new("wss://ws-subscriptions-clob.polymarket.com/ws/market");
         feed_manager = feed_manager.with_polymarket(pm_ws, pm_client);
     }
 
@@ -190,7 +193,12 @@ pub(super) async fn run_strategy_foreground(
     println!("\x1b[32m✓ Data feeds started\x1b[0m\n");
 
     let order_store = init_order_store().await;
-    let action_handle = tokio::spawn(handle_strategy_actions(action_rx, executor, order_store));
+    let action_handle = tokio::spawn(handle_strategy_actions(
+        action_rx,
+        dry_run,
+        executor,
+        order_store,
+    ));
 
     println!("Press Ctrl+C to stop...\n");
     tokio::signal::ctrl_c().await?;
@@ -240,168 +248,22 @@ pub(super) async fn init_order_store() -> Option<Arc<PostgresStore>> {
 
 pub(super) async fn handle_strategy_actions(
     mut rx: tokio::sync::mpsc::Receiver<(String, crate::strategy::StrategyAction)>,
+    dry_run: bool,
     executor: Option<Arc<OrderExecutor>>,
     store: Option<Arc<PostgresStore>>,
 ) {
+    let submitter = foreground_submit::ForegroundIntentSubmitter::new(dry_run, executor.clone());
+
     while let Some((strategy_id, action)) = rx.recv().await {
         match action {
             StrategyAction::SubmitIntent { intent } => {
-                let client_order_id = intent.client_order_id.clone();
-                let mut order = crate::strategy::order_request_from_intent(&intent);
-                if order.client_order_id != client_order_id {
-                    warn!(
-                        "Mismatched order IDs in strategy action: action={}, request={}; using action ID",
-                        client_order_id, order.client_order_id
-                    );
-                    order.client_order_id = client_order_id.clone();
-                }
-
-                let tracked_order_id = order.client_order_id.clone();
-                let price_cents = order.limit_price * rust_decimal::Decimal::from(100);
-                println!("\n  \x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-                println!("  \x1b[36m║\x1b[0m  📤 ORDER SUBMISSION                                          \x1b[36m║\x1b[0m");
-                println!("  \x1b[36m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
-                println!(
-                    "  \x1b[36m║\x1b[0m  Strategy: {:<47}\x1b[36m║\x1b[0m",
-                    strategy_id
-                );
-                println!(
-                    "  \x1b[36m║\x1b[0m  Order ID: {:<47}\x1b[36m║\x1b[0m",
-                    tracked_order_id
-                );
-                println!(
-                    "  \x1b[36m║\x1b[0m  Token: {:<50}\x1b[36m║\x1b[0m",
-                    &order.token_id[..order.token_id.len().min(50)]
-                );
-                println!(
-                    "  \x1b[36m║\x1b[0m  Side: {:?}, Shares: {}, Price: {:.2}¢{:<20}\x1b[36m║\x1b[0m",
-                    order.market_side, order.shares, price_cents, ""
-                );
-                println!("  \x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m");
-
-                if let Some(ref store) = store {
-                    let db_order = crate::domain::Order::from_request(
-                        &order,
-                        None,
-                        1,
-                        Some(strategy_id.clone()),
-                    );
-                    if let Err(e) = store.insert_order(&db_order).await {
-                        warn!(
-                            "Failed to persist strategy order {}: {}",
-                            tracked_order_id, e
-                        );
-                    }
-                }
-
-                if let Some(ref exec) = executor {
-                    info!(
-                        "Executing order: {} @ {:.2}¢",
-                        tracked_order_id, price_cents
-                    );
-                    match exec.execute(&order).await {
-                        Ok(result) => {
-                            println!("  \x1b[32m✓ Order executed!\x1b[0m");
-                            println!("    Order ID: {}", result.order_id);
-                            println!("    Status: {:?}", result.status);
-                            println!("    Filled: {} shares", result.filled_shares);
-                            if let Some(avg_price) = result.avg_fill_price {
-                                println!(
-                                    "    Avg Price: {:.2}¢",
-                                    avg_price * rust_decimal::Decimal::from(100)
-                                );
-                            }
-                            println!("    Time: {}ms\n", result.elapsed_ms);
-                            info!(
-                                "Order {} filled: {} shares @ {:?}",
-                                result.order_id, result.filled_shares, result.avg_fill_price
-                            );
-
-                            if let Some(ref store) = store {
-                                if let Err(e) = store
-                                    .update_order_status(
-                                        &tracked_order_id,
-                                        crate::domain::OrderStatus::Submitted,
-                                        Some(&result.order_id),
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        "Failed to update order {} to Submitted: {}",
-                                        tracked_order_id, e
-                                    );
-                                }
-
-                                if result.filled_shares > 0 {
-                                    let fill_price =
-                                        result.avg_fill_price.unwrap_or(order.limit_price);
-                                    if let Err(e) = store
-                                        .update_order_fill(
-                                            &tracked_order_id,
-                                            result.filled_shares,
-                                            fill_price,
-                                            result.status,
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            "Failed to update order fill for {}: {}",
-                                            tracked_order_id, e
-                                        );
-                                    }
-                                } else if let Err(e) = store
-                                    .update_order_status(&tracked_order_id, result.status, None)
-                                    .await
-                                {
-                                    warn!(
-                                        "Failed to update order {} status to {:?}: {}",
-                                        tracked_order_id, result.status, e
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("  \x1b[31m✗ Order failed: {}\x1b[0m\n", e);
-                            error!("Order execution failed: {}", e);
-                            if let Some(ref store) = store {
-                                if let Err(db_err) = store
-                                    .update_order_status(
-                                        &tracked_order_id,
-                                        crate::domain::OrderStatus::Failed,
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        "Failed to mark order {} as Failed: {}",
-                                        tracked_order_id, db_err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    println!("  \x1b[33m⚠ No executor - order logged but not submitted\x1b[0m\n");
-                    warn!(
-                        "Order {} not executed - no executor configured",
-                        tracked_order_id
-                    );
-                    if let Some(ref store) = store {
-                        if let Err(e) = store
-                            .update_order_status(
-                                &tracked_order_id,
-                                crate::domain::OrderStatus::Failed,
-                                None,
-                            )
-                            .await
-                        {
-                            warn!(
-                                "Failed to mark non-executed order {} as Failed: {}",
-                                tracked_order_id, e
-                            );
-                        }
-                    }
-                }
+                foreground_submit::handle_submit_intent(
+                    &strategy_id,
+                    intent,
+                    &submitter,
+                    store.as_ref(),
+                )
+                .await;
             }
             StrategyAction::CancelOrder { order_id } => {
                 println!("  \x1b[33m[{}]\x1b[0m Cancel: {}", strategy_id, order_id);
