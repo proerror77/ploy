@@ -24,6 +24,34 @@ Move the remaining platform-owned persistence pipeline/schema surface under `src
   - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-worker rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-worker rtk cargo test quote_dedup_skips_unchanged_within_interval --lib -- --exact --nocapture`
 
+# Data Plane Ownership Cut (2026-03-10)
+
+## Goal
+Move `PlatformDataPlane`, freshness tracking, and their related runtime/handle types out of `src/platform` so the live market-data surface has a neutral owner and `platform` degrades to a compatibility layer.
+
+## Tasks
+
+- [x] Add a top-level `src/data_plane` owner for runtime and freshness modules.
+- [x] Reduce `src/platform` to compatibility re-exports for data-plane types.
+- [x] Rewire live runtime, bootstrap, adapter, service, and strategy callers away from `crate::platform::*` data-plane imports.
+- [x] Re-run compile and focused data-plane/feed regressions after the move.
+
+## Review
+
+- [x] Confirm repo-internal imports for data-plane types no longer point at `crate::platform`.
+- [x] Confirm the data-plane runtime and feed consumers still compile and pass focused regressions.
+
+## Progress notes
+
+- 2026-03-10: Moved the data-plane owner into [mod.rs](/Users/proerror/Documents/ploy/src/data_plane/mod.rs), [runtime.rs](/Users/proerror/Documents/ploy/src/data_plane/runtime.rs), and [freshness.rs](/Users/proerror/Documents/ploy/src/data_plane/freshness.rs).
+- 2026-03-10: Reduced [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs) so `platform` now re-exports the data-plane surface instead of owning it.
+- 2026-03-10: Rewired bootstrap, managed runtime startup, adapters, services, TUI, RL CLI, and strategy runners to import data-plane types from `crate::data_plane`.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-dataplane-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-dataplane-cut rtk cargo test source_health_reports_down_healthy_and_degraded --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-dataplane-cut rtk cargo test test_from_data_plane_reuses_singleton_adapters --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-dataplane-cut rtk cargo test test_feed_builder --lib -- --exact --nocapture`
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal
