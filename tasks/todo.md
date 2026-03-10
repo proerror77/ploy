@@ -3315,3 +3315,27 @@ Move the massive inline `staggered_arb_live` test module into a dedicated siblin
   - `rtk cargo check --lib`
   - `rtk cargo test test_try_entry_rejects_sigma_above_max_entry_sigma --lib -- --nocapture`
   - `rtk cargo test test_leg2_partial_then_full_fill_closes_once_with_weighted_price --lib -- --nocapture`
+
+# Polymarket CLOB Read API Extraction (2026-03-10)
+
+## Goal
+Move the heavy read-only market/order/account/trade retrieval path out of `src/adapters/polymarket_clob.rs` so the root client keeps constructor/auth/trading/status ownership while read APIs live behind a dedicated sibling module.
+
+## Tasks
+
+- [x] Extract the read-only CLOB/Gamma pagination and account/market retrieval methods into `src/adapters/polymarket_clob/read_api.rs`.
+- [x] Keep `PolymarketClient`'s public API unchanged for callers.
+- [x] Re-run compile and focused adapter regressions after the extraction.
+
+## Review
+
+- [x] Confirm `polymarket_clob.rs` no longer owns the bulk read/query implementation body.
+- [x] Confirm the extracted module preserves market lookup, orderbook/best-price reads, account summary, position/trade history, and paginated order/trade retrieval behavior.
+
+## Progress notes
+
+- 2026-03-10: Added [read_api.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob/read_api.rs) and moved read-only retrieval ownership out of [polymarket_clob.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob.rs), including market/orderbook reads, balance/position/trade history, account summary, and paginated order/trade helpers.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_create_client --lib -- --exact --nocapture`
+  - `rtk cargo test test_position_response_deserializes_numeric_fields --lib -- --exact --nocapture`
