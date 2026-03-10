@@ -52,6 +52,34 @@ Move `PlatformDataPlane`, freshness tracking, and their related runtime/handle t
   - `CARGO_TARGET_DIR=/tmp/ploy-dataplane-cut rtk cargo test test_from_data_plane_reuses_singleton_adapters --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-dataplane-cut rtk cargo test test_feed_builder --lib -- --exact --nocapture`
 
+# Domain Ownership Cut (2026-03-10)
+
+## Goal
+Move the shared `Domain` scope type out of `src/platform` and into `src/domain` so control-plane, coordinator, strategy, API, and persistence contracts stop depending on a legacy platform owner for a cross-cutting business type.
+
+## Tasks
+
+- [x] Move the `Domain` type implementation into a `src/domain` leaf module.
+- [x] Keep crate-root and `platform` re-exports so external compatibility is preserved during the import migration.
+- [x] Rewire repo-internal imports away from `crate::platform::Domain`.
+- [x] Re-run compile and focused cross-layer regressions after the move.
+
+## Review
+
+- [x] Confirm repo-internal source imports no longer point at `crate::platform::Domain`.
+- [x] Confirm deployment/control-plane, order-intent, and coordinator domain gating tests still pass.
+
+## Progress notes
+
+- 2026-03-10: Moved the type implementation from [types.rs](/Users/proerror/Documents/ploy/src/platform/types.rs) to [scope.rs](/Users/proerror/Documents/ploy/src/domain/scope.rs), and re-exported it from [mod.rs](/Users/proerror/Documents/ploy/src/domain/mod.rs).
+- 2026-03-10: Updated [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs) and [lib.rs](/Users/proerror/Documents/ploy/src/lib.rs) so `platform::Domain` and the crate-root `Domain` remain compatibility re-exports.
+- 2026-03-10: Rewired coordinator, strategy, control-plane, API, RL, persistence, and agent modules to import `Domain` from `crate::domain`.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-cut rtk cargo test deployment_runtime_scope_matching --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-cut rtk cargo test order_intent_from_trade_intent_maps_priority_and_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-cut rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal
