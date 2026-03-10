@@ -3431,3 +3431,4 @@ Move the Leg1 submission/fill/version-conflict path out of `src/strategy/executi
 ## Progress notes
 
 - 2026-03-10: Added [ingress.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar/ingress.rs) and moved sidecar ingress/account-scope/deployment-binding/broadcast helper ownership out of [sidecar.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar.rs), leaving the root file focused on request/response types, handler flow, persistence, and tests.
+- 2026-03-10: `rtk cargo check --lib` passed after the extraction; focused `rtk cargo test --lib parse_domain_rejects_unknown_values -- --nocapture` is currently blocked by unrelated `src/cli/strategy/backtest_ops.rs` visibility errors in the existing workspace.
