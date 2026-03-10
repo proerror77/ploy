@@ -1,3 +1,30 @@
+# Coordinator Execution Settlement Cut (2026-03-10)
+
+## Goal
+Move execution success/failure settlement, position-book updates, and risk-exposure refresh out of `src/coordinator/coordinator/execution.rs` so the queue-drain loop becomes a thin dispatcher and recovery reuses a dedicated execution-outcome owner.
+
+## Tasks
+
+- [x] Add a dedicated coordinator submodule for execution outcome settlement helpers.
+- [x] Move success/failure persistence, fill-settlement, and risk-refresh helpers out of `execution.rs`.
+- [x] Reduce `drain_and_execute` to queue draining plus executor dispatch/delegation.
+- [x] Re-run compile plus focused buy/sell fill regressions after the cut.
+
+## Review
+
+- [x] Confirm `recovery.rs` still reuses the extracted settlement helpers instead of duplicating logic.
+- [x] Confirm the queue-drain happy path, pending/fill updates, and sell-fill PnL regression tests still pass.
+
+## Progress notes
+
+- 2026-03-10: Added [execution_settlement.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/execution_settlement.rs) to own execution success/failure journaling, capital settlement, position-book updates, and risk-refresh helpers.
+- 2026-03-10: Reduced [execution.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/execution.rs) to a thin queue-drain dispatcher that delegates post-execution handling to the new settlement owner.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-coord-exec-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-coord-exec-cut rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-coord-exec-cut-sell rtk cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-coord-exec-cut-updates rtk cargo test test_drain_and_execute_emits_pending_and_fill_updates --lib -- --exact --nocapture`
+
 # Persistence Pipeline Ownership Cut (2026-03-10)
 
 ## Goal

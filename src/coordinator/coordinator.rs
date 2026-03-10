@@ -36,6 +36,7 @@ use crate::domain::Domain;
 
 mod control_surface;
 mod execution;
+mod execution_settlement;
 mod ingress;
 mod ingress_preflight;
 mod ingress_rejections;
