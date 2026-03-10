@@ -3024,3 +3024,33 @@ Keep shrinking bootstrap-owned crypto runtime setup by splitting managed-crypto 
   - `cargo check --lib`
   - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
   - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
+
+# Coordinator Core Ownership Wave (2026-03-10)
+
+## Goal
+Keep collapsing the active runtime core by splitting coordinator recovery/orchestration ownership, capital allocation internals, and execution-journal restore/parsing ownership into dedicated modules.
+
+## Tasks
+
+- [x] Extract coordinator recovery/bootstrap ownership out of `src/coordinator/coordinator.rs`.
+- [ ] Extract a major allocator slice out of `src/coordinator/capital.rs`.
+- [ ] Extract execution-journal restore/parsing ownership out of `src/coordinator/journal.rs`.
+- [x] Re-run compile and focused coordinator regressions after each integrated slice.
+
+## Review
+
+- [x] Confirm `coordinator.rs` keeps runtime-loop ownership rather than restore/bootstrap details.
+- [ ] Confirm `capital.rs` no longer centralizes both crypto and market allocator internals in one file.
+- [ ] Confirm `journal.rs` no longer centralizes restore loaders and parsing helpers in the root owner.
+
+## Progress notes
+
+- 2026-03-10: Reserved ownership for the next parallel wave:
+  - mainline: `src/coordinator/coordinator.rs`
+  - worker 1: `src/coordinator/capital.rs`
+  - worker 2: `src/coordinator/journal.rs`
+- 2026-03-10: Added [recovery.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/recovery.rs) and moved the coordinator recovery/bootstrap ownership out of [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs), including risk runtime restore, governance restore, execution-log restore, and the persistence pool setters.
+- 2026-03-10: Validation passed for the local coordinator slice:
+  - `cargo check --lib`
+  - `cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --nocapture`
+  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
