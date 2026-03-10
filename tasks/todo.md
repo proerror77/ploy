@@ -3291,3 +3291,27 @@ Move event-registry persistence out of `src/adapters/postgres.rs` so the root ad
   - `rtk cargo check --lib`
   - `rtk cargo test strategy::event_edge::strategy::tests::on_market_update_tracks_discovered_events_and_expiry --lib -- --exact --nocapture`
   - `rtk cargo test strategy::event_edge::strategy::tests::emits_canonical_submit_order_and_tracks_fill_into_position --lib -- --exact --nocapture`
+
+# Staggered Arb Test Module Extraction (2026-03-10)
+
+## Goal
+Move the massive inline `staggered_arb_live` test module into a dedicated sibling file so the root strategy file reflects the live adapter implementation instead of mixing runtime ownership with 2k+ lines of tests.
+
+## Tasks
+
+- [x] Extract the inline `#[cfg(test)]` module out of `src/strategy/staggered_arb_live.rs` into `src/strategy/staggered_arb_live/tests.rs`.
+- [x] Keep the test helpers and assertions unchanged while switching the root file to `mod tests;`.
+- [x] Re-run compile and focused staggered-arb regressions after the move.
+
+## Review
+
+- [x] Confirm `staggered_arb_live.rs` is now focused on production strategy logic and no longer inlines the large test body.
+- [x] Confirm the moved tests still exercise both entry and leg2/close paths from the new sibling module.
+
+## Progress notes
+
+- 2026-03-10: Added [tests.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live/tests.rs) and moved the full inline `staggered_arb_live` test module out of [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs), leaving the root file at `975` lines instead of `3015`.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_try_entry_rejects_sigma_above_max_entry_sigma --lib -- --nocapture`
+  - `rtk cargo test test_leg2_partial_then_full_fill_closes_once_with_weighted_price --lib -- --nocapture`
