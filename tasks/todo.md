@@ -3339,3 +3339,27 @@ Move the heavy read-only market/order/account/trade retrieval path out of `src/a
   - `rtk cargo check --lib`
   - `rtk cargo test test_create_client --lib -- --exact --nocapture`
   - `rtk cargo test test_position_response_deserializes_numeric_fields --lib -- --exact --nocapture`
+
+# Momentum Trade Flow Extraction (2026-03-10)
+
+## Goal
+Move the momentum strategy's trade-entry, queued-signal, and exit execution flow out of `src/strategy/momentum.rs` so the root file keeps market-update/orchestration ownership while trade-flow state transitions live behind a dedicated sibling module.
+
+## Tasks
+
+- [x] Extract the momentum trade-flow methods into `src/strategy/momentum/trade_flow.rs`.
+- [x] Keep the existing strategy API and call graph unchanged for root/orchestration modules.
+- [x] Re-run compile and focused momentum regressions after the extraction.
+
+## Review
+
+- [x] Confirm `momentum.rs` no longer owns the bulk entry/exit/pending-signal execution implementation body.
+- [x] Confirm the extracted module preserves queue-based best-edge execution, cooldown handling, entry sizing, and exit execution behavior.
+
+## Progress notes
+
+- 2026-03-10: Added [trade_flow.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/trade_flow.rs) and moved `maybe_enter`, `execute_exit`, `in_cooldown`, `process_pending_signals`, and `execute_pending_trade` out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), leaving the root file focused on shared state, event resolution, PM updates, and test coverage.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_exit_manager_stop_loss --lib -- --exact --nocapture`
+  - `rtk cargo test test_find_event_with_timing_prefers_best_across_all_series --lib -- --nocapture`
