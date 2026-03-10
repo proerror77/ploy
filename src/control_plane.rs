@@ -16,42 +16,7 @@ pub use trade_intent::TradeIntent;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordinator::OrderPriority;
-    use crate::domain::Side;
     use crate::platform::Domain;
-    use rust_decimal_macros::dec;
-    use std::collections::HashMap;
-    use uuid::Uuid;
-
-    #[test]
-    fn trade_intent_into_order_intent_maps_priority_and_metadata() {
-        let intent = TradeIntent {
-            intent_id: Uuid::new_v4(),
-            deployment_id: "deploy.crypto.15m".to_string(),
-            agent_id: "openclaw-agent".to_string(),
-            domain: Domain::Crypto,
-            market_slug: "btc-updown-15m".to_string(),
-            token_id: "token-yes".to_string(),
-            side: Side::Up,
-            is_buy: true,
-            size: 10,
-            price_limit: dec!(0.42),
-            confidence: Some(dec!(0.73)),
-            edge: Some(dec!(0.05)),
-            event_time: None,
-            reason: Some("signal_edge".to_string()),
-            priority: Some("high".to_string()),
-            metadata: HashMap::new(),
-        };
-
-        let mapped = intent.into_order_intent();
-        assert_eq!(mapped.priority, OrderPriority::High);
-        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
-        assert_eq!(
-            mapped.metadata.get("intent_reason").map(String::as_str),
-            Some("signal_edge")
-        );
-    }
 
     #[test]
     fn deployment_runtime_scope_matching() {
@@ -90,33 +55,5 @@ mod tests {
         assert!(!deployment.matches_execution_mode(true));
         assert!(deployment.is_enabled_for_runtime("acct-a", false));
         assert!(!deployment.is_enabled_for_runtime("acct-a", true));
-    }
-
-    #[test]
-    fn trade_intent_into_order_intent_normalizes_blank_deployment_metadata() {
-        let mut intent = TradeIntent {
-            intent_id: Uuid::new_v4(),
-            deployment_id: "deploy.crypto.15m".to_string(),
-            agent_id: "openclaw-agent".to_string(),
-            domain: Domain::Crypto,
-            market_slug: "btc-updown-15m".to_string(),
-            token_id: "token-yes".to_string(),
-            side: Side::Up,
-            is_buy: true,
-            size: 10,
-            price_limit: dec!(0.42),
-            confidence: None,
-            edge: None,
-            event_time: None,
-            reason: None,
-            priority: None,
-            metadata: HashMap::new(),
-        };
-        intent
-            .metadata
-            .insert("deployment_id".to_string(), "   ".to_string());
-
-        let mapped = intent.into_order_intent();
-        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::control_plane::TradeIntent;
 use crate::domain::OrderStatus;
 
 impl Coordinator {
@@ -248,5 +249,12 @@ impl Coordinator {
 
     pub(super) async fn release_domain_reservation(&self, intent_id: Uuid) {
         self.capital_policy.release_buy_reservation(intent_id).await;
+    }
+}
+
+impl CoordinatorHandle {
+    /// Submit a strategy trade intent through coordinator ingress.
+    pub async fn submit_trade_intent(&self, intent: TradeIntent) -> crate::error::Result<()> {
+        self.submit_order(intent.into()).await
     }
 }

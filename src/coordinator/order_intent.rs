@@ -3,6 +3,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::control_plane::TradeIntent;
 use crate::domain::{OrderType, Side, TimeInForce};
 use crate::platform::Domain;
 
@@ -22,6 +23,93 @@ pub enum OrderPriority {
 impl Default for OrderPriority {
     fn default() -> Self {
         OrderPriority::Normal
+    }
+}
+
+fn metadata_needs_value(metadata: &HashMap<String, String>, key: &str) -> bool {
+    metadata
+        .get(key)
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+}
+
+fn trade_intent_priority(priority: Option<&str>) -> OrderPriority {
+    match priority
+        .unwrap_or("normal")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "critical" => OrderPriority::Critical,
+        "high" => OrderPriority::High,
+        "low" => OrderPriority::Low,
+        _ => OrderPriority::Normal,
+    }
+}
+
+impl From<TradeIntent> for OrderIntent {
+    fn from(intent: TradeIntent) -> Self {
+        let TradeIntent {
+            intent_id,
+            deployment_id,
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            size,
+            price_limit,
+            confidence,
+            edge,
+            event_time,
+            reason,
+            priority,
+            mut metadata,
+        } = intent;
+
+        if metadata_needs_value(&metadata, "deployment_id") {
+            metadata.insert("deployment_id".to_string(), deployment_id);
+        }
+        if metadata_needs_value(&metadata, "intent_reason") {
+            if let Some(reason) = reason {
+                metadata.insert("intent_reason".to_string(), reason);
+            }
+        }
+        if metadata_needs_value(&metadata, "signal_confidence") {
+            if let Some(confidence) = confidence {
+                metadata.insert(
+                    "signal_confidence".to_string(),
+                    confidence.normalize().to_string(),
+                );
+            }
+        }
+        if metadata_needs_value(&metadata, "signal_edge") {
+            if let Some(edge) = edge {
+                metadata.insert("signal_edge".to_string(), edge.normalize().to_string());
+            }
+        }
+        if metadata_needs_value(&metadata, "event_time") {
+            if let Some(event_time) = event_time {
+                metadata.insert("event_time".to_string(), event_time.to_rfc3339());
+            }
+        }
+
+        let mut order_intent = Self::new(
+            agent_id,
+            domain,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            size,
+            price_limit,
+        );
+        order_intent.priority = trade_intent_priority(priority.as_deref());
+        order_intent.intent_id = intent_id;
+        order_intent.client_order_id = format!("intent:{intent_id}");
+        order_intent.metadata = metadata;
+        order_intent
     }
 }
 
@@ -189,6 +277,9 @@ impl OrderIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+    use uuid::Uuid;
 
     fn sample_intent() -> OrderIntent {
         OrderIntent::new(
@@ -227,5 +318,63 @@ mod tests {
         assert!(intent.client_order_id.starts_with("intent:"));
         assert_eq!(intent.order_type, OrderType::Limit);
         assert_eq!(intent.time_in_force, TimeInForce::GTC);
+    }
+
+    #[test]
+    fn order_intent_from_trade_intent_maps_priority_and_metadata() {
+        let intent = TradeIntent {
+            intent_id: Uuid::new_v4(),
+            deployment_id: "deploy.crypto.15m".to_string(),
+            agent_id: "openclaw-agent".to_string(),
+            domain: Domain::Crypto,
+            market_slug: "btc-updown-15m".to_string(),
+            token_id: "token-yes".to_string(),
+            side: Side::Up,
+            is_buy: true,
+            size: 10,
+            price_limit: dec!(0.42),
+            confidence: Some(dec!(0.73)),
+            edge: Some(dec!(0.05)),
+            event_time: None,
+            reason: Some("signal_edge".to_string()),
+            priority: Some("high".to_string()),
+            metadata: HashMap::new(),
+        };
+
+        let mapped = OrderIntent::from(intent);
+        assert_eq!(mapped.priority, OrderPriority::High);
+        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
+        assert_eq!(
+            mapped.metadata.get("intent_reason").map(String::as_str),
+            Some("signal_edge")
+        );
+    }
+
+    #[test]
+    fn order_intent_from_trade_intent_normalizes_blank_deployment_metadata() {
+        let mut intent = TradeIntent {
+            intent_id: Uuid::new_v4(),
+            deployment_id: "deploy.crypto.15m".to_string(),
+            agent_id: "openclaw-agent".to_string(),
+            domain: Domain::Crypto,
+            market_slug: "btc-updown-15m".to_string(),
+            token_id: "token-yes".to_string(),
+            side: Side::Up,
+            is_buy: true,
+            size: 10,
+            price_limit: dec!(0.42),
+            confidence: None,
+            edge: None,
+            event_time: None,
+            reason: None,
+            priority: None,
+            metadata: HashMap::new(),
+        };
+        intent
+            .metadata
+            .insert("deployment_id".to_string(), "   ".to_string());
+
+        let mapped = OrderIntent::from(intent);
+        assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
     }
 }
