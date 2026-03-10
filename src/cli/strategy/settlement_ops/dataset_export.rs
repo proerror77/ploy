@@ -1,16 +1,14 @@
-use super::is_market_resolved;
-use crate::adapters::{PolymarketClient, PostgresStore};
+use super::settlement_refresh::refresh_pm_token_settlements_for_tokens;
+use crate::adapters::PostgresStore;
 use crate::cli::strategy::CryptoLobDatasetFormat;
 use anyhow::{Context, bail};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 #[derive(Debug, Clone)]
 struct CryptoLobDatasetRow {
@@ -304,155 +302,20 @@ pub(super) async fn export_crypto_lob_dataset(
     token_ids.dedup();
 
     if !no_refresh {
-        let existing = sqlx::query(
-            r#"
-            SELECT token_id, resolved
-            FROM pm_token_settlements
-            WHERE token_id = ANY($1)
-            "#,
-        )
-        .bind(&token_ids)
-        .fetch_all(store.pool())
-        .await
-        .context("Failed to query pm_token_settlements")?;
-
-        let mut resolved_map: HashMap<String, bool> = HashMap::new();
-        for row in existing {
-            let token_id: String = row.get("token_id");
-            let resolved: bool = row.get("resolved");
-            resolved_map.insert(token_id, resolved);
-        }
-
-        let mut to_refresh: Vec<String> = token_ids
-            .iter()
-            .filter(|t| !resolved_map.get(*t).copied().unwrap_or(false))
-            .cloned()
-            .collect();
-
         const MAX_REFRESH: usize = 500;
-        if to_refresh.len() > MAX_REFRESH {
-            to_refresh.truncate(MAX_REFRESH);
-        }
+        let summary =
+            refresh_pm_token_settlements_for_tokens(store.pool(), &token_ids, MAX_REFRESH).await?;
 
-        if !to_refresh.is_empty() {
+        if summary.requested_tokens > 0 {
             println!(
                 "\n  Refreshing settlement status for {} token(s) via Gamma...",
-                to_refresh.len()
+                summary.requested_tokens
             );
         }
-
-        let pm = PolymarketClient::new("https://clob.polymarket.com", true)
-            .context("Failed to create Polymarket client")?;
-
-        let mut refreshed_markets = 0usize;
-        let mut refreshed_tokens = 0usize;
-        let mut seen_conditions: HashSet<String> = HashSet::new();
-
-        for token_id in to_refresh {
-            let market = match pm.get_gamma_market_by_token_id(&token_id).await {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(token_id = %token_id, error = %e, "failed to fetch gamma market for token");
-                    continue;
-                }
-            };
-
-            if let Some(ref cond) = market.condition_id {
-                let cond_str = cond.to_string();
-                if !seen_conditions.insert(cond_str) {
-                    continue;
-                }
-            }
-
-            let clob_ids: Vec<String> = market
-                .clob_token_ids
-                .as_ref()
-                .map(|ids| ids.iter().map(|id| id.to_string()).collect())
-                .unwrap_or_default();
-            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
-            let price_strs: Vec<String> = market
-                .outcome_prices
-                .as_ref()
-                .map(|ps| ps.iter().map(|d| d.to_string()).collect())
-                .unwrap_or_default();
-
-            if clob_ids.is_empty() || price_strs.is_empty() {
-                tracing::debug!(
-                    token_id = %token_id,
-                    market_id = %market.id,
-                    "gamma market missing clob_token_ids or outcome_prices; skipping"
-                );
-                continue;
-            }
-
-            let mut prices: Vec<Decimal> = Vec::new();
-            for s in &price_strs {
-                if let Ok(p) = s.parse::<Decimal>() {
-                    prices.push(p);
-                }
-            }
-
-            let resolved = market.closed.unwrap_or(false) && is_market_resolved(&prices);
-            let resolved_at: Option<DateTime<Utc>> = resolved.then(Utc::now);
-            let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
-
-            let market_slug = market.slug.clone();
-            let condition_id = market.condition_id.map(|b| b.to_string());
-
-            for (i, tid) in clob_ids.iter().enumerate() {
-                let outcome = outcomes.get(i).cloned();
-                let settled_price = price_strs.get(i).and_then(|s| s.parse::<Decimal>().ok());
-
-                sqlx::query(
-                    r#"
-                    INSERT INTO pm_token_settlements (
-                        token_id,
-                        condition_id,
-                        market_id,
-                        market_slug,
-                        outcome,
-                        settled_price,
-                        resolved,
-                        resolved_at,
-                        fetched_at,
-                        raw_market
-                    )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
-                    ON CONFLICT (token_id) DO UPDATE SET
-                        condition_id = EXCLUDED.condition_id,
-                        market_id = EXCLUDED.market_id,
-                        market_slug = EXCLUDED.market_slug,
-                        outcome = EXCLUDED.outcome,
-                        settled_price = EXCLUDED.settled_price,
-                        resolved = EXCLUDED.resolved,
-                        resolved_at = COALESCE(pm_token_settlements.resolved_at, EXCLUDED.resolved_at),
-                        fetched_at = NOW(),
-                        raw_market = EXCLUDED.raw_market
-                    "#,
-                )
-                .bind(tid)
-                .bind(condition_id.as_deref())
-                .bind(&market.id)
-                .bind(market_slug.as_deref())
-                .bind(outcome.as_deref())
-                .bind(settled_price)
-                .bind(resolved)
-                .bind(resolved_at)
-                .bind(sqlx::types::Json(raw_market.clone()))
-                .execute(store.pool())
-                .await
-                .context("Failed to upsert pm_token_settlements row")?;
-
-                refreshed_tokens += 1;
-            }
-
-            refreshed_markets += 1;
-        }
-
-        if refreshed_markets > 0 {
+        if summary.refreshed_markets > 0 {
             println!(
                 "  ✓ Refreshed {} market(s), {} token rows",
-                refreshed_markets, refreshed_tokens
+                summary.refreshed_markets, summary.refreshed_tokens
             );
         }
     }
