@@ -2997,3 +2997,30 @@ Finish the next CLI/risk cleanup wave by moving settlement/dataset ownership out
   - `src/coordinator/bootstrap/managed_crypto.rs`
   - `src/coordinator/bootstrap/crypto_runtime_support.rs`
   - `src/strategy/adapters/momentum_adapter.rs`
+
+# Bootstrap Managed Crypto And Runtime Support Extraction (2026-03-10)
+
+## Goal
+Keep shrinking bootstrap-owned crypto runtime setup by splitting managed-crypto env/config ownership and crypto runtime preflight/discovery ownership into dedicated submodules.
+
+## Tasks
+
+- [x] Extract `ManagedCryptoRuntimeConfig` and runtime env hydration into `managed_crypto/config.rs` and `managed_crypto/env.rs`.
+- [x] Extract crypto runtime preflight and market-discovery ownership into `crypto_runtime_support/preflight.rs` and `crypto_runtime_support/market_discovery.rs`.
+- [x] Keep the bootstrap-facing root modules as thin facades over the extracted owners.
+- [x] Re-run compile and focused bootstrap regressions after the extraction.
+
+## Review
+
+- [x] Confirm `managed_crypto.rs` no longer owns both config structs and env hydration bodies inline.
+- [x] Confirm `crypto_runtime_support.rs` no longer owns preflight assembly and market-discovery collector wiring inline.
+- [x] Confirm managed-runtime planning and crypto env/config tests still pass after the move.
+
+## Progress notes
+
+- 2026-03-10: Added [config.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto/config.rs) and [env.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto/env.rs), leaving [managed_crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/managed_crypto.rs) as a thin facade over managed-crypto config and env ownership.
+- 2026-03-10: Added [preflight.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support/preflight.rs) and [market_discovery.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support/market_discovery.rs), leaving [crypto_runtime_support.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support.rs) to orchestrate the extracted pieces plus the existing market-data runtime module.
+- 2026-03-10: Validation passed:
+  - `cargo check --lib`
+  - `cargo test from_app_config_reads_crypto_lob_ml_model_env_vars --lib -- --nocapture`
+  - `cargo test collect_managed_strategy_runtime_plans_collapses_crypto_spawn_specs --lib -- --nocapture`
