@@ -3239,3 +3239,31 @@ Keep collapsing the remaining active-core hotspots by extracting another major s
   - `rtk cargo test test_orphan_leg1_cleanup_keeps_lock_and_allows_late_reconciliation --lib -- --exact --nocapture`
   - `rtk cargo test test_leg2_partial_then_full_fill_closes_once_with_weighted_price --lib -- --exact --nocapture`
   - `rtk cargo check --lib`
+
+# Strategy And Adapter Wave 4 (2026-03-10)
+
+## Goal
+Keep shrinking the remaining live-strategy core by pulling the momentum engine's runtime/entry orchestration out of the root file now that detector, matcher, and exit ownership have already moved.
+
+## Tasks
+
+- [x] Extract the momentum runtime/event-loop ownership out of `src/strategy/momentum.rs`.
+- [x] Keep the root strategy file focused on stateful trade management, PM update handling, and shared helpers.
+- [x] Re-run compile and focused momentum/feeds regressions after the extraction.
+
+## Review
+
+- [x] Confirm `momentum.rs` no longer inlines the main run loop plus the full CEX/Chainlink entry path.
+- [x] Confirm the extracted module keeps Binance/Chainlink entry behavior unchanged while preserving the existing strategy API.
+
+## Progress notes
+
+- 2026-03-10: Added [entry_runtime.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/entry_runtime.rs) and moved the momentum engine's main run loop, CEX entry path, directional Binance entry path, PM ask lookup, and Chainlink entry path out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), leaving the root file focused on PM updates, position management, and execution state.
+- 2026-03-10: Validation passed for the wave:
+  - `rtk cargo check --lib`
+  - `rtk cargo test characterization_replay_binance_price_to_strategy_market_update --lib -- --nocapture`
+  - `rtk cargo test characterization_replay_polymarket_quote_to_strategy_market_update --lib -- --nocapture`
+  - `rtk cargo test characterization_replay_binance_kline_to_strategy_market_update --lib -- --nocapture`
+  - `rtk cargo test test_parse_price_from_question --lib -- --nocapture`
+  - `rtk cargo test test_event_matcher_includes_btc_5m_series --lib -- --nocapture`
+  - `rtk cargo test test_find_event_with_timing_prefers_best_across_all_series --lib -- --nocapture`
