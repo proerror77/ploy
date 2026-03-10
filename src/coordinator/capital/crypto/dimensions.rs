@@ -1,4 +1,4 @@
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 
 use super::super::{
     intent_deployment_scope, intent_market_identity, KNOWN_15M_SERIES_IDS, KNOWN_5M_SERIES_IDS,

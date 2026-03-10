@@ -109,7 +109,7 @@ impl Coordinator {
         let mut daily_agent_pnl: HashMap<String, Decimal> = HashMap::new();
 
         for fill in fills {
-            let mut intent = crate::platform::OrderIntent::new(
+            let mut intent = crate::coordinator::OrderIntent::new(
                 fill.agent_id.clone(),
                 fill.domain,
                 fill.market_slug.clone(),

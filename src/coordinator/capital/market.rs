@@ -4,7 +4,8 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::coordinator::config::CoordinatorConfig;
-use crate::platform::{Domain, OrderIntent};
+use crate::coordinator::OrderIntent;
+use crate::platform::Domain;
 
 #[path = "market/accounting.rs"]
 mod accounting;

@@ -12,6 +12,7 @@ pub mod config;
 pub mod coordinator;
 mod governance;
 mod journal;
+mod order_intent;
 mod position;
 mod queue;
 mod risk;
@@ -26,6 +27,7 @@ pub use command::{
 };
 pub use config::CoordinatorConfig;
 pub use coordinator::{Coordinator, CoordinatorHandle};
+pub use order_intent::{OrderIntent, OrderPriority};
 pub use position::{AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
 pub use risk::{

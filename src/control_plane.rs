@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domain::Side;
-use crate::platform::{Domain, OrderIntent, OrderPriority};
+use crate::coordinator::{OrderIntent, OrderPriority};
+use crate::platform::Domain;
 
 /// Timeframe for deployment / intent routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

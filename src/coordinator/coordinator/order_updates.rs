@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::domain::OrderStatus;
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 use crate::strategy::{executor::ExecutionResult, OrderUpdate};
 
 use super::Coordinator;

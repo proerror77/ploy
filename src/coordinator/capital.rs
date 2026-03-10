@@ -2,7 +2,8 @@ use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::platform::{Domain, OrderIntent};
+use crate::coordinator::OrderIntent;
+use crate::platform::Domain;
 
 mod crypto;
 mod market;

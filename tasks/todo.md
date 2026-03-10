@@ -370,6 +370,30 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# Coordinator Order Intent Ownership Cut (2026-03-10)
+
+## Goal
+Move `OrderIntent` / `OrderPriority` ownership out of `src/platform` and into `src/coordinator` so the canonical order-ingress contract lives with coordinator-owned admission, queueing, and execution infrastructure.
+
+## Tasks
+
+- [x] Add a coordinator-owned `order_intent` module and move `OrderIntent` / `OrderPriority` into it.
+- [x] Rewire control-plane, coordinator, sidecar, strategy runtime, and RL compatibility callers to the new owner.
+- [x] Remove the `platform` re-export instead of leaving a compatibility shim.
+- [x] Re-run compile plus focused order-intent / coordinator / RL regressions after the move.
+
+## Progress notes
+
+- 2026-03-10: Added [order_intent.rs](/Users/proerror/Documents/ploy/src/coordinator/order_intent.rs) and re-exported `OrderIntent` / `OrderPriority` from [mod.rs](/Users/proerror/Documents/ploy/src/coordinator/mod.rs).
+- 2026-03-10: Reduced [types.rs](/Users/proerror/Documents/ploy/src/platform/types.rs) to `Domain` ownership only and removed the `platform` re-export from [mod.rs](/Users/proerror/Documents/ploy/src/platform/mod.rs).
+- 2026-03-10: Rewired [control_plane.rs](/Users/proerror/Documents/ploy/src/control_plane.rs), [sidecar.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar.rs), [runtime_order.rs](/Users/proerror/Documents/ploy/src/strategy/runtime_order.rs), the coordinator subtree, and the RL compatibility runtime to import the coordinator-owned contract.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut rtk cargo test order_intent_from_strategy_intent_preserves_runtime_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut rtk cargo test trade_intent_into_order_intent_maps_priority_and_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut rtk cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-rl rtk cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --exact --nocapture`
+
 # Coordinator Queue Ownership Cut (2026-03-10)
 
 ## Goal

@@ -13,7 +13,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::agent_runtime::AgentRiskParams;
-use crate::platform::{Domain, OrderIntent, OrderPriority};
+use crate::coordinator::{OrderIntent, OrderPriority};
+use crate::platform::Domain;
 mod checks;
 mod config;
 mod exposure;

@@ -13,7 +13,7 @@ use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::platform::OrderPriority;
+use crate::coordinator::OrderPriority;
 use crate::rl::config::RLConfig;
 #[cfg(feature = "onnx")]
 use crate::rl::core::TOTAL_FEATURES;

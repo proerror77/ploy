@@ -1,5 +1,6 @@
 use crate::domain::{OrderRequest, OrderSide};
-use crate::platform::{OrderIntent, OrderPriority};
+use crate::coordinator::{OrderIntent, OrderPriority};
+use crate::platform::Domain;
 
 use super::traits::StrategyOrderIntent;
 
@@ -64,7 +65,8 @@ fn map_strategy_priority(priority: u8) -> OrderPriority {
 mod tests {
     use super::{order_intent_from_strategy_intent, order_request_from_intent};
     use crate::domain::{OrderSide, OrderType, TimeInForce};
-    use crate::platform::{Domain, OrderPriority};
+    use crate::coordinator::OrderPriority;
+    use crate::platform::Domain;
     use crate::strategy::traits::StrategyOrderIntent;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;

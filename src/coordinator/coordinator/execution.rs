@@ -3,7 +3,7 @@ use crate::domain::OrderStatus;
 use rust_decimal::Decimal;
 use tracing::{debug, error, info, warn};
 
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 
 use super::Coordinator;
 

@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::api::{auth::ensure_sidecar_authorized, state::AppState};
 use crate::domain::market::Side;
-use crate::platform::{Domain, OrderIntent, OrderPriority};
+use crate::coordinator::{OrderIntent, OrderPriority};
+use crate::platform::Domain;
 
 mod grok_decision;
 mod ingress;

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnapshot};
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 
 use super::{
     MarketCapitalAllocator, intent_deployment_scope, intent_market_identity,

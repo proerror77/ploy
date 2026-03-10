@@ -7,7 +7,8 @@ use tracing::{info, warn};
 use crate::agent_runtime::AgentRiskParams;
 use crate::control_plane::StrategyDeployment;
 use crate::error::Result;
-use crate::platform::{Domain, OrderIntent};
+use crate::coordinator::OrderIntent;
+use crate::platform::Domain;
 
 use super::super::admission::{
     buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason,

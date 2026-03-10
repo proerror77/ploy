@@ -17,7 +17,7 @@ use crate::coordinator::{PlatformRiskState, RiskCheckResult, RiskConfig, RiskGat
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
 use crate::exchange::ExchangeClient;
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 use crate::rl::ExecutionReport;
 use crate::strategy::executor::OrderExecutor;
 

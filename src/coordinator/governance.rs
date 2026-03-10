@@ -126,7 +126,7 @@ impl GovernancePolicy {
 
 pub(super) fn governance_block_reason(
     policy: &GovernancePolicy,
-    intent: &crate::platform::OrderIntent,
+    intent: &crate::coordinator::OrderIntent,
     current_account_notional: Decimal,
 ) -> Option<String> {
     if !intent.is_buy {
@@ -554,7 +554,7 @@ pub(super) async fn load_governance_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::OrderIntent;
+    use crate::coordinator::OrderIntent;
     use rust_decimal_macros::dec;
 
     #[test]

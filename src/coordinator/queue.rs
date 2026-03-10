@@ -6,7 +6,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
-use crate::platform::{Domain, OrderIntent, OrderPriority};
+use crate::coordinator::{OrderIntent, OrderPriority};
+use crate::platform::Domain;
 use crate::domain::Side;
 
 /// 包裝 OrderIntent 以支持優先級排序

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionStatus {

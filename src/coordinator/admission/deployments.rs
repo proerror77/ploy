@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::control_plane::{MarketSelector, StrategyDeployment};
 use crate::coordinator::capital::CryptoHorizon;
-use crate::platform::OrderIntent;
+use crate::coordinator::OrderIntent;
 
 pub(in crate::coordinator) fn buy_intent_missing_deployment_reason(
     intent: &OrderIntent,
