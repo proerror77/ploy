@@ -3146,6 +3146,11 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - `rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --nocapture`
   - `rtk cargo test transition_to_idle_clears_state --lib -- --nocapture`
   - `rtk cargo test abort_cycle_without_active_cycle --lib -- --nocapture`
+- 2026-03-10: Validation passed for the momentum matcher slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_parse_price_from_question --lib -- --nocapture`
+  - `rtk cargo test test_event_matcher_includes_btc_5m_series --lib -- --nocapture`
+  - `rtk cargo test test_find_event_with_timing_prefers_best_across_all_series --lib -- --nocapture`
 - 2026-03-10: Validation passed for the local momentum slice:
   - `rtk cargo check --lib`
   - `rtk cargo test test_parse_price_from_question --lib -- --nocapture`
