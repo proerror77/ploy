@@ -2,14 +2,16 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnapshot};
 use crate::coordinator::config::CoordinatorConfig;
 use crate::platform::{Domain, OrderIntent};
 
 use super::{
-    intent_deployment_scope, intent_market_identity, sell_release_reference_price,
-    KNOWN_15M_SERIES_IDS, KNOWN_5M_SERIES_IDS,
+    intent_deployment_scope, intent_market_identity, KNOWN_15M_SERIES_IDS, KNOWN_5M_SERIES_IDS,
 };
+
+mod ledger;
+
+use ledger::{ExposureBook, PendingCryptoIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(in crate::coordinator) enum CryptoHorizon {
@@ -158,150 +160,6 @@ impl CryptoIntentDimensions {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PositionExposure {
-    deployment_scope: String,
-    coin: String,
-    horizon: CryptoHorizon,
-    amount: Decimal,
-}
-
-#[derive(Debug, Default)]
-struct ExposureBook {
-    total: Decimal,
-    by_coin: HashMap<String, Decimal>,
-    by_horizon: HashMap<CryptoHorizon, Decimal>,
-    by_position: HashMap<String, PositionExposure>,
-}
-
-impl ExposureBook {
-    fn value_for_coin(&self, coin: &str) -> Decimal {
-        self.by_coin.get(coin).copied().unwrap_or(Decimal::ZERO)
-    }
-
-    fn value_for_horizon(&self, horizon: CryptoHorizon) -> Decimal {
-        self.by_horizon
-            .get(&horizon)
-            .copied()
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    fn add(&mut self, dims: &CryptoIntentDimensions, amount: Decimal) {
-        if amount <= Decimal::ZERO {
-            return;
-        }
-        self.total += amount;
-        *self
-            .by_coin
-            .entry(dims.coin.clone())
-            .or_insert(Decimal::ZERO) += amount;
-        *self.by_horizon.entry(dims.horizon).or_insert(Decimal::ZERO) += amount;
-        self.by_position
-            .entry(dims.position_key.clone())
-            .and_modify(|pos| {
-                pos.amount += amount;
-                pos.deployment_scope = dims.deployment_scope.clone();
-                pos.coin = dims.coin.clone();
-                pos.horizon = dims.horizon;
-            })
-            .or_insert_with(|| PositionExposure {
-                deployment_scope: dims.deployment_scope.clone(),
-                coin: dims.coin.clone(),
-                horizon: dims.horizon,
-                amount,
-            });
-    }
-
-    fn subtract_from_position_key(&mut self, position_key: &str, amount: Decimal) -> Decimal {
-        if amount <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let mut removed = Decimal::ZERO;
-        let mut coin = None;
-        let mut horizon = None;
-        let mut delete_key = false;
-
-        if let Some(pos) = self.by_position.get_mut(position_key) {
-            removed = amount.min(pos.amount);
-            if removed > Decimal::ZERO {
-                pos.amount -= removed;
-                coin = Some(pos.coin.clone());
-                horizon = Some(pos.horizon);
-                delete_key = pos.amount <= Decimal::ZERO;
-            }
-        }
-
-        if delete_key {
-            self.by_position.remove(position_key);
-        }
-
-        if removed <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        self.total = (self.total - removed).max(Decimal::ZERO);
-
-        if let Some(c) = coin {
-            if let Some(v) = self.by_coin.get_mut(&c) {
-                *v = (*v - removed).max(Decimal::ZERO);
-                if *v == Decimal::ZERO {
-                    self.by_coin.remove(&c);
-                }
-            }
-        }
-
-        if let Some(h) = horizon {
-            if let Some(v) = self.by_horizon.get_mut(&h) {
-                *v = (*v - removed).max(Decimal::ZERO);
-                if *v == Decimal::ZERO {
-                    self.by_horizon.remove(&h);
-                }
-            }
-        }
-
-        removed
-    }
-
-    fn subtract_matching_bucket(
-        &mut self,
-        deployment_scope: &str,
-        coin: &str,
-        horizon: CryptoHorizon,
-        amount: Decimal,
-    ) -> Decimal {
-        if amount <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let mut remaining = amount;
-        let keys: Vec<String> = self
-            .by_position
-            .iter()
-            .filter(|(_, p)| {
-                p.deployment_scope == deployment_scope && p.coin == coin && p.horizon == horizon
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for key in keys {
-            if remaining <= Decimal::ZERO {
-                break;
-            }
-            let removed = self.subtract_from_position_key(&key, remaining);
-            remaining -= removed;
-        }
-
-        amount - remaining
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PendingCryptoIntent {
-    dims: CryptoIntentDimensions,
-    requested_notional: Decimal,
-}
-
 #[derive(Debug)]
 pub(super) struct CryptoCapitalAllocator {
     enabled: bool,
@@ -381,12 +239,6 @@ impl CryptoCapitalAllocator {
         } else {
             value
         }
-    }
-
-    pub(super) fn reset_runtime_state(&mut self) {
-        self.open = ExposureBook::default();
-        self.pending = ExposureBook::default();
-        self.pending_by_intent.clear();
     }
 
     pub(super) fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
@@ -475,83 +327,6 @@ impl CryptoCapitalAllocator {
         Some(remaining_total.min(remaining_coin).min(remaining_horizon))
     }
 
-    pub(super) fn release_buy_reservation(&mut self, intent_id: Uuid) {
-        let Some(reservation) = self.pending_by_intent.remove(&intent_id) else {
-            return;
-        };
-        self.pending.subtract_from_position_key(
-            &reservation.dims.position_key,
-            reservation.requested_notional,
-        );
-    }
-
-    pub(super) fn settle_buy_execution(
-        &mut self,
-        intent: &OrderIntent,
-        filled_shares: u64,
-        fill_price: Decimal,
-    ) {
-        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
-            return;
-        }
-
-        let reservation = self
-            .pending_by_intent
-            .remove(&intent.intent_id)
-            .unwrap_or_else(|| PendingCryptoIntent {
-                dims: CryptoIntentDimensions::from_intent(intent),
-                requested_notional: intent.notional_value(),
-            });
-
-        self.pending.subtract_from_position_key(
-            &reservation.dims.position_key,
-            reservation.requested_notional,
-        );
-
-        if filled_shares == 0 || fill_price <= Decimal::ZERO {
-            return;
-        }
-
-        let actual_notional = fill_price * Decimal::from(filled_shares);
-        self.open.add(&reservation.dims, actual_notional);
-    }
-
-    pub(super) fn settle_sell_execution(
-        &mut self,
-        intent: &OrderIntent,
-        filled_shares: u64,
-        execution_price: Decimal,
-    ) {
-        if !self.enabled || intent.domain != Domain::Crypto || intent.is_buy || filled_shares == 0 {
-            return;
-        }
-
-        let dims = CryptoIntentDimensions::from_intent(intent);
-        let Some((reference_price, has_explicit_entry_price)) =
-            sell_release_reference_price(intent, execution_price)
-        else {
-            return;
-        };
-
-        if reference_price <= Decimal::ZERO {
-            return;
-        }
-
-        let requested_release = Decimal::from(filled_shares) * reference_price;
-        let removed_by_key = self
-            .open
-            .subtract_from_position_key(&dims.position_key, requested_release);
-        if has_explicit_entry_price && removed_by_key < requested_release {
-            let remaining = requested_release - removed_by_key;
-            self.open.subtract_matching_bucket(
-                &dims.deployment_scope,
-                &dims.coin,
-                dims.horizon,
-                remaining,
-            );
-        }
-    }
-
     fn coin_cap_for(&self, coin: &str) -> Decimal {
         self.coin_cap_pct
             .get(coin)
@@ -566,64 +341,6 @@ impl CryptoCapitalAllocator {
             .copied()
             .or_else(|| self.horizon_cap_pct.get(&CryptoHorizon::Other).copied())
             .unwrap_or(Decimal::ZERO)
-    }
-
-    pub(super) fn open_notional(&self) -> Decimal {
-        self.open.total
-    }
-
-    pub(super) fn pending_notional(&self) -> Decimal {
-        self.pending.total
-    }
-
-    pub(super) fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
-        let open_notional_usd = self.open.total;
-        let pending_notional_usd = self.pending.total;
-        let used = open_notional_usd + pending_notional_usd;
-        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
-        AllocatorLedgerSnapshot {
-            domain: "crypto".to_string(),
-            enabled: self.enabled,
-            cap_notional_usd: self.total_cap,
-            open_notional_usd,
-            pending_notional_usd,
-            available_notional_usd,
-        }
-    }
-
-    pub(super) fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
-        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
-
-        for position in self.open.by_position.values() {
-            let entry = by_deployment
-                .entry(position.deployment_scope.clone())
-                .or_insert((Decimal::ZERO, Decimal::ZERO));
-            entry.0 += position.amount;
-        }
-
-        for position in self.pending.by_position.values() {
-            let entry = by_deployment
-                .entry(position.deployment_scope.clone())
-                .or_insert((Decimal::ZERO, Decimal::ZERO));
-            entry.1 += position.amount;
-        }
-
-        let mut rows = by_deployment
-            .into_iter()
-            .map(
-                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
-                    DeploymentLedgerSnapshot {
-                        deployment_id,
-                        domain: "crypto".to_string(),
-                        open_notional_usd,
-                        pending_notional_usd,
-                        total_notional_usd: open_notional_usd + pending_notional_usd,
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
-        rows
     }
 }
 
