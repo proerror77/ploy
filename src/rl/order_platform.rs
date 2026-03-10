@@ -12,12 +12,13 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::PolymarketClient;
 use crate::config::ExecutionConfig;
+use crate::coordinator::{OrderQueue, QueueStats};
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::{PloyError, Result};
 use crate::exchange::ExchangeClient;
 use crate::platform::{
-    AggregatedPosition, OrderIntent, OrderQueue, PlatformRiskState, Position, PositionAggregator,
-    QueueStats, RiskCheckResult, RiskConfig, RiskGate,
+    AggregatedPosition, OrderIntent, PlatformRiskState, Position, PositionAggregator,
+    RiskCheckResult, RiskConfig, RiskGate,
 };
 use crate::rl::ExecutionReport;
 use crate::strategy::executor::OrderExecutor;

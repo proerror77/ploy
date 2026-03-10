@@ -12,6 +12,7 @@ pub mod config;
 pub mod coordinator;
 mod governance;
 mod journal;
+mod queue;
 pub mod state;
 pub mod strategy_runtime;
 
@@ -23,4 +24,5 @@ pub use command::{
 };
 pub use config::CoordinatorConfig;
 pub use coordinator::{Coordinator, CoordinatorHandle};
+pub use queue::{OrderQueue, QueueStats};
 pub use state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};

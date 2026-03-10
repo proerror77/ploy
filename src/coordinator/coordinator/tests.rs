@@ -2,13 +2,13 @@ use super::*;
 use crate::adapters::PolymarketClient;
 use crate::agent_runtime::AgentStatus;
 use crate::config::ExecutionConfig;
-use crate::coordinator::QueueStatsSnapshot;
-use crate::platform::{Domain, OrderPriority, QueueStats};
+use crate::coordinator::{QueueStats, QueueStatsSnapshot};
+use crate::platform::{Domain, OrderPriority};
 use crate::strategy::executor::OrderExecutor;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
     AgentSnapshot {
@@ -187,7 +187,10 @@ async fn test_handle_order_intent_emits_rejected_update_for_missing_deployment()
         .await
         .expect("receive rejected order update")
         .expect("order update available");
-    assert_eq!(update.client_order_id.as_deref(), Some(client_order_id.as_str()));
+    assert_eq!(
+        update.client_order_id.as_deref(),
+        Some(client_order_id.as_str())
+    );
     assert_eq!(update.status, crate::domain::OrderStatus::Rejected);
     assert!(update
         .error
@@ -215,7 +218,10 @@ async fn test_drain_and_execute_emits_pending_and_fill_updates() {
         .await
         .expect("receive pending order update")
         .expect("pending update available");
-    assert_eq!(pending.client_order_id.as_deref(), Some(client_order_id.as_str()));
+    assert_eq!(
+        pending.client_order_id.as_deref(),
+        Some(client_order_id.as_str())
+    );
     assert_eq!(pending.status, crate::domain::OrderStatus::Pending);
 
     coordinator.drain_and_execute().await;
@@ -224,7 +230,10 @@ async fn test_drain_and_execute_emits_pending_and_fill_updates() {
         .await
         .expect("receive execution order update")
         .expect("execution update available");
-    assert_eq!(executed.client_order_id.as_deref(), Some(client_order_id.as_str()));
+    assert_eq!(
+        executed.client_order_id.as_deref(),
+        Some(client_order_id.as_str())
+    );
     assert!(matches!(
         executed.status,
         crate::domain::OrderStatus::Submitted

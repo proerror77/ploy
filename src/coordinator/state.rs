@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::agent_runtime::AgentStatus;
-use crate::platform::{
-    AggregatedPosition, CircuitBreakerEvent, Domain, PlatformRiskState, Position, QueueStats,
-};
+use crate::platform::{AggregatedPosition, CircuitBreakerEvent, Domain, PlatformRiskState, Position};
+
+use super::QueueStats;
 
 /// Per-agent snapshot visible to the coordinator and TUI
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +27,7 @@ pub struct AgentSnapshot {
     pub error_message: Option<String>,
 }
 
-/// Serializable queue stats snapshot (mirrors QueueStats from platform)
+/// Serializable queue stats snapshot (mirrors coordinator-owned QueueStats)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueStatsSnapshot {
     pub current_size: usize,

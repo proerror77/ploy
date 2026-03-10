@@ -9,7 +9,6 @@ mod market_persistence;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
 mod position;
-mod queue;
 mod risk;
 pub mod subscription_planner;
 mod types;
@@ -29,7 +28,6 @@ pub use persistence_pipeline::{
     PipelineStats,
 };
 pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
-pub use queue::{OrderQueue, QueueStats};
 pub use risk::{
     BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
     RiskConfig, RiskGate,

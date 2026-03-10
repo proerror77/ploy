@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
-use super::types::{Domain, OrderIntent};
+use crate::platform::{Domain, OrderIntent, OrderPriority};
 use crate::domain::Side;
 
 /// 包裝 OrderIntent 以支持優先級排序
@@ -356,7 +356,6 @@ impl std::fmt::Display for QueueStats {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{Domain, OrderPriority};
     use super::*;
     use crate::domain::Side;
     use rust_decimal::Decimal;

@@ -19,9 +19,6 @@ use uuid::Uuid;
 use sqlx::PgPool;
 
 use crate::agent_runtime::AgentRiskParams;
-use crate::platform::{
-    Domain, OrderIntent, OrderQueue, PositionAggregator, RiskCheckResult, RiskGate,
-};
 use crate::strategy::executor::OrderExecutor;
 
 use super::admission::{
@@ -32,7 +29,9 @@ use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
 use super::governance::{governance_block_reason, GovernanceController, IngressMode};
 use super::journal::ExecutionJournal;
+use super::queue::OrderQueue;
 use super::state::{AgentSnapshot, GlobalState};
+use crate::platform::{Domain, OrderIntent, PositionAggregator, RiskCheckResult, RiskGate};
 
 mod control_surface;
 mod execution;

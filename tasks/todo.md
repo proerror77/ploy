@@ -370,6 +370,27 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# Coordinator Queue Ownership Cut (2026-03-10)
+
+## Goal
+Move `OrderQueue` / `QueueStats` ownership out of `src/platform` and into `src/coordinator` so queueing stops looking like part of a second platform runtime.
+
+## Tasks
+
+- [x] Move the queue implementation into a coordinator-owned module.
+- [x] Rewire coordinator and RL compatibility runtime imports to the new queue owner.
+- [x] Remove the `platform` re-export instead of leaving a compatibility shim.
+- [x] Re-run compile plus focused queue / RL regressions after the move.
+
+## Progress notes
+
+- 2026-03-10: Moved queue ownership from [queue.rs](/Users/proerror/Documents/ploy/src/platform/queue.rs) to [queue.rs](/Users/proerror/Documents/ploy/src/coordinator/queue.rs).
+- 2026-03-10: Updated [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs), [state.rs](/Users/proerror/Documents/ploy/src/coordinator/state.rs), [tests.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/tests.rs), and [order_platform.rs](/Users/proerror/Documents/ploy/src/rl/order_platform.rs) to consume the new coordinator-owned queue types.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-queue-check3 rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-queue-check2 rtk cargo test test_queue_stats_snapshot_from --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-queue-cut rtk cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --exact --nocapture`
+
 # Strategy And Adapter Wave 10 (2026-03-10)
 
 ## Goal
