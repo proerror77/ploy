@@ -3428,7 +3428,23 @@ Move the Leg1 submission/fill/version-conflict path out of `src/strategy/executi
 
 # Sidecar Ingress Helper Extraction (2026-03-10)
 
+## Goal
+Move sidecar ingress/account-scope/deployment-binding/broadcast helpers out of `src/api/handlers/sidecar.rs` so the root handler file keeps request/response shapes, endpoint flow, persistence, and tests while ingress policy lives in a dedicated sibling module.
+
+## Tasks
+
+- [x] Extract sidecar ingress/account-scope/deployment-binding/broadcast helpers into `src/api/handlers/sidecar/ingress.rs`.
+- [x] Keep handler behavior and endpoint surface unchanged by reusing the extracted helpers from the root module.
+- [x] Re-run compile plus focused ingress/deployment helper regressions after the extraction.
+
+## Review
+
+- [x] Confirm `sidecar.rs` no longer inlines the ingress/account-scope/deployment-binding/broadcast helper bodies.
+- [x] Confirm side/domain parsing and deployment metadata behavior still matches the existing tests after the extraction.
+
 ## Progress notes
 
 - 2026-03-10: Added [ingress.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar/ingress.rs) and moved sidecar ingress/account-scope/deployment-binding/broadcast helper ownership out of [sidecar.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar.rs), leaving the root file focused on request/response types, handler flow, persistence, and tests.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
 - 2026-03-10: `rtk cargo check --lib` passed after the extraction; focused `rtk cargo test --lib parse_domain_rejects_unknown_values -- --nocapture` is currently blocked by unrelated `src/cli/strategy/backtest_ops.rs` visibility errors in the existing workspace.
