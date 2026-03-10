@@ -147,6 +147,46 @@ Delete the leftover `agents/openclaw/config.rs` shim so OpenClaw modules stop pr
   - `rtk cargo test leg_updates_should_use_incrementing_cycle_versions --lib -- --nocapture`
   - `rtk cargo test leg1_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
 
+# Strategy And Adapter Wave 5 (2026-03-10)
+
+## Goal
+Keep shrinking active-core live/runtime files after the legacy retirement wave by extracting ownership from the remaining heavy strategy and adapter modules.
+
+## File ownership
+
+- `src/strategy/execution/engine.rs`
+  - owner: execution flow extraction
+- `src/strategy/momentum.rs`
+  - owner: momentum runtime/state flow extraction
+- `src/adapters/polymarket_ws.rs`
+  - owner: websocket lifecycle / subscription flow extraction
+- `src/adapters/postgres.rs`
+  - owner: Postgres persistence/read-model extraction
+
+## Tasks
+
+- [x] Extract the next execution-flow ownership slice from `engine.rs`.
+- [x] Extract the next runtime/state-flow slice from `momentum.rs`.
+- [x] Extract a websocket lifecycle/subscription owner from `polymarket_ws.rs`.
+- [x] Extract a Postgres read/persistence owner from `postgres.rs`.
+- [x] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 5 assigned before starting the next parallel batch.
+- 2026-03-10: Moved the claimer native-gas preflight, auto-topup, and on-chain redeem flow out of [claimer.rs](/Users/proerror/Documents/ploy/src/strategy/claimer.rs) into [claim_flow.rs](/Users/proerror/Documents/ploy/src/strategy/claimer/claim_flow.rs), leaving the root claimer module with thin async delegators.
+- 2026-03-10: Moved Polymarket WebSocket subscription ownership out of [polymarket_ws.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws.rs) / [connection.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/connection.rs) into [subscriptions.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/subscriptions.rs).
+- 2026-03-10: Moved Binance WebSocket proxy/runtime lifecycle ownership out of [binance_ws.rs](/Users/proerror/Documents/ploy/src/adapters/binance_ws.rs) into [runtime.rs](/Users/proerror/Documents/ploy/src/adapters/binance_ws/runtime.rs).
+- 2026-03-10: Moved momentum runtime-state helpers and rate-limit/window tracking out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs) into [runtime_state.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/runtime_state.rs).
+- 2026-03-10: Moved the large `StrategyEngine` test ownership out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs) into [tests.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/tests.rs).
+- 2026-03-10: Moved Postgres recovery/read-model ownership out of [postgres.rs](/Users/proerror/Documents/ploy/src/adapters/postgres.rs) into [recovery.rs](/Users/proerror/Documents/ploy/src/adapters/postgres/recovery.rs).
+- 2026-03-10: Wave 5 validation passed so far:
+  - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo test test_window_tracker_prefers_highest_edge_signal --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo test leg1_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo test orphaned_order_cancel_gate_requires_exchange_id_and_active_status --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo test characterization_agg_trade_produces_price_update --lib -- --exact --nocapture`
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
