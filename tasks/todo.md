@@ -377,15 +377,23 @@ Find the verified root cause for `pm_5m_directional` producing `0 trades` on `ta
 
 ## Tasks
 
-- [ ] Confirm replay event discovery and Polymarket quote/LOB size propagation reach the strategy.
-- [ ] Capture dominant no-entry reject reasons from the strategy during replay instead of guessing from parameters.
-- [ ] Implement the minimal fix for the verified blocker and add focused regression coverage.
-- [ ] Rebuild an isolated x86 backtest artifact and rerun `tango-1-1` replay to confirm non-zero trades or a narrower proven data blocker.
+- [x] Confirm replay event discovery and Polymarket quote/LOB size propagation reach the strategy.
+- [x] Capture dominant no-entry reject reasons from the strategy during replay instead of guessing from parameters.
+- [x] Implement the minimal fix for the verified blocker and add focused regression coverage.
+- [x] Rebuild an isolated x86 backtest artifact and rerun `tango-1-1` replay to confirm non-zero trades or a narrower proven data blocker.
 
 ## Progress notes
 
 - 2026-03-10: Verified on `tango-1-1` that the new x86 backtest binary runs and can query the production history database, but both default and relaxed `pm_5m_directional` replays still returned `0 trades / 0 PnL`.
 - 2026-03-10: Host-side diagnostics showed `pm_market_metadata.raw_market.clobTokenIds` do not overlap `clob_quote_ticks` for BTCUSDT 5m, while `pm_token_settlements` token IDs do overlap quote history; replay feed window/end-time correction already normalizes several metadata issues, so the direct blocker still needs verification inside replay/strategy state.
+- 2026-03-10: Root cause was in the historical replay feed, not the strategy thresholds: `pm_token_settlements`/`sync_records` side information was not preserved into `clob_orderbook_snapshots` replay, so LOB updates reached `pm_5m_directional_backtest` as unusable `BOTH` snapshots and `ask_size` stayed zero at the strategy gate.
+- 2026-03-10: Fixed [database.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/strategy/backtest_feed/database.rs) to carry `token_id -> side` mappings and emit real `UP`/`DOWN` LOB replay updates, with focused regression coverage for outcome parsing and side-aware LOB construction.
+- 2026-03-10: Local validation passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-zero-trade-fix-2 rtk cargo test build_lob_update_uses_token_side_mapping --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-zero-trade-fix-2 rtk cargo test parse_token_outcome_side_accepts_up_down_aliases --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-zero-trade-fix-2 rtk cargo test replays_profitable_up_round_to_settlement --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-zero-trade-fix-2 rtk cargo check --lib`
+- 2026-03-10: Built x86 release `v0.0.0-pm5fixd8c915b` from commit `d8c915b01098cd13521f1d0c2260f44424ff3c16`, uploaded `/root/ploy/bin/backtests/ploy-pm5-d8c915b` to `tango-1-1`, and reran the full BTC window (`2026-03-05T03:45:00Z` to `2026-03-10T08:10:00Z`). Result: `83 trades`, `54/29` win/loss, `65.1%` win rate, `+52.50` total PnL, `10.66` Sharpe, `1.27` profit factor, `0.31%` max drawdown.
 
 # Coordinator Queue Ownership Cut (2026-03-10)
 
