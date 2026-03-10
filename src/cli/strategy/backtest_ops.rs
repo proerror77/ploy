@@ -8,6 +8,24 @@ use diagnostics::{print_backtest_db_diagnostics, verify_backtest_trades_gamma};
 
 pub(super) use reporting::{run_backtest_diff, run_backtest_list, run_live_backtest_compare};
 
+fn normalize_backtest_strategy_name(name: &str) -> Result<&'static str> {
+    match name {
+        "momentum" => Ok("momentum"),
+        "directional" => Ok("directional"),
+        "prob-garch" | "prob_garch" => Ok("prob-garch"),
+        "liquidity-vacuum" | "liquidity_vacuum" => Ok("liquidity-vacuum"),
+        "staggered-arb" | "staggered_arb" => Ok("staggered-arb"),
+        "gamma_scalping" | "gamma-scalping" => Ok("gamma_scalping"),
+        "pm_5m_directional" | "pm-5m-directional" | "pm5m-directional" | "pm5m_directional" => {
+            Ok("pm_5m_directional")
+        }
+        other => anyhow::bail!(
+            "Unknown backtest strategy: '{}'. Supported: momentum, directional, prob-garch (alias: prob_garch), liquidity-vacuum (alias: liquidity_vacuum), staggered-arb (aliases: staggered_arb, gamma_scalping, gamma-scalping), pm_5m_directional (aliases: pm-5m-directional, pm5m-directional, pm5m_directional)",
+            other
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_backtest(
     name: &str,
@@ -61,26 +79,14 @@ pub(super) async fn run_backtest(
         LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine,
     };
     use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
+    use crate::strategy::pm_5m_directional_backtest::{
+        Pm5mDirectionalBacktestConfig, Pm5mDirectionalBacktestEngine,
+    };
 
-    match name {
-            "momentum"
-            | "directional"
-            | "prob-garch"
-            | "prob_garch"
-            | "liquidity-vacuum"
-            | "liquidity_vacuum"
-            | "staggered-arb"
-            | "staggered_arb"
-            | "gamma_scalping"
-            | "gamma-scalping" => {}
-            other => anyhow::bail!(
-            "Unknown backtest strategy: '{}'. Supported: momentum, directional, prob-garch (alias: prob_garch), liquidity-vacuum (alias: liquidity_vacuum), staggered-arb (aliases: staggered_arb, gamma_scalping, gamma-scalping)",
-            other
-        ),
-    }
+    let canonical_name = normalize_backtest_strategy_name(name)?;
 
     if mode == StrategyBacktestMode::Settlement {
-        if name != "directional" {
+        if canonical_name != "directional" {
             anyhow::bail!("Settlement mode is only supported for directional strategy");
         }
         if json_output {
@@ -152,7 +158,7 @@ pub(super) async fn run_backtest(
 
     let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 
-    let results = match name {
+    let results = match canonical_name {
         "directional" => {
             let mut config = DirectionalBacktestConfig::with_symbols(symbol_list.clone());
             config.initial_capital = initial_capital;
@@ -211,6 +217,61 @@ pub(super) async fn run_backtest(
                     }
                 }
 
+                let report = backtest_report::load_report(store.pool(), run_id).await?;
+                if json_output {
+                    println!("{}", report.to_json()?);
+                } else {
+                    println!("{}", report.print_report());
+                }
+            }
+
+            results
+        }
+        "pm_5m_directional" => {
+            let mut config = Pm5mDirectionalBacktestConfig::with_symbols(symbol_list.clone());
+            config.initial_capital = initial_capital;
+
+            let mut saved_run_id: Option<uuid::Uuid> = None;
+            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
+                let config_json = serde_json::to_value(&config).unwrap_or_default();
+                let pg_recorder = PgBacktestRecorder::new(
+                    store.pool().clone(),
+                    "pm_5m_directional",
+                    "replay",
+                    &config_json,
+                    &symbol_list,
+                )
+                .await?;
+                saved_run_id = Some(pg_recorder.run_id());
+                info!(
+                    run_id = %pg_recorder.run_id(),
+                    "Recording pm_5m_directional backtest signals to DB"
+                );
+                Box::new(pg_recorder)
+            } else {
+                Box::new(NullRecorder)
+            };
+
+            let mut engine = Pm5mDirectionalBacktestEngine::new(config, recorder)?;
+            let results = engine.run(&mut feed);
+
+            if save {
+                let mut recorder = engine.take_recorder();
+                if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
+                    pg.finalize(
+                        Some(results.start_time),
+                        Some(results.end_time),
+                        results.total_trades as i32,
+                        results.win_rate,
+                        results.total_pnl,
+                        results.sharpe_ratio,
+                        results.max_drawdown,
+                        results.profit_factor,
+                    )
+                    .await?;
+                }
+
+                let run_id = saved_run_id.expect("run_id should be set when --save is used");
                 let report = backtest_report::load_report(store.pool(), run_id).await?;
                 if json_output {
                     println!("{}", report.to_json()?);
@@ -607,6 +668,30 @@ pub(super) async fn run_backtest(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_backtest_strategy_name;
+
+    #[test]
+    fn normalize_backtest_strategy_name_accepts_pm_5m_directional_aliases() {
+        assert_eq!(
+            normalize_backtest_strategy_name("pm_5m_directional")
+                .expect("canonical alias should parse"),
+            "pm_5m_directional"
+        );
+        assert_eq!(
+            normalize_backtest_strategy_name("pm-5m-directional")
+                .expect("dash alias should parse"),
+            "pm_5m_directional"
+        );
+        assert_eq!(
+            normalize_backtest_strategy_name("pm5m_directional")
+                .expect("compact alias should parse"),
+            "pm_5m_directional"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

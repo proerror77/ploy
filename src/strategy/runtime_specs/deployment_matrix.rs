@@ -14,6 +14,7 @@ enum CryptoStrategyKind {
     Momentum,
     PatternMemory,
     SplitArb,
+    Pm5mDirectional,
     LobMl,
     #[cfg(feature = "rl")]
     RlPolicy,
@@ -23,6 +24,13 @@ enum CryptoStrategyKind {
 fn classify_crypto_strategy(strategy: &str) -> CryptoStrategyKind {
     let key = normalize_strategy_key(strategy);
 
+    if key == "pm5mdirectional"
+        || key == "pm5mdirection"
+        || key == "pm5mdir"
+        || key == "pm5m"
+    {
+        return CryptoStrategyKind::Pm5mDirectional;
+    }
     if key.contains("momentum")
         || key == "mom"
         || key == "directional"
@@ -136,6 +144,7 @@ fn add_coins_from_selector(selector: &MarketSelector, coins: &mut HashSet<String
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RuntimeCryptoStrategyTargets {
+    pub(crate) pm_5m_directional_coins: HashSet<String>,
     pub(crate) pattern_memory_coins: HashSet<String>,
     pub(crate) split_arb_coins: HashSet<String>,
     pub(crate) split_arb_horizons: HashSet<String>,
@@ -159,6 +168,9 @@ pub(crate) fn collect_runtime_crypto_strategy_targets(
         }
 
         match classify_crypto_strategy(&dep.strategy) {
+            CryptoStrategyKind::Pm5mDirectional => {
+                add_coins_from_selector(&dep.market_selector, &mut out.pm_5m_directional_coins);
+            }
             CryptoStrategyKind::PatternMemory => {
                 add_coins_from_selector(&dep.market_selector, &mut out.pattern_memory_coins);
             }
@@ -200,6 +212,7 @@ pub(crate) fn apply_strategy_deployments(
     cfg.enable_crypto_momentum = false;
     cfg.enable_crypto_pattern_memory = false;
     cfg.enable_crypto_split_arb = false;
+    cfg.enable_crypto_pm_5m_directional = false;
     cfg.managed_crypto.enable_lob_ml = false;
     #[cfg(feature = "rl")]
     {
@@ -223,6 +236,10 @@ pub(crate) fn apply_strategy_deployments(
                 let mapped = match classify_crypto_strategy(&dep.strategy) {
                     CryptoStrategyKind::Momentum => {
                         cfg.enable_crypto_momentum = true;
+                        true
+                    }
+                    CryptoStrategyKind::Pm5mDirectional => {
+                        cfg.enable_crypto_pm_5m_directional = true;
                         true
                     }
                     CryptoStrategyKind::PatternMemory => {
@@ -303,6 +320,7 @@ pub(crate) fn apply_strategy_deployments(
         runtime_dry_run = runtime_dry_run,
         crypto = cfg.enable_crypto,
         crypto_momentum = cfg.enable_crypto_momentum,
+        crypto_pm_5m_directional = cfg.enable_crypto_pm_5m_directional,
         crypto_pattern_memory = cfg.enable_crypto_pattern_memory,
         crypto_split_arb = cfg.enable_crypto_split_arb,
         crypto_lob_ml = cfg.managed_crypto.enable_lob_ml,

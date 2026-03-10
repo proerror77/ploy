@@ -15,6 +15,7 @@ use super::runtime_configs::build_crypto_rl_policy_runtime_config;
 use super::runtime_configs::{
     build_crypto_lob_ml_runtime_config, build_event_edge_runtime_config,
     build_momentum_runtime_config, build_nba_comeback_runtime_config,
+    build_pm_5m_directional_runtime_config,
     build_pattern_memory_runtime_config, build_split_arb_runtime_config,
 };
 
@@ -51,6 +52,24 @@ fn pattern_memory_runtime_coins(
     } else {
         runtime_crypto_targets
             .pattern_memory_coins
+            .iter()
+            .cloned()
+            .collect()
+    };
+    coins.sort();
+    coins.dedup();
+    coins
+}
+
+fn pm_5m_directional_runtime_coins(
+    crypto_cfg: &CryptoTradingConfig,
+    runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
+) -> Vec<String> {
+    let mut coins: Vec<String> = if runtime_crypto_targets.pm_5m_directional_coins.is_empty() {
+        crypto_cfg.coins.clone()
+    } else {
+        runtime_crypto_targets
+            .pm_5m_directional_coins
             .iter()
             .cloned()
             .collect()
@@ -156,6 +175,26 @@ pub(crate) fn collect_managed_runtime_specs(
                 agent = crypto_cfg.agent_id,
                 "crypto momentum agent disabled"
             );
+        }
+
+        if config.enable_crypto_pm_5m_directional {
+            let coins = pm_5m_directional_runtime_coins(&crypto_cfg, runtime_crypto_targets);
+            match build_pm_5m_directional_runtime_config(&coins) {
+                Ok(strategy_config_toml) => specs.push(ManagedRuntimeSpec {
+                    strategy_label: "pm_5m_directional",
+                    agent_id: "pm_5m_directional".to_string(),
+                    domain: Domain::Crypto,
+                    risk_params: crypto_cfg.risk_params.clone(),
+                    strategy_config_toml,
+                    data_plane: ManagedRuntimeDataPlaneKind::ManagedCrypto,
+                    bootstrap_step: ManagedRuntimeBootstrapStep::None,
+                }),
+                Err(e) => warn!(
+                    agent = "pm_5m_directional",
+                    error = %e,
+                    "pm_5m_directional enabled but no valid runtime config could be built"
+                ),
+            }
         }
 
         if config.enable_crypto_pattern_memory {

@@ -277,6 +277,14 @@ impl StrategyFactory {
                     )?;
                 Ok(Box::new(strategy))
             }
+            "pm_5m_directional" => {
+                let strategy = super::pm_5m_directional::Pm5mDirectionalStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
             "nba_comeback" => {
                 let strategy = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
                     strategy_id,
@@ -332,6 +340,13 @@ impl StrategyFactory {
                     "Canonical observe-only crypto RL policy wrapper for runtime migration"
                         .to_string(),
                 config_template: "crypto_rl_policy.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "pm_5m_directional".to_string(),
+                description:
+                    "Standalone Polymarket 5m directional strategy driven by Binance direction and PM cost gates"
+                        .to_string(),
+                config_template: "pm_5m_directional_default.toml".to_string(),
             },
             StrategyInfo {
                 name: "nba_comeback".to_string(),
@@ -479,6 +494,34 @@ mod tests {
         assert!(strategies.iter().any(|s| s.name == "momentum"));
         assert!(strategies.iter().any(|s| s.name == "event_edge"));
         assert!(strategies.iter().any(|s| s.name == "nba_comeback"));
+    }
+
+    #[test]
+    fn test_available_strategies_include_pm_5m_directional() {
+        let strategies = StrategyFactory::available_strategies();
+        assert!(strategies.iter().any(|s| s.name == "pm_5m_directional"));
+        assert!(strategies.iter().any(|s| {
+            s.name == "pm_5m_directional" && s.config_template == "pm_5m_directional_default.toml"
+        }));
+    }
+
+    #[test]
+    fn test_factory_builds_pm_5m_directional_from_toml() {
+        let config = r#"
+[strategy]
+name = "pm_5m_directional"
+enabled = true
+
+[pm_5m_directional]
+symbols = ["BTCUSDT"]
+"#;
+
+        let strategy = StrategyFactory::from_toml(config, true).expect("strategy");
+        assert_eq!(strategy.name(), "pm_5m_directional");
+        assert!(strategy.required_feeds().iter().any(|feed| matches!(
+            feed,
+            DataFeed::PolymarketEvents { series_ids } if series_ids == &vec!["10684".to_string()]
+        )));
     }
 
     #[tokio::test]
