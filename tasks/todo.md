@@ -792,6 +792,7 @@ Expand the strategy-side `BinanceL2` market-update contract to expose the additi
 
 - 2026-03-09: Expanded [binance_depth.rs](/Users/proerror/Documents/ploy/src/collector/binance_depth.rs) `LobSnapshot` with `obi_1`, `obi_2`, `obi_3`, and `obi_20`, and updated snapshot construction in both cache read paths.
 - 2026-03-09: Expanded [traits.rs](/Users/proerror/Documents/ploy/src/strategy/traits.rs) `MarketUpdate::BinanceL2` plus [feeds.rs](/Users/proerror/Documents/ploy/src/strategy/feeds.rs) forwarding, so canonical strategy consumers can now observe the same extra OBI levels the legacy `lob_ml` / `rl_policy` agents use.
+- 2026-03-10: Extracted the feed runtime orchestration out of [feeds.rs](/Users/proerror/Documents/ploy/src/strategy/feeds.rs) into [runtime.rs](/Users/proerror/Documents/ploy/src/strategy/feeds/runtime.rs), moving Binance/Polymarket start-up, kline backfill, token subscribe, and L2 spin-up behind a dedicated runtime owner while leaving the root file focused on state layout, builders, and shared feed wiring.
 - 2026-03-09: Validation passed:
   - `cargo check --lib`
   - `cargo test test_apply_depth_snapshot_replaces_book_state --lib -- --nocapture`
