@@ -3426,6 +3426,30 @@ Move the Leg1 submission/fill/version-conflict path out of `src/strategy/executi
   - `rtk cargo test leg1_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
   - `rtk cargo test leg_updates_should_use_incrementing_cycle_versions --lib -- --nocapture`
 
+# Strategy Engine Round Flow Extraction (2026-03-10)
+
+## Goal
+Move quote-driven round management out of `src/strategy/execution/engine.rs` so the root engine file keeps constructor/runtime shell ownership while round updates, watch-window transitions, and cycle-state-driven quote handling live behind a dedicated sibling module.
+
+## Tasks
+
+- [x] Extract `on_quote_update`, `check_round_transition`, and `set_round` into `src/strategy/execution/engine/round_flow.rs`.
+- [x] Keep the public `StrategyEngine` API unchanged via thin delegating wrappers in the root file.
+- [x] Re-run compile plus focused `set_round` regressions after the extraction.
+
+## Review
+
+- [x] Confirm `engine.rs` no longer inlines the quote-driven round/watch-window/cycle routing logic.
+- [x] Confirm watch-window entry and mid-cycle round-switch guards still behave correctly after the extraction.
+
+## Progress notes
+
+- 2026-03-10: Added [round_flow.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/round_flow.rs) and moved quote-driven round handling out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs), including watch-window expiry, token filtering, Leg2 force checks, timeout-based round transitions, and `set_round` detector reset/persistence logic.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test set_round_transitions_to_watch_window --lib -- --nocapture`
+  - `rtk cargo test set_round_blocked_mid_cycle --lib -- --nocapture`
+
 # Sidecar Ingress Helper Extraction (2026-03-10)
 
 ## Goal

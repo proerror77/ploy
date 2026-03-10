@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 mod hedge_flow;
 mod leg1;
 mod lifecycle;
+mod round_flow;
 
 use lifecycle::{
     abort_cycle as abort_cycle_impl,
@@ -182,233 +183,17 @@ impl StrategyEngine {
 
     /// Handle a quote update
     async fn on_quote_update(&self, update: QuoteUpdate) -> Result<()> {
-        // Snapshot state needed for decision-making without holding locks across async work.
-        let (round, strategy_state, current_cycle) = {
-            let state = self.state.read().await;
-            let Some(round) = state.current_round.clone() else {
-                // No active round set yet; ignore market data.
-                return Ok(());
-            };
-            (round, state.strategy_state, state.current_cycle.clone())
-        };
-
-        // Always enforce round/window transitions even when quote updates are frequent.
-        if round.has_ended() {
-            if strategy_state.requires_abort_on_round_end() {
-                self.abort_cycle_and_halt_safely("Round ended").await?;
-            } else {
-                self.transition_to_idle().await?;
-            }
-            return Ok(());
-        }
-
-        if strategy_state == StrategyState::WatchWindow {
-            let minutes_elapsed = round.minutes_elapsed();
-            if minutes_elapsed >= self.config.strategy.window_min as i64 {
-                info!("Watch window expired after {} minutes", minutes_elapsed);
-                self.transition_to_idle().await?;
-                return Ok(());
-            }
-        }
-
-        // Ignore updates for tokens that don't belong to the active round.
-        // Note: this must happen *after* time-based transitions. The WebSocket client can have
-        // multiple historical token subscriptions, and we still need to enforce round/window
-        // expiry even if we're receiving quotes for unrelated tokens.
-        if update.token_id != round.up_token_id && update.token_id != round.down_token_id {
-            return Ok(());
-        }
-
-        // Process based on current strategy state
-        match strategy_state {
-            StrategyState::Idle => {
-                // Nothing to do, waiting for round start
-            }
-            StrategyState::WatchWindow => {
-                // Check for dump signal
-                let round_slug = Some(round.slug.as_str());
-                let signal = {
-                    let mut detector = self.signal_detector.write().await;
-                    detector.update(&update.quote, round_slug)
-                };
-
-                if let Some(signal) = signal {
-                    // Validate signal
-                    if signal.is_valid(self.config.execution.max_spread_bps) {
-                        // Try to enter Leg1
-                        if let Err(e) = self.enter_leg1(signal.side, signal.trigger_price).await {
-                            warn!("Failed to enter Leg1: {}", e);
-                        }
-                    } else {
-                        debug!(
-                            "Signal rejected: spread {} > max {}",
-                            signal.spread_bps, self.config.execution.max_spread_bps
-                        );
-                    }
-                }
-            }
-            StrategyState::Leg1Pending => {
-                // Waiting for Leg1 fill (handled by executor)
-            }
-            StrategyState::Leg1Filled => {
-                // Check for Leg2 opportunity
-                let should_enter_leg2 = match current_cycle.as_ref() {
-                    Some(ctx) => {
-                        let opposite_side = ctx.leg1_side.opposite();
-                        if update.side != opposite_side {
-                            None
-                        } else if let Some(ask) = update.quote.best_ask {
-                            let detector = self.signal_detector.read().await;
-                            detector
-                                .check_leg2_condition(ctx.leg1_price, ask)
-                                .then_some((opposite_side, ask))
-                        } else {
-                            None
-                        }
-                    }
-                    None => None,
-                };
-
-                // Check for force Leg2
-                let should_force = self.risk_manager.must_force_leg2(&round);
-
-                if let Some((opposite_side, ask)) = should_enter_leg2 {
-                    if let Err(e) = self.enter_leg2(opposite_side, ask).await {
-                        warn!("Failed to enter Leg2: {}", e);
-                    }
-                } else if should_force {
-                    self.force_leg2_or_abort().await?;
-                }
-            }
-            StrategyState::Leg2Pending => {
-                // Waiting for Leg2 fill (handled by executor)
-            }
-            StrategyState::CycleComplete | StrategyState::Abort => {
-                // Cleanup and return to idle
-                self.transition_to_idle().await?;
-            }
-        }
-
-        Ok(())
+        round_flow::on_quote_update(self, update).await
     }
 
     /// Check for round transitions
     async fn check_round_transition(&self) -> Result<()> {
-        let state = self.state.read().await;
-
-        if let Some(round) = &state.current_round {
-            if round.has_ended() {
-                // Round ended
-                info!("Round {} has ended", round.slug);
-
-                // If we're in the middle of a cycle, abort it
-                if state.strategy_state.requires_abort_on_round_end() {
-                    drop(state);
-                    self.abort_cycle_and_halt_safely("Round ended").await?;
-                } else {
-                    drop(state);
-                    self.transition_to_idle().await?;
-                }
-            } else if matches!(
-                state.strategy_state,
-                StrategyState::CycleComplete | StrategyState::Abort
-            ) {
-                // Terminal cycle state cleanup (timeout path). Without quote updates this state
-                // would otherwise persist indefinitely.
-                drop(state);
-                self.transition_to_idle().await?;
-            } else if state.strategy_state == StrategyState::Leg1Filled
-                && self.risk_manager.must_force_leg2(round)
-            {
-                // No quote updates (timeout path), but we're near round end and still exposed.
-                // Force Leg2 using REST best prices.
-                drop(state);
-                self.force_leg2_or_abort().await?;
-            } else if state.strategy_state == StrategyState::WatchWindow {
-                // Check if window expired
-                let minutes_elapsed = round.minutes_elapsed();
-                if minutes_elapsed >= self.config.strategy.window_min as i64 {
-                    info!("Watch window expired after {} minutes", minutes_elapsed);
-                    drop(state);
-                    self.transition_to_idle().await?;
-                }
-            }
-        }
-
-        Ok(())
+        round_flow::check_round_transition(self).await
     }
 
     /// Set the current round
     pub async fn set_round(&self, round: Round) -> Result<()> {
-        // Avoid resetting detector/state on the same round every poll interval.
-        // Also: never switch rounds mid-cycle. The engine must not mix tokens/prices across rounds.
-        {
-            let state = self.state.read().await;
-            if let Some(current) = state.current_round.as_ref() {
-                if current.slug == round.slug {
-                    return Ok(());
-                }
-
-                if state.strategy_state.requires_abort_on_round_end() {
-                    warn!(
-                        current_round = %current.slug,
-                        new_round = %round.slug,
-                        state = %state.strategy_state,
-                        "Ignoring round change while a cycle is active"
-                    );
-                    return Ok(());
-                }
-            }
-        }
-
-        let round_id = self.store.upsert_round(&round).await?;
-        let mut round_with_id = round.clone();
-        round_with_id.id = Some(round_id);
-
-        {
-            let mut state = self.state.write().await;
-            state.current_round = Some(round_with_id);
-
-            // Transition to watch window if idle (and still within the configured entry window).
-            if state.strategy_state == StrategyState::Idle {
-                if !round.has_ended()
-                    && round.minutes_elapsed() < self.config.strategy.window_min as i64
-                {
-                    state.strategy_state = StrategyState::WatchWindow;
-                    info!("Entering watch window for round: {}", round.slug);
-                } else {
-                    debug!(
-                        "Round {} already outside watch window (elapsed={}m, window={}m, ended={})",
-                        round.slug,
-                        round.minutes_elapsed(),
-                        self.config.strategy.window_min,
-                        round.has_ended(),
-                    );
-                }
-            }
-
-            state.version += 1;
-        }
-
-        // Reset signal detector for the new round. (SignalDetector also self-resets when it
-        // sees a new round slug, but doing it here makes the state transition explicit.)
-        {
-            let mut detector = self.signal_detector.write().await;
-            detector.reset(Some(&round.slug));
-        }
-
-        // Persist strategy state for observability/crash recovery (best effort).
-        let (strategy_state, cycle_id) = {
-            let state = self.state.read().await;
-            (
-                state.strategy_state,
-                state.current_cycle.as_ref().map(|c| c.cycle_id),
-            )
-        };
-        self.persist_strategy_state_best_effort(strategy_state, Some(round_id), cycle_id)
-            .await;
-
-        Ok(())
+        round_flow::set_round(self, round).await
     }
 
     /// Enter Leg1 position.
