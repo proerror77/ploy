@@ -24,7 +24,7 @@ use crate::adapters::{
 use crate::config::RiskConfig;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
-use crate::platform::CryptoDataPlaneHandle;
+use crate::data_plane::CryptoDataPlaneHandle;
 use crate::strategy::crypto::{
     horizon_for_series as crypto_horizon_for_series, known_binance_symbols,
     series_ids_for_symbol as crypto_series_ids_for_symbol,

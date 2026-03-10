@@ -13,7 +13,8 @@ use tracing::info;
 use crate::adapters::PolymarketClient;
 use crate::coordinator::{CoordinatorCommand, CoordinatorHandle};
 use crate::error::Result;
-use crate::platform::{Domain, PlatformDataPlane};
+use crate::data_plane::PlatformDataPlane;
+use crate::platform::Domain;
 use crate::strategy::OrderUpdate;
 
 mod actions;

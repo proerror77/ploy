@@ -428,7 +428,7 @@ pub struct ChainlinkRtds {
     price_cache: ChainlinkPriceCache,
     symbols: Vec<String>,
     // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
+    freshness: OnceLock<Arc<crate::data_plane::DataPlaneFreshness>>,
 }
 
 impl ChainlinkRtds {
@@ -448,13 +448,13 @@ impl ChainlinkRtds {
     }
 
     /// Attach a shared freshness tracker for the data plane.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+    pub fn set_freshness(&self, freshness: Arc<crate::data_plane::DataPlaneFreshness>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
             freshness.set_subscription_count(
-                crate::platform::DataSource::ChainlinkRtds,
+                crate::data_plane::DataSource::ChainlinkRtds,
                 self.symbols.len() as u64,
             );
-            freshness.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+            freshness.set_source_connected(crate::data_plane::DataSource::ChainlinkRtds, false);
         }
     }
 
@@ -520,7 +520,7 @@ impl ChainlinkRtds {
         impl Drop for ConnectionGuard<'_> {
             fn drop(&mut self) {
                 if let Some(f) = self.0.freshness.get() {
-                    f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+                    f.set_source_connected(crate::data_plane::DataSource::ChainlinkRtds, false);
                 }
             }
         }
@@ -535,7 +535,7 @@ impl ChainlinkRtds {
 
         info!("Connected to Chainlink RTDS WebSocket");
         if let Some(f) = self.freshness.get() {
-            f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, true);
+            f.set_source_connected(crate::data_plane::DataSource::ChainlinkRtds, true);
         }
 
         let (mut write, mut read) = ws_stream.split();
@@ -641,7 +641,7 @@ impl ChainlinkRtds {
 
         // Record per-symbol freshness for the data plane.
         if let Some(f) = self.freshness.get() {
-            f.record_update(crate::platform::DataSource::ChainlinkRtds, &payload.symbol);
+            f.record_update(crate::data_plane::DataSource::ChainlinkRtds, &payload.symbol);
         }
 
         // Broadcast update
@@ -788,13 +788,13 @@ mod tests {
     #[tokio::test]
     async fn characterization_rtds_records_freshness() {
         let rtds = ChainlinkRtds::new(vec!["sol/usd".to_string()]);
-        let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness = Arc::new(crate::data_plane::DataPlaneFreshness::new());
         rtds.set_freshness(freshness.clone());
 
         let msg = r#"{"symbol":"sol/usd","timestamp":1700000000000,"value":101.01}"#;
         rtds.ingest_test_message(msg).await;
 
-        let staleness = freshness.staleness(crate::platform::DataSource::ChainlinkRtds, "sol/usd");
+        let staleness = freshness.staleness(crate::data_plane::DataSource::ChainlinkRtds, "sol/usd");
         assert!(staleness.is_some(), "freshness should be recorded");
         assert!(staleness.unwrap() < 1.0);
     }

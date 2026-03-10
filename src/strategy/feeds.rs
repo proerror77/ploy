@@ -41,7 +41,7 @@ pub struct DataFeedManager {
     /// Reference to strategy manager
     manager: Arc<StrategyManager>,
     /// Optional shared data plane owner for WS lifecycles.
-    data_plane: Option<Arc<crate::platform::PlatformDataPlane>>,
+    data_plane: Option<Arc<crate::data_plane::PlatformDataPlane>>,
     /// Binance WebSocket (optional)
     binance_ws: Option<Arc<BinanceWebSocket>>,
     /// Binance Kline WebSocket (optional)
@@ -106,7 +106,7 @@ impl DataFeedManager {
 
     /// Create a DataFeedManager backed by a shared PlatformDataPlane.
     pub fn from_data_plane(
-        dp: Arc<crate::platform::PlatformDataPlane>,
+        dp: Arc<crate::data_plane::PlatformDataPlane>,
         manager: Arc<StrategyManager>,
     ) -> Self {
         let metadata_pool = std::env::var("PLOY_DATABASE__URL")
@@ -229,7 +229,7 @@ impl DataFeedBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
+    use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use crate::strategy::traits::{
         AlertLevel, DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction,
         StrategyStateInfo,

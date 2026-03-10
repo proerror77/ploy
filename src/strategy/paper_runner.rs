@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use crate::adapters::PolymarketClient;
 use crate::collector::BinanceKlineClient;
 use crate::domain::Side;
-use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
+use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::core::{BinaryMarket, MarketDiscovery};
 use crate::strategy::{CryptoMarketDiscovery, PaperTrader, PaperTradingStats, VolatilityArbConfig};
 

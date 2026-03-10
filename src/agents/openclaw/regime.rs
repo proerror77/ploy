@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::coordinator::bootstrap::RegimeConfig;
-use crate::platform::BinanceDataPlaneHandle;
+use crate::data_plane::BinanceDataPlaneHandle;
 
 /// Market regime classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

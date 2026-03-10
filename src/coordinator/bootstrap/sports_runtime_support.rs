@@ -5,7 +5,7 @@ pub(super) async fn prepare_sports_runtime_support(
     config: &PlatformBootstrapConfig,
     app_config: &AppConfig,
     shared_pool: Option<&PgPool>,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
 ) -> Result<()> {
     if app_config.nba_comeback.is_none() {
         return Ok(());

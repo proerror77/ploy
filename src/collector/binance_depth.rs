@@ -17,7 +17,7 @@ use tracing::{debug, error, info};
 use url::Url;
 
 use crate::error::{PloyError, Result};
-use crate::platform::{DataPlaneFreshness, DataSource};
+use crate::data_plane::{DataPlaneFreshness, DataSource};
 
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/stream?streams=";
 const PING_INTERVAL_SECS: u64 = 30;

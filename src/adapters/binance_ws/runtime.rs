@@ -198,7 +198,7 @@ impl BinanceWebSocket {
         impl Drop for ConnectionGuard<'_> {
             fn drop(&mut self) {
                 if let Some(f) = self.0.freshness.get() {
-                    f.set_source_connected(crate::platform::DataSource::BinanceSpot, false);
+                    f.set_source_connected(crate::data_plane::DataSource::BinanceSpot, false);
                 }
             }
         }
@@ -214,7 +214,7 @@ impl BinanceWebSocket {
 
         info!("Connected to Binance WebSocket");
         if let Some(f) = self.freshness.get() {
-            f.set_source_connected(crate::platform::DataSource::BinanceSpot, true);
+            f.set_source_connected(crate::data_plane::DataSource::BinanceSpot, true);
         }
 
         let (mut write, mut read) = ws_stream.split();

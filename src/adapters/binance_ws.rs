@@ -445,7 +445,7 @@ pub struct BinanceWebSocket {
     symbols: Vec<String>,
     reconnect_delay: Duration,
     // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
+    freshness: OnceLock<Arc<crate::data_plane::DataPlaneFreshness>>,
 }
 
 impl BinanceWebSocket {
@@ -472,13 +472,13 @@ impl BinanceWebSocket {
     }
 
     /// Attach a shared freshness tracker for the data plane.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+    pub fn set_freshness(&self, freshness: Arc<crate::data_plane::DataPlaneFreshness>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
             freshness.set_subscription_count(
-                crate::platform::DataSource::BinanceSpot,
+                crate::data_plane::DataSource::BinanceSpot,
                 self.symbols.len() as u64,
             );
-            freshness.set_source_connected(crate::platform::DataSource::BinanceSpot, false);
+            freshness.set_source_connected(crate::data_plane::DataSource::BinanceSpot, false);
         }
     }
 
@@ -547,7 +547,7 @@ impl BinanceWebSocket {
 
         // Record per-symbol freshness for the data plane.
         if let Some(f) = self.freshness.get() {
-            f.record_update(crate::platform::DataSource::BinanceSpot, symbol);
+            f.record_update(crate::data_plane::DataSource::BinanceSpot, symbol);
         }
 
         // Broadcast update
@@ -681,13 +681,13 @@ mod tests {
     #[tokio::test]
     async fn characterization_freshness_recorded_on_trade() {
         let ws = BinanceWebSocket::new(vec!["BTCUSDT".into()]);
-        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness = std::sync::Arc::new(crate::data_plane::DataPlaneFreshness::new());
         ws.set_freshness(freshness.clone());
 
         let json = r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43000","q":"0.5","T":1700000000000}"#;
         ws.handle_message(json).await;
 
-        let staleness = freshness.staleness(crate::platform::DataSource::BinanceSpot, "BTCUSDT");
+        let staleness = freshness.staleness(crate::data_plane::DataSource::BinanceSpot, "BTCUSDT");
         assert!(staleness.is_some(), "freshness should be recorded");
         assert!(staleness.unwrap() < 1.0);
     }

@@ -86,7 +86,7 @@ pub(super) fn spawn_managed_strategy_runtime_task(
 
 pub(super) fn spawn_openclaw_governance_agent(
     config: &PlatformBootstrapConfig,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
     coordinator: &mut Coordinator,
     handle: &CoordinatorHandle,
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,

@@ -3,7 +3,7 @@ use chrono::Utc;
 
 pub(super) async fn initialize_crypto_market_data_runtime(
     shared_pool: Option<&PgPool>,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
     use_data_plane: bool,
     data_plane: Option<&Arc<PlatformDataPlane>>,
     binance_ws: Arc<BinanceWebSocket>,
@@ -45,7 +45,7 @@ pub(super) async fn initialize_crypto_market_data_runtime(
 
 async fn initialize_crypto_persistence_pipeline(
     shared_pool: Option<&PgPool>,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
     use_data_plane: bool,
     data_plane: Option<&Arc<PlatformDataPlane>>,
     binance_ws: &Arc<BinanceWebSocket>,
@@ -247,7 +247,7 @@ async fn initialize_crypto_persistence_pipeline(
 
 async fn maybe_start_binance_lob_runtime(
     shared_pool: Option<&PgPool>,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
     crypto_persistence_pipeline: Option<crate::persistence::PersistencePipelineHandle>,
     crypto_cfg: &crate::strategy::CryptoTradingConfig,
     all_coins: &[String],

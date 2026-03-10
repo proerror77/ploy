@@ -39,7 +39,7 @@ pub struct PolymarketWebSocket {
     // Optional: wired in at runtime by the binary to report connectivity to /health.
     health_state: OnceLock<Arc<HealthState>>,
     // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
+    freshness: OnceLock<Arc<crate::data_plane::DataPlaneFreshness>>,
 }
 
 /// Quote update notification
@@ -86,10 +86,10 @@ impl PolymarketWebSocket {
     }
 
     /// Wire an optional `DataPlaneFreshness` for per-symbol tracking.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+    pub fn set_freshness(&self, freshness: Arc<crate::data_plane::DataPlaneFreshness>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
-            freshness.set_source_connected(crate::platform::DataSource::PolymarketWs, false);
-            freshness.set_subscription_count(crate::platform::DataSource::PolymarketWs, 0);
+            freshness.set_source_connected(crate::data_plane::DataSource::PolymarketWs, false);
+            freshness.set_subscription_count(crate::data_plane::DataSource::PolymarketWs, 0);
         }
     }
 
@@ -320,13 +320,13 @@ mod tests {
         let ws = PolymarketWebSocket::new("wss://example.invalid");
         ws.register_token("0xfresh", Side::Up).await;
 
-        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness = std::sync::Arc::new(crate::data_plane::DataPlaneFreshness::new());
         ws.set_freshness(freshness.clone());
 
         let json = r#"[{"asset_id":"0xfresh","market":"m","bids":[{"price":"0.50","size":"10"}],"asks":[{"price":"0.51","size":"10"}]}]"#;
         ws.handle_message(json).await;
 
-        let staleness = freshness.staleness(crate::platform::DataSource::PolymarketWs, "0xfresh");
+        let staleness = freshness.staleness(crate::data_plane::DataSource::PolymarketWs, "0xfresh");
         assert!(
             staleness.is_some(),
             "freshness should be recorded after book update"

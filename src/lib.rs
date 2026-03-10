@@ -12,6 +12,7 @@ pub mod config;
 pub mod control_plane;
 pub mod coordination;
 pub mod coordinator;
+pub mod data_plane;
 pub mod domain;
 pub mod error;
 pub mod exchange;

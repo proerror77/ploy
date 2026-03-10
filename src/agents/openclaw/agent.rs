@@ -17,7 +17,8 @@ use crate::agents::governance_agent::GovernanceAgent;
 use crate::agents::governance_context::GovernanceContext;
 use crate::coordinator::bootstrap::OpenClawConfig;
 use crate::coordinator::CoordinatorCommand;
-use crate::platform::{BinanceDataPlaneHandle, Domain};
+use crate::data_plane::BinanceDataPlaneHandle;
+use crate::platform::Domain;
 
 use super::allocator::DynamicAllocator;
 use super::conflict::ConflictDetector;

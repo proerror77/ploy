@@ -233,7 +233,7 @@ pub struct BinanceKlineWebSocket {
     closed_only: bool,
     reconnect_delay: Duration,
     // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
+    freshness: OnceLock<Arc<crate::data_plane::DataPlaneFreshness>>,
 }
 
 impl BinanceKlineWebSocket {
@@ -260,13 +260,13 @@ impl BinanceKlineWebSocket {
     }
 
     /// Attach a shared freshness tracker for the data plane.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+    pub fn set_freshness(&self, freshness: Arc<crate::data_plane::DataPlaneFreshness>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
             freshness.set_subscription_count(
-                crate::platform::DataSource::BinanceKline,
+                crate::data_plane::DataSource::BinanceKline,
                 (self.symbols.len() * self.intervals.len()) as u64,
             );
-            freshness.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+            freshness.set_source_connected(crate::data_plane::DataSource::BinanceKline, false);
         }
     }
 
@@ -332,7 +332,7 @@ impl BinanceKlineWebSocket {
         impl Drop for ConnectionGuard<'_> {
             fn drop(&mut self) {
                 if let Some(f) = self.0.freshness.get() {
-                    f.set_source_connected(crate::platform::DataSource::BinanceKline, false);
+                    f.set_source_connected(crate::data_plane::DataSource::BinanceKline, false);
                 }
             }
         }
@@ -347,7 +347,7 @@ impl BinanceKlineWebSocket {
         let ws_stream = connect_websocket_with_proxy(&url).await?;
         info!("Connected to Binance kline WS");
         if let Some(f) = self.freshness.get() {
-            f.set_source_connected(crate::platform::DataSource::BinanceKline, true);
+            f.set_source_connected(crate::data_plane::DataSource::BinanceKline, true);
         }
 
         let (mut write, mut read) = ws_stream.split();
@@ -463,7 +463,7 @@ impl BinanceKlineWebSocket {
 
         // Record per-symbol freshness for the data plane (before ev.symbol is moved).
         if let Some(f) = self.freshness.get() {
-            f.record_update(crate::platform::DataSource::BinanceKline, &ev.symbol);
+            f.record_update(crate::data_plane::DataSource::BinanceKline, &ev.symbol);
         }
 
         let update = KlineUpdate {
@@ -657,7 +657,7 @@ mod tests {
     #[tokio::test]
     async fn characterization_freshness_recorded_on_kline() {
         let ws = BinanceKlineWebSocket::new(vec!["BTCUSDT".into()], vec!["5m".into()], true);
-        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness = std::sync::Arc::new(crate::data_plane::DataPlaneFreshness::new());
         ws.set_freshness(freshness.clone());
 
         let msg = r#"{
@@ -689,7 +689,7 @@ mod tests {
         }"#;
 
         ws.ingest_test_message(msg).await;
-        let staleness = freshness.staleness(crate::platform::DataSource::BinanceKline, "BTCUSDT");
+        let staleness = freshness.staleness(crate::data_plane::DataSource::BinanceKline, "BTCUSDT");
         assert!(staleness.is_some(), "freshness should be recorded");
         assert!(staleness.unwrap() < 1.0);
     }

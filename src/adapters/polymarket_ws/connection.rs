@@ -246,11 +246,11 @@ impl PolymarketWebSocket {
             }
         }
 
-        struct WsFreshnessGuard(Option<Arc<crate::platform::DataPlaneFreshness>>);
+        struct WsFreshnessGuard(Option<Arc<crate::data_plane::DataPlaneFreshness>>);
         impl Drop for WsFreshnessGuard {
             fn drop(&mut self) {
                 if let Some(ref f) = self.0 {
-                    f.set_source_connected(crate::platform::DataSource::PolymarketWs, false);
+                    f.set_source_connected(crate::data_plane::DataSource::PolymarketWs, false);
                 }
             }
         }
@@ -270,7 +270,7 @@ impl PolymarketWebSocket {
             h.set_ws_connected(true);
         }
         if let Some(ref f) = freshness {
-            f.set_source_connected(crate::platform::DataSource::PolymarketWs, true);
+            f.set_source_connected(crate::data_plane::DataSource::PolymarketWs, true);
         }
 
         let (mut write, mut read) = ws_stream.split();

@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use crate::adapters::{PolymarketClient, PriceCache, QuoteCache};
 use crate::domain::Side;
 use crate::error::Result;
-use crate::platform::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
+use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::tui::app::TuiApp;
 use crate::tui::data::{DisplayAgent, DisplayRiskState, DisplayTransaction};
 use crate::tui::event::{AppEvent, KeyAction};

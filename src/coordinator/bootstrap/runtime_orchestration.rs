@@ -40,7 +40,7 @@ pub(super) async fn run_platform_runtime(
     }
 
     let mut agent_handles = Vec::new();
-    let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
+    let freshness = Arc::new(crate::data_plane::DataPlaneFreshness::new());
     let mut managed_runtime_data_plane: Option<Arc<PlatformDataPlane>> = None;
     let mut shared_crypto_data_plane: Option<Arc<PlatformDataPlane>> = None;
 

@@ -23,7 +23,7 @@ pub(super) async fn initialize_crypto_runtime_support(
     runtime_crypto_targets: &strategy_deployments::RuntimeCryptoStrategyTargets,
     shared_pool: Option<&PgPool>,
     pm_client: Option<&PolymarketClient>,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
 ) -> Result<CryptoRuntimeSupport> {
     let pm_client_ref = pm_client.ok_or_else(|| {
         crate::error::PloyError::Validation(

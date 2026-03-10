@@ -15,7 +15,7 @@ pub(super) async fn initialize_crypto_runtime_preflight(
     config: &PlatformBootstrapConfig,
     app_config: &AppConfig,
     runtime_crypto_targets: &strategy_deployments::RuntimeCryptoStrategyTargets,
-    freshness: &Arc<crate::platform::DataPlaneFreshness>,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
 ) -> Result<CryptoRuntimePreflight> {
     let use_data_plane = env_bool("PLOY_DATA_PLANE", false);
     let crypto_cfg = config.crypto.clone();

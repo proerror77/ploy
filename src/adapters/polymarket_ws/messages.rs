@@ -143,7 +143,7 @@ impl PolymarketWebSocket {
                 .update_snapshot(&asset_id, side, best_bid, best_ask, bid_size, ask_size);
 
             if let Some(f) = self.freshness.get() {
-                f.record_update(crate::platform::DataSource::PolymarketWs, &asset_id);
+                f.record_update(crate::data_plane::DataSource::PolymarketWs, &asset_id);
             }
 
             if let Some(quote) = self.quote_cache.get(&asset_id) {
