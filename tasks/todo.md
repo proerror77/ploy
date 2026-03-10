@@ -3108,7 +3108,8 @@ Move cycle-abort, halt-persistence, and idle-transition lifecycle ownership out 
 - 2026-03-10: Reduced [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs) to the core engine façade by delegating lifecycle calls through explicit `*_impl` imports.
 - 2026-03-10: Validation passed:
   - `rtk cargo check --lib`
-  - `rtk cargo test test_graceful_stop_reports_closed_action_channel --lib -- --nocapture`
+  - `rtk cargo test transition_to_idle_clears_state --lib -- --nocapture`
+  - `rtk cargo test abort_cycle_without_active_cycle --lib -- --nocapture`
 
 # Live Runtime And Strategy Core Wave (2026-03-10)
 
@@ -3119,7 +3120,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 
 - [x] Extract a major deployment/admission slice out of `src/coordinator/admission.rs`.
 - [ ] Extract a major ownership slice out of `src/strategy/staggered_arb_live.rs`.
-- [ ] Extract a major ownership slice out of `src/strategy/momentum.rs`.
+- [x] Extract a major ownership slice out of `src/strategy/momentum.rs`.
 - [x] Extract a major ownership slice out of `src/strategy/execution/engine.rs`.
 - [ ] Re-run compile and focused strategy/admission regressions after integrating the wave.
 
@@ -3127,7 +3128,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 
 - [x] Confirm `admission.rs` no longer centralizes deployment matching and admission policy helpers in one root file.
 - [ ] Confirm `staggered_arb_live.rs` no longer centralizes all runtime filters/evaluation/state helpers inline.
-- [ ] Confirm `momentum.rs` no longer centralizes all signal/state/config ownership inline.
+- [x] Confirm `momentum.rs` no longer centralizes all signal/state/config ownership inline.
 - [x] Confirm `engine.rs` no longer centralizes all execution-engine subflows in one root file.
 
 ## Progress notes
@@ -3138,9 +3139,14 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - worker 3: `src/strategy/momentum.rs`
   - mainline: `src/strategy/execution/engine.rs`
 - 2026-03-10: Added [lifecycle.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/lifecycle.rs) and moved `StrategyEngine` cycle-control ownership out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs), including halt persistence, strategy-state persistence, forced-leg2 fallback, abort handling, and idle transition helpers.
+- 2026-03-10: Added [matcher.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/matcher.rs) and moved `EventMatcher` / `EventInfo` ownership out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), keeping the strategy root focused on signals, position logic, and runtime orchestration.
 - 2026-03-10: Validation passed for the local engine slice:
   - `rtk cargo check --lib`
   - `rtk cargo test test_deployment_gate_accepts_explicit_deployment_and_applies_metadata --lib -- --nocapture`
   - `rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --nocapture`
   - `rtk cargo test transition_to_idle_clears_state --lib -- --nocapture`
   - `rtk cargo test abort_cycle_without_active_cycle --lib -- --nocapture`
+- 2026-03-10: Validation passed for the local momentum slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_parse_price_from_question --lib -- --nocapture`
+  - `rtk cargo test test_event_matcher_ --lib -- --nocapture`
