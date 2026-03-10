@@ -45,6 +45,7 @@ const CLOB_TERMINAL_CURSOR: &str = "LTE="; // base64("-1"), used by CLOB paginat
 
 type AuthClobClient = ClobClient<Authenticated<Normal>>;
 
+mod auth_api;
 mod gamma;
 mod read_api;
 
