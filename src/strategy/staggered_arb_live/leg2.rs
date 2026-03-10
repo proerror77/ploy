@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::info;
 
-use super::lifecycle::{LiveOrderTrack, PaperPositionState};
+use super::lifecycle::{LiveOrderTrack, PaperPositionState, PaperTrade};
 use super::{
     crypto_submit_intent, estimate_probability, polymarket_order_meets_minimum, Direction,
     StaggeredArbAdapter, StrategyAction, StrategyEvent, StrategyEventType,
@@ -14,7 +14,7 @@ use super::{
 use crate::domain::Side;
 
 impl StaggeredArbAdapter {
-    fn forced_close_allowed(
+    pub(super) fn forced_close_allowed(
         &self,
         current_sum: Decimal,
         time_remaining_secs: f64,
@@ -29,7 +29,7 @@ impl StaggeredArbAdapter {
         threshold <= Decimal::ZERO || current_sum <= threshold
     }
 
-    fn protective_close_allowed(
+    pub(super) fn protective_close_allowed(
         &self,
         current_sum: Decimal,
         time_remaining_secs: f64,
@@ -44,7 +44,7 @@ impl StaggeredArbAdapter {
         threshold <= Decimal::ZERO || current_sum <= threshold
     }
 
-    fn premium_sum_excess(&self, current_sum: Decimal) -> f64 {
+    pub(super) fn premium_sum_excess(&self, current_sum: Decimal) -> f64 {
         let threshold = self.config.backtest_config.premium_sum_threshold;
         if current_sum <= threshold {
             0.0
@@ -53,7 +53,7 @@ impl StaggeredArbAdapter {
         }
     }
 
-    fn current_window_greeks(
+    pub(super) fn current_window_greeks(
         &self,
         symbol: &str,
         event_id: &str,
@@ -82,7 +82,11 @@ impl StaggeredArbAdapter {
         )
     }
 
-    fn check_leg2_opportunities(&mut self, symbol: &str, ts: DateTime<Utc>) -> Vec<StrategyAction> {
+    pub(super) fn check_leg2_opportunities(
+        &mut self,
+        symbol: &str,
+        ts: DateTime<Utc>,
+    ) -> Vec<StrategyAction> {
         let mut actions = Vec::new();
         let bc = self.config.backtest_config.clone();
         let mut leg2_skip_batch: HashMap<&'static str, u64> = HashMap::new();
@@ -420,7 +424,7 @@ impl StaggeredArbAdapter {
         actions
     }
 
-    fn fill_leg2(
+    pub(super) fn fill_leg2(
         &mut self,
         idx: usize,
         other_ask: Decimal,
