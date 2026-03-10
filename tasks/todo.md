@@ -3085,6 +3085,31 @@ Move deployment registry/load/matching/gating ownership out of `src/coordinator/
   - `rtk cargo test test_deployment_gate_infers_unique_by_timeframe_hint --lib -- --nocapture`
   - `rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --nocapture`
 
+# Strategy Engine Lifecycle Extraction (2026-03-10)
+
+## Goal
+Move cycle-abort, halt-persistence, and idle-transition lifecycle ownership out of `src/strategy/execution/engine.rs` so the root engine owner keeps orchestration while lifecycle transitions live in a dedicated submodule.
+
+## Tasks
+
+- [x] Extract halt/state-persistence helpers out of `src/strategy/execution/engine.rs`.
+- [x] Extract cycle abort / force-leg2 / idle transition lifecycle routines out of `src/strategy/execution/engine.rs`.
+- [x] Keep execution behavior unchanged while delegating lifecycle transitions to the extracted owner.
+- [x] Re-run compile and focused engine regressions after the extraction.
+
+## Review
+
+- [x] Confirm `engine.rs` no longer centralizes lifecycle transition internals.
+- [x] Confirm engine lifecycle regression coverage still passes after the move.
+
+## Progress notes
+
+- 2026-03-10: Added [lifecycle.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/lifecycle.rs) to own halt persistence, strategy-state persistence, abort-cycle flows, forced Leg2 fallback, and idle-transition routines.
+- 2026-03-10: Reduced [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs) to the core engine façade by delegating lifecycle calls through explicit `*_impl` imports.
+- 2026-03-10: Validation passed:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_graceful_stop_reports_closed_action_channel --lib -- --nocapture`
+
 # Live Runtime And Strategy Core Wave (2026-03-10)
 
 ## Goal
@@ -3092,7 +3117,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 
 ## Tasks
 
-- [ ] Extract a major deployment/admission slice out of `src/coordinator/admission.rs`.
+- [x] Extract a major deployment/admission slice out of `src/coordinator/admission.rs`.
 - [ ] Extract a major ownership slice out of `src/strategy/staggered_arb_live.rs`.
 - [ ] Extract a major ownership slice out of `src/strategy/momentum.rs`.
 - [x] Extract a major ownership slice out of `src/strategy/execution/engine.rs`.
@@ -3100,7 +3125,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 
 ## Review
 
-- [ ] Confirm `admission.rs` no longer centralizes deployment matching and admission policy helpers in one root file.
+- [x] Confirm `admission.rs` no longer centralizes deployment matching and admission policy helpers in one root file.
 - [ ] Confirm `staggered_arb_live.rs` no longer centralizes all runtime filters/evaluation/state helpers inline.
 - [ ] Confirm `momentum.rs` no longer centralizes all signal/state/config ownership inline.
 - [x] Confirm `engine.rs` no longer centralizes all execution-engine subflows in one root file.
@@ -3118,4 +3143,4 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - `rtk cargo test test_deployment_gate_accepts_explicit_deployment_and_applies_metadata --lib -- --nocapture`
   - `rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --nocapture`
   - `rtk cargo test transition_to_idle_clears_state --lib -- --nocapture`
-  - `rtk cargo test abort_cycle_with_active_cycle_clears_context --lib -- --nocapture`
+  - `rtk cargo test abort_cycle_without_active_cycle --lib -- --nocapture`
