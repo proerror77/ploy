@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use std::str::FromStr;
 
-use crate::domain::Side;
+use crate::domain::{OrderType, Side, TimeInForce};
 
 /// 領域類型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -147,6 +147,8 @@ pub struct OrderIntent {
     pub agent_id: String,
     /// 意圖 ID (用於追蹤)
     pub intent_id: Uuid,
+    /// Strategy/runtime-scoped client order ID.
+    pub client_order_id: String,
     /// 領域
     pub domain: Domain,
     /// 市場 slug
@@ -161,6 +163,10 @@ pub struct OrderIntent {
     pub shares: u64,
     /// 限價
     pub limit_price: Decimal,
+    /// 訂單類型
+    pub order_type: OrderType,
+    /// 有效時間
+    pub time_in_force: TimeInForce,
     /// 優先級
     pub priority: OrderPriority,
     /// 創建時間
@@ -185,9 +191,11 @@ impl OrderIntent {
         shares: u64,
         limit_price: Decimal,
     ) -> Self {
+        let intent_id = Uuid::new_v4();
         Self {
             agent_id: agent_id.into(),
-            intent_id: Uuid::new_v4(),
+            intent_id,
+            client_order_id: format!("intent:{}", intent_id),
             domain,
             market_slug: market_slug.into(),
             token_id: token_id.into(),
@@ -195,6 +203,8 @@ impl OrderIntent {
             is_buy,
             shares,
             limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
             priority: OrderPriority::Normal,
             created_at: Utc::now(),
             expires_at: None,
@@ -204,6 +214,24 @@ impl OrderIntent {
 
     pub fn with_priority(mut self, priority: OrderPriority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    pub fn with_client_order_id(mut self, client_order_id: impl Into<String>) -> Self {
+        let client_order_id = client_order_id.into();
+        if !client_order_id.trim().is_empty() {
+            self.client_order_id = client_order_id;
+        }
+        self
+    }
+
+    pub fn with_order_type(mut self, order_type: OrderType) -> Self {
+        self.order_type = order_type;
+        self
+    }
+
+    pub fn with_time_in_force(mut self, time_in_force: TimeInForce) -> Self {
+        self.time_in_force = time_in_force;
         self
     }
 
@@ -306,5 +334,13 @@ mod tests {
 
         let alias = sample_intent().with_metadata("marketConditionId", " 0xdef ");
         assert_eq!(alias.condition_id(), Some("0xdef"));
+    }
+
+    #[test]
+    fn order_intent_defaults_to_limit_gtc() {
+        let intent = sample_intent();
+        assert!(intent.client_order_id.starts_with("intent:"));
+        assert_eq!(intent.order_type, OrderType::Limit);
+        assert_eq!(intent.time_in_force, TimeInForce::GTC);
     }
 }

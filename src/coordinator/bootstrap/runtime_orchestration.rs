@@ -87,6 +87,7 @@ pub(super) async fn run_platform_runtime(
         let _ = spawn_managed_strategy_runtime_task(
             plan.spawn,
             &mut coordinator,
+            &handle,
             &shutdown_tx,
             &mut agent_handles,
             config.dry_run,

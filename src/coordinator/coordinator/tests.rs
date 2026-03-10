@@ -8,6 +8,7 @@ use crate::strategy::executor::OrderExecutor;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::time::{Duration, timeout};
 
 fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
     AgentSnapshot {
@@ -170,6 +171,66 @@ async fn test_drain_and_execute_records_single_success_for_buy_fill() {
     assert_eq!(total_pnl, Decimal::ZERO);
     assert_eq!(success_count, 1);
     assert_eq!(failure_count, 0);
+}
+
+#[tokio::test]
+async fn test_handle_order_intent_emits_rejected_update_for_missing_deployment() {
+    let (_handle, mut coordinator) = make_test_handle();
+    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string());
+
+    let intent = make_intent(true, OrderPriority::Normal);
+    let client_order_id = intent.client_order_id.clone();
+
+    coordinator.handle_order_intent(intent).await;
+
+    let update = timeout(Duration::from_secs(1), order_updates.recv())
+        .await
+        .expect("receive rejected order update")
+        .expect("order update available");
+    assert_eq!(update.client_order_id.as_deref(), Some(client_order_id.as_str()));
+    assert_eq!(update.status, crate::domain::OrderStatus::Rejected);
+    assert!(update
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("deployment_id"));
+}
+
+#[tokio::test]
+async fn test_drain_and_execute_emits_pending_and_fill_updates() {
+    let (_handle, mut coordinator) = make_test_handle();
+    coordinator
+        .risk_gate
+        .register_agent_with_domain("crypto_lob_ml", Domain::Crypto, AgentRiskParams::default())
+        .await;
+    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string());
+
+    let intent =
+        make_intent(true, OrderPriority::Normal).with_metadata("deployment_id", "deploy.test");
+    let client_order_id = intent.client_order_id.clone();
+
+    coordinator.handle_order_intent(intent).await;
+
+    let pending = timeout(Duration::from_secs(1), order_updates.recv())
+        .await
+        .expect("receive pending order update")
+        .expect("pending update available");
+    assert_eq!(pending.client_order_id.as_deref(), Some(client_order_id.as_str()));
+    assert_eq!(pending.status, crate::domain::OrderStatus::Pending);
+
+    coordinator.drain_and_execute().await;
+
+    let executed = timeout(Duration::from_secs(1), order_updates.recv())
+        .await
+        .expect("receive execution order update")
+        .expect("execution update available");
+    assert_eq!(executed.client_order_id.as_deref(), Some(client_order_id.as_str()));
+    assert!(matches!(
+        executed.status,
+        crate::domain::OrderStatus::Submitted
+            | crate::domain::OrderStatus::PartiallyFilled
+            | crate::domain::OrderStatus::Filled
+    ));
 }
 
 #[tokio::test]

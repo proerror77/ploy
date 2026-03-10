@@ -1,4 +1,5 @@
 use chrono::Utc;
+use crate::domain::OrderStatus;
 use rust_decimal::Decimal;
 use tracing::{debug, error, info, warn};
 
@@ -46,6 +47,12 @@ impl Coordinator {
         };
 
         for intent in expired {
+            self.emit_rejected_intent_update(
+                &intent,
+                OrderStatus::Expired,
+                "intent expired in coordinator queue".to_string(),
+            )
+            .await;
             self.settle_domain_failure(&intent).await;
         }
 
@@ -87,6 +94,7 @@ impl Coordinator {
                             Some(queue_delay_ms),
                         )
                         .await;
+                    self.emit_execution_result_update(&intent, &result).await;
 
                     let fill_price = result.avg_fill_price.unwrap_or(intent.limit_price);
                     self.settle_domain_success(&intent, result.filled_shares, fill_price)
@@ -156,6 +164,12 @@ impl Coordinator {
                             Some(queue_delay_ms),
                         )
                         .await;
+                    self.emit_rejected_intent_update(
+                        &intent,
+                        OrderStatus::Failed,
+                        e.to_string(),
+                    )
+                    .await;
 
                     self.risk_gate
                         .record_failure(&agent_id, &e.to_string())

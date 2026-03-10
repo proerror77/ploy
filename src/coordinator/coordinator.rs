@@ -37,6 +37,7 @@ use super::state::{AgentSnapshot, GlobalState};
 mod control_surface;
 mod execution;
 mod ingress;
+mod order_updates;
 mod recovery;
 mod runtime_status;
 
@@ -87,6 +88,8 @@ pub struct Coordinator {
     governance_store_pool: Option<PgPool>,
     governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
+    order_update_sinks:
+        Arc<std::sync::RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -121,6 +124,7 @@ impl Coordinator {
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let governance = Arc::new(GovernanceController::new(&config));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
+        let order_update_sinks = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
         } else {
@@ -144,6 +148,7 @@ impl Coordinator {
             governance_store_pool: None,
             governance,
             stale_heartbeat_warn_at,
+            order_update_sinks,
             order_tx,
             order_rx,
             state_tx,

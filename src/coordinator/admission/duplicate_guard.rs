@@ -105,15 +105,15 @@ impl AdmissionController {
 
         let idempotency_key = self.stable_idempotency_key(account_id, intent);
         OrderRequest {
-            client_order_id: format!("intent:{}", intent.intent_id),
+            client_order_id: intent.client_order_id.clone(),
             idempotency_key: Some(idempotency_key),
             token_id: intent.token_id.clone(),
             market_side: intent.side.clone(),
             order_side,
             shares: intent.shares,
             limit_price: intent.limit_price,
-            order_type: OrderType::Limit,
-            time_in_force: TimeInForce::GTC,
+            order_type: intent.order_type,
+            time_in_force: intent.time_in_force,
         }
     }
 
@@ -221,11 +221,9 @@ mod tests {
             .with_metadata("deployment_id", "crypto.pm.btc.5m.momentum");
 
         assert!(guard.register_or_block(&intent, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
-                .is_some()
-        );
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
+            .is_some());
     }
 
     #[test]
@@ -237,11 +235,9 @@ mod tests {
             .with_metadata("deployment_id", "crypto.pm.btc.5m.momentum");
 
         assert!(guard.register_or_block(&intent, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&intent, now + chrono::Duration::seconds(11))
-                .is_none()
-        );
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::seconds(11))
+            .is_none());
     }
 
     #[test]
@@ -256,11 +252,9 @@ mod tests {
 
         let mut guard = controller.duplicate_guard.blocking_write();
         assert!(guard.register_or_block(&first, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&second, now + chrono::Duration::milliseconds(10))
-                .is_some()
-        );
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(10))
+            .is_some());
     }
 
     #[test]
@@ -280,11 +274,9 @@ mod tests {
 
         let mut guard = controller.duplicate_guard.blocking_write();
         assert!(guard.register_or_block(&first, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&second, now + chrono::Duration::milliseconds(10))
-                .is_some()
-        );
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(10))
+            .is_some());
     }
 
     #[test]
@@ -305,11 +297,9 @@ mod tests {
 
         let mut guard = controller.duplicate_guard.blocking_write();
         assert!(guard.register_or_block(&first, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&second, now + chrono::Duration::milliseconds(100))
-                .is_none()
-        );
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_none());
     }
 
     #[test]
@@ -330,11 +320,9 @@ mod tests {
 
         let mut guard = controller.duplicate_guard.blocking_write();
         assert!(guard.register_or_block(&first, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&second, now + chrono::Duration::milliseconds(100))
-                .is_some()
-        );
+        assert!(guard
+            .register_or_block(&second, now + chrono::Duration::milliseconds(100))
+            .is_some());
     }
 
     #[test]
@@ -345,11 +333,9 @@ mod tests {
 
         let mut guard = controller.duplicate_guard.blocking_write();
         assert!(guard.register_or_block(&intent, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
-                .is_none()
-        );
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
+            .is_none());
     }
 
     #[test]
@@ -360,11 +346,9 @@ mod tests {
 
         let mut guard = controller.duplicate_guard.blocking_write();
         assert!(guard.register_or_block(&intent, now).is_none());
-        assert!(
-            guard
-                .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
-                .is_none()
-        );
+        assert!(guard
+            .register_or_block(&intent, now + chrono::Duration::milliseconds(10))
+            .is_none());
     }
 
     #[test]

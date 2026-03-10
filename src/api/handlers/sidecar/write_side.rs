@@ -322,6 +322,9 @@ pub async fn sidecar_submit_intent(
             )
         })?;
         intent.intent_id = parsed;
+        if intent.client_order_id.starts_with("intent:") {
+            intent.client_order_id = format!("intent:{}", parsed);
+        }
     }
     let intent_id = intent.intent_id.to_string();
 

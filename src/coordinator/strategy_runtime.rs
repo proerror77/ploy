@@ -16,10 +16,11 @@ use tracing::{info, warn};
 
 use crate::adapters::PolymarketClient;
 use crate::agent_runtime::AgentStatus;
-use crate::coordinator::CoordinatorCommand;
+use crate::coordinator::{CoordinatorCommand, CoordinatorHandle};
 use crate::error::Result;
 use crate::platform::{Domain, PlatformDataPlane};
 use crate::strategy::executor::OrderExecutor;
+use crate::strategy::OrderUpdate;
 use crate::strategy::{StrategyFactory, StrategyManager};
 
 mod actions;
@@ -47,7 +48,9 @@ pub(crate) async fn run_managed_strategy_runtime(
     data_plane: Option<Arc<PlatformDataPlane>>,
     observability_pool: Option<PgPool>,
     observability_account_id: String,
+    coordinator_handle: CoordinatorHandle,
     mut cmd_rx: mpsc::Receiver<CoordinatorCommand>,
+    order_update_rx: mpsc::Receiver<OrderUpdate>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
     let strategy = StrategyFactory::from_toml(&strategy_config_toml, dry_run)?;
@@ -97,13 +100,19 @@ pub(crate) async fn run_managed_strategy_runtime(
     let orders_submitted_for_actions = orders_submitted.clone();
     let orders_filled_for_actions = orders_filled.clone();
     let strategy_label_owned = strategy_label.to_string();
+    let strategy_id_for_actions = strategy_id.clone();
+    let agent_id_owned = agent_id.to_string();
     let observability_pool_for_actions = observability_pool.clone();
     let observability_account_for_actions = observability_account_id.clone();
     let action_task = tokio::spawn(async move {
         handle_strategy_actions_runtime(
             &strategy_label_owned,
+            &agent_id_owned,
+            &strategy_id_for_actions,
             manager_for_actions,
             action_rx,
+            order_update_rx,
+            coordinator_handle,
             executor,
             paused_for_actions,
             orders_submitted_for_actions,

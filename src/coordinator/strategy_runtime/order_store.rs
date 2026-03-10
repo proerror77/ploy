@@ -104,28 +104,39 @@ pub(crate) async fn persist_runtime_order_result(
     status: OrderStatus,
     filled_shares: u64,
     avg_fill_price: Option<Decimal>,
-    fallback_price: Decimal,
+    _fallback_price: Decimal,
 ) -> Result<()> {
+    persist_runtime_order_update(
+        store,
+        client_order_id,
+        Some(exchange_order_id),
+        status,
+        filled_shares,
+        avg_fill_price,
+    )
+    .await
+}
+
+pub(crate) async fn persist_runtime_order_update(
+    store: &dyn RuntimeOrderStore,
+    client_order_id: &str,
+    exchange_order_id: Option<&str>,
+    status: OrderStatus,
+    filled_shares: u64,
+    avg_fill_price: Option<Decimal>,
+) -> Result<()> {
+    let persisted_exchange_order_id = exchange_order_id.filter(|id| !id.trim().is_empty());
+
     store
-        .update_order_status(
-            client_order_id,
-            OrderStatus::Submitted,
-            Some(exchange_order_id),
-        )
+        .update_order_status(client_order_id, status, persisted_exchange_order_id)
         .await?;
 
     if filled_shares > 0 {
+        let Some(fill_price) = avg_fill_price else {
+            return Ok(());
+        };
         store
-            .update_order_fill(
-                client_order_id,
-                filled_shares,
-                avg_fill_price.unwrap_or(fallback_price),
-                status,
-            )
-            .await?;
-    } else if status != OrderStatus::Submitted {
-        store
-            .update_order_status(client_order_id, status, Some(exchange_order_id))
+            .update_order_fill(client_order_id, filled_shares, fill_price, status)
             .await?;
     }
 

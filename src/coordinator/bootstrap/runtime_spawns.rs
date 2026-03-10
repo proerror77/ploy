@@ -15,6 +15,7 @@ pub(super) struct ManagedStrategyRuntimeSpawn {
 pub(super) fn spawn_managed_strategy_runtime_task(
     spec: ManagedStrategyRuntimeSpawn,
     coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
     shutdown_tx: &broadcast::Sender<()>,
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     dry_run: bool,
@@ -37,6 +38,7 @@ pub(super) fn spawn_managed_strategy_runtime_task(
     let agent_id = spec.agent_id;
     let strategy_cmd_rx =
         coordinator.register_agent(agent_id.clone(), spec.domain, spec.risk_params);
+    let strategy_order_updates_rx = coordinator.register_order_updates(agent_id.clone());
     let strategy_shutdown_rx = shutdown_tx.subscribe();
     let strategy_ws_url = pm_ws_url.to_string();
     let strategy_data_plane = data_plane;
@@ -44,6 +46,7 @@ pub(super) fn spawn_managed_strategy_runtime_task(
     let strategy_account_id = observability_account_id.to_string();
     let strategy_config_toml = spec.strategy_config_toml;
     let runtime_agent_id = agent_id.clone();
+    let strategy_handle = handle.clone();
 
     let jh = tokio::spawn(async move {
         if let Err(e) = run_managed_strategy_runtime(
@@ -57,7 +60,9 @@ pub(super) fn spawn_managed_strategy_runtime_task(
             strategy_data_plane,
             strategy_observability_pool,
             strategy_account_id,
+            strategy_handle,
             strategy_cmd_rx,
+            strategy_order_updates_rx,
             strategy_shutdown_rx,
         )
         .await

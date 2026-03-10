@@ -345,6 +345,56 @@ Keep shrinking the remaining core infrastructure by extracting ownership from th
   - `CARGO_TARGET_DIR=/tmp/ploy-wave9-crypto rtk cargo test test_crypto_allocator_deployment_ledger_snapshot_groups_open_and_pending --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave9-market rtk cargo test test_market_allocator_deployment_ledger_snapshot_groups_open_and_pending --lib -- --exact --nocapture`
 
+# Strategy And Adapter Wave 10 (2026-03-10)
+
+## Goal
+Keep shrinking the remaining live-path active core by extracting ownership from the strategy, API ingress, and capital-policy modules that still act like mixed owner/facade files.
+
+## File ownership
+
+- `src/strategy/momentum.rs`
+  - owner: config/facade/tests extraction
+- `src/api/handlers/sidecar.rs`
+  - owner: types/tests extraction
+- `src/coordinator/capital/crypto.rs`
+  - owner: dimensions/policy extraction
+
+## Tasks
+
+- [ ] Extract the next `momentum` ownership slice into sibling modules.
+- [ ] Extract the next `sidecar` ownership slice into sibling modules.
+- [ ] Extract the next `capital/crypto` ownership slice into sibling modules.
+- [ ] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
+
+# Strategy And Adapter Wave 10 (2026-03-10)
+
+## Goal
+Keep collapsing active live-path ownership by cutting remaining sidecar write-path, momentum engine config, and executor idempotency flow out of their current root files.
+
+## File ownership
+
+- `src/api/handlers/sidecar.rs`
+  - owner: write-path handler extraction
+- `src/strategy/momentum.rs`
+  - owner: momentum config/defaults extraction
+- `src/strategy/execution/executor/execution_flow.rs`
+  - owner: idempotency/execution orchestration split
+
+## Tasks
+
+- [ ] Extract the sidecar write-path handlers into a sibling module.
+- [ ] Extract momentum config/defaults into a sibling module.
+- [ ] Extract executor idempotency flow into a sibling module.
+- [ ] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
@@ -437,17 +487,17 @@ Add a brand-new standalone crypto strategy named `pm_5m_directional` that implem
 
 ## Tasks
 
-- [ ] Register `pm_5m_directional` in the canonical strategy factory and default config surface.
-- [ ] Add failing tests for factory wiring and core entry gating behavior.
-- [ ] Implement `pm_5m_directional` as an independent strategy module using Binance spot + Binance L2 + Polymarket event/quote feeds.
-- [ ] Implement the PRD core gates for V1: z-score probability, signed short-horizon flow, OBI confirmation, fee-adjusted edge, no-trade zone, spread/size checks, and hold-to-settlement lifecycle.
+- [x] Register `pm_5m_directional` in the canonical strategy factory and default config surface.
+- [x] Add failing tests for factory wiring and core entry gating behavior.
+- [x] Implement `pm_5m_directional` as an independent strategy module using Binance spot + Binance L2 + Polymarket event/quote feeds.
+- [x] Implement the PRD core gates for V1: z-score probability, signed short-horizon flow, OBI confirmation, fee-adjusted edge, no-trade zone, spread/size checks, and hold-to-settlement lifecycle.
 - [ ] Run focused validation for the new strategy path.
 
 ## Review
 
-- [ ] Confirm the repo can instantiate `pm_5m_directional` from TOML without touching `momentum`.
-- [ ] Confirm the new strategy only submits entries when the directional gates and PM execution gates both pass.
-- [ ] Confirm the new strategy uses IOC/FAK-style submit intents and defaults to hold-to-settlement.
+- [x] Confirm the repo can instantiate `pm_5m_directional` from TOML without touching `momentum`.
+- [x] Confirm the new strategy only submits entries when the directional gates and PM execution gates both pass.
+- [x] Confirm the new strategy uses IOC/FAK-style submit intents and defaults to hold-to-settlement.
 - [x] Re-run compile and focused canonical strategy tests after the entrypoint cleanup.
 
 ## Review
@@ -457,6 +507,10 @@ Add a brand-new standalone crypto strategy named `pm_5m_directional` that implem
 - [x] Confirm the remaining CLI entrypoints fail fast with explicit retirement guidance instead of spinning their own live loops.
 
 ## Progress notes
+
+- 2026-03-10: Added standalone [pm_5m_directional.rs](/Users/proerror/Documents/ploy/src/strategy/pm_5m_directional.rs), registered it in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs), exposed it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs), and added the default template [pm_5m_directional_default.toml](/Users/proerror/Documents/ploy/config/strategies/pm_5m_directional_default.toml).
+- 2026-03-10: Implemented the V1 directional core gates plus IOC submit intents, terminal partial-fill handling, hold-to-settlement state retention, and unit coverage for factory wiring, entry gating, no-trade-zone blocking, partial fills, and unrealized PnL reporting.
+- 2026-03-10: Focused validation is currently blocked by unrelated existing compile errors in [crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/crypto.rs), [capital.rs](/Users/proerror/Documents/ploy/src/coordinator/capital.rs), and [deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/admission/deployments.rs); the new strategy path itself has not produced a strategy-local compiler error yet.
 
 - 2026-03-09: Removed the standalone `EventEdgeConfig` + `run_event_edge(...)` surface from [event_edge/mod.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/mod.rs) and stopped re-exporting it from [strategy/mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
 - 2026-03-09: Deleted [runner.rs](/Users/proerror/Documents/ploy/src/strategy/sports/runner.rs), shrank [sports/mod.rs](/Users/proerror/Documents/ploy/src/strategy/sports/mod.rs) to discovery-only exports, and changed [sports.rs](/Users/proerror/Documents/ploy/src/main_commands/sports.rs) to return an explicit retirement error instead of running a standalone sports split-arb loop.
@@ -3689,3 +3743,34 @@ Move sidecar ingress/account-scope/deployment-binding/broadcast helpers out of `
 - 2026-03-10: Validation passed for the slice:
   - `rtk cargo check --lib`
 - 2026-03-10: `rtk cargo check --lib` passed after the extraction; focused `rtk cargo test --lib parse_domain_rejects_unknown_values -- --nocapture` is currently blocked by unrelated `src/cli/strategy/backtest_ops.rs` visibility errors in the existing workspace.
+
+# Managed Runtime Coordinator Ingress Cutover (2026-03-10)
+
+## Goal
+Finish the managed-strategy live-path migration by making `StrategyAction::SubmitIntent` flow through coordinator ingress instead of direct `OrderExecutor::execute(...)`, while preserving strategy-local order tracking and runtime observability.
+
+## Tasks
+
+- [x] Preserve `client_order_id`, `order_type`, and `time_in_force` on `OrderIntent` and coordinator-built `OrderRequest`.
+- [x] Sync coordinator rejection/pending/execution updates back into managed strategy runtimes.
+- [x] Rewire the managed runtime action loop to submit via `CoordinatorHandle::submit_order(...)` instead of direct execution.
+- [x] Keep recovery/control-plane callers aligned when they override `intent_id`.
+- [x] Re-run compile plus focused contract/coordinator regressions after the cutover.
+
+## Review
+
+- [x] Confirm managed strategy submit flow no longer calls `executor.execute(...)` directly from `src/coordinator/strategy_runtime/actions.rs`.
+- [x] Confirm coordinator ingress/execution emits rejection/pending/execution updates that the managed runtime consumes.
+- [x] Confirm `OrderIntent -> OrderRequest` preserves runtime client order identity and execution semantics.
+
+## Progress notes
+
+- 2026-03-10: Extended [types.rs](/Users/proerror/Documents/ploy/src/platform/types.rs) so `OrderIntent` now owns `client_order_id`, `order_type`, and `time_in_force`, with defaults preserved for non-strategy callers.
+- 2026-03-10: Updated [runtime_order.rs](/Users/proerror/Documents/ploy/src/strategy/runtime_order.rs) and [duplicate_guard.rs](/Users/proerror/Documents/ploy/src/coordinator/admission/duplicate_guard.rs) so coordinator-built requests keep the strategy/runtime client order ID plus `Market/IOC`-style execution settings.
+- 2026-03-10: Rewired [actions.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions.rs) and [strategy_runtime.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime.rs) so managed runtimes now submit canonical intents through coordinator ingress and consume coordinator order-update callbacks for local strategy state progression.
+- 2026-03-10: Synced `intent_id` overrides in [control_plane.rs](/Users/proerror/Documents/ploy/src/control_plane.rs), [write_side.rs](/Users/proerror/Documents/ploy/src/api/handlers/sidecar/write_side.rs), and [recovery.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/recovery.rs) so default client order IDs stay deterministic after external/requested intent IDs are applied.
+- 2026-03-10: Validation passed for the cutover:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test order_intent_from_strategy_intent_preserves_runtime_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`

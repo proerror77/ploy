@@ -1,19 +1,19 @@
 use chrono::{Duration as ChronoDuration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::control_plane::StrategyDeployment;
-use crate::domain::{OrderRequest, OrderSide, OrderType, TimeInForce};
+use crate::domain::{OrderRequest, OrderSide};
 use crate::platform::{Domain, OrderIntent, OrderPriority};
 
 mod deployments;
 mod duplicate_guard;
 
-use super::capital::{CapitalPolicy, intent_deployment_scope, intent_market_identity};
+use super::capital::{intent_deployment_scope, intent_market_identity, CapitalPolicy};
 use super::config::{CoordinatorConfig, DuplicateGuardScope};
 use duplicate_guard::IntentDuplicateGuard;
 
@@ -431,11 +431,9 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("strategy metadata is required")
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("strategy metadata is required"));
     }
 
     #[test]
@@ -511,11 +509,9 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("ambiguous deployment resolution")
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("ambiguous deployment resolution"));
     }
 
     #[test]

@@ -120,8 +120,19 @@ impl Coordinator {
                 fill.fill_price,
             );
             intent.intent_id = fill.intent_id;
+            intent.metadata = fill.metadata.clone();
+            if let Some(client_order_id) = intent
+                .metadata
+                .get("client_order_id")
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                intent.client_order_id = client_order_id.to_string();
+            } else {
+                intent.client_order_id = format!("intent:{}", fill.intent_id);
+            }
             intent.created_at = fill.executed_at;
-            intent.metadata = fill.metadata;
 
             self.settle_domain_success(&intent, fill.filled_shares, fill.fill_price)
                 .await;

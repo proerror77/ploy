@@ -355,6 +355,7 @@ impl TradeIntent {
             _ => OrderPriority::Normal,
         };
         intent.intent_id = self.intent_id;
+        intent.client_order_id = format!("intent:{}", self.intent_id);
         intent.metadata = self.metadata;
         intent
     }
