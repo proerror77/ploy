@@ -188,6 +188,9 @@ fn build_unified_decision_request(
     req: GrokDecisionRequest,
 ) -> UnifiedDecisionRequest {
     let fair_value_estimate = req.adjusted_win_prob.unwrap_or(req.market_price);
+    let comeback = build_comeback_snapshot(&req);
+    let grok_intel = build_grok_intel(&req);
+    let market = build_market_snapshot(&req);
 
     UnifiedDecisionRequest {
         request_id,
@@ -196,9 +199,9 @@ fn build_unified_decision_request(
         trailing_team: req.trailing_team,
         trailing_abbrev: req.trailing_abbrev,
         deficit: req.deficit,
-        comeback: build_comeback_snapshot(&req),
-        grok_intel: build_grok_intel(&req),
-        market: build_market_snapshot(&req),
+        comeback,
+        grok_intel,
+        market,
         risk_metrics: RiskMetrics::calculate(fair_value_estimate, req.market_price),
     }
 }
@@ -250,21 +253,23 @@ fn build_grok_intel(req: &GrokDecisionRequest) -> Option<GrokGameIntel> {
     let injuries = req
         .injury_updates
         .as_ref()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|inj| InjuryUpdate {
-            player_name: inj.player_name,
-            team_abbrev: inj.team_abbrev,
-            status: inj.status,
-            impact: match inj.impact.as_deref() {
-                Some("high") => InjuryImpact::High,
-                Some("medium") => InjuryImpact::Medium,
-                _ => InjuryImpact::Low,
-            },
-            details: inj.details.unwrap_or_default(),
+        .map(|updates| {
+            updates
+                .iter()
+                .map(|inj| InjuryUpdate {
+                    player_name: inj.player_name.clone(),
+                    team_abbrev: inj.team_abbrev.clone(),
+                    status: inj.status.clone(),
+                    impact: match inj.impact.as_deref() {
+                        Some("high") => InjuryImpact::High,
+                        Some("medium") => InjuryImpact::Medium,
+                        _ => InjuryImpact::Low,
+                    },
+                    details: inj.details.clone().unwrap_or_default(),
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
 
     Some(GrokGameIntel {
         game_id: req.game_id.clone(),

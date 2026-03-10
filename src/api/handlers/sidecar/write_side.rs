@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 /// POST /api/sidecar/orders
 ///
