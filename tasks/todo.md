@@ -3095,7 +3095,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 - [ ] Extract a major deployment/admission slice out of `src/coordinator/admission.rs`.
 - [ ] Extract a major ownership slice out of `src/strategy/staggered_arb_live.rs`.
 - [ ] Extract a major ownership slice out of `src/strategy/momentum.rs`.
-- [ ] Extract a major ownership slice out of `src/strategy/execution/engine.rs`.
+- [x] Extract a major ownership slice out of `src/strategy/execution/engine.rs`.
 - [ ] Re-run compile and focused strategy/admission regressions after integrating the wave.
 
 ## Review
@@ -3103,7 +3103,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 - [ ] Confirm `admission.rs` no longer centralizes deployment matching and admission policy helpers in one root file.
 - [ ] Confirm `staggered_arb_live.rs` no longer centralizes all runtime filters/evaluation/state helpers inline.
 - [ ] Confirm `momentum.rs` no longer centralizes all signal/state/config ownership inline.
-- [ ] Confirm `engine.rs` no longer centralizes all execution-engine subflows in one root file.
+- [x] Confirm `engine.rs` no longer centralizes all execution-engine subflows in one root file.
 
 ## Progress notes
 
@@ -3112,3 +3112,10 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - worker 2: `src/strategy/staggered_arb_live.rs`
   - worker 3: `src/strategy/momentum.rs`
   - mainline: `src/strategy/execution/engine.rs`
+- 2026-03-10: Added [lifecycle.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/lifecycle.rs) and moved `StrategyEngine` cycle-control ownership out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs), including halt persistence, strategy-state persistence, forced-leg2 fallback, abort handling, and idle transition helpers.
+- 2026-03-10: Validation passed for the local engine slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_deployment_gate_accepts_explicit_deployment_and_applies_metadata --lib -- --nocapture`
+  - `rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --nocapture`
+  - `rtk cargo test transition_to_idle_clears_state --lib -- --nocapture`
+  - `rtk cargo test abort_cycle_with_active_cycle_clears_context --lib -- --nocapture`

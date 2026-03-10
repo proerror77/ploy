@@ -13,6 +13,17 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
+mod lifecycle;
+
+use lifecycle::{
+    abort_cycle as abort_cycle_impl, abort_cycle_and_halt_safely as abort_cycle_and_halt_safely_impl,
+    abort_cycle_neutral as abort_cycle_neutral_impl,
+    force_leg2_or_abort as force_leg2_or_abort_impl,
+    persist_halt_if_needed as persist_halt_if_needed_impl,
+    persist_strategy_state_best_effort as persist_strategy_state_best_effort_impl,
+    transition_to_idle as transition_to_idle_impl,
+};
+
 /// Main strategy engine orchestrating all components
 pub struct StrategyEngine {
     config: AppConfig,
@@ -1547,20 +1558,7 @@ impl StrategyEngine {
     }
 
     async fn persist_halt_if_needed(&self) {
-        if self.risk_manager.can_trade().await {
-            return;
-        }
-
-        let today = Utc::now().date_naive();
-        let reason = self
-            .risk_manager
-            .halt_reason()
-            .await
-            .unwrap_or_else(|| "Risk circuit breaker triggered".to_string());
-
-        if let Err(e) = self.store.halt_trading(today, &reason).await {
-            error!("Failed to persist trading halt to DB: {}", e);
-        }
+        persist_halt_if_needed_impl(self).await
     }
 
     async fn persist_strategy_state_best_effort(
@@ -1569,13 +1567,7 @@ impl StrategyEngine {
         round_id: Option<i32>,
         cycle_id: Option<i32>,
     ) {
-        if let Err(e) = self
-            .store
-            .update_strategy_state(state, round_id, cycle_id)
-            .await
-        {
-            error!("Failed to persist strategy_state to DB: {}", e);
-        }
+        persist_strategy_state_best_effort_impl(self, state, round_id, cycle_id).await
     }
 
     /// Abort the current cycle and halt trading.
@@ -1583,222 +1575,29 @@ impl StrategyEngine {
     /// If we're in `LEG1_FILLED` and no Leg2 has been started, this will attempt a best-effort
     /// unwind (SELL IOC) to reduce directional exposure before halting.
     async fn abort_cycle_and_halt_safely(&self, reason: &str) -> Result<()> {
-        let _exec_guard = self.execution_mutex.lock().await;
-
-        let (strategy_state, round, ctx) = {
-            let state = self.state.read().await;
-            (
-                state.strategy_state,
-                state.current_round.clone(),
-                state.current_cycle.clone(),
-            )
-        };
-
-        let (cycle_id, full_reason) = match (ctx.as_ref(), round.as_ref()) {
-            (Some(ctx), Some(round)) => {
-                let mut full_reason = reason.to_string();
-
-                // Only unwind if we know Leg2 hasn't been started.
-                if strategy_state == StrategyState::Leg1Filled && ctx.leg2_order_id.is_none() {
-                    match self.unwind_leg1_exposure(ctx, round, ctx.leg1_shares).await {
-                        Ok(summary) => full_reason = format!("{}; {}", reason, summary),
-                        Err(e) => full_reason = format!("{}; unwind failed: {}", reason, e),
-                    }
-                }
-
-                (Some(ctx.cycle_id), full_reason)
-            }
-            _ => (ctx.as_ref().map(|c| c.cycle_id), reason.to_string()),
-        };
-
-        // Persist abort + metrics best effort (exposure handling and halting is higher priority).
-        if let Some(cycle_id) = cycle_id {
-            if let Err(err) = self.store.abort_cycle(cycle_id, &full_reason).await {
-                error!("Failed to abort cycle {} in DB: {}", cycle_id, err);
-            }
-
-            self.risk_manager.record_failure(reason).await;
-
-            let today = Utc::now().date_naive();
-            if let Err(e) = self.store.record_cycle_abort(today).await {
-                error!("Failed to record cycle abort: {}", e);
-            }
-            if let Err(e) = self.store.halt_trading(today, reason).await {
-                error!("Failed to persist halt_trading: {}", e);
-            }
-        } else {
-            let today = Utc::now().date_naive();
-            if let Err(e) = self.store.halt_trading(today, reason).await {
-                error!("Failed to persist halt_trading: {}", e);
-            }
-        }
-
-        // Always halt trading on aborts that indicate potential exposure or operational risk.
-        self.risk_manager.trigger_circuit_breaker(reason).await;
-        self.persist_halt_if_needed().await;
-
-        {
-            let mut state = self.state.write().await;
-            state.strategy_state = StrategyState::Abort;
-            state.current_cycle = None;
-            state.version += 1;
-        }
-
-        self.persist_strategy_state_best_effort(
-            StrategyState::Abort,
-            round.as_ref().and_then(|r| r.id),
-            None,
-        )
-        .await;
-
-        Ok(())
+        abort_cycle_and_halt_safely_impl(self, reason).await
     }
 
     /// Force Leg2 or abort when time is running out
     async fn force_leg2_or_abort(&self) -> Result<()> {
-        let state = self.state.read().await;
-
-        let ctx = match &state.current_cycle {
-            Some(c) => c.clone(),
-            None => return Ok(()),
-        };
-
-        let round = match &state.current_round {
-            Some(r) => r.clone(),
-            None => return Ok(()),
-        };
-
-        drop(state);
-
-        warn!(
-            "Forcing Leg2 with {} seconds remaining",
-            round.seconds_remaining()
-        );
-
-        // Try to get opposite side quote
-        let opposite_side = ctx.leg1_side.opposite();
-        let token_id = round.token_id(opposite_side);
-
-        if let Ok((_, Some(ask))) = self.executor.get_prices(token_id).await {
-            // Use higher price tolerance for forced execution
-            let forced_price = ask * (Decimal::ONE + self.config.strategy.slippage_buffer);
-            if let Err(e) = self.enter_leg2_forced(opposite_side, forced_price).await {
-                error!("Forced Leg2 failed: {}", e);
-                self.abort_cycle_and_halt_safely("Forced Leg2 failed")
-                    .await?;
-            }
-        } else {
-            // No quote available, must abort
-            self.abort_cycle_and_halt_safely("No quote for forced Leg2")
-                .await?;
-        }
-
-        Ok(())
+        force_leg2_or_abort_impl(self).await
     }
 
     /// Abort the current cycle
     async fn abort_cycle(&self, reason: &str) -> Result<()> {
-        let (cycle_id, round_id) = {
-            let mut state = self.state.write().await;
-            let cycle_id = state.current_cycle.as_ref().map(|c| c.cycle_id);
-            let round_id = state.current_round.as_ref().and_then(|r| r.id);
-            state.strategy_state = StrategyState::Abort;
-            state.current_cycle = None;
-            state.version += 1;
-            (cycle_id, round_id)
-        };
-
-        if let Some(cycle_id) = cycle_id {
-            warn!("Aborting cycle {}: {}", cycle_id, reason);
-            if let Err(e) = self.store.abort_cycle(cycle_id, reason).await {
-                error!("Failed to abort cycle {} in DB: {}", cycle_id, e);
-                let halt_reason = "Database error during abort_cycle";
-                self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                self.persist_halt_if_needed().await;
-            }
-            self.risk_manager.record_failure(reason).await;
-            self.persist_halt_if_needed().await;
-
-            let today = Utc::now().date_naive();
-            if let Err(e) = self.store.record_cycle_abort(today).await {
-                error!("Failed to record cycle abort metric: {}", e);
-                let halt_reason = "Database error during record_cycle_abort";
-                self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                self.persist_halt_if_needed().await;
-            }
-        }
-
-        self.persist_strategy_state_best_effort(StrategyState::Abort, round_id, None)
-            .await;
-
-        Ok(())
+        abort_cycle_impl(self, reason).await
     }
 
     /// Abort the current cycle without recording a risk failure.
     ///
     /// This is for expected/neutral aborts where no exposure exists (e.g. an IOC order got 0 fill).
     async fn abort_cycle_neutral(&self, reason: &str) -> Result<()> {
-        let (cycle_id, round_id) = {
-            let mut state = self.state.write().await;
-            let cycle_id = state.current_cycle.as_ref().map(|c| c.cycle_id);
-            let round_id = state.current_round.as_ref().and_then(|r| r.id);
-            state.strategy_state = StrategyState::Abort;
-            state.current_cycle = None;
-            state.version += 1;
-            (cycle_id, round_id)
-        };
-
-        if let Some(cycle_id) = cycle_id {
-            warn!("Aborting cycle {} (neutral): {}", cycle_id, reason);
-
-            if let Err(e) = self.store.abort_cycle(cycle_id, reason).await {
-                error!("Failed to abort cycle {} in DB: {}", cycle_id, e);
-                // Operational DB error: halt to avoid blind state.
-                let halt_reason = "Database error during abort_cycle_neutral";
-                self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                self.persist_halt_if_needed().await;
-            }
-
-            let today = Utc::now().date_naive();
-            if let Err(e) = self.store.record_cycle_abort_neutral(today).await {
-                error!("Failed to record neutral cycle abort metric: {}", e);
-                let halt_reason = "Database error during record_cycle_abort_neutral";
-                self.risk_manager.trigger_circuit_breaker(halt_reason).await;
-                self.persist_halt_if_needed().await;
-            }
-        }
-
-        // Persist strategy state for observability/crash recovery (best effort).
-        self.persist_strategy_state_best_effort(StrategyState::Abort, round_id, None)
-            .await;
-
-        // If something else already halted trading, ensure it's persisted.
-        self.persist_halt_if_needed().await;
-
-        Ok(())
+        abort_cycle_neutral_impl(self, reason).await
     }
 
     /// Transition back to idle state
     async fn transition_to_idle(&self) -> Result<()> {
-        {
-            let mut state = self.state.write().await;
-            state.strategy_state = StrategyState::Idle;
-            state.current_cycle = None;
-            state.current_round = None;
-            state.version += 1;
-        }
-
-        self.persist_strategy_state_best_effort(StrategyState::Idle, None, None)
-            .await;
-
-        // Reset signal detector
-        {
-            let mut detector = self.signal_detector.write().await;
-            detector.reset(None);
-        }
-
-        debug!("Transitioned to IDLE state");
-        Ok(())
+        transition_to_idle_impl(self).await
     }
 
     /// Get risk manager for external queries
