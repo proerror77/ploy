@@ -394,6 +394,53 @@ Move `OrderIntent` / `OrderPriority` ownership out of `src/platform` and into `s
   - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut rtk cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-order-intent-cut-rl rtk cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --exact --nocapture`
 
+# Control Plane Contract Split (2026-03-10)
+
+## Goal
+Split `src/control_plane.rs` into contract-owned submodules so deployment metadata, evaluation evidence, trade intent bridging, and risk-decision types stop sharing one mixed owner file.
+
+## Tasks
+
+- [x] Extract deployment/runtime contract types into a dedicated `control_plane/deployments.rs`.
+- [x] Extract evaluation evidence types into `control_plane/evaluation.rs`.
+- [x] Extract `TradeIntent` and its order-intent bridge into `control_plane/trade_intent.rs`.
+- [x] Extract `RiskDecision` / `RiskDecisionStatus` into `control_plane/risk_decision.rs`.
+- [x] Reduce `src/control_plane.rs` to a thin re-export facade plus focused tests.
+- [x] Re-run compile plus focused control-plane regressions after the split.
+
+## Progress notes
+
+- 2026-03-10: Added [deployments.rs](/Users/proerror/Documents/ploy/src/control_plane/deployments.rs), [evaluation.rs](/Users/proerror/Documents/ploy/src/control_plane/evaluation.rs), [trade_intent.rs](/Users/proerror/Documents/ploy/src/control_plane/trade_intent.rs), and [risk_decision.rs](/Users/proerror/Documents/ploy/src/control_plane/risk_decision.rs).
+- 2026-03-10: Reduced [control_plane.rs](/Users/proerror/Documents/ploy/src/control_plane.rs) to a thin re-export facade with the existing focused tests preserved at the root.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-main rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-main rtk cargo test trade_intent_into_order_intent_maps_priority_and_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-main rtk cargo test trade_intent_into_order_intent_normalizes_blank_deployment_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-main rtk cargo test deployment_runtime_scope_matching --lib -- --exact --nocapture`
+
+# Control Plane Contract Split (2026-03-10)
+
+## Goal
+Break `src/control_plane.rs` into contract-focused submodules so deployment, evaluation, intent, and risk-decision ownership stop living in one file.
+
+## Tasks
+
+- [x] Extract deployment contracts into a dedicated submodule.
+- [x] Extract evaluation/evidence contracts into a dedicated submodule.
+- [x] Extract trade-intent and risk-decision contracts into dedicated submodules.
+- [x] Keep the root file as a thin re-export and test surface.
+- [x] Re-run compile plus focused control-plane regressions after the split.
+
+## Progress notes
+
+- 2026-03-10: Added [deployments.rs](/Users/proerror/Documents/ploy/src/control_plane/deployments.rs), [evaluation.rs](/Users/proerror/Documents/ploy/src/control_plane/evaluation.rs), [trade_intent.rs](/Users/proerror/Documents/ploy/src/control_plane/trade_intent.rs), and [risk_decision.rs](/Users/proerror/Documents/ploy/src/control_plane/risk_decision.rs).
+- 2026-03-10: Reduced [control_plane.rs](/Users/proerror/Documents/ploy/src/control_plane.rs) to a thin re-export surface plus focused regression tests.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-split rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-split rtk cargo test trade_intent_into_order_intent_maps_priority_and_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-split rtk cargo test deployment_runtime_scope_matching --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-cp-split rtk cargo test trade_intent_into_order_intent_normalizes_blank_deployment_metadata --lib -- --exact --nocapture`
+
 # Coordinator Queue Ownership Cut (2026-03-10)
 
 ## Goal
