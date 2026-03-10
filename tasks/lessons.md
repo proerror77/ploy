@@ -218,3 +218,6 @@
 
 - Pattern: During architectural cleanup, the user does not want a stream of tiny isolated refactors with frequent stop-and-report pauses; that makes structural progress look smaller than it is and slows down legacy retirement.
 - Rule: For active refactor sessions, batch work into larger ownership cuts, keep multiple agents busy on non-overlapping slices, and only stop at natural atomic checkpoints (validated commit boundaries), not after every small extraction.
+
+- Pattern: Parallel agent work can re-dirty the integration worktree with unrelated experiments, which blurs commit boundaries and slows structural refactors.
+- Rule: After every parallel batch, compare the worktree against the current ownership plan and evict unrelated agent edits before validation or staging. Do not let maintenance/perf side experiments bleed into the current atomic refactor slice.

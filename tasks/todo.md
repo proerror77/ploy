@@ -306,6 +306,45 @@ Keep collapsing the remaining active-core and legacy strategy surface by extract
   - `CARGO_TARGET_DIR=/tmp/ploy-wave8-lobml rtk cargo check --lib`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave8-lobml rtk cargo test on_tick_emits_inference_log_once_sequence_is_ready --lib -- --nocapture`
 
+# Strategy And Adapter Wave 9 (2026-03-10)
+
+## Goal
+Keep shrinking the remaining core infrastructure by extracting ownership from the heaviest execution, capital-allocation, and config modules still used on the live path.
+
+## File ownership
+
+- `src/strategy/execution/executor.rs`
+  - owner: execution/result-handling extraction
+- `src/coordinator/capital/crypto.rs`
+  - owner: crypto allocator/runtime slice extraction
+- `src/coordinator/capital/market.rs`
+  - owner: market capital accounting extraction
+- `src/config.rs`
+  - owner: runtime/env config extraction
+
+## Tasks
+
+- [x] Extract the next `execution executor` ownership slice into a sibling module.
+- [x] Extract the next `capital/crypto` ownership slice into a sibling module.
+- [x] Extract the next `capital/market` ownership slice into a sibling module.
+- [x] Extract the next `config` ownership slice into a sibling module.
+- [x] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 9 assigned before dispatching the next parallel batch.
+- 2026-03-10: Reused the already-landed config extraction from commit `8251242` as the Wave 9 config slice; [config.rs](/Users/proerror/Documents/ploy/src/config.rs) now delegates env parsing into [env_overrides.rs](/Users/proerror/Documents/ploy/src/config/env_overrides.rs).
+- 2026-03-10: Moved `OrderExecutor` submission/retry/fill-confirmation ownership out of [executor.rs](/Users/proerror/Documents/ploy/src/strategy/execution/executor.rs) into [execution_flow.rs](/Users/proerror/Documents/ploy/src/strategy/execution/executor/execution_flow.rs), leaving the root executor focused on construction, public API, and tests.
+- 2026-03-10: Moved crypto capital runtime accounting, settlement, and ledger snapshot ownership out of [crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/crypto.rs) into [ledger.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/crypto/ledger.rs).
+- 2026-03-10: Moved market-domain capital accounting, settlement, and deployment-ledger ownership out of [market.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/market.rs) into [accounting.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/market/accounting.rs); fixed `available_notional_for(...)` to honor the allocator domain instead of hardcoding `Sports`.
+- 2026-03-10: Cleared unrelated parallel-agent edits from maintenance/persistence files before validation so Wave 9 stays atomic.
+- 2026-03-10: Wave 9 validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave9-main rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave9-executor rtk cargo test execute_reports_last_retryable_error_when_retries_exhausted --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave9-config rtk cargo test test_parse_string_list_json_array --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave9-crypto rtk cargo test test_crypto_allocator_deployment_ledger_snapshot_groups_open_and_pending --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave9-market rtk cargo test test_market_allocator_deployment_ledger_snapshot_groups_open_and_pending --lib -- --exact --nocapture`
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
@@ -390,6 +429,25 @@ Retire the remaining standalone domain runtime entrypoints so `event_edge`, `nba
 - [x] Remove the standalone `event_edge` runner/config surface and keep only the canonical `EventEdgeStrategy`.
 - [x] Retire the standalone `ploy strategy nba-comeback` loop and replace it with a compatibility error that points operators to managed deployments.
 - [x] Retire the standalone `ploy sports split-arb` loop and delete the old sports runner module.
+
+# PM 5m Directional Strategy (2026-03-10)
+
+## Goal
+Add a brand-new standalone crypto strategy named `pm_5m_directional` that implements the Polymarket 5m directional core without changing existing `momentum` behavior.
+
+## Tasks
+
+- [ ] Register `pm_5m_directional` in the canonical strategy factory and default config surface.
+- [ ] Add failing tests for factory wiring and core entry gating behavior.
+- [ ] Implement `pm_5m_directional` as an independent strategy module using Binance spot + Binance L2 + Polymarket event/quote feeds.
+- [ ] Implement the PRD core gates for V1: z-score probability, signed short-horizon flow, OBI confirmation, fee-adjusted edge, no-trade zone, spread/size checks, and hold-to-settlement lifecycle.
+- [ ] Run focused validation for the new strategy path.
+
+## Review
+
+- [ ] Confirm the repo can instantiate `pm_5m_directional` from TOML without touching `momentum`.
+- [ ] Confirm the new strategy only submits entries when the directional gates and PM execution gates both pass.
+- [ ] Confirm the new strategy uses IOC/FAK-style submit intents and defaults to hold-to-settlement.
 - [x] Re-run compile and focused canonical strategy tests after the entrypoint cleanup.
 
 ## Review
