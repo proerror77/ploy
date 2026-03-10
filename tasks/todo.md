@@ -2964,3 +2964,36 @@ Move the backtest/reporting ownership out of `src/cli/strategy.rs` so the CLI ro
   - `cargo check --lib`
   - `cargo test test_settlement_binary_payout --lib -- --nocapture`
   - `cargo test test_config_from_toml_matches_checked_in_template --lib -- --nocapture`
+
+# CLI Settlement And Risk Query Extraction (2026-03-10)
+
+## Goal
+Finish the next CLI/risk cleanup wave by moving settlement/dataset ownership out of `src/cli/strategy.rs` and moving `RiskGate` read/query helpers out of `src/platform/risk.rs`.
+
+## Tasks
+
+- [x] Extract settlement/reporting + crypto LOB dataset helpers into `src/cli/strategy/settlement_ops.rs`.
+- [x] Rewire CLI root and backtest module to consume settlement helpers from the new owner.
+- [x] Extract `RiskGate` read/query helpers into `src/platform/risk/queries.rs`.
+- [x] Re-run compile and focused settlement/risk regressions after both slices land.
+
+## Review
+
+- [x] Confirm `src/cli/strategy.rs` no longer owns the settlement accuracy / directional-settlement backtest / dataset export block inline.
+- [x] Confirm `src/platform/risk.rs` retains stateful mutations while query helpers now live in `queries.rs`.
+- [x] Confirm CLI settlement commands and risk runtime snapshots still compile and behave the same.
+
+## Progress notes
+
+- 2026-03-10: Reserved mainline ownership for `src/cli/strategy.rs`, `src/cli/strategy/settlement_ops.rs`, and the `src/platform/risk.rs` / `src/platform/risk/queries.rs` pair so the tree returns to a buildable state before the next parallel wave.
+- 2026-03-10: Added [settlement_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/settlement_ops.rs) and moved the settlement accuracy report, directional settlement backtest, crypto LOB dataset export helpers, and shared resolution helper out of [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs).
+- 2026-03-10: Rewired [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs) and [backtest_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops.rs) to consume settlement helpers from the new owner module instead of half-owning the same surface.
+- 2026-03-10: Added [queries.rs](/Users/proerror/Documents/ploy/src/platform/risk/queries.rs) and moved the `RiskGate` read/query helpers out of [risk.rs](/Users/proerror/Documents/ploy/src/platform/risk.rs), leaving the root file focused on state ownership, tests, and mutation wiring.
+- 2026-03-10: Validation passed:
+  - `cargo check --lib`
+  - `cargo test test_settlement_binary_payout --lib -- --nocapture`
+  - `cargo test test_query_helpers_report_runtime_snapshots --lib -- --nocapture`
+- 2026-03-10: Parallel ownership reserved after this slice:
+  - `src/coordinator/bootstrap/managed_crypto.rs`
+  - `src/coordinator/bootstrap/crypto_runtime_support.rs`
+  - `src/strategy/adapters/momentum_adapter.rs`

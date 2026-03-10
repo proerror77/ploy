@@ -17,6 +17,7 @@ use crate::agent_runtime::AgentRiskParams;
 mod checks;
 mod config;
 mod exposure;
+mod queries;
 mod stats;
 mod transitions;
 mod types;
@@ -74,79 +75,6 @@ impl RiskGate {
             circuit_events: Arc::new(RwLock::new(Vec::new())),
             halted_at: Arc::new(RwLock::new(None)),
         }
-    }
-
-    // ==================== 查詢方法 ====================
-
-    /// 當前平台狀態
-    pub async fn state(&self) -> PlatformRiskState {
-        *self.state.read().await
-    }
-
-    /// 是否可以交易
-    pub async fn can_trade(&self) -> bool {
-        self.state.read().await.can_trade()
-    }
-
-    /// 當前平台總暴露
-    pub async fn total_exposure(&self) -> Decimal {
-        *self.total_exposure.read().await
-    }
-
-    /// Agent 統計
-    pub async fn agent_stats(&self, agent_id: &str) -> Option<(Decimal, Decimal, usize, u32)> {
-        let stats_map = self.agent_stats.read().await;
-        stats_map.get(agent_id).map(|s| {
-            (
-                s.exposure,
-                s.realized_pnl,
-                s.position_count,
-                s.consecutive_failures,
-            )
-        })
-    }
-
-    /// 每日統計
-    pub async fn daily_stats(&self) -> (Decimal, u32, u32) {
-        let daily = self.daily_stats.read().await;
-        (daily.total_pnl, daily.success_count, daily.failure_count)
-    }
-
-    /// Daily loss limit (USD)
-    pub fn daily_loss_limit(&self) -> Decimal {
-        self.config.daily_loss_limit
-    }
-
-    /// Optional max drawdown limit (USD)
-    pub fn max_drawdown_limit(&self) -> Option<Decimal> {
-        self.config.max_drawdown_limit
-    }
-
-    /// Current drawdown + max observed drawdown (USD)
-    pub async fn drawdown_stats(&self) -> (Decimal, Decimal) {
-        let drawdown = self.drawdown_stats.read().await;
-        (drawdown.current_drawdown, drawdown.max_drawdown_observed)
-    }
-
-    /// Full drawdown snapshot for persistence/recovery.
-    pub async fn drawdown_snapshot(&self) -> DrawdownSnapshot {
-        let drawdown = self.drawdown_stats.read().await;
-        DrawdownSnapshot {
-            current_equity: drawdown.current_equity,
-            equity_peak: drawdown.equity_peak,
-            current_drawdown: drawdown.current_drawdown,
-            max_drawdown_observed: drawdown.max_drawdown_observed,
-        }
-    }
-
-    /// Circuit breaker event history
-    pub async fn circuit_breaker_events(&self) -> Vec<CircuitBreakerEvent> {
-        self.circuit_events.read().await.clone()
-    }
-
-    /// 連續失敗數
-    pub fn consecutive_failures(&self) -> u32 {
-        self.consecutive_failures.load(Ordering::SeqCst)
     }
 
     // ==================== 輔助方法 ====================
@@ -446,6 +374,34 @@ mod tests {
         let (current_drawdown, max_drawdown) = gate.drawdown_stats().await;
         assert_eq!(current_drawdown, Decimal::from(6));
         assert_eq!(max_drawdown, Decimal::from(6));
+    }
+
+    #[tokio::test]
+    async fn test_query_helpers_report_runtime_snapshots() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 1;
+        config.circuit_breaker_auto_recover = false;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+        gate.record_success("agent1", Decimal::from(10)).await;
+        gate.record_success("agent1", Decimal::from(-4)).await;
+
+        let (daily_pnl, success_count, failure_count) = gate.daily_stats().await;
+        assert_eq!(daily_pnl, Decimal::from(6));
+        assert_eq!(success_count, 2);
+        assert_eq!(failure_count, 0);
+
+        let snapshot = gate.drawdown_snapshot().await;
+        assert_eq!(snapshot.current_equity, Decimal::from(6));
+        assert_eq!(snapshot.equity_peak, Decimal::from(10));
+        assert_eq!(snapshot.current_drawdown, Decimal::from(4));
+
+        gate.record_failure("agent1", "forced failure").await;
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+        assert!(!gate.can_trade().await);
+        assert!(!gate.circuit_breaker_events().await.is_empty());
     }
 
     #[tokio::test]

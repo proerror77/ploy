@@ -1,4 +1,5 @@
 use super::*;
+use super::settlement_ops::{backtest_directional_signals_pm_settlement, is_market_resolved};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_backtest(
