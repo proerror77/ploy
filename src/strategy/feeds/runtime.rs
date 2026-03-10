@@ -1,10 +1,11 @@
-use super::*;
+use super::DataFeedManager;
 use chrono::Utc;
-use tokio::task::yield_now;
+use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info, warn};
 
 use crate::collector::{BinanceDepthStream, BinanceKlineClient};
-use crate::strategy::traits::KlineBar;
+use crate::error::Result;
+use crate::strategy::traits::{DataFeed, KlineBar, MarketUpdate};
 
 impl DataFeedManager {
     async fn backfill_binance_klines(&self) -> Result<()> {
@@ -93,7 +94,7 @@ impl DataFeedManager {
                     sent = sent.saturating_add(1);
 
                     if sent % 50 == 0 {
-                        yield_now().await;
+                        tokio::task::yield_now().await;
                     }
                 }
             }
@@ -103,6 +104,7 @@ impl DataFeedManager {
         Ok(())
     }
 
+    /// Start all configured data feeds
     pub async fn start(&self) -> Result<()> {
         info!("Starting data feed manager");
 
@@ -123,14 +125,14 @@ impl DataFeedManager {
                             };
                             manager.send_market_update(market_update);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        Err(RecvError::Lagged(n)) => {
                             warn!("Binance price feed lagged by {} messages", n);
                             if let Some(ref f) = freshness {
                                 f.record_broadcast_lag(n as u64);
                             }
                             continue;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Err(RecvError::Closed) => {
                             warn!("Binance price feed ended");
                             break;
                         }
@@ -198,14 +200,14 @@ impl DataFeedManager {
                             };
                             manager.send_market_update(market_update);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        Err(RecvError::Lagged(n)) => {
                             warn!("Binance kline feed lagged by {} messages", n);
                             if let Some(ref f) = freshness {
                                 f.record_broadcast_lag(n as u64);
                             }
                             continue;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Err(RecvError::Closed) => {
                             warn!("Binance kline feed ended");
                             break;
                         }
@@ -262,14 +264,14 @@ impl DataFeedManager {
                             };
                             manager.send_market_update(market_update);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        Err(RecvError::Lagged(n)) => {
                             warn!("Quote feed lagged by {} messages", n);
                             if let Some(ref f) = freshness {
                                 f.record_broadcast_lag(n as u64);
                             }
                             continue;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Err(RecvError::Closed) => {
                             warn!("Quote feed recv error: channel closed");
                             break;
                         }
@@ -387,7 +389,7 @@ impl DataFeedManager {
 
         let manager = self.manager.clone();
         let freshness = self.data_plane.as_ref().map(|dp| dp.freshness());
-        let depth_ws = Arc::new(match freshness.clone() {
+        let depth_ws = std::sync::Arc::new(match freshness.clone() {
             Some(f) => BinanceDepthStream::new(symbols.clone()).with_freshness(f),
             None => BinanceDepthStream::new(symbols.clone()),
         });
@@ -413,13 +415,13 @@ impl DataFeedManager {
                         };
                         manager.send_market_update(market_update);
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    Err(RecvError::Lagged(n)) => {
                         warn!("Binance L2 depth feed lagged by {} messages", n);
                         if let Some(ref f) = freshness {
                             f.record_broadcast_lag(n as u64);
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Err(RecvError::Closed) => {
                         warn!("Binance L2 depth feed ended");
                         break;
                     }

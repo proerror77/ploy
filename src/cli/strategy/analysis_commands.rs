@@ -2,7 +2,7 @@ use super::*;
 use clap::Args;
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct AccuracyArgs {
+pub struct AccuracyArgs {
     /// Lookback window in hours (scopes which entry intents are scored)
     #[arg(long, default_value = "12")]
     lookback_hours: u64,
@@ -53,7 +53,7 @@ impl AccuracyArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct DirectionalSignalBacktestArgs {
+pub struct DirectionalSignalBacktestArgs {
     /// Lookback window in hours (which directional signals are included)
     #[arg(long, default_value = "168")]
     lookback_hours: u64,
@@ -124,7 +124,7 @@ impl DirectionalSignalBacktestArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct ExportCryptoLobDatasetArgs {
+pub struct ExportCryptoLobDatasetArgs {
     /// Lookback window in hours (which entry intents are exported)
     #[arg(long, default_value = "168")]
     lookback_hours: u64,
@@ -180,7 +180,7 @@ impl ExportCryptoLobDatasetArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct BacktestArgs {
+pub struct BacktestArgs {
     /// Strategy name (momentum, directional, prob-garch/prob_garch, liquidity-vacuum/liquidity_vacuum, staggered-arb/staggered_arb/gamma_scalping)
     name: String,
 
@@ -353,7 +353,7 @@ impl BacktestArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct BacktestListArgs {
+pub struct BacktestListArgs {
     #[arg(long)]
     database_url: Option<String>,
     #[arg(long, default_value = "20")]
@@ -367,7 +367,7 @@ impl BacktestListArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct BacktestDiffArgs {
+pub struct BacktestDiffArgs {
     run1: String,
     run2: String,
     #[arg(long)]
@@ -381,7 +381,7 @@ impl BacktestDiffArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub(super) struct LiveBacktestCompareArgs {
+pub struct LiveBacktestCompareArgs {
     /// Backtest run UUID
     run_id: String,
 

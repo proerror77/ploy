@@ -11,11 +11,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::manager::StrategyManager;
-use super::traits::{DataFeed, MarketUpdate};
+use super::traits::DataFeed;
 use crate::adapters::{
     BinanceKlineWebSocket, BinanceWebSocket, PolymarketClient, PolymarketWebSocket,
 };
-use crate::error::Result;
 
 mod polymarket_events;
 mod runtime;
