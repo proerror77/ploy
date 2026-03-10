@@ -187,6 +187,44 @@ Keep shrinking active-core live/runtime files after the legacy retirement wave b
   - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo test orphaned_order_cancel_gate_requires_exchange_id_and_active_status --lib -- --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-main-wave5 rtk cargo test characterization_agg_trade_produces_price_update --lib -- --exact --nocapture`
 
+# Strategy And Adapter Wave 6 (2026-03-10)
+
+## Goal
+Keep shrinking the remaining active-core modules after Wave 5 by extracting clear owners from the heaviest adapter, platform, CLI, and live-strategy files still on the hot path.
+
+## File ownership
+
+- `src/adapters/polymarket_clob.rs`
+  - owner: remaining authenticated/read-path extraction
+- `src/cli/strategy/runtime_ops.rs`
+  - owner: runtime CLI orchestration extraction
+- `src/platform/persistence_pipeline.rs`
+  - owner: persistence pipeline stage ownership
+- `src/strategy/event_edge/strategy.rs`
+  - owner: event-edge runtime/position flow extraction
+
+## Tasks
+
+- [x] Extract the next `polymarket_clob` ownership slice into a sibling module.
+- [x] Extract the next `runtime_ops` ownership slice into a sibling module.
+- [x] Extract the next `persistence_pipeline` ownership slice into a sibling module.
+- [x] Extract the next `event_edge` strategy ownership slice into a sibling module.
+- [x] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 6 assigned before dispatching the next parallel batch.
+- 2026-03-10: Moved the remaining Polymarket CLOB API response/model ownership out of [polymarket_clob.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob.rs) into [models.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob/models.rs), keeping the root adapter focused on client behavior.
+- 2026-03-10: Moved the foreground strategy runner, feed wiring, and action dispatch loop out of [runtime_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/runtime_ops.rs) into [foreground.rs](/Users/proerror/Documents/ploy/src/cli/strategy/runtime_ops/foreground.rs), and deleted the leftover dead wrapper functions.
+- 2026-03-10: Moved persistence-pipeline buffering, dedup, flush/runtime loop, and focused tests out of [persistence_pipeline.rs](/Users/proerror/Documents/ploy/src/platform/persistence_pipeline.rs) into [runtime.rs](/Users/proerror/Documents/ploy/src/platform/persistence_pipeline/runtime.rs).
+- 2026-03-10: Moved event-edge pending-order, signal-intent, fill-reconciliation, and state-metrics ownership out of [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy.rs) into [runtime_flow.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy/runtime_flow.rs).
+- 2026-03-10: Wave 6 validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo test test_position_response_deserializes_numeric_fields --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo test quote_dedup_skips_unchanged_within_interval --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo test on_market_update_tracks_discovered_events_and_expiry --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo test test_graceful_stop_reports_closed_action_channel --lib -- --exact --nocapture`
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
