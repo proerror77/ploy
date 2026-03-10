@@ -21,13 +21,11 @@ use sqlx::PgPool;
 use crate::agent_runtime::AgentRiskParams;
 use crate::strategy::executor::OrderExecutor;
 
-use super::admission::{
-    buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason, AdmissionController,
-};
+use super::admission::AdmissionController;
 use super::capital::CapitalPolicy;
 use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
-use super::governance::{governance_block_reason, GovernanceController, IngressMode};
+use super::governance::{governance_block_reason, GovernanceController};
 use super::journal::ExecutionJournal;
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;

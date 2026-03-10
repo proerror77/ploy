@@ -2,6 +2,9 @@ use super::*;
 use crate::adapters::PolymarketClient;
 use crate::agent_runtime::AgentStatus;
 use crate::config::ExecutionConfig;
+use crate::coordinator::admission::{
+    buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason,
+};
 use crate::coordinator::{QueueStats, QueueStatsSnapshot};
 use crate::coordinator::OrderPriority;
 use crate::platform::Domain;

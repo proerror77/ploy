@@ -207,10 +207,6 @@ impl Coordinator {
         entry.domain == target
     }
 
-    pub(super) fn is_domain_allowed(&self, domain: Domain) -> bool {
-        self.allowed_domains.contains(&domain)
-    }
-
     async fn cancel_queued_buy_intents(&self, domain: Option<Domain>, reason: &str) {
         let dropped = {
             let mut queue = self.order_queue.write().await;
