@@ -29,9 +29,10 @@ use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
 use super::governance::{governance_block_reason, GovernanceController, IngressMode};
 use super::journal::ExecutionJournal;
+use super::position::PositionAggregator;
 use super::queue::OrderQueue;
 use super::state::{AgentSnapshot, GlobalState};
-use crate::platform::{Domain, OrderIntent, PositionAggregator, RiskCheckResult, RiskGate};
+use crate::platform::{Domain, OrderIntent, RiskCheckResult, RiskGate};
 
 mod control_surface;
 mod execution;

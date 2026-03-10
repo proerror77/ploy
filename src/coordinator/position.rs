@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use super::types::Domain;
+use crate::platform::Domain;
 use crate::domain::Side;
 
 mod transitions;
@@ -358,7 +358,6 @@ impl PositionAggregator {
             .filter(|p| !p.is_hedged)
             .count()
     }
-
 }
 
 #[cfg(test)]

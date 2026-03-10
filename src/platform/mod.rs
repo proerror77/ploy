@@ -8,7 +8,6 @@ pub mod freshness;
 mod market_persistence;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
-mod position;
 mod risk;
 pub mod subscription_planner;
 mod types;
@@ -27,7 +26,6 @@ pub use persistence_pipeline::{
     PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
     PipelineStats,
 };
-pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
 pub use risk::{
     BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
     RiskConfig, RiskGate,

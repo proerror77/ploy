@@ -391,6 +391,28 @@ Move `OrderQueue` / `QueueStats` ownership out of `src/platform` and into `src/c
   - `CARGO_TARGET_DIR=/tmp/ploy-queue-check2 rtk cargo test test_queue_stats_snapshot_from --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-queue-cut rtk cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --exact --nocapture`
 
+# Coordinator Position Ownership Cut (2026-03-10)
+
+## Goal
+Move `Position` / `AggregatedPosition` / `PositionAggregator` ownership out of `src/platform` and into `src/coordinator` so shared live position state lives with coordinator-owned execution/runtime infrastructure.
+
+## Tasks
+
+- [x] Move the position implementation and transitions submodule into coordinator-owned modules.
+- [x] Rewire coordinator state and RL compatibility runtime imports to the new position owner.
+- [x] Remove the `platform` re-export instead of leaving a compatibility shim.
+- [x] Re-run compile plus focused position / coordinator / RL regressions after the move.
+
+## Progress notes
+
+- 2026-03-10: Moved position ownership from [position.rs](/Users/proerror/Documents/ploy/src/platform/position.rs) to [position.rs](/Users/proerror/Documents/ploy/src/coordinator/position.rs), including [transitions.rs](/Users/proerror/Documents/ploy/src/coordinator/position/transitions.rs).
+- 2026-03-10: Updated [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs), [state.rs](/Users/proerror/Documents/ploy/src/coordinator/state.rs), and [order_platform.rs](/Users/proerror/Documents/ploy/src/rl/order_platform.rs) to consume the new coordinator-owned position types.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-position-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-position-cut rtk cargo test test_reduce_position_partial_close --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-position-cut rtk cargo test test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-position-cut-rl rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+
 # Strategy And Adapter Wave 10 (2026-03-10)
 
 ## Goal
