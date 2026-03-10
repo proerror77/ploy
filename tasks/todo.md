@@ -3402,6 +3402,30 @@ Move the read-only `pm.*` JSON-RPC method handling out of `src/cli/rpc.rs` so th
 
 - 2026-03-10: Added [messages.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/messages.rs) and moved Polymarket websocket payload types, book-top normalization helpers, and inbound `handle_message` / `process_*` handling out of [polymarket_ws.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws.rs), leaving the root file focused on connection lifecycle, subscription state, cache ownership, and tests.
 
+# Strategy Engine Leg1 Extraction (2026-03-10)
+
+## Goal
+Move the Leg1 submission/fill/version-conflict path out of `src/strategy/execution/engine.rs` so the root engine keeps orchestration ownership while the highest-risk entry flow lives in a dedicated sibling module.
+
+## Tasks
+
+- [x] Extract the full `enter_leg1` implementation into `src/strategy/execution/engine/leg1.rs`.
+- [x] Keep the root `StrategyEngine` API unchanged by delegating through a thin wrapper.
+- [x] Re-run compile plus focused Leg1 regression tests after the extraction.
+
+## Review
+
+- [x] Confirm `engine.rs` no longer inlines the full Leg1 order submission/fill/unwind path.
+- [x] Confirm Leg1 cycle-version persistence checks still abort correctly on conflicts after the extraction.
+
+## Progress notes
+
+- 2026-03-10: Added [leg1.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/leg1.rs) and moved the full `enter_leg1` path out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs), including quote freshness, slippage gating, IOC request creation, order persistence, execution result handling, cycle-version conflict aborts, and detector triggering.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test leg1_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
+  - `rtk cargo test leg_updates_should_use_incrementing_cycle_versions --lib -- --nocapture`
+
 # Sidecar Ingress Helper Extraction (2026-03-10)
 
 ## Progress notes

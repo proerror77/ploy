@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Utc;
 
 pub(super) async fn persist_halt_if_needed(engine: &StrategyEngine) {
     if engine.risk_manager.can_trade().await {
@@ -160,7 +161,10 @@ pub(super) async fn abort_cycle(engine: &StrategyEngine, reason: &str) -> Result
         if let Err(e) = engine.store.abort_cycle(cycle_id, reason).await {
             error!("Failed to abort cycle {} in DB: {}", cycle_id, e);
             let halt_reason = "Database error during abort_cycle";
-            engine.risk_manager.trigger_circuit_breaker(halt_reason).await;
+            engine
+                .risk_manager
+                .trigger_circuit_breaker(halt_reason)
+                .await;
             persist_halt_if_needed(engine).await;
         }
         engine.risk_manager.record_failure(reason).await;
@@ -170,7 +174,10 @@ pub(super) async fn abort_cycle(engine: &StrategyEngine, reason: &str) -> Result
         if let Err(e) = engine.store.record_cycle_abort(today).await {
             error!("Failed to record cycle abort metric: {}", e);
             let halt_reason = "Database error during record_cycle_abort";
-            engine.risk_manager.trigger_circuit_breaker(halt_reason).await;
+            engine
+                .risk_manager
+                .trigger_circuit_breaker(halt_reason)
+                .await;
             persist_halt_if_needed(engine).await;
         }
     }
@@ -197,7 +204,10 @@ pub(super) async fn abort_cycle_neutral(engine: &StrategyEngine, reason: &str) -
         if let Err(e) = engine.store.abort_cycle(cycle_id, reason).await {
             error!("Failed to abort cycle {} in DB: {}", cycle_id, e);
             let halt_reason = "Database error during abort_cycle_neutral";
-            engine.risk_manager.trigger_circuit_breaker(halt_reason).await;
+            engine
+                .risk_manager
+                .trigger_circuit_breaker(halt_reason)
+                .await;
             persist_halt_if_needed(engine).await;
         }
 
@@ -205,7 +215,10 @@ pub(super) async fn abort_cycle_neutral(engine: &StrategyEngine, reason: &str) -
         if let Err(e) = engine.store.record_cycle_abort_neutral(today).await {
             error!("Failed to record neutral cycle abort metric: {}", e);
             let halt_reason = "Database error during record_cycle_abort_neutral";
-            engine.risk_manager.trigger_circuit_breaker(halt_reason).await;
+            engine
+                .risk_manager
+                .trigger_circuit_breaker(halt_reason)
+                .await;
             persist_halt_if_needed(engine).await;
         }
     }
