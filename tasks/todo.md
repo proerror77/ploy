@@ -3049,6 +3049,7 @@ Keep collapsing the active runtime core by splitting coordinator recovery/orches
   - mainline: `src/coordinator/coordinator.rs`
   - worker 1: `src/coordinator/capital.rs`
   - worker 2: `src/coordinator/journal.rs`
+- 2026-03-10: Extracted the crypto allocator ownership from [capital.rs](/Users/proerror/Documents/ploy/src/coordinator/capital.rs) into [crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/crypto.rs), leaving `CapitalPolicy` and the market allocator path in the root facade while targeted capital ledger checks stayed green.
 - 2026-03-10: Added [recovery.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/recovery.rs) and moved the coordinator recovery/bootstrap ownership out of [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs), including risk runtime restore, governance restore, execution-log restore, and the persistence pool setters.
 - 2026-03-10: Validation passed for the local coordinator slice:
   - `cargo check --lib`
