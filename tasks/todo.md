@@ -3200,3 +3200,40 @@ Keep collapsing the largest active live-strategy and execution modules by extrac
   - `rtk cargo test characterization_replay_polymarket_quote_to_strategy_market_update --lib -- --nocapture`
   - `rtk cargo test leg2_pending_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
   - `rtk cargo test leg2_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
+
+# Strategy And Adapter Wave 3 (2026-03-10)
+
+## Goal
+Keep collapsing the remaining active-core hotspots by extracting another major slice from the two heaviest live strategies, the monolithic strategy CLI, and the Polymarket adapter.
+
+## Tasks
+
+- [x] Extract another major ownership slice out of `src/strategy/staggered_arb_live.rs`.
+- [x] Extract another major ownership slice out of `src/strategy/momentum.rs`.
+- [x] Extract another major ownership slice out of `src/cli/strategy.rs`.
+- [x] Extract a major API/ownership slice out of `src/adapters/polymarket_clob.rs`.
+- [x] Re-run compile and focused regressions after integrating the wave.
+
+## Review
+
+- [x] Confirm `staggered_arb_live.rs` no longer centralizes both lifecycle and the next runtime branch inline.
+- [x] Confirm `momentum.rs` no longer centralizes both detector ownership and the next strategy branch inline.
+- [x] Confirm `cli/strategy.rs` no longer centralizes both command parsing and the next large operational command branch inline.
+- [x] Confirm `polymarket_clob.rs` no longer centralizes both gateway/auth core and the next API ownership branch inline.
+
+## Progress notes
+
+- 2026-03-10: Reserved ownership for the next parallel wave:
+  - worker 1: `src/strategy/staggered_arb_live.rs`
+  - worker 2: `src/strategy/momentum.rs`
+  - worker 3: `src/cli/strategy.rs`
+  - mainline: `src/adapters/polymarket_clob.rs`
+- 2026-03-10: Added [maintenance_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/maintenance_ops.rs) and moved the strategy CLI's seeding, integrity, and backfill handlers out of [strategy.rs](/Users/proerror/Documents/ploy/src/cli/strategy.rs), leaving the root CLI focused on command wiring plus thin delegation.
+- 2026-03-10: Added [position_exit.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/position_exit.rs) and moved momentum position/exit ownership out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), leaving the root strategy focused on discovery, signals, and runtime orchestration.
+- 2026-03-10: Added [order_updates.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live/order_updates.rs) and moved live order-update reconciliation, stale-order cancellation, and orphan cleanup ownership out of [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs), keeping the root adapter focused on market/update orchestration.
+- 2026-03-10: Added [gamma.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob/gamma.rs) and moved Gamma discovery/types ownership out of [polymarket_clob.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob.rs), leaving the adapter root focused on gateway/auth/trading flows.
+- 2026-03-10: Validation passed for the wave:
+  - `rtk cargo test test_exit_manager_stop_loss --lib -- --exact --nocapture`
+  - `rtk cargo test test_orphan_leg1_cleanup_keeps_lock_and_allows_late_reconciliation --lib -- --exact --nocapture`
+  - `rtk cargo test test_leg2_partial_then_full_fill_closes_once_with_weighted_price --lib -- --exact --nocapture`
+  - `rtk cargo check --lib`
