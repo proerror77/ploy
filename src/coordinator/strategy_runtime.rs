@@ -14,22 +14,27 @@ use std::sync::{
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-use crate::adapters::{PolymarketClient, PolymarketWebSocket};
+use crate::adapters::PolymarketClient;
 use crate::agent_runtime::AgentStatus;
 use crate::coordinator::CoordinatorCommand;
 use crate::error::Result;
 use crate::platform::{Domain, PlatformDataPlane};
 use crate::strategy::executor::OrderExecutor;
-use crate::strategy::{DataFeed, DataFeedManager, StrategyFactory, StrategyManager};
+use crate::strategy::{StrategyFactory, StrategyManager};
 
 mod actions;
 mod control;
 mod observability;
 mod order_store;
+mod setup;
 
 use actions::handle_strategy_actions_runtime;
 use control::drive_managed_runtime_control_loop;
 use observability::is_managed_staggered_arb_label;
+use setup::{
+    build_managed_feed_manager, ensure_managed_runtime_observability,
+    start_account_claimer_daemon_if_needed,
+};
 
 pub(crate) async fn run_managed_strategy_runtime(
     strategy_label: &str,
@@ -62,98 +67,23 @@ pub(crate) async fn run_managed_strategy_runtime(
         ))
     })?;
 
-    if is_managed_staggered_arb_label(strategy_label) {
-        if let Some(pool) = observability_pool.as_ref() {
-            if let Err(e) = crate::persistence::ensure_strategy_observability_tables(pool).await {
-                warn!(
-                    strategy = strategy_label,
-                    error = %e,
-                    "failed to ensure strategy observability tables for managed runtime"
-                );
-            }
-        }
-    }
+    ensure_managed_runtime_observability(
+        strategy_label,
+        observability_pool.as_ref(),
+        is_managed_staggered_arb_label(strategy_label),
+    )
+    .await;
 
-    let mut binance_spot_symbols: Vec<String> = Vec::new();
-    let mut binance_kline_symbols: Vec<String> = Vec::new();
-    let mut binance_kline_intervals: Vec<String> = Vec::new();
-    let mut binance_kline_closed_only = true;
-
-    for feed in &required_feeds {
-        match feed {
-            DataFeed::BinanceSpot { symbols } => {
-                binance_spot_symbols.extend(symbols.clone());
-            }
-            DataFeed::BinanceKlines {
-                symbols,
-                intervals,
-                closed_only,
-            } => {
-                binance_kline_symbols.extend(symbols.clone());
-                binance_kline_intervals.extend(intervals.clone());
-                if !*closed_only {
-                    binance_kline_closed_only = false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    binance_spot_symbols.sort();
-    binance_spot_symbols.dedup();
-    binance_kline_symbols.sort();
-    binance_kline_symbols.dedup();
-    binance_kline_intervals.sort();
-    binance_kline_intervals.dedup();
-
-    let feed_manager = if let Some(dp) = data_plane {
-        DataFeedManager::from_data_plane(dp, manager.clone()).with_pm_client(pm_client.clone())
-    } else {
-        let mut feed_manager = DataFeedManager::new(manager.clone());
-        if !binance_spot_symbols.is_empty() {
-            feed_manager = feed_manager.with_binance(binance_spot_symbols.clone());
-        }
-
-        if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
-            let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(300);
-            feed_manager = feed_manager.with_binance_klines(
-                binance_kline_symbols.clone(),
-                binance_kline_intervals.clone(),
-                binance_kline_closed_only,
-                backfill_limit,
-            );
-        }
-
-        let has_polymarket_feed = required_feeds.iter().any(|f| {
-            matches!(
-                f,
-                DataFeed::PolymarketEvents { .. } | DataFeed::PolymarketQuotes { .. }
-            )
-        });
-        if has_polymarket_feed {
-            let pm_ws = PolymarketWebSocket::new(&pm_ws_url);
-            feed_manager = feed_manager.with_polymarket(pm_ws, pm_client.clone());
-        }
-
-        feed_manager
-    };
+    let feed_manager = build_managed_feed_manager(
+        &required_feeds,
+        data_plane,
+        manager.clone(),
+        &pm_client,
+        &pm_ws_url,
+    );
 
     manager.start_strategy(strategy, None).await?;
-
-    #[cfg(feature = "claimer_daemon")]
-    if !dry_run {
-        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
-            warn!(
-                strategy = strategy_label,
-                agent_id = agent_id,
-                error = %e,
-                "failed to start account-level auto-claimer daemon"
-            );
-        }
-    }
+    start_account_claimer_daemon_if_needed(strategy_label, agent_id, dry_run).await?;
 
     feed_manager.start().await?;
     let subscribed_tokens = feed_manager.start_for_feeds(required_feeds).await?;
