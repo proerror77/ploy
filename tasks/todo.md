@@ -3267,3 +3267,27 @@ Keep shrinking the remaining live-strategy core by pulling the momentum engine's
   - `rtk cargo test test_parse_price_from_question --lib -- --nocapture`
   - `rtk cargo test test_event_matcher_includes_btc_5m_series --lib -- --nocapture`
   - `rtk cargo test test_find_event_with_timing_prefers_best_across_all_series --lib -- --nocapture`
+
+# Postgres Event Registry Extraction (2026-03-10)
+
+## Goal
+Move event-registry persistence out of `src/adapters/postgres.rs` so the root adapter keeps cycle/order/recovery ownership while registry CRUD and status-transition logic live behind a dedicated module boundary.
+
+## Tasks
+
+- [x] Extract the event-registry persistence methods into `src/adapters/postgres/event_registry.rs`.
+- [x] Keep `PostgresStore`'s public API unchanged for discovery, RPC, and event-edge callers.
+- [x] Re-run compile and focused event-edge regressions after the extraction.
+
+## Review
+
+- [x] Confirm `postgres.rs` no longer owns the event-registry query/state-transition implementation body.
+- [x] Confirm the extracted module preserves registry filtering, status-transition validation, and stale-event expiry behavior.
+
+## Progress notes
+
+- 2026-03-10: Added [event_registry.rs](/Users/proerror/Documents/ploy/src/adapters/postgres/event_registry.rs) and moved `upsert_event`, `list_events`, `update_event_status`, `get_monitoring_events`, and `expire_stale_events` out of [postgres.rs](/Users/proerror/Documents/ploy/src/adapters/postgres.rs), leaving the root store focused on trading state, metrics, and recovery persistence.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test strategy::event_edge::strategy::tests::on_market_update_tracks_discovered_events_and_expiry --lib -- --exact --nocapture`
+  - `rtk cargo test strategy::event_edge::strategy::tests::emits_canonical_submit_order_and_tracks_fill_into_position --lib -- --exact --nocapture`
