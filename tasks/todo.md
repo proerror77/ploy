@@ -370,6 +370,23 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# pm_5m_directional Zero-Trade Investigation (2026-03-10)
+
+## Goal
+Find the verified root cause for `pm_5m_directional` producing `0 trades` on `tango-1-1` historical replay, then land the smallest safe fix or the narrowest proven blocker.
+
+## Tasks
+
+- [ ] Confirm replay event discovery and Polymarket quote/LOB size propagation reach the strategy.
+- [ ] Capture dominant no-entry reject reasons from the strategy during replay instead of guessing from parameters.
+- [ ] Implement the minimal fix for the verified blocker and add focused regression coverage.
+- [ ] Rebuild an isolated x86 backtest artifact and rerun `tango-1-1` replay to confirm non-zero trades or a narrower proven data blocker.
+
+## Progress notes
+
+- 2026-03-10: Verified on `tango-1-1` that the new x86 backtest binary runs and can query the production history database, but both default and relaxed `pm_5m_directional` replays still returned `0 trades / 0 PnL`.
+- 2026-03-10: Host-side diagnostics showed `pm_market_metadata.raw_market.clobTokenIds` do not overlap `clob_quote_ticks` for BTCUSDT 5m, while `pm_token_settlements` token IDs do overlap quote history; replay feed window/end-time correction already normalizes several metadata issues, so the direct blocker still needs verification inside replay/strategy state.
+
 # Coordinator Queue Ownership Cut (2026-03-10)
 
 ## Goal

@@ -286,6 +286,7 @@ fn symbol_filter(symbols: &[String]) -> Option<Vec<String>> {
 struct TokenMappings {
     token_to_symbol: HashMap<String, String>,
     token_to_slug: HashMap<String, String>,
+    token_to_side: HashMap<String, Side>,
     slug_to_symbol: HashMap<String, String>,
 }
 
@@ -341,12 +342,14 @@ async fn build_token_mappings(
                     }
                     if let Some(t) = yes_token_id {
                         mappings.token_to_slug.insert(t.clone(), slug.clone());
+                        mappings.token_to_side.insert(t.clone(), Side::Up);
                         if !sym.is_empty() {
                             mappings.token_to_symbol.insert(t, sym.clone());
                         }
                     }
                     if let Some(t) = no_token_id {
                         mappings.token_to_slug.insert(t.clone(), slug.clone());
+                        mappings.token_to_side.insert(t.clone(), Side::Down);
                         if !sym.is_empty() {
                             mappings.token_to_symbol.insert(t, sym.clone());
                         }
@@ -392,14 +395,22 @@ async fn build_token_mappings(
                 .cloned()
                 .or_else(|| infer_symbol_from_slug(&slug))
             {
-                mappings.token_to_symbol.entry(token_id).or_insert(sym);
+                mappings
+                    .token_to_symbol
+                    .entry(token_id.clone())
+                    .or_insert(sym);
             }
             if !mappings.slug_to_symbol.contains_key(&slug) {
                 if let Some(sym) = infer_symbol_from_slug(&slug) {
                     mappings.slug_to_symbol.insert(slug.clone(), sym);
                 }
             }
-            let _ = outcome;
+            if let Some(side) = outcome
+                .as_deref()
+                .and_then(parse_token_outcome_side)
+            {
+                mappings.token_to_side.entry(token_id).or_insert(side);
+            }
         }
         info!(
             "Built token mapping from pm_token_settlements: {} tokens",
@@ -917,56 +928,10 @@ async fn load_lob_updates(
 
     let mut lob_count = 0u64;
     for (ts, token_id, asks_json) in &lob_rows {
-        let event_slug = match mappings.token_to_slug.get(token_id.as_str()) {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-        let Some(symbol) = mappings.resolve_symbol(token_id, &event_slug) else {
-            continue;
-        };
-        if symbol.is_empty() {
-            continue;
+        if let Some(update) = build_lob_update(*ts, token_id, asks_json, mappings) {
+            updates.push(update);
+            lob_count += 1;
         }
-
-        let (total_depth, best_ask_price) = match asks_json {
-            Some(arr) if arr.is_array() => {
-                let levels = arr.as_array().unwrap();
-                let mut depth = 0.0f64;
-                let mut best = None;
-                for level in levels {
-                    if let (Some(size_str), Some(price_str)) = (
-                        level.get("size").and_then(|v| v.as_str()),
-                        level.get("price").and_then(|v| v.as_str()),
-                    ) {
-                        if let Ok(size) = size_str.parse::<f64>() {
-                            depth += size;
-                        }
-                        if best.is_none() {
-                            if let Ok(p) = price_str.parse::<Decimal>() {
-                                best = Some(p);
-                            }
-                        }
-                    }
-                }
-                (depth as u64, best)
-            }
-            _ => continue,
-        };
-
-        if total_depth == 0 {
-            continue;
-        }
-
-        updates.push(MarketUpdate {
-            timestamp: *ts,
-            symbol,
-            update_type: UpdateType::LobSnapshot {
-                side: "BOTH".to_string(),
-                ask_depth_shares: total_depth,
-                best_ask: best_ask_price,
-            },
-        });
-        lob_count += 1;
     }
     info!(
         "Loaded {} LOB snapshots ({} mapped to symbols)",
@@ -987,6 +952,67 @@ fn infer_symbol_from_slug(slug: &str) -> Option<String> {
         return Some("SOLUSDT".to_string());
     }
     None
+}
+
+fn parse_token_outcome_side(outcome: &str) -> Option<Side> {
+    match outcome.trim().to_ascii_lowercase().as_str() {
+        "up" | "yes" => Some(Side::Up),
+        "down" | "no" => Some(Side::Down),
+        _ => None,
+    }
+}
+
+fn build_lob_update(
+    timestamp: DateTime<Utc>,
+    token_id: &str,
+    asks_json: &Option<serde_json::Value>,
+    mappings: &TokenMappings,
+) -> Option<MarketUpdate> {
+    let event_slug = mappings.token_to_slug.get(token_id)?.clone();
+    let symbol = mappings.resolve_symbol(token_id, &event_slug)?;
+    if symbol.is_empty() {
+        return None;
+    }
+    let side = mappings.token_to_side.get(token_id)?.as_str().to_string();
+
+    let (total_depth, best_ask_price) = match asks_json {
+        Some(arr) if arr.is_array() => {
+            let levels = arr.as_array().unwrap();
+            let mut depth = 0.0f64;
+            let mut best = None;
+            for level in levels {
+                if let (Some(size_str), Some(price_str)) = (
+                    level.get("size").and_then(|v| v.as_str()),
+                    level.get("price").and_then(|v| v.as_str()),
+                ) {
+                    if let Ok(size) = size_str.parse::<f64>() {
+                        depth += size;
+                    }
+                    if best.is_none() {
+                        if let Ok(p) = price_str.parse::<Decimal>() {
+                            best = Some(p);
+                        }
+                    }
+                }
+            }
+            (depth as u64, best)
+        }
+        _ => return None,
+    };
+
+    if total_depth == 0 {
+        return None;
+    }
+
+    Some(MarketUpdate {
+        timestamp,
+        symbol,
+        update_type: UpdateType::LobSnapshot {
+            side,
+            ask_depth_shares: total_depth,
+            best_ask: best_ask_price,
+        },
+    })
 }
 
 fn infer_window_duration_secs(slug: &str) -> Option<i64> {
@@ -1065,6 +1091,7 @@ fn corrected_window_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn normalize_clob_token_id_accepts_hex_without_prefix() {
@@ -1089,5 +1116,51 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc)
         );
+    }
+
+    #[test]
+    fn parse_token_outcome_side_accepts_up_down_aliases() {
+        assert_eq!(parse_token_outcome_side("UP"), Some(Side::Up));
+        assert_eq!(parse_token_outcome_side("yes"), Some(Side::Up));
+        assert_eq!(parse_token_outcome_side("DOWN"), Some(Side::Down));
+        assert_eq!(parse_token_outcome_side("no"), Some(Side::Down));
+        assert_eq!(parse_token_outcome_side("other"), None);
+    }
+
+    #[test]
+    fn build_lob_update_uses_token_side_mapping() {
+        let ts = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut mappings = TokenMappings::default();
+        mappings
+            .token_to_slug
+            .insert("token-up".to_string(), "btc-updown-5m-test".to_string());
+        mappings
+            .token_to_symbol
+            .insert("token-up".to_string(), "BTCUSDT".to_string());
+        mappings
+            .token_to_side
+            .insert("token-up".to_string(), Side::Up);
+
+        let asks_json = Some(json!([
+            {"price": "0.43", "size": "25"},
+            {"price": "0.44", "size": "10"}
+        ]));
+
+        let update = build_lob_update(ts, "token-up", &asks_json, &mappings).expect("lob update");
+        assert_eq!(update.symbol, "BTCUSDT");
+        match update.update_type {
+            UpdateType::LobSnapshot {
+                side,
+                ask_depth_shares,
+                best_ask,
+            } => {
+                assert_eq!(side, "UP");
+                assert_eq!(ask_depth_shares, 35);
+                assert_eq!(best_ask, Some(Decimal::new(43, 2)));
+            }
+            other => panic!("unexpected update type: {other:?}"),
+        }
     }
 }
