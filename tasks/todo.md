@@ -225,6 +225,46 @@ Keep shrinking the remaining active-core modules after Wave 5 by extracting clea
   - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo test on_market_update_tracks_discovered_events_and_expiry --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave6 rtk cargo test test_graceful_stop_reports_closed_action_channel --lib -- --exact --nocapture`
 
+# Strategy And Adapter Wave 7 (2026-03-10)
+
+## Goal
+Keep cutting active-core runtime ownership out of the remaining heavy modules that still sit on the live path or strategy lifecycle boundary.
+
+## File ownership
+
+- `src/adapters/polymarket_ws.rs`
+  - owner: remaining websocket runtime/broadcast extraction
+- `src/strategy/manager.rs`
+  - owner: strategy lifecycle and command-surface extraction
+- `src/strategy/gamma_scalping/strategy.rs`
+  - owner: gamma strategy runtime/decision-flow extraction
+- `src/platform/position.rs`
+  - owner: position reconciliation/state-transition extraction
+
+## Tasks
+
+- [x] Extract the next `polymarket_ws` ownership slice into a sibling module.
+- [x] Extract the next `strategy manager` ownership slice into a sibling module.
+- [x] Extract the next `gamma_scalping` ownership slice into a sibling module.
+- [x] Extract the next `platform position` ownership slice into a sibling module.
+- [x] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 7 assigned before dispatching the next parallel batch.
+- 2026-03-10: Moved Polymarket WebSocket runtime support ownership out of [polymarket_ws.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws.rs) into [runtime_support.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/runtime_support.rs), including the circuit breaker, quote cache, and their focused tests. Integrated a follow-up fix in [subscriptions.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/subscriptions.rs) so the extracted module tree still logs registration events cleanly.
+- 2026-03-10: Moved strategy-manager lifecycle ownership out of [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs) into [lifecycle.rs](/Users/proerror/Documents/ploy/src/strategy/manager/lifecycle.rs), leaving the root manager focused on channel ownership, runtime loop, factory, and tests.
+- 2026-03-10: Moved gamma-scalping decision/runtime ownership out of [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/gamma_scalping/strategy.rs) into [decision_flow.rs](/Users/proerror/Documents/ploy/src/strategy/gamma_scalping/strategy/decision_flow.rs).
+- 2026-03-10: Moved `PositionAggregator` state-transition and cleanup ownership out of [position.rs](/Users/proerror/Documents/ploy/src/platform/position.rs) into [transitions.rs](/Users/proerror/Documents/ploy/src/platform/position/transitions.rs).
+- 2026-03-10: Wave 7 validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo test test_reduce_position_partial_close --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo test test_agent_open_shares_for_token_side --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo test test_graceful_stop_reports_closed_action_channel --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo test evaluate_entry_emits_submit_intents --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo test test_circuit_breaker_opens_after_failures --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave7-ws rtk cargo test characterization_book_snapshot_produces_quote_update --lib -- --exact --nocapture`
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
