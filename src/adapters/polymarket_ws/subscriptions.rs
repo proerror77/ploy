@@ -1,4 +1,5 @@
 use super::*;
+use tracing::info;
 
 impl PolymarketWebSocket {
     /// Get a receiver for quote updates
@@ -88,10 +89,7 @@ impl PolymarketWebSocket {
     /// `Side` mapping exists). They *will* emit full `BookMessage`s via `subscribe_books()`.
     ///
     /// Returns `(added, removed, total)`.
-    pub async fn reconcile_extra_tokens(
-        &self,
-        desired: &HashSet<String>,
-    ) -> (usize, usize, usize) {
+    pub async fn reconcile_extra_tokens(&self, desired: &HashSet<String>) -> (usize, usize, usize) {
         let mut extra = self.extra_tokens.write().await;
 
         let mut added: usize = 0;
