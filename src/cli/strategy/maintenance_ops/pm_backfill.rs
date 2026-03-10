@@ -69,10 +69,10 @@ pub(crate) async fn backfill_pm_replay_tables(
     let store = PostgresStore::new(&db_url, 5).await?;
     let pool = store.pool();
 
-    crate::platform::persistence_schema::ensure_clob_quote_ticks_table(pool)
+    crate::persistence::ensure_clob_quote_ticks_table(pool)
         .await
         .context("Failed to ensure clob_quote_ticks table")?;
-    crate::platform::persistence_schema::ensure_clob_orderbook_snapshots_table(pool)
+    crate::persistence::ensure_clob_orderbook_snapshots_table(pool)
         .await
         .context("Failed to ensure clob_orderbook_snapshots table")?;
 

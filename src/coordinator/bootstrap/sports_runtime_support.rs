@@ -146,14 +146,14 @@ pub(super) async fn prepare_sports_runtime_support(
         };
         let sports_orderbook_require_hash_change =
             env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
-        let sports_pipeline_config = crate::platform::PersistenceConfig {
+        let sports_pipeline_config = crate::persistence::PersistenceConfig {
             clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
             clob_orderbook_snapshot_interval_ms: sports_orderbook_snapshot_ms as i64,
             clob_orderbook_max_levels: sports_orderbook_levels,
             clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
             ..Default::default()
         };
-        let sports_pipeline = crate::platform::PersistencePipeline::spawn_with_freshness(
+        let sports_pipeline = crate::persistence::PersistencePipeline::spawn_with_freshness(
             pool.clone(),
             sports_pipeline_config,
             Some(Arc::clone(freshness)),
@@ -165,8 +165,8 @@ pub(super) async fn prepare_sports_runtime_support(
                     quote_rx,
                     format!("{}.sports_quote", sports_cfg.agent_id),
                     |update| {
-                        Some(crate::platform::PersistenceEvent::ClobQuote(
-                            crate::platform::ClobQuoteTick {
+                        Some(crate::persistence::PersistenceEvent::ClobQuote(
+                            crate::persistence::ClobQuoteTick {
                                 token_id: update.token_id.clone(),
                                 side: update.side.as_str().to_string(),
                                 best_bid: update.quote.best_bid,
@@ -197,8 +197,8 @@ pub(super) async fn prepare_sports_runtime_support(
                         hasher.update(bids_json.to_string().as_bytes());
                         hasher.update(asks_json.to_string().as_bytes());
                         let hash = format!("{:x}", hasher.finalize());
-                        Some(crate::platform::PersistenceEvent::ClobOrderbook(
-                            crate::platform::ClobOrderbookSnapshot {
+                        Some(crate::persistence::PersistenceEvent::ClobOrderbook(
+                            crate::persistence::ClobOrderbookSnapshot {
                                 domain: Domain::Sports,
                                 token_id: book_msg.asset_id.clone(),
                                 market: Some(book_msg.market.clone()),

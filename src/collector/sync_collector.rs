@@ -433,8 +433,8 @@ impl SyncCollector {
 
     /// Create database tables
     async fn create_tables(&self, pool: &PgPool) -> Result<()> {
-        crate::platform::persistence_schema::ensure_binance_lob_ticks_table(pool).await?;
-        crate::platform::persistence_schema::ensure_clob_quote_ticks_table(pool).await?;
+        crate::persistence::ensure_binance_lob_ticks_table(pool).await?;
+        crate::persistence::ensure_clob_quote_ticks_table(pool).await?;
 
         if self.persist_sync_records {
             sqlx::query(

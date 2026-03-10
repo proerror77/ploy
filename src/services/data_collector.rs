@@ -70,7 +70,7 @@ impl DataCollector {
         }
 
         if self.persist_canonical_quotes {
-            crate::platform::persistence_schema::ensure_clob_quote_ticks_table(self.store.pool())
+            crate::persistence::ensure_clob_quote_ticks_table(self.store.pool())
                 .await?;
         }
 

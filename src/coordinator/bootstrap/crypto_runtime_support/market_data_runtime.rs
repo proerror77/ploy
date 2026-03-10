@@ -53,7 +53,7 @@ async fn initialize_crypto_persistence_pipeline(
     event_matcher: Arc<EventMatcher>,
     crypto_cfg: &crate::strategy::CryptoTradingConfig,
     all_coins: &[String],
-) -> Option<crate::platform::PersistencePipelineHandle> {
+) -> Option<crate::persistence::PersistencePipelineHandle> {
     let Some(pool) = shared_pool else {
         return None;
     };
@@ -106,7 +106,7 @@ async fn initialize_crypto_persistence_pipeline(
     };
 
     let pipeline_handle = if quote_table_ready || price_table_ready || orderbook_table_ready {
-        let pipeline_config = crate::platform::PersistenceConfig {
+        let pipeline_config = crate::persistence::PersistenceConfig {
             clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
             binance_price_min_interval_secs: BINANCE_PERSIST_MIN_INTERVAL_SECS,
             binance_lob_snapshot_interval_ms: env_u64("BN_LOB_SNAPSHOT_MS", 1000).max(100) as i64,
@@ -116,7 +116,7 @@ async fn initialize_crypto_persistence_pipeline(
             clob_orderbook_require_hash_change: orderbook_require_hash_change,
             ..Default::default()
         };
-        let pipeline_handle = crate::platform::PersistencePipeline::spawn_with_freshness(
+        let pipeline_handle = crate::persistence::PersistencePipeline::spawn_with_freshness(
             pool.clone(),
             pipeline_config,
             Some(Arc::clone(freshness)),
@@ -133,8 +133,8 @@ async fn initialize_crypto_persistence_pipeline(
                     quote_rx,
                     format!("{}.quote", crypto_cfg.agent_id),
                     |update| {
-                        Some(crate::platform::PersistenceEvent::ClobQuote(
-                            crate::platform::ClobQuoteTick {
+                        Some(crate::persistence::PersistenceEvent::ClobQuote(
+                            crate::persistence::ClobQuoteTick {
                                 token_id: update.token_id.clone(),
                                 side: update.side.as_str().to_string(),
                                 best_bid: update.quote.best_bid,
@@ -163,8 +163,8 @@ async fn initialize_crypto_persistence_pipeline(
                     price_rx,
                     format!("{}.price", crypto_cfg.agent_id),
                     |update| {
-                        Some(crate::platform::PersistenceEvent::BinancePrice(
-                            crate::platform::BinancePriceTick {
+                        Some(crate::persistence::PersistenceEvent::BinancePrice(
+                            crate::persistence::BinancePriceTick {
                                 symbol: update.symbol.clone(),
                                 price: Some(update.price),
                                 quantity: update.quantity,
@@ -196,8 +196,8 @@ async fn initialize_crypto_persistence_pipeline(
                         hasher.update(bids_json.to_string().as_bytes());
                         hasher.update(asks_json.to_string().as_bytes());
                         let hash = format!("{:x}", hasher.finalize());
-                        Some(crate::platform::PersistenceEvent::ClobOrderbook(
-                            crate::platform::ClobOrderbookSnapshot {
+                        Some(crate::persistence::PersistenceEvent::ClobOrderbook(
+                            crate::persistence::ClobOrderbookSnapshot {
                                 domain: Domain::Crypto,
                                 token_id: book_msg.asset_id.clone(),
                                 market: Some(book_msg.market.clone()),
@@ -248,7 +248,7 @@ async fn initialize_crypto_persistence_pipeline(
 async fn maybe_start_binance_lob_runtime(
     shared_pool: Option<&PgPool>,
     freshness: &Arc<crate::platform::DataPlaneFreshness>,
-    crypto_persistence_pipeline: Option<crate::platform::PersistencePipelineHandle>,
+    crypto_persistence_pipeline: Option<crate::persistence::PersistencePipelineHandle>,
     crypto_cfg: &crate::strategy::CryptoTradingConfig,
     all_coins: &[String],
     lob_agent_enabled: bool,
@@ -298,8 +298,8 @@ async fn maybe_start_binance_lob_runtime(
                                 lob_levels_json(&update.raw_state, false, max_levels),
                             )
                         };
-                        Some(crate::platform::PersistenceEvent::BinanceLob(
-                            crate::platform::BinanceLobTick {
+                        Some(crate::persistence::PersistenceEvent::BinanceLob(
+                            crate::persistence::BinanceLobTick {
                                 symbol,
                                 update_id: update.snapshot.update_id,
                                 best_bid: Some(update.snapshot.best_bid),
