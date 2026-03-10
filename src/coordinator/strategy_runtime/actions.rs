@@ -15,7 +15,7 @@ use crate::strategy::{OrderUpdate, StrategyAction, StrategyManager};
 mod order_commands;
 mod update_flow;
 
-use super::observability::{
+use super::signal_history::{
     is_managed_staggered_arb_label, persist_split_arb_signal_history,
     split_arb_event_signal_type,
 };

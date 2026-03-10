@@ -21,6 +21,7 @@ mod control;
 mod observability;
 mod order_store;
 mod session;
+mod signal_history;
 mod startup;
 
 use control::drive_managed_runtime_control_loop;

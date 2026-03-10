@@ -12,12 +12,12 @@ use crate::domain::OrderStatus;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{OrderUpdate, StrategyManager};
 
-use super::super::observability::{
-    persist_live_order_signal_history, persist_split_arb_signal_history, split_arb_leg_and_mode,
-    split_arb_status_key,
-};
+use super::super::observability::persist_live_order_signal_history;
 use super::super::order_store::{
     persist_runtime_order_result, persist_runtime_order_update, RuntimeOrderStore,
+};
+use super::super::signal_history::{
+    persist_split_arb_signal_history, split_arb_leg_and_mode, split_arb_status_key,
 };
 use super::env_u64;
 

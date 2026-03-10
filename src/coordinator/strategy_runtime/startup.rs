@@ -15,8 +15,8 @@ use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{DataFeed, DataFeedManager, OrderUpdate, StrategyFactory, StrategyManager};
 
 use super::actions::handle_strategy_actions_runtime;
-use super::observability::is_managed_staggered_arb_label;
 use super::session::ManagedRuntimeSession;
+use super::signal_history::is_managed_staggered_arb_label;
 
 pub(super) async fn start_managed_runtime_session(
     strategy_label: &str,
