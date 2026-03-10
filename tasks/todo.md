@@ -3161,3 +3161,42 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - `rtk cargo test test_try_entry_does_not_cap_concurrency_when_max_concurrent_is_zero --lib -- --nocapture`
   - `rtk cargo test test_try_entry_rejects_sigma_above_max_entry_sigma --lib -- --nocapture`
   - `rtk cargo test test_try_entry_requires_persistent_other_ask_before_leg1 --lib -- --nocapture`
+
+# Live Strategy Core Wave 2 (2026-03-10)
+
+## Goal
+Keep collapsing the largest active live-strategy and execution modules by extracting another cohesive slice from the two biggest strategy files, the execution engine, and the claimer daemon.
+
+## Tasks
+
+- [x] Extract a second major ownership slice out of `src/strategy/staggered_arb_live.rs`.
+- [x] Extract a second major ownership slice out of `src/strategy/momentum.rs`.
+- [x] Extract a second major ownership slice out of `src/strategy/execution/engine.rs`.
+- [x] Extract a major daemon/discovery-adjacent slice out of `src/strategy/claimer.rs`.
+- [x] Re-run compile and focused live-strategy/claimer regressions after integrating the wave.
+
+## Review
+
+- [x] Confirm `staggered_arb_live.rs` no longer centralizes both entry and the next major runtime branch inline.
+- [x] Confirm `momentum.rs` no longer centralizes both matcher/discovery and the next major strategy branch inline.
+- [x] Confirm `engine.rs` no longer centralizes both lifecycle and the next major execution branch inline.
+- [x] Confirm `claimer.rs` no longer centralizes both discovery and the next major daemon/claim path inline.
+
+## Progress notes
+
+- 2026-03-10: Reserved ownership for the next parallel wave:
+  - worker 1: `src/strategy/staggered_arb_live.rs`
+  - worker 2: `src/strategy/momentum.rs`
+  - worker 3: `src/strategy/claimer.rs`
+  - mainline: `src/strategy/execution/engine.rs`
+- 2026-03-10: Added [lifecycle.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live/lifecycle.rs) and moved staggered-arb position lifecycle ownership out of [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs), including paper/live position structs, fill tracking, expired-event settlement, and leg finalization flow.
+- 2026-03-10: Added [detector.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/detector.rs) and moved `MomentumSignal` / `MomentumDetector` ownership out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), leaving the root strategy focused on orchestration and stateful trade management.
+- 2026-03-10: Added [hedge_flow.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/hedge_flow.rs) and moved Leg2 execution, forced hedge handling, and unwind ownership out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs), leaving the root engine focused on round/Leg1 orchestration plus lifecycle wrappers.
+- 2026-03-10: Added [relayer.rs](/Users/proerror/Documents/ploy/src/strategy/claimer/relayer.rs) and moved relayer credential, proxy-signing, polling, and gasless-claim ownership out of [claimer.rs](/Users/proerror/Documents/ploy/src/strategy/claimer.rs), leaving the root daemon focused on eligibility, on-chain claim flow, and gas top-up orchestration.
+- 2026-03-10: Validation passed for the wave:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_feed_builder --lib -- --nocapture`
+  - `rtk cargo test test_from_data_plane_reuses_singleton_adapters --lib -- --nocapture`
+  - `rtk cargo test characterization_replay_polymarket_quote_to_strategy_market_update --lib -- --nocapture`
+  - `rtk cargo test leg2_pending_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
+  - `rtk cargo test leg2_cycle_version_conflict_should_abort_and_error --lib -- --nocapture`
