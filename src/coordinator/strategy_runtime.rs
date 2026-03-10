@@ -7,9 +7,8 @@
 
 use chrono::Utc;
 use sqlx::PgPool;
-use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64},
     Arc,
 };
 use tokio::sync::{broadcast, mpsc};
@@ -17,17 +16,19 @@ use tracing::{info, warn};
 
 use crate::adapters::{PolymarketClient, PolymarketWebSocket};
 use crate::agent_runtime::AgentStatus;
-use crate::coordinator::{AgentHealthResponse, AgentSnapshot, CoordinatorCommand};
+use crate::coordinator::CoordinatorCommand;
 use crate::error::Result;
 use crate::platform::{Domain, PlatformDataPlane};
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{DataFeed, DataFeedManager, StrategyFactory, StrategyManager};
 
 mod actions;
+mod control;
 mod observability;
 mod order_store;
 
 use actions::handle_strategy_actions_runtime;
+use control::drive_managed_runtime_control_loop;
 use observability::is_managed_staggered_arb_label;
 
 pub(crate) async fn run_managed_strategy_runtime(
@@ -192,98 +193,21 @@ pub(crate) async fn run_managed_strategy_runtime(
         "managed strategy runtime started"
     );
 
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                info!(
-                    strategy = strategy_label,
-                    agent_id = agent_id,
-                    strategy_id = %strategy_id,
-                    "managed strategy runtime shutdown requested"
-                );
-                break;
-            }
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(CoordinatorCommand::Pause) => {
-                        paused.store(true, Ordering::Relaxed);
-                        status = AgentStatus::Paused;
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime paused"
-                        );
-                    }
-                    Some(CoordinatorCommand::Resume) => {
-                        paused.store(false, Ordering::Relaxed);
-                        status = AgentStatus::Running;
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime resumed"
-                        );
-                    }
-                    Some(CoordinatorCommand::ForceClose) => {
-                        warn!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime force-close requested"
-                        );
-                        break;
-                    }
-                    Some(CoordinatorCommand::Shutdown) => {
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime shutdown command received"
-                        );
-                        break;
-                    }
-                    Some(CoordinatorCommand::HealthCheck(tx)) => {
-                        let position_count = manager
-                            .get_strategy_status(&strategy_id)
-                            .await
-                            .map(|s| s.position_count)
-                            .unwrap_or(0);
-                        let snapshot = AgentSnapshot {
-                            agent_id: agent_id.to_string(),
-                            name: strategy_label.to_string(),
-                            domain,
-                            status,
-                            position_count,
-                            exposure: rust_decimal::Decimal::ZERO,
-                            daily_pnl: rust_decimal::Decimal::ZERO,
-                            unrealized_pnl: rust_decimal::Decimal::ZERO,
-                            metrics: HashMap::new(),
-                            last_heartbeat: Utc::now(),
-                            error_message: None,
-                        };
-                        let uptime_secs = (Utc::now() - started_at).num_seconds().max(0) as u64;
-                        let _ = tx.send(AgentHealthResponse {
-                            snapshot,
-                            is_healthy: matches!(status, AgentStatus::Running | AgentStatus::Paused),
-                            uptime_secs,
-                            orders_submitted: orders_submitted.load(Ordering::Relaxed),
-                            orders_filled: orders_filled.load(Ordering::Relaxed),
-                        });
-                    }
-                    None => {
-                        warn!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime command channel closed"
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    drive_managed_runtime_control_loop(
+        strategy_label,
+        agent_id,
+        domain,
+        &strategy_id,
+        started_at,
+        manager.clone(),
+        paused.clone(),
+        orders_submitted.clone(),
+        orders_filled.clone(),
+        &mut status,
+        &mut cmd_rx,
+        &mut shutdown_rx,
+    )
+    .await;
 
     if let Err(e) = manager.stop_all(true).await {
         warn!(
