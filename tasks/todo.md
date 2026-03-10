@@ -3119,7 +3119,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 ## Tasks
 
 - [x] Extract a major deployment/admission slice out of `src/coordinator/admission.rs`.
-- [ ] Extract a major ownership slice out of `src/strategy/staggered_arb_live.rs`.
+- [x] Extract a major ownership slice out of `src/strategy/staggered_arb_live.rs`.
 - [x] Extract a major ownership slice out of `src/strategy/momentum.rs`.
 - [x] Extract a major ownership slice out of `src/strategy/execution/engine.rs`.
 - [ ] Re-run compile and focused strategy/admission regressions after integrating the wave.
@@ -3127,7 +3127,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
 ## Review
 
 - [x] Confirm `admission.rs` no longer centralizes deployment matching and admission policy helpers in one root file.
-- [ ] Confirm `staggered_arb_live.rs` no longer centralizes all runtime filters/evaluation/state helpers inline.
+- [x] Confirm `staggered_arb_live.rs` no longer centralizes all runtime filters/evaluation/state helpers inline.
 - [x] Confirm `momentum.rs` no longer centralizes all signal/state/config ownership inline.
 - [x] Confirm `engine.rs` no longer centralizes all execution-engine subflows in one root file.
 
@@ -3140,6 +3140,7 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - mainline: `src/strategy/execution/engine.rs`
 - 2026-03-10: Added [lifecycle.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine/lifecycle.rs) and moved `StrategyEngine` cycle-control ownership out of [engine.rs](/Users/proerror/Documents/ploy/src/strategy/execution/engine.rs), including halt persistence, strategy-state persistence, forced-leg2 fallback, abort handling, and idle transition helpers.
 - 2026-03-10: Added [matcher.rs](/Users/proerror/Documents/ploy/src/strategy/momentum/matcher.rs) and moved `EventMatcher` / `EventInfo` ownership out of [momentum.rs](/Users/proerror/Documents/ploy/src/strategy/momentum.rs), keeping the strategy root focused on signals, position logic, and runtime orchestration.
+- 2026-03-10: Added [entry.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live/entry.rs) and moved opening-window gating plus entry-evaluation logic out of [staggered_arb_live.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live.rs), keeping the root adapter focused on orchestration and state transitions.
 - 2026-03-10: Validation passed for the local engine slice:
   - `rtk cargo check --lib`
   - `rtk cargo test test_deployment_gate_accepts_explicit_deployment_and_applies_metadata --lib -- --nocapture`
@@ -3155,3 +3156,8 @@ Keep collapsing the active live-trading core by splitting a major admission slic
   - `rtk cargo check --lib`
   - `rtk cargo test test_parse_price_from_question --lib -- --nocapture`
   - `rtk cargo test test_event_matcher_ --lib -- --nocapture`
+- 2026-03-10: Validation passed for the staggered-arb entry slice:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_try_entry_does_not_cap_concurrency_when_max_concurrent_is_zero --lib -- --nocapture`
+  - `rtk cargo test test_try_entry_rejects_sigma_above_max_entry_sigma --lib -- --nocapture`
+  - `rtk cargo test test_try_entry_requires_persistent_other_ask_before_leg1 --lib -- --nocapture`
