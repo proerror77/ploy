@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::api::{auth::ensure_sidecar_authorized, state::AppState};
 #[cfg(test)]
