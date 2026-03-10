@@ -3363,3 +3363,25 @@ Move the momentum strategy's trade-entry, queued-signal, and exit execution flow
   - `rtk cargo check --lib`
   - `rtk cargo test test_exit_manager_stop_loss --lib -- --exact --nocapture`
   - `rtk cargo test test_find_event_with_timing_prefers_best_across_all_series --lib -- --nocapture`
+
+# RPC PM Read Method Extraction (2026-03-10)
+
+## Goal
+Move the read-only `pm.*` JSON-RPC method handling out of `src/cli/rpc.rs` so the root file keeps protocol/idempotency/write-routing ownership while PM read dispatch lives behind a dedicated sibling module.
+
+## Tasks
+
+- [x] Extract the read-only PM JSON-RPC method handlers into `src/cli/rpc/pm_read_methods.rs`.
+- [x] Keep the public RPC surface and method names unchanged.
+- [x] Re-run compile after the extraction.
+
+## Review
+
+- [x] Confirm `rpc.rs` no longer inlines the full PM read dispatch surface.
+- [x] Confirm the extracted module preserves request parsing, PM client initialization, and JSON-RPC response formatting for read-only `pm.*` methods.
+
+## Progress notes
+
+- 2026-03-10: Added [pm_read_methods.rs](/Users/proerror/Documents/ploy/src/cli/rpc/pm_read_methods.rs) and moved the read-only `pm.*` RPC handlers out of [rpc.rs](/Users/proerror/Documents/ploy/src/cli/rpc.rs), including event resolution, balance/positions/open-orders/order lookup, market/event/orderbook/trade reads, and account summary handling.
+- 2026-03-10: Validation passed for the slice:
+  - `rtk cargo check --lib`
