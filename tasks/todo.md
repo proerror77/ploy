@@ -3033,15 +3033,15 @@ Keep collapsing the active runtime core by splitting coordinator recovery/orches
 ## Tasks
 
 - [x] Extract coordinator recovery/bootstrap ownership out of `src/coordinator/coordinator.rs`.
-- [ ] Extract a major allocator slice out of `src/coordinator/capital.rs`.
-- [ ] Extract execution-journal restore/parsing ownership out of `src/coordinator/journal.rs`.
+- [x] Extract a major allocator slice out of `src/coordinator/capital.rs`.
+- [x] Extract execution-journal restore/parsing ownership out of `src/coordinator/journal.rs`.
 - [x] Re-run compile and focused coordinator regressions after each integrated slice.
 
 ## Review
 
 - [x] Confirm `coordinator.rs` keeps runtime-loop ownership rather than restore/bootstrap details.
-- [ ] Confirm `capital.rs` no longer centralizes both crypto and market allocator internals in one file.
-- [ ] Confirm `journal.rs` no longer centralizes restore loaders and parsing helpers in the root owner.
+- [x] Confirm `capital.rs` no longer centralizes both crypto and market allocator internals in one file.
+- [x] Confirm `journal.rs` no longer centralizes restore loaders and parsing helpers in the root owner.
 
 ## Progress notes
 
@@ -3051,7 +3051,64 @@ Keep collapsing the active runtime core by splitting coordinator recovery/orches
   - worker 2: `src/coordinator/journal.rs`
 - 2026-03-10: Extracted the crypto allocator ownership from [capital.rs](/Users/proerror/Documents/ploy/src/coordinator/capital.rs) into [crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/crypto.rs), leaving `CapitalPolicy` and the market allocator path in the root facade while targeted capital ledger checks stayed green.
 - 2026-03-10: Added [recovery.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/recovery.rs) and moved the coordinator recovery/bootstrap ownership out of [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs), including risk runtime restore, governance restore, execution-log restore, and the persistence pool setters.
+- 2026-03-10: Added [restore.rs](/Users/proerror/Documents/ploy/src/coordinator/journal/restore.rs) and moved journal restore/parsing/loading ownership out of [journal.rs](/Users/proerror/Documents/ploy/src/coordinator/journal.rs), including persisted restore structs, risk snapshot loading, execution restore loading, JSON metadata normalization, and the restore-focused tests.
 - 2026-03-10: Validation passed for the local coordinator slice:
-  - `cargo check --lib`
-  - `cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --nocapture`
-  - `cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_crypto_allocator_ledger_snapshot_reports_open_pending_and_available --lib -- --nocapture`
+  - `rtk cargo test test_string_metadata_from_json_normalizes_scalar_values --lib -- --nocapture`
+  - `rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --nocapture`
+  - `rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --nocapture`
+
+# Admission Deployment Ownership Extraction (2026-03-10)
+
+## Goal
+Move deployment registry/load/matching/gating ownership out of `src/coordinator/admission.rs` so the root owner keeps duplicate-guard, sizing, and order-request orchestration while deployment resolution lives in a dedicated submodule.
+
+## Tasks
+
+- [x] Extract deployment registry loading and file/env discovery out of `src/coordinator/admission.rs`.
+- [x] Extract deployment selector/timeframe matching and metadata application out of `src/coordinator/admission.rs`.
+- [x] Keep `AdmissionController` behavior unchanged while delegating deployment gating to the extracted owner.
+- [x] Re-run compile and focused admission regressions after the extraction.
+
+## Review
+
+- [x] Confirm `admission.rs` no longer centralizes deployment file loading and selector/timeframe matching internals.
+- [x] Confirm deployment gating and stable idempotency bucket behavior still pass focused regressions.
+
+## Progress notes
+
+- 2026-03-10: Added [deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/admission/deployments.rs) to own deployment JSON/env loading, metadata lookup, selector matching, timeframe inference, and deployment gate resolution.
+- 2026-03-10: Left [admission.rs](/Users/proerror/Documents/ploy/src/coordinator/admission.rs) owning duplicate guarding, Kelly/min-order sizing, idempotency-key construction, and the public admission surface while delegating deployment-specific behavior to the new owner.
+- 2026-03-10: Validation passed:
+  - `rtk cargo check --lib`
+  - `rtk cargo test test_deployment_gate_infers_unique_by_timeframe_hint --lib -- --nocapture`
+  - `rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --nocapture`
+
+# Live Runtime And Strategy Core Wave (2026-03-10)
+
+## Goal
+Keep collapsing the active live-trading core by splitting a major admission slice plus the two largest live-strategy implementations into dedicated submodules with clear ownership.
+
+## Tasks
+
+- [ ] Extract a major deployment/admission slice out of `src/coordinator/admission.rs`.
+- [ ] Extract a major ownership slice out of `src/strategy/staggered_arb_live.rs`.
+- [ ] Extract a major ownership slice out of `src/strategy/momentum.rs`.
+- [ ] Extract a major ownership slice out of `src/strategy/execution/engine.rs`.
+- [ ] Re-run compile and focused strategy/admission regressions after integrating the wave.
+
+## Review
+
+- [ ] Confirm `admission.rs` no longer centralizes deployment matching and admission policy helpers in one root file.
+- [ ] Confirm `staggered_arb_live.rs` no longer centralizes all runtime filters/evaluation/state helpers inline.
+- [ ] Confirm `momentum.rs` no longer centralizes all signal/state/config ownership inline.
+- [ ] Confirm `engine.rs` no longer centralizes all execution-engine subflows in one root file.
+
+## Progress notes
+
+- 2026-03-10: Reserved ownership for the active parallel wave:
+  - worker 1: `src/coordinator/admission.rs`
+  - worker 2: `src/strategy/staggered_arb_live.rs`
+  - worker 3: `src/strategy/momentum.rs`
+  - mainline: `src/strategy/execution/engine.rs`
