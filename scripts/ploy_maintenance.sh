@@ -71,7 +71,9 @@ fi
 
 echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS}"
 
-if command -v runuser >/dev/null 2>&1; then
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  PSQL=(psql "$DATABASE_URL" -v ON_ERROR_STOP=1)
+elif command -v runuser >/dev/null 2>&1; then
   PSQL=(runuser -u postgres -- psql -d "$DB_NAME" -v ON_ERROR_STOP=1)
 else
   # Fallback for minimal distros.
