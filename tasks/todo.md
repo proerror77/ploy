@@ -265,6 +265,47 @@ Keep cutting active-core runtime ownership out of the remaining heavy modules th
   - `CARGO_TARGET_DIR=/tmp/ploy-wave7-main rtk cargo test test_circuit_breaker_opens_after_failures --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave7-ws rtk cargo test characterization_book_snapshot_produces_quote_update --lib -- --exact --nocapture`
 
+# Strategy And Adapter Wave 8 (2026-03-10)
+
+## Goal
+Keep collapsing the remaining active-core and legacy strategy surface by extracting ownership from the heaviest coordinator and strategy modules still on the live path.
+
+## File ownership
+
+- `src/coordinator/coordinator.rs`
+  - owner: remaining runtime/recovery/control extraction
+- `src/strategy/strategies/momentum_strat.rs`
+  - owner: legacy momentum signal/runtime extraction
+- `src/strategy/split_arb.rs`
+  - owner: split-arb decision/runtime extraction
+- `src/strategy/crypto_lob_ml/strategy.rs`
+  - owner: crypto LOB ML inference/runtime extraction
+
+## Tasks
+
+- [x] Extract the next `coordinator` ownership slice into a sibling module.
+- [x] Extract the next `momentum_strat` ownership slice into a sibling module.
+- [x] Extract the next `split_arb` ownership slice into a sibling module.
+- [x] Extract the next `crypto_lob_ml` ownership slice into a sibling module.
+- [x] Re-run compile plus focused regressions after the wave.
+
+## Progress notes
+
+- 2026-03-10: Preflight file ownership for Wave 8 assigned before dispatching the next parallel batch.
+- 2026-03-10: Moved coordinator intent-ingress ownership out of [coordinator.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator.rs) into [ingress.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/ingress.rs), leaving the root coordinator focused on wiring, runtime loop, and tests.
+- 2026-03-10: Moved legacy momentum signal/runtime ownership out of [momentum_strat.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/momentum_strat.rs) into [signal_flow.rs](/Users/proerror/Documents/ploy/src/strategy/strategies/momentum_strat/signal_flow.rs).
+- 2026-03-10: Moved `SplitArbEngine` runtime/opportunity ownership out of [split_arb.rs](/Users/proerror/Documents/ploy/src/strategy/split_arb.rs) into [runtime_flow.rs](/Users/proerror/Documents/ploy/src/strategy/split_arb/runtime_flow.rs).
+- 2026-03-10: Moved crypto-LOB-ML inference/decision ownership out of [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/strategy.rs) into [inference.rs](/Users/proerror/Documents/ploy/src/strategy/crypto_lob_ml/strategy/inference.rs).
+- 2026-03-10: Wave 8 validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-main rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-main rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-momentum rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-momentum rtk cargo test test_series_mapping --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-splitarb rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-splitarb rtk cargo test test_split_arb_adapter_creation --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-lobml rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave8-lobml rtk cargo test on_tick_emits_inference_log_once_sequence_is_ready --lib -- --nocapture`
+
 - [x] Rewire `agents/openclaw/*` modules to import `OpenClawConfig` / `AllocatorConfig` / `RegimeConfig` / `StraddleConfig` from `crate::coordinator::bootstrap`.
 - [x] Delete `src/agents/openclaw/config.rs` and remove the dead `mod config;` entry from `src/agents/openclaw/mod.rs`.
 - [x] Re-run focused OpenClaw compile/tests after the shim removal.
