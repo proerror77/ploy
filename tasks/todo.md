@@ -486,6 +486,29 @@ Extract shared ingress preflight and rejection choreography out of `control_surf
   - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
 
+# Strategy Runtime Update Flow Extraction (2026-03-10)
+
+## Goal
+Move the managed-runtime order-update, observability, and split-arb poll flow out of `src/coordinator/strategy_runtime/actions.rs` so the root actions module focuses on dispatch and submit/cancel handling.
+
+## Tasks
+
+- [x] Extract the managed runtime update/poll flow into a dedicated `actions/update_flow.rs`.
+- [x] Rewire `actions.rs` to delegate coordinator updates and observability writes to the extracted owner.
+- [x] Keep submit/cancel behavior unchanged while reducing root-file ownership.
+- [x] Re-run compile plus focused managed-runtime regressions after the extraction.
+
+## Progress notes
+
+- 2026-03-10: Added [update_flow.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions/update_flow.rs) to own `handle_runtime_order_update(...)`, `persist_runtime_observability(...)`, and the split-arb poll loop.
+- 2026-03-10: Reduced [actions.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions.rs) so the root module now delegates managed-runtime update flow to the extracted owner.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-actions-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-actions-cut rtk cargo test persist_runtime_order_insert_uses_action_order_id_and_leg --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-actions-cut rtk cargo test test_graceful_stop_reports_closed_action_channel --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-actions-cut rtk cargo test test_strategy_manager_creation --lib -- --exact --nocapture`
+- 2026-03-10: Residual note: `CARGO_TARGET_DIR=/tmp/ploy-actions-cut rtk cargo test persist_runtime_order_result_records_submission_and_fill --lib -- --exact --nocapture` is currently failing with an existing order-store expectation mismatch (`Submitted` vs `Filled`) and was not introduced by this extraction.
+
 # Control Plane Contract Split (2026-03-10)
 
 ## Goal
