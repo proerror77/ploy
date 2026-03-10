@@ -3,7 +3,7 @@ use super::trades::{
     ensure_clob_trade_ticks_table,
 };
 use super::{env_i64, env_u64, env_usize};
-use crate::platform::Domain;
+use crate::domain::Domain;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::Client as DataApiClient;
 use sqlx::PgPool;

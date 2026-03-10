@@ -15,7 +15,7 @@ use crate::control_plane::{
     MarketSelector, StrategyDeployment, StrategyEvaluationEvidence, StrategyLifecycleStage,
     StrategyProductType,
 };
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::deployment_gate::ensure_required_strategy_evidence;
 

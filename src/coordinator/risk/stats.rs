@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DrawdownStats {

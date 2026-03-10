@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::api::{auth::ensure_sidecar_or_admin_authorized, state::AppState};
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 #[derive(Debug, Deserialize)]
 pub struct UpsertStrategyEvaluationRequest {

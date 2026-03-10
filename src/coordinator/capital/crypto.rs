@@ -90,7 +90,7 @@ mod tests {
     use super::*;
     use crate::domain::Side;
     use crate::coordinator::OrderIntent;
-    use crate::platform::Domain;
+    use crate::domain::Domain;
     use rust_decimal_macros::dec;
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {

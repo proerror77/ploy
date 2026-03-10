@@ -9,7 +9,7 @@ use crate::coordinator::{
     GovernancePolicyUpdate,
 };
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 /// Governance-only context given to non-trading control-plane agents.
 ///

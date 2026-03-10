@@ -5,16 +5,15 @@
 
 pub mod persistence_pipeline;
 pub mod persistence_schema;
-mod types;
 
 pub use crate::data_plane::{
     BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, DataPlaneHealth,
     PlatformDataPlane, SourceHealth,
 };
 pub use crate::data_plane::{DataPlaneFreshness, DataSource};
+pub use crate::domain::Domain;
 pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,
     PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
     PipelineStats,
 };
-pub use types::Domain;

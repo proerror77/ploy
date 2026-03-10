@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::coordinator::config::CoordinatorConfig;
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 #[path = "market/accounting.rs"]
 mod accounting;

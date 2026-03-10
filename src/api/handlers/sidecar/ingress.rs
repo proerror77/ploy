@@ -12,7 +12,7 @@ use crate::control_plane::{MarketSelector, StrategyDeployment};
 use crate::domain::market::Side;
 use crate::error::PloyError;
 use crate::coordinator::OrderPriority;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 fn parse_boolish(value: &str) -> bool {
     matches!(

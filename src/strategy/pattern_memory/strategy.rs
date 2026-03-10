@@ -6,7 +6,7 @@
 use super::engine::{PatternMemory, Posterior};
 use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::{PloyError, Result};
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,

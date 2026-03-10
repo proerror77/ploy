@@ -3,7 +3,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 mod crypto;
 mod market;

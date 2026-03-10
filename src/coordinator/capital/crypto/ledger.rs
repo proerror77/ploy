@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnapshot};
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::super::sell_release_reference_price;
 use super::{CryptoCapitalAllocator, CryptoHorizon, CryptoIntentDimensions};

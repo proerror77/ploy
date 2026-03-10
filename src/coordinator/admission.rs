@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use crate::control_plane::StrategyDeployment;
 use crate::domain::{OrderRequest, OrderSide};
 use crate::coordinator::{OrderIntent, OrderPriority};
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 mod deployments;
 mod duplicate_guard;

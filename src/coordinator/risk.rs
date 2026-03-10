@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::agent_runtime::AgentRiskParams;
 use crate::coordinator::{OrderIntent, OrderPriority};
-use crate::platform::Domain;
+use crate::domain::Domain;
 mod checks;
 mod config;
 mod exposure;
@@ -105,7 +105,7 @@ impl Default for RiskGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Domain;
+    use crate::domain::Domain;
     use crate::domain::Side;
 
     fn make_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {

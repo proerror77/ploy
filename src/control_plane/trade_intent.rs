@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domain::Side;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 /// Unified strategy output contract (agent -> coordinator).
 #[derive(Debug, Clone, Serialize, Deserialize)]

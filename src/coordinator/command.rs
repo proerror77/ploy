@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 
 use super::PlatformRiskState;
 use super::state::{AgentSnapshot, QueueStatsSnapshot};
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 /// Commands sent from the coordinator to individual agents
 #[derive(Debug)]

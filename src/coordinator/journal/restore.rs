@@ -334,7 +334,7 @@ mod tests {
         execution_error_is_failure, parse_persisted_domain, parse_persisted_side,
         string_metadata_from_json,
     };
-    use crate::platform::Domain;
+    use crate::domain::Domain;
 
     #[test]
     fn test_execution_error_is_failure_treats_blank_as_success() {

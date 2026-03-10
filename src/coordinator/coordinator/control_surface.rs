@@ -8,7 +8,7 @@ use crate::agent_runtime::AgentRiskParams;
 use crate::control_plane::StrategyDeployment;
 use crate::error::Result;
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::super::governance::IngressMode;

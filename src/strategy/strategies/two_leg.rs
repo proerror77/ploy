@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use crate::strategy::detectors::{DumpDetector, DumpDetectorConfig, DumpSignal};
 use crate::strategy::traits::{

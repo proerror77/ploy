@@ -8,7 +8,7 @@ use crate::api::{
     state::{AppState, SystemRunStatus},
     types::*,
 };
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 #[derive(Debug, Deserialize)]
 pub struct DomainControlRequest {

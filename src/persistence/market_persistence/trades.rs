@@ -1,6 +1,6 @@
 use super::{env_decimal, env_i64, env_u64, env_usize};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::momentum::EventMatcher;
 use chrono::Utc;
 use futures_util::StreamExt;

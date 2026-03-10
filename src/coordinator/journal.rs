@@ -8,7 +8,7 @@ use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::Result;
 use crate::coordinator::DrawdownSnapshot;
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::executor::ExecutionResult;
 
 #[path = "journal/restore.rs"]

@@ -33,7 +33,7 @@ use super::traits::{
 use crate::adapters::SpotPrice;
 use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
 
 mod entry;

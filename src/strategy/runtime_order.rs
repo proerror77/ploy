@@ -1,6 +1,6 @@
 use crate::domain::{OrderRequest, OrderSide};
 use crate::coordinator::{OrderIntent, OrderPriority};
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::traits::StrategyOrderIntent;
 
@@ -66,7 +66,7 @@ mod tests {
     use super::{order_intent_from_strategy_intent, order_request_from_intent};
     use crate::domain::{OrderSide, OrderType, TimeInForce};
     use crate::coordinator::OrderPriority;
-    use crate::platform::Domain;
+    use crate::domain::Domain;
     use crate::strategy::traits::StrategyOrderIntent;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 // ============================================================================
 // Strategy Trait

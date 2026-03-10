@@ -1,7 +1,7 @@
 use crate::ai_clients::{EventDetails, LiveGameMarket};
 use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::nba_comeback::core::ComebackOpportunity;
 use crate::strategy::nba_comeback::espn::LiveGame;
 use crate::strategy::traits::{

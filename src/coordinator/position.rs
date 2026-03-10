@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::domain::Side;
 
 mod transitions;

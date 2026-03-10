@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::{CryptoCapitalAllocator, CryptoHorizon, CryptoIntentDimensions, PendingCryptoIntent};
 

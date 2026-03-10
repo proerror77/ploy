@@ -53,7 +53,7 @@ pub use persistence::{
 };
 pub use coordinator::OrderIntent;
 pub use coordinator::RiskGate;
-pub use platform::Domain;
+pub use domain::Domain;
 pub use signing::Wallet;
 pub use supervisor::{
     AlertLevel, AlertManager, AlertManagerConfig, ComponentHealth, RecoveryAction,

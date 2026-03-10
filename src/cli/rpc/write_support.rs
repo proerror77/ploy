@@ -1,7 +1,7 @@
 use super::jsonrpc_err;
 use crate::config::AppConfig;
 use crate::error::{PloyError, Result};
-use crate::platform::Domain;
+use crate::domain::Domain;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

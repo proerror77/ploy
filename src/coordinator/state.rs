@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::agent_runtime::AgentStatus;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::{AggregatedPosition, CircuitBreakerEvent, PlatformRiskState, Position};
 use super::QueueStats;

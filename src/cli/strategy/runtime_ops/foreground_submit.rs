@@ -421,7 +421,7 @@ fn coordinator_ingress_http_client() -> Result<&'static reqwest::Client> {
 mod tests {
     use super::{build_coordinator_payload, external_priority_label};
     use crate::domain::{OrderType, Side, TimeInForce};
-    use crate::platform::Domain;
+    use crate::domain::Domain;
     use crate::strategy::traits::StrategyOrderIntent;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;

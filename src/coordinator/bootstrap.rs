@@ -24,7 +24,7 @@ use crate::persistence::{
     spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
 };
 use crate::data_plane::{BinanceDataPlaneHandle, DataPlaneConfig, PlatformDataPlane};
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;

@@ -32,7 +32,7 @@ use super::queue::OrderQueue;
 use super::risk::{RiskCheckResult, RiskGate};
 use super::state::{AgentSnapshot, GlobalState};
 use crate::coordinator::OrderIntent;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 mod control_surface;
 mod execution;

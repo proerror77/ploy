@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::super::governance::load_governance_policy;
 use super::Coordinator;

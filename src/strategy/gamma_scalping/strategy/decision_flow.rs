@@ -7,7 +7,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::domain::{OrderType, Side, TimeInForce};
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::traits::{
     StrategyAction, StrategyEvent, StrategyEventType, StrategyOrderIntent,
 };

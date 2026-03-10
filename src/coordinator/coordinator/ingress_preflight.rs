@@ -8,7 +8,7 @@ use crate::coordinator::position::PositionAggregator;
 use crate::coordinator::queue::OrderQueue;
 use crate::coordinator::OrderIntent;
 use crate::error::{PloyError, Result};
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::super::admission::{
     buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason,

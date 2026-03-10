@@ -3,7 +3,7 @@ use crate::ai_clients::grok::GrokClient;
 use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
 use crate::control_plane::{StrategyDeployment, StrategyEvaluationEvidence};
 use crate::coordinator::CoordinatorHandle;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;

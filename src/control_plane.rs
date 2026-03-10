@@ -16,7 +16,7 @@ pub use trade_intent::TradeIntent;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Domain;
+    use crate::domain::Domain;
 
     #[test]
     fn deployment_runtime_scope_matching() {

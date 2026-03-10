@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::agent_runtime::AgentStatus;
 use crate::coordinator::{AgentHealthResponse, AgentSnapshot, CoordinatorCommand};
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::StrategyManager;
 
 pub(super) async fn drive_managed_runtime_control_loop(

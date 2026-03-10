@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
 use crate::data_plane::DataPlaneFreshness;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 mod runtime;
 

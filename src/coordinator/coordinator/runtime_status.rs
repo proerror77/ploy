@@ -2,7 +2,7 @@ use chrono::Utc;
 use tracing::warn;
 
 use crate::agent_runtime::AgentStatus;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use super::super::command::{
     GovernanceAgentSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,
@@ -217,7 +217,7 @@ mod tests {
     use crate::adapters::PolymarketClient;
     use crate::agent_runtime::AgentStatus;
     use crate::config::ExecutionConfig;
-    use crate::platform::Domain;
+    use crate::domain::Domain;
     use crate::strategy::executor::OrderExecutor;
 
     use super::super::super::config::CoordinatorConfig;

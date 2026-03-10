@@ -2,7 +2,7 @@ use crate::adapters::PolymarketClient;
 use crate::config::EventEdgeAgentConfig;
 use crate::domain::{OrderStatus, OrderType, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::strategy::event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
 use crate::strategy::event_edge::EventEdgeScan;

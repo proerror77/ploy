@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::control_plane::TradeIntent;
 use crate::domain::{OrderType, Side, TimeInForce};
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 /// 訂單優先級
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

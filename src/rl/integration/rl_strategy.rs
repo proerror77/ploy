@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 use crate::rl::config::RLConfig;
 use crate::rl::core::{
     ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
