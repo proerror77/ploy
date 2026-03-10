@@ -62,10 +62,12 @@ async fn initialize_crypto_persistence_pipeline(
     let orderbook_levels = env_usize("PM_ORDERBOOK_LEVELS", orderbook_levels_default).clamp(1, 200);
     let orderbook_snapshot_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
         Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-        Err(_) => {
-            (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", orderbook_snapshot_secs_default).max(0) as u64)
-                .saturating_mul(1000)
-        }
+        Err(_) => (env_i64(
+            "PM_ORDERBOOK_SNAPSHOT_SECS",
+            orderbook_snapshot_secs_default,
+        )
+        .max(0) as u64)
+            .saturating_mul(1000),
     };
     let orderbook_require_hash_change = env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
 
@@ -276,7 +278,8 @@ async fn maybe_start_binance_lob_runtime(
     };
 
     let depth_stream = Arc::new(
-        crate::collector::BinanceDepthStream::new(depth_symbols).with_freshness(Arc::clone(freshness)),
+        crate::collector::BinanceDepthStream::new(depth_symbols)
+            .with_freshness(Arc::clone(freshness)),
     );
     if let Some(pool) = shared_pool {
         match ensure_binance_lob_ticks_table(pool).await {
@@ -343,10 +346,7 @@ async fn maybe_start_binance_lob_runtime(
     );
 }
 
-fn spawn_raw_websocket_tasks(
-    binance_ws: Arc<BinanceWebSocket>,
-    pm_ws: Arc<PolymarketWebSocket>,
-) {
+fn spawn_raw_websocket_tasks(binance_ws: Arc<BinanceWebSocket>, pm_ws: Arc<PolymarketWebSocket>) {
     let bws = binance_ws.clone();
     tokio::spawn(async move {
         if let Err(e) = bws.run().await {

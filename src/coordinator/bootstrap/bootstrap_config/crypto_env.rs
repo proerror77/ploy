@@ -27,9 +27,13 @@ pub(super) fn apply_crypto_runtime_env(cfg: &mut PlatformBootstrapConfig, app: &
             cfg.crypto.coins = coins;
         }
     }
-    cfg.crypto.sum_threshold = env_decimal("PLOY_CRYPTO_AGENT__SUM_THRESHOLD", cfg.crypto.sum_threshold);
-    cfg.crypto.default_shares =
-        env_u64("PLOY_CRYPTO_AGENT__DEFAULT_SHARES", cfg.crypto.default_shares).max(1);
+    cfg.crypto.sum_threshold =
+        env_decimal("PLOY_CRYPTO_AGENT__SUM_THRESHOLD", cfg.crypto.sum_threshold);
+    cfg.crypto.default_shares = env_u64(
+        "PLOY_CRYPTO_AGENT__DEFAULT_SHARES",
+        cfg.crypto.default_shares,
+    )
+    .max(1);
     if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__MIN_MOMENTUM_1S") {
         if let Ok(v) = raw.parse::<f64>() {
             if v.is_finite() && v >= 0.0 {
@@ -42,8 +46,11 @@ pub(super) fn apply_crypto_runtime_env(cfg: &mut PlatformBootstrapConfig, app: &
         cfg.crypto.min_window_move_pct,
     );
     cfg.crypto.min_edge = env_decimal("PLOY_CRYPTO_AGENT__MIN_EDGE", cfg.crypto.min_edge);
-    cfg.crypto.event_refresh_secs =
-        env_u64("PLOY_CRYPTO_AGENT__EVENT_REFRESH_SECS", cfg.crypto.event_refresh_secs).max(1);
+    cfg.crypto.event_refresh_secs = env_u64(
+        "PLOY_CRYPTO_AGENT__EVENT_REFRESH_SECS",
+        cfg.crypto.event_refresh_secs,
+    )
+    .max(1);
     cfg.crypto.min_time_remaining_secs = env_u64(
         "PLOY_CRYPTO_AGENT__MIN_TIME_REMAINING_SECS",
         cfg.crypto.min_time_remaining_secs,
@@ -62,8 +69,10 @@ pub(super) fn apply_crypto_runtime_env(cfg: &mut PlatformBootstrapConfig, app: &
             _ => {}
         }
     }
-    cfg.crypto.entry_cooldown_secs =
-        env_u64("PLOY_CRYPTO_AGENT__ENTRY_COOLDOWN_SECS", cfg.crypto.entry_cooldown_secs);
+    cfg.crypto.entry_cooldown_secs = env_u64(
+        "PLOY_CRYPTO_AGENT__ENTRY_COOLDOWN_SECS",
+        cfg.crypto.entry_cooldown_secs,
+    );
     if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__REQUIRE_MTF_AGREEMENT") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => cfg.crypto.require_mtf_agreement = true,
@@ -86,7 +95,8 @@ pub(super) fn apply_crypto_runtime_env(cfg: &mut PlatformBootstrapConfig, app: &
             _ => {}
         }
     }
-    cfg.crypto.min_hold_secs = env_u64("PLOY_CRYPTO_AGENT__MIN_HOLD_SECS", cfg.crypto.min_hold_secs);
+    cfg.crypto.min_hold_secs =
+        env_u64("PLOY_CRYPTO_AGENT__MIN_HOLD_SECS", cfg.crypto.min_hold_secs);
     if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENTRY_MODE") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "arb_only" | "arb" => cfg.crypto.entry_mode = CryptoEntryMode::ArbOnly,

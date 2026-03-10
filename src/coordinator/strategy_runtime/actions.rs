@@ -20,8 +20,8 @@ use super::observability::{
     split_arb_status_key,
 };
 use super::order_store::{
-    normalize_runtime_order_request, persist_runtime_order_insert,
-    persist_runtime_order_result, RuntimeOrderStore,
+    normalize_runtime_order_request, persist_runtime_order_insert, persist_runtime_order_result,
+    RuntimeOrderStore,
 };
 
 fn env_u64(name: &str, default: u64) -> u64 {

@@ -179,12 +179,8 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
                     )
                     .await
                 } else {
-                    PolymarketClient::new_authenticated(
-                        "https://clob.polymarket.com",
-                        wallet,
-                        true,
-                    )
-                    .await
+                    PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true)
+                        .await
                 };
                 match auth_result {
                     Ok(client) => {

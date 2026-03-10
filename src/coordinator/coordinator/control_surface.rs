@@ -77,7 +77,10 @@ impl CoordinatorHandle {
     }
 
     /// Report agent state (heartbeat + position/PnL snapshot)
-    pub async fn update_agent_state(&self, snapshot: super::super::state::AgentSnapshot) -> Result<()> {
+    pub async fn update_agent_state(
+        &self,
+        snapshot: super::super::state::AgentSnapshot,
+    ) -> Result<()> {
         self.state_tx.send(snapshot).await.map_err(|_| {
             crate::error::PloyError::Internal("coordinator state channel closed".into())
         })
@@ -403,7 +406,9 @@ impl Coordinator {
             }
             CoordinatorControlCommand::ResumeAgent(id) => {
                 self.governance.resume_agent(&id).await;
-                self.send_command(&id, CoordinatorCommand::Resume).await.ok();
+                self.send_command(&id, CoordinatorCommand::Resume)
+                    .await
+                    .ok();
             }
         }
     }

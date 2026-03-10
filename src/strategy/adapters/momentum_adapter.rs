@@ -421,7 +421,8 @@ impl MomentumStrategyAdapter {
         let _cex = self.cex_prices.get(symbol)?;
         let event = {
             let event_list = self.events.get(symbol)?;
-            self.pick_entry_event_in_window(event_list, timestamp)?.clone()
+            self.pick_entry_event_in_window(event_list, timestamp)?
+                .clone()
         };
 
         let Some(open_price) = event.open_price else {
@@ -516,16 +517,8 @@ impl MomentumStrategyAdapter {
         };
 
         let (market_slug, token_id, market_side) = match direction {
-            Direction::Up => (
-                symbol.to_string(),
-                event.up_token_id.clone(),
-                Side::Up,
-            ),
-            Direction::Down => (
-                symbol.to_string(),
-                event.down_token_id.clone(),
-                Side::Down,
-            ),
+            Direction::Up => (symbol.to_string(), event.up_token_id.clone(), Side::Up),
+            Direction::Down => (symbol.to_string(), event.down_token_id.clone(), Side::Down),
         };
 
         let shares = if let Some(fixed_amount_usd) = self.fixed_amount_usd {
@@ -538,12 +531,7 @@ impl MomentumStrategyAdapter {
             self.config.shares_per_trade
         };
 
-        let client_order_id = format!(
-            "{}_entry_{}_{}",
-            self.id,
-            symbol,
-            now.timestamp_millis()
-        );
+        let client_order_id = format!("{}_entry_{}_{}", self.id, symbol, now.timestamp_millis());
 
         self.pending_orders.insert(
             client_order_id.clone(),
