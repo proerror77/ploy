@@ -1,3 +1,30 @@
+# Coordinator Ingress Admission Cut (2026-03-10)
+
+## Goal
+Move the post-preflight coordinator ingress admission pipeline out of `src/coordinator/coordinator/ingress.rs` so submit-facing handle APIs stop sharing ownership with governance checks, allocator reservation, and queue-admission orchestration.
+
+## Tasks
+
+- [x] Add a dedicated coordinator submodule for runtime ingress admission orchestration.
+- [x] Move `handle_order_intent` and its governance/account-notional/reservation helpers out of `ingress.rs`.
+- [x] Reduce `ingress.rs` to the `CoordinatorHandle` submit-facing trade-intent bridge.
+- [x] Re-run compile plus focused ingress/governance regressions after the cut.
+
+## Review
+
+- [x] Confirm runtime preflight and rejection helpers remain in their existing owner modules.
+- [x] Confirm missing-deployment rejection, force-close domain gating, and pending/fill updates still pass.
+
+## Progress notes
+
+- 2026-03-10: Added [ingress_pipeline.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/ingress_pipeline.rs) to own runtime order-intent admission, governance policy checks, allocator reservation, and queue enqueue orchestration.
+- 2026-03-10: Reduced [ingress.rs](/Users/proerror/Documents/ploy/src/coordinator/coordinator/ingress.rs) to the `CoordinatorHandle::submit_trade_intent` bridge.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut-missing rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut-force rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-ingress-cut-updates rtk cargo test test_drain_and_execute_emits_pending_and_fill_updates --lib -- --exact --nocapture`
+
 # Coordinator Execution Settlement Cut (2026-03-10)
 
 ## Goal

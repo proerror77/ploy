@@ -38,6 +38,7 @@ mod control_surface;
 mod execution;
 mod execution_settlement;
 mod ingress;
+mod ingress_pipeline;
 mod ingress_preflight;
 mod ingress_rejections;
 mod order_updates;
