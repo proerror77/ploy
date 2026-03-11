@@ -1,3 +1,36 @@
+# Polymarket Sports Query Ownership Split (2026-03-11)
+
+## Goal
+Move the sports Gamma/CLOB query families out of `src/ai_clients/polymarket_sports.rs` so the root file keeps client construction, shared helpers, constants, and tests while sibling modules own mapping, market queries, and live-game queries.
+
+## File ownership
+
+- `src/ai_clients/polymarket_sports.rs`
+  - owner: client façade, constants, shared deserializers/helpers, and focused tests
+- `src/ai_clients/polymarket_sports/mapping.rs`
+  - owner: Gamma/CLOB response mapping helpers
+- `src/ai_clients/polymarket_sports/market_queries.rs`
+  - owner: market discovery, keyword filters, order books, and market-detail lookups
+- `src/ai_clients/polymarket_sports/live_games.rs`
+  - owner: series-event fetches, live-game lookups, and today/live detail hydration
+
+## Tasks
+
+- [x] Extract response mapping helpers into a sibling module.
+- [x] Extract market/query and order-book flows into a sibling module.
+- [x] Extract live-game/event-detail flows into a sibling module.
+- [x] Re-run compile plus focused sports-client regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [mapping.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/polymarket_sports/mapping.rs) for Gamma/CLOB mapping helpers.
+- 2026-03-11: Added [market_queries.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/polymarket_sports/market_queries.rs) for sports market discovery, keyword filters, order books, and market-detail lookup.
+- 2026-03-11: Added [live_games.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/polymarket_sports/live_games.rs) for series events, live-game lookup, and today/live detail hydration.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-query-split rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-query-split rtk cargo test test_sports_keyword_detection --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-query-split rtk cargo test test_event_details_null_bools --lib -- --exact --nocapture`
+
 # Momentum Best Edge Split (2026-03-11)
 
 ## Goal
