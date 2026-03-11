@@ -1,12 +1,8 @@
 use super::alerts::{
     InsertedTradeTickRow, TradeAlertConfig, TradeAlertState, maybe_emit_trade_alerts,
 };
-use super::{env_i64, env_u64, env_usize};
-use crate::domain::Domain;
 use crate::error::Result;
-use crate::strategy::momentum::EventMatcher;
 use chrono::Utc;
-use futures_util::StreamExt;
 use polymarket_client_sdk::data::Client as DataApiClient;
 use polymarket_client_sdk::data::types::MarketFilter as DataMarketFilter;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -307,125 +303,4 @@ pub(super) async fn collect_trades_for_market(
         let mut map = last_seen_by_market.write().await;
         map.insert(condition_id.to_string(), max_ts_seen);
     }
-}
-
-pub(crate) fn spawn_polymarket_trade_persistence(
-    event_matcher: Arc<EventMatcher>,
-    pool: PgPool,
-    agent_id: String,
-    coins: Vec<String>,
-    domain: Domain,
-) {
-    tokio::spawn(async move {
-        let agent_label = agent_id.clone();
-
-        if let Err(e) = ensure_clob_trade_ticks_table(&pool).await {
-            warn!(
-                agent = agent_label,
-                error = %e,
-                "failed to ensure clob_trade_ticks table; trade persistence disabled"
-            );
-            return;
-        }
-
-        let data_client = Arc::new(DataApiClient::default());
-        let poll_secs = env_u64("PM_TRADES_POLL_SECS", 10).max(1);
-        let page_limit = env_usize("PM_TRADES_PAGE_LIMIT", 200).clamp(1, 1000);
-        let max_pages = env_usize("PM_TRADES_MAX_PAGES", 10).clamp(1, 100);
-        let overlap_secs = env_i64("PM_TRADES_OVERLAP_SECS", 120).max(0);
-        let max_concurrency = env_usize("PM_TRADES_CONCURRENCY", 4).clamp(1, 32);
-
-        let mut alert_cfg = TradeAlertConfig::from_env();
-        let mut alert_state: Option<Arc<tokio::sync::Mutex<TradeAlertState>>> =
-            if alert_cfg.burst_enabled() {
-                Some(Arc::new(
-                    tokio::sync::Mutex::new(TradeAlertState::default()),
-                ))
-            } else {
-                None
-            };
-
-        if alert_cfg.enabled() {
-            if let Err(e) = ensure_clob_trade_alerts_table(&pool).await {
-                warn!(
-                    agent = agent_label,
-                    error = %e,
-                    "failed to ensure clob_trade_alerts table; trade alerting disabled"
-                );
-                alert_cfg = TradeAlertConfig::disabled();
-                alert_state = None;
-            }
-        }
-
-        let last_seen_by_market: Arc<tokio::sync::RwLock<HashMap<String, i64>>> =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-
-        let end_grace_secs = env_i64("PM_TRADES_END_GRACE_SECS", 600).max(0);
-        let min_remaining_for_collection = env_i64("PM_TRADES_MIN_REMAINING_SECS", 0)
-            .max(-86400)
-            .min(86400);
-        let mut tracked_markets: HashMap<String, i64> = HashMap::new();
-
-        let mut tick = tokio::time::interval(Duration::from_secs(poll_secs));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tick.tick().await;
-            let now_unix = Utc::now().timestamp();
-            for coin in &coins {
-                let symbol = format!("{}USDT", coin.to_uppercase());
-                for ev in event_matcher
-                    .get_events_with_min_remaining(&symbol, min_remaining_for_collection)
-                    .await
-                {
-                    let cid = ev.condition_id.trim();
-                    if cid.is_empty() {
-                        continue;
-                    }
-                    let expires_at = ev.end_time.timestamp().saturating_add(end_grace_secs);
-                    tracked_markets.insert(cid.to_string(), expires_at);
-                }
-            }
-
-            tracked_markets.retain(|_, expires_at| *expires_at >= now_unix);
-            let mut markets: Vec<String> = tracked_markets.keys().cloned().collect();
-            markets.sort();
-            if markets.is_empty() {
-                continue;
-            }
-
-            let domain_str = domain.to_string();
-            let pool_ref = pool.clone();
-            let data_client_ref = data_client.clone();
-            let last_seen = last_seen_by_market.clone();
-            let alert_cfg_ref = alert_cfg.clone();
-            let alert_state_ref = alert_state.clone();
-
-            futures_util::stream::iter(markets)
-                .for_each_concurrent(max_concurrency, |condition_id| {
-                    let pool = pool_ref.clone();
-                    let data_client = data_client_ref.clone();
-                    let domain = domain_str.clone();
-                    let last_seen = last_seen.clone();
-                    let alert_cfg = alert_cfg_ref.clone();
-                    let alert_state = alert_state_ref.clone();
-                    async move {
-                        collect_trades_for_market(
-                            data_client.as_ref(),
-                            &pool,
-                            &condition_id,
-                            &domain,
-                            page_limit,
-                            max_pages,
-                            overlap_secs,
-                            &last_seen,
-                            alert_cfg,
-                            alert_state,
-                        )
-                        .await;
-                    }
-                })
-                .await;
-        }
-    });
 }
