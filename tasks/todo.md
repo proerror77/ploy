@@ -1024,6 +1024,38 @@ Shrink `src/strategy/claimer/relayer.rs` again by moving the SDK path, legacy HT
   - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-shared rtk cargo check --lib --message-format=short`
 - 2026-03-11: `cargo test --lib -- --list` still did not expose relayer-focused unit tests in the current lib harness, so this slice is compile-verified only.
 
+# Runtime Schema Repairs Wave 1 (2026-03-11)
+
+## Goal
+Break `src/persistence/runtime_schema/repairs.rs` into domain-focused sibling modules so trade-state repairs, runtime-event repairs, and idempotency/freshness repairs stop living in one monolithic DDL owner.
+
+## File ownership
+
+- `src/persistence/runtime_schema/repairs.rs`
+  - owner: thin façade that assembles the startup repair DDL
+- `src/persistence/runtime_schema/repairs/trade_state_repairs.rs`
+  - owner: orders/positions/reconciliation/nonce/fill repair fragments
+- `src/persistence/runtime_schema/repairs/runtime_event_repairs.rs`
+  - owner: balance snapshot / heartbeat / system event repair fragments
+- `src/persistence/runtime_schema/repairs/idempotency_repairs.rs`
+  - owner: order idempotency / quote freshness repair fragments
+
+## Tasks
+
+- [x] Split trade-state repair SQL into a sibling module.
+- [x] Split runtime-event repair SQL into a sibling module.
+- [x] Split idempotency/freshness repair SQL into a sibling module.
+- [x] Re-run compile plus focused persistence regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [trade_state_repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs/trade_state_repairs.rs), [runtime_event_repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs/runtime_event_repairs.rs), and [idempotency_repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs/idempotency_repairs.rs).
+- 2026-03-11: Reduced [repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs.rs) to a façade that assembles the same startup `DO $$ ... $$` repair block.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-shared rtk cargo check --lib --message-format=short`
+  - `rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
+  - `rtk cargo test ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
+
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
 ## Goal
