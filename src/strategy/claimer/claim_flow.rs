@@ -304,10 +304,7 @@ pub(super) async fn claim_position(
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(rpc_url);
 
     let conditional_tokens_addr: Address = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
-        crate::error::PloyError::AddressParsing(format!(
-            "Invalid ConditionalTokens address: {}",
-            e
-        ))
+        crate::error::PloyError::AddressParsing(format!("Invalid ConditionalTokens address: {}", e))
     })?;
     let collateral_addr: Address = USDC_E_POLYGON.parse().map_err(|e| {
         crate::error::PloyError::AddressParsing(format!("Invalid USDC.e address: {}", e))

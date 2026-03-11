@@ -1,6 +1,6 @@
 use super::trades::{
-    TradeAlertConfig, TradeAlertState, collect_trades_for_market, ensure_clob_trade_alerts_table,
-    ensure_clob_trade_ticks_table,
+    collect_trades_for_market, ensure_clob_trade_alerts_table, ensure_clob_trade_ticks_table,
+    TradeAlertConfig, TradeAlertState,
 };
 use super::{env_i64, env_u64, env_usize};
 use crate::platform::Domain;

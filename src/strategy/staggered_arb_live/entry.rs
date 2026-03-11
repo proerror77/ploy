@@ -212,10 +212,8 @@ pub(super) fn try_entry_for_window(
         if bc.max_fair_value_distance < 0.5
             && (g.fair_value - 0.5).abs() > bc.max_fair_value_distance
         {
-            adapter.bump_entry_reject_for_symbol(
-                symbol,
-                "greeks_fair_value_outside_long_gamma_band",
-            );
+            adapter
+                .bump_entry_reject_for_symbol(symbol, "greeks_fair_value_outside_long_gamma_band");
             return None;
         }
     }

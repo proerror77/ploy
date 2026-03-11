@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, warn};
 
 /// Binance WebSocket URL for spot market streams

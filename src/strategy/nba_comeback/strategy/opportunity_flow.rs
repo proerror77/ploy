@@ -12,8 +12,8 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use super::{
-    NBA_COMEBACK_PRIORITY, NBA_COMEBACK_STRATEGY_NAME, NbaComebackMarketRegistration,
-    NbaComebackStrategy, PendingNbaComebackOrder,
+    NbaComebackMarketRegistration, NbaComebackStrategy, PendingNbaComebackOrder,
+    NBA_COMEBACK_PRIORITY, NBA_COMEBACK_STRATEGY_NAME,
 };
 
 impl NbaComebackMarketRegistration {

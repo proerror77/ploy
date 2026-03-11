@@ -35,7 +35,8 @@ pub(super) fn build_managed_feed_manager(
     pm_ws_url: &str,
 ) -> DataFeedManager {
     if let Some(data_plane) = data_plane {
-        return DataFeedManager::from_data_plane(data_plane, manager).with_pm_client(pm_client.clone());
+        return DataFeedManager::from_data_plane(data_plane, manager)
+            .with_pm_client(pm_client.clone());
     }
 
     let mut binance_spot_symbols: Vec<String> = Vec::new();

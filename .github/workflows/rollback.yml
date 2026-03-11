@@ -25,6 +25,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
+
 jobs:
   rollback:
     name: Execute Rollback
@@ -39,45 +42,63 @@ jobs:
             exit 1
           fi
 
-      - name: Roll back service on EC2
+      - name: Roll back service on Aliyun ECS
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ secrets.ALIYUN_ECS_HOST }}
+          username: root
+          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
           script_stop: true
+          envs: DEPLOY_ROOT
           script: |
-            set -e
+            set -euo pipefail
             MODE="${{ github.event.inputs.mode }}"
             RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+            DEPLOY_ROOT="${DEPLOY_ROOT:-/root/ploy}"
 
-            sudo systemctl stop ploy || true
+            SUDO=""
+            if [ "$(id -u)" -ne 0 ]; then
+              SUDO="sudo"
+            fi
+
+            $SUDO systemctl stop ploy || true
 
             if [ "$MODE" = "specific-tag" ]; then
-              target="/opt/ploy/releases/${RELEASE_TAG}/ploy"
+              target="${DEPLOY_ROOT}/releases/${RELEASE_TAG}/ploy"
               if [ ! -f "$target" ]; then
                 echo "Release binary not found: $target"
                 exit 1
               fi
-              sudo cp "$target" /opt/ploy/bin/ploy
-              echo "$RELEASE_TAG" | sudo tee /opt/ploy/bin/.current_release > /dev/null
+              $SUDO cp "$target" "${DEPLOY_ROOT}/bin/ploy"
+              echo "$RELEASE_TAG" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_release" > /dev/null
             else
-              latest_backup="$(ls -1t /opt/ploy/bin/ploy.bak.* 2>/dev/null | head -1 || true)"
+              latest_backup="$(ls -1t "${DEPLOY_ROOT}/bin/ploy.bak."* 2>/dev/null | head -1 || true)"
               if [ -n "$latest_backup" ]; then
-                sudo cp "$latest_backup" /opt/ploy/bin/ploy
-              elif [ -f /opt/ploy/bin/ploy.bak ]; then
-                sudo cp /opt/ploy/bin/ploy.bak /opt/ploy/bin/ploy
+                $SUDO cp "$latest_backup" "${DEPLOY_ROOT}/bin/ploy"
+              elif [ -f "${DEPLOY_ROOT}/bin/ploy.bak" ]; then
+                $SUDO cp "${DEPLOY_ROOT}/bin/ploy.bak" "${DEPLOY_ROOT}/bin/ploy"
               else
-                echo "No backup binary found in /opt/ploy/bin"
+                echo "No backup binary found in ${DEPLOY_ROOT}/bin"
                 exit 1
               fi
             fi
 
-            sudo chmod +x /opt/ploy/bin/ploy
-            sudo chown ploy:ploy /opt/ploy/bin/ploy
-            sudo systemctl start ploy
-            sleep 5
-            sudo systemctl is-active --quiet ploy
+            $SUDO chmod +x "${DEPLOY_ROOT}/bin/ploy"
+            $SUDO systemctl start ploy
+
+            # Health check: 20 attempts, 2s delay (matches release-aliyun.yml)
+            for i in $(seq 1 20); do
+              if $SUDO systemctl is-active --quiet ploy; then
+                echo "ploy.service is active after ${i} checks."
+                exit 0
+              fi
+              sleep 2
+            done
+
+            echo "ploy.service failed to become active after 40s."
+            $SUDO systemctl status ploy --no-pager -l || true
+            $SUDO journalctl -u ploy -n 80 --no-pager -l || true
+            exit 1
 
       - name: Rollback summary
         run: |

@@ -418,7 +418,10 @@ jobs:
                 unit_diagnostics "$unit"
                 return 1
               fi
-              wait_for_unit_active "$unit" 20 2
+              if ! wait_for_unit_active "$unit" 20 2; then
+                echo "${unit}.service failed health check after ${action}."
+                return 1
+              fi
               $SUDO systemctl show "$unit" -p Restart -p RestartUSec -p MemoryHigh -p MemoryMax -p OOMPolicy
               echo "${unit}.service ${action}ed successfully."
             }

@@ -161,11 +161,22 @@ fn execution_error_is_failure(error: Option<&str>) -> bool {
         .is_some()
 }
 
+fn recovery_window_hours() -> i64 {
+    std::env::var("PLOY_RECOVERY_WINDOW_HOURS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(24)
+        .max(1)
+}
+
 async fn load_execution_log_fills(
     pool: &PgPool,
     account_id: &str,
     dry_run: bool,
 ) -> Result<Vec<PersistedExecutionFill>> {
+    let window_hours = recovery_window_hours();
+    let cutoff = Utc::now() - chrono::Duration::hours(window_hours);
+
     let rows = sqlx::query_as::<
         _,
         (
@@ -201,11 +212,13 @@ async fn load_execution_log_fills(
         WHERE account_id = $1
           AND dry_run = $2
           AND filled_shares > 0
+          AND executed_at > $3
         ORDER BY executed_at ASC, id ASC
         "#,
     )
     .bind(account_id)
     .bind(dry_run)
+    .bind(cutoff)
     .fetch_all(pool)
     .await
     .map_err(|error| {

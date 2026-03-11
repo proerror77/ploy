@@ -1,5 +1,5 @@
-use chrono::Utc;
 use crate::domain::OrderStatus;
+use chrono::Utc;
 use rust_decimal::Decimal;
 use tracing::{debug, error, info, warn};
 
@@ -164,12 +164,8 @@ impl Coordinator {
                             Some(queue_delay_ms),
                         )
                         .await;
-                    self.emit_rejected_intent_update(
-                        &intent,
-                        OrderStatus::Failed,
-                        e.to_string(),
-                    )
-                    .await;
+                    self.emit_rejected_intent_update(&intent, OrderStatus::Failed, e.to_string())
+                        .await;
 
                     self.risk_gate
                         .record_failure(&agent_id, &e.to_string())

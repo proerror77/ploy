@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use crate::agent_runtime::AgentStatus;
 use crate::platform::Domain;
 
-use super::{AggregatedPosition, CircuitBreakerEvent, PlatformRiskState, Position};
 use super::QueueStats;
+use super::{AggregatedPosition, CircuitBreakerEvent, PlatformRiskState, Position};
 
 /// Per-agent snapshot visible to the coordinator and TUI
 #[derive(Debug, Clone, Serialize, Deserialize)]

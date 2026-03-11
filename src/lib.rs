@@ -45,12 +45,12 @@ pub use coordination::{
     CircuitState, ComponentState, GracefulShutdown, LifecycleEvent, LifecycleManager,
     ShutdownSignal, TradingCircuitBreaker, TradingCircuitBreakerConfig,
 };
+pub use coordinator::RiskGate;
 pub use error::{PloyError, Result};
 pub use persistence::{
     CheckpointConfig, CheckpointService, Checkpointable, DLQHandler, DLQProcessor,
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
 };
-pub use coordinator::RiskGate;
 pub use platform::{Domain, OrderIntent};
 pub use signing::Wallet;
 pub use supervisor::{

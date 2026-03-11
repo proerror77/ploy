@@ -96,7 +96,7 @@ pub(super) async fn run_platform_runtime(
             runtime_data_plane,
             shared_pool.clone(),
             &account_id,
-        );
+        ).await;
     }
 
     spawn_openclaw_governance_agent(
@@ -105,7 +105,7 @@ pub(super) async fn run_platform_runtime(
         &mut coordinator,
         &handle,
         &mut agent_handles,
-    );
+    ).await;
 
     #[cfg(feature = "claimer_daemon")]
     if !config.dry_run && pm_client.is_some() {

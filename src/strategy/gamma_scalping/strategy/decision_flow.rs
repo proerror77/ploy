@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use tracing::{debug, info};
 use uuid::Uuid;
 

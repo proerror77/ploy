@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 
-use super::PlatformRiskState;
 use super::state::{AgentSnapshot, QueueStatsSnapshot};
+use super::PlatformRiskState;
 use crate::platform::Domain;
 
 /// Commands sent from the coordinator to individual agents

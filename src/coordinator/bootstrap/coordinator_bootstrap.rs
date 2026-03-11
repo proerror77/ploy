@@ -136,6 +136,34 @@ pub(super) async fn initialize_coordinator_runtime(
                 );
             }
         }
+        if let Err(e) = ensure_coordinator_ingress_state_table(pool).await {
+            if require_startup_schema {
+                return Err(crate::error::PloyError::Internal(format!(
+                    "failed to ensure coordinator_ingress_state table: {}",
+                    e
+                )));
+            }
+            warn!(
+                error = %e,
+                "failed to ensure coordinator_ingress_state table; ingress state persistence disabled"
+            );
+        } else {
+            if let Err(e) = coordinator.load_persisted_ingress_state().await {
+                if require_startup_schema {
+                    return Err(crate::error::PloyError::Internal(format!(
+                        "failed to restore coordinator ingress state: {}",
+                        e
+                    )));
+                }
+                warn!(
+                    error = %e,
+                    "failed to restore coordinator ingress state from DB"
+                );
+            }
+            coordinator
+                .set_ingress_persist_pool(pool.clone())
+                .await;
+        }
         if let Err(e) = ensure_agent_order_executions_table(pool).await {
             if require_startup_schema {
                 return Err(crate::error::PloyError::Internal(format!(

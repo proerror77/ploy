@@ -67,6 +67,7 @@ pub(super) async fn initialize_startup_context(
         account_id = %account_id,
         crypto = config.enable_crypto,
         crypto_momentum = config.enable_crypto_momentum,
+        crypto_pm_5m_directional = config.enable_crypto_pm_5m_directional,
         crypto_pattern_memory = config.enable_crypto_pattern_memory,
         crypto_split_arb = config.enable_crypto_split_arb,
         crypto_lob_ml = config.managed_crypto.enable_lob_ml,

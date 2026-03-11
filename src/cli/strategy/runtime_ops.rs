@@ -494,6 +494,9 @@ fn create_default_config(name: &str, path: &PathBuf) -> Result<()> {
         "momentum" => include_str!("../../../config/strategies/momentum_default.toml"),
         "split_arb" => include_str!("../../../config/strategies/split_arb_default.toml"),
         "pattern_memory" => include_str!("../../../config/strategies/pattern_memory_default.toml"),
+        "pm_5m_directional" => {
+            include_str!("../../../config/strategies/pm_5m_directional_default.toml")
+        }
         _ => return Ok(()),
     };
 

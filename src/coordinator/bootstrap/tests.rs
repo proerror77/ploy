@@ -6,6 +6,7 @@ use crate::coordinator::bootstrap::strategy_deployments::apply_strategy_deployme
 use crate::strategy::crypto_lob_ml::{
     CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
 };
+use crate::strategy::runtime_specs::runtime_configs::build_pm_5m_directional_runtime_config;
 use crate::strategy::CryptoTradingConfig;
 use chrono::Utc;
 use rust_decimal_macros::dec;
@@ -182,6 +183,65 @@ fn apply_strategy_deployments_maps_gamma_scalping_alias_to_split_arb() {
     assert!(cfg.enable_crypto);
     assert!(cfg.enable_crypto_split_arb);
     assert!(!cfg.enable_crypto_momentum);
+}
+
+#[test]
+fn apply_strategy_deployments_maps_pm_5m_directional_to_dedicated_runtime() {
+    let mut cfg = PlatformBootstrapConfig::default();
+    let deployments = vec![crypto_deployment("pm_5m_directional", true)];
+
+    apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+    assert!(cfg.enable_crypto);
+    assert!(cfg.enable_crypto_pm_5m_directional);
+    assert!(!cfg.enable_crypto_momentum);
+}
+
+#[test]
+fn collect_managed_strategy_runtime_plans_includes_pm_5m_directional() {
+    let mut cfg = PlatformBootstrapConfig::default();
+    cfg.enable_crypto = true;
+    cfg.enable_crypto_pm_5m_directional = true;
+    cfg.crypto.coins = vec!["BTC".to_string(), "ETH".to_string()];
+
+    let app_config = AppConfig::default_config(true, "btc-up-down");
+    let plans = collect_managed_strategy_runtime_plans(
+        &cfg,
+        &app_config,
+        &strategy_deployments::RuntimeCryptoStrategyTargets::default(),
+    );
+
+    let pm_directional = plans
+        .iter()
+        .find(|plan| plan.spawn.strategy_label == "pm_5m_directional")
+        .expect("pm_5m_directional plan");
+    assert_eq!(
+        pm_directional.data_plane,
+        ManagedRuntimeDataPlaneKind::ManagedCrypto
+    );
+}
+
+#[test]
+fn build_pm_5m_directional_runtime_config_renders_symbol_filters() {
+    let rendered =
+        build_pm_5m_directional_runtime_config(&["ETH".to_string(), "BTCUSDT".to_string()])
+            .expect("render pm_5m_directional config");
+    let value: toml::Value =
+        toml::from_str(&rendered).expect("valid pm_5m_directional runtime toml");
+
+    assert_eq!(
+        value["strategy"]["name"].as_str(),
+        Some("pm_5m_directional")
+    );
+    assert_eq!(
+        value["pm_5m_directional"]["symbols"]
+            .as_array()
+            .expect("symbols array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["BTCUSDT", "ETHUSDT"]
+    );
 }
 
 #[test]

@@ -370,6 +370,35 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# PM 5m Directional Deployment And Backtest Integration (2026-03-10)
+
+## Goal
+Wire the standalone `pm_5m_directional` strategy into the managed runtime deployment path and add a replay backtest path that reuses the canonical strategy logic plus existing backtest persistence.
+
+## Tasks
+
+- [x] Add focused failing tests for deployment matrix classification, runtime config rendering, and managed runtime plan generation.
+- [x] Wire `pm_5m_directional` into managed runtime bootstrap/spec generation without touching existing strategy behavior.
+- [x] Add focused failing tests for `pm_5m_directional` backtest replay and CLI strategy selection.
+- [x] Implement a thin replay backtest engine plus recorder/save support for `pm_5m_directional`.
+- [x] Re-run compile and focused deployment/backtest validations after both paths are wired.
+
+## Review
+
+- [x] Confirm deployment-scoped crypto runtimes can spawn `pm_5m_directional` independently of `momentum`.
+- [x] Confirm backtest replay can emit trades/signals and save a `pm_5m_directional` run through existing backtest persistence.
+
+## Progress notes
+
+- 2026-03-10: Added dedicated deployment-matrix classification and bootstrap/runtime flags for `pm_5m_directional` so deployment-scoped crypto runtimes no longer alias this strategy onto `momentum`.
+- 2026-03-10: Added managed runtime TOML rendering for [pm_5m_directional_default.toml](/Users/proerror/Documents/ploy/config/strategies/pm_5m_directional_default.toml), including deployment-scoped symbol normalization and external config override support via `PLOY_PM_5M_DIRECTIONAL_CONFIG`.
+- 2026-03-10: Added [pm_5m_directional_backtest.rs](/Users/proerror/Documents/ploy/src/strategy/pm_5m_directional_backtest.rs), a thin replay runner that reuses the canonical strategy, simulates IOC fills off historical PM quote/LOB data, and settles positions to existing `BacktestRecorder`/`PgBacktestRecorder` persistence.
+- 2026-03-10: Wired the CLI backtest entrypoint in [backtest_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops.rs) to accept `pm_5m_directional` plus dashed/compact aliases and save runs under the `pm_5m_directional` strategy id.
+- 2026-03-10: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-directional-3 rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/pm5-directional-3 rtk cargo test pm_5m_directional --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-directional-3 rtk cargo test normalize_backtest_strategy_name_accepts_pm_5m_directional_aliases --lib -- --exact --nocapture`
+
 # Coordinator Queue Ownership Cut (2026-03-10)
 
 ## Goal
@@ -556,7 +585,7 @@ Add a brand-new standalone crypto strategy named `pm_5m_directional` that implem
 - [x] Add failing tests for factory wiring and core entry gating behavior.
 - [x] Implement `pm_5m_directional` as an independent strategy module using Binance spot + Binance L2 + Polymarket event/quote feeds.
 - [x] Implement the PRD core gates for V1: z-score probability, signed short-horizon flow, OBI confirmation, fee-adjusted edge, no-trade zone, spread/size checks, and hold-to-settlement lifecycle.
-- [ ] Run focused validation for the new strategy path.
+- [x] Run focused validation for the new strategy path.
 
 ## Review
 
@@ -575,7 +604,10 @@ Add a brand-new standalone crypto strategy named `pm_5m_directional` that implem
 
 - 2026-03-10: Added standalone [pm_5m_directional.rs](/Users/proerror/Documents/ploy/src/strategy/pm_5m_directional.rs), registered it in [manager.rs](/Users/proerror/Documents/ploy/src/strategy/manager.rs), exposed it from [mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs), and added the default template [pm_5m_directional_default.toml](/Users/proerror/Documents/ploy/config/strategies/pm_5m_directional_default.toml).
 - 2026-03-10: Implemented the V1 directional core gates plus IOC submit intents, terminal partial-fill handling, hold-to-settlement state retention, and unit coverage for factory wiring, entry gating, no-trade-zone blocking, partial fills, and unrealized PnL reporting.
-- 2026-03-10: Focused validation is currently blocked by unrelated existing compile errors in [crypto.rs](/Users/proerror/Documents/ploy/src/coordinator/capital/crypto.rs), [capital.rs](/Users/proerror/Documents/ploy/src/coordinator/capital.rs), and [deployments.rs](/Users/proerror/Documents/ploy/src/coordinator/admission/deployments.rs); the new strategy path itself has not produced a strategy-local compiler error yet.
+- 2026-03-10: Focused validation passed after the concurrent `coordinator/capital` edits settled:
+  - `CARGO_TARGET_DIR=/tmp/pm5-directional-2 rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/pm5-directional-2 rtk cargo test no_trade_zone_blocks_weak_mid_price_entry --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-directional-2 rtk cargo test pm_5m_directional --lib -- --nocapture`
 
 - 2026-03-09: Removed the standalone `EventEdgeConfig` + `run_event_edge(...)` surface from [event_edge/mod.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/mod.rs) and stopped re-exporting it from [strategy/mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
 - 2026-03-09: Deleted [runner.rs](/Users/proerror/Documents/ploy/src/strategy/sports/runner.rs), shrank [sports/mod.rs](/Users/proerror/Documents/ploy/src/strategy/sports/mod.rs) to discovery-only exports, and changed [sports.rs](/Users/proerror/Documents/ploy/src/main_commands/sports.rs) to return an explicit retirement error instead of running a standalone sports split-arb loop.

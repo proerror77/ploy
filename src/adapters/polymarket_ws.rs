@@ -1,11 +1,11 @@
 use crate::domain::{Quote, Side};
 use crate::services::HealthState;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 use tracing::debug;
 
 mod connection;

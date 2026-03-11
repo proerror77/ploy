@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-use super::{CryptoRlPolicyStrategy, core};
+use super::{core, CryptoRlPolicyStrategy};
 use crate::error::Result;
 use crate::strategy::crypto::series_info;
 use crate::strategy::traits::{MarketUpdate, StrategyEvent, StrategyEventType};

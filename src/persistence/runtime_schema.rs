@@ -9,8 +9,8 @@ pub(crate) use analytics::{
 pub(crate) use control_tables::{
     ensure_accounts_table, ensure_agent_order_executions_table,
     ensure_coordinator_governance_policies_table,
-    ensure_coordinator_governance_policy_history_table, ensure_risk_runtime_state_table,
-    upsert_account_from_config,
+    ensure_coordinator_governance_policy_history_table, ensure_coordinator_ingress_state_table,
+    ensure_risk_runtime_state_table, upsert_account_from_config,
 };
 pub(crate) use market_data::{
     ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,

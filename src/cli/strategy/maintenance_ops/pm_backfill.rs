@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use super::super::settlement_ops::is_market_resolved;
+use anyhow::{Context, Result};
 
 use crate::adapters::{PolymarketClient, PostgresStore};
 use chrono::{DateTime, Utc};
@@ -588,7 +588,9 @@ pub(crate) async fn backfill_pm_token_settlements(
                 .or_insert_with(|| slug.clone());
         }
         if let Some(token_id) = no {
-            token_to_slug.entry(token_id).or_insert_with(|| slug.clone());
+            token_to_slug
+                .entry(token_id)
+                .or_insert_with(|| slug.clone());
         }
     }
 

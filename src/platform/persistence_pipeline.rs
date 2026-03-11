@@ -18,8 +18,8 @@ use sqlx::PgPool;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
-use crate::platform::DataPlaneFreshness;
 use crate::platform::types::Domain;
+use crate::platform::DataPlaneFreshness;
 
 mod runtime;
 

@@ -218,11 +218,11 @@ impl CoordinatorHandle {
     }
 
     /// Whether an agent_id is registered/authorized for order ingress.
-    pub fn is_agent_authorized(&self, agent_id: &str) -> bool {
+    pub async fn is_agent_authorized(&self, agent_id: &str) -> bool {
         self.authorized_agents
             .read()
-            .map(|agents| agents.contains(agent_id))
-            .unwrap_or(false)
+            .await
+            .contains(agent_id)
     }
 }
 
@@ -232,9 +232,7 @@ impl Coordinator {
         if id.is_empty() {
             return;
         }
-        if let Ok(mut authorized) = self.authorized_agents.write() {
-            authorized.insert(id.to_string());
-        }
+        self.authorized_agents.write().await.insert(id.to_string());
         self.risk_gate.register_agent(id, params).await;
         info!(agent_id = %id, "external ingress agent authorized");
     }

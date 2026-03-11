@@ -1,11 +1,11 @@
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
+    Json,
 };
 use chrono::Utc;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::warn;
@@ -18,8 +18,8 @@ use crate::config::AppConfig;
 use crate::domain::market::Side;
 
 use super::{
-    SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition, SidecarRiskState,
-    table_has_account_scope,
+    table_has_account_scope, SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition,
+    SidecarRiskState,
 };
 
 /// GET /api/sidecar/positions

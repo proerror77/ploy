@@ -20,6 +20,7 @@ pub(super) async fn initialize_crypto_runtime_preflight(
     let use_data_plane = env_bool("PLOY_DATA_PLANE", false);
     let crypto_cfg = config.crypto.clone();
     let momentum_enabled = config.enable_crypto_momentum;
+    let pm_5m_directional_enabled = config.enable_crypto_pm_5m_directional;
     let pattern_memory_enabled = config.enable_crypto_pattern_memory;
     let split_arb_enabled = config.enable_crypto_split_arb;
     let lob_cfg = config.managed_crypto.lob_ml.clone();
@@ -48,6 +49,32 @@ pub(super) async fn initialize_crypto_runtime_preflight(
         for coin in &crypto_cfg.coins {
             if !all_coins.contains(coin) {
                 all_coins.push(coin.clone());
+            }
+        }
+    }
+    if pm_5m_directional_enabled {
+        let mut coins: Vec<String> = if runtime_crypto_targets.pm_5m_directional_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .pm_5m_directional_coins
+                .iter()
+                .cloned()
+                .collect()
+        };
+        coins.sort();
+        coins.dedup();
+        let symbols: Vec<String> = coins.iter().map(|c| format!("{}USDT", c)).collect();
+        planner_requirements.push((
+            crate::platform::ConsumerId::from("pm-5m-directional"),
+            Domain::Crypto,
+            vec![DataFeed::BinanceSpot {
+                symbols: symbols.clone(),
+            }],
+        ));
+        for coin in coins {
+            if !all_coins.contains(&coin) {
+                all_coins.push(coin);
             }
         }
     }

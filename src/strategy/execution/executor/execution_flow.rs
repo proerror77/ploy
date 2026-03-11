@@ -212,7 +212,10 @@ impl OrderExecutor {
     }
 
     /// Execute order with retry logic (internal method)
-    pub(super) async fn execute_with_retry(&self, request: &OrderRequest) -> Result<ExecutionResult> {
+    pub(super) async fn execute_with_retry(
+        &self,
+        request: &OrderRequest,
+    ) -> Result<ExecutionResult> {
         let mut attempts = 0;
 
         loop {
@@ -310,7 +313,12 @@ impl OrderExecutor {
             let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(100));
             let confirm_timeout = Duration::from_millis(self.config.confirm_fill_timeout_ms);
 
-            match timeout(confirm_timeout, self.wait_for_fill(&order_id, poll_interval)).await {
+            match timeout(
+                confirm_timeout,
+                self.wait_for_fill(&order_id, poll_interval),
+            )
+            .await
+            {
                 Ok(Ok(mut result)) => {
                     result.elapsed_ms = start.elapsed().as_millis() as u64;
                     return Ok(result);

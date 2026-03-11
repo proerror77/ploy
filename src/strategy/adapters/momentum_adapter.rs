@@ -362,11 +362,9 @@ directional_entry_threshold = 0.11
         );
 
         assert!(adapter.get_entry_price("BTCUSDT", Direction::Up).is_none());
-        assert!(
-            adapter
-                .generate_entry("BTCUSDT", Direction::Up, dec!(0.42))
-                .is_none()
-        );
+        assert!(adapter
+            .generate_entry("BTCUSDT", Direction::Up, dec!(0.42))
+            .is_none());
     }
 
     #[test]
@@ -531,11 +529,9 @@ stop_loss = 12
         let position = adapter.positions.get("token-1").expect("position inserted");
         assert_eq!(position.shares, 7);
         assert_eq!(position.entry_price, dec!(0.45));
-        assert!(
-            actions
-                .iter()
-                .any(|action| matches!(action, StrategyAction::LogEvent { .. }))
-        );
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, StrategyAction::LogEvent { .. })));
     }
 
     #[tokio::test]

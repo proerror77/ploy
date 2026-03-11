@@ -104,8 +104,8 @@ impl Default for RiskGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Domain;
     use crate::domain::Side;
+    use crate::platform::Domain;
 
     fn make_intent(agent: &str, shares: u64, price: Decimal) -> OrderIntent {
         OrderIntent::new(

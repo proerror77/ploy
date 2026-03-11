@@ -13,8 +13,8 @@ use crate::strategy::traits::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 
@@ -554,11 +554,9 @@ min_net_ev = 0.0
             other => panic!("expected submit intent, got {other:?}"),
         };
 
-        assert!(
-            intent
-                .client_order_id
-                .starts_with("pattern-memory-test_BTC_event-1_up_")
-        );
+        assert!(intent
+            .client_order_id
+            .starts_with("pattern-memory-test_BTC_event-1_up_"));
         assert_eq!(intent.domain, Domain::Crypto);
         assert_eq!(intent.market_slug, "event-1");
         assert_eq!(intent.token_id, "token-up");

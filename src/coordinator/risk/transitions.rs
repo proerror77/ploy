@@ -65,9 +65,12 @@ impl RiskGate {
             return;
         }
 
-        if *self.state.read().await == PlatformRiskState::Elevated {
-            *self.state.write().await = PlatformRiskState::Normal;
-            info!("Risk state normalized after successful execution");
+        {
+            let mut state = self.state.write().await;
+            if *state == PlatformRiskState::Elevated {
+                *state = PlatformRiskState::Normal;
+                info!("Risk state normalized after successful execution");
+            }
         }
     }
 
@@ -107,9 +110,12 @@ impl RiskGate {
     pub async fn record_loss(&self, agent_id: &str, loss: Decimal) {
         let domain = self.agent_domains.read().await.get(agent_id).copied();
 
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+
         {
             let mut stats_map = self.agent_stats.write().await;
             let stats = stats_map.entry(agent_id.to_string()).or_default();
+            stats.consecutive_failures = 0;
             stats.realized_pnl -= loss.abs();
         }
 
@@ -120,6 +126,7 @@ impl RiskGate {
             if let Some(domain) = domain {
                 *daily.domain_pnl.entry(domain).or_insert(Decimal::ZERO) -= loss.abs();
             }
+            daily.order_count += 1;
             if daily.total_pnl.abs() >= self.config.daily_loss_limit {
                 Some("Daily loss limit exceeded".to_string())
             } else {

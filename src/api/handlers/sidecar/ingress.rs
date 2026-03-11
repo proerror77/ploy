@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use chrono::Utc;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use crate::api::{
@@ -171,7 +171,7 @@ pub(super) fn ensure_agent_authorized(
             "Coordinator not running (platform not started)".to_string(),
         )
     })?;
-    if coordinator.is_agent_authorized(agent_id) {
+    if coordinator.is_agent_authorized(agent_id).await {
         return Ok(());
     }
     Err((
