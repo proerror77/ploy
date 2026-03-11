@@ -22,7 +22,7 @@ use crate::rl::core::{
     RewardFunction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
 };
 use crate::rl::memory::ReplayBuffer;
-use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
+use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport, ExecutionStatus};
 use crate::{AgentStatus, Domain, OrderIntent};
 
 mod policy;
@@ -354,7 +354,14 @@ impl RLCryptoAgent {
 
     /// Handle execution report
     fn handle_execution(&mut self, report: &ExecutionReport) {
-        if report.is_success() {
+        match report.status {
+            ExecutionStatus::Submitted | ExecutionStatus::Pending => {
+                debug!(
+                    "[{}] Execution accepted for processing: status={:?} order_id={:?}",
+                    self.config.id, report.status, report.order_id
+                );
+            }
+            _ if report.is_success() => {
             self.consecutive_failures = 0;
 
             // Update position based on execution
@@ -410,16 +417,18 @@ impl RLCryptoAgent {
 
             // Decay exploration
             self.decay_exploration();
-        } else {
-            self.consecutive_failures += 1;
-            warn!(
-                "[{}] Execution failed: {:?}. Consecutive: {}",
-                self.config.id, report.error_message, self.consecutive_failures
-            );
+            }
+            _ => {
+                self.consecutive_failures += 1;
+                warn!(
+                    "[{}] Execution failed: {:?}. Consecutive: {}",
+                    self.config.id, report.error_message, self.consecutive_failures
+                );
 
-            if self.consecutive_failures >= 3 {
-                warn!("[{}] Too many failures, pausing agent", self.config.id);
-                self.status = AgentStatus::Paused;
+                if self.consecutive_failures >= 3 {
+                    warn!("[{}] Too many failures, pausing agent", self.config.id);
+                    self.status = AgentStatus::Paused;
+                }
             }
         }
     }
@@ -680,5 +689,30 @@ mod tests {
 
         assert_eq!(agent.position_count(), 1);
         assert!(agent.total_exposure() > Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_submitted_execution_does_not_pause_agent() {
+        let mut agent = RLCryptoAgent::with_defaults();
+        agent.start().await.unwrap();
+
+        for _ in 0..3 {
+            agent
+                .on_execution(ExecutionReport {
+                    intent_id: uuid::Uuid::new_v4(),
+                    agent_id: agent.id().to_string(),
+                    order_id: Some("intent-123".to_string()),
+                    status: ExecutionStatus::Submitted,
+                    filled_shares: 0,
+                    avg_fill_price: None,
+                    fees: Decimal::ZERO,
+                    error_message: None,
+                    executed_at: Utc::now(),
+                    latency_ms: 5,
+                })
+                .await;
+        }
+
+        assert_eq!(agent.status(), AgentStatus::Running);
     }
 }

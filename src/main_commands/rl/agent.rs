@@ -1,6 +1,12 @@
 #[cfg(feature = "rl")]
 use ploy::error::Result;
 #[cfg(feature = "rl")]
+use serde::Deserialize;
+#[cfg(feature = "rl")]
+use serde_json::{json, Value};
+#[cfg(feature = "rl")]
+use std::sync::OnceLock;
+#[cfg(feature = "rl")]
 use tokio::signal;
 #[cfg(feature = "rl")]
 use tracing::{debug, error, info, warn};
@@ -22,16 +28,15 @@ pub(super) async fn run_agent(
     policy_output: &str,
     policy_version: &Option<String>,
 ) -> Result<()> {
-    use ploy::adapters::{polymarket_clob::POLYGON_CHAIN_ID, PolymarketClient};
+    use ploy::adapters::PolymarketClient;
     use ploy::domain::Side;
     use ploy::error::PloyError;
     use ploy::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
     use ploy::rl::config::RLConfig;
-    use ploy::rl::order_platform::{RlOrderRuntime, RlOrderRuntimeConfig};
-    use ploy::rl::{CryptoEvent, DomainEvent, QuoteData};
-    use ploy::signing::Wallet;
+    use ploy::rl::{CryptoEvent, DomainEvent, ExecutionReport, QuoteData};
     use ploy::AgentRiskParams;
+    use ploy::OrderIntent;
     use rust_decimal::prelude::ToPrimitive;
     use rust_decimal::Decimal;
     use std::sync::Arc;
@@ -132,25 +137,6 @@ pub(super) async fn run_agent(
     println!("🚀 Agent started. Listening for market data...\n");
     println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
 
-    let mut runtime: Option<RlOrderRuntime> = if !dry_run {
-        info!("Setting up live order execution...");
-        let wallet = Wallet::from_env(POLYGON_CHAIN_ID)?;
-        info!("Wallet loaded: {:?}", wallet.address());
-
-        let client = PolymarketClient::new_authenticated(
-            "https://clob.polymarket.com",
-            wallet,
-            true, // neg_risk for UP/DOWN markets
-        )
-        .await?;
-        info!("✅ Authenticated with Polymarket CLOB");
-
-        let runtime_config = RlOrderRuntimeConfig::default();
-        Some(RlOrderRuntime::new(client, runtime_config))
-    } else {
-        None
-    };
-
     let tick_duration = std::time::Duration::from_millis(tick_interval);
     let mut interval = tokio::time::interval(tick_duration);
     let mut step_count = 0u64;
@@ -245,30 +231,28 @@ pub(super) async fn run_agent(
                                     intent.limit_price,
                                     intent.market_slug,
                                 );
-                            } else if let Some(runtime) = runtime.as_mut() {
-                                println!("🔴 [LIVE] Executing: {} {} {} @ {} ({})",
+                            } else {
+                                println!("🔴 [LIVE] Routing via coordinator: {} {} {} @ {} ({})",
                                     if intent.is_buy { "BUY" } else { "SELL" },
                                     intent.shares,
                                     intent.side,
                                     intent.limit_price,
                                     intent.market_slug,
                                 );
-                                if let Err(e) = runtime.enqueue_intent(intent.clone()).await {
-                                    error!("Failed to enqueue intent: {}", e);
-                                    continue;
-                                }
-                                match runtime.process_queue().await {
-                                    Ok(reports) => {
-                                        for report in reports {
-                                            agent.on_execution(report).await;
-                                        }
+                                match submit_intent_via_coordinator(&intent).await {
+                                    Ok(report) => {
+                                        agent.on_execution(report).await;
                                     }
                                     Err(e) => {
-                                        error!("Failed to process queue: {}", e);
+                                        error!("Failed to submit RL intent via coordinator: {}", e);
+                                        agent
+                                            .on_execution(ExecutionReport::rejected(
+                                                &intent,
+                                                e.to_string(),
+                                            ))
+                                            .await;
                                     }
                                 }
-                            } else {
-                                warn!("Live mode but no RL runtime initialized");
                             }
                         }
                     }
@@ -307,4 +291,150 @@ pub(super) async fn run_agent(
 
     agent.stop().await?;
     Ok(())
+}
+
+#[cfg(feature = "rl")]
+#[derive(Debug, Deserialize)]
+struct CoordinatorIntentResponse {
+    intent_id: String,
+}
+
+#[cfg(feature = "rl")]
+fn coordinator_intent_ingress_url() -> String {
+    std::env::var("PLOY_RPC_COORDINATOR_INTENT_URL")
+        .or_else(|_| std::env::var("PLOY_COORDINATOR_INTENT_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8081/api/sidecar/intents".to_string())
+}
+
+#[cfg(feature = "rl")]
+fn coordinator_intent_ingress_token() -> Option<String> {
+    std::env::var("PLOY_RPC_SIDECAR_AUTH_TOKEN")
+        .or_else(|_| std::env::var("PLOY_SIDECAR_AUTH_TOKEN"))
+        .or_else(|_| std::env::var("PLOY_API_SIDECAR_AUTH_TOKEN"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(feature = "rl")]
+fn rl_http_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .tcp_nodelay(true)
+            .build()
+            .map_err(|error| format!("failed to build RL coordinator client: {}", error))
+    });
+
+    client
+        .as_ref()
+        .map_err(|msg| ploy::error::PloyError::Internal(msg.clone()))
+}
+
+#[cfg(feature = "rl")]
+fn build_coordinator_payload(intent: &OrderIntent) -> Result<Value> {
+    let deployment_id = intent.deployment_id().ok_or_else(|| {
+        ploy::error::PloyError::Validation(format!(
+            "RL intent {} is missing deployment_id metadata required for coordinator ingress",
+            intent.intent_id
+        ))
+    })?;
+    let price_limit = intent.limit_price.to_f64().ok_or_else(|| {
+        ploy::error::PloyError::Validation(format!(
+            "RL intent {} has price that cannot be represented as f64",
+            intent.intent_id
+        ))
+    })?;
+
+    let mut metadata = intent.metadata.clone();
+    metadata
+        .entry("source".to_string())
+        .or_insert_with(|| "cli.rl.agent".to_string());
+    metadata
+        .entry("agent_id".to_string())
+        .or_insert_with(|| intent.agent_id.clone());
+    metadata
+        .entry("runtime".to_string())
+        .or_insert_with(|| "rl_cli".to_string());
+    metadata
+        .entry("client_order_id".to_string())
+        .or_insert_with(|| intent.client_order_id.clone());
+
+    Ok(json!({
+        "deployment_id": deployment_id,
+        "domain": intent.domain.to_string().to_ascii_lowercase(),
+        "market_slug": intent.market_slug.clone(),
+        "token_id": intent.token_id.clone(),
+        "side": intent.side.as_str(),
+        "order_side": if intent.is_buy { "BUY" } else { "SELL" },
+        "is_buy": intent.is_buy,
+        "size": intent.shares,
+        "price_limit": price_limit,
+        "idempotency_key": intent.client_order_id.clone(),
+        "reason": format!("rl cli submit: {}", intent.agent_id),
+        "priority": priority_label(intent.priority),
+        "metadata": metadata,
+        "dry_run": false,
+    }))
+}
+
+#[cfg(feature = "rl")]
+fn priority_label(priority: ploy::coordinator::OrderPriority) -> &'static str {
+    match priority {
+        ploy::coordinator::OrderPriority::Critical => "critical",
+        ploy::coordinator::OrderPriority::High => "high",
+        ploy::coordinator::OrderPriority::Normal => "normal",
+        ploy::coordinator::OrderPriority::Low => "low",
+    }
+}
+
+#[cfg(feature = "rl")]
+async fn submit_intent_via_coordinator(intent: &OrderIntent) -> Result<ExecutionReport> {
+    let payload = build_coordinator_payload(intent)?;
+    let url = coordinator_intent_ingress_url();
+    let client = rl_http_client()?;
+
+    let mut request = client.post(&url).json(&payload);
+    if let Some(token) = coordinator_intent_ingress_token() {
+        request = request.header("x-ploy-sidecar-token", token);
+    }
+
+    let response = request.send().await.map_err(|error| {
+        ploy::error::PloyError::Internal(format!(
+            "failed to reach coordinator intent ingress {}: {}",
+            url, error
+        ))
+    })?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<empty>".to_string());
+
+    if !status.is_success() {
+        let message = format!(
+            "coordinator intent ingress rejected RL intent (status={}): {}",
+            status, text
+        );
+        return Err(if status.is_client_error() {
+            ploy::error::PloyError::Validation(message)
+        } else {
+            ploy::error::PloyError::Internal(message)
+        });
+    }
+
+    let response: CoordinatorIntentResponse = serde_json::from_str(&text).map_err(|error| {
+        ploy::error::PloyError::Internal(format!(
+            "invalid ingress JSON from coordinator intent ingress: {}",
+            error
+        ))
+    })?;
+
+    Ok(ExecutionReport::submitted(
+        intent,
+        Some(response.intent_id),
+    ))
 }

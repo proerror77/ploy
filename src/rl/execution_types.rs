@@ -31,6 +31,21 @@ pub struct ExecutionReport {
 }
 
 impl ExecutionReport {
+    pub fn submitted(intent: &OrderIntent, order_id: Option<String>) -> Self {
+        Self {
+            intent_id: intent.intent_id,
+            agent_id: intent.agent_id.clone(),
+            order_id,
+            status: ExecutionStatus::Submitted,
+            filled_shares: 0,
+            avg_fill_price: None,
+            fees: Decimal::ZERO,
+            error_message: None,
+            executed_at: Utc::now(),
+            latency_ms: 0,
+        }
+    }
+
     pub fn success(
         intent: &OrderIntent,
         order_id: String,
