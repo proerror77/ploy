@@ -1,3 +1,4 @@
+#[cfg(feature = "builder_relayer_sdk")]
 use super::AutoClaimer;
 #[cfg(feature = "builder_relayer_sdk")]
 use super::proxy_support::RelayerBuilderCredentials;
