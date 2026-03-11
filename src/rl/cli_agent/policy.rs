@@ -1,7 +1,13 @@
 use super::*;
-use rust_decimal_macros::dec;
 
 impl RLCryptoAgent {
+    /// Decay exploration rate.
+    pub(super) fn decay_exploration(&mut self) {
+        let decay = self.config.rl_config.training.exploration_decay;
+        let min = self.config.rl_config.training.exploration_min;
+        self.exploration_rate = (self.exploration_rate * decay).max(min);
+    }
+
     /// Select action using RL policy
     pub(super) fn select_action(&mut self) -> ContinuousAction {
         let mut action = self.rule_based_policy();

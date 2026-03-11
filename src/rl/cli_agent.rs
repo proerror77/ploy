@@ -28,6 +28,7 @@ mod intent_mapping;
 mod market_state;
 mod policy;
 mod policy_output;
+mod position_state;
 mod runtime;
 #[cfg(test)]
 mod tests;

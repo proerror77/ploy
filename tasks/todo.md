@@ -217,6 +217,37 @@ Split the remaining RL CLI policy owner into focused sibling modules so policy-o
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-policy-split rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-policy-split rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
 
+# RL CLI Position State Split (2026-03-11)
+
+## Goal
+Move position bookkeeping out of `market_state.rs` so market-event ingestion, policy exploration state, and position-state updates stop sharing one owner.
+
+## File ownership
+
+- `src/rl/cli_agent/market_state.rs`
+  - owner: crypto-event filtering, observation ingestion, and intent trigger flow
+- `src/rl/cli_agent/position_state.rs`
+  - owner: position-derived observation fields, exposure totals, and unrealized-PnL refresh
+- `src/rl/cli_agent/policy.rs`
+  - owner: exploration decay and policy-selection flow
+
+## Tasks
+
+- [x] Extract position bookkeeping helpers into a sibling module.
+- [x] Move exploration decay back under policy ownership.
+- [x] Re-run RL-focused compile and behavior regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [position_state.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/position_state.rs) for observation position fields, exposure refresh, and unrealized-PnL updates.
+- 2026-03-11: Reduced [market_state.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/market_state.rs) to crypto-event filtering, observation ingestion, and intent generation.
+- 2026-03-11: Moved `decay_exploration()` into [policy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/policy.rs) so exploration state stays with policy ownership.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-position-split rtk cargo check --lib --features rl --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-position-split rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-position-split rtk cargo test --features rl test_exploration_decay --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-position-split rtk cargo test --features rl test_rl_signal_on_good_sum --lib -- --exact --nocapture`
+
 # Runtime Schema Surface Split (2026-03-11)
 
 ## Goal
