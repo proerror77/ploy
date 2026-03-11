@@ -2,7 +2,7 @@
 //! market data streams.
 //!
 //! Canonical owner for the market-data persistence pipeline. The legacy
-//! `crate::platform::persistence_pipeline` module re-exports this surface.
+//! `crate::persistence` owns this runtime pipeline surface.
 
 use std::collections::HashMap;
 use std::sync::Arc;

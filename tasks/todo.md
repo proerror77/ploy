@@ -1,3 +1,30 @@
+# Platform Persistence Shim Retirement (2026-03-11)
+
+## Goal
+Remove the last `platform` persistence compatibility shims so market-data schema and pipeline ownership live under `crate::persistence`.
+
+## Tasks
+
+- [x] Move quote/price/lob/orderbook schema DDL into `src/persistence/runtime_schema.rs`.
+- [x] Remove dead `src/platform/persistence_pipeline.rs` and `src/platform/persistence_schema.rs` shims.
+- [x] Delete the orphaned `src/platform/persistence_pipeline/runtime.rs` implementation after the shim removal.
+- [x] Stop exporting persistence pipeline types from `src/platform/mod.rs`.
+- [x] Re-run focused persistence compile/tests after retiring the shims.
+
+## Review
+
+- [x] Confirm `src/persistence/runtime_schema.rs` no longer calls into `crate::platform::persistence_schema`.
+- [x] Confirm `src/platform/mod.rs` now only re-exports data-plane/domain primitives.
+
+## Progress notes
+
+- 2026-03-11: Inlined the quote/price/lob/orderbook schema builders into [runtime_schema.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema.rs).
+- 2026-03-11: Deleted [persistence_pipeline.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/platform/persistence_pipeline.rs), [runtime.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/platform/persistence_pipeline/runtime.rs), and [persistence_schema.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/platform/persistence_schema.rs), and removed the matching `platform` re-exports in [mod.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/platform/mod.rs).
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-persistence-shim-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-persistence-shim-cut-surface rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-persistence-shim-cut-quote rtk cargo test quote_dedup_skips_unchanged_within_interval --lib -- --exact --nocapture`
+
 # Legacy Orchestrator Live Submit Guard (2026-03-11)
 
 ## Goal
