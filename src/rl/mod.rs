@@ -25,7 +25,6 @@ pub mod execution_types;
 pub mod integration;
 pub mod memory;
 pub mod networks;
-pub mod order_platform;
 pub mod runtime_types;
 pub mod training;
 

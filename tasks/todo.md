@@ -1,3 +1,56 @@
+# RL Compatibility Runtime Retirement (2026-03-11)
+
+## Goal
+Delete the dead `src/rl/order_platform.rs` compatibility runtime now that the RL CLI no longer consumes it.
+
+## Tasks
+
+- [x] Remove `order_platform` from `src/rl/mod.rs`.
+- [x] Delete `src/rl/order_platform.rs`.
+- [x] Update RL CLI messaging so live mode refers to coordinator ingress instead of a local order runtime.
+- [x] Re-run RL-focused compile/tests after the retirement.
+
+## Review
+
+- [x] Confirm there are no remaining `RlOrderRuntime*` references in `src/rl` or `src/main_commands/rl`.
+- [x] Confirm the RL CLI banner no longer suggests a separate local order runtime.
+
+## Progress notes
+
+- 2026-03-11: Removed the dead `order_platform` module from [mod.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/mod.rs) and deleted [order_platform.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/order_platform.rs).
+- 2026-03-11: Updated [agent.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/main_commands/rl/agent.rs) to advertise coordinator ingress instead of a local order runtime.
+- 2026-03-11: Validation passed:
+  - `rg -n "RlOrderRuntime|RlOrderRuntimeConfig|RlRuntimeStats|order_platform" src/rl src/main_commands/rl -g '*.rs'`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-runtime-retire rtk cargo check --lib --features rl --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-runtime-retire rtk cargo test --features rl test_rl_agent_lifecycle --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-runtime-retire rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-runtime-retire rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
+
+# Strategy Compatibility Surface Retirement (2026-03-11)
+
+## Goal
+Shrink the remaining legacy `strategy` compatibility surface by removing dead runtime code and making the `runtime_order` bridge crate-private.
+
+## Tasks
+
+- [x] Make `src/strategy/runtime_order.rs` crate-private instead of part of the public strategy module surface.
+- [x] Delete the orphaned `src/strategy/orchestrator.rs` legacy runtime file.
+- [x] Re-run focused compile/runtime-order tests after the surface cut.
+
+## Review
+
+- [x] Confirm the only remaining `runtime_order` consumers live inside the crate.
+- [x] Confirm `StrategyOrchestrator` had no module-tree consumers before deletion.
+
+## Progress notes
+
+- 2026-03-11: Changed [mod.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/mod.rs) so `runtime_order` is now `pub(crate)`.
+- 2026-03-11: Deleted the dead [orchestrator.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/orchestrator.rs) compatibility runtime file.
+- 2026-03-11: Validation passed:
+  - `rg -n "StrategyOrchestrator|OrchestratorConfig|ploy::strategy::runtime_order|pub mod runtime_order" src tests -g '!target'`
+  - `CARGO_TARGET_DIR=/tmp/ploy-strategy-compat-retire rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-strategy-compat-retire rtk cargo test order_request_from_intent_preserves_action_id --lib -- --exact --nocapture`
+
 # Platform Persistence Shim Retirement (2026-03-11)
 
 ## Goal

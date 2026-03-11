@@ -42,7 +42,7 @@ pub(super) async fn run_agent(
     use std::sync::Arc;
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║            Ploy RL Agent - Order Runtime                     ║");
+    println!("║         Ploy RL Agent - Coordinator Ingress                  ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!(
         "║  Symbol:         {:>10}                                    ║",
