@@ -1,3 +1,38 @@
+# PM5 Full 20-Level OBI Factors (2026-03-11)
+
+## Goal
+Upgrade `pm_5m_directional` to consume native 20-level Binance L2 imbalance features in both live and backtest paths, and add a richer OBI factor set instead of only `obi_1/obi_3`.
+
+## Tasks
+
+- [x] Extend backtest Binance L2 replay to reconstruct native `obi_1/obi_2/obi_3/obi_5/obi_10/obi_20` from persisted `bids/asks`.
+- [x] Expand `pm_5m_directional` live L2 state to store the full OBI ladder and derive additional OBI shape factors.
+- [x] Rework directional probability adjustment / confirmation logic to use the new OBI factor family.
+- [x] Add focused unit tests for the new backtest L2 reconstruction and strategy-side OBI factor behavior.
+- [ ] Re-run compile and focused regressions, then redeploy an isolated backtest artifact to `tango-1-1` and compare results.
+
+## Review
+
+- [x] Confirm live and backtest now use the same native OBI ladder instead of `obi_5 -> obi_3` fallback.
+- [x] Confirm metadata / diagnostics expose the new OBI factors at entry.
+- [ ] Confirm `tango-1-1` backtest rerun succeeds with the new isolated artifact.
+
+## Progress notes
+
+- 2026-03-11: User approved the full 20-level path instead of the minimal `obi_5/10/20` patch.
+- 2026-03-11: Backtest replay now rebuilds native `obi_1/2/3/5/10/20` from persisted `bids/asks`, stops 1 Hz `DISTINCT ON` downsampling, and rejects partial-depth rows that cannot support true `obi_20`.
+- 2026-03-11: `pm_5m_directional` now stores the full OBI ladder and scores with `obi_5` plus compact `obi_micro/obi_slope/obi_shape` factors; entry metadata now emits `lob_*` diagnostics for downstream analysis.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test build_binance_l2_update_reconstructs_native_obi_ladder --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test build_binance_l2_update_rejects_partial_depth_books --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test emits_ioc_entry_when_directional_core_passes --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test far_book_divergence_blocks_entry_even_with_positive_obi_3 --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test pm_5m_directional --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test pm_5m_directional_backtest --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test replays_profitable_up_round_to_settlement --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test supported_5m_slug_filter_rejects_other_horizons --lib -- --exact --nocapture`
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal

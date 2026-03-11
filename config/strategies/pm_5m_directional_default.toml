@@ -21,9 +21,12 @@ min_edge = 0.03
 min_abs_z = 0.35
 
 # Binance confirmation
+# `obi_weight` now applies to the 20-level main OBI term (`obi_5`).
+# `obi_shape_weight` adds a compact near/far book shape term.
 min_obi = 0.05
 min_flow_2s = 0.10
 obi_weight = 0.75
+obi_shape_weight = 0.30
 flow_weight = 1.10
 microgap_weight = 0.40
 max_l2_age_secs = 2

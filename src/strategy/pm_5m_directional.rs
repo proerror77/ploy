@@ -43,6 +43,7 @@ struct Pm5mDirectionalConfig {
     min_obi: f64,
     min_flow_2s: f64,
     obi_weight: f64,
+    obi_shape_weight: f64,
     flow_weight: f64,
     microgap_weight: f64,
     max_l2_age_secs: u64,
@@ -78,6 +79,7 @@ impl Default for Pm5mDirectionalConfig {
             min_obi: 0.05,
             min_flow_2s: 0.10,
             obi_weight: 0.75,
+            obi_shape_weight: 0.30,
             flow_weight: 1.10,
             microgap_weight: 0.40,
             max_l2_age_secs: 2,
@@ -170,11 +172,25 @@ struct Pm5mDirectionalToml {
 #[derive(Debug, Clone)]
 struct BinanceL2State {
     obi_1: Decimal,
+    obi_2: Decimal,
     obi_3: Decimal,
+    obi_5: Decimal,
+    obi_10: Decimal,
+    obi_20: Decimal,
     spread_bps: Decimal,
     bid_volume_5: Decimal,
     ask_volume_5: Decimal,
     timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ObiFactors {
+    main: f64,
+    obi_10: f64,
+    obi_20: f64,
+    shape: f64,
+    micro: f64,
+    slope: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +386,24 @@ impl Pm5mDirectionalStrategy {
         (obi * spread_scale).clamp(-1.0, 1.0)
     }
 
+    fn obi_factors(l2: &BinanceL2State) -> ObiFactors {
+        let obi_1 = l2.obi_1.to_f64().unwrap_or(0.0);
+        let obi_5 = l2.obi_5.to_f64().unwrap_or(0.0);
+        let obi_10 = l2.obi_10.to_f64().unwrap_or(0.0);
+        let obi_20 = l2.obi_20.to_f64().unwrap_or(0.0);
+        let obi_micro = (obi_1 - obi_5).clamp(-2.0, 2.0);
+        let obi_slope = (obi_5 - obi_20).clamp(-2.0, 2.0);
+
+        ObiFactors {
+            main: obi_5,
+            obi_10,
+            obi_20,
+            shape: (0.5 * (obi_micro + obi_slope)).clamp(-2.0, 2.0),
+            micro: obi_micro,
+            slope: obi_slope,
+        }
+    }
+
     fn compute_probability(
         &self,
         spot: &SpotPrice,
@@ -526,8 +560,10 @@ impl Pm5mDirectionalStrategy {
         let (p_base, sigma, z) = self.compute_probability(&spot, &event, now)?;
         let logit_base = (p_base / (1.0 - p_base)).ln();
         let microgap = Self::microgap_proxy(&l2);
+        let obi = Self::obi_factors(&l2);
         let adjusted_logit = logit_base
-            + self.cfg.obi_weight * l2.obi_3.to_f64().unwrap_or(0.0)
+            + self.cfg.obi_weight * obi.main
+            + self.cfg.obi_shape_weight * obi.shape
             + self.cfg.flow_weight * flow_2s
             + self.cfg.microgap_weight * microgap;
         let p_hat = (1.0 / (1.0 + (-adjusted_logit).exp())).clamp(PROB_FLOOR, 1.0 - PROB_FLOOR);
@@ -538,16 +574,23 @@ impl Pm5mDirectionalStrategy {
             return None;
         }
 
-        let obi_3 = l2.obi_3.to_f64().unwrap_or(0.0);
         match side {
             Side::Up => {
-                if obi_3 < self.cfg.min_obi || flow_2s < self.cfg.min_flow_2s || microgap < 0.0 {
+                if obi.main < self.cfg.min_obi
+                    || obi.obi_20 <= 0.0
+                    || flow_2s < self.cfg.min_flow_2s
+                    || microgap < 0.0
+                {
                     self.last_reason = Some(format!("{symbol}:up_confirmation_failed"));
                     return None;
                 }
             }
             Side::Down => {
-                if obi_3 > -self.cfg.min_obi || flow_2s > -self.cfg.min_flow_2s || microgap > 0.0 {
+                if obi.main > -self.cfg.min_obi
+                    || obi.obi_20 >= 0.0
+                    || flow_2s > -self.cfg.min_flow_2s
+                    || microgap > 0.0
+                {
                     self.last_reason = Some(format!("{symbol}:down_confirmation_failed"));
                     return None;
                 }
@@ -630,10 +673,37 @@ impl Pm5mDirectionalStrategy {
         metadata.insert("event_id".to_string(), event.event_id);
         metadata.insert("p_base".to_string(), format!("{p_base:.6}"));
         metadata.insert("p_hat".to_string(), format!("{p_hat:.6}"));
+        metadata.insert("p_up".to_string(), format!("{p_hat:.6}"));
         metadata.insert("effective_p".to_string(), format!("{effective_p:.6}"));
         metadata.insert("sigma".to_string(), format!("{sigma:.6}"));
         metadata.insert("z".to_string(), format!("{z:.6}"));
-        metadata.insert("obi_3".to_string(), format!("{obi_3:.6}"));
+        metadata.insert("obi_1".to_string(), format!("{:.6}", l2.obi_1));
+        metadata.insert("obi_3".to_string(), format!("{:.6}", l2.obi_3));
+        metadata.insert("obi_5".to_string(), format!("{:.6}", l2.obi_5));
+        metadata.insert("obi_10".to_string(), format!("{:.6}", l2.obi_10));
+        metadata.insert("obi_20".to_string(), format!("{:.6}", l2.obi_20));
+        metadata.insert("obi_weighted".to_string(), format!("{:.6}", obi.main));
+        metadata.insert("obi_shape".to_string(), format!("{:.6}", obi.shape));
+        metadata.insert("obi_micro".to_string(), format!("{:.6}", obi.micro));
+        metadata.insert("obi_slope".to_string(), format!("{:.6}", obi.slope));
+        metadata.insert("lob_obi_5".to_string(), format!("{:.6}", l2.obi_5));
+        metadata.insert("lob_obi_10".to_string(), format!("{:.6}", obi.obi_10));
+        metadata.insert("lob_obi_20".to_string(), format!("{:.6}", obi.obi_20));
+        metadata.insert("lob_obi_micro".to_string(), format!("{:.6}", obi.micro));
+        metadata.insert("lob_obi_slope".to_string(), format!("{:.6}", obi.slope));
+        metadata.insert("lob_obi_shape".to_string(), format!("{:.6}", obi.shape));
+        metadata.insert(
+            "lob_spread_bps".to_string(),
+            format!("{:.6}", l2.spread_bps),
+        );
+        metadata.insert(
+            "lob_bid_volume_5".to_string(),
+            format!("{:.6}", l2.bid_volume_5),
+        );
+        metadata.insert(
+            "lob_ask_volume_5".to_string(),
+            format!("{:.6}", l2.ask_volume_5),
+        );
         metadata.insert("flow_2s".to_string(), format!("{flow_2s:.6}"));
         metadata.insert("microgap_proxy".to_string(), format!("{microgap:.6}"));
         metadata.insert("edge".to_string(), format!("{edge:.6}"));
@@ -733,7 +803,11 @@ impl Strategy for Pm5mDirectionalStrategy {
             MarketUpdate::BinanceL2 {
                 symbol,
                 obi_1,
+                obi_2,
                 obi_3,
+                obi_5,
+                obi_10,
+                obi_20,
                 spread_bps,
                 bid_volume_5,
                 ask_volume_5,
@@ -745,7 +819,11 @@ impl Strategy for Pm5mDirectionalStrategy {
                         symbol.clone(),
                         BinanceL2State {
                             obi_1: *obi_1,
+                            obi_2: *obi_2,
                             obi_3: *obi_3,
+                            obi_5: *obi_5,
+                            obi_10: *obi_10,
+                            obi_20: *obi_20,
                             spread_bps: *spread_bps,
                             bid_volume_5: *bid_volume_5,
                             ask_volume_5: *ask_volume_5,
@@ -1109,25 +1187,33 @@ no_trade_override_flow = 99.0
         }
     }
 
-    fn l2_update(
+    fn l2_update_full(
         ts: DateTime<Utc>,
         obi_1: Decimal,
+        obi_2: Decimal,
         obi_3: Decimal,
+        obi_5: Decimal,
+        obi_10: Decimal,
+        obi_20: Decimal,
         spread_bps: Decimal,
     ) -> MarketUpdate {
         MarketUpdate::BinanceL2 {
             symbol: "BTCUSDT".to_string(),
             obi_1,
-            obi_2: obi_1,
+            obi_2,
             obi_3,
-            obi_5: obi_3,
-            obi_10: obi_3,
-            obi_20: obi_3,
+            obi_5,
+            obi_10,
+            obi_20,
             bid_volume_5: dec!(1200),
             ask_volume_5: dec!(800),
             spread_bps,
             timestamp: ts,
         }
+    }
+
+    fn l2_update(ts: DateTime<Utc>, obi_1: Decimal, obi_3: Decimal, spread_bps: Decimal) -> MarketUpdate {
+        l2_update_full(ts, obi_1, obi_1, obi_3, obi_3, obi_3, obi_3, spread_bps)
     }
 
     fn price_update(ts: DateTime<Utc>, price: Decimal) -> MarketUpdate {
@@ -1184,11 +1270,20 @@ no_trade_override_flow = 99.0
             .await
             .expect("down quote");
         strategy
-            .on_market_update(&l2_update(anchor, dec!(0.20), dec!(0.18), dec!(2.0)))
+            .on_market_update(&l2_update_full(
+                anchor,
+                dec!(0.22),
+                dec!(0.21),
+                dec!(0.20),
+                dec!(0.19),
+                dec!(0.16),
+                dec!(0.12),
+                dec!(2.0),
+            ))
             .await
             .expect("l2");
 
-        let mut saw_submit = false;
+        let mut submit_metadata = None;
         for step in 0..8 {
             let ts = anchor + chrono::Duration::milliseconds((step as i64) * 250);
             let price = dec!(100.180) + Decimal::new(step as i64, 3);
@@ -1196,19 +1291,35 @@ no_trade_override_flow = 99.0
                 .on_market_update(&price_update(ts, price))
                 .await
                 .expect("price");
-            if actions.iter().any(|action| {
-                matches!(
-                    action,
-                    StrategyAction::SubmitIntent { intent }
-                        if intent.token_id == "up-token" && intent.time_in_force == TimeInForce::IOC
-                )
+            if let Some(metadata) = actions.iter().find_map(|action| match action {
+                StrategyAction::SubmitIntent { intent }
+                    if intent.token_id == "up-token"
+                        && intent.time_in_force == TimeInForce::IOC =>
+                {
+                    Some(intent.metadata.clone())
+                }
+                _ => None,
             }) {
-                saw_submit = true;
+                submit_metadata = Some(metadata);
                 break;
             }
         }
 
-        assert!(saw_submit, "expected IOC submit intent for up side");
+        let metadata = submit_metadata.expect("expected IOC submit intent for up side");
+        assert!(metadata.contains_key("obi_3"));
+        assert!(metadata.contains_key("obi_5"));
+        assert!(metadata.contains_key("obi_10"));
+        assert!(metadata.contains_key("obi_20"));
+        assert!(metadata.contains_key("obi_weighted"));
+        assert!(metadata.contains_key("obi_shape"));
+        assert!(metadata.contains_key("obi_slope"));
+        assert!(metadata.contains_key("p_up"));
+        assert!(metadata.contains_key("lob_obi_5"));
+        assert!(metadata.contains_key("lob_obi_10"));
+        assert!(metadata.contains_key("lob_obi_20"));
+        assert!(metadata.contains_key("lob_obi_micro"));
+        assert!(metadata.contains_key("lob_obi_slope"));
+        assert!(metadata.contains_key("lob_obi_shape"));
     }
 
     #[tokio::test]
@@ -1281,6 +1392,70 @@ no_trade_override_flow = 99.0
         assert_eq!(
             strategy.last_reason.as_deref(),
             Some("BTCUSDT:no_trade_zone")
+        );
+    }
+
+    #[tokio::test]
+    async fn far_book_divergence_blocks_entry_even_with_positive_obi_3() {
+        let mut strategy =
+            Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), minimal_toml(), true)
+                .expect("strategy");
+        let start = Utc::now();
+
+        for second in 0..30 {
+            let ts = start + chrono::Duration::seconds(second);
+            let price = dec!(100.05) + Decimal::new(second as i64, 3);
+            strategy
+                .on_market_update(&price_update(ts, price))
+                .await
+                .expect("history price");
+        }
+
+        let anchor = start + chrono::Duration::seconds(31);
+        strategy
+            .on_market_update(&event_update(anchor))
+            .await
+            .expect("event");
+        strategy
+            .on_market_update(&up_quote(anchor, dec!(0.38), dec!(0.36)))
+            .await
+            .expect("up quote");
+        strategy
+            .on_market_update(&down_quote(anchor, dec!(0.66), dec!(0.64)))
+            .await
+            .expect("down quote");
+        strategy
+            .on_market_update(&l2_update_full(
+                anchor,
+                dec!(0.24),
+                dec!(0.22),
+                dec!(0.18),
+                dec!(0.08),
+                dec!(-0.02),
+                dec!(-0.18),
+                dec!(2.0),
+            ))
+            .await
+            .expect("l2");
+
+        let mut saw_submit = false;
+        for step in 0..8 {
+            let ts = anchor + chrono::Duration::milliseconds((step as i64) * 250);
+            let price = dec!(100.180) + Decimal::new(step as i64, 3);
+            let actions = strategy
+                .on_market_update(&price_update(ts, price))
+                .await
+                .expect("price");
+            if actions.iter().any(|action| matches!(action, StrategyAction::SubmitIntent { .. })) {
+                saw_submit = true;
+                break;
+            }
+        }
+
+        assert!(!saw_submit, "far-book divergence should block the entry");
+        assert_eq!(
+            strategy.last_reason.as_deref(),
+            Some("BTCUSDT:up_confirmation_failed")
         );
     }
 

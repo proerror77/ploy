@@ -159,30 +159,20 @@ pub(super) async fn load_database_updates(
         );
     }
 
-    let binance_l2_rows: Vec<(
-        DateTime<Utc>,
-        String,
-        Decimal,
-        Decimal,
-        Decimal,
-        Decimal,
-        Decimal,
-    )> = if binance_lob_ticks_exists {
+    let binance_l2_rows: Vec<(DateTime<Utc>, String, serde_json::Value, serde_json::Value)> =
+        if binance_lob_ticks_exists {
         sqlx::query_as(
             r#"
-                SELECT DISTINCT ON (date_trunc('second', event_time), symbol)
+                SELECT
                     event_time,
                     symbol,
-                    obi_5,
-                    obi_10,
-                    bid_volume_5,
-                    ask_volume_5,
-                    spread_bps
+                    bids,
+                    asks
                 FROM binance_lob_ticks
                 WHERE ($1::text[] IS NULL OR symbol = ANY($1))
                   AND ($2::timestamptz IS NULL OR event_time >= $2)
                   AND ($3::timestamptz IS NULL OR event_time <= $3)
-                ORDER BY date_trunc('second', event_time), symbol, event_time DESC
+                ORDER BY event_time ASC, symbol ASC
                 "#,
         )
         .bind(symbol_filter(symbols))
@@ -195,18 +185,10 @@ pub(super) async fn load_database_updates(
         Vec::new()
     };
 
-    for (ts, sym, obi_5, obi_10, bid_volume_5, ask_volume_5, spread_bps) in &binance_l2_rows {
-        updates.push(MarketUpdate {
-            timestamp: *ts,
-            symbol: sym.clone(),
-            update_type: UpdateType::BinanceL2 {
-                obi_5: *obi_5,
-                obi_10: *obi_10,
-                bid_volume_5: *bid_volume_5,
-                ask_volume_5: *ask_volume_5,
-                spread_bps: *spread_bps,
-            },
-        });
+    for (ts, sym, bids, asks) in &binance_l2_rows {
+        if let Some(update) = build_binance_l2_update(*ts, sym, bids, asks) {
+            updates.push(update);
+        }
     }
     if !binance_l2_rows.is_empty() {
         info!(
@@ -272,6 +254,90 @@ async fn table_exists(pool: &PgPool, table_name: &str) -> Result<bool> {
             .unwrap_or(None)
             .is_some(),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BinanceBookLevel {
+    price: Decimal,
+    size: Decimal,
+}
+
+fn build_binance_l2_update(
+    timestamp: DateTime<Utc>,
+    symbol: &str,
+    bids_json: &serde_json::Value,
+    asks_json: &serde_json::Value,
+) -> Option<MarketUpdate> {
+    let bids = parse_binance_book_levels(bids_json, true);
+    let asks = parse_binance_book_levels(asks_json, false);
+    if bids.len() < 20 || asks.len() < 20 {
+        return None;
+    }
+
+    let best_bid = bids.first()?.price;
+    let best_ask = asks.first()?.price;
+    if best_bid <= Decimal::ZERO || best_ask <= Decimal::ZERO || best_ask <= best_bid {
+        return None;
+    }
+
+    Some(MarketUpdate {
+        timestamp,
+        symbol: symbol.to_string(),
+        update_type: UpdateType::BinanceL2 {
+            obi_1: calculate_obi(&bids, &asks, 1)?,
+            obi_2: calculate_obi(&bids, &asks, 2)?,
+            obi_3: calculate_obi(&bids, &asks, 3)?,
+            obi_5: calculate_obi(&bids, &asks, 5)?,
+            obi_10: calculate_obi(&bids, &asks, 10)?,
+            obi_20: calculate_obi(&bids, &asks, 20)?,
+            bid_volume_5: side_volume(&bids, 5),
+            ask_volume_5: side_volume(&asks, 5),
+            spread_bps: ((best_ask - best_bid) / best_bid) * Decimal::from(10000),
+        },
+    })
+}
+
+fn parse_binance_book_levels(raw: &serde_json::Value, is_bid: bool) -> Vec<BinanceBookLevel> {
+    let Some(levels) = raw.as_array() else {
+        return Vec::new();
+    };
+
+    let mut parsed = levels
+        .iter()
+        .filter_map(|level| {
+            let price = level.get("price")?.as_str()?.parse::<Decimal>().ok()?;
+            let size = level.get("size")?.as_str()?.parse::<Decimal>().ok()?;
+            if price <= Decimal::ZERO || size <= Decimal::ZERO {
+                return None;
+            }
+            Some(BinanceBookLevel { price, size })
+        })
+        .collect::<Vec<_>>();
+
+    if is_bid {
+        parsed.sort_by(|left, right| right.price.cmp(&left.price));
+    } else {
+        parsed.sort_by(|left, right| left.price.cmp(&right.price));
+    }
+    parsed
+}
+
+fn calculate_obi(
+    bids: &[BinanceBookLevel],
+    asks: &[BinanceBookLevel],
+    depth: usize,
+) -> Option<Decimal> {
+    let bid_sum = side_volume(bids, depth);
+    let ask_sum = side_volume(asks, depth);
+    let total = bid_sum + ask_sum;
+    if total <= Decimal::ZERO {
+        return None;
+    }
+    Some((bid_sum - ask_sum) / total)
+}
+
+fn side_volume(levels: &[BinanceBookLevel], depth: usize) -> Decimal {
+    levels.iter().take(depth).map(|level| level.size).sum()
 }
 
 fn symbol_filter(symbols: &[String]) -> Option<Vec<String>> {
@@ -1153,6 +1219,7 @@ fn corrected_window_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
     use serde_json::json;
 
     #[test]
@@ -1298,6 +1365,102 @@ mod tests {
             }
             other => panic!("unexpected update type: {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_binance_l2_update_reconstructs_native_obi_ladder() {
+        let ts = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bids = json!([
+            {"price": "99.1", "size": "11"},
+            {"price": "99.8", "size": "18"},
+            {"price": "99.4", "size": "14"},
+            {"price": "99.7", "size": "17"},
+            {"price": "99.2", "size": "12"},
+            {"price": "99.9", "size": "19"},
+            {"price": "99.5", "size": "15"},
+            {"price": "99.3", "size": "13"},
+            {"price": "100.0", "size": "20"},
+            {"price": "99.6", "size": "16"},
+            {"price": "98.1", "size": "1"},
+            {"price": "98.3", "size": "3"},
+            {"price": "98.2", "size": "2"},
+            {"price": "98.5", "size": "5"},
+            {"price": "98.4", "size": "4"},
+            {"price": "98.7", "size": "7"},
+            {"price": "98.6", "size": "6"},
+            {"price": "98.9", "size": "9"},
+            {"price": "98.8", "size": "8"},
+            {"price": "99.0", "size": "10"}
+        ]);
+        let asks = json!([
+            {"price": "100.9", "size": "9"},
+            {"price": "100.2", "size": "2"},
+            {"price": "100.6", "size": "6"},
+            {"price": "100.1", "size": "1"},
+            {"price": "100.4", "size": "4"},
+            {"price": "100.5", "size": "5"},
+            {"price": "100.3", "size": "3"},
+            {"price": "100.7", "size": "7"},
+            {"price": "100.8", "size": "8"},
+            {"price": "101.0", "size": "10"},
+            {"price": "101.1", "size": "11"},
+            {"price": "101.2", "size": "12"},
+            {"price": "101.3", "size": "13"},
+            {"price": "101.4", "size": "14"},
+            {"price": "101.5", "size": "15"},
+            {"price": "101.6", "size": "16"},
+            {"price": "101.7", "size": "17"},
+            {"price": "101.8", "size": "18"},
+            {"price": "101.9", "size": "19"},
+            {"price": "102.0", "size": "20"}
+        ]);
+
+        let update = build_binance_l2_update(ts, "BTCUSDT", &bids, &asks).expect("l2 update");
+        match update.update_type {
+            UpdateType::BinanceL2 {
+                obi_1,
+                obi_2,
+                obi_3,
+                obi_5,
+                obi_10,
+                obi_20,
+                bid_volume_5,
+                ask_volume_5,
+                spread_bps,
+            } => {
+                assert_eq!(obi_1, dec!(19) / dec!(21));
+                assert_eq!(obi_2, dec!(36) / dec!(42));
+                assert_eq!(obi_3, dec!(51) / dec!(63));
+                assert_eq!(obi_5, dec!(75) / dec!(105));
+                assert_eq!(obi_10, dec!(100) / dec!(210));
+                assert_eq!(obi_20, Decimal::ZERO);
+                assert_eq!(bid_volume_5, dec!(90));
+                assert_eq!(ask_volume_5, dec!(15));
+                assert_eq!(spread_bps, dec!(10));
+            }
+            other => panic!("unexpected update type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_binance_l2_update_rejects_partial_depth_books() {
+        let ts = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bids = json!([
+            {"price": "100.0", "size": "10"},
+            {"price": "99.9", "size": "9"},
+            {"price": "99.8", "size": "8"}
+        ]);
+        let asks = json!([
+            {"price": "100.1", "size": "1"},
+            {"price": "100.2", "size": "2"},
+            {"price": "100.3", "size": "3"}
+        ]);
+
+        assert!(build_binance_l2_update(ts, "BTCUSDT", &bids, &asks).is_none());
     }
 
     #[test]

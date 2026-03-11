@@ -2932,8 +2932,12 @@ mod tests {
                 .with_timezone(&Utc),
             symbol: symbol.to_string(),
             update_type: UpdateType::BinanceL2 {
+                obi_1: obi_5,
+                obi_2: obi_5,
+                obi_3: obi_5,
                 obi_5,
                 obi_10: obi_5,
+                obi_20: obi_5,
                 bid_volume_5: dec!(1000),
                 ask_volume_5: dec!(900),
                 spread_bps: dec!(1),

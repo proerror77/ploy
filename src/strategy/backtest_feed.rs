@@ -77,10 +77,14 @@ pub enum UpdateType {
         /// Best ask price
         best_ask: Option<Decimal>,
     },
-    /// Binance L2 depth-derived features, downsampled for historical replay.
+    /// Binance L2 depth-derived features rebuilt from persisted 20-level books.
     BinanceL2 {
+        obi_1: Decimal,
+        obi_2: Decimal,
+        obi_3: Decimal,
         obi_5: Decimal,
         obi_10: Decimal,
+        obi_20: Decimal,
         bid_volume_5: Decimal,
         ask_volume_5: Decimal,
         spread_bps: Decimal,
