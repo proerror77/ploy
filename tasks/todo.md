@@ -1021,8 +1021,11 @@ Shrink `src/strategy/claimer/relayer.rs` again by moving the SDK path, legacy HT
 - 2026-03-11: Added [sdk_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/sdk_flow.rs), [legacy_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/legacy_flow.rs), and [tests.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/tests.rs).
 - 2026-03-11: Reduced [relayer.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer.rs) to relayer env/config helpers plus the top-level `claim_position_via_relayer_proxy(...)` path selector.
 - 2026-03-11: Validation passed:
-  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-shared rtk cargo check --lib --message-format=short`
-- 2026-03-11: `cargo test --lib -- --list` still did not expose relayer-focused unit tests in the current lib harness, so this slice is compile-verified only.
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-claimer rtk cargo check --lib --features claimer_daemon --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-claimer cargo test --lib --features claimer_daemon -- --list | rg 'relayer|proxy_signature|missing_relayer|0x_prefix|hmac'`
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-claimer rtk cargo test --features claimer_daemon strategy::claimer::relayer::tests::test_relayer_hmac_signature_urlsafe_base64 --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-claimer rtk cargo test --features claimer_daemon strategy::claimer::relayer::tests::test_missing_relayer_builder_credential_groups --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-claimer rtk cargo test --features claimer_daemon strategy::claimer::relayer::tests::test_proxy_signature_matches_builder_relayer_client_vector --lib -- --exact --nocapture`
 
 # Runtime Schema Repairs Wave 1 (2026-03-11)
 
@@ -1052,9 +1055,9 @@ Break `src/persistence/runtime_schema/repairs.rs` into domain-focused sibling mo
 - 2026-03-11: Added [trade_state_repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs/trade_state_repairs.rs), [runtime_event_repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs/runtime_event_repairs.rs), and [idempotency_repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs/idempotency_repairs.rs).
 - 2026-03-11: Reduced [repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs.rs) to a façade that assembles the same startup `DO $$ ... $$` repair block.
 - 2026-03-11: Validation passed:
-  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-shared rtk cargo check --lib --message-format=short`
-  - `rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
-  - `rtk cargo test ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-repairs rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-repairs rtk cargo test persistence::tests::persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-repairs rtk cargo test coordinator::bootstrap::tests::ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
 
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
