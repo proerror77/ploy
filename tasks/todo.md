@@ -819,6 +819,38 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# Strategy And Adapter Wave 11 (2026-03-11)
+
+## Goal
+Finish the half-applied `nba_comeback` strategy split by moving config-loading and tests into dedicated sibling modules so the root strategy file stays focused on runtime ownership.
+
+## File ownership
+
+- `src/strategy/nba_comeback/strategy.rs`
+  - owner: thin strategy owner / module wiring
+- `src/strategy/nba_comeback/strategy/config_loader.rs`
+  - owner: config/default/TOML loading
+- `src/strategy/nba_comeback/strategy/tests.rs`
+  - owner: focused NBA strategy regressions
+
+## Tasks
+
+- [x] Complete the extracted config-loader module and restore `from_config` / `from_toml` there.
+- [x] Move the inline NBA strategy tests into a dedicated sibling module.
+- [x] Re-run compile plus focused NBA strategy regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Found the `nba_comeback` split already half-started in the worktree: `strategy.rs` had dropped config/test code and declared `mod config_loader; mod tests;`, but the module files did not exist yet.
+- 2026-03-11: Added [config_loader.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy/config_loader.rs) to own default config, TOML parsing helpers, `from_config`, and `from_toml`.
+- 2026-03-11: Added [tests.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy/tests.rs) to own the strategy-focused config/fill regressions.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-nba-config-cut rtk cargo check --lib --message-format=short`
+- 2026-03-11: Focused lib-test runs were attempted with:
+  - `CARGO_TARGET_DIR=/tmp/ploy-nba-config-cut-t1 rtk cargo test strategy::nba_comeback::strategy::tests::from_toml_builds_nba_strategy_and_overrides_config --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-nba-config-cut-t2 rtk cargo test strategy::nba_comeback::strategy::tests::emits_canonical_submit_order_and_tracks_fill_into_position --lib -- --exact --nocapture`
+- 2026-03-11: The focused test invocations did not complete within the tool window because compiling the branch's full `lib test` target exceeded the session limit; no NBA-specific compile failures surfaced after the module split.
+
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
 ## Goal
