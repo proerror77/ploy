@@ -1,5 +1,4 @@
 use crate::coordinator::{OrderIntent, OrderPriority};
-use crate::domain::Domain;
 
 use super::traits::StrategyOrderIntent;
 

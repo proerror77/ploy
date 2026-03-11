@@ -1,3 +1,30 @@
+# RL CLI Agent State Split (2026-03-11)
+
+## Goal
+Reduce `src/rl/cli_agent.rs` root-file ownership by extracting market-state updates and execution feedback handling into sibling modules.
+
+## Tasks
+
+- [x] Extract observation/event processing into a `market_state` sibling module.
+- [x] Extract execution/position feedback handling into an `execution_feedback` sibling module.
+- [x] Keep public agent lifecycle/API methods in the root file.
+- [x] Re-run RL-focused compile and behavior regressions after the split.
+
+## Review
+
+- [x] Confirm `cli_agent.rs` no longer owns the large `process_crypto_event` and `handle_execution` implementations directly.
+- [x] Confirm the extracted modules only depend on the parent agent state and do not create a new runtime surface.
+
+## Progress notes
+
+- 2026-03-11: Added [market_state.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/market_state.rs) for observation updates, event processing, exposure refresh, and mark-to-market logic.
+- 2026-03-11: Added [execution_feedback.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/execution_feedback.rs) for submitted/success/failure execution handling.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-agent-split rtk cargo check --lib --features rl --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-agent-split rtk cargo test --features rl test_rl_signal_on_good_sum --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-agent-split rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-agent-split rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
+
 # Domain OrderRequest Bridge Cut (2026-03-11)
 
 ## Goal
