@@ -2,78 +2,74 @@
 
 ## Target
 
-Full Ploy trading system codebase — a Polymarket trading bot written in Rust (~165K lines, 260+ source files) with TypeScript sidecar and React frontend.
+Branch `hotfix/staggered-arb-release-20260306` vs `main` — 10 commits, ~317 source files changed.
 
-## Components
+The branch represents a major **coordinator refactor**: the monolithic `bootstrap.rs` (~7,000 lines) and `coordinator.rs` (~6,500 lines) have been decomposed into focused sub-modules. Key themes:
 
-### Rust Core (src/) — ~260 files, ~165K lines
-- **adapters/**: Exchange connectors (Polymarket CLOB/WS, Binance, Kalshi, Chainlink), PostgreSQL, Feishu, API server
-- **agents/**: Domain trading agents (crypto, sports, politics) + OpenClaw integration
-- **ai_clients/**: Grok/LLM integration, autonomous trading, sports analysis
-- **analysis/**: Pattern memory backtest, up/down backtest
-- **api/**: Axum REST API + WebSocket server, auth, handlers, routes
-- **cli/**: CLI commands, Polymarket subcommands (pm/*), RPC, service management
-- **collector/**: Market data collection (Binance depth/klines, Polymarket orderbook)
-- **config.rs**: Configuration system
-- **coordination/**: Circuit breaker, emergency stop, lifecycle, shutdown
-- **coordinator/**: Multi-agent coordinator, bootstrap, state management
-- **domain/**: Core domain models (market, order, state)
-- **exchange/**: Exchange abstraction layer (factory, traits)
-- **main*.rs**: Entry points, dispatch, runtime, agent modes
-- **ml/**: Dense neural network, ONNX inference
-- **persistence/**: Checkpoint, DLQ processor, event store
-- **platform/**: Platform orchestration, risk, queue, position, data plane, subscriptions
-- **rl/**: Reinforcement learning (PPO, environments, training, networks)
-- **safety/**: Direct live trading safety checks
-- **services/**: Health, metrics, discovery, order monitor, data collector
-- **signing/**: Wallet signing, HMAC, nonce management, order signing
-- **strategy/**: Core trading strategies — split arb, staggered arb, momentum, NBA comeback, event edge, gamma scalping, pattern memory, directional, volatility arb, liquidity vacuum
-- **supervisor/**: Watchdog, alert manager, playbook
-- **tui/**: Terminal UI (ratatui) — app, widgets, events, theme
-- **validation.rs**: Input validation
-
-### TypeScript Sidecar (ploy-sidecar/) — 6 files
-- Claude Agent SDK integration for NBA comeback research
-- MCP tools: ESPN, Polymarket, Ploy backend
-- Risk guard hook
-
-### React Frontend (ploy-frontend/) — 22 files
-- Dashboard, live monitor, strategy config, risk dashboard
-- WebSocket + REST API services
-- Zustand state management
-
-### Infrastructure
-- **migrations/**: 22 SQL migration files (PostgreSQL schema)
-- **config/**: TOML strategy configurations (10 files)
-- **.github/workflows/**: 11 CI/CD workflows (deploy, release, test, rollback)
-- **deployment/**: Production TOML configs
+1. **Coordinator decomposition** — `src/coordinator/` split into: `admission/`, `capital/`, `journal/`, `position/`, `queue/`, `risk/`, `strategy_runtime/`, `governance.rs`
+2. **Bootstrap decomposition** — `src/coordinator/bootstrap/` split into: `bootstrap_config/`, `coordinator_bootstrap.rs`, `crypto_runtime_support/`, `managed_crypto/`, `runtime_orchestration.rs`, `runtime_spawns.rs`, `strategy_deployments.rs`
+3. **New strategies** — `src/strategy/pm_5m_directional.rs`, `src/strategy/pm_5m_directional_backtest.rs`, `src/strategy/staggered_arb_live/`
+4. **Control plane** — new `src/control_plane/` module
+5. **CLI routing** — foreground intents now routed through coordinator ingress
+6. **Staggered arb live** — new live trading strategy with entry, leg2, lifecycle, order_updates, runtime_flow
 
 ## Files
 
-### Rust Source (260+ files)
-All files under `src/` — see component breakdown above.
+### Core Coordinator (new sub-modules)
+- `src/coordinator/admission.rs` + `admission/deployments.rs` + `admission/duplicate_guard.rs`
+- `src/coordinator/capital.rs` + `capital/crypto/` + `capital/market/`
+- `src/coordinator/journal.rs` + `journal/restore.rs`
+- `src/coordinator/position.rs` + `position/transitions.rs`
+- `src/coordinator/queue.rs`
+- `src/coordinator/risk.rs` + `risk/checks.rs` + `risk/config.rs` + `risk/exposure.rs` + `risk/queries.rs` + `risk/stats.rs` + `risk/transitions.rs` + `risk/types.rs`
+- `src/coordinator/strategy_runtime.rs` + `strategy_runtime/actions.rs` + `strategy_runtime/control.rs` + `strategy_runtime/observability.rs` + `strategy_runtime/order_store.rs` + `strategy_runtime/session.rs` + `strategy_runtime/setup.rs`
+- `src/coordinator/governance.rs`
+- `src/coordinator/coordinator/control_surface.rs` + `execution.rs` + `ingress.rs` + `order_updates.rs` + `recovery.rs` + `runtime_status.rs` + `tests.rs`
 
-### Frontend Source (22 files)
-All files under `ploy-frontend/src/`
+### Bootstrap (decomposed)
+- `src/coordinator/bootstrap/bootstrap_config.rs` + `bootstrap_config/coordinator_env.rs` + `bootstrap_config/crypto_env.rs`
+- `src/coordinator/bootstrap/coordinator_bootstrap.rs`
+- `src/coordinator/bootstrap/crypto_runtime_support/` (market_data_runtime, market_discovery, preflight)
+- `src/coordinator/bootstrap/managed_crypto/` (config, env)
+- `src/coordinator/bootstrap/runtime_orchestration.rs` + `runtime_spawns.rs` + `strategy_deployments.rs`
+- `src/coordinator/bootstrap/startup_context.rs` + `tests.rs`
 
-### Sidecar Source (6 files)
-All files under `ploy-sidecar/src/`
+### New Strategies
+- `src/strategy/staggered_arb_live/` (entry, leg2, lifecycle, order_updates, runtime_flow, tests)
+- `src/strategy/pm_5m_directional.rs`
+- `src/strategy/pm_5m_directional_backtest.rs`
+- `config/strategies/pm_5m_directional_default.toml`
 
-### Database Migrations (22 files)
-All files under `migrations/`
+### Control Plane
+- `src/control_plane/` (new module)
 
-### CI/CD Workflows (11 files)
-All files under `.github/workflows/`
+### CLI / API
+- `src/cli/strategy/runtime_ops/foreground.rs` + `foreground_submit.rs`
+- `src/api/handlers/sidecar/` (grok_decision, ingress, read_side, write_side, types, tests)
 
-### Configuration (10+ files)
-All files under `config/` and `deployment/`
+### Modified Adapters
+- `src/adapters/binance_ws.rs` + `binance_ws/runtime.rs`
+- `src/adapters/polymarket_ws.rs` + `polymarket_ws/connection.rs` + `polymarket_ws/runtime_support.rs`
+
+### Modified Strategies
+- `src/strategy/adapters/momentum_adapter.rs` + `split_arb_adapter.rs` + `split_arb_adapter/runtime_support.rs`
+- `src/strategy/claimer.rs` + `claimer/claim_flow.rs`
+- `src/strategy/execution/engine/round_flow.rs` + `tests.rs`
+- `src/strategy/execution/executor/execution_flow.rs`
+- `src/strategy/gamma_scalping/strategy.rs` + `strategy/decision_flow.rs`
+- `src/strategy/manager.rs` + `src/strategy/mod.rs`
+- `src/strategy/momentum/entry_runtime.rs`
+- `src/strategy/multi_outcome.rs`
+- `src/strategy/nba_comeback/core/positioning.rs` + `strategy/opportunity_flow.rs`
+- `src/strategy/pattern_memory/decision_runtime.rs` + `strategy.rs`
+- `src/strategy/runtime_specs/deployment_matrix.rs` + `runtime_configs.rs` + `runtime_plans.rs`
 
 ## Flags
 
 - Security Focus: no
-- Performance Critical: no
+- Performance Critical: yes (live trading system)
 - Strict Mode: no
-- Framework: Rust/Tokio/Axum (auto-detected)
+- Framework: Rust / Tokio / Axum / sqlx (PostgreSQL)
 
 ## Review Phases
 

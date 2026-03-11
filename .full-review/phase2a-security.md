@@ -1,469 +1,349 @@
-# Phase 2a: Security Audit — Ploy Trading System
-
-**Date**: 2026-03-08
-**Scope**: Full Ploy trading system (Rust ~165K lines, TypeScript sidecar, React frontend)
-**Auditor**: Automated security review (claude-opus-4.6)
-**Classification**: CONFIDENTIAL — contains vulnerability details for a live trading system
+# Phase 2A Security Audit — ploy Trading System
+**Branch**: `hotfix/staggered-arb-release-20260306` vs `main`
+**Date**: 2026-03-11
+**Auditor**: Security review agent (claude-sonnet-4-6)
+**Scope**: Coordinator decomposition, staggered-arb-live strategy, control plane, CLI routing
 
 ---
 
 ## Executive Summary
 
-The Ploy trading system demonstrates strong security fundamentals: parameterized SQL queries throughout, constant-time token comparison, private key zeroization, and defense-in-depth auth layers. However, several findings require attention — particularly around sensitive data exposure in logs, missing API hardening, and the Wallet struct's `#[derive(Clone)]` which silently copies the private key signer across memory.
-
-**Finding Distribution**: 2 High, 7 Medium, 6 Low, 3 Informational
+The codebase demonstrates solid security fundamentals in several areas: parameterized SQL throughout (no injection risk), constant-time token comparison, secure-by-default cookie flags, and a well-layered coordinator ingress pipeline. However, **six findings warrant immediate attention** before production release, including one Critical and three High severity issues. The most dangerous is the foreground bypass path that allows live order execution with no coordinator risk controls when the coordinator URL is unreachable or unconfigured.
 
 ---
 
-## Critical Findings
-
-*None identified.* The system's core security architecture is sound.
+## Findings
 
 ---
 
-## High Severity Findings
+### F-01 — CRITICAL: Foreground Fallback Executes Live Orders Without Any Risk Controls
 
-### H-01: `ApiCredentials` derives `Debug` — secrets printed in logs/panics
+**Severity**: Critical
+**CWE**: CWE-284 (Improper Access Control)
+**Files**:
+- `src/cli/strategy/runtime_ops/foreground_submit.rs` lines 23–44, 270–315
+- `src/cli/strategy/runtime_ops/foreground.rs` lines 33–85, 196–201
 
-**Severity**: High (CVSS 7.5)
-**CWE**: CWE-532 (Insertion of Sensitive Information into Log File)
-**Location**: `src/signing/hmac.rs:12`
+**Description**
 
-```rust
-#[derive(Debug, Clone)]
-pub struct ApiCredentials {
-    pub api_key: String,
-    pub secret: String,
-    pub passphrase: String,
-}
-```
+`ForegroundIntentSubmitter::submit()` implements a two-stage fallback:
 
-The `Debug` derive on `ApiCredentials` means any `{:?}` formatting (panic messages, `tracing::debug!`, error chains) will dump the API key, HMAC secret, and passphrase to logs. On the production host (`tango-1-1`), journald captures all output.
+1. If `deployment_id` is present in metadata → route through coordinator HTTP ingress (all risk controls apply).
+2. If `deployment_id` is absent → fall through to `self.executor.execute(order)` — a **direct CLOB call** with no admission check, no risk gate, no governance check, no capital allocator, no circuit breaker, no journal entry.
 
-**Attack scenario**: An attacker with read access to `/var/log/journal` or systemd logs obtains full Polymarket API credentials, enabling unauthorized trading on the account.
+The fallback is triggered silently whenever `deployment_id_from_metadata()` returns `None`. Any strategy that does not embed `deployment_id` in its intent metadata (including the legacy `staggered_arb_live` path, which constructs intents via `crypto_submit_intent()` without guaranteed deployment metadata) will execute live orders through this path.
 
-**Remediation**:
-```rust
-impl std::fmt::Debug for ApiCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ApiCredentials")
-            .field("api_key", &format!("{}...", &self.api_key[..8.min(self.api_key.len())]))
-            .field("secret", &"[REDACTED]")
-            .field("passphrase", &"[REDACTED]")
-            .finish()
-    }
-}
-```
+Additionally, if the coordinator HTTP endpoint is unreachable (network partition, coordinator not started, wrong `PLOY_RPC_COORDINATOR_INTENT_URL`), `submit_intent_via_coordinator` returns `Err(...)`, which propagates up and causes the order to be marked `Failed` — but the executor fallback is **not** attempted in that error case. However, the silent `None` path (missing deployment_id) does reach the executor directly.
+
+**Attack / Failure Scenario**
+
+An operator runs `ploy strategy start staggered_arb_live --foreground` on a live host. The strategy's `crypto_submit_intent()` helper does not inject `deployment_id` into the intent metadata. Every order silently bypasses the coordinator and executes directly against the CLOB. Exposure limits, circuit breaker, daily loss limit, governance pauses, and the audit journal are all bypassed. The system can accumulate unlimited live exposure.
+
+**Remediation**
+
+1. Remove the direct-executor fallback from `ForegroundIntentSubmitter::submit()` entirely. If coordinator routing fails, the order must be rejected, not silently executed.
+2. Enforce that `deployment_id` is always present in strategy intents at the `StrategyOrderIntent` construction site; return an error at strategy startup if it is missing.
+3. Add a startup assertion in `run_strategy_foreground` that verifies the coordinator URL is reachable before accepting live orders.
 
 ---
 
-### H-02: HMAC debug log leaks full signing message including body content
+### F-02 — HIGH: TOCTOU Race on Elevated→Normal Circuit Breaker Transition
 
-**Severity**: High (CVSS 7.1)
-**CWE**: CWE-532 (Insertion of Sensitive Information into Log File)
-**Location**: `src/signing/hmac.rs:106-113`
-
-```rust
-tracing::debug!(
-    "HMAC signing - timestamp: {}, method: {}, path: {}, message: '{}', address: {}",
-    timestamp, method, path, message, self.address
-);
-```
-
-The `message` variable contains the full HMAC signing payload: `{timestamp}{METHOD}{path}{body}`. For order submissions, the body includes order details. Combined with the timestamp and address, this provides enough information for an attacker to reconstruct valid HMAC signatures if they can observe the log output and know the signing algorithm.
-
-**Remediation**: Remove or redact the `message` field from the debug log:
-```rust
-tracing::debug!(
-    "HMAC signing - method: {}, path: {}, address: {}",
-    method, path, self.address
-);
-```
-
----
-
-## Medium Severity Findings
-
-### M-01: `Wallet` derives `Clone` — private key signer copied across memory
-
-**Severity**: Medium (CVSS 5.3)
-**CWE**: CWE-316 (Cleartext Storage of Sensitive Information in Memory)
-**Location**: `src/signing/wallet.rs:14`
-
-```rust
-#[derive(Clone)]
-pub struct Wallet {
-    inner: PrivateKeySigner,
-    chain_id: u64,
-}
-```
-
-The `Wallet` struct claims "the private key is only used during wallet creation and then immediately zeroized" (line 12-13), but `#[derive(Clone)]` on the struct means every `.clone()` call duplicates the `PrivateKeySigner` (which holds the private key in memory). The `PolymarketClient::clone()` at `polymarket_clob.rs:85` clones the wallet via `Arc<Wallet>`, which is safe (reference count), but the `Clone` derive itself is misleading and could lead to future misuse where `wallet.clone()` creates an untracked copy of the key material.
-
-Additionally, `pub fn inner(&self) -> &PrivateKeySigner` (line 120) exposes the raw signer, which could be used to extract the private key, undermining the zeroization guarantee.
-
-**Remediation**:
-1. Remove `#[derive(Clone)]` from `Wallet` — force all sharing through `Arc<Wallet>`.
-2. Remove or restrict `pub fn inner()` to `pub(crate)` and audit all call sites.
-
----
-
-### M-02: No API rate limiting — brute-force and DoS exposure
-
-**Severity**: Medium (CVSS 6.5)
-**CWE**: CWE-307 (Improper Restriction of Excessive Authentication Attempts)
-**Location**: `src/api/routes.rs` (entire router)
-
-The Axum API server has no rate limiting middleware. All endpoints, including:
-- `/api/auth/login` (admin token brute-force)
-- `/api/sidecar/orders` (order flooding)
-- `/api/system/halt` (repeated halt attempts)
-
-...are unprotected against excessive requests. The admin token comparison is constant-time (good), but without rate limiting an attacker can attempt millions of tokens per second.
-
-**Remediation**: Add `tower::limit::RateLimitLayer` or `tower_governor` middleware:
-```rust
-use tower::limit::RateLimitLayer;
-use std::time::Duration;
-
-// In create_router():
-router.layer(RateLimitLayer::new(100, Duration::from_secs(60)))
-```
-
-For the login endpoint specifically, implement exponential backoff after N failed attempts.
-
----
-
-### M-03: Missing security headers on API responses
-
-**Severity**: Medium (CVSS 5.3)
-**CWE**: CWE-693 (Protection Mechanism Failure)
-**Location**: `src/api/routes.rs`
-
-The API server does not set any security headers:
-- No `X-Content-Type-Options: nosniff`
-- No `X-Frame-Options: DENY`
-- No `Content-Security-Policy`
-- No `Strict-Transport-Security` (HSTS)
-- No `Cache-Control: no-store` on sensitive endpoints
-
-**Remediation**: Add a `tower_http::set_header::SetResponseHeaderLayer` or custom middleware:
-```rust
-use axum::http::header;
-use tower_http::set_header::SetResponseHeaderLayer;
-
-router
-    .layer(SetResponseHeaderLayer::overriding(
-        header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
-    .layer(SetResponseHeaderLayer::overriding(
-        header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")))
-```
-
----
-
-### M-04: WebSocket auth token passed in query parameter — logged in access logs
-
-**Severity**: Medium (CVSS 5.9)
-**CWE**: CWE-598 (Use of GET Request Method With Sensitive Query Strings)
-**Location**: `src/api/websocket.rs:22-36`
-
-```rust
-pub async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    Query(auth): Query<WsAuth>,  // token in ?token=...
-    ...
-```
-
-The admin token is passed as a URL query parameter (`/ws?token=SECRET`). Query parameters are:
-- Logged in web server access logs
-- Stored in browser history
-- Visible in network monitoring tools
-- Potentially cached by proxies
-
-**Remediation**: Use the first WebSocket message for authentication instead of query params, or use a short-lived session token obtained via the `/api/auth/login` endpoint.
-
----
-
-### M-05: `DatabaseConfig` derives `Debug` — connection URL with credentials exposed
-
-**Severity**: Medium (CVSS 5.5)
-**CWE**: CWE-532 (Insertion of Sensitive Information into Log File)
-**Location**: `src/config.rs:673-680`
-
-```rust
-#[derive(Debug, Clone, Deserialize)]
-pub struct DatabaseConfig {
-    pub url: String,           // Contains postgres://user:password@host/db
-    pub max_connections: u32,
-}
-```
-
-The database URL typically contains credentials (`postgres://ploy:PASSWORD@localhost:5432/ploy`). The `Debug` derive means any debug formatting of `AppConfig` will dump the full connection string.
-
-**Remediation**: Implement a custom `Debug` that redacts the URL:
-```rust
-impl std::fmt::Debug for DatabaseConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DatabaseConfig")
-            .field("url", &"[REDACTED]")
-            .field("max_connections", &self.max_connections)
-            .finish()
-    }
-}
-```
-
----
-
-### M-06: Emergency stop `is_stopped` uses `Ordering::Relaxed` — may miss stop signal
-
-**Severity**: Medium (CVSS 5.0)
+**Severity**: High
 **CWE**: CWE-362 (Concurrent Execution Using Shared Resource with Improper Synchronization)
-**Location**: `src/coordination/emergency_stop.rs:133`
+**File**: `src/coordinator/risk/transitions.rs` lines 68–71
+
+**Description**
+
+In `record_success()`, the state transition from `Elevated` to `Normal` is performed with two separate lock acquisitions:
 
 ```rust
-pub fn is_stopped(&self) -> bool {
-    self.is_stopped.load(Ordering::Relaxed)
+if *self.state.read().await == PlatformRiskState::Elevated {
+    *self.state.write().await = PlatformRiskState::Normal;
+    info!("Risk state normalized after successful execution");
 }
 ```
 
-While `trigger()` uses `Ordering::SeqCst` to set the flag (line 152), the read side uses `Ordering::Relaxed`. On weakly-ordered architectures (ARM, which Alibaba Cloud may use), a thread could continue executing trades for an unbounded time after emergency stop is triggered, because `Relaxed` provides no cross-thread visibility guarantee.
+Between the `read()` guard drop and the `write()` guard acquisition, a concurrent call to `trigger_circuit_breaker()` can set the state to `Halted`. The subsequent `write()` then overwrites `Halted` with `Normal`, silently clearing the circuit breaker without logging a reset event, without clearing `halted_at`, and without resetting consecutive failure counters.
 
-For a financial safety mechanism, this is unacceptable.
+**Attack / Failure Scenario**
 
-**Remediation**: Change to `Ordering::Acquire`:
+1. Platform accumulates failures → state transitions to `Elevated`.
+2. One more failure triggers `trigger_circuit_breaker()` → state set to `Halted`.
+3. Concurrently, a fill callback calls `record_success()`.
+4. The read sees `Elevated` (stale), the write overwrites `Halted` → `Normal`.
+5. Circuit breaker is silently cleared. Trading resumes despite the halt condition still being valid. `halted_at` remains set to the old timestamp, causing the next `try_auto_recover_circuit_breaker()` to behave incorrectly.
+
+**Remediation**
+
+Replace the read-then-write pattern with a single write-lock acquisition and an atomic compare-and-swap:
+
 ```rust
-pub fn is_stopped(&self) -> bool {
-    self.is_stopped.load(Ordering::Acquire)
+let mut state = self.state.write().await;
+if *state == PlatformRiskState::Elevated {
+    *state = PlatformRiskState::Normal;
+    info!("Risk state normalized after successful execution");
 }
 ```
 
----
-
-### M-07: Sidecar risk guard only checks `submit_order` tool name — bypassable
-
-**Severity**: Medium (CVSS 5.5)
-**CWE**: CWE-863 (Incorrect Authorization)
-**Location**: `ploy-sidecar/src/hooks/risk-guard.ts:32`
-
-```typescript
-if (!input.tool_name.includes("submit_order")) return {};
-```
-
-The risk guard uses `includes("submit_order")` which is a substring match. If a new tool is added with a different name that can submit orders (e.g., `batch_submit`, `emergency_order`, `submit_intent`), the guard will not intercept it. Additionally, the guard runs client-side in the sidecar process — the Rust backend is the true enforcement point.
-
-The `MAX_PRICE = 0.20` hardcoded limit also means the sidecar cannot trade any market where the fair value is above $0.20, which may be overly restrictive for non-NBA strategies.
-
-**Remediation**:
-1. Use an allowlist approach: only permit known-safe tools, deny everything else.
-2. Ensure the Rust backend (`/api/sidecar/orders`) independently validates all limits.
+This eliminates the window between the read and write.
 
 ---
 
-## Low Severity Findings
+### F-03 — HIGH: Governance State Not Restored on Restart Unless Pool Is Explicitly Wired
 
-### L-01: `KalshiConfig` stores API key and secret in `Option<String>` without zeroization
+**Severity**: High
+**CWE**: CWE-665 (Improper Initialization)
+**File**: `src/coordinator/coordinator/recovery.rs` lines 55–72
 
-**Severity**: Low (CVSS 3.7)
-**CWE**: CWE-316 (Cleartext Storage of Sensitive Information in Memory)
-**Location**: `src/config.rs:611-631`
+**Description**
 
-Unlike the Polymarket private key (which uses `zeroize`), the Kalshi API key and secret are stored as plain `String` values in `KalshiConfig`. They persist in memory for the lifetime of the process and are never zeroized.
-
-**Remediation**: Use `zeroize::Zeroizing<String>` for `api_key` and `api_secret`.
-
----
-
-### L-02: `GrokConfig` stores API key as plain `String`
-
-**Severity**: Low (CVSS 3.7)
-**CWE**: CWE-316 (Cleartext Storage of Sensitive Information in Memory)
-**Location**: `src/ai_clients/grok.rs:21`
+`load_persisted_governance_policy()` correctly loads governance state from the database, but it is guarded by:
 
 ```rust
-pub struct GrokConfig {
-    pub api_key: String,
-    ...
-}
+let Some(pool) = self.governance_store_pool.as_ref() else {
+    return Ok(());
+};
 ```
 
-The Grok API key is stored as a plain `String` and never zeroized. It also derives `Debug` (line 18) and `Clone` (line 18), meaning it can be printed and duplicated freely.
+`governance_store_pool` is set only via `set_governance_store_pool()`, which is a separate opt-in call. If the bootstrap path does not call this method (e.g., a new bootstrap variant, a test harness, or a misconfigured deployment), `GovernanceController::new()` initializes with `IngressMode::Running` and an empty `blocked_domains` set, silently discarding any operator-set domain pauses or global halts that were persisted before the restart.
 
-**Remediation**: Use `zeroize::Zeroizing<String>` and implement custom `Debug`.
+The `GovernanceController::new()` constructor (governance.rs line 178–185) always starts with defaults regardless of what is in the database.
+
+**Attack / Failure Scenario**
+
+An operator pauses the Sports domain via the governance API due to a data quality incident. The process restarts (OOM kill, deploy). The governance pool is not wired in the new bootstrap path. Sports domain resumes trading immediately, placing orders against stale or incorrect market data.
+
+**Remediation**
+
+1. Make `governance_store_pool` a required field in `Coordinator` construction, not an optional post-construction setter. Fail fast at startup if the pool is absent and governance persistence is expected.
+2. Alternatively, call `load_persisted_governance_policy()` unconditionally in the bootstrap sequence and log a warning (not silently skip) if the pool is absent.
+3. Add an integration test that verifies governance state survives a coordinator restart.
 
 ---
 
-### L-03: Prompt injection mitigation is incomplete — 500-char truncation may be insufficient
+### F-04 — HIGH: Capital Allocator Exposure Gap After Fill (Double-Entry Risk)
 
-**Severity**: Low (CVSS 4.3)
+**Severity**: High
+**CWE**: CWE-841 (Improper Enforcement of Behavioral Workflow)
+**File**: `src/coordinator/coordinator/recovery.rs` lines 77–231 (recovery path); `src/coordinator/risk/exposure.rs` lines 44–77
+
+**Description**
+
+As described in the pre-audit context (A-H2): after a fill is processed, `MarketCapitalAllocator` shows zero exposure for the filled position because the allocator tracks *pending reservations*, not *open positions*. The reservation is released on fill, but the position tracker (`self.positions`) is updated separately. Between the reservation release and the next `refresh_risk_exposure_for_agent()` call, the risk gate's `current_agent_exposure` reads from `agent_stats[agent_id].exposure`, which is only updated by `update_agent_exposure()`.
+
+In the recovery path (`restore_runtime_state_from_execution_log`), `settle_domain_success()` is called for each fill, but `refresh_risk_exposure_for_agent()` is called only once at the end of the loop (line 216), not after each fill. During the replay loop, the risk gate's exposure counters are stale, meaning a strategy that submits a new intent during recovery could pass exposure checks against an underestimated baseline.
+
+**Attack / Failure Scenario**
+
+Strategy has a $50 exposure limit. It holds a $45 open position. Process restarts. During the recovery replay loop, the risk gate shows $0 exposure (not yet refreshed). A new intent for $48 arrives during recovery. It passes the $50 exposure check. After recovery completes, actual exposure is $93 — nearly 2x the configured limit.
+
+**Remediation**
+
+1. Call `refresh_risk_exposure_for_agent()` after each fill is replayed in the recovery loop, not only at the end.
+2. Consider holding the coordinator's ingress channel closed (rejecting new intents) until recovery is fully complete and all exposure counters are refreshed.
+
+---
+
+### F-05 — MEDIUM: Deployment JSON Loaded from Attacker-Controlled File Paths
+
+**Severity**: Medium
+**CWE**: CWE-73 (External Control of File Name or Path)
+**File**: `src/coordinator/admission/deployments.rs` lines 34–62, 191–217
+
+**Description**
+
+`load_strategy_deployments()` resolves the deployment configuration from multiple sources in priority order:
+
+1. `PLOY_STRATEGY_DEPLOYMENTS_JSON` env var (raw JSON string)
+2. `PLOY_DEPLOYMENTS_JSON` env var
+3. `PLOY_DEPLOYMENTS_FILE` env var (arbitrary file path)
+4. Hardcoded candidate paths: `data/state/deployments.json`, `/opt/ploy/data/state/deployments.json`, `deployment/deployments.json`, `/opt/ploy/deployment/deployments.json`
+
+The `PLOY_DEPLOYMENTS_FILE` env var accepts an arbitrary filesystem path with no validation. On a shared host or in a container with a writable volume, an attacker who can set environment variables or write to the candidate paths can inject a crafted `deployments.json` that:
+- Enables a disabled deployment
+- Changes `execution_mode` from `DryRunOnly` to `LiveOnly`
+- Removes `account_ids` restrictions to allow any account
+- Sets `lifecycle_stage` to `Live` to bypass lifecycle checks
+
+The `parse_strategy_deployments()` function deserializes the JSON without any signature or integrity check.
+
+**Remediation**
+
+1. Restrict `PLOY_DEPLOYMENTS_FILE` to paths within a known safe prefix (e.g., `/opt/ploy/`).
+2. Add a HMAC or checksum verification for deployment JSON loaded from disk, signed with a key only the operator controls.
+3. Log the resolved deployment source (env var vs. file path vs. which candidate) at startup at `info` level so operators can audit which source was used.
+
+---
+
+### F-06 — MEDIUM: Sidecar Token Accepted via Standard Authorization Header (Token Confusion)
+
+**Severity**: Medium
+**CWE**: CWE-287 (Improper Authentication)
+**File**: `src/api/auth.rs` lines 182–213
+
+**Description**
+
+`ensure_sidecar_authorized()` accepts the sidecar token from either `x-ploy-sidecar-token` (dedicated header) or the standard `Authorization: Bearer <token>` header. Similarly, `ensure_admin_authorized()` accepts the admin token from `x-ploy-admin-token` or `Authorization: Bearer <token>`.
+
+`ensure_sidecar_or_admin_authorized()` (line 216–223) tries sidecar first, then admin. This means:
+- A request carrying the admin token in `Authorization: Bearer` will first be tested as a sidecar token (ct_eq will fail), then tested as an admin token (will pass).
+- A request carrying the sidecar token in `Authorization: Bearer` will pass sidecar auth.
+
+The risk is that any endpoint that calls `ensure_sidecar_or_admin_authorized()` can be accessed with either token via the generic `Authorization` header, making it impossible to enforce token-role separation at the HTTP layer (e.g., via a WAF or API gateway that inspects the `Authorization` header). A sidecar token holder can reach admin-only endpoints if those endpoints use `ensure_sidecar_or_admin_authorized`.
+
+Additionally, the admin cookie check (lines 167–173) accepts both the SHA-256 fingerprint of the token AND the raw token itself:
+```rust
+if cookie.as_deref().is_some_and(|v| ct_eq(v, &expected_fp) || ct_eq(v, &expected))
+```
+This means if the raw admin token is ever stored in a cookie (e.g., by a misconfigured client), it will be accepted. The raw token in a cookie is a higher-risk exposure than the fingerprint.
+
+**Remediation**
+
+1. Remove the `Authorization: Bearer` fallback from both `ensure_sidecar_authorized` and `ensure_admin_authorized`. Require dedicated headers (`x-ploy-sidecar-token`, `x-ploy-admin-token`) exclusively. This enables WAF-level enforcement.
+2. Remove the `ct_eq(v, &expected)` branch from the cookie check. The cookie should only ever contain the fingerprint, never the raw token.
+
+---
+
+### F-07 — MEDIUM: Unbounded Fill Replay Blocks Startup (Pagination Missing)
+
+**Severity**: Medium
+**CWE**: CWE-400 (Uncontrolled Resource Consumption)
+**File**: `src/coordinator/coordinator/recovery.rs` lines 77–94
+
+**Description**
+
+`restore_runtime_state_from_execution_log()` queries fills with a date window of `[today 00:00:00, today 24:00:00)`. This is correctly bounded to today. However, the recovery function calls `self.positions.clear()` and `self.capital_policy.reset_runtime_state()` before replaying fills (lines 102–103). If the fill query returns a large result set (e.g., a high-frequency strategy with thousands of fills today), the replay loop runs synchronously in the coordinator startup path, blocking the ingress channel for an extended period. There is no timeout or pagination on the fill query.
+
+Additionally, the recovery loop calls `settle_domain_success()` for every fill, which acquires and releases multiple async locks per iteration. With thousands of fills, this can take seconds to minutes, during which the coordinator is not accepting new intents.
+
+**Remediation**
+
+1. Add a `LIMIT` clause or pagination to `load_execution_restore_data` to cap the number of fills replayed (e.g., last 10,000 fills today).
+2. Consider running recovery in a background task and holding the ingress channel in a `Paused` state until recovery completes, rather than blocking startup.
+
+---
+
+### F-08 — MEDIUM: Grok Decision Prompt Contains Unvalidated External Strings
+
+**Severity**: Medium
 **CWE**: CWE-77 (Improper Neutralization of Special Elements used in a Command)
-**Location**: `src/ai_clients/autonomous.rs:303-309`
+**File**: `src/api/handlers/sidecar/grok_decision.rs` lines 59–96, 239–282
 
+**Description**
+
+The `GrokDecisionRequest` struct accepts several free-text fields from the TypeScript sidecar that are passed directly into the Grok prompt via `build_unified_prompt()`:
+
+- `momentum_narrative: Option<String>` — no length limit, no sanitization
+- `research_summary: Option<String>` — no length limit, no sanitization
+- `injury_updates[].details: Option<String>` — no length limit, no sanitization
+- `clock: String` — no format validation
+
+These strings are embedded into the LLM prompt. A compromised sidecar (or a MITM on the loopback interface between the TypeScript sidecar and the Rust backend) could inject prompt-manipulation content into these fields, potentially causing Grok to return a `"trade"` decision when it should return `"pass"`, or to return fabricated `fair_value` / `edge` values.
+
+The `raw_response` from Grok is also persisted verbatim to the database (line 446), which could contain adversarial content if the LLM is manipulated.
+
+**Remediation**
+
+1. Enforce maximum length limits on all free-text fields in `GrokDecisionRequest` (e.g., 2000 chars for narrative fields, 100 chars for `clock`).
+2. Strip or escape characters that are known prompt-injection vectors (e.g., sequences like `\n\nSystem:`, `\n\nHuman:`, `IGNORE PREVIOUS INSTRUCTIONS`) before embedding in the prompt.
+3. Validate `clock` against a known format (e.g., `MM:SS` regex) and reject malformed values.
+4. The existing memory notes confirm "Prompt injection sanitization" was applied to `autonomous.rs` — apply the same sanitization here.
+
+---
+
+### F-09 — LOW: Deployment Gate Bypass for Sell Intents Undocumented
+
+**Severity**: Low
+**CWE**: CWE-284 (Improper Access Control)
+**File**: `src/coordinator/admission/deployments.rs` line 81; `src/coordinator/admission.rs` line 50
+
+**Description**
+
+The deployment gate check explicitly skips sell intents:
 ```rust
-fn sanitize_for_prompt(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .take(500)
-        .collect()
+if !intent.is_buy || dry_run || !deployment_gate_required() {
+    return Ok(());
 }
 ```
 
-The sanitization strips control characters and truncates to 500 chars, but does not address:
-- Markdown/formatting injection (e.g., `## SYSTEM: Ignore previous instructions`)
-- Unicode homoglyphs that could confuse the LLM
-- Nested prompt delimiters that could escape the context
+This is architecturally correct for reduce-only exits (you must be able to close positions even if the deployment is disabled). However, it is not documented in the code, and the same bypass applies to `buy_intent_missing_deployment_reason()` (line 11–19 of deployments.rs). A sell intent with no `deployment_id` metadata passes all deployment gate checks silently.
 
-However, the autonomous agent's direct order submission is disabled (lines 489-492, 530-532), routing through the coordinator instead. This significantly reduces the impact.
+If a strategy bug generates a spurious sell intent for a token the account does not hold, the reduce-only guard in `coordinator/ingress.rs` (lines 39–69) will catch it — but only if position tracking is accurate. If position tracking is stale (e.g., immediately after restart before recovery completes), a spurious sell could pass.
 
-**Remediation**: Add delimiter escaping and consider a structured data format instead of string interpolation for LLM context.
+**Remediation**
 
----
-
-### L-04: CORS allows `localhost:5173` by default in production
-
-**Severity**: Low (CVSS 3.1)
-**CWE**: CWE-942 (Permissive Cross-domain Policy with Untrusted Domains)
-**Location**: `src/api/routes.rs:24-27`
-
-```rust
-if origins.is_empty() {
-    origins.push(HeaderValue::from_static("http://localhost:5173"));
-    origins.push(HeaderValue::from_static("http://127.0.0.1:5173"));
-}
-```
-
-When `PLOY_API_CORS_ALLOWED_ORIGINS` is not set, the API defaults to allowing `localhost:5173`. On the production server, this means any process running on the same host on port 5173 can make authenticated cross-origin requests.
-
-**Remediation**: In production, require explicit CORS origin configuration. If no origins are configured, deny all cross-origin requests.
+1. Add a code comment at the sell bypass explaining the reduce-only rationale.
+2. Ensure the reduce-only guard in `handle_order_intent` is always evaluated before the sell reaches the executor, even during recovery.
 
 ---
 
-### L-05: `stop-trading.yml` writes SSH private key to disk
+### F-10 — LOW: Admin Token Fingerprint Uses Unsalted SHA-256
 
-**Severity**: Low (CVSS 3.3)
-**CWE**: CWE-312 (Cleartext Storage of Sensitive Information)
-**Location**: `.github/workflows/stop-trading.yml:25-26`
+**Severity**: Low
+**CWE**: CWE-916 (Use of Password Hash With Insufficient Computational Effort)
+**File**: `src/api/auth.rs` lines 87–91
 
-```yaml
-echo "$PRIVATE_KEY" > private_key.pem
-chmod 600 private_key.pem
-```
+**Description**
 
-The SSH private key is written to the runner's filesystem. While `rm private_key.pem` is called at the end, if the workflow fails between write and delete, the key persists on the runner. The `release-aliyun.yml` workflow avoids this by using `appleboy/ssh-action` which handles key material in memory.
+`admin_token_fingerprint()` computes `SHA-256(token)` with no salt. The fingerprint is stored in the session cookie. If an attacker obtains the cookie value, they can attempt to reverse the token via a rainbow table or brute-force attack (SHA-256 is fast; a short or low-entropy token could be reversed in seconds).
 
-**Remediation**: Migrate to `appleboy/ssh-action` like the other workflows, or use `trap` to ensure cleanup on failure.
+The comment in the code acknowledges that length leaks are acceptable for fixed-format bearer tokens, but does not address the unsalted hash risk.
 
----
+**Remediation**
 
-### L-06: `Wallet::private_key_hex()` still in public API despite deprecation
-
-**Severity**: Low (CVSS 2.7)
-**CWE**: CWE-749 (Exposed Dangerous Method or Function)
-**Location**: `src/signing/wallet.rs:89-98`
-
-The method is deprecated and returns an empty string (good), but it remains `pub` and could confuse callers or be accidentally relied upon. No call sites exist currently.
-
-**Remediation**: Remove the method entirely or change visibility to `pub(crate)`.
+1. Use HMAC-SHA256 with a server-side secret as the cookie fingerprint: `HMAC-SHA256(server_secret, token)`. This makes the fingerprint unguessable even if the token is known.
+2. Alternatively, use a random session ID stored server-side (mapping to the token), which is the standard session cookie pattern.
 
 ---
 
-## Informational Findings
+### F-11 — LOW: `PLOY_DEPLOYMENT_GATE_REQUIRED=false` Has No Audit Trail
 
-### I-01: SQL injection risk is well-mitigated
+**Severity**: Low
+**CWE**: CWE-1188 (Insecure Default Initialization of Resource)
+**Files**:
+- `src/api/handlers/sidecar/ingress.rs` lines 110–120
+- `src/coordinator/admission/deployments.rs` lines 22–32
 
-All SQL queries use parameterized `sqlx::query` with `$1`, `$2` bind parameters. No `format!`-based SQL construction was found. The `QueryBuilder` usage in `get_security_events` (system.rs:609) correctly uses `.push_bind()`. The `nonce_manager.rs` cleanup query uses `$2 || ' days'` which is safe because `$2` is bound as an integer.
+**Description**
 
-**Status**: No action required.
+Setting `PLOY_DEPLOYMENT_GATE_REQUIRED=false` (or `0`, `no`, `off`) disables the deployment gate for all intents globally, including live buy intents. This env var is checked at runtime on every request (not cached), meaning it can be changed without restart. There is no audit log entry when the gate is disabled.
 
----
+**Remediation**
 
-### I-02: Authentication architecture is sound
-
-- Constant-time comparison (`ct_eq`) for token validation
-- SHA-256 fingerprinting for session cookies (not raw token)
-- `HttpOnly; SameSite=Strict; Secure` cookie attributes (with env override for dev)
-- Separate admin and sidecar token scopes
-- Default-deny: auth required unless explicitly disabled via env var
-- Sidecar endpoints require sidecar token; system endpoints require admin token
-
-**Status**: No action required.
+1. Log a `warn!` at startup and at each request where the gate is disabled, so operators are alerted.
+2. Consider requiring a separate `PLOY_DEPLOYMENT_GATE_OVERRIDE_TOKEN` to be set alongside the disable flag, to prevent accidental misconfiguration.
 
 ---
 
-### I-03: Autonomous agent direct order submission is correctly disabled
+## Summary Table
 
-The `AutonomousAgent::execute_action()` method returns `Err(PloyError::Validation("autonomous direct submit is disabled"))` for both `EnterPosition` and `ExitPosition` actions (lines 489-492, 530-532). All orders must route through the coordinator intent ingress. This is a strong defense-in-depth measure.
-
-**Status**: No action required. The Phase 1 finding about "autonomous.rs bypasses RiskManager" is no longer accurate — direct submission is blocked.
-
----
-
-## OWASP Top 10 Assessment
-
-| Category | Status | Notes |
-|----------|--------|-------|
-| A01: Broken Access Control | PASS | Admin/sidecar token separation, deployment gate, domain scoping |
-| A02: Cryptographic Failures | WARN | H-01, H-02 (credential exposure in logs); key material otherwise well-handled |
-| A03: Injection | PASS | All SQL parameterized; prompt injection mitigated (L-03) |
-| A04: Insecure Design | PASS | Defense-in-depth: coordinator gateway, deployment lifecycle gates, dry-run defaults |
-| A05: Security Misconfiguration | WARN | M-03 (missing headers), L-04 (CORS defaults) |
-| A06: Vulnerable Components | INFO | Dependencies are recent versions; no known CVEs in pinned versions |
-| A07: Auth Failures | WARN | M-02 (no rate limiting on login), M-04 (WS token in query) |
-| A08: Data Integrity Failures | PASS | EIP-712 signing, HMAC auth, deployment gate enforcement |
-| A09: Logging Failures | WARN | H-01, H-02 (over-logging secrets); audit logging present for system events |
-| A10: SSRF | PASS | No user-controlled URL fetching in the Rust backend |
+| ID   | Severity | Title                                                        | File(s)                                      |
+|------|----------|--------------------------------------------------------------|----------------------------------------------|
+| F-01 | Critical | Foreground fallback executes live orders without risk controls | `foreground_submit.rs`, `foreground.rs`      |
+| F-02 | High     | TOCTOU race on Elevated→Normal circuit breaker transition    | `risk/transitions.rs`                        |
+| F-03 | High     | Governance state not restored unless pool explicitly wired   | `coordinator/recovery.rs`                    |
+| F-04 | High     | Capital allocator exposure gap after fill (double-entry risk)| `coordinator/recovery.rs`, `risk/exposure.rs`|
+| F-05 | Medium   | Deployment JSON loaded from attacker-controlled file paths   | `admission/deployments.rs`                   |
+| F-06 | Medium   | Sidecar token accepted via Authorization header (confusion)  | `api/auth.rs`                                |
+| F-07 | Medium   | Unbounded fill replay blocks startup (pagination missing)    | `coordinator/recovery.rs`                    |
+| F-08 | Medium   | Grok prompt contains unvalidated external strings            | `sidecar/grok_decision.rs`                   |
+| F-09 | Low      | Deployment gate bypass for sells undocumented                | `admission/deployments.rs`                   |
+| F-10 | Low      | Admin token fingerprint uses unsalted SHA-256                | `api/auth.rs`                                |
+| F-11 | Low      | `PLOY_DEPLOYMENT_GATE_REQUIRED=false` has no audit trail     | `ingress.rs`, `admission/deployments.rs`     |
 
 ---
 
-## Dependency Assessment
+## Positive Security Observations
 
-### Rust (Cargo.toml)
-- `sqlx 0.8.6`: Current, no known CVEs
-- `reqwest 0.12`: Current
-- `alloy 1.x`: Current
-- `axum 0.8`: Current
-- `tokio 1.x`: Current
-- `hmac 0.12` / `sha2 0.10`: Current, well-audited crates
-- `zeroize 1.8.2`: Current
-- `polymarket-client-sdk 0.4`: Vendored (`vendor/polymarket-client-sdk`), should be periodically synced
+The following patterns are well-implemented and should be preserved:
 
-### TypeScript (ploy-sidecar/package.json)
-- `@anthropic-ai/claude-agent-sdk ^0.2.37`: Recent
-- `zod ^4.0.0`: Recent
-- Minimal dependency surface (good)
-
-### React (ploy-frontend)
-- No `dangerouslySetInnerHTML` usage found (good)
-- Standard React/Vite stack
-
----
-
-## Trading-Specific Security Assessment
-
-| Control | Status | Details |
-|---------|--------|---------|
-| Order size limits | PASS | Autonomous agent: $50/trade, $200 total. Sidecar risk guard: $50 max |
-| Position limits | PASS | `max_positions`, `max_positions_per_symbol` in RiskConfig |
-| Emergency stop | WARN | M-06: Relaxed ordering on read side |
-| Dry-run default | PASS | `dry_run` defaults to `true` in AppState |
-| Direct live gate | PASS | `PLOY_ALLOW_DIRECT_LIVE` env required for legacy paths |
-| Deployment lifecycle | PASS | `lifecycle_stage.allows_live_ingress()` gate on intent submission |
-| Order expiration | PASS | 30-min default EIP-712 expiry, configurable via `PLOY_ORDER_EXPIRY_SECS` |
-| Sidecar orders | PASS | `/api/sidecar/orders` only enabled when `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=1` |
-
----
-
-## Remediation Priority
-
-| Priority | Finding | Effort |
-|----------|---------|--------|
-| 1 | H-01: Redact `ApiCredentials` Debug | 15 min |
-| 2 | H-02: Remove HMAC signing message from debug log | 5 min |
-| 3 | M-06: Fix emergency stop memory ordering | 5 min |
-| 4 | M-02: Add API rate limiting | 1 hour |
-| 5 | M-03: Add security headers | 30 min |
-| 6 | M-04: Move WS auth out of query params | 2 hours |
-| 7 | M-05: Redact `DatabaseConfig` Debug | 15 min |
-| 8 | M-01: Remove Clone from Wallet, restrict inner() | 30 min |
-| 9 | M-07: Harden sidecar risk guard | 30 min |
-| 10 | L-01 through L-06 | 2 hours total |
+- **Parameterized SQL throughout**: All database queries use `sqlx` bound parameters. No SQL injection risk found.
+- **Constant-time token comparison**: `ct_eq()` in `auth.rs` correctly uses XOR-fold to prevent timing side-channels.
+- **Secure cookie defaults**: `HttpOnly`, `SameSite=Strict`, `Secure` (default true), configurable max-age with a minimum floor of 60 seconds.
+- **Sidecar auth required by default**: `sidecar_auth_required()` defaults to `true` with a warning log when the env var is absent.
+- **Reduce-only sell guard**: `sell_reduce_only_violation_reason()` prevents spurious sell intents from exceeding tracked open positions.
+- **Governance persistence**: `persist_governance_policy()` uses a transaction with both upsert and history append, providing a complete audit trail of policy changes.
+- **Circuit breaker idempotency**: `trigger_circuit_breaker()` checks for `Halted` state before writing, preventing redundant events.
+- **Deployment gate ambiguity rejection**: Ambiguous deployment resolution (multiple candidates) is rejected rather than silently picking one.
+- **External critical priority clamped**: `clamp_external_priority()` prevents external callers from escalating to `Critical` priority without explicit env var opt-in.

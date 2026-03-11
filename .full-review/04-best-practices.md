@@ -1,88 +1,99 @@
 # Phase 4: Best Practices & Standards
 
-**Date**: 2026-03-08
-**Scope**: Full Ploy trading system
+**Branch:** `hotfix/staggered-arb-release-20260306` vs `main`
+**Date:** 2026-03-11
 
 ---
 
-## Framework & Language Findings
-
-### High (4)
-
-1. **BP-01: `ApiCredentials` derives `Debug` — secrets in logs** (`signing/hmac.rs:12`) — Duplicate of H-01; confirms the issue from a best-practices angle
-2. **BP-02: `std::sync::Mutex` in async `AutonomousAgent`** (`ai_clients/autonomous.rs:125`) — Deadlock risk when lock held across `.await` points
-3. **BP-03: No typed API error responses** — 30+ handlers return `(StatusCode, String)` instead of structured error JSON
-4. **BP-04: Zero compile-time checked SQL queries** — 297 string `sqlx::query()` calls, 0 `sqlx::query!()` macros; all SQL validated only at runtime
-
-### Medium (14)
-
-5. BP-05: `parse_boolish` duplicated 7 times across API and adapter files
-6. BP-06: 252 `std::env::var` calls scattered across 42 files — untestable, unsound in multi-threaded contexts
-7. BP-07: `PloyError::Other(anyhow::Error)` catch-all bypasses typed error hierarchy
-8. BP-08: `std::sync::RwLock` mixed with tokio locks in CoordinatorHandle
-9. BP-09: ~60 spawned tasks with no JoinHandle tracking — panics silently swallowed
-10. BP-10: No `CancellationToken` — shutdown via ad-hoc `Arc<RwLock<bool>>` flags
-11. BP-11: 60+ `Arc<RwLock<>>` wrappings suggesting over-sharing
-12. BP-12: Auth checks are manual function calls, not Axum middleware/extractors
-13. BP-13: DDL in application code bypassing migration system (5+ files)
-14. BP-14: Manual `Row::get()` instead of typed `FromRow` deserialization
-15. BP-15: `async-trait` crate still used (40 occurrences) — native async traits available since Rust 1.75
-16. BP-16: Vendored `polymarket-client-sdk` with no documented patch delta
-17. BP-17: `bincode` pinned to release candidate `=2.0.0-rc.3`
-18. BP-18: `panic = "abort"` in release profile — no Drop cleanup on panic in live trading
-
-### Low (12)
-
-19. BP-19: 45 `#[allow(dead_code)]` annotations across 19 files
-20. BP-20: Glob re-exports in `api/handlers/mod.rs`
-21. BP-21: `std::thread::sleep` in async code (nba_data_collector.rs)
-22. BP-22: Flat router with 40+ routes, no nesting
-23. BP-23: `AppState` with 15 fields
-24. BP-24: `thiserror` v1 (v2 available)
-25. BP-25: `rand` v0.8 (v0.9 available)
-26. BP-26: Edition 2021 (2024 available)
-27. BP-27: Both `futures` and `futures-util` declared
-28. BP-28: No `[workspace.dependencies]` for shared versions
-29. BP-29: No MSRV declared
-30. BP-30: 17 feature flags with complex dependency chains
-
----
-
-## CI/CD & DevOps Findings
+## Framework & Language Findings (from phase4a-best-practices.md)
 
 ### Critical (1)
 
-1. **CICD-01: Architecture mismatch — x86 binary deployed to ARM host** (`release-aliyun.yml`) — Binary built on ubuntu-latest (x86_64) cannot execute on tango-1-1 (aarch64)
+| ID | Area | Issue |
+|----|------|-------|
+| BP-C1 | `coordinator/coordinator.rs:69,93` | `std::sync::RwLock` used in async context — blocks Tokio worker thread; lock poisoning silently drops registrations |
 
-### High (9)
+### High (4)
 
-2. **CICD-02: Feature flag mismatch** — CI tests `--features rl` but production ships `claimer_daemon,api,pm_ctf`
-3. **CICD-03: No security scanning** — No `cargo audit`, Dependabot, or dependency vulnerability checks
-4. **CICD-04: No staging environment** — Every deploy goes straight to production
-5. **CICD-05: Hardcoded secrets in workflow files** — DB credentials in `deploy-prebuilt.yml`
-6. **CICD-06: SSH key written to disk** — 3 workflows write private key to runner filesystem
-7. **CICD-11: No blue-green or canary deployment** — Stop-replace-start with downtime window
-8. **CICD-14: No infrastructure as code** — No Terraform/Pulumi; servers set up imperatively via SSH
-9. **CICD-16: Prometheus metrics exist but no scraper** — `/metrics` endpoint implemented but nothing reads it
-10. **CICD-19: No runbooks** — No documented procedures for incident response
-11. **CICD-20: Emergency stop only covers AWS Docker** — Primary Aliyun systemd deployment has no emergency stop workflow
+| ID | Area | Issue |
+|----|------|-------|
+| BP-H1 | `coordinator/risk/transitions.rs:68–71` | TOCTOU read-then-write on `state` in `record_success` — can overwrite `Halted` with `Normal` (confirms F-02) |
+| BP-H2 | `coordinator/coordinator/ingress.rs` (14 call sites) | Sequential `persist_risk_decision` DB writes block coordinator loop (confirms P-C2) |
+| BP-H3 | `coordinator/position/transitions.rs:52–72` | Nested write locks in `close_position` — lock-ordering deadlock risk (confirms C1) |
+| BP-H4 | `coordinator/strategy_runtime/actions.rs:588` | Unbounded poll-task spawning without dedup or handle tracking (confirms P-H3) |
 
-### Medium (12)
+### Medium (5)
 
-12. CICD-07: Service stopped before binary uploaded — downtime on failed deploy
-13. CICD-08: Rust built on production host (violates own policy)
-14. CICD-09: Deprecated GitHub Actions (`actions-rs/toolchain@v1`)
-15. CICD-10: No timeout on most deploy jobs
-16. CICD-12: Rollback only covers AWS, not Aliyun
-17. CICD-15: S3 bucket leak — new bucket per deployment run
-18. CICD-17: No centralized logging
-19. CICD-18: No deployment notifications
-20. CICD-21: Config parity issues between environments
-21. CICD-22: Systemd service file inconsistencies (memory limits, security hardening)
-22. CICD-23: Version stuck at 0.1.0 in Cargo.toml
-23. CICD-25: 7 overlapping deployment workflows with significant duplication
+| ID | Area | Issue |
+|----|------|-------|
+| BP-M1 | `coordinator/risk/transitions.rs:15,76,187,333` | `Ordering::SeqCst` used where `Relaxed` suffices — unnecessary full memory fence |
+| BP-M2 | `coordinator/strategy_runtime/order_store.rs:1,9,27` | `async_trait` macro used where native async traits suffice (Rust 1.75+) |
+| BP-M3 | `coordinator/queue.rs:129,211,235,248` | `BinaryHeap` O(n log n) rebuild for every filtered mutation |
+| BP-M4 | `coordinator/journal.rs`, `governance.rs`, `observability.rs` | `sqlx::query` runtime strings instead of `sqlx::query!` compile-time macros |
+| BP-M5 | `coordinator/queue.rs:128–149` | `swap_remove` + heap rebuild pattern is correct but non-obvious; needs comment |
 
-### Low (2)
+### Low (4)
 
-24. CICD-13: No backup rotation
-25. CICD-24: No CHANGELOG
+| ID | Area | Issue |
+|----|------|-------|
+| BP-L1 | `coordinator/risk/transitions.rs:353–356` | `Vec::drain(0..n)` O(n) shift for ring buffer; use `VecDeque::pop_front()` |
+| BP-L2 | `Cargo.toml:83` | `rand = "0.8"` is two major versions behind (current: 0.9.x) |
+| BP-L3 | `Cargo.toml:60–61` | `ethers-core`/`ethers-signers` v2 deprecated; project already has `alloy` |
+| BP-L4 | `coordinator/strategy_runtime/actions.rs:173,274` | `#[allow(clippy::too_many_arguments)]` on 13-parameter function suppresses design signal |
+
+**Dependency Hygiene:** `bincode = "=2.0.0-rc.3"` pinned to RC (burn compatibility workaround); `async-trait` superseded by native async traits in Rust 1.75+.
+
+---
+
+## CI/CD & DevOps Findings (from phase4b-cicd.md)
+
+### Critical (1)
+
+| ID | Area | Issue |
+|----|------|-------|
+| D-01 | `deploy-prebuilt.yml` | Writes `POLYMARKET_PRIVATE_KEY` and `GROK_API_KEY` directly into systemd unit `Environment=` lines on disk — readable by any root process, visible in `systemctl show` |
+
+### High (5)
+
+| ID | Area | Issue |
+|----|------|-------|
+| C-01 | `test.yml` | No `cargo audit` / `cargo deny` — zero dependency vulnerability scanning for a system handling private keys |
+| D-02 | `deploy-tango21.yml`, `deploy.yml`, `release.yml` | Legacy workflows build Rust on-host, violating deployment policy; wrong arch (x86_64 vs aarch64) |
+| S-01 | Secrets | No secrets rotation procedure; `deploy-prebuilt.yml` may have left private key in systemd unit on tango-1-1 |
+| S-02 | `stop-trading.yml`, `get-logs.yml`, `deploy-prebuilt.yml` | `StrictHostKeyChecking=no` in 3 workflows — SSH MITM risk against trading host |
+| O-03 | `docs/runbooks/` | No runbooks for governance restore, foreground bypass warning, circuit breaker reset, or emergency stop |
+
+### Medium (10)
+
+| ID | Area | Issue |
+|----|------|-------|
+| C-02 | `auto-review.yml` | Clippy is advisory-only (`exit 0`); does not block merge |
+| C-03 | `test.yml` | `api` feature not tested in CI; production feature set (`api,claimer_daemon,pm_ctf`) untested |
+| D-03 | `rollback.yml` | Targets `secrets.EC2_HOST` (AWS EC2) not Aliyun tango-1-1 — rollback during incident would target wrong host |
+| D-04 | `release-aliyun.yml` | Post-deploy health check uses `|| true` — failed health does not abort deploy |
+| D-05 | `release-aliyun.yml` | Migration applied via raw `psql` without tracking; not idempotent; no rollback migration |
+| O-01 | Observability | No Prometheus metrics endpoint; no alerting on order failures or circuit breaker state |
+| O-02 | Observability | No log aggregation; logs only accessible via SSH; log loss if host replaced |
+| E-01 | Environments | No staging environment; tango-2-1 available but unused |
+| E-02 | Environments | EC2 instance IDs and IPs hardcoded in workflow files |
+| Sy-01 | Systemd | No `StartLimitIntervalSec`/`StartLimitBurst` — crash loop not bounded |
+
+### Low (3)
+
+| ID | Area | Issue |
+|----|------|-------|
+| Sy-02 | Systemd | No `ExecStartPre` config/DB validation before service start |
+| Cf-01 | Config | Only 2 of 11 strategy configs deployed by CI; rest require manual placement (config drift risk) |
+| C-04 | `auto-review.yml` | Advisory-only design not documented as deliberate choice |
+
+**Positives:** `release-aliyun.yml` is well-designed — native ARM64 build, `--locked`, ELF verification, timestamped backup, systemd guardrails matching CLAUDE.md policy, `environment: production` gate, concurrency group.
+
+---
+
+## Phase 4 Summary
+
+| Category | Critical | High | Medium | Low | Total |
+|----------|----------|------|--------|-----|-------|
+| Best Practices | 1 | 4 | 5 | 4 | 14 |
+| CI/CD & DevOps | 1 | 5 | 10 | 3 | 19 |
+| **Combined** | **2** | **9** | **15** | **7** | **33** |

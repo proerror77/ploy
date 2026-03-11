@@ -1,232 +1,501 @@
-# Phase 3a: Test Coverage & Quality Analysis — Ploy Trading System
-
-**Date**: 2026-03-08
-**Scope**: Full Ploy trading system (Rust ~165K lines, 260+ source files)
-**Focus**: Test coverage gaps, test quality, and testing strategy
+# Phase 3a — Testing Strategy Review
+**Branch**: `hotfix/staggered-arb-release-20260306`
+**Date**: 2026-03-11
+**Reviewer**: automated analysis (Phase 3a)
 
 ---
 
 ## Executive Summary
 
-The Ploy codebase has substantial test infrastructure — 153 files contain `#[cfg(test)]` modules, with ~796 individual test functions (651 `#[test]` + 145 `#[tokio::test]`). The coordinator alone has 53 tests. However, testing is heavily concentrated in pure computation modules (probability, fee models, calculations) while critical production paths — order execution, database persistence, and the bootstrap pipeline — have minimal or no test coverage. The CI pipeline runs all tests against a PostgreSQL service container, which is good, but there are no integration tests for the end-to-end order flow, no load/soak tests for memory growth, and no security-specific test assertions.
+The coordinator decomposition introduced substantial new code across ~14 sub-modules. Test coverage is uneven: the admission, risk, position, queue, and governance modules have solid unit tests, but the critical concurrency hazards identified in Phase 1 are entirely untested. The foreground path has partial tests (payload construction only). The staggered_arb_live strategy has 43 tests covering config, lifecycle, and order-update scenarios, but no tests for the live coordinator integration path.
 
-**Finding Distribution**: 3 Critical, 4 High, 5 Medium, 3 Low
-
----
-
-## Critical Findings
-
-### T-01: No integration test for order execution pipeline
-
-**Severity**: Critical
-**Impact**: The most important code path — intent submission → risk check → queue → execution → PnL recording — has zero end-to-end tests
-
-The coordinator's `handle_order_intent` → `drain_queue` → `execute_order` pipeline is the core revenue path. While the coordinator has 53 unit tests (mostly for parsing, config validation, and state transitions), none test the full order lifecycle. The P-01 double `record_success` bug (Phase 2) would have been caught by an integration test asserting PnL accounting after a simulated trade.
-
-**Recommendation**: Create an integration test that:
-1. Constructs a coordinator with mock exchange client
-2. Submits an order intent
-3. Asserts risk gate checks pass
-4. Verifies exactly one `record_success` call with correct PnL
-5. Verifies position tracking updates
-
-### T-02: No tests for position tracking error handling
-
-**Severity**: Critical
-**Impact**: The silently discarded `let _ = self.positions.open_position(...)` at coordinator.rs:2734,4229 (Phase 1 finding Q-01) has no test coverage
-
-Position tracking is a financial safety mechanism. The `open_position` and `close_position` calls are fire-and-forget with `let _ =`, meaning errors are silently swallowed. No test verifies what happens when position tracking fails — whether the system continues trading with stale position data, whether risk limits are still enforced, or whether reconciliation catches the drift.
-
-**Recommendation**: Add tests that:
-1. Mock `PositionAggregator` to return errors
-2. Verify the coordinator logs the error (not silently discards)
-3. Verify risk gate still enforces position limits even with stale data
-
-### T-03: No regression test for PnL accounting correctness
-
-**Severity**: Critical
-**Impact**: The double `record_success` bug (P-01) demonstrates that PnL accounting can silently corrupt without any test catching it
-
-The `RiskGate` tracks daily PnL for circuit breaker decisions. If PnL is inflated 2x (as P-01 causes), the risk gate may allow trades that should be blocked, or block trades that should be allowed. No test asserts the invariant: "for a trade with realized PnL X, the risk gate's daily PnL counter increases by exactly X."
-
-**Recommendation**: Add a unit test for the coordinator's PnL recording path that asserts:
-- Profitable trade: `record_success` called once with exact PnL
-- Losing trade: `record_loss` called once with abs(PnL), `record_success` called once with zero
-- Net daily PnL matches sum of individual trades
+**Test file inventory:**
+- `src/coordinator/bootstrap/tests.rs` — 14 tests (config rendering, env-var overrides)
+- `src/coordinator/coordinator/tests.rs` — 9 tests (ingress, drain, governance)
+- `src/strategy/execution/engine/tests.rs` — 14 tests (state machine, optimistic locking)
+- `src/strategy/staggered_arb_live/tests.rs` — 43 tests (2034 lines)
+- `src/strategy/momentum/tests.rs` — exists
+- `src/tui/tests.rs` — exists
+- `src/api/handlers/sidecar/tests.rs` — exists
+- Inline `#[cfg(test)]` blocks in: `risk.rs` (13 tests), `position.rs` (6 tests), `queue.rs` (7 tests), `governance.rs` (4 tests), `admission/duplicate_guard.rs` (10 tests), `coordinator/bootstrap/strategy_deployments.rs`, `coordinator/bootstrap/runtime_config.rs`, `coordinator/bootstrap/openclaw_config.rs`, `coordinator/capital/market.rs`, `coordinator/capital/crypto.rs`, `coordinator/journal/restore.rs`, `coordinator/strategy_runtime/order_store.rs`, `cli/strategy/runtime_ops/foreground_submit.rs` (5 tests)
+- Integration tests: `tests/architecture_gateway_only.rs`, `tests/legacy_live_gate.rs`, `tests/strategy_evaluations_and_deployment_gate.rs`
 
 ---
 
-## High Severity Findings
+## 1. Critical Path Coverage
 
-### T-04: PostgresStore (1,364 lines) has zero unit tests
+### 1.1 C2 — `record_loss` Does Not Reset `consecutive_failures`
 
-**Severity**: High
-**Location**: `src/adapters/postgres.rs`
-**Impact**: All 50+ SQL queries are only validated at runtime; schema drift between bootstrap DDL and migrations is untested
+**Status: Untested**
 
-The `PostgresStore` implements the `EngineStore` trait with 50+ methods for order persistence, cycle management, position tracking, and audit logging. None of these methods have unit tests. The CI integration tests exercise some paths indirectly, but there are no targeted tests for:
-- SQL query correctness (especially complex queries with CTEs and window functions)
-- Concurrent access patterns (two strategies writing simultaneously)
-- Error handling for constraint violations
+`record_loss` in `src/coordinator/risk/transitions.rs` (lines 107–137) updates `daily_stats.total_pnl` and `agent_stats.realized_pnl` but never touches `consecutive_failures` on the agent stats or the global `AtomicU32`. `record_success` does reset it (line 15: `self.consecutive_failures.store(0, Ordering::SeqCst)`; line 20: `stats.consecutive_failures = 0`).
 
-**Recommendation**: Add `sqlx::test` integration tests for critical store methods: `insert_order`, `update_order_status`, `get_active_positions`, `record_pnl`.
+This means a sequence of: failure → loss-realizing sell → failure will not reset the streak counter between the two failures, causing premature circuit-breaker trips. No test covers this path.
 
-### T-05: Emergency stop mechanism has no concurrency test
+**Severity: Critical**
 
-**Severity**: High
-**Location**: `src/coordination/emergency_stop.rs` (2 tests)
-**Impact**: M-06 (Relaxed ordering) means the emergency stop may not propagate on ARM; no test verifies cross-thread visibility
-
-The emergency stop has only 2 tests, both single-threaded. No test spawns multiple tokio tasks, triggers emergency stop from one, and verifies all others see it within a bounded time. On the production ARM server (tango-1-1), `Ordering::Relaxed` could cause unbounded delay.
-
-**Recommendation**: Add a multi-threaded test:
 ```rust
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn emergency_stop_visible_across_threads() {
-    let stop = EmergencyStop::new();
-    let stop_clone = stop.clone();
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let b2 = barrier.clone();
+// Add to src/coordinator/risk.rs #[cfg(test)]
+#[tokio::test]
+async fn test_record_loss_does_not_reset_consecutive_failures() {
+    let mut config = RiskConfig::default();
+    config.max_consecutive_failures = 4;
+    let gate = RiskGate::new(config);
+    gate.register_agent("agent1", AgentRiskParams::default()).await;
 
-    let reader = tokio::spawn(async move {
-        b2.wait().await;
-        // Must see stop within 100ms
-        tokio::time::timeout(Duration::from_millis(100), async {
-            while !stop_clone.is_stopped() {
-                tokio::task::yield_now().await;
-            }
-        }).await.expect("stop not visible within 100ms");
-    });
+    gate.record_failure("agent1", "order rejected").await;
+    assert_eq!(gate.consecutive_failures(), 1);
 
-    barrier.wait().await;
-    stop.trigger("test").await;
-    reader.await.unwrap();
+    // A loss (realized from a sell fill) must not reset the failure streak.
+    gate.record_loss("agent1", dec!(5)).await;
+    assert_eq!(
+        gate.consecutive_failures(), 1,
+        "record_loss must not reset consecutive_failures"
+    );
+
+    gate.record_failure("agent1", "second failure").await;
+    assert_eq!(gate.consecutive_failures(), 2);
+    assert_eq!(gate.state().await, PlatformRiskState::Elevated);
 }
 ```
 
-### T-06: No tests assert Debug output doesn't contain secrets
+---
 
-**Severity**: High
-**Impact**: H-01 and H-02 (credential logging) could regress silently after fix
+### 1.2 H5 — TOCTOU Race on `Elevated → Normal` Transition
 
-After fixing `ApiCredentials` and `DatabaseConfig` Debug impls to redact secrets, there should be regression tests asserting that `format!("{:?}", credentials)` does NOT contain the actual secret values.
+**Status: Untested**
 
-**Recommendation**:
+`record_success` in `src/coordinator/risk/transitions.rs` (lines 68–71):
+
+```rust
+if *self.state.read().await == PlatformRiskState::Elevated {
+    *self.state.write().await = PlatformRiskState::Normal;
+    info!("Risk state normalized after successful execution");
+}
+```
+
+This is a classic TOCTOU: the read-lock is dropped before the write-lock is acquired. Between those two lock acquisitions another task could have already transitioned the state to `Halted` (via `trigger_circuit_breaker`). The write then overwrites `Halted` with `Normal`, silently re-enabling trading.
+
+No test exercises concurrent `record_success` + `trigger_circuit_breaker` racing on the same `RiskGate`.
+
+**Severity: Critical**
+
+```rust
+#[tokio::test]
+async fn test_record_success_does_not_overwrite_halted_state() {
+    let mut config = RiskConfig::default();
+    config.max_consecutive_failures = 1;
+    config.circuit_breaker_auto_recover = false;
+    let gate = Arc::new(RiskGate::new(config));
+    gate.register_agent("agent1", AgentRiskParams::default()).await;
+
+    // Force Elevated state.
+    *gate.state.write().await = PlatformRiskState::Elevated;
+
+    // Concurrently: record_success (which may normalize) vs trigger_circuit_breaker.
+    let gate2 = gate.clone();
+    tokio::join!(
+        gate.record_success("agent1", dec!(1)),
+        gate2.trigger_circuit_breaker("concurrent halt"),
+    );
+
+    // Halted must win — record_success must not overwrite it.
+    assert_eq!(
+        gate.state().await,
+        PlatformRiskState::Halted,
+        "Halted state must not be overwritten by concurrent record_success"
+    );
+}
+```
+
+---
+
+### 1.3 C1 — Lock-Ordering Hazard in `close_position`
+
+**Status: Untested**
+
+`close_position` in `src/coordinator/position/transitions.rs` (lines 52–72) acquires `positions.write()` and then, while holding it, acquires `realized_pnl.write()`:
+
+```rust
+pub async fn close_position(&self, position_id: &str, exit_price: Decimal) -> Option<Decimal> {
+    let mut positions = self.positions.write().await;          // lock 1
+    if let Some(position) = positions.remove(position_id) {
+        let pnl = ...;
+        let mut realized = self.realized_pnl.write().await;    // lock 2 — held while lock 1 active
+        *realized.entry(...).or_insert(Decimal::ZERO) += pnl;
+        ...
+    }
+}
+```
+
+`reduce_position` (lines 76–116) correctly drops `positions` before acquiring `realized_pnl` (`drop(positions)` at line 110). The inconsistency means concurrent `close_position` + `reduce_position` on the same agent can deadlock if the Tokio runtime schedules them on different tasks.
+
+No test exercises concurrent close + reduce on the same `PositionAggregator`.
+
+**Severity: Critical**
+
+```rust
+#[tokio::test]
+async fn test_concurrent_close_and_reduce_do_not_deadlock() {
+    let agg = Arc::new(PositionAggregator::new());
+    let pos_id = agg
+        .open_position("agent1", Domain::Crypto, "btc-15m", "t1", Side::Up, 100, dec!(0.50))
+        .await;
+
+    let agg2 = agg.clone();
+    let pos_id2 = pos_id.clone();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::join!(
+            agg.close_position(&pos_id, dec!(0.55)),
+            agg2.reduce_position(&pos_id2, 50, dec!(0.52)),
+        ),
+    )
+    .await;
+
+    assert!(result.is_ok(), "concurrent close+reduce deadlocked");
+}
+```
+
+---
+
+### 1.4 A-C2 — Foreground Path Risk Bypass
+
+**Status: Partially tested (payload construction only)**
+
+`src/cli/strategy/runtime_ops/foreground_submit.rs` has 5 tests in its `#[cfg(test)]` block, but they only test `build_coordinator_payload` (JSON shape, deployment_id requirement, priority label mapping) and `external_priority_label`. They do not test:
+
+- The `ForegroundIntentSubmitter::submit` path
+- The fallback to `DirectExecuted` when no coordinator URL is reachable
+- The `Skipped` path when no executor is configured
+- Whether a live-mode submitter with no executor silently drops orders
+
+The foreground path routes through the coordinator HTTP API (`submit_intent_via_coordinator`) when a `deployment_id` is present. When the coordinator is unreachable, it falls back to `DirectExecuted` via the `OrderExecutor` — which bypasses all coordinator risk controls. This fallback has zero tests.
+
+**Severity: Critical**
+
+```rust
+// Add to foreground_submit.rs #[cfg(test)]
+#[tokio::test]
+async fn test_foreground_submitter_skipped_when_no_deployment_id_and_no_executor() {
+    let submitter = ForegroundIntentSubmitter::new(false, None);
+    let intent = sample_intent(HashMap::new()); // no deployment_id
+    // Should produce Skipped outcome, not panic.
+    handle_submit_intent("test-strategy", intent, &submitter, None).await;
+    // Verify: no order was silently submitted.
+}
+
+#[tokio::test]
+async fn test_foreground_submitter_live_mode_direct_executor_bypasses_risk_gate() {
+    // This test documents the bypass — it should fail once the bypass is fixed.
+    let executor = Arc::new(make_mock_executor());
+    let submitter = ForegroundIntentSubmitter::new(false, Some(executor.clone()));
+    let intent = sample_intent(HashMap::new()); // no deployment_id → direct path
+    handle_submit_intent("test-strategy", intent, &submitter, None).await;
+    // Assert: executor was called directly, no risk gate was consulted.
+    assert!(executor.was_called(), "direct executor was invoked");
+}
+```
+
+---
+
+### 1.5 A-H1 — `pending_buy_notional_excluding_domains` Call Site
+
+**Status: Function correct; call site semantics unverified**
+
+The Phase 1 report flagged `pending_buy_notional_excluding_domains` as always returning zero. Reading the implementation at `src/coordinator/queue.rs:290–299`, the function is correct — it iterates `self.heap` and sums notionals for non-excluded domains.
+
+The call site in `src/coordinator/coordinator/ingress.rs:339–351` passes all four known domains as the excluded list:
+
+```rust
+.pending_buy_notional_excluding_domains(&[
+    Domain::Crypto,
+    Domain::Sports,
+    Domain::Politics,
+    Domain::Economics,
+])
+```
+
+This means `other_pending_buy_notional` is always zero for any intent from a known domain. The function is used to catch pending buys from *unknown* future domains — a reasonable design, but it means the governance notional cap (`current_account_notional`) never includes cross-domain pending buys from known domains. The existing test `test_pending_buy_notional_excluding_domains` passes `[Crypto, Sports]` and expects `10.00` from a Politics buy — it does not test the all-domains-excluded scenario.
+
+**Severity: Medium (design question, not a confirmed bug)**
+
+```rust
+// Recommended test to document the all-domains-excluded behavior
+#[test]
+fn test_pending_buy_notional_all_known_domains_excluded_returns_zero() {
+    let mut queue = OrderQueue::new(100);
+    for domain in [Domain::Crypto, Domain::Sports, Domain::Politics, Domain::Economics] {
+        let intent = OrderIntent::new("a", domain, "mkt", "tok", Side::Up, true, 10, dec!(0.50));
+        queue.enqueue(intent).unwrap();
+    }
+    let notional = queue.pending_buy_notional_excluding_domains(&[
+        Domain::Crypto, Domain::Sports, Domain::Politics, Domain::Economics,
+    ]);
+    assert_eq!(notional, Decimal::ZERO,
+        "all known domains excluded — documents that cross-domain pending is not counted");
+}
+```
+
+---
+
+## 2. Strategy Test Coverage — `staggered_arb_live`
+
+**Status: Good unit coverage; no coordinator integration tests**
+
+`src/strategy/staggered_arb_live/tests.rs` (2034 lines, 43 test functions) covers:
+
+- Config parsing and TOML defaults
+- OBI bonus threshold adjustment
+- Adapter creation and series mapping
+- Leg1 submit (idempotency key, client order ID)
+- Leg2 merge logic (fee-adjusted PnL gate, force threshold, protective stop)
+- Required feeds
+- Order update handling (lifecycle, order_updates, late fills after settlement)
+- Tick-driven recheck (`on_tick`)
+- Quote persistence gate
+- Balance pause
+- Event expiry settlement (single-leg, partial leg2, double-close prevention)
+- Live leg2 without active window
+- Residual below venue minimum
+
+**Gaps:**
+
+### 2.1 No test for the live coordinator submission path
+
+The strategy emits `StrategyAction::SubmitIntent` which is consumed by `foreground.rs` → `foreground_submit.rs`. When running in managed mode (coordinator present), the intent is POSTed to the coordinator HTTP API. There is no integration test that verifies a staggered_arb intent flows through the coordinator risk gate.
+
+**Severity: High**
+
+```rust
+#[tokio::test]
+async fn test_staggered_arb_intent_routed_through_coordinator_risk_gate() {
+    let (handle, coordinator) = make_test_handle();
+    coordinator.risk_gate
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
+        .await;
+
+    let intent = OrderIntent::new(
+        "staggered_arb", Domain::Crypto, "btc-up-5m", "token-up",
+        Side::Up, true, 100, dec!(0.50),
+    ).with_deployment_id("deploy.crypto.staggered_arb.5m");
+
+    coordinator.handle_order_intent(intent).await;
+    let (_, success_count, _) = coordinator.risk_gate.daily_stats().await;
+    assert_eq!(success_count, 0, "intent should be queued, not yet executed");
+    coordinator.drain_and_execute().await;
+    let (_, success_count, _) = coordinator.risk_gate.daily_stats().await;
+    assert_eq!(success_count, 1);
+}
+```
+
+### 2.2 No test for leg2 timeout / force-close path in live mode
+
+The live adapter has a `wait_deadline` per position and a `force_leg2_attempted` flag on `LiveOrderTrack`. No test verifies that a leg2 that times out triggers the force-close path and records the abort correctly in live (non-dry-run) mode.
+
+**Severity: High**
+
+### 2.3 No test for `on_order_update` with partial fill then cancel
+
+The `on_order_update` handler processes `Filled`, `Cancelled`, and `PartiallyFilled` statuses. There is no test for the sequence: partial fill → cancel (which should record the partial fill and close the position with the partial shares).
+
+**Severity: Medium**
+
+---
+
+## 3. Concurrency Test Coverage
+
+**Status: Absent for all identified hazards**
+
+None of the three concurrency issues (lock-ordering in `close_position`, TOCTOU in `record_success`, and the `record_loss` streak bug) have dedicated concurrency tests. All existing tests are sequential.
+
+### 3.1 `OrderQueue` under concurrent enqueue/dequeue
+
+`OrderQueue` is wrapped in `RwLock<OrderQueue>` at the coordinator level. There is no test that verifies priority ordering holds under rapid concurrent submissions from multiple agents.
+
+**Severity: Medium**
+
+```rust
+#[tokio::test]
+async fn test_queue_priority_ordering_under_concurrent_enqueue() {
+    let queue = Arc::new(tokio::sync::RwLock::new(OrderQueue::new(200)));
+
+    let mut handles = Vec::new();
+    for i in 0..20u64 {
+        let q = queue.clone();
+        let priority = if i % 4 == 0 { OrderPriority::Critical } else { OrderPriority::Normal };
+        handles.push(tokio::spawn(async move {
+            let intent = make_intent_with_priority(priority);
+            q.write().await.enqueue(intent).unwrap();
+        }));
+    }
+    for h in handles { h.await.unwrap(); }
+
+    let batch = queue.write().await.dequeue_batch(5);
+    for item in &batch {
+        assert_eq!(item.priority, OrderPriority::Critical,
+            "Critical intents must drain first");
+    }
+}
+```
+
+---
+
+## 4. Bootstrap Test Coverage
+
+**Status: Config rendering only; no runtime behavior**
+
+`src/coordinator/bootstrap/tests.rs` (14 tests) covers:
+- `apply_strategy_deployments` domain routing (economics, crypto, unknown strategy, gamma_scalping alias, pm_5m_directional)
+- `collect_managed_strategy_runtime_plans` plan generation
+- `build_*_runtime_config` TOML rendering for all strategy types
+- `from_app_config` env-var overrides for lob_ml and crypto agent signal gate
+- `ensure_pm_market_metadata_table` (DB-gated, skips without `PLOY_TEST_DATABASE_URL`)
+
+**Gaps:**
+
+### 4.1 No test for `start_platform` bootstrap sequence
+
+The `start_platform` function in `src/coordinator/bootstrap.rs` wires together coordinator, agents, API server, and journal. There is no test that exercises this wiring — only the individual config-building functions are tested.
+
+**Severity: High**
+
+### 4.2 No test for `PlatformBootstrapConfig::from_app_config` with conflicting env vars
+
+The env-var override tests use `Mutex<()>` to serialize access, but they do not test the case where two conflicting env vars are set simultaneously (e.g., both `PLOY_CRYPTO_LOB_ML__EXIT_MODE` and the deprecated `PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS`). The existing test `from_app_config_ignores_deprecated_price_exits_env` covers one direction but not the reverse.
+
+**Severity: Low**
+
+---
+
+## 5. Recovery / Restore Test Coverage
+
+**Status: Partially covered**
+
+`src/coordinator/journal/restore.rs` has 4 unit tests covering domain/side parsing and metadata normalization.
+
+`src/coordinator/risk.rs` has 2 restore tests:
+- `test_restore_runtime_counters_restores_agent_and_failure_streaks`
+- `test_restore_runtime_counters_halts_when_daily_loss_exceeded`
+
+**Gaps:**
+
+### 5.1 No end-to-end restore integration test
+
+There is no test that exercises the full cold-start replay path: load fills from DB → replay into `PositionAggregator` → restore risk counters → verify the coordinator is in the correct state. The individual pieces are tested in isolation but the wiring in `coordinator_bootstrap.rs` is untested.
+
+**Severity: High**
+
+### 5.2 No test for restore with corrupt fills
+
+The restore path skips rows with unknown domain, unknown side, zero shares, or non-positive fill price. There is no test that verifies a partially corrupt restore log results in a consistent (not panicking) position book.
+
+**Severity: Medium**
+
 ```rust
 #[test]
-fn api_credentials_debug_redacts_secret() {
-    let creds = ApiCredentials {
-        api_key: "ak_test_12345678".into(),
-        secret: "super_secret_value".into(),
-        passphrase: "my_passphrase".into(),
-    };
-    let debug = format!("{:?}", creds);
-    assert!(!debug.contains("super_secret_value"));
-    assert!(!debug.contains("my_passphrase"));
-    assert!(debug.contains("REDACTED"));
+fn test_restore_skips_corrupt_fills_and_continues() {
+    let fills = vec![
+        make_fill("agent1", Domain::Crypto, true, 100, dec!(0.50)),      // valid
+        make_fill("agent1", Domain::Crypto, true, 0, dec!(0.50)),        // zero shares — skip
+        make_fill_raw("agent1", "unknown_domain", true, 10, dec!(0.50)), // bad domain — skip
+        make_fill("agent1", Domain::Crypto, true, 10, dec!(-0.01)),      // bad price — skip
+    ];
+    let agg = PositionAggregator::new();
+    replay_fills_into_aggregator(&fills, &agg);
+    assert_eq!(agg.blocking_position_count(), 1);
 }
 ```
 
-### T-07: Staggered arb entry evaluation (470 lines) has no targeted unit tests
+---
 
-**Severity**: High
-**Location**: `src/strategy/staggered_arb_live.rs` — 43 tests exist but focus on state management
-**Impact**: The hot-path entry evaluation with 15+ filter gates is tested only indirectly
+## 6. Governance Test Coverage
 
-The `try_entry_for_window()` method is the most complex pure function in the codebase (470 lines, 15+ sequential checks). While staggered_arb_live.rs has 43 tests (the most of any strategy file), they primarily test order tracking, state transitions, and configuration parsing — not the entry evaluation logic itself. Each filter gate should have a targeted test proving it rejects when expected.
+**Status: Unit logic covered; persistence and restore not tested**
 
-**Recommendation**: Extract `try_entry_for_window` into a pure function and add parameterized tests for each rejection reason.
+`src/coordinator/governance.rs` has 4 unit tests covering policy validation and block logic.
+
+**Gaps:**
+
+### 6.1 Governance state not restored on restart
+
+`load_persisted_governance_policy` is called from `coordinator_bootstrap.rs` only when a DB pool is provided. If the pool is absent, the coordinator silently starts with the default config-derived policy, discarding any runtime changes made via the API. There is no test that verifies a policy update persisted to DB is correctly restored after a simulated restart.
+
+**Severity: Critical**
+
+```rust
+#[tokio::test]
+async fn test_governance_policy_survives_coordinator_restart() {
+    let pool = test_pool().await;
+    let coordinator = make_coordinator_with_pool(pool.clone()).await;
+
+    coordinator.handle().update_governance_policy(GovernancePolicyUpdate {
+        block_new_intents: true,
+        blocked_domains: vec!["sports".to_string()],
+        updated_by: "test".to_string(),
+        ..Default::default()
+    }).await.expect("policy update");
+
+    // Simulate restart: new coordinator, same pool.
+    let coordinator2 = make_coordinator_with_pool(pool.clone()).await;
+    coordinator2.load_persisted_governance_policy().await.expect("restore");
+
+    let snapshot = coordinator2.handle().governance_status().await;
+    assert!(snapshot.policy.block_new_intents, "block_new_intents must survive restart");
+    assert!(snapshot.policy.blocked_domains.contains(&"sports".to_string()));
+}
+```
+
+### 6.2 No test for `set_global_mode` clearing domain modes
+
+`set_global_mode` clears all domain-level overrides. No test verifies this side-effect.
+
+**Severity: Low**
 
 ---
 
-## Medium Severity Findings
+## 7. Test Quality Assessment
 
-### T-08: No soak/long-running tests for memory growth (P-03)
+### Strengths
 
-**Severity**: Medium
-**Impact**: Unbounded HashMap growth (P-03) will only manifest after hours/days of operation
+- `duplicate_guard.rs`: 10 tests, behavior-focused, cover scope variants, window expiry, critical bypass, sell exemption. High quality.
+- `risk.rs`: 13 tests, cover all major state transitions. Correct use of `Ordering::SeqCst` in atomic operations.
+- `position.rs`: 6 tests, cover open/close/reduce/aggregate/price-update/agent-stats. Isolated, fast.
+- `queue.rs`: 7 tests, cover priority ordering, eviction, expiry, notional sum, sell-shares filter.
+- `governance.rs`: 4 tests, cover policy validation and block logic. Pure unit tests, no DB.
+- `execution/engine/tests.rs`: 14 tests, use a `RecordingStore` mock to verify optimistic-locking version sequences. Excellent pattern — tests behavior (version numbers passed to DB) not implementation.
+- `staggered_arb_live/tests.rs`: 43 tests, comprehensive config and lifecycle coverage. Good use of `seed_persistent_pm_quotes` helper to avoid test setup duplication.
+- `coordinator/tests.rs`: 9 tests including `test_drain_and_execute_sell_fill_reduces_position_and_realizes_pnl` which exercises the full buy→sell→position-reduce→pnl path.
 
-The `archived_live_orders`, `entry_reject_counts`, and `cooldowns` HashMaps grow without bounds. No test simulates a long-running session (e.g., 10,000 simulated trades) and asserts memory stays within bounds.
+### Weaknesses
 
-### T-09: Integration tests use `unsafe` env manipulation
-
-**Severity**: Medium
-**Location**: `tests/legacy_live_gate.rs`, `tests/strategy_evaluations_and_deployment_gate.rs`
-**Impact**: Tests using `unsafe { env::set_var() }` are unsound in multi-threaded test execution
-
-Both integration test files use `unsafe { std::env::set_var() }` with a `Mutex` guard. Since Rust 1.66, `env::set_var` is documented as unsound in multi-threaded programs. While the Mutex prevents concurrent env modification within these tests, other tests running in parallel (via `cargo test`) may read env vars concurrently.
-
-**Recommendation**: Use `temp_env` crate or refactor to pass config via function parameters instead of env vars.
-
-### T-10: No test for WebSocket authentication flow
-
-**Severity**: Medium
-**Location**: `src/api/websocket.rs`
-**Impact**: M-04 (WS token in query parameter) has no test verifying auth works or rejects invalid tokens
-
-### T-11: Architecture gateway test is fragile (string scanning)
-
-**Severity**: Medium
-**Location**: `tests/architecture_gateway_only.rs`
-**Impact**: The test scans source files for string patterns like `client.submit_order(` — easily bypassed by renaming
-
-The architecture test that enforces "only executors can call submit_order" uses substring matching on source code. This is a good idea but fragile — a refactor renaming the method would silently bypass the guard.
-
-### T-12: No property-based tests for financial calculations
-
-**Severity**: Medium
-**Impact**: Fee model, probability, and slippage calculations use `Decimal` arithmetic with edge cases
-
-The `fee_model.rs` (9 tests), `probability.rs` (10 tests), and `slippage.rs` (10 tests) have good unit test coverage but all use hand-picked values. Property-based testing (via `proptest` or `quickcheck`) would catch edge cases like:
-- Fees on zero-size orders
-- Probability at exactly 0.0 or 1.0 boundaries
-- Slippage with extreme price movements
+- No concurrency tests anywhere in the coordinator.
+- No integration tests that wire coordinator → risk → position → journal together end-to-end.
+- Foreground path tests cover only JSON payload construction, not the submission lifecycle.
+- Bootstrap tests test config rendering only — no runtime behavior.
+- `coordinator/tests.rs` uses a dry-run `PolymarketClient` that always succeeds; no failure injection for testing error paths.
+- `staggered_arb_live/tests.rs` has no tests for the live (non-dry-run) coordinator submission path.
+- No property-based tests or fuzzing for the risk gate or admission controller.
 
 ---
 
-## Low Severity Findings
+## 8. Summary Table
 
-### T-13: No frontend tests
-
-**Severity**: Low
-**Location**: `ploy-frontend/`
-**Impact**: React dashboard has no unit or integration tests
-
-The frontend has no test files, no test configuration, and no test scripts in `package.json`. Given that the frontend is a monitoring dashboard (not order entry), this is low severity.
-
-### T-14: Backtest modules have limited assertion coverage
-
-**Severity**: Low
-**Impact**: Backtest results are logged but not programmatically asserted
-
-### T-15: No test for circuit breaker state machine transitions
-
-**Severity**: Low
-**Location**: `src/coordination/circuit_breaker.rs` (6 tests)
-**Impact**: Tests exist but don't cover all state transitions (Closed→Open→HalfOpen→Closed cycle)
-
----
-
-## Test Coverage by Module
-
-| Module | Files with tests | Test count | Critical paths tested? |
-|--------|-----------------|------------|----------------------|
-| coordinator/ | 2/3 | ~56 | Partial — unit tests only, no integration |
-| strategy/ | 40+/60+ | ~350 | Good for calculations, weak for execution |
-| adapters/ | 9/15 | ~65 | WebSocket mocking good, DB untested |
-| coordination/ | 4/4 | ~16 | Basic, no concurrency tests |
-| signing/ | 5/6 | ~10 | HMAC and order signing covered |
-| platform/ | 8/12 | ~50 | Risk and position well-tested |
-| persistence/ | 3/4 | ~5 | Minimal — DLQ and checkpoint only |
-| api/ | 5/8 | ~16 | Sidecar endpoints tested, core routes not |
-| rl/ | 8/10 | ~30 | Good coverage for RL-specific code |
-| ai_clients/ | 8/10 | ~25 | Mock-based, good isolation |
-
-## Positive Patterns
-
-- **Architecture gateway test**: `tests/architecture_gateway_only.rs` enforces that only executor modules can call `submit_order` — a structural safety test
-- **Legacy live gate tests**: `tests/legacy_live_gate.rs` verifies the safety gate blocks all known legacy commands
-- **Strategy evaluation + deployment gate**: Integration test with real PostgreSQL verifying deployment lifecycle
-- **CI with PostgreSQL service**: The test workflow provisions a real PostgreSQL 15 instance
-- **Commit hygiene check**: CI rejects WIP/fixup commits on PRs
-- **Feature-gated test compilation**: Tests behind `#[cfg(feature = "api")]` only run when the feature is enabled
+| Finding | Severity | Status | Recommended Test |
+|---|---|---|---|
+| `record_loss` doesn't reset `consecutive_failures` (C2) | Critical | Untested | `test_record_loss_does_not_reset_consecutive_failures` |
+| TOCTOU race: `record_success` overwrites `Halted` (H5) | Critical | Untested | Concurrent `record_success` + `trigger_circuit_breaker` |
+| Lock-ordering deadlock in `close_position` (C1) | Critical | Untested | Concurrent close + reduce with timeout |
+| Governance not restored on restart | Critical | Untested | DB-backed restart round-trip test |
+| Foreground path risk bypass (A-C2) | Critical | Partial (payload only) | `ForegroundIntentSubmitter` lifecycle tests |
+| Staggered arb → coordinator integration | High | Untested | Coordinator submission path test |
+| Leg2 timeout / force-close in live mode | High | Untested | Lifecycle timeout test |
+| Cold-start restore end-to-end | High | Untested | Full replay integration test |
+| Bootstrap `start_platform` wiring | High | Untested | Platform bootstrap smoke test |
+| Restore with corrupt fills | Medium | Untested | Partial-corrupt restore test |
+| Queue concurrency under load | Medium | Untested | Concurrent enqueue priority test |
+| `pending_buy_notional` all-domains-excluded | Medium | Undocumented | Document zero-return behavior |
+| Partial fill → cancel lifecycle | Medium | Untested | `on_order_update` sequence test |
+| `set_global_mode` clears domain overrides | Low | Untested | `GovernanceController` side-effect test |
+| Deprecated env var conflict | Low | Partial | Reverse-direction env var test |

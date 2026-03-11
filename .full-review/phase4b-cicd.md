@@ -1,351 +1,329 @@
-# Phase 4b: CI/CD Pipeline & Operational Review
+# Phase 4B — CI/CD & Operational Practices Review
 
-**Date**: 2026-03-08
-**Scope**: `.github/workflows/` (11 files), `deployment/` (13 service files, configs), `scripts/`, `Dockerfile`
-**System**: Rust trading bot on Polymarket, deployed to Alibaba Cloud (tango-1-1, ARM) and AWS Tokyo (tango-2-1, x86)
+**Branch**: `hotfix/staggered-arb-release-20260306` vs `main`
+**Date**: 2026-03-11
+**Reviewer**: DevOps Agent (Phase 4B)
+
+---
+
+## Executive Summary
+
+The pipeline has a solid structural foundation: a proper build/test/deploy separation, GitHub environment protection on production jobs, systemd guardrails enforced at deploy time, and a rollback workflow. However, several gaps create meaningful operational risk for a live trading system: no security scanning, no post-deploy smoke test that blocks rollback, legacy workflows that build Rust on-host in violation of the deployment policy, secrets embedded in a systemd unit file, and no operational runbooks for the failure modes identified in prior phases (governance restore, foreground bypass, circuit breaker reset).
 
 ---
 
 ## 1. CI/CD Pipeline
 
-### CICD-01: Architecture Mismatch — x86 Binary Deployed to ARM Host
-**Severity**: Critical
-**Files**: `.github/workflows/release-aliyun.yml` (line 39, 109-112)
+### 1.1 Test Gate (`test.yml`)
 
-The `release-aliyun.yml` workflow builds on `ubuntu-latest` (x86_64) and verifies `ELF 64-bit LSB`, then deploys to tango-1-1 which is an ARM (aarch64) Alibaba Cloud instance. The binary will fail to execute or, if the host happens to have qemu-user installed, run with severe performance degradation.
+**Severity: Medium**
 
-The deploy script at line 331 checks `file ... | grep -q "ELF 64-bit LSB"` but does not verify the architecture field (x86-64 vs aarch64).
+The test job runs `cargo test --locked --features rl` against a live Postgres service container. This is good. However:
 
-**Risk**: Binary cannot run on production host. Complete deployment failure.
-**Recommendation**: Either cross-compile with `cross` or `cargo-zigbuild` targeting `aarch64-unknown-linux-gnu`, or use a self-hosted ARM runner. Add architecture verification: `grep -q "ARM aarch64"` or `grep -q "x86-64"` as appropriate per target.
+- `cargo clippy` and `cargo fmt` are run only in `auto-review.yml` (advisory, non-blocking) — they do **not** block merge. A clippy failure posts a PR comment but does not fail the required status check.
+- There is no `cargo deny` or `cargo audit` step anywhere in the pipeline. For a system handling private keys and financial transactions, dependency vulnerability scanning is a baseline requirement.
+- The test job does not run with `--all-features`, so the `api` feature (which enables the Axum server and all sidecar endpoints) is not tested in CI. The `rl` feature is tested but `api` is not.
+- No integration tests or end-to-end tests exist in CI. All tests are unit-level.
 
-### CICD-02: Feature Flag Inconsistency Across Workflows
-**Severity**: High
-**Files**: All build workflows
+**Recommendation**: Add `cargo deny check` as a required gate in `test.yml`. Add `cargo clippy -- -D warnings` as a blocking step (not advisory). Add a separate test run with `--features api,claimer_daemon,pm_ctf` to cover the production feature set.
 
-Different workflows build with different feature sets:
-- `test.yml`: `--features rl`
-- `release.yml`: `--features rl`
-- `release-aliyun.yml`: `--features claimer_daemon,api,pm_ctf,tokio/io-std`
-- `deploy-prebuilt.yml`: `--features rl`
-- `deploy.yml`: `--features rl`
-- `auto-review.yml` (clippy): `--features rl`
-- `deploy-aws-jp.yml`: no features specified (default)
-- `deploy-tango21.yml`: no features specified (default)
+### 1.2 Auto-Review (`auto-review.yml`)
 
-The test suite runs with `--features rl` but the Aliyun production release uses a completely different feature set (`claimer_daemon,api,pm_ctf`). Code paths exercised in CI may not match what ships.
+**Severity: Low**
 
-**Risk**: Untested code paths in production. Bugs in `claimer_daemon`/`api`/`pm_ctf` features are never caught by CI.
-**Recommendation**: Test with the same feature matrix that ships. Add a CI job that builds and tests with `PLOY_RELEASE_FEATURES`.
+Clippy and fmt results are posted as PR comments but both steps use `exit 0` unconditionally — they never fail the workflow. This means a PR with 50 clippy warnings merges cleanly. The advisory-only design is intentional but should be documented as a deliberate choice, not a gap.
 
-### CICD-03: No Security Scanning in Pipeline
-**Severity**: High
-**Files**: `.github/workflows/` (all)
+**Recommendation**: Either promote clippy to a blocking gate or document explicitly that it is advisory-only and why.
 
-No `cargo audit`, `cargo deny`, Trivy, Snyk, or any dependency vulnerability scanning. No Dependabot or Renovate configuration. A trading system handling real money with no supply-chain security checks.
+### 1.3 No Security Scanning
 
-**Risk**: Vulnerable dependencies ship to production undetected.
-**Recommendation**: Add `cargo audit` to the test workflow. Add `.github/dependabot.yml` for automated dependency updates. Consider `cargo deny` for license and advisory checks.
+**Severity: High**
 
-### CICD-04: No Staging Environment
-**Severity**: High
-**Files**: All deploy workflows
+There is no `cargo audit`, `cargo deny`, Trivy, or any other dependency/vulnerability scan in any workflow. The codebase uses `ethers-core`, `alloy`, `reqwest`, `sqlx`, and `polymarket-client-sdk` — all high-value targets for supply-chain attacks. A compromised dependency could exfiltrate the Polymarket private key.
 
-Every deployment workflow targets `environment: production` directly. There is no staging, canary, or pre-production environment. The `deploy-prebuilt.yml` even hardcodes database credentials and creates the production database inline.
-
-**Risk**: Every deployment is a direct-to-production push with no validation buffer. A bad release immediately affects live trading.
-**Recommendation**: Add a staging environment (even a dry-run instance on the same host) that receives deployments first. Gate production deployment on staging health checks passing.
-
-### CICD-05: Hardcoded Secrets in Workflow Files
-**Severity**: High
-**Files**: `.github/workflows/deploy-prebuilt.yml` (lines 153-165, 216-219)
-
-The `deploy-prebuilt.yml` workflow contains:
-- Hardcoded database credentials: `postgresql://ploy:ploy@localhost:5432/ploy` (lines 162, 216)
-- Secrets baked into systemd unit files via `Environment=` directives (lines 217-219), which are visible to any process that can read `/etc/systemd/system/`
-- Hardcoded `CREATE USER ploy WITH PASSWORD 'ploy'` (line 156)
-
-**Risk**: Credentials visible in workflow logs, systemd unit files, and version control. Any user on the host can read the private key from the unit file.
-**Recommendation**: Use `EnvironmentFile` pointing to a secrets file (as the proper service files in `deployment/` already do). Never embed secrets in systemd unit definitions.
-
-### CICD-06: SSH Private Key Written to Disk
-**Severity**: High
-**Files**: `.github/workflows/deploy-aws-jp.yml` (lines 85-86, 129), `stop-trading.yml` (lines 25-26, 35), `get-logs.yml` (lines 25-26, 54)
-
-Three workflows write `${{ secrets.AWS_EC2_PRIVATE_KEY }}` to `private_key.pem` on the runner filesystem. While they `rm` it afterward, if the workflow fails between write and cleanup, the key persists in the runner's filesystem and potentially in runner logs.
-
-Additionally, all three use `StrictHostKeyChecking=no`, making them vulnerable to MITM attacks.
-
-**Risk**: SSH key exposure on shared GitHub runners. MITM vulnerability.
-**Recommendation**: Use `appleboy/ssh-action` (already used in other workflows) which handles key lifecycle internally. If raw SSH is needed, use `ssh-agent` with `webfactory/ssh-agent` action instead of writing keys to disk.
-
-### CICD-07: deploy.yml Stops Service Before Binary Upload
-**Severity**: Medium
-**Files**: `.github/workflows/deploy.yml` (lines 102-128)
-
-The deploy workflow stops the ploy service (line 112), then in a separate step uploads the binary (line 122). If the upload step fails, the service remains stopped with no automatic recovery. The `sleep 2` at line 120 is a race condition, not a synchronization mechanism.
-
-**Risk**: Extended downtime during failed deployments. Trading halted with open positions.
-**Recommendation**: Upload first, then atomically swap the binary and restart. The `release-aliyun.yml` workflow does this correctly — consolidate on that pattern.
-
-### CICD-08: deploy-tango21.yml Builds Rust on Production Host
-**Severity**: Medium
-**Files**: `.github/workflows/deploy-tango21.yml` (lines 154-158)
-
-The deployment script uploads source code to the EC2 instance and runs `cargo build --release` on the production host. This violates the project's own "Trading Host Deployment Policy" in CLAUDE.md which explicitly states: "do not build Rust source on-host."
-
-**Risk**: Build process consumes all CPU/memory on a trading host, potentially causing OOM kills of running trading processes. Build artifacts consume disk space.
-**Recommendation**: Remove this workflow or refactor to use pre-built binaries like `release-aliyun.yml`.
-
-### CICD-09: Deprecated GitHub Actions
-**Severity**: Medium
-**Files**: `.github/workflows/deploy-prebuilt.yml` (line 22)
-
-Uses `actions-rs/toolchain@v1` which has been deprecated and archived. Also uses `actions/cache@v3` (line 33) while other workflows use `v4`.
-
-**Risk**: Deprecated actions may stop working without notice. Inconsistent cache behavior.
-**Recommendation**: Replace with `dtolnay/rust-toolchain@stable` (already used elsewhere) and `actions/cache@v4`.
-
-### CICD-10: No Timeout on Most Deploy Jobs
-**Severity**: Medium
-**Files**: `deploy.yml`, `deploy-prebuilt.yml`, `deploy-aws-jp.yml`, `deploy-tango21.yml`, `rollback.yml`
-
-Only `test.yml` (30min), `auto-review.yml` (20min), `release-aliyun.yml` (40min), and `release.yml` (30min) have `timeout-minutes`. Deploy jobs have no timeout and could hang indefinitely (e.g., SSH connection stall).
-
-**Risk**: Hung workflows consume runner minutes and block the concurrency group.
-**Recommendation**: Add `timeout-minutes: 15` to all deploy jobs.
+**Recommendation**: Add a weekly scheduled `cargo audit` job and a `cargo deny check advisories` step in `test.yml`. Pin third-party GitHub Actions to full commit SHAs (currently using `@v4`, `@v1.0.3`, etc. — mutable tags).
 
 ---
 
-## 2. Deployment Strategy
+## 2. Release Process
 
-### CICD-11: No Blue-Green or Canary Deployment
-**Severity**: High
+### 2.1 Primary Path: `release-aliyun.yml`
 
-All deployments follow a stop-replace-start pattern. There is no blue-green, canary, or rolling deployment capability. For a system trading real money, this means:
-- Downtime during every deployment (service stop -> binary copy -> service start)
-- No traffic shifting or gradual rollout
-- No automatic rollback on health check failure
+**Severity: Low (well-designed)**
 
-**Risk**: Every deployment creates a window where the system cannot trade, potentially missing hedge exits or leaving positions unmanaged.
-**Recommendation**: Implement at minimum a "deploy and verify before switching" pattern. The `release-aliyun.yml` already installs to a versioned directory — extend this to symlink-swap with health check verification before switching the active binary.
+The Aliyun release workflow is the most mature in the repo:
+- Builds on `ubuntu-24.04-arm` (native ARM64, matching tango-1-1's aarch64 target)
+- Uses `--locked` to pin `Cargo.lock`
+- Verifies ELF format and architecture before deploy
+- Creates a timestamped backup (`ploy.bak.<ts>`) before overwriting
+- Writes a `10-memory-restart.conf` drop-in enforcing `Restart=always`, `RestartSec=5`, `MemoryHigh=1280M`, `MemoryMax=1536M`, `OOMPolicy=kill`
+- Waits for `systemctl is-active` with a 20-attempt / 2s-delay loop
+- Requires `environment: production` (GitHub environment protection)
+- Concurrency group prevents parallel deploys
 
-### CICD-12: Rollback Only Covers One Host
-**Severity**: Medium
-**Files**: `.github/workflows/rollback.yml`
+One gap: the deploy step runs `rustup toolchain install stable` and creates symlinks on the trading host. This is correct for keeping rustup current but the `pkill -x cargo || true` / `pkill -x rustc || true` lines suggest the host has previously had on-host builds. The policy is correct; the defensive kill is a smell that the policy was not always enforced.
 
-The rollback workflow only targets `EC2_HOST` (AWS). There is no rollback workflow for the Aliyun ECS host (tango-1-1), which is the primary production target per CLAUDE.md.
+### 2.2 Legacy Workflows: `deploy.yml`, `release.yml`, `deploy-tango21.yml`, `deploy-prebuilt.yml`
 
-**Risk**: Cannot quickly rollback the primary production deployment.
-**Recommendation**: Add Aliyun rollback workflow, or parameterize the existing one to target either host.
+**Severity: High**
 
-### CICD-13: Backup Rotation Not Enforced
-**Severity**: Low
-**Files**: `.github/workflows/release-aliyun.yml` (lines 319-323), `release.yml` (lines 189-193)
+These four workflows represent earlier generations of the deployment approach and contain serious issues:
 
-Timestamped backups (`ploy.bak.YYYYMMDD_HHMMSS`) accumulate without cleanup. On a 197GB disk with a ~100MB binary, this is not immediately critical but will eventually consume space.
+- **`deploy-tango21.yml`**: Uploads raw source (`Cargo.toml`, `src/`, etc.) to S3 and runs `cargo build --release` on the EC2 host via SSM. This directly violates the "no build on trading host" policy. The EC2 instance ID (`i-01de34df55726073d`) and IP (`3.112.247.26`) are hardcoded in plaintext.
 
-**Risk**: Disk space exhaustion over time.
-**Recommendation**: Add backup rotation (keep last 5) in the deploy script or maintenance job.
+- **`deploy-prebuilt.yml`**: Generates a systemd unit file with secrets interpolated directly into `Environment=` lines:
+  ```
+  Environment="POLYMARKET_PRIVATE_KEY=${{ secrets.POLYMARKET_PRIVATE_KEY }}"
+  Environment="GROK_API_KEY=${{ secrets.GROK_API_KEY }}"
+  ```
+  This writes the private key into `/etc/systemd/system/ploy-backend.service` on disk, readable by any process with root access and visible in `systemctl show`. This is a **critical secret exposure pattern**.
+
+- **`deploy.yml`**: Builds x86_64 binary (wrong arch for tango-1-1 which is aarch64), no `--locked` flag, no feature flags matching production.
+
+- **`release.yml`**: Builds x86_64 without production features (`claimer_daemon,api,pm_ctf`).
+
+**Recommendation**: Delete or disable `deploy-tango21.yml`, `deploy-prebuilt.yml`, `deploy.yml`, and `release.yml`. They are superseded by `release-aliyun.yml` and create confusion about the canonical deploy path. At minimum, add a comment header marking them as deprecated and add a branch protection rule that only `release-aliyun.yml` can deploy to the `production` environment.
+
+### 2.3 Rollback (`rollback.yml`)
+
+**Severity: Medium**
+
+The rollback workflow targets `secrets.EC2_HOST` (the old AWS EC2 host) and uses `/opt/ploy/` paths — inconsistent with the Aliyun deployment which uses `$DEPLOY_ROOT` (defaulting to `/root/ploy/`). A rollback triggered during an incident on tango-1-1 would silently target the wrong host.
+
+**Recommendation**: Update `rollback.yml` to use `secrets.ALIYUN_ECS_HOST` and `/root/ploy/` paths, or parameterize the target host. Add a `dry_run` input that prints what would be done without executing.
 
 ---
 
-## 3. Infrastructure as Code
+## 3. Configuration Management
 
-### CICD-14: Infrastructure Not Codified
-**Severity**: High
+### 3.1 Strategy Configs in Git
 
-There is no Terraform, Pulumi, CloudFormation, or any IaC for:
-- Alibaba Cloud ECS instances
-- AWS EC2 instances
-- Security groups / firewall rules
-- S3 buckets (created ad-hoc per deployment in `deploy-prebuilt.yml` and `deploy-tango21.yml`)
-- ECR repositories
-- Database provisioning
+**Severity: Low**
 
-Server setup is done imperatively via SSH in workflow scripts.
+Strategy TOML files (`staggered_arb.toml`, `momentum.toml`, etc.) contain only trading parameters — no secrets. They are committed to git and deployed as part of the release bundle. This is appropriate.
 
-**Risk**: Infrastructure drift, unreproducible environments, no disaster recovery plan. If tango-1-1 dies, there is no automated way to recreate it.
-**Recommendation**: At minimum, document the infrastructure setup. Ideally, codify with Terraform (supports both Alibaba Cloud and AWS).
+The `release-aliyun.yml` bundle only includes `momentum.toml` and `staggered_arb.toml`. Other strategy configs (`gamma_scalping.toml`, `pattern_memory.toml`, `pm_5m_directional_default.toml`, etc.) are not deployed by CI — they must be manually placed on the host. This creates a config drift risk where the host has configs that differ from what is in git.
 
-### CICD-15: S3 Bucket Leak in deploy-prebuilt and deploy-tango21
-**Severity**: Medium
-**Files**: `.github/workflows/deploy-prebuilt.yml` (line 9), `deploy-tango21.yml` (line 16)
+**Recommendation**: Either include all strategy configs in the release bundle, or document explicitly which configs are CI-managed vs. manually managed.
 
-Both workflows create a new S3 bucket per run (`ploy-prebuilt-${{ github.run_number }}`, `ploy-deployment-${{ github.run_number }}`). The cleanup step in `deploy-tango21.yml` is commented out (line 255). These buckets accumulate indefinitely.
+### 3.2 Secrets Management
 
-**Risk**: Unbounded S3 cost growth. Stale deployment artifacts with potential secrets.
-**Recommendation**: Enable the cleanup step or use a single bucket with versioned prefixes.
+**Severity: High**
+
+The `.env` file on the host (`/root/ploy/.env`) is the primary secrets delivery mechanism for the Aliyun deployment. This is reasonable for a single-host setup. However:
+
+- The `deploy-prebuilt.yml` workflow writes `POLYMARKET_PRIVATE_KEY` directly into a systemd unit file on disk (see §2.2). Even if this workflow is deprecated, it may have been used to provision existing hosts.
+- There is no secrets rotation procedure documented anywhere.
+- The `.gitignore` correctly excludes `.env` and `*.key` files.
+- `production.example.toml` contains placeholder private key (`0x...`) — acceptable as an example, but the file is in git and could mislead operators into committing real credentials.
+
+**Recommendation**: Audit tango-1-1 to confirm `POLYMARKET_PRIVATE_KEY` is not present in any systemd unit file. Establish a secrets rotation runbook. Consider using systemd `EnvironmentFile=` pointing to a 0600-owned file rather than inline `Environment=` directives.
 
 ---
 
 ## 4. Monitoring & Observability
 
-### CICD-16: Prometheus Metrics Exist But No Scraper Configured
-**Severity**: High
-**Files**: `src/services/health.rs`, `src/services/metrics.rs`
+### 4.1 Health Endpoint
 
-The codebase has a well-implemented `/metrics` endpoint with Prometheus-format output (health status, PnL, order counts, WS status, per-symbol freshness). However, there is no evidence of:
-- Prometheus server or Victoria Metrics deployed
-- Grafana dashboards
-- Alert rules (PnL threshold, consecutive failures, WS disconnect)
-- Any scrape configuration
+**Severity: Low (present and functional)**
 
-The metrics endpoint exists but nobody is reading it.
+`GET /health` is implemented at `src/api/handlers/system.rs:51`. It checks DB connectivity (`SELECT 1`) and returns `{"status":"ok","db":"connected","uptime_secs":N}` or 503 when degraded. A `/healthz` liveness endpoint also exists in `src/services/health.rs`.
 
-**Risk**: Operational blindness. The system could be losing money, disconnected, or in a failure loop with no alerting.
-**Recommendation**: Deploy Prometheus + Grafana (or a managed alternative like Grafana Cloud free tier). Define alerts for: `ploy_daily_pnl_usd < -100`, `ploy_consecutive_failures > 3`, `ploy_websocket_connected == 0`, `ploy_up < 1`.
+The deploy workflow checks `curl -f http://localhost:8080/health` after restart but uses `|| true` — a health check failure does not abort the deploy. This means a broken binary that starts but cannot connect to the DB will be considered a successful deployment.
 
-### CICD-17: No Centralized Logging
-**Severity**: Medium
+**Recommendation**: Remove `|| true` from the post-deploy health check in `release-aliyun.yml`. A failed health check should trigger automatic rollback.
 
-Logs go to journald on each host. There is no log aggregation (Loki, CloudWatch Logs, Elasticsearch). The `get-logs.yml` workflow SSHes into the host to tail logs — this is the only way to access them.
+### 4.2 Logging
 
-**Risk**: Logs lost on host failure. No cross-host correlation. No log-based alerting.
-**Recommendation**: Ship journald logs to a centralized store. Loki + Promtail is lightweight and pairs with Grafana.
+**Severity: Medium**
 
-### CICD-18: No Deployment Notifications
-**Severity**: Medium
+Logging uses `tracing` + `tracing-subscriber` + `tracing-appender`. Log files go to `/var/log/ploy/`. The `get-logs.yml` workflow provides a manual log retrieval mechanism via SSH.
 
-No Slack, Discord, Feishu, or email notifications on deployment success/failure. The Feishu webhook is referenced in `deploy-aws-jp.yml` as a runtime env var for the trading bot, but not used for CI/CD notifications.
+There is no structured log aggregation (no CloudWatch, no Loki, no ELK). Logs are only accessible by SSHing to the host or running the `get-logs.yml` workflow. For a 24/7 trading system, this means:
+- No alerting on error patterns (e.g., repeated order failures, circuit breaker trips)
+- No cross-session log correlation
+- Log loss if the host is replaced
 
-**Risk**: Failed deployments go unnoticed.
-**Recommendation**: Add a notification step to deployment workflows using the existing Feishu webhook or GitHub's built-in notification system.
+**Recommendation**: At minimum, configure `journald` forwarding to a persistent log store, or add a lightweight log shipper (Vector, Promtail) to push to a managed service. Add alerting on `ERROR` log patterns for order submission failures and circuit breaker state changes.
 
----
+### 4.3 Metrics
 
-## 5. Incident Response
+**Severity: Medium**
 
-### CICD-19: No Runbooks or On-Call Procedures
-**Severity**: High
+There are no Prometheus metrics, no OpenTelemetry instrumentation, and no metrics endpoint in any workflow or source file. The only operational visibility is logs and the `/health` endpoint. For a trading system, the absence of metrics means:
+- No P&L dashboards
+- No order fill rate tracking
+- No latency percentiles for order submission
+- No alerting on position size or daily loss limit approach
 
-No runbooks exist for:
-- "Trading bot is losing money rapidly"
-- "WebSocket disconnected for >5 minutes"
-- "Database disk full"
-- "Host unreachable"
-- "Deployment failed mid-way"
-
-The `stop-trading.yml` workflow exists as an emergency stop but only covers the Docker-based AWS deployment, not the primary Aliyun systemd deployment.
-
-**Risk**: During an incident, the operator must figure out the correct response in real-time while money is at risk.
-**Recommendation**: Create runbooks for the top 5 failure scenarios. Ensure `stop-trading.yml` covers all deployment targets.
-
-### CICD-20: Emergency Stop Coverage Gap
-**Severity**: High
-**Files**: `.github/workflows/stop-trading.yml`
-
-The emergency stop workflow only stops a Docker container named `ploy-trading` on the AWS host. The primary production deployment (tango-1-1, Aliyun, systemd) has no emergency stop workflow. An operator would need to SSH manually.
-
-**Risk**: Cannot quickly halt trading on the primary production system via CI/CD.
-**Recommendation**: Add an Aliyun emergency stop workflow that runs `systemctl stop ploy-platform-live` (or all ploy-* services) on tango-1-1.
+**Recommendation**: Add a `/metrics` endpoint (Prometheus format) exposing at minimum: orders submitted/filled/failed, active positions count, daily P&L, circuit breaker state, and WebSocket connection status.
 
 ---
 
-## 6. Environment Management
+## 5. Deployment Safety
 
-### CICD-21: Config Parity Issues Between Environments
-**Severity**: Medium
-**Files**: `deployment/config/crypto_live.toml`, `deployment/config/platform_live.toml`, `deployment/production.toml`, `deployment/aws/config/production.toml`
+### 5.1 No Blue-Green or Canary
 
-Multiple production config files exist with subtle differences:
-- `crypto_live.toml`: `json = false`, `sum_target = 1.0`
-- `production.toml`: `json = true`, `sum_target = 0.95`
-- `aws/config/production.toml`: `json = true`, `sum_target = 0.95`
-- `platform_live.toml`: `json = false`, `sum_target = 1.0`, includes `nba_comeback` section
+**Severity: Medium**
 
-No config validation or schema enforcement exists. A typo in a TOML value (e.g., integer instead of float, as documented in MEMORY.md) causes silent runtime failure.
+All deployments are in-place: stop service → replace binary → start service. There is no blue-green or canary capability. For a trading system, this means:
+- Downtime during every deploy (typically 5-10 seconds based on the `wait_for_unit_active` loop)
+- No ability to validate a new binary against live traffic before full cutover
+- A bad deploy that passes the health check but has a logic error will affect all live positions
 
-**Risk**: Behavioral differences between environments. Config errors cause runtime failures.
-**Recommendation**: Add a config validation step to CI (e.g., `ploy config validate`). Reduce config duplication by using a base config with environment-specific overrides.
+**Recommendation**: For a single-host setup, a practical mitigation is a pre-deploy dry-run smoke test: start the new binary with `--dry-run` flag against the live DB, verify it reaches `READY` state, then perform the swap. Document this as the required pre-deploy step.
 
-### CICD-22: Systemd Service File Inconsistencies
-**Severity**: Medium
-**Files**: `deployment/*.service`
+### 5.2 Deployment Gate
 
-Memory limits vary across service files without clear rationale:
-- `ploy.service`: `MemoryMax=512M`
-- `ploy@.service`: `MemoryMax=512M`
-- `ploy-platform-live.service`: `MemoryMax=768M`
-- `ploy-crypto-live.service`: `MemoryMax=768M`
-- `ploy-strategy-split-arb-dryrun.service`: `MemoryMax=256M`
+**Severity: Low (present)**
 
-But the `release-aliyun.yml` deploy script overrides all of these with a systemd drop-in setting `MemoryMax=1536M` (line 364), which is 2-6x higher than the unit file values.
+The `release-aliyun.yml` workflow uses `environment: production` which enables GitHub's environment protection rules (required reviewers, wait timers). This is the correct gate. The `deploy_production` boolean input also provides an explicit opt-in for manual dispatches.
 
-The `deployment/aws/ploy.service` has much stricter security hardening (`ProtectSystem=strict`, `MemoryDenyWriteExecute=true`, `ProtectKernelTunables=true`) than the other service files (`ProtectSystem=full`). This inconsistency means the AWS deployment is more hardened than Aliyun.
+### 5.3 Migration Safety
 
-**Risk**: The drop-in override silently negates the carefully tuned memory limits. Security posture varies by host.
-**Recommendation**: Align service files. Either remove the drop-in override or update the base service files to match. Standardize security hardening across all service files.
+**Severity: Medium**
+
+The deploy script runs a single hardcoded migration (`022_order_strategy_tracking.sql`) via `psql`. There is no migration framework (sqlx migrate, flyway, etc.) tracking which migrations have been applied. Running the same migration twice will either error or silently succeed depending on whether it uses `CREATE TABLE IF NOT EXISTS`. There is no rollback migration.
+
+**Recommendation**: Use `sqlx migrate run` (already a dependency) as the migration step. This tracks applied migrations in a `_sqlx_migrations` table and is idempotent.
 
 ---
 
-## 7. Release Process
+## 6. Operational Runbooks
 
-### CICD-23: Version Stuck at 0.1.0
-**Severity**: Medium
-**Files**: `Cargo.toml` (line 4)
+### 6.1 No Runbooks for Known Failure Modes
 
-`Cargo.toml` has `version = "0.1.0"` despite the system being in production trading real money. Release tags (vX.Y.Z) are used in workflows but the binary itself always reports 0.1.0.
+**Severity: High**
 
-**Risk**: Cannot determine which version is running on a host from the binary itself.
-**Recommendation**: Use `vergen` or a build script to embed the git tag/SHA into the binary. Bump `Cargo.toml` version as part of the release process.
+The `scripts/` directory contains deployment and maintenance scripts but no runbooks for the operational failure modes identified in prior review phases:
 
-### CICD-24: No CHANGELOG
-**Severity**: Low
+- **A-H4 (governance not restored on restart)**: No documented procedure for re-applying governance pauses after a service restart. An operator responding to an incident would not know to manually re-pause domains.
+- **F-01 (foreground bypass)**: No documented warning that `ploy strategy start --foreground` bypasses risk controls. An operator using this for debugging in production could inadvertently trade without risk gates.
+- **Circuit breaker reset**: No documented procedure for resetting a tripped circuit breaker without restarting the service.
+- **Emergency stop**: No documented procedure for triggering emergency stop via the API vs. `systemctl stop`.
 
-No CHANGELOG.md exists (confirmed by prior review phase3b). Release notes are auto-generated by GitHub (`generate_release_notes: true`) but there is no curated changelog.
+The `ploy_maintenance.sh` script covers DB retention and log rotation — useful but not incident response.
 
-**Risk**: Difficult to understand what changed between releases.
-**Recommendation**: Adopt conventional commits and auto-generate changelogs, or maintain a manual CHANGELOG.md.
+**Recommendation**: Create `docs/runbooks/` with at minimum:
+1. `restart.md` — safe restart procedure including governance state backup/restore
+2. `emergency-stop.md` — API-based stop vs. systemd stop, when to use each
+3. `circuit-breaker.md` — how to inspect state, reset, and validate
+4. `governance-pause.md` — how to pause a domain and verify it survives restart (pending A-H4 fix)
+5. `rollback.md` — step-by-step rollback using `rollback.yml` with the corrected host target
 
-### CICD-25: Workflow Proliferation and Duplication
-**Severity**: Medium
-**Files**: All 11 workflow files
+### 6.2 `ploy_maintenance.sh` is Unscheduled
 
-There are 7 deployment-related workflows with significant duplication:
-1. `deploy.yml` — AWS EC2 (binary via SCP)
-2. `deploy-prebuilt.yml` — AWS EC2 (binary via S3, builds frontend)
-3. `deploy-aws-jp.yml` — AWS EC2 (Docker via ECR)
-4. `deploy-tango21.yml` — AWS EC2 (source via S3, builds on host)
-5. `release.yml` — GitHub Release + AWS EC2 deploy
-6. `release-aliyun.yml` — GitHub Release + Aliyun ECS deploy
-7. `rollback.yml` — AWS EC2 rollback
+**Severity: Low**
 
-Each has its own build step, SSH pattern, and deployment logic. It is unclear which workflows are actively used vs. legacy.
+The maintenance script handles DB retention and journal vacuum but there is no cron job or systemd timer documented or deployed by CI. If it is not running, the 18GB database on tango-1-1 will continue growing.
 
-**Risk**: Maintenance burden. Fixes applied to one workflow are not propagated to others. Confusion about which workflow to use.
-**Recommendation**: Consolidate to 2-3 workflows: `test.yml`, `release.yml` (build + publish), `deploy.yml` (parameterized for target host). Archive or delete unused workflows.
+**Recommendation**: Add a systemd timer unit for `ploy_maintenance.sh` to the release bundle and deploy it via `release-aliyun.yml`.
+
+---
+
+## 7. Environment Management
+
+### 7.1 No Staging Environment
+
+**Severity: Medium**
+
+There is one production host (tango-1-1) and no staging environment. The test suite runs against an ephemeral Postgres container in CI, but there is no environment that mirrors production configuration for pre-release validation.
+
+The `deploy-aws-jp.yml` workflow appears to have been used as an ad-hoc staging environment (it accepts trading parameters as inputs and deploys to a separate EC2 host), but it builds on-host and is not a proper staging pipeline.
+
+**Recommendation**: Designate tango-2-1 (AWS Tokyo, currently running) as a staging environment. Add a `deploy-staging` job to `release-aliyun.yml` that deploys to tango-2-1 before the production deploy, with a manual approval gate between them.
+
+### 7.2 Hardcoded Infrastructure Values
+
+**Severity: Medium**
+
+Several workflows hardcode infrastructure values that should be variables or secrets:
+- `deploy-tango21.yml`: EC2 instance ID `i-01de34df55726073d` and IP `3.112.247.26` in plaintext
+- `deploy-prebuilt.yml`: EC2 IP `13.231.209.90` in plaintext
+- `stop-trading.yml` and `get-logs.yml`: Use `StrictHostKeyChecking=no` — disables SSH host key verification, enabling MITM attacks against the trading host
+
+**Recommendation**: Move all host IPs and instance IDs to GitHub repository variables (not secrets, but not hardcoded). Replace `StrictHostKeyChecking=no` with `ssh_known_hosts` verification using the `appleboy/ssh-action` `known_hosts` parameter.
+
+---
+
+## 8. Systemd Service Configuration
+
+### 8.1 Guardrails (Well-Implemented)
+
+**Severity: Low (positive finding)**
+
+The `release-aliyun.yml` deploy script writes a `10-memory-restart.conf` drop-in to every detected ploy service unit:
+```
+[Service]
+Restart=always
+RestartSec=5
+MemoryHigh=1280M
+MemoryMax=1536M
+OOMPolicy=kill
+```
+
+This matches the CLAUDE.md deployment policy exactly. The deploy script also verifies these settings with `systemctl show` after restart. This is correct.
+
+### 8.2 Missing `StartLimitIntervalSec` / `StartLimitBurst`
+
+**Severity: Medium**
+
+The drop-in sets `Restart=always` but does not set `StartLimitIntervalSec` or `StartLimitBurst`. If the binary crashes immediately on startup (e.g., DB unreachable, bad config), systemd will restart it indefinitely at 5-second intervals, consuming resources and flooding logs. The default systemd start limit (5 starts in 10 seconds) may or may not apply depending on the base unit definition.
+
+**Recommendation**: Add `StartLimitIntervalSec=60` and `StartLimitBurst=5` to the drop-in. After 5 rapid failures, systemd will stop retrying and alert via `systemctl status`, giving an operator a clear signal.
+
+### 8.3 No `ExecStartPre` Health Check
+
+**Severity: Low**
+
+There is no `ExecStartPre` step to verify DB connectivity or config validity before the main process starts. A misconfigured `.env` will cause the service to start, fail, and restart in a loop.
+
+**Recommendation**: Add `ExecStartPre=/usr/bin/pg_isready -d $DATABASE_URL` or a lightweight `ploy config check` subcommand as `ExecStartPre`.
+
+---
+
+## 9. Prior Phase Findings — CI/CD Impact
+
+| Finding | CI/CD Impact | Current Mitigation |
+|---------|-------------|-------------------|
+| A-H4: Governance not restored on restart | `Restart=always` means every OOM or crash loses governance state | None — no pre-restart state export, no post-restart restore hook |
+| F-01: Foreground bypass | No CI gate prevents deploying code with this path | None — no integration test exercises the foreground path |
+| P-C1: Coordinator serialization | No load test in CI to detect throughput regression | None |
+| F-03: Governance pool not wired | Silent failure not caught by health endpoint | Health endpoint only checks DB, not governance pool wiring |
 
 ---
 
 ## Summary Table
 
-| ID | Severity | Category | Finding |
-|----|----------|----------|---------|
-| CICD-01 | Critical | Build | x86 binary deployed to ARM host |
-| CICD-02 | High | Build | Feature flag mismatch between test and release |
-| CICD-03 | High | Security | No dependency vulnerability scanning |
-| CICD-04 | High | Deployment | No staging environment |
-| CICD-05 | High | Security | Hardcoded secrets in workflow files |
-| CICD-06 | High | Security | SSH key written to disk on runners |
-| CICD-07 | Medium | Deployment | Service stopped before binary uploaded |
-| CICD-08 | Medium | Policy | Rust built on production host |
-| CICD-09 | Medium | Build | Deprecated GitHub Actions |
-| CICD-10 | Medium | Reliability | No timeout on deploy jobs |
-| CICD-11 | High | Deployment | No blue-green or canary deployment |
-| CICD-12 | Medium | Deployment | Rollback only covers AWS, not Aliyun |
-| CICD-13 | Low | Operations | No backup rotation |
-| CICD-14 | High | IaC | No infrastructure as code |
-| CICD-15 | Medium | Cost | S3 bucket leak per deployment |
-| CICD-16 | High | Observability | Prometheus metrics exist but no scraper |
-| CICD-17 | Medium | Observability | No centralized logging |
-| CICD-18 | Medium | Observability | No deployment notifications |
-| CICD-19 | High | Incident | No runbooks or on-call procedures |
-| CICD-20 | High | Incident | Emergency stop only covers AWS Docker |
-| CICD-21 | Medium | Config | Config parity issues between environments |
-| CICD-22 | Medium | Config | Systemd service file inconsistencies |
-| CICD-23 | Medium | Release | Version stuck at 0.1.0 |
-| CICD-24 | Low | Release | No CHANGELOG |
-| CICD-25 | Medium | Maintenance | 7 overlapping deployment workflows |
+| ID | Area | Severity | Finding |
+|----|------|----------|---------|
+| C-01 | CI Gates | High | No `cargo audit` / `cargo deny` — no dependency vulnerability scanning |
+| C-02 | CI Gates | Medium | Clippy is advisory-only; does not block merge |
+| C-03 | CI Gates | Medium | `api` feature not tested in CI; production feature set untested |
+| D-01 | Deploy | Critical | `deploy-prebuilt.yml` writes `POLYMARKET_PRIVATE_KEY` into systemd unit file on disk |
+| D-02 | Deploy | High | Legacy workflows (`deploy-tango21.yml`, `deploy.yml`, `release.yml`) build Rust on-host, violating deployment policy |
+| D-03 | Deploy | Medium | `rollback.yml` targets wrong host (AWS EC2 vs. Aliyun tango-1-1) |
+| D-04 | Deploy | Medium | Post-deploy health check uses `|| true` — failed health does not abort deploy |
+| D-05 | Deploy | Medium | Migration applied via raw `psql` without tracking; not idempotent |
+| S-01 | Secrets | High | No secrets rotation procedure; `deploy-prebuilt.yml` may have left private key in systemd unit |
+| S-02 | Security | High | `StrictHostKeyChecking=no` in 3 workflows — SSH MITM risk |
+| S-03 | Security | Medium | Third-party Actions pinned to mutable version tags, not commit SHAs |
+| O-01 | Observability | Medium | No metrics endpoint; no alerting on order failures or circuit breaker state |
+| O-02 | Observability | Medium | No log aggregation; logs only accessible via SSH |
+| O-03 | Runbooks | High | No runbooks for governance restore, foreground bypass warning, circuit breaker reset, emergency stop |
+| E-01 | Environments | Medium | No staging environment; tango-2-1 available but not used as staging |
+| E-02 | Environments | Medium | Infrastructure values hardcoded in workflow files |
+| Sy-01 | Systemd | Medium | No `StartLimitIntervalSec`/`StartLimitBurst` — crash loop not bounded |
+| Sy-02 | Systemd | Low | No `ExecStartPre` config/DB validation before service start |
+| Cf-01 | Config | Low | Only 2 of 11 strategy configs deployed by CI; rest require manual placement |
 
-**Critical**: 1 | **High**: 9 | **Medium**: 12 | **Low**: 3
+---
+
+## Immediate Actions (Priority Order)
+
+1. **Audit tango-1-1** for `POLYMARKET_PRIVATE_KEY` in `/etc/systemd/system/*.service` files. Rotate the key if found. (D-01)
+2. **Fix `rollback.yml`** to target the correct host before the next incident requires it. (D-03)
+3. **Remove `|| true`** from post-deploy health check in `release-aliyun.yml`. (D-04)
+4. **Add `cargo audit`** to `test.yml` as a blocking step. (C-01)
+5. **Write governance restore runbook** covering the A-H4 failure mode. (O-03)
+6. **Replace `StrictHostKeyChecking=no`** with known_hosts verification. (S-02)

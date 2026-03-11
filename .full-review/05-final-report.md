@@ -1,176 +1,202 @@
 # Comprehensive Code Review Report
 
+**Branch:** `hotfix/staggered-arb-release-20260306` vs `main`
+**Review Date:** 2026-03-11
+**Phases Completed:** Code Quality, Architecture, Security, Performance, Testing, Documentation, Best Practices, CI/CD
+
+---
+
 ## Review Target
 
-Full Ploy trading system codebase — a Polymarket prediction market trading bot.
-- ~165K lines Rust (260+ source files), TypeScript sidecar, React frontend
-- Frameworks: Tokio, Axum, sqlx, DashMap, alloy/ethers
-- Deployed to Alibaba Cloud (tango-1-1, ARM) and AWS Tokyo (tango-2-1, x86)
-- Trades real money on Polymarket CLOB
+Branch `hotfix/staggered-arb-release-20260306` — 10 commits, ~317 source files changed vs `main`.
+
+The branch is a major **coordinator decomposition refactor**: monolithic `bootstrap.rs` (~7,000 lines) and `coordinator.rs` (~6,500 lines) split into focused sub-modules. It also introduces the `staggered_arb_live` live trading strategy, a new `pm_5m_directional` strategy, a new `control_plane` module, and routes foreground CLI intents through the coordinator ingress.
+
+**Framework:** Rust / Tokio / Axum / sqlx (PostgreSQL) — live trading system.
+
+---
 
 ## Executive Summary
 
-The Ploy trading system has strong architectural foundations — multi-layer risk management, event sourcing with DLQ, parameterized SQL throughout, and defense-in-depth safety gates. However, the review uncovered 5 critical issues that require immediate attention: a double PnL recording bug inflating risk gate accounting, silently discarded position-tracking errors, an x86 binary being deployed to an ARM production host, a 7,761-line god module, and missing root documentation. The system's ~796 tests provide good coverage for pure computation but leave the order execution pipeline — the core revenue path — completely untested end-to-end. The CI/CD pipeline has significant gaps: no staging environment, no dependency scanning, and feature flag mismatches between test and production builds.
+The coordinator decomposition is architecturally sound and the file structure is significantly improved. However, the refactor has introduced or exposed several production-critical issues that must be resolved before this branch is deployed to a live trading host. The most urgent concerns are: a foreground execution path that bypasses all risk controls, a serialized coordinator loop that saturates at ~20 intents/sec under DB pressure, governance state that is silently lost on every restart, and a legacy CI workflow that may have written the Polymarket private key into a systemd unit file on the production host. None of the five critical code-quality findings from Phase 1 have been addressed in this branch.
+
+---
 
 ## Findings by Priority
 
-### Critical Issues (P0 — Must Fix Immediately)
+### P0 — Critical: Must Fix Before Deployment (9 unique findings)
 
-| ID | Phase | Finding | Impact |
-|----|-------|---------|--------|
-| P-01 | Perf | Double `record_success` at coordinator.rs:4268 inflates PnL 2x | Risk gate accounting corrupted; may allow/block trades incorrectly |
-| Q-01 | Quality | `let _ = self.positions.open_position(...)` silently discards errors | Invisible position drift; exposure tracking becomes stale |
-| CICD-01 | CI/CD | x86 binary deployed to ARM host (release-aliyun.yml) | Binary cannot execute on primary production server |
-| Q-02 | Quality | bootstrap.rs god module (7,761 lines) | Unmaintainable; mixes DDL, env parsing, alerts, orchestration |
-| D-01 | Docs | No root-level README.md | No entry point for understanding the system |
+| ID | Category | File | Issue |
+|----|----------|------|-------|
+| **R-01** | Security / Architecture | `cli/strategy/runtime_ops/foreground.rs`, `foreground_submit.rs` | **Foreground bypass**: `ForegroundIntentSubmitter::submit` executes live CLOB orders when `deployment_id` is absent in metadata, bypassing admission, risk gate, governance, capital allocator, circuit breaker, and journal. No tests cover the lifecycle or direct-executor fallback. |
+| **R-02** | Performance | `coordinator/coordinator.rs:237–274` | **Serialized coordinator loop**: `handle_order_intent` is awaited inline in the single `tokio::select!` loop. At 50ms DB latency, throughput saturates at ~20 intents/sec. All queue drain ticks, state refresh ticks, and shutdown signals are blocked during processing. |
+| **R-03** | Performance | `coordinator/coordinator/ingress.rs` (14 call sites) | **14 sequential DB writes per intent**: Every `persist_risk_decision` call on the hot path is awaited sequentially, blocking the coordinator loop for the duration of all DB round-trips. |
+| **R-04** | Code Quality | `coordinator/position/transitions.rs:52–72` | **Lock-ordering deadlock**: `close_position` acquires `positions` write lock then `realized_pnl` write lock while the first is held. `reduce_position` acquires them in the opposite order. Concurrent close + reduce will deadlock. No test covers this. |
+| **R-05** | Code Quality | `coordinator/risk/transitions.rs:107` | **Risk state corruption**: `record_loss` does not reset `consecutive_failures` or increment daily loss counters. After a loss-realizing sell between two failures, the circuit breaker counter is wrong. No test covers this path. |
+| **R-06** | Security / Performance | `coordinator/risk/transitions.rs:68–71` | **TOCTOU circuit breaker bypass**: `record_success` reads `state`, releases the lock, then writes `Normal`. A concurrent `trigger_circuit_breaker` between the two lock acquisitions is silently overwritten, re-enabling trading after a circuit-breaker trip. |
+| **R-07** | Security / Architecture | `coordinator/governance.rs`, `coordinator/recovery.rs:55–72` | **Governance state lost on restart**: Governance state is not restored unless `governance_store_pool` is explicitly wired. Operator-set domain pauses are silently lost on every OOM kill or deploy. With `Restart=always`, this means pauses never survive a crash. |
+| **R-08** | CI/CD | `.github/workflows/deploy-prebuilt.yml` | **Private key on disk**: `deploy-prebuilt.yml` writes `POLYMARKET_PRIVATE_KEY` and `GROK_API_KEY` directly into `Environment=` lines in the systemd unit file. The key is readable by any root process and visible in `systemctl show`. Audit tango-1-1 immediately. |
+| **R-09** | Best Practices | `coordinator/coordinator.rs:69,93` | **`std::sync::RwLock` in async context**: Blocks the Tokio worker thread when contended. Lock poisoning on panic silently drops order update registrations. Affects `authorized_agents` and `order_update_sinks`. |
 
-### High Priority (P1 — Fix Before Next Release)
+---
 
-| ID | Phase | Finding |
-|----|-------|---------|
-| H-01 | Security | `ApiCredentials` derives `Debug` — secrets dumped to logs (CVSS 7.5) |
-| H-02 | Security | HMAC debug log leaks full signing message (CVSS 7.1) |
-| P-02 | Perf | Unnecessary `Arc<RwLock<>>` on MomentumStrategyAdapter (~2-5μs per update) |
-| P-03 | Perf | Unbounded HashMap growth in strategy state — OOM risk on 3.4GB server |
-| P-04 | Perf | WebSocket UI polls DB every 1s instead of event-driven |
-| Q-03 | Quality | Series ID magic numbers duplicated across 6+ files |
-| Q-04 | Quality | Env parsing helpers reimplemented in 7+ files |
-| Q-05 | Quality | staggered_arb_live.rs 470-line entry method with 15+ filter gates |
-| Q-06 | Quality | coordinator.rs at 6,508 lines needs extraction |
-| Q-07 | Quality | 45 `#[allow(dead_code)]` annotations — abandoned features |
-| Q-08 | Quality | Inline DDL in 9 files — shadow schema outside migrations |
-| Q-09 | Quality | Three competing agent abstractions with overlapping signatures |
-| Q-10 | Arch | Type duplication — Position (5x), PositionStatus (3x) |
-| T-01 | Testing | No integration test for order execution pipeline |
-| T-02 | Testing | No tests for position tracking error handling |
-| T-03 | Testing | No regression test for PnL accounting correctness |
-| T-04 | Testing | PostgresStore (1,364 lines) has zero unit tests |
-| T-05 | Testing | Emergency stop has no concurrency test |
-| T-06 | Testing | No tests assert Debug output doesn't contain secrets |
-| T-07 | Testing | Staggered arb entry evaluation has no targeted tests |
-| D-02 | Docs | No Architecture Decision Records (ADRs) |
-| D-03 | Docs | API endpoints undocumented (20+ endpoints, no schemas) |
-| D-04 | Docs | Inline documentation sparse (0.7% density) |
-| D-05 | Docs | Configuration documentation incomplete |
-| BP-02 | Best Prac | `std::sync::Mutex` in async `AutonomousAgent` — deadlock risk |
-| BP-03 | Best Prac | No typed API error responses — `(StatusCode, String)` everywhere |
-| BP-04 | Best Prac | Zero compile-time checked SQL (297 string queries, 0 macros) |
-| CICD-02 | CI/CD | Feature flag mismatch between test and production builds |
-| CICD-03 | CI/CD | No dependency vulnerability scanning |
-| CICD-04 | CI/CD | No staging environment — direct to production |
-| CICD-05 | CI/CD | Hardcoded secrets in workflow files |
-| CICD-06 | CI/CD | SSH key written to disk on runners |
-| CICD-11 | CI/CD | No blue-green or canary deployment |
-| CICD-14 | CI/CD | No infrastructure as code |
-| CICD-16 | CI/CD | Prometheus metrics exist but no scraper configured |
-| CICD-19 | CI/CD | No runbooks or on-call procedures |
-| CICD-20 | CI/CD | Emergency stop only covers AWS Docker, not primary Aliyun |
+### P1 — High: Fix Before Next Live Deployment (16 unique findings)
 
-### Medium Priority (P2 — Plan for Next Sprint)
+| ID | Category | File | Issue |
+|----|----------|------|-------|
+| **R-10** | Code Quality | `coordinator/coordinator/recovery.rs:77` | Unbounded fill replay on restart — replays ALL historical fills, creating phantom positions and blocking ingress for seconds/minutes on a long-running system. |
+| **R-11** | Architecture | `coordinator/coordinator/ingress.rs:343` | `pending_buy_notional_excluding_domains` excludes ALL known domains — result is always zero. Capital notional limit is never enforced. |
+| **R-12** | Architecture / Security | `coordinator/capital/market.rs`, `coordinator/recovery.rs:77–231` | Capital allocator exposure gap: after a fill, risk gate shows $0 exposure during recovery replay, enabling 2x exposure limit breach. |
+| **R-13** | Performance | `coordinator/strategy_runtime/actions.rs:337–355` | Unbounded `spawn_split_arb_poll_task`: every order update spawns a new 600s polling task with no dedup or cancellation on WS reconnect. Duplicate fills can be processed. |
+| **R-14** | Testing | `staggered_arb_live` | No integration test for staggered arb intent flowing through coordinator risk gate. |
+| **R-15** | Testing | `staggered_arb_live` | No test for leg2 timeout / force-close path in live (non-dry-run) mode. |
+| **R-16** | Testing | `coordinator/bootstrap.rs` | `start_platform` bootstrap wiring is untested — only config rendering is tested. |
+| **R-17** | Testing | `coordinator/journal/restore.rs` | No end-to-end cold-start restore integration test (fill replay → position aggregator → risk counters). |
+| **R-18** | Documentation | `coordinator/capital.rs`, `governance.rs`, `journal.rs` | Zero `//!` module-level docs on three non-trivial coordinator sub-modules. |
+| **R-19** | Documentation | `src/control_plane/` | New module has no `//!` docs at all — role in four-layer architecture not explained. |
+| **R-20** | Documentation | `CLAUDE.md` / `AGENTS.md` | Architecture decomposition not documented — no mention of coordinator sub-modules, canonical order path, or foreground vs managed runtime distinction. |
+| **R-21** | CI/CD | `test.yml` | No `cargo audit` / `cargo deny` — zero dependency vulnerability scanning for a system handling private keys and financial transactions. |
+| **R-22** | CI/CD | `deploy-tango21.yml`, `deploy.yml`, `release.yml` | Legacy workflows build Rust on-host (violating deployment policy) and target wrong architecture (x86_64 vs aarch64). |
+| **R-23** | CI/CD | Secrets | No secrets rotation procedure documented. `deploy-prebuilt.yml` may have left private key in systemd unit on tango-1-1 (see R-08). |
+| **R-24** | CI/CD | `stop-trading.yml`, `get-logs.yml` | `StrictHostKeyChecking=no` in 3 workflows — SSH MITM risk against the trading host. |
+| **R-25** | CI/CD | `docs/runbooks/` | No runbooks for governance restore (R-07), foreground bypass warning (R-01), circuit breaker reset (R-06), or emergency stop. |
 
-| ID | Phase | Finding |
-|----|-------|---------|
-| M-01 | Security | `Wallet` derives `Clone` — private key signer copyable |
-| M-02 | Security | No API rate limiting on any endpoint |
-| M-03 | Security | Missing security headers (X-Content-Type-Options, HSTS, etc.) |
-| M-04 | Security | WebSocket auth token in query parameter |
-| M-05 | Security | `DatabaseConfig` derives `Debug` — connection URL exposed |
-| M-06 | Security | Emergency stop `is_stopped` uses `Ordering::Relaxed` |
-| M-07 | Security | Sidecar risk guard uses bypassable substring match |
-| P-05 | Perf | Sequential RwLock acquisition in handle_order_intent |
-| P-06 | Perf | PostgresStore uses string SQL without compile-time checks |
-| P-07 | Perf | No connection pool size tuning documentation |
-| P-08 | Perf | 470-line entry evaluation on hot path |
-| P-09 | Perf | Circuit breaker uses RwLock for timestamp (could be AtomicI64) |
-| T-08 | Testing | No soak tests for memory growth |
-| T-09 | Testing | Integration tests use `unsafe` env manipulation |
-| T-10 | Testing | No test for WebSocket authentication flow |
-| T-11 | Testing | Architecture gateway test uses fragile string scanning |
-| T-12 | Testing | No property-based tests for financial calculations |
-| D-06 | Docs | Module CLAUDE.md files serve AI context, not human docs |
-| D-07 | Docs | Deployment documentation fragmented |
-| D-08 | Docs | Strategy documentation scattered |
-| D-09 | Docs | Migration documentation missing |
-| BP-05–18 | Best Prac | 14 medium findings (env vars, error handling, async patterns, etc.) |
-| CICD-07–10 | CI/CD | Deploy ordering, on-host builds, deprecated actions, no timeouts |
-| CICD-12,15,17,18 | CI/CD | Rollback gaps, S3 leaks, no logging/notifications |
-| CICD-21–23,25 | CI/CD | Config parity, service inconsistencies, version, workflow duplication |
+---
 
-### Low Priority (P3 — Track in Backlog)
+### P2 — Medium: Plan for Next Sprint (20 unique findings)
 
-| ID | Phase | Finding |
-|----|-------|---------|
-| L-01–06 | Security | KalshiConfig/GrokConfig key storage, prompt injection, CORS, SSH key, deprecated API |
-| P-10–13 | Perf | to_f64 precision loss, bootstrap compile time, no Prometheus, DashMap shrink |
-| T-13–15 | Testing | No frontend tests, backtest assertions, circuit breaker transitions |
-| D-10–12 | Docs | No changelog, review findings untracked, sidecar undocumented |
-| BP-19–30 | Best Prac | 12 low findings (dead code, glob exports, dependency freshness, etc.) |
-| CICD-13,24 | CI/CD | No backup rotation, no changelog |
+| ID | Category | File | Issue |
+|----|----------|------|-------|
+| **R-26** | Architecture | `coordinator/coordinator.rs` | Coordinator struct has 12 direct `Arc<RwLock<_>>` fields — structural God Object despite file decomposition. |
+| **R-27** | Architecture | `coordinator/bootstrap/startup_context.rs` | Bootstrap initialization order is implicit — no compile-time enforcement (typestate pattern would prevent misconfiguration). |
+| **R-28** | Performance | `coordinator/coordinator/ingress.rs:72,107,121` | 4 separate governance lock acquisitions per intent — needs `governance_snapshot()`. |
+| **R-29** | Performance | `coordinator/risk/checks.rs:13–102` | `check_order` acquires 7 sequential read locks — needs `risk_snapshot()`. |
+| **R-30** | Performance | `coordinator/coordinator/execution.rs:180–232` | `get_agent_positions` does full O(n) scan across all agents on every sell fill. |
+| **R-31** | Performance | `coordinator/journal.rs:66–175` | 4 sequential DB writes per fill — should be `tokio::join!`. |
+| **R-32** | Performance | `coordinator/capital/market/accounting.rs:294–321` | `market_cap_for` builds `HashSet` on every `reserve_buy` call. |
+| **R-33** | Testing | `coordinator/coordinator/ingress.rs:339–351` | `pending_buy_notional_excluding_domains` all-domains-excluded behavior undocumented — always returns zero for known domains. |
+| **R-34** | Testing | `coordinator/position.rs` | No concurrent enqueue/dequeue test for `OrderQueue` under load. |
+| **R-35** | Testing | `staggered_arb_live` | No test for partial fill → cancel lifecycle sequence. |
+| **R-36** | Testing | `coordinator/journal/restore.rs` | No test for restore with corrupt fills (zero shares, bad domain, negative price). |
+| **R-37** | Documentation | `staggered_arb_live/*.rs` | Six sub-modules (entry, leg2, lifecycle, order_updates, runtime_flow) have no `//!` docs despite being 19–66KB each. |
+| **R-38** | Documentation | `docs/strategies/staggered_arb_state_machine.md` | State machine doc covers paper path only — `LiveOrderTrack` lifecycle, coordinator integration, and `--foreground` vs managed runtime not documented. |
+| **R-39** | Best Practices | `coordinator/journal.rs`, `governance.rs`, `observability.rs` | `sqlx::query` runtime strings instead of `sqlx::query!` compile-time macros — type mismatches only discovered at runtime. |
+| **R-40** | Best Practices | `coordinator/strategy_runtime/order_store.rs` | `async_trait` macro used where native async traits suffice (Rust 1.75+) — adds `Box<dyn Future>` allocations. |
+| **R-41** | CI/CD | `rollback.yml` | Targets `secrets.EC2_HOST` (AWS EC2) not Aliyun tango-1-1 — rollback during incident would target wrong host. |
+| **R-42** | CI/CD | `release-aliyun.yml` | Post-deploy health check uses `|| true` — failed health does not abort deploy. |
+| **R-43** | CI/CD | `release-aliyun.yml` | Migration applied via raw `psql` without tracking; not idempotent; no rollback migration. |
+| **R-44** | CI/CD | Observability | No Prometheus metrics endpoint; no alerting on order failures or circuit breaker state changes. |
+| **R-45** | CI/CD | Environments | No staging environment; tango-2-1 available but unused. `rollback.yml` and several workflows hardcode infrastructure values. |
+
+---
+
+### P3 — Low: Track in Backlog (14 unique findings)
+
+| ID | Category | Issue |
+|----|----------|-------|
+| **R-46** | Code Quality | `staggered_arb_live/entry.rs:76` — `try_entry_for_window` is 250 lines, cyclomatic complexity >20 |
+| **R-47** | Code Quality | `coordinator/coordinator/ingress.rs` — 4-step rejection pattern repeated 9 times (DRY violation) |
+| **R-48** | Architecture | `coordinator/strategy_runtime/` — two separate action dispatch paths with overlapping implementations |
+| **R-49** | Security | `admission/deployments.rs:34–62` — `PLOY_DEPLOYMENTS_FILE` env var accepts arbitrary path (CWE-73) |
+| **R-50** | Security | `sidecar/grok_decision.rs:59–96` — Grok prompt embeds unvalidated free-text fields (CWE-77) |
+| **R-51** | Security | `api/auth.rs:87–91` — admin token fingerprint uses unsalted SHA-256 (CWE-916) |
+| **R-52** | Testing | `coordinator/governance.rs` — no test for `set_global_mode` clearing domain-level overrides |
+| **R-53** | Testing | `coordinator/bootstrap/tests.rs` — deprecated env var conflict test covers only one direction |
+| **R-54** | Documentation | `cli/strategy/runtime_ops/foreground.rs` — no `//!` block warning that foreground bypasses coordinator risk gate |
+| **R-55** | Documentation | No `CHANGELOG.md` — breaking changes (bootstrap decomposition, new `control_plane`, `TradeIntent` type) not documented |
+| **R-56** | Best Practices | `coordinator/risk/transitions.rs:15,76` — `Ordering::SeqCst` where `Relaxed` suffices (unnecessary memory fence) |
+| **R-57** | Best Practices | `Cargo.toml:83` — `rand = "0.8"` two major versions behind (current: 0.9.x) |
+| **R-58** | Best Practices | `Cargo.toml:60–61` — `ethers-core`/`ethers-signers` v2 deprecated; project already has `alloy` |
+| **R-59** | CI/CD | `release-aliyun.yml` — no `StartLimitIntervalSec`/`StartLimitBurst`; crash loop not bounded |
+
+---
 
 ## Findings by Category
 
 | Category | Critical | High | Medium | Low | Total |
 |----------|----------|------|--------|-----|-------|
-| Code Quality | 2 | 8 | 12 | 5 | 27 |
-| Architecture | 1 | 3 | 8 | 4 | 16 |
-| Security | 0 | 2 | 7 | 6 | 15 |
-| Performance | 1 | 3 | 5 | 4 | 13 |
-| Testing | 0 | 7 (3 crit-equiv) | 5 | 3 | 15 |
-| Documentation | 0 | 5 (2 crit-equiv) | 4 | 3 | 12 |
-| Best Practices | 0 | 4 | 14 | 12 | 30 |
-| CI/CD & DevOps | 1 | 9 | 12 | 2 | 25 |
-| **Total** | **5** | **41** | **67** | **39** | **153** |
+| Code Quality | 3 | 3 | 2 | 0 | 8 |
+| Architecture | 2 | 4 | 2 | 1 | 9 |
+| Security | 2 | 2 | 3 | 1 | 8 |
+| Performance | 2 | 4 | 5 | 0 | 11 |
+| Testing | 5 | 4 | 3 | 2 | 14 |
+| Documentation | 0 | 3 | 3 | 2 | 8 |
+| Best Practices | 1 | 0 | 2 | 3 | 6 |
+| CI/CD & DevOps | 1 | 5 | 7 | 2 | 15 |
+| **Total** | **16** | **25** | **27** | **11** | **79** |
+
+*(Raw phase totals: 123 findings across 4 phases; 79 unique after deduplication)*
+
+---
 
 ## Recommended Action Plan
 
-### Immediate (This Week)
+### Immediate (before any live deployment)
 
-1. **Remove duplicate `record_success`** at coordinator.rs:4268 — one-line fix, prevents PnL corruption (P-01) [small]
-2. **Fix release-aliyun.yml architecture** — cross-compile for aarch64 or use ARM runner (CICD-01) [medium]
-3. **Custom Debug for `ApiCredentials`** — redact secrets, add regression test (H-01, T-06) [small]
-4. **Remove HMAC signing message from debug log** (H-02) [small]
-5. **Fix emergency stop ordering** — change `Relaxed` to `Acquire` (M-06) [small]
-6. **Log position tracking errors** — replace `let _ =` with proper error handling (Q-01) [small]
+1. **Audit tango-1-1 for private key in systemd unit** (R-08) — run `grep -r POLYMARKET /etc/systemd/system/` on the host. Rotate the key if found. `[small]`
 
-### This Sprint
+2. **Fix `rollback.yml` target host** (R-41) — change `secrets.EC2_HOST` to `secrets.ALIYUN_ECS_HOST` and update paths. `[small]`
 
-7. **Add order execution integration test** — mock exchange, verify PnL accounting end-to-end (T-01, T-03) [medium]
-8. **Remove `Arc<RwLock<>>` from MomentumStrategyAdapter** — trait takes `&mut self` (P-02) [small]
-9. **Add HashMap pruning** to staggered arb and momentum strategies (P-03) [medium]
-10. **Align CI feature flags** with production build features (CICD-02) [small]
-11. **Add `cargo audit`** to test workflow (CICD-03) [small]
-12. **Create root README.md** with architecture overview (D-01) [medium]
-13. **Replace `std::sync::Mutex`** with `tokio::sync::Mutex` in AutonomousAgent (BP-02) [small]
+3. **Remove `|| true` from post-deploy health check** (R-42) — a failed health check must abort the deploy. `[small]`
 
-### Next Sprint
+4. **Add `cargo audit` to `test.yml`** (R-21) as a blocking step. `[small]`
 
-14. **Event-driven WebSocket updates** instead of DB polling (P-04) [large]
-15. **Add API rate limiting** via tower middleware (M-02) [medium]
-16. **Add security headers** middleware (M-03) [small]
-17. **Create typed `ApiError`** response type and auth extractors (BP-03) [medium]
-18. **Add staging environment** or dry-run validation step (CICD-04) [large]
-19. **Create emergency stop workflow for Aliyun** (CICD-20) [small]
-20. **Write ADRs** for coordinator pattern, agent abstractions, bootstrap DDL (D-02) [medium]
-21. **Deploy Prometheus + Grafana** to scrape existing metrics endpoint (CICD-16) [medium]
+5. **Replace `StrictHostKeyChecking=no`** (R-24) with `known_hosts` verification in all 3 workflows. `[small]`
 
-### Backlog
+### Sprint 1 — Critical correctness and safety
 
-22. Split bootstrap.rs god module (Q-02) [large]
-23. Unify agent abstractions (Q-09) [large]
-24. Migrate critical SQL to `sqlx::query!` macros (BP-04) [large]
-25. Consolidate deployment workflows (CICD-25) [medium]
-26. Add infrastructure as code (CICD-14) [large]
-27. Create runbooks for top 5 failure scenarios (CICD-19) [medium]
-28. Profile and optimize entry evaluation hot path (P-08) [medium]
-29. Add property-based tests for financial calculations (T-12) [medium]
-30. Document all configuration options (D-05) [medium]
+6. **Fix foreground bypass** (R-01): Either route all foreground intents through the coordinator risk gate, or add a hard guard that refuses to execute live orders when `deployment_id` is absent. Add tests for the full lifecycle. `[medium]`
+
+7. **Fix `record_loss` risk state corruption** (R-05): Reset `consecutive_failures` and increment daily counters in `record_loss`. Add test for loss-realizing sell between two failures. `[small]`
+
+8. **Fix TOCTOU in `record_success`** (R-06): Acquire a single write lock and check-then-set atomically. Add concurrent test. `[small]`
+
+9. **Fix `close_position` lock ordering** (R-04): Drop `positions` lock before acquiring `realized_pnl`. Add concurrent close + reduce test with timeout. `[small]`
+
+10. **Fix governance restore on restart** (R-07): Ensure `governance_store_pool` is always wired in bootstrap; restore governance state during recovery. Add DB-backed restart round-trip test. `[medium]`
+
+11. **Write governance restore runbook** (R-25): Document safe restart procedure including governance state backup/restore, foreground bypass warning, circuit breaker reset, and emergency stop. `[small]`
+
+### Sprint 2 — Performance and throughput
+
+12. **Fire-and-forget journal writes** (R-03): Replace 14 sequential `persist_risk_decision` awaits with `tokio::spawn` or a dedicated journaling channel. `[medium]`
+
+13. **Decouple coordinator loop** (R-02): Move `handle_order_intent` off the main `select!` loop — spawn a task per intent or use a dedicated ingress worker. `[large]`
+
+14. **Fix `pending_buy_notional` always-zero bug** (R-11): Remove the all-domains exclusion or fix the domain-matching logic. `[small]`
+
+15. **Dedup poll task spawning** (R-13): Track `AbortHandle` per `exchange_order_id` in a `DashMap`; abort existing task before spawning. `[small]`
+
+16. **Replace `std::sync::RwLock` with `tokio::sync::RwLock`** (R-09) for `authorized_agents` and `order_update_sinks`. `[small]`
+
+17. **Bound fill replay on restart** (R-10): Add a `since` timestamp parameter to the fill query; only replay fills from the last N hours or since last checkpoint. `[medium]`
+
+### Sprint 3 — Testing and documentation
+
+18. **Add coordinator integration tests** (R-14, R-16, R-17): Wire coordinator → risk → position → journal end-to-end. Test staggered arb intent through risk gate. Test cold-start restore. `[large]`
+
+19. **Add `//!` module docs** (R-18, R-19, R-20): Document `capital.rs`, `governance.rs`, `journal.rs`, `control_plane/`. Update `CLAUDE.md` with coordinator sub-module architecture and foreground vs managed runtime distinction. `[medium]`
+
+20. **Migrate to `sqlx::query!` macros** (R-39): Start with journal and governance queries. `[medium]`
+
+21. **Add `cargo deny` and staging environment** (R-21, R-45): Add `deny.toml` with license and advisory checks. Designate tango-2-1 as staging. `[medium]`
+
+22. **Fix capital allocator exposure tracking** (R-12): Track pending reservations separately from realized positions; do not reset to zero after fill. `[large]`
+
+---
 
 ## Review Metadata
 
-- Review date: 2026-03-08
-- Phases completed: 1A (Quality), 1B (Architecture), 2A (Security), 2B (Performance), 3A (Testing), 3B (Documentation), 4A (Best Practices), 4B (CI/CD)
-- Flags applied: framework=Rust/Tokio/Axum
-- Total findings: 153
-- Reviewers: claude-opus-4.6 (automated multi-agent review)
-
-
+- **Review date:** 2026-03-11
+- **Branch:** `hotfix/staggered-arb-release-20260306` vs `main`
+- **Phases completed:** Code Quality, Architecture, Security, Performance, Testing, Documentation, Best Practices, CI/CD
+- **Flags:** Performance Critical
+- **Raw findings:** 123 (across 4 phases, with cross-phase confirmation)
+- **Unique findings:** 59 (after deduplication)
+- **Output files:**
+  - `.full-review/00-scope.md`
+  - `.full-review/01-quality-architecture.md`
+  - `.full-review/02-security-performance.md`
+  - `.full-review/03-testing-documentation.md`
+  - `.full-review/04-best-practices.md`
+  - `.full-review/05-final-report.md`

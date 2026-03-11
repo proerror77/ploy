@@ -1,115 +1,86 @@
 # Phase 1: Code Quality & Architecture Review
 
-**Date**: 2026-03-08
-**Scope**: Full Ploy trading system (~165K lines Rust, 260+ files, plus TS sidecar and React frontend)
+**Branch:** `hotfix/staggered-arb-release-20260306` vs `main`
+**Date:** 2026-03-11
 
 ---
 
-## Code Quality Findings
+## Code Quality Findings (from phase1a-quality.md)
 
-### Critical (2)
+### Critical (3)
 
-1. **Silently discarded position-tracking errors** (`coordinator.rs:2734,4229`)
-   - `let _ = self.positions.open_position(...)` discards Result, causing invisible exposure drift
-   - Fix: Log error and optionally trigger position reconciliation
-
-2. **`bootstrap.rs` god module** (7,761 lines)
-   - Mixes DDL, env parsing, trade alerts, market resolution, account upsert, and bootstrap orchestration
-   - Fix: Split into bootstrap.rs (~500 lines), schema.rs, env_helpers.rs, trade_alerts.rs
+| ID | File | Issue |
+|----|------|-------|
+| C1 | `coordinator/position/transitions.rs:52` | Nested write-lock acquisition in `close_position` — lock-ordering hazard, potential deadlock |
+| C2 | `coordinator/risk/transitions.rs:107` | `record_loss` doesn't reset `consecutive_failures` or increment daily counters — risk state corruption |
+| C3 | `coordinator/coordinator/recovery.rs:77` | Unbounded execution log replay on restart — replays ALL historical fills, creates phantom positions |
 
 ### High (8)
 
-3. **Series ID magic numbers duplicated across 6+ files** — adding a symbol requires shotgun surgery
-4. **Env parsing helpers reimplemented in 7+ files** with inconsistent signatures
-5. **`staggered_arb_live.rs` 470-line entry method** with 15+ sequential filter gates
-6. **`coordinator.rs` at 6,508 lines** — governance and execution logic need extraction
-7. **45 `#[allow(dead_code)]` annotations** across 19 files indicate abandoned features
-8. **Inline DDL in 9 files** instead of proper SQL migrations (shadow schema)
-9. **`autonomous.rs` TODO** indicates autonomous trading bypasses RiskManager
-10. **Three competing agent abstractions** (DomainAgent, TradingAgent, Strategy) with overlapping signatures
+| ID | File | Issue |
+|----|------|-------|
+| H1 | `strategy/staggered_arb_live/entry.rs:76` | `try_entry_for_window` is 250 lines, cyclomatic complexity >20, duplicated dry-run/live paths |
+| H2 | `coordinator/coordinator/ingress.rs` | 4-step rejection pattern repeated 9 times — DRY violation in hottest path |
+| H3 | `coordinator/queue.rs:128` | `pop_lowest_priority` rebuilds entire heap O(n) on every full-queue enqueue |
+| H4 | `coordinator/strategy_runtime/actions.rs:564` | `spawn_split_arb_poll_task` spawns unbounded concurrent polling tasks per order |
+| H5 | `coordinator/risk/transitions.rs:68` | TOCTOU race on `Elevated→Normal` state transition — can silently clear circuit breaker |
+| H6 | `cli/strategy/runtime_ops/foreground.rs:66` | Silent dry-run fallback on live auth failure — misconfigured live deployment runs silently |
+| H7 | `coordinator/admission/deployments.rs:22` | `deployment_gate_required()` reads env var on every BUY intent — global lock overhead |
+| H8 | `coordinator/admission.rs:100` | `apply_kelly_sizing` silently skips when signal metadata absent — silent misconfiguration |
 
-### Medium (12)
+### Medium (7) / Low (2)
 
-11. `MomentumConfig` has 30+ fields in flat struct — needs nested config groups
-12. `fetch_orders_paginated`/`fetch_trades_paginated` near-identical pagination logic
-13. `database_url_from_env()` pattern duplicated in 3+ files
-14. `StaggeredArbAdapter` struct has 25+ fields — data clump smell
-15. `MomentumStrategyAdapter` wraps everything in `Arc<RwLock<>>` unnecessarily (trait takes `&mut self`)
-16. `on_market_update` deeply nested match arms (7 levels)
-17. TODO/FIXME comments indicate unfinished work (autonomous risk, RL order execution)
-18. `PriceCache` name collision between split_arb and adapters
-19. `PloyError::Other(anyhow::Error)` catch-all bypasses typed error hierarchy
-20. Type duplication — Position (5x), PositionStatus (3x), ArbStats (2x), RiskLevel (2x)
-21. `parse_boolish` duplicated 7 times across API and adapter files
-22. Strategy-specific config embedded in AppConfig instead of strategy-level configs
-
-### Low (5)
-
-23. Deprecated `private_key_hex()` still exists (returns empty string)
-24. `config.rs` at 1,168 lines is a flat config monolith
-25. `to_f64().unwrap_or(0.0)` pattern masks precision failures silently
-26. `OrderError`/`RiskError` lose type information when converted to `PloyError`
-27. `rand = "0.8"` — version 0.9 has been stable since early 2025
+See `.full-review/phase1a-quality.md` for full details.
 
 ---
 
-## Architecture Findings
+## Architecture Findings (from phase1b-architecture.md)
 
-### Critical (1)
+### Critical (2)
 
-1. **Bootstrap.rs god module** (7,761 lines) — composition root that has grown to contain business logic, DDL, persistence pipelines, and configuration parsing
+| ID | File | Issue |
+|----|------|-------|
+| A-C1 | `coordinator/coordinator.rs` | Coordinator struct has 12 direct fields — structural God Object despite file decomposition |
+| A-C2 | `cli/strategy/runtime_ops/foreground.rs` | Foreground execution path bypasses ALL coordinator risk controls (admission, risk gate, position tracking) |
 
-### High (3)
+### High (5)
 
-2. **Three-layer agent abstraction** — DomainAgent (push), TradingAgent (pull), Strategy (event-driven) overlap in purpose; DomainAgent and TradingAgent share identical method signatures but aren't unified
-3. **Type duplication across modules** — Position defined 5 times, PositionStatus 3 times, with alias re-exports as symptom treatment
-4. **Shadow schema via bootstrap DDL** — CREATE TABLE statements in bootstrap.rs not tracked by sqlx migrate
+| ID | File | Issue |
+|----|------|-------|
+| A-H1 | `coordinator/coordinator/ingress.rs:343` | `pending_buy_notional_excluding_domains` excludes ALL domains — result is always zero |
+| A-H2 | `coordinator/capital/market.rs` | `MarketCapitalAllocator` doesn't track realized positions — exposure resets to zero after fill |
+| A-H3 | `coordinator/bootstrap/startup_context.rs` | Bootstrap initialization order is implicit — no compile-time enforcement |
+| A-H4 | `coordinator/governance.rs` | Governance state not restored on startup — operator pauses lost on restart |
+| A-H5 | `coordinator/strategy_runtime/` | Two separate action dispatch paths with overlapping implementations |
 
-### Medium (8)
+### Medium (4) / Low (2)
 
-5. Strategy module sprawl — 40+ flat submodules, 230+ re-exports from single mod.rs
-6. Platform vs. Coordinator overlap in order execution orchestration
-7. No API versioning — breaking changes require coordinated multi-service deploys
-8. Inconsistent API error contracts — mix of ad-hoc JSON and typed responses
-9. Circuit breaker logic duplicated in RiskGate and TradingCircuitBreaker
-10. PostgresStore monolith — 1,364 lines, no compile-time SQL checks
-11. Configuration consistency — strategy-specific fields in AppConfig, TOML float parsing gotcha
-12. Strategies import concrete adapter types instead of abstractions
-
-### Low (4)
-
-13. WebSocket UI updates poll DB every 1s instead of event-driven emission
-14. `parse_boolish` duplicated 7 times
-15. No standard metrics exposition (Prometheus)
-16. Module dependency direction — bootstrap imports from nearly every module
-
-### Positive Patterns
-
-- **EngineStore trait** — Clean DI for database access
-- **Subscription Planner** — Functional delta computation for WS subscriptions
-- **Data Plane + Freshness** — Shared market data with staleness monitoring
-- **Safety gate** — Coordinator-only live trading enforcement
-- **Event sourcing + DLQ** — Production-grade crash recovery with DB-level guards
-- **Drift-safe migrations** — Schema detection before DDL
-- **Feature-gated compilation** — Heavy deps behind feature flags
-- **Governance policy** — Runtime-adjustable trading constraints with audit trail
-- **Wallet security** — zeroize, constant-time auth comparison, explicit live order opt-in
-- **Risk gate** — Multi-layer checks (agent, platform, domain, daily loss, drawdown, circuit breaker)
-- **Optimistic locking** — Version numbers prevent concurrent order submissions
+See `.full-review/phase1b-architecture.md` for full details.
 
 ---
 
 ## Critical Issues for Phase 2 Context
 
-### Security-relevant findings:
-- `autonomous.rs` bypasses RiskManager — potential for uncontrolled order execution
-- `PloyError::Other(anyhow::Error)` escape hatch could mask security-relevant errors
-- Inline DDL creates schema drift risk — tables may exist in production but not in migration-created DBs
-- `private_key_hex()` deprecated but still in public API
+The following findings should inform the security and performance review:
 
-### Performance-relevant findings:
-- `Arc<RwLock<>>` wrappers on MomentumStrategyAdapter fields add unnecessary lock contention
-- WebSocket UI polls DB every 1s instead of event-driven
-- PostgresStore uses string SQL without compile-time checks — runtime SQL errors possible
-- `bootstrap.rs` 7,761 lines — compilation unit size may impact incremental build times
-- `staggered_arb_live.rs` 470-line entry method — hot path with 15+ sequential checks
+1. **Foreground bypass (A-C2)**: Live orders can bypass all risk controls via `ploy strategy run --foreground`. Security implication: no exposure limits, no circuit breaker, no deployment gate enforcement.
+
+2. **Capital allocator gap (A-H2)**: After a fill, the capital allocator shows zero exposure for that market. A strategy can immediately re-enter at full size. Performance/correctness implication: actual exposure can be 2x the configured limit.
+
+3. **Unbounded fill replay (C3)**: On restart, all historical fills are replayed into `PositionAggregator`. On a long-running system this is an unbounded DB query that can cause startup delays and incorrect initial state.
+
+4. **TOCTOU race on circuit breaker (H5)**: A successful order can silently clear a `Halted` circuit breaker state. Security implication: the circuit breaker can be bypassed by a race condition.
+
+5. **Governance not restored (A-H4)**: Operator-set domain pauses are lost on restart. Operational security implication: a paused domain automatically resumes after any process restart.
+
+6. **Unbounded poll task spawning (H4)**: WS reconnects can spawn multiple concurrent polling tasks per order, sending duplicate order updates to the strategy manager. Performance implication: duplicate fills can be processed.
+
+---
+
+## Phase 1 Summary
+
+| Category | Critical | High | Medium | Low | Total |
+|----------|----------|------|--------|-----|-------|
+| Code Quality | 3 | 8 | 7 | 2 | 20 |
+| Architecture | 2 | 5 | 4 | 2 | 13 |
+| **Combined** | **5** | **13** | **11** | **4** | **33** |

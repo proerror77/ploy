@@ -1,104 +1,107 @@
 # Phase 2: Security & Performance Review
 
-**Date**: 2026-03-08
-**Scope**: Full Ploy trading system
+**Branch:** `hotfix/staggered-arb-release-20260306` vs `main`
+**Date:** 2026-03-11
 
 ---
 
-## Security Findings
-
-### High (2)
-
-1. **H-01: `ApiCredentials` derives `Debug` — secrets printed in logs/panics** (`signing/hmac.rs:12`)
-   - CVSS 7.5, CWE-532. API key, HMAC secret, passphrase dumped via `{:?}` formatting
-   - Fix: Custom Debug impl with `[REDACTED]` for secret fields
-
-2. **H-02: HMAC debug log leaks full signing message** (`signing/hmac.rs:106-113`)
-   - CVSS 7.1, CWE-532. Full signing payload (timestamp+method+path+body) logged at debug level
-   - Fix: Remove `message` field from debug log
-
-### Medium (7)
-
-3. **M-01: `Wallet` derives `Clone` — private key signer copyable** (`signing/wallet.rs:14`)
-4. **M-02: No API rate limiting** — brute-force/DoS on all endpoints including login
-5. **M-03: Missing security headers** — no X-Content-Type-Options, X-Frame-Options, HSTS
-6. **M-04: WebSocket auth token in query parameter** — logged, cached, visible in history
-7. **M-05: `DatabaseConfig` derives `Debug`** — connection URL with credentials exposed
-8. **M-06: Emergency stop `is_stopped` uses `Ordering::Relaxed`** — may miss stop signal on ARM
-9. **M-07: Sidecar risk guard uses substring match** — bypassable with new tool names
-
-### Low (6)
-
-10. L-01: KalshiConfig stores API key without zeroization
-11. L-02: GrokConfig stores API key as plain String with Debug derive
-12. L-03: Prompt injection mitigation incomplete (500-char truncation only)
-13. L-04: CORS allows localhost:5173 by default in production
-14. L-05: stop-trading.yml writes SSH key to disk (cleanup on failure not guaranteed)
-15. L-06: Deprecated `private_key_hex()` still in public API
-
-### Positive
-
-- All SQL parameterized — zero injection risk
-- Constant-time token comparison with SHA-256 fingerprinting
-- HttpOnly/SameSite=Strict/Secure cookies
-- Autonomous agent direct order submission correctly disabled
-- Dry-run defaults to true
-- Dependencies are current versions with no known CVEs
-
----
-
-## Performance Findings
+## Security Findings (from phase2a-security.md)
 
 ### Critical (1)
 
-1. **P-01: Double `record_success` call inflates PnL tracking** (`coordinator.rs:4268`)
-   - Line 4268 unconditionally calls `record_success` after the if/else block that already handles both branches
-   - Profitable trades: PnL inflated 2x. Losing trades: negative PnL passed to record_success
-   - Fix: Remove line 4268 entirely
+| ID | File | Issue |
+|----|------|-------|
+| F-01 | `foreground_submit.rs`, `foreground.rs` | Foreground fallback executes live orders without any risk controls when `deployment_id` absent in metadata — direct CLOB call bypasses admission, risk gate, governance, capital allocator, circuit breaker, journal |
 
 ### High (3)
 
-2. **P-02: Unnecessary `Arc<RwLock<>>` on MomentumStrategyAdapter** (`adapters.rs:52-86`)
-   - Strategy trait takes `&mut self` — locks add pure overhead (~2-5μs per update)
-3. **P-03: Unbounded HashMap growth in strategy state** (multiple files)
-   - `archived_live_orders`, `entry_reject_counts`, `cooldowns` never pruned — OOM risk on 3.4GB server
-4. **P-04: WebSocket UI polls database every 1 second** (`api/state.rs`)
-   - 1s latency floor, constant DB load even when idle
+| ID | File | Issue |
+|----|------|-------|
+| F-02 | `risk/transitions.rs:68–71` | TOCTOU race on `Elevated→Normal` circuit breaker transition — concurrent `trigger_circuit_breaker` can be silently overwritten (CWE-362) |
+| F-03 | `coordinator/recovery.rs:55–72` | Governance state not restored on restart unless `governance_store_pool` is explicitly wired — operator pauses lost on OOM kill/deploy (CWE-665) |
+| F-04 | `coordinator/recovery.rs:77–231`, `risk/exposure.rs:44–77` | Capital allocator exposure gap after fill — risk gate shows $0 exposure during recovery replay, enabling 2x exposure limit breach (CWE-841) |
 
-### Medium (5)
+### Medium (4)
 
-5. P-05: Sequential RwLock acquisition in `handle_order_intent` (~10-20μs overhead)
-6. P-06: PostgresStore uses string SQL without compile-time checks
-7. P-07: No connection pool size tuning documentation
-8. P-08: 470-line entry evaluation on hot path (staggered_arb_live.rs)
-9. P-09: Circuit breaker uses RwLock for timestamp (could be AtomicI64)
+| ID | File | Issue |
+|----|------|-------|
+| F-05 | `admission/deployments.rs:34–62` | Deployment JSON loaded from `PLOY_DEPLOYMENTS_FILE` env var with no path validation — attacker-controlled file can enable disabled deployments (CWE-73) |
+| F-06 | `api/auth.rs:182–213` | Sidecar token accepted via `Authorization: Bearer` header — prevents WAF-level token-role separation; admin cookie accepts raw token (CWE-287) |
+| F-07 | `coordinator/recovery.rs:77–94` | Fill replay loop runs synchronously at startup with no pagination — thousands of fills today block ingress channel for seconds/minutes (CWE-400) |
+| F-08 | `sidecar/grok_decision.rs:59–96` | Grok prompt embeds unvalidated free-text fields from sidecar — prompt injection risk; `autonomous.rs` sanitization not applied here (CWE-77) |
 
-### Low (4)
+### Low (3)
 
-10. P-10: `to_f64().unwrap_or(0.0)` pattern on hot path (silent precision loss)
-11. P-11: bootstrap.rs 7,761 lines impacts incremental compilation
-12. P-12: No Prometheus metrics exposition
-13. P-13: DashMap in QuoteCache never shrinks
+| ID | File | Issue |
+|----|------|-------|
+| F-09 | `admission/deployments.rs:81` | Deployment gate bypass for sell intents is architecturally correct but undocumented |
+| F-10 | `api/auth.rs:87–91` | Admin token fingerprint uses unsalted SHA-256 — reversible via rainbow table (CWE-916) |
+| F-11 | `ingress.rs`, `admission/deployments.rs:22–32` | `PLOY_DEPLOYMENT_GATE_REQUIRED=false` has no audit trail; checked at runtime on every request |
 
-### Positive
+**Security Positives:** Parameterized SQL throughout (no injection risk), constant-time `ct_eq()` token comparison, secure cookie defaults (`HttpOnly`, `SameSite=Strict`), sidecar auth required by default, reduce-only sell guard, governance persistence with full audit trail, circuit breaker idempotency.
 
-- DashMap for lock-free concurrent reads on price data
-- Tokio select! loop well-structured in coordinator
-- Broadcast channels for zero-copy market data fan-out
-- Feature-gated heavy dependencies reduce production binary size
+---
+
+## Performance Findings (from phase2b-performance.md)
+
+### Critical (2)
+
+| ID | File | Issue |
+|----|------|-------|
+| P-C1 | `coordinator/coordinator.rs:237–274` | Serialized coordinator loop — `handle_order_intent` awaited inline, blocking all other intents. At 50ms DB latency, saturates at ~20 intents/sec |
+| P-C2 | `coordinator/coordinator/ingress.rs` (18 call sites) | 14 sequential `persist_risk_decision` DB writes on the hot path for a single passing intent — observability writes blocking order processing |
+
+### High (6)
+
+| ID | File | Issue |
+|----|------|-------|
+| P-H1 | `coordinator/queue.rs:128–148` | `pop_lowest_priority` rebuilds entire heap O(n log n) on every full-queue eviction |
+| P-H2 | `coordinator/queue.rs:205–229` | `cleanup_expired_intents` rebuilds heap O(n log n) on every drain tick (1s interval), even with zero expired items |
+| P-H3 | `coordinator/strategy_runtime/actions.rs:337–355` | `spawn_split_arb_poll_task` spawns unbounded concurrent tasks per order — no dedup, no cancellation on WS reconnect |
+| P-H4 | `coordinator/admission/deployments.rs:22–32` | `deployment_gate_required()` reads env var (global lock) on every BUY intent |
+| P-H5 | `coordinator/coordinator/execution.rs:180–232` | `get_agent_positions` does full O(n) scan across all agents on every sell fill |
+| P-H6 | `coordinator/coordinator/execution.rs:136`, `risk/exposure.rs:44–77` | `refresh_risk_exposure_for_agent` acquires 3 separate write locks + full position scan per fill |
+
+### Medium (7)
+
+| ID | File | Issue |
+|----|------|-------|
+| P-M1 | `coordinator/coordinator/ingress.rs:336–352` | `current_account_notional` acquires 6 locks + O(n) queue scan per BUY intent; result always zero due to A-H1 bug |
+| P-M2 | `coordinator/coordinator/ingress.rs:72,107,121` | 4 separate governance lock acquisitions per intent — needs `governance_snapshot()` |
+| P-M3 | `coordinator/risk/checks.rs:13–102` | `check_order` acquires 7 sequential read locks — needs `risk_snapshot()` |
+| P-M4 | `strategy/staggered_arb_live/entry.rs:86` | `backtest_config.clone()` on every entry check — should be a reference |
+| P-M5 | `strategy/staggered_arb_live/runtime_flow.rs:173–179` | Full `HashSet<String>` clone of all active window keys on every tick |
+| P-M6 | `coordinator/journal.rs:66–175` | 4 sequential DB writes per fill — should be `tokio::join!` |
+| P-M7 | `coordinator/capital/market/accounting.rs:294–321` | `market_cap_for` builds `HashSet` on every `reserve_buy` call |
+
+### Low (5)
+
+| ID | File | Issue |
+|----|------|-------|
+| P-L1 | `coordinator/position.rs:148–155` | Three separate `Arc<RwLock<_>>` fields where one combined struct would suffice |
+| P-L2 | `coordinator/position.rs:154` | `position_counter` uses `Arc<RwLock<u64>>` instead of `AtomicU64` |
+| P-L3 | `coordinator/coordinator.rs:91` | `stale_heartbeat_warn_at` uses `Arc<RwLock<HashMap>>` — `DashMap` would eliminate write lock |
+| P-L4 | `coordinator/coordinator.rs:93` | `order_update_sinks` uses blocking `std::sync::RwLock` — should be `tokio::sync::RwLock` |
+| P-L5 | `coordinator/coordinator.rs:69,119` | `authorized_agents` uses blocking `std::sync::RwLock` |
+
+**Critical Path Summary:** A passing BUY intent requires ~17 sequential lock acquisitions and 2 DB writes before reaching the queue, all blocking the single coordinator `tokio::select!` loop. Estimated latency: 5–15ms under normal load, 50–200ms under DB pressure.
 
 ---
 
 ## Critical Issues for Phase 3 Context
 
-### Testing implications:
-- P-01 (double record_success) needs a regression test for PnL accounting
-- M-06 (emergency stop ordering) needs a concurrency test on ARM
-- H-01/H-02 (credential logging) need tests asserting Debug output doesn't contain secrets
-- P-03 (unbounded growth) needs long-running soak tests
+1. **F-01 / A-C2 (foreground bypass)**: Live orders bypass all risk controls — needs tests documenting the bypass and verifying the fix.
+2. **F-03 (governance not restored)**: Governance state lost on restart — needs integration test for restart round-trip.
+3. **F-04 (capital allocator gap)**: Exposure underestimated during recovery — needs test for recovery-time intent submission.
+4. **P-C2 (14 sequential DB writes)**: Journal writes block order processing — highest-impact performance fix before next live deployment.
+5. **P-H3 (unbounded poll tasks)**: WS reconnects spawn duplicate polling tasks — affects staggered arb live correctness.
 
-### Documentation implications:
-- Security headers and rate limiting configuration should be documented
-- Connection pool tuning guidance needed
-- Emergency stop behavior and memory ordering guarantees should be documented
-- API versioning strategy needs an ADR
+---
+
+## Phase 2 Summary
+
+| Category | Critical | High | Medium | Low | Total |
+|----------|----------|------|--------|-----|-------|
+| Security | 1 | 3 | 4 | 3 | 11 |
+| Performance | 2 | 6 | 7 | 5 | 20 |
+| **Combined** | **3** | **9** | **11** | **8** | **31** |

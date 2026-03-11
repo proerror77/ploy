@@ -1,81 +1,89 @@
 # Phase 3: Testing & Documentation Review
 
-**Date**: 2026-03-08
-**Scope**: Full Ploy trading system
+**Branch:** `hotfix/staggered-arb-release-20260306` vs `main`
+**Date:** 2026-03-11
 
 ---
 
-## Test Coverage Findings
+## Test Coverage Findings (from phase3a-testing.md)
 
-### Critical (3)
+**Test inventory:** 80+ tests across coordinator, strategy, and integration layers. Key files: `staggered_arb_live/tests.rs` (43 tests, 2034 lines), `risk.rs` (13 tests), `coordinator/tests.rs` (9 tests), `bootstrap/tests.rs` (14 tests), `execution/engine/tests.rs` (14 tests), `duplicate_guard.rs` (10 tests). Integration tests: `tests/architecture_gateway_only.rs`, `tests/legacy_live_gate.rs`, `tests/strategy_evaluations_and_deployment_gate.rs`.
 
-1. **T-01: No integration test for order execution pipeline** — The core revenue path (intent → risk check → queue → execute → PnL) has zero end-to-end tests. The P-01 double `record_success` bug would have been caught.
+### Critical (5)
 
-2. **T-02: No tests for position tracking error handling** — `let _ = self.positions.open_position(...)` silently discards errors with no test verifying behavior on failure.
-
-3. **T-03: No regression test for PnL accounting correctness** — No test asserts the invariant that risk gate daily PnL matches sum of individual trade PnLs.
+| ID | Area | Issue |
+|----|------|-------|
+| T-C1 | `risk/transitions.rs` | `record_loss` not resetting `consecutive_failures` is entirely untested — no test for loss-realizing sell between two failures |
+| T-C2 | `risk/transitions.rs:68–71` | TOCTOU race on `Elevated→Normal` transition is untested — no concurrent `record_success` + `trigger_circuit_breaker` test |
+| T-C3 | `position/transitions.rs:52–72` | Lock-ordering deadlock in `close_position` is untested — no concurrent close + reduce test with timeout |
+| T-C4 | `coordinator/governance.rs` | Governance state not restored on restart is untested — no DB-backed restart round-trip test |
+| T-C5 | `foreground_submit.rs` | Foreground path risk bypass partially tested (payload construction only) — `ForegroundIntentSubmitter::submit` lifecycle and direct-executor fallback have zero tests |
 
 ### High (4)
 
-4. **T-04: PostgresStore (1,364 lines) has zero unit tests** — 50+ SQL queries validated only at runtime
-5. **T-05: Emergency stop has no concurrency test** — Only 2 single-threaded tests; M-06 (Relaxed ordering) untested on multi-thread
-6. **T-06: No tests assert Debug output doesn't contain secrets** — H-01/H-02 fixes need regression tests
-7. **T-07: Staggered arb entry evaluation (470 lines) has no targeted tests** — 43 tests in file but none for the 15-gate entry logic
+| ID | Area | Issue |
+|----|------|-------|
+| T-H1 | `staggered_arb_live` | No integration test for staggered arb intent flowing through coordinator risk gate |
+| T-H2 | `staggered_arb_live` | No test for leg2 timeout / force-close path in live (non-dry-run) mode |
+| T-H3 | `coordinator/bootstrap.rs` | `start_platform` bootstrap wiring is untested — only config rendering is tested |
+| T-H4 | `coordinator/journal/restore.rs` | No end-to-end cold-start restore integration test (fill replay → position aggregator → risk counters) |
 
 ### Medium (5)
 
-8. T-08: No soak/long-running tests for memory growth (P-03)
-9. T-09: Integration tests use `unsafe` env manipulation — unsound in multi-threaded test execution
-10. T-10: No test for WebSocket authentication flow
-11. T-11: Architecture gateway test uses fragile string scanning
-12. T-12: No property-based tests for financial calculations
+| ID | Area | Issue |
+|----|------|-------|
+| T-M1 | `coordinator/coordinator/ingress.rs:339–351` | `pending_buy_notional_excluding_domains` all-domains-excluded behavior undocumented — always returns zero for known domains |
+| T-M2 | `coordinator/position.rs` | No concurrent enqueue/dequeue test for `OrderQueue` under load |
+| T-M3 | `staggered_arb_live` | No test for partial fill → cancel lifecycle sequence |
+| T-M4 | `coordinator/journal/restore.rs` | No test for restore with corrupt fills (zero shares, bad domain, negative price) |
+| T-M5 | `coordinator/bootstrap/tests.rs` | No test for conflicting env var combinations in `PlatformBootstrapConfig::from_app_config` |
 
-### Low (3)
+### Low (2)
 
-13. T-13: No frontend tests
-14. T-14: Backtest modules have limited assertion coverage
-15. T-15: Circuit breaker state machine transitions not fully tested
+| ID | Area | Issue |
+|----|------|-------|
+| T-L1 | `coordinator/governance.rs` | No test for `set_global_mode` clearing domain-level overrides |
+| T-L2 | `coordinator/bootstrap/tests.rs` | Deprecated env var conflict test covers only one direction |
 
-### Positive
+**Test Strengths:** `duplicate_guard.rs` (10 behavior-focused tests), `execution/engine/tests.rs` (14 tests with `RecordingStore` mock verifying optimistic-locking version sequences), `staggered_arb_live/tests.rs` (43 tests with comprehensive config/lifecycle coverage), `coordinator/tests.rs` (full buy→sell→position-reduce→pnl path).
 
-- 153 files with `#[cfg(test)]`, ~796 test functions total
-- Architecture gateway test enforces executor-only order submission
-- Legacy live gate tests verify safety gate blocks all known commands
-- CI provisions real PostgreSQL 15 for integration tests
-- Commit hygiene check rejects WIP commits on PRs
+**Test Weaknesses:** No concurrency tests anywhere in the coordinator; no integration tests wiring coordinator → risk → position → journal end-to-end; foreground path tests cover only JSON payload construction.
 
 ---
 
-## Documentation Findings
-
-### Critical (2)
-
-1. **D-01: No root-level README.md** — No entry point for understanding the system
-2. **D-02: No Architecture Decision Records (ADRs)** — Key decisions (3 agent abstractions, coordinator pattern, shadow schema) undocumented
+## Documentation Findings (from phase3b-documentation.md)
 
 ### High (3)
 
-3. **D-03: API endpoints undocumented** — 20+ endpoints with no auth requirements, schemas, or error formats documented
-4. **D-04: Inline documentation sparse** — ~1,110 doc comments across 165K lines (0.7% density); critical modules minimally documented
-5. **D-05: Configuration documentation incomplete** — 30+ config fields per strategy with no reference guide
+| ID | Area | Issue |
+|----|------|-------|
+| D-H1 | `coordinator/capital.rs`, `governance.rs`, `journal.rs` | Zero `//!` module-level docs on three non-trivial coordinator sub-modules |
+| D-H2 | `src/control_plane/` | New module has no `//!` docs at all — role in four-layer architecture not explained |
+| D-H3 | `CLAUDE.md` / `AGENTS.md` | Architecture decomposition not documented — no mention of coordinator sub-modules, canonical order path, foreground vs managed runtime distinction |
 
 ### Medium (4)
 
-6. D-06: Module CLAUDE.md files serve AI context, not human documentation
-7. D-07: Deployment documentation fragmented across 7 workflows + runbook
-8. D-08: Strategy documentation scattered across docs/, config/, and code
-9. D-09: Migration documentation missing — 22 migrations + shadow schema undocumented
+| ID | Area | Issue |
+|----|------|-------|
+| D-M1 | `staggered_arb_live/*.rs` | Six sub-modules (entry, leg2, lifecycle, order_updates, runtime_flow) have no `//!` docs despite being 19–66KB each |
+| D-M2 | `CoordinatorHandle`, `AdmissionController`, `CapitalPolicy`, `GovernancePolicy`, `ExecutionJournal` | Key public types lack `///` doc comments |
+| D-M3 | `docs/strategies/staggered_arb_state_machine.md` | State machine doc covers paper path only — `LiveOrderTrack` lifecycle, coordinator integration, and `--foreground` vs managed runtime not documented |
+| D-M4 | No `CHANGELOG.md` | Breaking changes (bootstrap decomposition, new `control_plane` module, `TradeIntent` type) not documented |
 
 ### Low (3)
 
-10. D-10: No CHANGELOG or release notes
-11. D-11: Previous review findings not tracked as GitHub Issues
-12. D-12: Sidecar documentation minimal — no README
+| ID | Area | Issue |
+|----|------|-------|
+| D-L1 | `cli/strategy/runtime_ops/foreground.rs` | No `//!` block warning that foreground bypasses coordinator risk gate — safety-critical omission |
+| D-L2 | `MEMORY.md` | Auto-memory architecture section describes pre-decomposition coordinator structure |
+| D-L3 | `docs/plans/2026-03-06-layered-live-runtime-design.md` | Primary architecture rationale document is in Traditional Chinese only |
 
-### Positive
+---
 
-- Well-structured CONTRIBUTING.md with build, git, CI, and code style guidance
-- 9 module-level CLAUDE.md files for AI-assisted development
-- Design documents in docs/plans/ capture architectural proposals
-- Comprehensive Chinese-language frontend README
-- Previous review documents provide detailed analysis baseline
+## Phase 3 Summary
+
+| Category | Critical | High | Medium | Low | Total |
+|----------|----------|------|--------|-----|-------|
+| Testing | 5 | 4 | 5 | 2 | 16 |
+| Documentation | 0 | 3 | 4 | 3 | 10 |
+| **Combined** | **5** | **7** | **9** | **5** | **26** |
