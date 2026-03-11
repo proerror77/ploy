@@ -84,6 +84,14 @@ Explain why `pm_5m_directional` cannot produce a real post-`2026-03-08` out-of-s
 - 2026-03-11: `tango-1-1` still runs `ploy-platform.service` from `/root/ploy`, while repo deployment units default to `/opt/ploy`. Updated the watchdog to resolve either root so the safeguard matches both the legacy live host and the current deployment layout.
 - 2026-03-11: Deployed the watchdog files to `tango-1-1:/root/ploy`, installed `/etc/systemd/system/ploy-platform-watchdog.{service,timer}`, and enabled the timer. Host verification after the final unit update shows `ActiveState=active`, `SubState=waiting`, `UnitFileState=enabled` for the timer and `Result=success`, `ExecMainStatus=0` for the oneshot service.
 - 2026-03-11: A first host run exposed `bash -lc` reading root's `.profile`; the unit was tightened to `bash -c`, redeployed, and re-run cleanly without new profile noise.
+- 2026-03-11: Added a PM5 replay coverage gate in [backtest_ops.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/cli/strategy/backtest_ops.rs) and [diagnostics.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/cli/strategy/backtest_ops/diagnostics.rs). `pm_5m_directional` now refuses requested windows when spot/L2/PM quote/PM LOB/event feeds do not share a contiguous 5-minute bucket run, and reports the longest usable range instead of silently backtesting through multi-day capture gaps.
+- 2026-03-11: Local validation for the PM5 coverage gate passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-coverage-gate-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/pm5-coverage-gate-check rtk cargo test longest_contiguous_bucket_run_prefers_longest_segment --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-coverage-gate-check rtk cargo test coverage_snapshot_intersects_all_critical_feeds --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-coverage-gate-check rtk cargo test bucket_floor_5m_rounds_down --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-coverage-gate-check rtk cargo test pm_5m_directional_backtest --lib -- --nocapture`
+- 2026-03-11: Following the new shorter-window rule, the host replay was re-run on a contiguous one-day slice instead of the broken multi-day window: `2026-03-07T00:00:00Z` to `2026-03-08T00:00:00Z` with `vol_floor=0.0010`, producing `87` trades, `70.1%` win rate, `+68.98` net PnL, `30.24` Sharpe, `1.40` profit factor, and `0.37%` max drawdown.
 - 2026-03-11: Repo owner map:
   - `binance_price_ticks` / `clob_quote_ticks` / `clob_orderbook_snapshots`: live `PersistencePipeline` from [market_data_runtime.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/coordinator/bootstrap/crypto_runtime_support/market_data_runtime.rs)
   - `binance_lob_ticks`: live `PersistencePipeline` plus optional `SyncCollector`; no historical backfill command exists

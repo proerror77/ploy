@@ -4,7 +4,9 @@ use super::*;
 mod diagnostics;
 mod reporting;
 
-use diagnostics::{print_backtest_db_diagnostics, verify_backtest_trades_gamma};
+use diagnostics::{
+    ensure_pm5_replay_coverage, print_backtest_db_diagnostics, verify_backtest_trades_gamma,
+};
 
 pub(super) use reporting::{run_backtest_diff, run_backtest_list, run_live_backtest_compare};
 
@@ -151,6 +153,9 @@ pub(super) async fn run_backtest(
     if diagnose_db {
         print_backtest_db_diagnostics(store.pool(), &symbol_list, from_dt, to_dt).await?;
         return Ok(());
+    }
+    if canonical_name == "pm_5m_directional" {
+        ensure_pm5_replay_coverage(store.pool(), &symbol_list, from_dt, to_dt).await?;
     }
     info!("Loading historical data from database");
     let mut feed =

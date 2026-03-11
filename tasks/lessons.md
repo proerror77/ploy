@@ -221,3 +221,8 @@
 
 - Pattern: Parallel agent work can re-dirty the integration worktree with unrelated experiments, which blurs commit boundaries and slows structural refactors.
 - Rule: After every parallel batch, compare the worktree against the current ownership plan and evict unrelated agent edits before validation or staging. Do not let maintenance/perf side experiments bleed into the current atomic refactor slice.
+
+## 2026-03-11
+
+- Pattern: PM5 backtests can look “valid” on long windows even when host market-data capture was down for a day or more; sparse tail data at the end of the range hides the outage unless coverage is checked explicitly.
+- Rule: Before trusting any `pm_5m_directional` replay over multi-hour or multi-day windows, first verify contiguous common coverage across spot, Binance L2, PM quotes, PM LOB, and event windows. If coverage is broken, reject the range and rerun on a shorter contiguous window instead of averaging over the outage.
