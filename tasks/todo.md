@@ -1,3 +1,30 @@
+# Strategy OrderRequest Surface Quarantine (2026-03-11)
+
+## Goal
+Stop exposing `order_request_from_intent` through the public `strategy` facade so `OrderRequest` is no longer presented as part of the canonical strategy API surface.
+
+## Tasks
+
+- [x] Remove `order_request_from_intent` from the strategy runtime facade and `src/strategy/mod.rs` re-exports.
+- [x] Rewire existing compatibility callers to import `runtime_order::order_request_from_intent` explicitly.
+- [x] Keep the compatibility bridge itself in `runtime_order.rs` for now.
+- [x] Re-run compile plus focused runtime-order and foreground-submit regressions after the surface cut.
+
+## Review
+
+- [x] Confirm public facade exports no longer include `order_request_from_intent`.
+- [x] Confirm coordinator runtime, foreground submit, and strategy compatibility consumers still compile through explicit module paths.
+
+## Progress notes
+
+- 2026-03-11: Removed `order_request_from_intent` from [runtime_facade.rs](/Users/proerror/Documents/ploy/src/strategy/runtime_facade.rs) and [mod.rs](/Users/proerror/Documents/ploy/src/strategy/mod.rs).
+- 2026-03-11: Rewired [foreground_submit.rs](/Users/proerror/Documents/ploy/src/cli/strategy/runtime_ops/foreground_submit.rs), [order_commands.rs](/Users/proerror/Documents/ploy/src/coordinator/strategy_runtime/actions/order_commands.rs), [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/event_edge/strategy.rs), [strategy.rs](/Users/proerror/Documents/ploy/src/strategy/nba_comeback/strategy.rs), and [tests.rs](/Users/proerror/Documents/ploy/src/strategy/staggered_arb_live/tests.rs) to import the bridge from `crate::strategy::runtime_order`.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-strategy-surface-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-strategy-surface-cut-runtime rtk cargo test order_request_from_intent_preserves_action_id --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-strategy-surface-cut-fg rtk cargo test build_coordinator_payload_requires_deployment_id --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-strategy-surface-cut-fg2 rtk cargo test build_coordinator_payload_preserves_strategy_metadata --lib -- --exact --nocapture`
+
 # RL Public Surface Quarantine (2026-03-11)
 
 ## Goal

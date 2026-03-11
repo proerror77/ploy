@@ -37,8 +37,8 @@ mod sports_facade;
 pub mod traits;
 
 pub use runtime_facade::{
-    engine, engine_store, executor, fund_manager, idempotency, order_request_from_intent,
-    AlertLevel, DataFeed, DataFeedBuilder, DataFeedManager, FundManager, FundStatus,
+    engine, engine_store, executor, fund_manager, idempotency, AlertLevel, DataFeed,
+    DataFeedBuilder, DataFeedManager, FundManager, FundStatus,
     IdempotencyManager, IdempotencyResult, MarketUpdate, MomentumStrategyAdapter, OrderExecutor,
     OrderUpdate, PositionInfo, PositionSizeResult, RiskLevel, SplitArbStrategyAdapter,
     StaggeredArbAdapter, Strategy, StrategyAction, StrategyConfig, StrategyEngine, StrategyEvent,

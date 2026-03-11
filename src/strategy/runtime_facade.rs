@@ -7,7 +7,6 @@ pub use super::execution::fund_manager::{self, FundManager, FundStatus, Position
 pub use super::execution::idempotency::{self, IdempotencyManager, IdempotencyResult};
 pub use super::feeds::{DataFeedBuilder, DataFeedManager};
 pub use super::manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus};
-pub use super::runtime_order::order_request_from_intent;
 pub use super::staggered_arb_live::StaggeredArbAdapter;
 pub use super::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
