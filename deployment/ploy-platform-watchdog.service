@@ -11,7 +11,7 @@ ExecStart=/bin/bash -lc 'for root in /root/ploy /opt/ploy; do if [[ -x "$root/sc
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=true
+ProtectHome=read-only
 ReadWritePaths=/root/ploy/run /opt/ploy/run
 
 StandardOutput=journal
