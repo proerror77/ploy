@@ -53,6 +53,41 @@ Move RL CLI config/default ownership and focused regressions out of `src/rl/cli_
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-config-split rtk cargo check --lib --features rl --message-format=short`
 - 2026-03-11: The RL split no longer introduces its own compile errors, but branch-wide compile is still blocked by existing `nba_comeback` errors in [strategy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy.rs) and [state_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy/state_flow.rs).
 
+# Runtime Schema Surface Split (2026-03-11)
+
+## Goal
+Break `src/persistence/runtime_schema.rs` into domain-focused submodules so market-data schema, control-plane tables, analytics tables, and repair DDL stop living in one 1000+ line owner.
+
+## File ownership
+
+- `src/persistence/runtime_schema.rs`
+  - owner: thin runtime-schema façade
+- `src/persistence/runtime_schema/market_data.rs`
+  - owner: quote/binance/orderbook/metadata tables
+- `src/persistence/runtime_schema/control_tables.rs`
+  - owner: accounts, governance, execution, risk runtime tables
+- `src/persistence/runtime_schema/analytics.rs`
+  - owner: settlements and observability/evidence tables
+- `src/persistence/runtime_schema/repairs.rs`
+  - owner: startup schema repair DDL
+
+## Tasks
+
+- [x] Extract market-data schema builders into a dedicated submodule.
+- [x] Extract account/governance/runtime table builders into a dedicated submodule.
+- [x] Extract observability/settlement schema builders into a dedicated submodule.
+- [x] Extract repair DDL into a dedicated submodule and leave a thin façade behind.
+- [x] Re-run compile plus focused persistence regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [market_data.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/market_data.rs), [control_tables.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/control_tables.rs), [analytics.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/analytics.rs), and [repairs.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema/repairs.rs).
+- 2026-03-11: Reduced [runtime_schema.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/runtime_schema.rs) to a thin re-export façade so existing callers did not move.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-split rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-tests rtk cargo test ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-tests2 rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
+
 # Domain OrderRequest Bridge Cut (2026-03-11)
 
 ## Goal
