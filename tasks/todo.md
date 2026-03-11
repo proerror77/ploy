@@ -82,6 +82,8 @@ Explain why `pm_5m_directional` cannot produce a real post-`2026-03-08` out-of-s
 - 2026-03-11: Wired the watchdog through both `scripts/install-service.sh` and `scripts/aws_ec2_deploy.sh`. `install-service.sh` now uses `systemctl enable --now ploy-platform-watchdog.timer`, so a fresh install does not wait for the next reboot before the safeguard becomes active.
 - 2026-03-11: Shell regression coverage passed via `bash scripts/tests/test_ploy_platform_watchdog.sh`, covering inactive, locked, maintenance-active, and already-active unit states.
 - 2026-03-11: `tango-1-1` still runs `ploy-platform.service` from `/root/ploy`, while repo deployment units default to `/opt/ploy`. Updated the watchdog to resolve either root so the safeguard matches both the legacy live host and the current deployment layout.
+- 2026-03-11: Deployed the watchdog files to `tango-1-1:/root/ploy`, installed `/etc/systemd/system/ploy-platform-watchdog.{service,timer}`, and enabled the timer. Host verification after the final unit update shows `ActiveState=active`, `SubState=waiting`, `UnitFileState=enabled` for the timer and `Result=success`, `ExecMainStatus=0` for the oneshot service.
+- 2026-03-11: A first host run exposed `bash -lc` reading root's `.profile`; the unit was tightened to `bash -c`, redeployed, and re-run cleanly without new profile noise.
 - 2026-03-11: Repo owner map:
   - `binance_price_ticks` / `clob_quote_ticks` / `clob_orderbook_snapshots`: live `PersistencePipeline` from [market_data_runtime.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/coordinator/bootstrap/crypto_runtime_support/market_data_runtime.rs)
   - `binance_lob_ticks`: live `PersistencePipeline` plus optional `SyncCollector`; no historical backfill command exists
