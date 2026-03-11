@@ -1,3 +1,30 @@
+# Momentum Best Edge Split (2026-03-11)
+
+## Goal
+Move the best-edge window selection and deferred entry execution out of `src/strategy/momentum/trade_flow.rs` so the trade-flow root keeps direct entry/exit ownership while the queued-window path lives in a dedicated module.
+
+## File ownership
+
+- `src/strategy/momentum/trade_flow.rs`
+  - owner: immediate entry/exit flow, cooldown checks, and shared direct-trade path
+- `src/strategy/momentum/best_edge.rs`
+  - owner: `PendingSignal`, `WindowRiskTracker`, queued-signal selection, and deferred best-edge execution
+
+## Tasks
+
+- [x] Extract `PendingSignal` / `WindowRiskTracker` and their focused tests into a sibling module.
+- [x] Extract queued-signal selection and deferred execution helpers into the same module.
+- [x] Re-run compile plus focused momentum best-edge regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [best_edge.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/momentum/best_edge.rs) for window tracking, pending-signal queueing, delayed best-edge selection, deferred execution, and focused regression tests.
+- 2026-03-11: Reduced [trade_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/momentum/trade_flow.rs) so `maybe_enter(...)` delegates best-edge queueing and the root file no longer owns the queued execution path.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-momentum-best-edge-1 rtk cargo test test_window_id_rounds_down_to_15m_boundary --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-momentum-best-edge-2 rtk cargo test test_window_tracker_prefers_highest_edge_signal --lib -- --exact --nocapture`
+
 # Sidecar Ingress Deployment Gate Split (2026-03-11)
 
 ## Goal
