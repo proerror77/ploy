@@ -1,3 +1,25 @@
+# Sidecar Ingress Deployment Gate Split (2026-03-11)
+
+## Goal
+Move deployment/account gate ownership out of `src/api/handlers/sidecar/ingress.rs` so the root ingress helper file keeps parsing, presentation, and coordinator-error helpers.
+
+## Tasks
+
+- [x] Extract deployment/account scope helpers into `src/api/handlers/sidecar/ingress/deployment_gate.rs`.
+- [x] Keep parsing/presentation helpers in `src/api/handlers/sidecar/ingress.rs`.
+- [ ] Re-run focused sidecar ingress validations after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [deployment_gate.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/api/handlers/sidecar/ingress/deployment_gate.rs) for account-scope, deployment gate, binding validation, and metadata enrichment.
+- 2026-03-11: Reduced [ingress.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/api/handlers/sidecar/ingress.rs) to parsing, priority policy, sidecar activity broadcast, and coordinator error mapping.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+- 2026-03-11: Focused sidecar test filters were attempted but the RTK wrapper returned `0 passed, 736 filtered out` for:
+  - `rtk cargo test non_live_deployment_ingress_is_blocked_by_default --lib -- --exact --nocapture`
+  - `rtk cargo test api::handlers::sidecar::tests::non_live_deployment_ingress_is_blocked_by_default --lib -- --exact --nocapture`
+- 2026-03-11: The extraction is committed with compile validation cleared, but a sidecar-specific assertion still needs a working RTK test selector.
+
 # RL CLI Agent State Split (2026-03-11)
 
 ## Goal
@@ -136,6 +158,33 @@ Move trade-alert schema/state/emission ownership out of `src/persistence/market_
   - `CARGO_TARGET_DIR=/tmp/ploy-market-alerts-check4 rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-market-alerts-test4 rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
 - 2026-03-11: Both validation commands are currently blocked by pre-existing compile failures in [subscriptions.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/adapters/polymarket_ws/subscriptions.rs); no errors referenced the new `market_persistence` alert split files.
+
+# Market Persistence Runtime Wave 1 (2026-03-11)
+
+## Goal
+Move the event-matcher polling/runtime owner out of `src/persistence/market_persistence/trades.rs` so the root trade collector keeps only tick schema and per-market ingestion.
+
+## File ownership
+
+- `src/persistence/market_persistence/trades.rs`
+  - owner: trade tick schema + per-market collection/persistence
+- `src/persistence/market_persistence/runtime.rs`
+  - owner: event-matcher trade persistence daemon/runtime config + tracked-market polling
+
+## Tasks
+
+- [x] Extract the event-matcher trade persistence spawn/runtime into a sibling module.
+- [x] Keep `trades.rs` focused on `ensure_clob_trade_ticks_table(...)` and `collect_trades_for_market(...)`.
+- [x] Re-run compile plus focused persistence regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [runtime.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/market_persistence/runtime.rs) for env-driven runtime config, alert/bootstrap state, tracked-market refresh, and concurrent trade collection dispatch.
+- 2026-03-11: Reduced [trades.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/market_persistence/trades.rs) to schema + per-market ingestion only.
+- 2026-03-11: Rewired [market_persistence.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/market_persistence.rs) so `spawn_polymarket_trade_persistence(...)` now exports from the runtime owner.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
 
 # Domain OrderRequest Bridge Cut (2026-03-11)
 
@@ -4762,3 +4811,23 @@ Finish the managed-strategy live-path migration by making `StrategyAction::Submi
   - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test order_intent_from_strategy_intent_preserves_runtime_metadata --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
+
+# Polymarket WS Surface Split (2026-03-11)
+
+## Goal
+Move the remaining adapter surface/bootstrap owner out of `src/adapters/polymarket_ws.rs` so the root module becomes a thin façade plus test-only support, while runtime/message/subscription ownership stays in sibling modules.
+
+## Tasks
+
+- [x] Extract `PolymarketWebSocket` / `QuoteUpdate` plus constructor and health/freshness wiring into `src/adapters/polymarket_ws/surface.rs`.
+- [x] Keep the test-only `ingest_test_message` helper out of the live-path surface cut.
+- [x] Re-run focused compile and polymarket WS regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [surface.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/adapters/polymarket_ws/surface.rs) and reduced [polymarket_ws.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/adapters/polymarket_ws.rs) to module wiring, re-exports, and test-only support.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test test_build_subscription_list_includes_extra_tokens --lib -- --exact --nocapture`
+  - `rtk cargo test characterization_single_book_message --lib -- --exact --nocapture`
+  - `rtk cargo test characterization_freshness_recorded_on_book_update --lib -- --exact --nocapture`
