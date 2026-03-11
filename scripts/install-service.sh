@@ -44,6 +44,12 @@ fi
 if [[ -f /opt/ploy/deployment/ploy-maintenance.timer ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-maintenance.timer /etc/systemd/system/ploy-maintenance.timer
 fi
+if [[ -f /opt/ploy/deployment/ploy-platform-watchdog.service ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-platform-watchdog.service /etc/systemd/system/ploy-platform-watchdog.service
+fi
+if [[ -f /opt/ploy/deployment/ploy-platform-watchdog.timer ]]; then
+  sudo install -m 0644 /opt/ploy/deployment/ploy-platform-watchdog.timer /etc/systemd/system/ploy-platform-watchdog.timer
+fi
 if [[ -f /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service /etc/systemd/system/ploy-strategy-pattern-memory-dryrun.service
 fi
@@ -220,6 +226,9 @@ sudo systemctl daemon-reload
 
 # Enable service to start on boot
 sudo systemctl enable ploy
+if [[ -f /etc/systemd/system/ploy-platform-watchdog.timer ]]; then
+  sudo systemctl enable --now ploy-platform-watchdog.timer
+fi
 
 echo "==> Service installed"
 echo ""
@@ -229,6 +238,7 @@ echo "  sudo systemctl stop ploy    # Stop"
 echo "  sudo systemctl status ploy  # Status"
 echo "  sudo systemctl start ploy-sports-pm       # Start sports PM workload"
 echo "  sudo systemctl start ploy-crypto-dryrun   # Start crypto dry-run workload"
+echo "  sudo systemctl status ploy-platform-watchdog.timer  # Inspect watchdog loop"
 echo "  sudo systemctl start ploy@acc1   # Start account acc1 (multi-account)"
 echo "  sudo systemctl status ploy@acc1  # Status account acc1"
 echo "  journalctl -u ploy -f       # View logs"
