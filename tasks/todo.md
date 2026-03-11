@@ -1,3 +1,26 @@
+# Platform Namespace Retirement (2026-03-11)
+
+## Goal
+Remove the now-empty `crate::platform` namespace after queue/risk/position/persistence/data-plane ownership has been moved elsewhere.
+
+## Tasks
+
+- [x] Remove `pub mod platform;` from `src/lib.rs`.
+- [x] Delete the dead `src/platform/mod.rs` shim.
+- [x] Re-run compile plus a repo-wide search to confirm there are no remaining `crate::platform` consumers.
+
+## Review
+
+- [x] Confirm `rg -n "crate::platform::|use crate::platform|ploy::platform::|platform::Domain|platform::PlatformDataPlane"` returns no live consumers before deleting the namespace.
+- [x] Confirm `src/lib.rs` already re-exports the surviving canonical owners (`domain`, `data_plane`, `coordinator`, `persistence`) directly.
+
+## Progress notes
+
+- 2026-03-11: Deleted [mod.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/platform/mod.rs) and removed `pub mod platform;` from [lib.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/lib.rs).
+- 2026-03-11: Validation passed:
+  - `rg -n "crate::platform::|use crate::platform|ploy::platform::|platform::Domain|platform::PlatformDataPlane" src tests -g '!target'`
+  - `CARGO_TARGET_DIR=/tmp/ploy-namespace-retire rtk cargo check --lib --message-format=short`
+
 # RL Compatibility Runtime Retirement (2026-03-11)
 
 ## Goal

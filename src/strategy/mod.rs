@@ -31,7 +31,7 @@ pub mod manager;
 pub mod registry;
 mod research_facade;
 mod runtime_facade;
-pub mod runtime_order;
+pub(crate) mod runtime_order;
 pub mod runtime_specs;
 mod sports_facade;
 pub mod traits;
