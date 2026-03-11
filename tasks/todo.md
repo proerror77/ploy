@@ -1,3 +1,30 @@
+# RL Public Surface Quarantine (2026-03-11)
+
+## Goal
+Stop exporting the legacy RL order runtime as part of the public `rl` and crate-root API so the compatibility execution stack is no longer presented as a canonical runtime surface.
+
+## Tasks
+
+- [x] Remove `RlOrderRuntime*` re-exports from `src/rl/mod.rs`.
+- [x] Remove `RlOrderRuntime*` crate-root re-exports from `src/lib.rs`.
+- [x] Rewire the RL CLI command to import the compatibility runtime from its concrete module path.
+- [x] Re-run RL-focused compile and runtime regressions after the public-surface cut.
+
+## Review
+
+- [x] Confirm the only remaining direct consumer is the RL CLI command.
+- [x] Confirm RL runtime behavior tests still pass after the surface quarantine.
+
+## Progress notes
+
+- 2026-03-11: Removed `RlOrderRuntime`, `RlOrderRuntimeConfig`, and `RlRuntimeStats` from [mod.rs](/Users/proerror/Documents/ploy/src/rl/mod.rs) and from the crate-root RL exports in [lib.rs](/Users/proerror/Documents/ploy/src/lib.rs).
+- 2026-03-11: Rewired [agent.rs](/Users/proerror/Documents/ploy/src/main_commands/rl/agent.rs) to import the compatibility runtime from `ploy::rl::order_platform`.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-surface-cut rtk cargo check --lib --features rl --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-surface-cut-start rtk cargo test --features rl test_rl_order_runtime_start_blocks_live_runtime --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-surface-cut-agent rtk cargo test --features rl test_rl_agent_lifecycle --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-surface-cut-pos rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+
 # Journal Ingress Writes Cut (2026-03-11)
 
 ## Goal

@@ -62,7 +62,4 @@ pub use supervisor::{
 
 // RL exports (when feature enabled)
 #[cfg(feature = "rl")]
-pub use rl::{
-    ExecutionReport, ExecutionStatus, RLConfig, RLStrategy, RlOrderRuntime, RlOrderRuntimeConfig,
-    RlRuntimeStats,
-};
+pub use rl::{ExecutionReport, ExecutionStatus, RLConfig, RLStrategy};
