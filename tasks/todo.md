@@ -186,6 +186,37 @@ Move the public lifecycle, ingress, and read-side facade out of `src/rl/cli_agen
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
 
+# RL CLI Policy Ownership Split (2026-03-11)
+
+## Goal
+Split the remaining RL CLI policy owner into focused sibling modules so policy-output decoding and intent mapping stop living in one file.
+
+## File ownership
+
+- `src/rl/cli_agent/policy.rs`
+  - owner: action selection orchestration and rule-based fallback
+- `src/rl/cli_agent/policy_output.rs`
+  - owner: ONNX/discrete policy-output decoding helpers
+- `src/rl/cli_agent/intent_mapping.rs`
+  - owner: deployment-id derivation, share sizing, and `ContinuousAction -> OrderIntent` mapping
+
+## Tasks
+
+- [x] Extract policy-output decoding helpers into a sibling module.
+- [x] Extract `ContinuousAction -> OrderIntent` mapping into a sibling module.
+- [x] Re-run RL-focused compile and behavior regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [policy_output.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/policy_output.rs) for output-shape decoding, logits/probabilities handling, and discrete-to-continuous fallback mapping.
+- 2026-03-11: Added [intent_mapping.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/intent_mapping.rs) for deployment-id derivation, intent construction, and share sizing.
+- 2026-03-11: Reduced [policy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/policy.rs) to policy selection orchestration plus rule-based fallback.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-policy-split rtk cargo check --lib --features rl --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-policy-split rtk cargo test --features rl test_rl_signal_on_good_sum --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-policy-split rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-policy-split rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
+
 # Runtime Schema Surface Split (2026-03-11)
 
 ## Goal

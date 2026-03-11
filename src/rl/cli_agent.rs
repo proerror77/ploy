@@ -24,8 +24,10 @@ use crate::{AgentStatus, Domain, OrderIntent};
 
 mod config;
 mod execution_feedback;
+mod intent_mapping;
 mod market_state;
 mod policy;
+mod policy_output;
 mod runtime;
 #[cfg(test)]
 mod tests;
