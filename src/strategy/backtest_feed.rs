@@ -18,6 +18,12 @@ use crate::strategy::backtest::{load_klines_from_csv, load_pm_prices_from_csv};
 
 mod database;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BookAskLevel {
+    pub price: Decimal,
+    pub size_shares: u64,
+}
+
 /// A single market data update event, timestamped for replay ordering.
 #[derive(Debug, Clone)]
 pub struct MarketUpdate {
@@ -66,6 +72,8 @@ pub enum UpdateType {
         ask_depth_shares: u64,
         /// Best ask level size in shares at the top of book.
         best_ask_size_shares: u64,
+        /// Best few ask levels preserved for replay-side slippage simulation.
+        ask_levels: Vec<BookAskLevel>,
         /// Best ask price
         best_ask: Option<Decimal>,
     },

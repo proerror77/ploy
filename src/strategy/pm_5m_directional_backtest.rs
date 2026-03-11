@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{OrderStatus, Quote, Side};
 use crate::strategy::backtest::{BacktestResults, BacktestTrade, SymbolStats};
-use crate::strategy::backtest_feed::{MarketFeed, MarketUpdate as HistoricalMarketUpdate, UpdateType};
+use crate::strategy::backtest_feed::{
+    BookAskLevel, MarketFeed, MarketUpdate as HistoricalMarketUpdate, UpdateType,
+};
 use crate::strategy::backtest_recorder::{
     BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, SignalType,
 };
@@ -79,6 +81,7 @@ pub struct Pm5mDirectionalBacktestEngine {
     event_states: HashMap<String, FeedEventState>,
     token_to_event: HashMap<String, String>,
     quotes: HashMap<String, QuoteState>,
+    book_asks: HashMap<String, Vec<BookAskLevel>>,
     latest_spot: HashMap<String, Decimal>,
     open_trades: HashMap<String, OpenTrade>,
     closed_trades: Vec<BacktestTrade>,
@@ -107,6 +110,7 @@ impl Pm5mDirectionalBacktestEngine {
             event_states: HashMap::new(),
             token_to_event: HashMap::new(),
             quotes: HashMap::new(),
+            book_asks: HashMap::new(),
             latest_spot: HashMap::new(),
             open_trades: HashMap::new(),
             closed_trades: Vec::new(),
@@ -255,10 +259,12 @@ impl Pm5mDirectionalBacktestEngine {
                 side,
                 ask_depth_shares,
                 best_ask_size_shares,
+                ask_levels,
                 best_ask,
             } => {
                 self.token_to_event
                     .insert(token_id.clone(), event_slug.clone());
+                self.book_asks.insert(token_id.clone(), ask_levels.clone());
                 let merged_quote = {
                     let quote = self
                         .quotes
@@ -342,6 +348,7 @@ impl Pm5mDirectionalBacktestEngine {
         }
 
         let _ = block_on(self.strategy.on_tick(ts));
+        self.record_equity_point(ts);
     }
 
     fn dispatch_market_update(&mut self, update: StrategyMarketUpdate) {
@@ -486,13 +493,8 @@ impl Pm5mDirectionalBacktestEngine {
             return;
         }
 
-        let available = quote
-            .ask_size
-            .unwrap_or(Decimal::ZERO)
-            .floor()
-            .to_u64()
-            .unwrap_or(0);
-        let filled_qty = shares.min(available);
+        let fill = self.simulate_replay_fill(&token_id, &quote, shares, limit_price);
+        let filled_qty = fill.filled_qty;
 
         if filled_qty == 0 {
             self.send_order_update(OrderUpdate {
@@ -507,7 +509,6 @@ impl Pm5mDirectionalBacktestEngine {
             return;
         }
 
-        let entry_fee = self.fill_fee(filled_qty, best_ask);
         let event_slug = metadata
             .get("event_id")
             .cloned()
@@ -521,8 +522,8 @@ impl Pm5mDirectionalBacktestEngine {
                 token_id: token_id.clone(),
                 side,
                 entry_time: timestamp,
-                entry_price: best_ask,
-                entry_fee,
+                entry_price: fill.avg_fill_price,
+                entry_fee: fill.fee_paid,
                 shares: filled_qty,
                 entry_p_hat: parse_f64(metadata.get("effective_p").or_else(|| metadata.get("p_hat"))),
                 entry_ev_net: parse_f64(metadata.get("edge")),
@@ -533,7 +534,7 @@ impl Pm5mDirectionalBacktestEngine {
                     .and_then(|state| state.price_to_beat),
             },
         );
-        self.total_volume += best_ask * Decimal::from(filled_qty);
+        self.total_volume += fill.avg_fill_price * Decimal::from(filled_qty);
 
         if filled_qty < shares {
             self.send_order_update(OrderUpdate {
@@ -541,7 +542,7 @@ impl Pm5mDirectionalBacktestEngine {
                 client_order_id: Some(client_order_id.clone()),
                 status: OrderStatus::PartiallyFilled,
                 filled_qty,
-                avg_fill_price: Some(best_ask),
+                avg_fill_price: Some(fill.avg_fill_price),
                 timestamp,
                 error: None,
             });
@@ -550,7 +551,7 @@ impl Pm5mDirectionalBacktestEngine {
                 client_order_id: Some(client_order_id),
                 status: OrderStatus::Expired,
                 filled_qty,
-                avg_fill_price: Some(best_ask),
+                avg_fill_price: Some(fill.avg_fill_price),
                 timestamp,
                 error: None,
             });
@@ -560,7 +561,7 @@ impl Pm5mDirectionalBacktestEngine {
                 client_order_id: Some(client_order_id),
                 status: OrderStatus::Filled,
                 filled_qty,
-                avg_fill_price: Some(best_ask),
+                avg_fill_price: Some(fill.avg_fill_price),
                 timestamp,
                 error: None,
             });
@@ -593,11 +594,6 @@ impl Pm5mDirectionalBacktestEngine {
             };
             let (pnl, pnl_pct) = self.realized_trade_pnl(&trade, exit_price);
             self.realized_pnl += pnl;
-            self.equity_curve.push((
-                timestamp,
-                self.config.initial_capital + self.realized_pnl,
-            ));
-
             self.recorder.record_exit(&BacktestSignal {
                 signal_type: SignalType::Exit,
                 symbol: trade.symbol.clone(),
@@ -671,11 +667,6 @@ impl Pm5mDirectionalBacktestEngine {
                 .unwrap_or(trade.entry_price);
             let (pnl, pnl_pct) = self.realized_trade_pnl(&trade, exit_price);
             self.realized_pnl += pnl;
-            self.equity_curve.push((
-                timestamp,
-                self.config.initial_capital + self.realized_pnl,
-            ));
-
             self.recorder.record_exit(&BacktestSignal {
                 signal_type: SignalType::Exit,
                 symbol: trade.symbol.clone(),
@@ -734,10 +725,63 @@ impl Pm5mDirectionalBacktestEngine {
                 implied_volatility: 0.0,
             });
         }
+        self.record_equity_point(timestamp);
     }
 
     fn fill_fee(&self, shares: u64, price: Decimal) -> Decimal {
         self.fee_model.fee_shares(Decimal::from(shares), price)
+    }
+
+    fn simulate_replay_fill(
+        &self,
+        token_id: &str,
+        quote: &QuoteState,
+        requested_shares: u64,
+        limit_price: Decimal,
+    ) -> SimulatedFill {
+        if let Some(levels) = self.book_asks.get(token_id) {
+            let mut remaining = requested_shares;
+            let mut filled_qty = 0u64;
+            let mut notional = Decimal::ZERO;
+            let mut fee_paid = Decimal::ZERO;
+
+            for level in levels {
+                if level.price > limit_price || remaining == 0 {
+                    break;
+                }
+                let take = remaining.min(level.size_shares);
+                if take == 0 {
+                    continue;
+                }
+                let take_dec = Decimal::from(take);
+                notional += level.price * take_dec;
+                fee_paid += self.fill_fee(take, level.price);
+                filled_qty += take;
+                remaining -= take;
+            }
+
+            if filled_qty > 0 {
+                return SimulatedFill {
+                    filled_qty,
+                    avg_fill_price: notional / Decimal::from(filled_qty),
+                    fee_paid,
+                };
+            }
+        }
+
+        let available = quote
+            .ask_size
+            .unwrap_or(Decimal::ZERO)
+            .floor()
+            .to_u64()
+            .unwrap_or(0);
+        let filled_qty = requested_shares.min(available);
+        let avg_fill_price = quote.best_ask.unwrap_or(limit_price);
+        SimulatedFill {
+            filled_qty,
+            avg_fill_price,
+            fee_paid: self.fill_fee(filled_qty, avg_fill_price),
+        }
     }
 
     fn realized_trade_pnl(&self, trade: &OpenTrade, exit_price: Decimal) -> (Decimal, Decimal) {
@@ -752,6 +796,35 @@ impl Pm5mDirectionalBacktestEngine {
             Decimal::ZERO
         };
         (pnl, pnl_pct)
+    }
+
+    fn unrealized_trade_pnl(&self, trade: &OpenTrade) -> Decimal {
+        let exit_price = self
+            .quotes
+            .get(&trade.token_id)
+            .and_then(|quote| quote.best_bid.or(quote.best_ask))
+            .unwrap_or(trade.entry_price);
+        self.realized_trade_pnl(trade, exit_price).0
+    }
+
+    fn current_equity(&self) -> Decimal {
+        let unrealized_open_pnl: Decimal = self
+            .open_trades
+            .values()
+            .map(|trade| self.unrealized_trade_pnl(trade))
+            .sum();
+        self.config.initial_capital + self.realized_pnl + unrealized_open_pnl
+    }
+
+    fn record_equity_point(&mut self, timestamp: DateTime<Utc>) {
+        let equity = self.current_equity();
+        match self.equity_curve.last_mut() {
+            Some((last_ts, last_equity)) if *last_ts == timestamp => {
+                *last_equity = equity;
+            }
+            Some((_, last_equity)) if *last_equity == equity => {}
+            _ => self.equity_curve.push((timestamp, equity)),
+        }
     }
 
     fn build_results(&self, start_time: DateTime<Utc>, end_time: DateTime<Utc>) -> BacktestResults {
@@ -846,7 +919,7 @@ impl Pm5mDirectionalBacktestEngine {
             total_volume: self.total_volume,
             avg_pnl_per_trade,
             max_drawdown: calculate_max_drawdown(&self.equity_curve, self.config.initial_capital),
-            sharpe_ratio: calculate_trade_sharpe(&self.closed_trades),
+            sharpe_ratio: calculate_equity_sharpe(&self.equity_curve),
             profit_factor,
             avg_win,
             avg_loss,
@@ -868,19 +941,37 @@ fn parse_f64(raw: Option<&String>) -> Option<f64> {
     raw.and_then(|value| value.parse::<f64>().ok())
 }
 
-fn calculate_trade_sharpe(trades: &[BacktestTrade]) -> f64 {
-    if trades.len() < 2 {
+fn calculate_equity_sharpe(equity_curve: &[(DateTime<Utc>, Decimal)]) -> f64 {
+    if equity_curve.len() < 2 {
         return 0.0;
     }
-    let pnls: Vec<f64> = trades
-        .iter()
-        .filter_map(|trade| trade.pnl.to_f64())
-        .collect();
-    if pnls.len() < 2 {
+
+    let mut returns = Vec::new();
+    let mut total_elapsed_secs = 0f64;
+    for window in equity_curve.windows(2) {
+        let (prev_ts, prev_equity) = window[0];
+        let (next_ts, next_equity) = window[1];
+        if prev_equity <= Decimal::ZERO || next_equity <= Decimal::ZERO {
+            continue;
+        }
+        let elapsed_secs = (next_ts - prev_ts).num_seconds().max(1) as f64;
+        total_elapsed_secs += elapsed_secs;
+        let Some(prev_value) = prev_equity.to_f64() else {
+            continue;
+        };
+        let Some(next_value) = next_equity.to_f64() else {
+            continue;
+        };
+        returns.push((next_value / prev_value) - 1.0);
+    }
+
+    if returns.len() < 2 || total_elapsed_secs <= 0.0 {
         return 0.0;
     }
-    let mean = pnls.iter().sum::<f64>() / pnls.len() as f64;
-    let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (pnls.len() as f64 - 1.0);
+
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance =
+        returns.iter().map(|ret| (ret - mean).powi(2)).sum::<f64>() / (returns.len() as f64 - 1.0);
     if variance <= f64::EPSILON {
         return 0.0;
     }
@@ -888,8 +979,9 @@ fn calculate_trade_sharpe(trades: &[BacktestTrade]) -> f64 {
     if std_dev <= f64::EPSILON {
         return 0.0;
     }
-    let trades_per_year: f64 = 24.0 * 365.0;
-    (mean / std_dev) * trades_per_year.sqrt()
+    let avg_interval_secs = total_elapsed_secs / returns.len() as f64;
+    let periods_per_year = (365.0 * 24.0 * 60.0 * 60.0) / avg_interval_secs;
+    (mean / std_dev) * periods_per_year.sqrt()
 }
 
 fn calculate_max_drawdown(
@@ -910,6 +1002,13 @@ fn calculate_max_drawdown(
         }
     }
     max_drawdown
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimulatedFill {
+    filled_qty: u64,
+    avg_fill_price: Decimal,
+    fee_paid: Decimal,
 }
 
 #[cfg(test)]
@@ -1005,6 +1104,10 @@ mod tests {
                 side: Side::Up,
                 ask_depth_shares: 100,
                 best_ask_size_shares: 100,
+                ask_levels: vec![BookAskLevel {
+                    price: dec!(0.40),
+                    size_shares: 100,
+                }],
                 best_ask: Some(dec!(0.40)),
             },
         });
@@ -1121,6 +1224,10 @@ mod tests {
                 side: Side::Up,
                 ask_depth_shares: 100,
                 best_ask_size_shares: 100,
+                ask_levels: vec![BookAskLevel {
+                    price: dec!(0.40),
+                    size_shares: 100,
+                }],
                 best_ask: Some(dec!(0.40)),
             },
         });
@@ -1242,6 +1349,16 @@ mod tests {
                 side: Side::Up,
                 ask_depth_shares: 77,
                 best_ask_size_shares: 25,
+                ask_levels: vec![
+                    BookAskLevel {
+                        price: dec!(0.45),
+                        size_shares: 25,
+                    },
+                    BookAskLevel {
+                        price: dec!(0.46),
+                        size_shares: 52,
+                    },
+                ],
                 best_ask: Some(dec!(0.45)),
             },
         });
@@ -1253,6 +1370,107 @@ mod tests {
         assert_eq!(
             engine.quotes.get(&format!("{early}:UP")).and_then(|q| q.ask_size),
             Some(dec!(20))
+        );
+    }
+
+    #[test]
+    fn simulate_replay_fill_walks_book_and_uses_vwap() {
+        let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
+        let mut engine =
+            Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+        let token_id = "btc-updown-5m-vwap:UP".to_string();
+
+        engine.quotes.insert(
+            token_id.clone(),
+            QuoteState {
+                best_bid: Some(dec!(0.39)),
+                best_ask: Some(dec!(0.40)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: ts(10),
+            },
+        );
+        engine.book_asks.insert(
+            token_id.clone(),
+            vec![
+                BookAskLevel {
+                    price: dec!(0.40),
+                    size_shares: 30,
+                },
+                BookAskLevel {
+                    price: dec!(0.41),
+                    size_shares: 40,
+                },
+                BookAskLevel {
+                    price: dec!(0.42),
+                    size_shares: 50,
+                },
+            ],
+        );
+
+        let fill = engine.simulate_replay_fill(
+            &token_id,
+            engine.quotes.get(&token_id).expect("quote"),
+            60,
+            dec!(0.41),
+        );
+
+        assert_eq!(fill.filled_qty, 60);
+        assert_eq!(fill.avg_fill_price, dec!(0.405));
+        let expected_fee = engine.fill_fee(30, dec!(0.40)) + engine.fill_fee(30, dec!(0.41));
+        assert_eq!(fill.fee_paid, expected_fee);
+    }
+
+    #[test]
+    fn record_equity_point_marks_open_trade_to_best_bid() {
+        let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
+        let mut engine =
+            Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+        let token_id = "btc-updown-5m-mtm:UP".to_string();
+        let shares = 10u64;
+        let entry_fee = engine.fill_fee(shares, dec!(0.40));
+
+        engine.open_trades.insert(
+            token_id.clone(),
+            OpenTrade {
+                symbol: "BTCUSDT".to_string(),
+                event_slug: "btc-updown-5m-mtm".to_string(),
+                token_id: token_id.clone(),
+                side: Side::Up,
+                entry_time: ts(5),
+                entry_price: dec!(0.40),
+                entry_fee,
+                shares,
+                entry_p_hat: Some(0.65),
+                entry_ev_net: Some(0.05),
+                entry_sigma: Some(0.02),
+                s0: Some(dec!(100)),
+            },
+        );
+        engine.quotes.insert(
+            token_id,
+            QuoteState {
+                best_bid: Some(dec!(0.32)),
+                best_ask: Some(dec!(0.33)),
+                bid_size: Some(dec!(10)),
+                ask_size: Some(dec!(10)),
+                timestamp: ts(6),
+            },
+        );
+
+        engine.record_equity_point(ts(6));
+
+        let expected_unrealized =
+            (dec!(0.32) * Decimal::from(shares) - engine.fill_fee(shares, dec!(0.32)))
+                - (dec!(0.40) * Decimal::from(shares) + entry_fee);
+        assert_eq!(engine.equity_curve.len(), 1);
+        assert_eq!(
+            engine.equity_curve[0].1,
+            engine.config.initial_capital + expected_unrealized
+        );
+        assert!(
+            calculate_max_drawdown(&engine.equity_curve, engine.config.initial_capital)
+                > Decimal::ZERO
         );
     }
 }
