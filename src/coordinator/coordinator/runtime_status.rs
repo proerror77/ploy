@@ -9,13 +9,22 @@ use super::super::command::{
     GovernancePolicyUpdate, GovernanceStatusSnapshot,
 };
 use super::super::governance::{
-    governance_domain_snapshot_label, load_governance_policy_history, persist_governance_policy,
-    GovernancePolicy,
+    GovernancePolicy, governance_domain_snapshot_label, load_governance_policy_history,
+    persist_governance_policy,
 };
 use super::super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 use super::{Coordinator, CoordinatorHandle};
 
 impl CoordinatorHandle {
+    pub(super) async fn persist_governance_state_if_configured(&self) -> crate::error::Result<()> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Ok(());
+        };
+        let policy = self.governance.current_policy().await;
+        let runtime_state = self.governance.runtime_state_snapshot().await;
+        persist_governance_policy(pool, &self.account_id, &policy, &runtime_state).await
+    }
+
     /// Read the current global state (non-blocking snapshot)
     pub async fn read_state(&self) -> GlobalState {
         self.global_state.read().await.clone()
@@ -47,7 +56,8 @@ impl CoordinatorHandle {
         let next = GovernancePolicy::try_from_update(update)
             .map_err(crate::error::PloyError::Validation)?;
         if let Some(pool) = self.governance_store_pool.as_ref() {
-            persist_governance_policy(pool, &self.account_id, &next).await?;
+            let runtime_state = self.governance.runtime_state_snapshot().await;
+            persist_governance_policy(pool, &self.account_id, &next, &runtime_state).await?;
         }
         Ok(self.governance.replace_policy(next).await)
     }
@@ -56,6 +66,7 @@ impl CoordinatorHandle {
     pub async fn governance_status(&self) -> GovernanceStatusSnapshot {
         let ingress_mode = self.governance.ingress_mode_label().await;
         let domain_ingress_modes = self.governance.domain_ingress_snapshot_rows().await;
+        let paused_agent_ids = self.governance.paused_agent_ids_sorted().await;
         let policy = self.governance.policy_snapshot().await;
         let risk_state = self.risk_gate.state().await;
         let platform_exposure_usd = self.risk_gate.total_exposure().await;
@@ -103,6 +114,7 @@ impl CoordinatorHandle {
             account_id: self.account_id.clone(),
             ingress_mode,
             domain_ingress_modes,
+            paused_agent_ids,
             policy,
             account_notional_usd,
             platform_exposure_usd,
@@ -119,6 +131,15 @@ impl CoordinatorHandle {
 }
 
 impl Coordinator {
+    pub(super) async fn persist_governance_state_if_configured(&self) -> crate::error::Result<()> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Ok(());
+        };
+        let policy = self.governance.current_policy().await;
+        let runtime_state = self.governance.runtime_state_snapshot().await;
+        persist_governance_policy(pool, &self.account_id, &policy, &runtime_state).await
+    }
+
     /// Update agent snapshot in global state
     pub(super) async fn handle_state_update(&self, snapshot: AgentSnapshot) {
         let agent_id = snapshot.agent_id.clone();

@@ -154,6 +154,7 @@ pub struct GovernanceStatusSnapshot {
     pub account_id: String,
     pub ingress_mode: String,
     pub domain_ingress_modes: Vec<DomainIngressSnapshot>,
+    pub paused_agent_ids: Vec<String>,
     pub policy: GovernancePolicySnapshot,
     pub account_notional_usd: Decimal,
     pub platform_exposure_usd: Decimal,

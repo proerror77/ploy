@@ -2,17 +2,17 @@ use super::*;
 use crate::adapters::PolymarketClient;
 use crate::agent_runtime::AgentStatus;
 use crate::config::ExecutionConfig;
+use crate::coordinator::OrderPriority;
 use crate::coordinator::admission::{
     buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason,
 };
 use crate::coordinator::{QueueStats, QueueStatsSnapshot};
-use crate::coordinator::OrderPriority;
 use crate::domain::Domain;
 use crate::strategy::executor::OrderExecutor;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 fn mock_snapshot(agent_id: &str) -> AgentSnapshot {
     AgentSnapshot {
@@ -118,18 +118,22 @@ fn test_sell_intent_does_not_require_deployment_id_metadata() {
 fn test_sell_reduce_only_violation_when_no_tracked_shares() {
     let intent = make_intent(false, OrderPriority::Normal);
     let reason = sell_reduce_only_violation_reason(&intent, 0, 0);
-    assert!(reason
-        .unwrap_or_default()
-        .contains("no tracked open shares"));
+    assert!(
+        reason
+            .unwrap_or_default()
+            .contains("no tracked open shares")
+    );
 }
 
 #[test]
 fn test_sell_reduce_only_violation_when_requested_exceeds_tracked() {
     let intent = make_intent(false, OrderPriority::Normal);
     let reason = sell_reduce_only_violation_reason(&intent, 30, 0);
-    assert!(reason
-        .unwrap_or_default()
-        .contains("requested shares 100 exceeds available reduce-only shares 30"));
+    assert!(
+        reason
+            .unwrap_or_default()
+            .contains("requested shares 100 exceeds available reduce-only shares 30")
+    );
 }
 
 #[test]
@@ -143,18 +147,22 @@ fn test_sell_reduce_only_allows_with_sufficient_tracked_shares() {
 fn test_sell_reduce_only_violation_when_pending_sells_exhaust_available() {
     let intent = make_intent(false, OrderPriority::Normal);
     let reason = sell_reduce_only_violation_reason(&intent, 100, 100);
-    assert!(reason
-        .unwrap_or_default()
-        .contains("fully reserved by pending SELL intents 100"));
+    assert!(
+        reason
+            .unwrap_or_default()
+            .contains("fully reserved by pending SELL intents 100")
+    );
 }
 
 #[test]
 fn test_sell_reduce_only_violation_when_requested_exceeds_available_after_pending() {
     let intent = make_intent(false, OrderPriority::Normal);
     let reason = sell_reduce_only_violation_reason(&intent, 100, 40);
-    assert!(reason
-        .unwrap_or_default()
-        .contains("requested shares 100 exceeds available reduce-only shares 60"));
+    assert!(
+        reason
+            .unwrap_or_default()
+            .contains("requested shares 100 exceeds available reduce-only shares 60")
+    );
 }
 
 #[tokio::test]
@@ -180,7 +188,9 @@ async fn test_drain_and_execute_records_single_success_for_buy_fill() {
 #[tokio::test]
 async fn test_handle_order_intent_emits_rejected_update_for_missing_deployment() {
     let (_handle, mut coordinator) = make_test_handle();
-    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string());
+    let mut order_updates = coordinator
+        .register_order_updates("crypto_lob_ml".to_string())
+        .await;
 
     let intent = make_intent(true, OrderPriority::Normal);
     let client_order_id = intent.client_order_id.clone();
@@ -196,11 +206,13 @@ async fn test_handle_order_intent_emits_rejected_update_for_missing_deployment()
         Some(client_order_id.as_str())
     );
     assert_eq!(update.status, crate::domain::OrderStatus::Rejected);
-    assert!(update
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("deployment_id"));
+    assert!(
+        update
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("deployment_id")
+    );
 }
 
 #[tokio::test]
@@ -210,7 +222,9 @@ async fn test_drain_and_execute_emits_pending_and_fill_updates() {
         .risk_gate
         .register_agent_with_domain("crypto_lob_ml", Domain::Crypto, AgentRiskParams::default())
         .await;
-    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string());
+    let mut order_updates = coordinator
+        .register_order_updates("crypto_lob_ml".to_string())
+        .await;
 
     let intent =
         make_intent(true, OrderPriority::Normal).with_metadata("deployment_id", "deploy.test");
@@ -345,6 +359,10 @@ async fn test_governance_status_includes_domain_ingress_and_agents() {
         .pause_domain(Domain::Sports)
         .await
         .expect("pause domain command accepted");
+    handle
+        .pause_agent("sports_agent")
+        .await
+        .expect("pause agent command accepted");
     {
         let mut state = handle.global_state.write().await;
         state.agents.insert(
@@ -367,14 +385,24 @@ async fn test_governance_status_includes_domain_ingress_and_agents() {
 
     let snapshot = handle.governance_status().await;
 
-    assert!(snapshot
-        .domain_ingress_modes
-        .iter()
-        .any(|row| row.domain == "sports" && row.mode == "paused"));
-    assert!(snapshot
-        .agents
-        .iter()
-        .any(|agent| agent.agent_id == "sports_agent"
-            && agent.domain == "sports"
-            && agent.status == "running"));
+    assert!(
+        snapshot
+            .domain_ingress_modes
+            .iter()
+            .any(|row| row.domain == "sports" && row.mode == "paused")
+    );
+    assert!(
+        snapshot
+            .agents
+            .iter()
+            .any(|agent| agent.agent_id == "sports_agent"
+                && agent.domain == "sports"
+                && agent.status == "running")
+    );
+    assert!(
+        snapshot
+            .paused_agent_ids
+            .iter()
+            .any(|id| id == "sports_agent")
+    );
 }

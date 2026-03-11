@@ -12,7 +12,7 @@ pub(super) struct ManagedStrategyRuntimeSpawn {
     pub(super) strategy_config_toml: String,
 }
 
-pub(super) fn spawn_managed_strategy_runtime_task(
+pub(super) async fn spawn_managed_strategy_runtime_task(
     spec: ManagedStrategyRuntimeSpawn,
     coordinator: &mut Coordinator,
     handle: &CoordinatorHandle,
@@ -36,9 +36,10 @@ pub(super) fn spawn_managed_strategy_runtime_task(
 
     let strategy_label = spec.strategy_label;
     let agent_id = spec.agent_id;
-    let strategy_cmd_rx =
-        coordinator.register_agent(agent_id.clone(), spec.domain, spec.risk_params);
-    let strategy_order_updates_rx = coordinator.register_order_updates(agent_id.clone());
+    let strategy_cmd_rx = coordinator
+        .register_agent(agent_id.clone(), spec.domain, spec.risk_params)
+        .await;
+    let strategy_order_updates_rx = coordinator.register_order_updates(agent_id.clone()).await;
     let strategy_shutdown_rx = shutdown_tx.subscribe();
     let strategy_ws_url = pm_ws_url.to_string();
     let strategy_data_plane = data_plane;
@@ -84,7 +85,7 @@ pub(super) fn spawn_managed_strategy_runtime_task(
     true
 }
 
-pub(super) fn spawn_openclaw_governance_agent(
+pub(super) async fn spawn_openclaw_governance_agent(
     config: &PlatformBootstrapConfig,
     freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
     coordinator: &mut Coordinator,
@@ -119,7 +120,9 @@ pub(super) fn spawn_openclaw_governance_agent(
         allowed_markets: vec![],
     };
     let oc_agent_id = config.openclaw.agent_id.clone();
-    let cmd_rx = coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
+    let cmd_rx = coordinator
+        .register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params)
+        .await;
 
     let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);
     let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);

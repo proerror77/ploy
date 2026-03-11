@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::RwLock;
 
 use crate::agent_runtime::AgentRiskParams;
@@ -357,6 +357,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_record_loss_resets_failure_streaks() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 5;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+        gate.record_failure("agent1", "first failure").await;
+        gate.record_failure("agent1", "second failure").await;
+
+        assert_eq!(gate.consecutive_failures(), 2);
+        assert_eq!(gate.agent_stats("agent1").await.expect("agent stats").3, 2);
+
+        gate.record_loss("agent1", Decimal::from(3)).await;
+
+        assert_eq!(gate.consecutive_failures(), 0);
+        assert_eq!(gate.agent_stats("agent1").await.expect("agent stats").3, 0);
+    }
+
+    #[tokio::test]
     async fn test_drawdown_limit_triggers_circuit_breaker() {
         let mut config = RiskConfig::default();
         config.max_drawdown_limit = Some(Decimal::from(5));
@@ -403,6 +423,22 @@ mod tests {
         assert_eq!(gate.state().await, PlatformRiskState::Halted);
         assert!(!gate.can_trade().await);
         assert!(!gate.circuit_breaker_events().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_record_success_does_not_clear_halted_state() {
+        let mut config = RiskConfig::default();
+        config.max_consecutive_failures = 1;
+        config.circuit_breaker_auto_recover = false;
+        let gate = RiskGate::new(config);
+
+        gate.register_agent("agent1", AgentRiskParams::default())
+            .await;
+        gate.record_failure("agent1", "forced failure").await;
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
+
+        gate.record_success("agent1", Decimal::from(1)).await;
+        assert_eq!(gate.state().await, PlatformRiskState::Halted);
     }
 
     #[tokio::test]

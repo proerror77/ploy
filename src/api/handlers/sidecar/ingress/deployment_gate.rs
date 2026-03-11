@@ -154,7 +154,7 @@ pub(super) fn ensure_deployment_accepts_live_ingress(
     ))
 }
 
-pub(super) fn ensure_agent_authorized(
+pub(super) async fn ensure_agent_authorized(
     state: &AppState,
     agent_id: &str,
 ) -> std::result::Result<(), (StatusCode, String)> {
@@ -164,7 +164,7 @@ pub(super) fn ensure_agent_authorized(
             "Coordinator not running (platform not started)".to_string(),
         )
     })?;
-    if coordinator.is_agent_authorized(agent_id) {
+    if coordinator.is_agent_authorized(agent_id).await {
         return Ok(());
     }
     Err((

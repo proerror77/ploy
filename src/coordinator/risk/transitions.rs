@@ -65,8 +65,9 @@ impl RiskGate {
             return;
         }
 
-        if *self.state.read().await == PlatformRiskState::Elevated {
-            *self.state.write().await = PlatformRiskState::Normal;
+        let mut state = self.state.write().await;
+        if *state == PlatformRiskState::Elevated {
+            *state = PlatformRiskState::Normal;
             info!("Risk state normalized after successful execution");
         }
     }
@@ -106,10 +107,12 @@ impl RiskGate {
     /// 記錄損失
     pub async fn record_loss(&self, agent_id: &str, loss: Decimal) {
         let domain = self.agent_domains.read().await.get(agent_id).copied();
+        self.consecutive_failures.store(0, Ordering::SeqCst);
 
         {
             let mut stats_map = self.agent_stats.write().await;
             let stats = stats_map.entry(agent_id.to_string()).or_default();
+            stats.consecutive_failures = 0;
             stats.realized_pnl -= loss.abs();
         }
 

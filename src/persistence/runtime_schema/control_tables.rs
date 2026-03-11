@@ -157,6 +157,9 @@ pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) 
             account_id TEXT PRIMARY KEY,
             block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
             blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+            ingress_mode TEXT NOT NULL DEFAULT 'running',
+            domain_ingress_modes JSONB NOT NULL DEFAULT '{}'::jsonb,
+            paused_agent_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
             max_intent_notional_usd NUMERIC,
             max_total_notional_usd NUMERIC,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -164,6 +167,24 @@ pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) 
             reason TEXT
         )
         "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE coordinator_governance_policies ADD COLUMN IF NOT EXISTS ingress_mode TEXT NOT NULL DEFAULT 'running'",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE coordinator_governance_policies ADD COLUMN IF NOT EXISTS domain_ingress_modes JSONB NOT NULL DEFAULT '{}'::jsonb",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE coordinator_governance_policies ADD COLUMN IF NOT EXISTS paused_agent_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
     )
     .execute(pool)
     .await?;

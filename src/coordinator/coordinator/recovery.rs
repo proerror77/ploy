@@ -3,8 +3,8 @@ use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
-use crate::error::Result;
 use crate::domain::Domain;
+use crate::error::Result;
 
 use super::super::governance::load_governance_policy;
 use super::Coordinator;
@@ -57,15 +57,19 @@ impl Coordinator {
             return Ok(());
         };
 
-        let Some(policy) = load_governance_policy(pool, &self.account_id).await? else {
+        let Some(restored) = load_governance_policy(pool, &self.account_id).await? else {
             return Ok(());
         };
 
-        let snapshot = self.governance.replace_policy(policy).await;
+        let snapshot = self.governance.replace_policy(restored.policy).await;
+        self.governance
+            .restore_runtime_state(&restored.runtime_state)
+            .await;
         info!(
             account_id = %self.account_id,
             updated_by = %snapshot.updated_by,
             updated_at = %snapshot.updated_at,
+            paused_agents = restored.runtime_state.paused_agent_ids.len(),
             "restored governance policy from DB"
         );
         Ok(())

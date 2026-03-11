@@ -159,7 +159,7 @@ pub async fn sidecar_submit_order(
 
     let intent_id = intent.intent_id.to_string();
 
-    ensure_agent_authorized(&state, "sidecar")?;
+    ensure_agent_authorized(&state, "sidecar").await?;
     coordinator
         .submit_order(intent)
         .await
@@ -337,7 +337,7 @@ pub async fn sidecar_submit_intent(
         }));
     }
 
-    ensure_agent_authorized(&state, &agent_id)?;
+    ensure_agent_authorized(&state, &agent_id).await?;
 
     let coordinator = state.coordinator.as_ref().ok_or_else(|| {
         (

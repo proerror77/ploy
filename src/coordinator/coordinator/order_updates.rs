@@ -3,18 +3,16 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::domain::OrderStatus;
 use crate::coordinator::OrderIntent;
-use crate::strategy::{executor::ExecutionResult, OrderUpdate};
+use crate::domain::OrderStatus;
+use crate::strategy::{OrderUpdate, executor::ExecutionResult};
 
 use super::Coordinator;
 
 impl Coordinator {
-    pub fn register_order_updates(&mut self, agent_id: String) -> mpsc::Receiver<OrderUpdate> {
+    pub async fn register_order_updates(&self, agent_id: String) -> mpsc::Receiver<OrderUpdate> {
         let (tx, rx) = mpsc::channel(128);
-        if let Ok(mut sinks) = self.order_update_sinks.write() {
-            sinks.insert(agent_id, tx);
-        }
+        self.order_update_sinks.write().await.insert(agent_id, tx);
         rx
     }
 
@@ -78,12 +76,11 @@ impl Coordinator {
     }
 
     async fn emit_order_update(&self, agent_id: &str, update: OrderUpdate) {
-        let Some(tx) = self
-            .order_update_sinks
-            .read()
-            .ok()
-            .and_then(|sinks| sinks.get(agent_id).cloned())
-        else {
+        let tx = {
+            let sinks = self.order_update_sinks.read().await;
+            sinks.get(agent_id).cloned()
+        };
+        let Some(tx) = tx else {
             return;
         };
 

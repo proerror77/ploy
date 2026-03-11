@@ -5,8 +5,8 @@ use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
-use crate::error::Result;
 use crate::domain::Domain;
+use crate::error::Result;
 
 use super::command::{
     DomainIngressSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,
@@ -31,6 +31,15 @@ impl IngressMode {
     }
 }
 
+fn parse_ingress_mode(raw: &str) -> Option<IngressMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "running" => Some(IngressMode::Running),
+        "paused" => Some(IngressMode::Paused),
+        "halted" => Some(IngressMode::Halted),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct GovernancePolicy {
     pub(super) block_new_intents: bool,
@@ -41,6 +50,19 @@ pub(super) struct GovernancePolicy {
     pub(super) updated_by: String,
     pub(super) reason: Option<String>,
     pub(super) metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GovernanceRuntimeStateSnapshot {
+    pub(super) ingress_mode: IngressMode,
+    pub(super) domain_ingress_modes: HashMap<Domain, IngressMode>,
+    pub(super) paused_agent_ids: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PersistedGovernanceState {
+    pub(super) policy: GovernancePolicy,
+    pub(super) runtime_state: GovernanceRuntimeStateSnapshot,
 }
 
 impl GovernancePolicy {
@@ -245,6 +267,18 @@ impl GovernanceController {
         self.paused_agent_ids.read().await.contains(agent_id)
     }
 
+    pub(super) async fn paused_agent_ids_sorted(&self) -> Vec<String> {
+        let mut paused = self
+            .paused_agent_ids
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        paused.sort();
+        paused
+    }
+
     pub(super) async fn policy_snapshot(&self) -> GovernancePolicySnapshot {
         self.governance_policy.read().await.to_snapshot()
     }
@@ -257,6 +291,20 @@ impl GovernanceController {
         let snapshot = next.to_snapshot();
         *self.governance_policy.write().await = next;
         snapshot
+    }
+
+    pub(super) async fn runtime_state_snapshot(&self) -> GovernanceRuntimeStateSnapshot {
+        GovernanceRuntimeStateSnapshot {
+            ingress_mode: *self.ingress_mode.read().await,
+            domain_ingress_modes: self.domain_ingress_mode.read().await.clone(),
+            paused_agent_ids: self.paused_agent_ids.read().await.clone(),
+        }
+    }
+
+    pub(super) async fn restore_runtime_state(&self, snapshot: &GovernanceRuntimeStateSnapshot) {
+        *self.ingress_mode.write().await = snapshot.ingress_mode;
+        *self.domain_ingress_mode.write().await = snapshot.domain_ingress_modes.clone();
+        *self.paused_agent_ids.write().await = snapshot.paused_agent_ids.clone();
     }
 }
 
@@ -305,8 +353,26 @@ pub(super) async fn persist_governance_policy(
     pool: &PgPool,
     account_id: &str,
     policy: &GovernancePolicy,
+    runtime_state: &GovernanceRuntimeStateSnapshot,
 ) -> Result<()> {
     let blocked_domains = governance_policy_blocked_domains_sorted(policy);
+    let domain_ingress_modes = runtime_state
+        .domain_ingress_modes
+        .iter()
+        .map(|(domain, mode)| {
+            (
+                governance_domain_snapshot_label(*domain),
+                mode.as_str().to_string(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut paused_agent_ids = runtime_state
+        .paused_agent_ids
+        .iter()
+        .map(|agent_id| agent_id.trim().to_string())
+        .filter(|agent_id| !agent_id.is_empty())
+        .collect::<Vec<_>>();
+    paused_agent_ids.sort();
     let mut tx = pool.begin().await.map_err(|e| {
         crate::error::PloyError::Internal(format!("begin governance policy tx: {}", e))
     })?;
@@ -317,16 +383,22 @@ pub(super) async fn persist_governance_policy(
             account_id,
             block_new_intents,
             blocked_domains,
+            ingress_mode,
+            domain_ingress_modes,
+            paused_agent_ids,
             max_intent_notional_usd,
             max_total_notional_usd,
             updated_at,
             updated_by,
             reason
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT (account_id) DO UPDATE SET
             block_new_intents = EXCLUDED.block_new_intents,
             blocked_domains = EXCLUDED.blocked_domains,
+            ingress_mode = EXCLUDED.ingress_mode,
+            domain_ingress_modes = EXCLUDED.domain_ingress_modes,
+            paused_agent_ids = EXCLUDED.paused_agent_ids,
             max_intent_notional_usd = EXCLUDED.max_intent_notional_usd,
             max_total_notional_usd = EXCLUDED.max_total_notional_usd,
             updated_at = EXCLUDED.updated_at,
@@ -337,6 +409,9 @@ pub(super) async fn persist_governance_policy(
     .bind(account_id)
     .bind(policy.block_new_intents)
     .bind(sqlx::types::Json(blocked_domains.clone()))
+    .bind(runtime_state.ingress_mode.as_str())
+    .bind(sqlx::types::Json(domain_ingress_modes))
+    .bind(sqlx::types::Json(paused_agent_ids))
     .bind(policy.max_intent_notional_usd)
     .bind(policy.max_total_notional_usd)
     .bind(policy.updated_at)
@@ -462,11 +537,14 @@ pub(super) async fn load_governance_policy_history(
 pub(super) async fn load_governance_policy(
     pool: &PgPool,
     account_id: &str,
-) -> Result<Option<GovernancePolicy>> {
+) -> Result<Option<PersistedGovernanceState>> {
     let row = sqlx::query_as::<
         _,
         (
             bool,
+            sqlx::types::Json<Vec<String>>,
+            String,
+            sqlx::types::Json<HashMap<String, String>>,
             sqlx::types::Json<Vec<String>>,
             Option<Decimal>,
             Option<Decimal>,
@@ -479,6 +557,9 @@ pub(super) async fn load_governance_policy(
         SELECT
             block_new_intents,
             blocked_domains,
+            ingress_mode,
+            domain_ingress_modes,
+            paused_agent_ids,
             max_intent_notional_usd,
             max_total_notional_usd,
             updated_at,
@@ -496,6 +577,9 @@ pub(super) async fn load_governance_policy(
     let Some((
         block_new_intents,
         sqlx::types::Json(raw_blocked_domains),
+        raw_ingress_mode,
+        sqlx::types::Json(raw_domain_ingress_modes),
+        sqlx::types::Json(raw_paused_agent_ids),
         max_intent_notional_usd,
         max_total_notional_usd,
         updated_at,
@@ -526,6 +610,42 @@ pub(super) async fn load_governance_policy(
 
     let max_intent_notional_usd = max_intent_notional_usd.filter(|v| *v > Decimal::ZERO);
     let max_total_notional_usd = max_total_notional_usd.filter(|v| *v > Decimal::ZERO);
+    let ingress_mode = parse_ingress_mode(&raw_ingress_mode).unwrap_or_else(|| {
+        tracing::warn!(
+            account_id = %account_id,
+            ingress_mode = %raw_ingress_mode,
+            "ignoring unknown governance ingress mode from DB; defaulting to running"
+        );
+        IngressMode::Running
+    });
+    let mut domain_ingress_modes = HashMap::new();
+    for (raw_domain, raw_mode) in raw_domain_ingress_modes {
+        let Some(domain) = parse_governance_domain(&raw_domain) else {
+            tracing::warn!(
+                account_id = %account_id,
+                domain = %raw_domain,
+                "ignoring unknown governance ingress domain from DB"
+            );
+            continue;
+        };
+        let Some(mode) = parse_ingress_mode(&raw_mode) else {
+            tracing::warn!(
+                account_id = %account_id,
+                domain = %raw_domain,
+                mode = %raw_mode,
+                "ignoring unknown governance ingress mode from DB"
+            );
+            continue;
+        };
+        if mode != IngressMode::Running {
+            domain_ingress_modes.insert(domain, mode);
+        }
+    }
+    let paused_agent_ids = raw_paused_agent_ids
+        .into_iter()
+        .map(|agent_id| agent_id.trim().to_string())
+        .filter(|agent_id| !agent_id.is_empty())
+        .collect::<HashSet<_>>();
     let updated_by = {
         let trimmed = updated_by.trim();
         if trimmed.is_empty() {
@@ -539,15 +659,22 @@ pub(super) async fn load_governance_policy(
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
 
-    Ok(Some(GovernancePolicy {
-        block_new_intents,
-        blocked_domains,
-        max_intent_notional_usd,
-        max_total_notional_usd,
-        updated_at,
-        updated_by,
-        reason,
-        metadata: HashMap::new(),
+    Ok(Some(PersistedGovernanceState {
+        policy: GovernancePolicy {
+            block_new_intents,
+            blocked_domains,
+            max_intent_notional_usd,
+            max_total_notional_usd,
+            updated_at,
+            updated_by,
+            reason,
+            metadata: HashMap::new(),
+        },
+        runtime_state: GovernanceRuntimeStateSnapshot {
+            ingress_mode,
+            domain_ingress_modes,
+            paused_agent_ids,
+        },
     }))
 }
 
@@ -555,7 +682,12 @@ pub(super) async fn load_governance_policy(
 mod tests {
     use super::*;
     use crate::coordinator::OrderIntent;
+    use crate::persistence::{
+        ensure_coordinator_governance_policies_table,
+        ensure_coordinator_governance_policy_history_table,
+    };
     use rust_decimal_macros::dec;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn test_governance_policy_update_rejects_unknown_domain() {
@@ -624,9 +756,11 @@ mod tests {
             dec!(0.50),
         );
         let reason = governance_block_reason(&policy, &intent, dec!(90));
-        assert!(reason
-            .unwrap_or_default()
-            .contains("max_total_notional_usd"));
+        assert!(
+            reason
+                .unwrap_or_default()
+                .contains("max_total_notional_usd")
+        );
     }
 
     #[test]
@@ -661,5 +795,104 @@ mod tests {
         assert_eq!(clamp_governance_history_limit(0), 1);
         assert_eq!(clamp_governance_history_limit(25), 25);
         assert_eq!(clamp_governance_history_limit(999), 500);
+    }
+
+    #[tokio::test]
+    async fn test_governance_runtime_state_snapshot_roundtrip() {
+        let controller = GovernanceController::new(&CoordinatorConfig::default());
+        controller.set_global_mode(IngressMode::Paused).await;
+        controller
+            .set_domain_mode(Domain::Sports, IngressMode::Halted)
+            .await;
+        controller.pause_agent("sports_agent").await;
+
+        let snapshot = controller.runtime_state_snapshot().await;
+        assert_eq!(snapshot.ingress_mode, IngressMode::Paused);
+        assert_eq!(
+            snapshot.domain_ingress_modes.get(&Domain::Sports),
+            Some(&IngressMode::Halted)
+        );
+        assert!(snapshot.paused_agent_ids.contains("sports_agent"));
+
+        let restored = GovernanceController::new(&CoordinatorConfig::default());
+        restored.restore_runtime_state(&snapshot).await;
+
+        let restored_snapshot = restored.runtime_state_snapshot().await;
+        assert_eq!(restored_snapshot, snapshot);
+    }
+
+    #[tokio::test]
+    async fn test_governance_policy_persistence_roundtrips_runtime_state() {
+        let db_url = std::env::var("PLOY_TEST_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok());
+        let Some(db_url) = db_url else {
+            return;
+        };
+
+        let pool = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+
+        ensure_coordinator_governance_policies_table(&pool)
+            .await
+            .expect("ensure governance policies table");
+        ensure_coordinator_governance_policy_history_table(&pool)
+            .await
+            .expect("ensure governance policy history table");
+
+        let account_id = format!(
+            "gov-persist-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let controller = GovernanceController::new(&CoordinatorConfig::default());
+        controller.set_global_mode(IngressMode::Paused).await;
+        controller
+            .set_domain_mode(Domain::Sports, IngressMode::Halted)
+            .await;
+        controller.pause_agent("sports_agent").await;
+
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: true,
+            blocked_domains: vec!["sports".to_string()],
+            max_intent_notional_usd: Some(dec!(10)),
+            max_total_notional_usd: Some(dec!(50)),
+            updated_by: "test".to_string(),
+            reason: Some("maintenance".to_string()),
+            metadata: HashMap::new(),
+        })
+        .expect("valid policy");
+
+        let runtime_state = controller.runtime_state_snapshot().await;
+        persist_governance_policy(&pool, &account_id, &policy, &runtime_state)
+            .await
+            .expect("persist governance policy");
+
+        let restored = load_governance_policy(&pool, &account_id)
+            .await
+            .expect("load governance policy")
+            .expect("persisted governance policy");
+
+        assert!(restored.policy.block_new_intents);
+        assert!(restored.policy.blocked_domains.contains(&Domain::Sports));
+        assert_eq!(restored.runtime_state.ingress_mode, IngressMode::Paused);
+        assert_eq!(
+            restored
+                .runtime_state
+                .domain_ingress_modes
+                .get(&Domain::Sports),
+            Some(&IngressMode::Halted)
+        );
+        assert!(
+            restored
+                .runtime_state
+                .paused_agent_ids
+                .contains("sports_agent")
+        );
     }
 }

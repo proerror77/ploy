@@ -9,10 +9,9 @@
 //!   - Periodically refresh GlobalState from aggregators
 
 use chrono::Utc;
-use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -25,7 +24,7 @@ use super::admission::AdmissionController;
 use super::capital::CapitalPolicy;
 use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
-use super::governance::{governance_block_reason, GovernanceController};
+use super::governance::{GovernanceController, governance_block_reason};
 use super::journal::ExecutionJournal;
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;
@@ -69,7 +68,7 @@ pub struct CoordinatorHandle {
     governance: Arc<GovernanceController>,
     admission: Arc<AdmissionController>,
     allowed_domains: Arc<HashSet<Domain>>,
-    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
+    authorized_agents: Arc<RwLock<HashSet<String>>>,
     governance_store_pool: Option<PgPool>,
 }
 
@@ -80,7 +79,7 @@ pub struct Coordinator {
     config: CoordinatorConfig,
     account_id: String,
     allowed_domains: Arc<HashSet<Domain>>,
-    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
+    authorized_agents: Arc<RwLock<HashSet<String>>>,
     admission: Arc<AdmissionController>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
@@ -92,8 +91,7 @@ pub struct Coordinator {
     governance_store_pool: Option<PgPool>,
     governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
-    order_update_sinks:
-        Arc<std::sync::RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
+    order_update_sinks: Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -119,7 +117,7 @@ impl Coordinator {
         let (control_tx, control_rx) = mpsc::channel(32);
 
         let allowed_domains = Arc::new(allowed_domains);
-        let authorized_agents = Arc::new(std::sync::RwLock::new(HashSet::new()));
+        let authorized_agents = Arc::new(RwLock::new(HashSet::new()));
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
         let admission = Arc::new(AdmissionController::new(&config));
@@ -128,7 +126,7 @@ impl Coordinator {
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let governance = Arc::new(GovernanceController::new(&config));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
-        let order_update_sinks = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let order_update_sinks = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
         } else {
@@ -194,7 +192,7 @@ impl Coordinator {
     }
 
     /// Register an agent and return its command receiver
-    pub fn register_agent(
+    pub async fn register_agent(
         &mut self,
         agent_id: String,
         domain: Domain,
@@ -203,18 +201,13 @@ impl Coordinator {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.agent_commands
             .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
-        if let Ok(mut authorized) = self.authorized_agents.write() {
-            authorized.insert(agent_id.clone());
-        }
-
-        // Register with risk gate (fire-and-forget via spawn since we're not async here)
-        let risk_gate = self.risk_gate.clone();
-        let id = agent_id.clone();
-        tokio::spawn(async move {
-            risk_gate
-                .register_agent_with_domain(&id, domain, risk_params)
-                .await;
-        });
+        self.authorized_agents
+            .write()
+            .await
+            .insert(agent_id.clone());
+        self.risk_gate
+            .register_agent_with_domain(&agent_id, domain, risk_params)
+            .await;
 
         info!(agent_id, "agent registered with coordinator");
         cmd_rx
