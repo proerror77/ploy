@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use crate::error::Result;
 use crate::platform::Domain;
 
-use super::super::governance::load_governance_policy;
+use super::super::governance::{load_governance_policy, load_ingress_state};
 use super::Coordinator;
 
 impl Coordinator {
@@ -51,6 +51,13 @@ impl Coordinator {
         self.governance_store_pool = Some(pool);
     }
 
+    /// Enable fire-and-forget ingress state persistence on governance mutations.
+    pub async fn set_ingress_persist_pool(&self, pool: sqlx::PgPool) {
+        self.governance
+            .set_ingress_persist_pool(pool, self.account_id.clone())
+            .await;
+    }
+
     /// Restore runtime governance policy from DB (if a persisted row exists).
     pub async fn load_persisted_governance_policy(&self) -> Result<()> {
         let Some(pool) = self.governance_store_pool.as_ref() else {
@@ -67,6 +74,35 @@ impl Coordinator {
             updated_by = %snapshot.updated_by,
             updated_at = %snapshot.updated_at,
             "restored governance policy from DB"
+        );
+        Ok(())
+    }
+
+    /// Restore persisted ingress state (global mode, domain modes, paused agents).
+    pub async fn load_persisted_ingress_state(&self) -> Result<()> {
+        let Some(pool) = self.governance_store_pool.as_ref() else {
+            return Ok(());
+        };
+
+        let Some(state) = load_ingress_state(pool, &self.account_id).await? else {
+            return Ok(());
+        };
+
+        // Restore order: global mode first, then domain modes, then paused agents
+        self.governance.set_global_mode(state.ingress_mode).await;
+        for (domain, mode) in &state.domain_modes {
+            self.governance.set_domain_mode(*domain, *mode).await;
+        }
+        for agent_id in &state.paused_agent_ids {
+            self.governance.pause_agent(agent_id).await;
+        }
+
+        info!(
+            account_id = %self.account_id,
+            ingress_mode = %state.ingress_mode.as_str(),
+            domain_overrides = state.domain_modes.len(),
+            paused_agents = state.paused_agent_ids.len(),
+            "restored ingress state from DB"
         );
         Ok(())
     }
@@ -225,6 +261,7 @@ impl Coordinator {
             daily_success_count,
             daily_failure_count,
             global_consecutive_failures,
+            recovery_window = "PLOY_RECOVERY_WINDOW_HOURS (default 24h)",
             "restored coordinator runtime state from execution log"
         );
         Ok(())

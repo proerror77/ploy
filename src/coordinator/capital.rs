@@ -1,3 +1,18 @@
+//! Capital Allocation — per-domain notional tracking and reservation lifecycle.
+//!
+//! Each trading domain (Crypto, Sports, Politics, Economics) gets its own
+//! capital allocator that enforces deployment-level and domain-level limits.
+//! The `CapitalPolicy` facade provides a unified async interface used by the
+//! coordinator ingress path:
+//!
+//!   1. `reserve_buy` — atomically reserves notional before an order enters the queue.
+//!   2. `settle_success` / `settle_failure` — releases or converts the reservation
+//!      once execution completes.
+//!   3. `release_buy_reservation` — explicit release on rejection or timeout.
+//!
+//! Crypto uses a dedicated `CryptoCapitalAllocator` (series-aware, 5m/15m buckets),
+//! while Sports/Politics/Economics share the generic `MarketCapitalAllocator`.
+
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use uuid::Uuid;

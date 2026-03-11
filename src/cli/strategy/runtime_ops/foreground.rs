@@ -1,3 +1,10 @@
+//! Foreground strategy runtime — runs a single strategy in the current process.
+//!
+//! **Warning**: Foreground mode has limited risk controls compared to the managed
+//! coordinator runtime. In live (non-dry-run) mode, orders are routed through the
+//! coordinator intent ingress for risk gating. Direct CLOB execution is only
+//! permitted in dry-run / observation mode.
+
 use super::*;
 use crate::adapters::PolymarketWebSocket;
 use crate::strategy::{DataFeed, DataFeedManager, StrategyAction};

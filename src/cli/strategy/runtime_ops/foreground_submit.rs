@@ -31,6 +31,14 @@ impl ForegroundIntentSubmitter {
             return Ok(ForegroundSubmitOutcome::CoordinatorAccepted(response));
         }
 
+        // Live execution MUST go through the coordinator — refuse direct CLOB bypass
+        // when deployment_id is absent, since that skips all risk controls.
+        if !self.dry_run {
+            return Err(PloyError::Internal(
+                "live foreground execution requires deployment_id in metadata — refusing direct CLOB bypass".into()
+            ));
+        }
+
         if let Some(executor) = &self.executor {
             return executor
                 .execute(order)

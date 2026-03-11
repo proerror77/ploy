@@ -169,6 +169,25 @@ When using a skill:
   - `OOMPolicy=kill`
 - After deploy, verify with `systemctl show <service> -p MemoryMax -p Restart -p OOMPolicy` and ensure no active `cargo`/`rustc` build process remains.
 
+## Coordinator Architecture
+
+### Sub-modules
+- `admission` — deployment gate, duplicate guard, Kelly sizing
+- `risk` — circuit breaker, drawdown tracking, daily loss limits
+- `capital` — market capital allocation, reserve/release lifecycle
+- `position` — position aggregator, realized PnL tracking
+- `queue` — priority queue with capacity management
+- `journal` — execution log, risk decision persistence
+- `governance` — ingress modes, domain/agent pauses, policy persistence
+- `strategy_runtime` — agent lifecycle, order store, action dispatch
+
+### Canonical Order Path
+TradeIntent → admission → risk gate → queue → executor → journal
+
+### Runtime Modes
+- **Managed** (`ploy platform start`): Full coordinator with all risk controls
+- **Foreground** (`ploy strategy run --foreground`): Limited risk controls — requires deployment_id for live trading
+
 ## Core Principles
 
 - **Agent Team First**: Prefer Agent team/subagents for parallelizable or non-trivial tasks.

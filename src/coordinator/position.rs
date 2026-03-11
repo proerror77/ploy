@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use crate::platform::Domain;
 use crate::domain::Side;
+use crate::platform::Domain;
 
 mod transitions;
 
@@ -555,6 +555,56 @@ mod tests {
         let stats2 = agg.agent_stats("agent2").await;
         assert_eq!(stats2.exposure, Decimal::from(120));
         assert_eq!(stats2.position_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_close_position_no_deadlock_with_reduce() {
+        use std::sync::Arc;
+        use tokio::time::{timeout, Duration};
+
+        let agg = Arc::new(PositionAggregator::new());
+
+        // Open two positions so close and reduce target different ones
+        let pos_close = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "t1",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+        let pos_reduce = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "eth-15m",
+                "t2",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.40").unwrap(),
+            )
+            .await;
+
+        let agg1 = Arc::clone(&agg);
+        let agg2 = Arc::clone(&agg);
+
+        // Run close_position and reduce_position concurrently.
+        // If lock ordering were inconsistent this could deadlock.
+        let result = timeout(Duration::from_secs(5), async move {
+            let (r1, r2) = tokio::join!(
+                agg1.close_position(&pos_close, Decimal::from_str_exact("0.55").unwrap()),
+                agg2.reduce_position(&pos_reduce, 50, Decimal::from_str_exact("0.45").unwrap()),
+            );
+            (r1, r2)
+        })
+        .await;
+
+        let (close_pnl, reduce_pnl) = result.expect("deadlock: close + reduce timed out");
+        assert_eq!(close_pnl, Some(Decimal::from(5))); // (0.55-0.50)*100
+        assert_eq!(reduce_pnl, Some(Decimal::from_str_exact("2.5").unwrap())); // (0.45-0.40)*50
     }
 
     #[tokio::test]

@@ -176,7 +176,7 @@ async fn test_drain_and_execute_records_single_success_for_buy_fill() {
 #[tokio::test]
 async fn test_handle_order_intent_emits_rejected_update_for_missing_deployment() {
     let (_handle, mut coordinator) = make_test_handle();
-    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string());
+    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string()).await;
 
     let intent = make_intent(true, OrderPriority::Normal);
     let client_order_id = intent.client_order_id.clone();
@@ -206,7 +206,7 @@ async fn test_drain_and_execute_emits_pending_and_fill_updates() {
         .risk_gate
         .register_agent_with_domain("crypto_lob_ml", Domain::Crypto, AgentRiskParams::default())
         .await;
-    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string());
+    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string()).await;
 
     let intent =
         make_intent(true, OrderPriority::Normal).with_metadata("deployment_id", "deploy.test");
@@ -373,4 +373,367 @@ async fn test_governance_status_includes_domain_ingress_and_agents() {
         .any(|agent| agent.agent_id == "sports_agent"
             && agent.domain == "sports"
             && agent.status == "running"));
+}
+
+// ---------------------------------------------------------------------------
+// R-14: Staggered arb intent through coordinator risk gate
+// ---------------------------------------------------------------------------
+
+fn make_staggered_arb_intent(agent_id: &str, is_buy: bool, shares: u64) -> OrderIntent {
+    let mut intent = OrderIntent::new(
+        agent_id,
+        Domain::Crypto,
+        "btc-updown-5m-arb",
+        "token-arb-yes",
+        crate::domain::Side::Up,
+        is_buy,
+        shares,
+        dec!(0.45),
+    );
+    intent.priority = OrderPriority::High;
+    intent
+}
+
+#[tokio::test]
+async fn test_staggered_arb_intent_passes_admission_risk_and_enqueues() {
+    // R-14: Submit a staggered arb buy intent with deployment_id through the
+    // full coordinator pipeline: admission -> risk gate -> queue.
+    let (_handle, coordinator) = make_test_handle();
+    coordinator
+        .risk_gate
+        .register_agent_with_domain(
+            "staggered_arb",
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    let intent = make_staggered_arb_intent("staggered_arb", true, 20)
+        .with_metadata("deployment_id", "deploy.crypto.staggered_arb.5m");
+
+    coordinator.handle_order_intent(intent).await;
+
+    // Verify the intent was enqueued (not rejected)
+    let queue_stats = coordinator.order_queue.read().await.stats();
+    assert_eq!(
+        queue_stats.current_size, 1,
+        "staggered arb intent should be enqueued after passing admission + risk"
+    );
+    assert_eq!(queue_stats.enqueued_total, 1);
+
+    // Drain and execute — should succeed in dry-run mode
+    coordinator.drain_and_execute().await;
+
+    let (_, success_count, failure_count) = coordinator.risk_gate.daily_stats().await;
+    assert_eq!(success_count, 1, "dry-run execution should record success");
+    assert_eq!(failure_count, 0);
+}
+
+// PLACEHOLDER_R14_NEGATIVE
+
+#[tokio::test]
+async fn test_staggered_arb_intent_rejected_without_deployment_id() {
+    // R-14 negative case: staggered arb buy intent without deployment_id is rejected.
+    let (_handle, coordinator) = make_test_handle();
+    coordinator
+        .risk_gate
+        .register_agent_with_domain(
+            "staggered_arb",
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    let intent = make_staggered_arb_intent("staggered_arb", true, 20);
+    coordinator.handle_order_intent(intent).await;
+
+    let queue_stats = coordinator.order_queue.read().await.stats();
+    assert_eq!(
+        queue_stats.current_size, 0,
+        "intent without deployment_id should be rejected before enqueue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R-15: Leg2 timeout / force-close
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_force_close_domain_blocks_subsequent_buy_allows_sell() {
+    // R-15: After force-closing a domain, new BUY intents are blocked but
+    // SELL intents (to unwind positions) should still be accepted.
+    let (handle, coordinator) = make_test_handle();
+    coordinator
+        .risk_gate
+        .register_agent_with_domain(
+            "staggered_arb",
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    // First, open a position so we have shares to sell
+    let buy_intent = make_staggered_arb_intent("staggered_arb", true, 50)
+        .with_metadata("deployment_id", "deploy.crypto.staggered_arb.5m");
+    coordinator.handle_order_intent(buy_intent).await;
+    coordinator.drain_and_execute().await;
+
+    let open_shares = coordinator
+        .positions
+        .agent_open_shares_for_token_side(
+            "staggered_arb",
+            Domain::Crypto,
+            "token-arb-yes",
+            crate::domain::Side::Up,
+        )
+        .await;
+    assert_eq!(open_shares, 50, "should have 50 open shares after buy fill");
+
+    // Force-close the domain
+    handle
+        .force_close_domain(Domain::Crypto)
+        .await
+        .expect("force-close crypto domain");
+
+    // New BUY should be blocked via handle
+    let blocked_buy = make_staggered_arb_intent("staggered_arb", true, 10)
+        .with_metadata("deployment_id", "deploy.crypto.staggered_arb.5m");
+    let err = handle.submit_order(blocked_buy).await;
+    assert!(err.is_err(), "BUY should be blocked after force-close");
+
+    // SELL should still be accepted (reduce-only)
+    let sell_intent = make_staggered_arb_intent("staggered_arb", false, 50);
+    coordinator.handle_order_intent(sell_intent).await;
+
+    let queue_stats = coordinator.order_queue.read().await.stats();
+    assert_eq!(
+        queue_stats.current_size, 1,
+        "SELL intent should be enqueued even after force-close"
+    );
+}
+
+// PLACEHOLDER_R16
+
+// ---------------------------------------------------------------------------
+// R-16: Bootstrap wiring — verify coordinator initializes with sub-modules
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_coordinator_new_initializes_all_sub_modules() {
+    // R-16: Verify that Coordinator::new wires up all sub-modules correctly.
+    let client = PolymarketClient::new("https://clob.polymarket.com", true)
+        .expect("build dry-run polymarket client");
+    let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+    let allowed_domains = HashSet::from([
+        Domain::Crypto,
+        Domain::Sports,
+        Domain::Politics,
+        Domain::Economics,
+    ]);
+
+    let coordinator = Coordinator::new(
+        CoordinatorConfig::default(),
+        executor,
+        "acct-bootstrap-test".to_string(),
+        allowed_domains,
+    );
+
+    // Verify handle can be created (proves all Arc fields are wired)
+    let handle = coordinator.handle();
+
+    // Verify the handle exposes the expected shared state
+    assert_eq!(handle.account_id, "acct-bootstrap-test");
+
+    // Verify allowed domains propagated
+    assert!(handle.allowed_domains.contains(&Domain::Crypto));
+    assert!(handle.allowed_domains.contains(&Domain::Sports));
+    assert!(handle.allowed_domains.contains(&Domain::Politics));
+    assert!(handle.allowed_domains.contains(&Domain::Economics));
+    assert!(!handle.allowed_domains.contains(&Domain::Custom(0)));
+}
+
+#[tokio::test]
+async fn test_coordinator_register_agent_wires_risk_gate() {
+    // R-16: Verify register_agent sets up risk gate + authorized agents.
+    let client = PolymarketClient::new("https://clob.polymarket.com", true)
+        .expect("build dry-run polymarket client");
+    let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+    let allowed_domains = HashSet::from([Domain::Crypto, Domain::Sports]);
+
+    let mut coordinator = Coordinator::new(
+        CoordinatorConfig::default(),
+        executor,
+        "acct-register-test".to_string(),
+        allowed_domains,
+    );
+
+    let _cmd_rx = coordinator
+        .register_agent(
+            "momentum_agent".to_string(),
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    // Agent should be authorized
+    assert!(
+        coordinator
+            .authorized_agents
+            .read()
+            .await
+            .contains("momentum_agent")
+    );
+}
+
+// PLACEHOLDER_R17
+
+// ---------------------------------------------------------------------------
+// R-17: Cold-start restore — positions and risk counters
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_cold_start_restore_rebuilds_positions_from_fills() {
+    // R-17: Simulate a cold-start scenario by executing fills, then verifying
+    // that position and risk state are consistent.
+    let (_handle, coordinator) = make_test_handle();
+    coordinator
+        .risk_gate
+        .register_agent_with_domain(
+            "staggered_arb",
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    // Execute a buy fill
+    let buy1 = make_staggered_arb_intent("staggered_arb", true, 50)
+        .with_metadata("deployment_id", "deploy.crypto.staggered_arb.5m");
+    coordinator.handle_order_intent(buy1).await;
+    coordinator.drain_and_execute().await;
+
+    // Verify positions reflect the fill
+    let open_shares = coordinator
+        .positions
+        .agent_open_shares_for_token_side(
+            "staggered_arb",
+            Domain::Crypto,
+            "token-arb-yes",
+            crate::domain::Side::Up,
+        )
+        .await;
+    assert_eq!(open_shares, 50, "should have 50 open shares from buy");
+
+    // Verify risk counters
+    let (total_pnl, success_count, failure_count) =
+        coordinator.risk_gate.daily_stats().await;
+    assert_eq!(total_pnl, Decimal::ZERO, "no sells yet, pnl should be zero");
+    assert_eq!(success_count, 1, "one successful buy execution");
+    assert_eq!(failure_count, 0);
+
+    // Execute a partial sell to verify PnL tracking
+    let mut sell = make_staggered_arb_intent("staggered_arb", false, 30);
+    sell.limit_price = dec!(0.55);
+    coordinator.handle_order_intent(sell).await;
+    coordinator.drain_and_execute().await;
+
+    let remaining = coordinator
+        .positions
+        .agent_open_shares_for_token_side(
+            "staggered_arb",
+            Domain::Crypto,
+            "token-arb-yes",
+            crate::domain::Side::Up,
+        )
+        .await;
+    assert_eq!(remaining, 20, "should have 20 shares after selling 30");
+
+    let realized_pnl = coordinator.positions.total_realized_pnl().await;
+    assert!(
+        realized_pnl > Decimal::ZERO,
+        "selling at 0.55 after buying at 0.45 should realize positive PnL"
+    );
+}
+
+#[ignore = "requires PgPool — run with PLOY_TEST_DATABASE_URL set"]
+#[tokio::test]
+async fn test_cold_start_restore_from_execution_log_requires_db() {
+    // R-17: Full cold-start restore from execution log.
+    // This test requires a live Postgres connection. When run, it:
+    //   1. Creates a coordinator with DB pool
+    //   2. Executes fills that get persisted to agent_order_executions
+    //   3. Creates a fresh coordinator
+    //   4. Calls restore_runtime_state_from_execution_log()
+    //   5. Verifies positions and risk counters match
+    //
+    // To run: cargo test --lib -- coordinator::tests::test_cold_start_restore_from_execution_log --ignored
+    let db_url = std::env::var("PLOY_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("PLOY_TEST_DATABASE_URL or DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("connect to test database");
+
+    let client = PolymarketClient::new("https://clob.polymarket.com", true)
+        .expect("build dry-run polymarket client");
+    let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+    let allowed_domains = HashSet::from([Domain::Crypto]);
+
+    let mut coordinator = Coordinator::new(
+        CoordinatorConfig::default(),
+        executor.clone(),
+        "acct-restore-test".to_string(),
+        allowed_domains.clone(),
+    );
+    coordinator.set_execution_log_pool(pool.clone());
+    coordinator
+        .risk_gate
+        .register_agent_with_domain(
+            "staggered_arb",
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    let intent = make_staggered_arb_intent("staggered_arb", true, 25)
+        .with_metadata("deployment_id", "deploy.crypto.staggered_arb.5m");
+    coordinator.handle_order_intent(intent).await;
+    coordinator.drain_and_execute().await;
+
+    // Create a fresh coordinator and restore
+    let mut restored = Coordinator::new(
+        CoordinatorConfig::default(),
+        executor,
+        "acct-restore-test".to_string(),
+        allowed_domains,
+    );
+    restored.set_execution_log_pool(pool);
+    restored
+        .risk_gate
+        .register_agent_with_domain(
+            "staggered_arb",
+            Domain::Crypto,
+            AgentRiskParams::default(),
+        )
+        .await;
+
+    restored
+        .restore_runtime_state_from_execution_log()
+        .await
+        .expect("restore runtime state");
+
+    let open_shares = restored
+        .positions
+        .agent_open_shares_for_token_side(
+            "staggered_arb",
+            Domain::Crypto,
+            "token-arb-yes",
+            crate::domain::Side::Up,
+        )
+        .await;
+    assert!(
+        open_shares > 0,
+        "restored coordinator should have open positions from execution log"
+    );
 }

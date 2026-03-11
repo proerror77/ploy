@@ -66,7 +66,7 @@ pub struct CoordinatorHandle {
     governance: Arc<GovernanceController>,
     admission: Arc<AdmissionController>,
     allowed_domains: Arc<HashSet<Domain>>,
-    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
+    authorized_agents: Arc<RwLock<HashSet<String>>>,
     governance_store_pool: Option<PgPool>,
 }
 
@@ -77,7 +77,7 @@ pub struct Coordinator {
     config: CoordinatorConfig,
     account_id: String,
     allowed_domains: Arc<HashSet<Domain>>,
-    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
+    authorized_agents: Arc<RwLock<HashSet<String>>>,
     admission: Arc<AdmissionController>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
@@ -90,7 +90,7 @@ pub struct Coordinator {
     governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
     order_update_sinks:
-        Arc<std::sync::RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
+        Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -102,6 +102,26 @@ pub struct Coordinator {
 
     // Per-agent command channels
     agent_commands: HashMap<String, AgentCommandChannel>,
+}
+
+/// Extracted context for the intent-processing worker task.
+///
+/// Contains only the Arc-wrapped fields that `handle_order_intent` needs,
+/// allowing it to run in a dedicated tokio task without blocking the
+/// coordinator's main `select!` loop.
+pub(super) struct IntentWorkerCtx {
+    pub(super) account_id: String,
+    pub(super) allowed_domains: Arc<HashSet<Domain>>,
+    pub(super) admission: Arc<AdmissionController>,
+    pub(super) risk_gate: Arc<RiskGate>,
+    pub(super) order_queue: Arc<RwLock<OrderQueue>>,
+    pub(super) capital_policy: Arc<CapitalPolicy>,
+    pub(super) positions: Arc<PositionAggregator>,
+    pub(super) executor: Arc<OrderExecutor>,
+    pub(super) journal: ExecutionJournal,
+    pub(super) governance: Arc<GovernanceController>,
+    pub(super) order_update_sinks:
+        Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 }
 
 impl Coordinator {
@@ -116,7 +136,7 @@ impl Coordinator {
         let (control_tx, control_rx) = mpsc::channel(32);
 
         let allowed_domains = Arc::new(allowed_domains);
-        let authorized_agents = Arc::new(std::sync::RwLock::new(HashSet::new()));
+        let authorized_agents = Arc::new(RwLock::new(HashSet::new()));
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
         let admission = Arc::new(AdmissionController::new(&config));
@@ -125,7 +145,7 @@ impl Coordinator {
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
         let governance = Arc::new(GovernanceController::new(&config));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
-        let order_update_sinks = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let order_update_sinks = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
         } else {
@@ -190,8 +210,30 @@ impl Coordinator {
         self.positions.clone()
     }
 
+    /// Build an `IntentWorkerCtx` from the coordinator's shared fields.
+    fn intent_worker_ctx(&self) -> IntentWorkerCtx {
+        IntentWorkerCtx {
+            account_id: self.account_id.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            admission: self.admission.clone(),
+            risk_gate: self.risk_gate.clone(),
+            order_queue: self.order_queue.clone(),
+            capital_policy: self.capital_policy.clone(),
+            positions: self.positions.clone(),
+            executor: self.executor.clone(),
+            journal: self.journal.clone(),
+            governance: self.governance.clone(),
+            order_update_sinks: self.order_update_sinks.clone(),
+        }
+    }
+
+    /// Convenience delegation for tests and direct callers.
+    pub(super) async fn handle_order_intent(&self, intent: OrderIntent) {
+        self.intent_worker_ctx().handle_order_intent(intent).await;
+    }
+
     /// Register an agent and return its command receiver
-    pub fn register_agent(
+    pub async fn register_agent(
         &mut self,
         agent_id: String,
         domain: Domain,
@@ -200,18 +242,12 @@ impl Coordinator {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.agent_commands
             .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
-        if let Ok(mut authorized) = self.authorized_agents.write() {
-            authorized.insert(agent_id.clone());
-        }
+        self.authorized_agents.write().await.insert(agent_id.clone());
 
-        // Register with risk gate (fire-and-forget via spawn since we're not async here)
-        let risk_gate = self.risk_gate.clone();
-        let id = agent_id.clone();
-        tokio::spawn(async move {
-            risk_gate
-                .register_agent_with_domain(&id, domain, risk_params)
-                .await;
-        });
+        // Register with risk gate (now safe since register_agent is async)
+        self.risk_gate
+            .register_agent_with_domain(&agent_id, domain, risk_params)
+            .await;
 
         info!(agent_id, "agent registered with coordinator");
         cmd_rx
@@ -234,6 +270,38 @@ impl Coordinator {
         drain_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Spawn a dedicated worker for order intent processing so that
+        // handle_order_intent (which does risk checks, capital reservation,
+        // and queue enqueue) does not block the select! loop.  A bounded
+        // channel preserves sequential intent ordering — important for
+        // consistent capital reservation and duplicate-intent detection.
+        let (intent_worker_tx, mut intent_worker_rx) =
+            mpsc::channel::<OrderIntent>(64);
+
+        // Move the fields the worker needs into an Arc-friendly bundle.
+        // All accessed fields are already Arc-wrapped or Clone, so we
+        // just clone the references the worker will use.
+        let worker_self = IntentWorkerCtx {
+            account_id: self.account_id.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            admission: self.admission.clone(),
+            risk_gate: self.risk_gate.clone(),
+            order_queue: self.order_queue.clone(),
+            capital_policy: self.capital_policy.clone(),
+            positions: self.positions.clone(),
+            executor: self.executor.clone(),
+            journal: self.journal.clone(),
+            governance: self.governance.clone(),
+            order_update_sinks: self.order_update_sinks.clone(),
+        };
+
+        let intent_worker = tokio::spawn(async move {
+            while let Some(intent) = intent_worker_rx.recv().await {
+                worker_self.handle_order_intent(intent).await;
+            }
+            debug!("intent worker: channel closed, exiting");
+        });
+
         loop {
             tokio::select! {
                 // --- Control commands (pause/resume/force-close) ---
@@ -243,7 +311,9 @@ impl Coordinator {
 
                 // --- Incoming order intents ---
                 Some(intent) = self.order_rx.recv() => {
-                    self.handle_order_intent(intent).await;
+                    if let Err(e) = intent_worker_tx.send(intent).await {
+                        warn!("intent worker channel closed, dropping intent: {}", e);
+                    }
                 }
 
                 // --- Agent state updates (heartbeats) ---
@@ -264,6 +334,10 @@ impl Coordinator {
                 // --- Shutdown signal ---
                 _ = shutdown_rx.recv() => {
                     info!("coordinator: shutdown signal received");
+                    // Drop the sender so the intent worker drains remaining
+                    // intents and exits cleanly.
+                    drop(intent_worker_tx);
+                    let _ = intent_worker.await;
                     self.shutdown().await;
                     break;
                 }

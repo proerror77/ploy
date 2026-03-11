@@ -207,6 +207,24 @@ pub(crate) async fn ensure_coordinator_governance_policy_history_table(
     Ok(())
 }
 
+pub(crate) async fn ensure_coordinator_ingress_state_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS coordinator_ingress_state (
+            account_id TEXT PRIMARY KEY,
+            ingress_mode TEXT NOT NULL DEFAULT 'running',
+            domain_ingress_modes JSONB NOT NULL DEFAULT '{}'::jsonb,
+            paused_agent_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub(crate) async fn ensure_risk_runtime_state_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"

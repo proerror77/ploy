@@ -6,8 +6,8 @@ use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnaps
 use crate::platform::OrderIntent;
 
 use super::{
-    MarketCapitalAllocator, intent_deployment_scope, intent_market_identity,
-    sell_release_reference_price,
+    intent_deployment_scope, intent_market_identity, sell_release_reference_price,
+    MarketCapitalAllocator,
 };
 
 #[derive(Debug, Clone)]
@@ -238,6 +238,12 @@ impl MarketCapitalAllocator {
             return;
         }
 
+        if filled_shares == 0 || fill_price <= Decimal::ZERO {
+            // No fill yet — keep the reservation in pending so exposure is not
+            // underestimated between submission and fill.
+            return;
+        }
+
         let reservation = self
             .pending_by_intent
             .remove(&intent.intent_id)
@@ -250,10 +256,6 @@ impl MarketCapitalAllocator {
             &reservation.dims.position_key,
             reservation.requested_notional,
         );
-
-        if filled_shares == 0 || fill_price <= Decimal::ZERO {
-            return;
-        }
 
         let actual_notional = fill_price * Decimal::from(filled_shares);
         self.open.add(&reservation.dims, actual_notional);

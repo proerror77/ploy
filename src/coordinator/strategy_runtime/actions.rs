@@ -1,12 +1,14 @@
 use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 use tracing::{debug, info, warn};
 
 use crate::adapters::PostgresStore;
@@ -52,6 +54,7 @@ pub(super) async fn handle_strategy_actions_runtime(
         .as_ref()
         .map(|pool| Arc::new(PostgresStore::from_pool(pool.clone())) as Arc<dyn RuntimeOrderStore>);
     let split_arb_managed = is_managed_staggered_arb_label(strategy_label);
+    let mut active_poll_tasks: HashMap<String, AbortHandle> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -161,6 +164,7 @@ pub(super) async fn handle_strategy_actions_runtime(
                     observability_pool.as_ref(),
                     observability_account_id.as_str(),
                     split_arb_managed,
+                    &mut active_poll_tasks,
                     update,
                 )
                 .await;
@@ -282,6 +286,7 @@ async fn handle_runtime_order_update(
     observability_pool: Option<&PgPool>,
     observability_account_id: &str,
     split_arb_managed: bool,
+    active_poll_tasks: &mut HashMap<String, AbortHandle>,
     update: OrderUpdate,
 ) {
     if matches!(update.status, OrderStatus::Filled) {
@@ -341,7 +346,14 @@ async fn handle_runtime_order_update(
             OrderStatus::Submitted | OrderStatus::PartiallyFilled
         )
     {
-        spawn_split_arb_poll_task(
+        let order_key = update.order_id.clone();
+
+        // Abort any existing poll task for this exchange order before spawning a new one.
+        if let Some(prev) = active_poll_tasks.remove(&order_key) {
+            prev.abort();
+        }
+
+        let abort_handle = spawn_split_arb_poll_task(
             strategy_label.to_string(),
             strategy_id.to_string(),
             manager.clone(),
@@ -352,6 +364,10 @@ async fn handle_runtime_order_update(
             observability_account_id.to_string(),
             update,
         );
+        active_poll_tasks.insert(order_key, abort_handle);
+
+        // Prune completed poll tasks to avoid unbounded map growth.
+        active_poll_tasks.retain(|_, handle| !handle.is_finished());
     }
 }
 
@@ -572,7 +588,7 @@ fn spawn_split_arb_poll_task(
     observability_pool: Option<PgPool>,
     observability_account_id: String,
     update: OrderUpdate,
-) {
+) -> AbortHandle {
     let client_order_id = update
         .client_order_id
         .clone()
@@ -585,7 +601,7 @@ fn spawn_split_arb_poll_task(
     let poll_max_ms =
         env_u64("PLOY_MANAGED_STRATEGY_ORDER_POLL_MAX_MS", 600_000).max(poll_interval_ms);
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let started_at = std::time::Instant::now();
         while started_at.elapsed().as_millis() < poll_max_ms as u128 {
             tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
@@ -674,4 +690,5 @@ fn spawn_split_arb_poll_task(
             }
         }
     });
+    handle.abort_handle()
 }

@@ -1,8 +1,107 @@
 use super::*;
 use crate::domain::OrderStatus;
 
-impl Coordinator {
-    /// Risk-check an incoming order intent and enqueue if passed
+impl IntentWorkerCtx {
+    /// Fire-and-forget: persist a risk decision without blocking the ingress hot path.
+    fn spawn_persist_risk_decision(
+        &self,
+        intent: &OrderIntent,
+        decision: &'static str,
+        block_reason: Option<String>,
+        adjusted: Option<(u64, String)>,
+    ) {
+        let journal = self.journal.clone();
+        let intent = intent.clone();
+        tokio::spawn(async move {
+            journal
+                .persist_risk_decision(&intent, decision, block_reason, adjusted)
+                .await;
+        });
+    }
+
+    fn is_domain_allowed(&self, domain: Domain) -> bool {
+        self.allowed_domains.contains(&domain)
+    }
+
+    async fn emit_rejected_intent_update(
+        &self,
+        intent: &OrderIntent,
+        status: OrderStatus,
+        error: impl Into<String>,
+    ) {
+        self.emit_intent_update(intent, status, None, 0, None, Some(error.into()))
+            .await;
+    }
+
+    async fn emit_pending_intent_update(&self, intent: &OrderIntent) {
+        self.emit_intent_update(intent, OrderStatus::Pending, None, 0, None, None)
+            .await;
+    }
+
+    async fn emit_intent_update(
+        &self,
+        intent: &OrderIntent,
+        status: OrderStatus,
+        exchange_order_id: Option<&str>,
+        filled_qty: u64,
+        avg_fill_price: Option<Decimal>,
+        error: Option<String>,
+    ) {
+        let client_order_id = intent.client_order_id.trim();
+        if client_order_id.is_empty() {
+            return;
+        }
+        let update = crate::strategy::OrderUpdate {
+            order_id: exchange_order_id
+                .unwrap_or(client_order_id)
+                .to_string(),
+            client_order_id: Some(client_order_id.to_string()),
+            status,
+            filled_qty,
+            avg_fill_price,
+            timestamp: Utc::now(),
+            error,
+        };
+        let tx = {
+            let sinks = self.order_update_sinks.read().await;
+            match sinks.get(&intent.agent_id).cloned() {
+                Some(tx) => tx,
+                None => return,
+            }
+        };
+        if tx.send(update).await.is_err() {
+            warn!(agent_id = %intent.agent_id, "strategy order update channel closed");
+        }
+    }
+
+    async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {
+        let policy = self.governance.current_policy().await;
+        let current_notional = self.current_account_notional(intent.domain).await;
+        governance_block_reason(&policy, intent, current_notional)
+    }
+
+    async fn current_account_notional(&self, current_domain: Domain) -> Decimal {
+        let platform_exposure = self.risk_gate.total_exposure().await;
+        let (allocator_open, allocator_pending) = self.capital_policy.allocator_totals().await;
+        let other_pending_buy_notional = self
+            .order_queue
+            .read()
+            .await
+            .pending_buy_notional_excluding_domains(&[current_domain]);
+
+        let open_notional = platform_exposure.max(allocator_open);
+        open_notional + allocator_pending + other_pending_buy_notional
+    }
+
+    async fn reserve_domain_capital(&self, intent: &OrderIntent) -> Option<String> {
+        self.capital_policy.reserve_buy(intent).await
+    }
+
+    async fn release_domain_reservation(&self, intent_id: Uuid) {
+        self.capital_policy.release_buy_reservation(intent_id).await;
+    }
+
+    /// Risk-check an incoming order intent and enqueue if passed.
     pub(super) async fn handle_order_intent(&self, intent: OrderIntent) {
         let mut intent = intent;
         let agent_id = intent.agent_id.clone();
@@ -11,9 +110,7 @@ impl Coordinator {
 
         if !self.is_domain_allowed(intent.domain) {
             let reason = format!("domain {} is not enabled for this runtime", intent.domain);
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -24,9 +121,7 @@ impl Coordinator {
         }
 
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -56,9 +151,7 @@ impl Coordinator {
             if let Some(reason) =
                 sell_reduce_only_violation_reason(&intent, tracked_open_shares, pending_sell_shares)
             {
-                self.journal
-                    .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                    .await;
+                self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
                 self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                     .await;
                 warn!(
@@ -68,16 +161,13 @@ impl Coordinator {
                 return;
             }
         }
-
         let (ingress_mode, domain_mode) = self.governance.ingress_modes(intent.domain).await;
         if intent.is_buy && ingress_mode != IngressMode::Running {
             let reason = format!(
                 "Coordinator ingress is {:?}; blocking BUY intent while paused/halted",
                 ingress_mode
             );
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -92,9 +182,7 @@ impl Coordinator {
                 "Domain {:?} ingress is {:?}; blocking BUY intent while paused/halted",
                 intent.domain, domain_mode
             );
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -106,9 +194,7 @@ impl Coordinator {
 
         if intent.is_buy && self.governance.is_agent_paused(&intent.agent_id).await {
             let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -119,9 +205,7 @@ impl Coordinator {
         }
 
         if let Some(reason) = self.check_governance_policy(&intent).await {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -141,9 +225,7 @@ impl Coordinator {
             )
             .await
         {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -159,9 +241,7 @@ impl Coordinator {
         }
 
         if let Some(reason) = self.admission.check_duplicate_intent(&intent).await {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -176,9 +256,7 @@ impl Coordinator {
             .apply_kelly_sizing(&self.capital_policy, &mut intent)
             .await
         {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -192,9 +270,7 @@ impl Coordinator {
             .admission
             .apply_min_order_constraints(&mut intent, strategy_max_shares)
         {
-            self.journal
-                .persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
-                .await;
+            self.spawn_persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None);
             self.emit_rejected_intent_update(&intent, OrderStatus::Rejected, reason.clone())
                 .await;
             warn!(
@@ -210,14 +286,12 @@ impl Coordinator {
             match self.risk_gate.check_order(&evaluated).await {
                 RiskCheckResult::Passed => {
                     if let Some(reason) = self.reserve_domain_capital(&evaluated).await {
-                        self.journal
-                            .persist_risk_decision(
-                                &evaluated,
-                                "BLOCKED",
-                                Some(reason.clone()),
-                                adjusted.clone(),
-                            )
-                            .await;
+                        self.spawn_persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.clone()),
+                            adjusted.clone(),
+                        );
                         self.emit_rejected_intent_update(
                             &evaluated,
                             OrderStatus::Rejected,
@@ -231,9 +305,7 @@ impl Coordinator {
                         return;
                     }
 
-                    self.journal
-                        .persist_risk_decision(&evaluated, "PASSED", None, adjusted.clone())
-                        .await;
+                    self.spawn_persist_risk_decision(&evaluated, "PASSED", None, adjusted.clone());
                     let enqueue_result = {
                         let mut queue = self.order_queue.write().await;
                         queue.enqueue(evaluated.clone())
@@ -257,14 +329,12 @@ impl Coordinator {
                     return;
                 }
                 RiskCheckResult::Blocked(reason) => {
-                    self.journal
-                        .persist_risk_decision(
-                            &evaluated,
-                            "BLOCKED",
-                            Some(reason.to_string()),
-                            adjusted.clone(),
-                        )
-                        .await;
+                    self.spawn_persist_risk_decision(
+                        &evaluated,
+                        "BLOCKED",
+                        Some(reason.to_string()),
+                        adjusted.clone(),
+                    );
                     self.emit_rejected_intent_update(
                         &evaluated,
                         OrderStatus::Rejected,
@@ -282,14 +352,12 @@ impl Coordinator {
                     if suggestion.max_shares == 0 {
                         let reason =
                             format!("risk-gate suggested max_shares=0: {}", suggestion.reason);
-                        self.journal
-                            .persist_risk_decision(
-                                &evaluated,
-                                "BLOCKED",
-                                Some(reason.clone()),
-                                adjusted.clone(),
-                            )
-                            .await;
+                        self.spawn_persist_risk_decision(
+                            &evaluated,
+                            "BLOCKED",
+                            Some(reason.clone()),
+                            adjusted.clone(),
+                        );
                         self.emit_rejected_intent_update(
                             &evaluated,
                             OrderStatus::Rejected,
@@ -319,43 +387,10 @@ impl Coordinator {
         }
 
         let reason = "risk-gate adjustment loop exceeded max attempts".to_string();
-        self.journal
-            .persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted)
-            .await;
+        self.spawn_persist_risk_decision(&evaluated, "BLOCKED", Some(reason.clone()), adjusted);
         self.emit_rejected_intent_update(&evaluated, OrderStatus::Rejected, reason.clone())
             .await;
         warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
     }
-
-    pub(super) async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {
-        let policy = self.governance.current_policy().await;
-        let current_notional = self.current_account_notional().await;
-        governance_block_reason(&policy, intent, current_notional)
-    }
-
-    pub(super) async fn current_account_notional(&self) -> Decimal {
-        let platform_exposure = self.risk_gate.total_exposure().await;
-        let (allocator_open, allocator_pending) = self.capital_policy.allocator_totals().await;
-        let other_pending_buy_notional = self
-            .order_queue
-            .read()
-            .await
-            .pending_buy_notional_excluding_domains(&[
-                Domain::Crypto,
-                Domain::Sports,
-                Domain::Politics,
-                Domain::Economics,
-            ]);
-
-        let open_notional = platform_exposure.max(allocator_open);
-        open_notional + allocator_pending + other_pending_buy_notional
-    }
-
-    pub(super) async fn reserve_domain_capital(&self, intent: &OrderIntent) -> Option<String> {
-        self.capital_policy.reserve_buy(intent).await
-    }
-
-    pub(super) async fn release_domain_reservation(&self, intent_id: Uuid) {
-        self.capital_policy.release_buy_reservation(intent_id).await;
-    }
 }
+

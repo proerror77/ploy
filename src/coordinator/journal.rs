@@ -1,12 +1,30 @@
+//! Execution Journal — persistent audit trail for the coordinator.
+//!
+//! Records every order execution, risk gate decision, signal, exit reason,
+//! and execution-quality analysis to Postgres. All writes are fire-and-forget
+//! (log-on-error) so they never block the hot path.
+//!
+//! Key tables written:
+//!   - `agent_order_executions` — full execution lifecycle per intent
+//!   - `risk_gate_decisions` — allow/block/adjust verdicts
+//!   - `signal_history` — strategy signals that generated intents
+//!   - `exit_reasons` — why a position was closed
+//!   - `execution_analysis` — slippage, latency, fill quality
+//!   - `strategy_evaluations` — live evaluation evidence rows
+//!   - `risk_runtime_state` — periodic risk state snapshots
+//!
+//! Cold-start restore is handled by the `restore` sub-module, which replays
+//! recent fills to rebuild position and risk counters.
+
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
 use sqlx::PgPool;
 
+use crate::coordinator::DrawdownSnapshot;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::Result;
-use crate::coordinator::DrawdownSnapshot;
 use crate::platform::{Domain, OrderIntent};
 use crate::strategy::executor::ExecutionResult;
 

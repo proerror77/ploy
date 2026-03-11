@@ -1,3 +1,17 @@
+//! Governance Controller — ingress mode management and policy enforcement.
+//!
+//! Controls whether the coordinator accepts new trade intents at three levels:
+//!   - **Global** ingress mode: Running / Paused / Halted
+//!   - **Per-domain** ingress mode: override for individual domains
+//!   - **Per-agent** pause: selectively pause specific agent IDs
+//!
+//! A `GovernancePolicy` adds notional caps (`max_intent_notional_usd`,
+//! `max_total_notional_usd`) and domain block-lists that are checked on every
+//! buy intent before it reaches the risk gate.
+//!
+//! All ingress state and policy changes are persisted to Postgres via
+//! fire-and-forget writes so they survive restarts.
+
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -172,6 +186,8 @@ pub(super) struct GovernanceController {
     domain_ingress_mode: RwLock<HashMap<Domain, IngressMode>>,
     governance_policy: RwLock<GovernancePolicy>,
     paused_agent_ids: RwLock<HashSet<String>>,
+    persist_pool: RwLock<Option<PgPool>>,
+    account_id: RwLock<String>,
 }
 
 impl GovernanceController {
@@ -181,7 +197,15 @@ impl GovernanceController {
             domain_ingress_mode: RwLock::new(HashMap::new()),
             governance_policy: RwLock::new(GovernancePolicy::from_config(config)),
             paused_agent_ids: RwLock::new(HashSet::new()),
+            persist_pool: RwLock::new(None),
+            account_id: RwLock::new(String::new()),
         }
+    }
+
+    /// Set the persistence pool and account ID for fire-and-forget ingress state writes.
+    pub(super) async fn set_ingress_persist_pool(&self, pool: PgPool, account_id: String) {
+        *self.persist_pool.write().await = Some(pool);
+        *self.account_id.write().await = account_id;
     }
 
     pub(super) async fn ingress_modes(&self, domain: Domain) -> (IngressMode, IngressMode) {
@@ -216,6 +240,7 @@ impl GovernanceController {
     pub(super) async fn set_global_mode(&self, mode: IngressMode) {
         *self.ingress_mode.write().await = mode;
         self.domain_ingress_mode.write().await.clear();
+        self.fire_persist_ingress().await;
     }
 
     pub(super) async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
@@ -228,6 +253,8 @@ impl GovernanceController {
                 domain_modes.insert(domain, mode);
             }
         }
+        drop(domain_modes);
+        self.fire_persist_ingress().await;
     }
 
     pub(super) async fn pause_agent(&self, agent_id: &str) {
@@ -235,10 +262,12 @@ impl GovernanceController {
             .write()
             .await
             .insert(agent_id.to_string());
+        self.fire_persist_ingress().await;
     }
 
     pub(super) async fn resume_agent(&self, agent_id: &str) {
         self.paused_agent_ids.write().await.remove(agent_id);
+        self.fire_persist_ingress().await;
     }
 
     pub(super) async fn is_agent_paused(&self, agent_id: &str) -> bool {
@@ -257,6 +286,27 @@ impl GovernanceController {
         let snapshot = next.to_snapshot();
         *self.governance_policy.write().await = next;
         snapshot
+    }
+
+    /// Snapshot current ingress state and spawn a fire-and-forget DB persist.
+    async fn fire_persist_ingress(&self) {
+        let pool = self.persist_pool.read().await.clone();
+        let Some(pool) = pool else {
+            return;
+        };
+        let account_id = self.account_id.read().await.clone();
+        if account_id.is_empty() {
+            return;
+        }
+        let mode = *self.ingress_mode.read().await;
+        let domain_modes = self.domain_ingress_mode.read().await.clone();
+        let paused_ids = self.paused_agent_ids.read().await.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = persist_ingress_state(&pool, &account_id, mode, &domain_modes, &paused_ids).await {
+                tracing::warn!(error = %e, "fire-and-forget ingress state persist failed");
+            }
+        });
     }
 }
 
@@ -548,6 +598,111 @@ pub(super) async fn load_governance_policy(
         updated_by,
         reason,
         metadata: HashMap::new(),
+    }))
+}
+
+pub(super) async fn persist_ingress_state(
+    pool: &PgPool,
+    account_id: &str,
+    mode: IngressMode,
+    domain_modes: &HashMap<Domain, IngressMode>,
+    paused_ids: &HashSet<String>,
+) -> Result<()> {
+    let domain_modes_json: HashMap<String, String> = domain_modes
+        .iter()
+        .map(|(d, m)| (governance_domain_snapshot_label(*d), m.as_str().to_string()))
+        .collect();
+    let paused_ids_json: Vec<&str> = paused_ids.iter().map(String::as_str).collect();
+
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_ingress_state (
+            account_id, ingress_mode, domain_ingress_modes, paused_agent_ids, updated_at
+        )
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (account_id) DO UPDATE SET
+            ingress_mode = EXCLUDED.ingress_mode,
+            domain_ingress_modes = EXCLUDED.domain_ingress_modes,
+            paused_agent_ids = EXCLUDED.paused_agent_ids,
+            updated_at = EXCLUDED.updated_at
+        "#,
+    )
+    .bind(account_id)
+    .bind(mode.as_str())
+    .bind(sqlx::types::Json(&domain_modes_json))
+    .bind(sqlx::types::Json(&paused_ids_json))
+    .execute(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("persist ingress state: {}", e)))?;
+
+    Ok(())
+}
+
+pub(super) struct PersistedIngressState {
+    pub(super) ingress_mode: IngressMode,
+    pub(super) domain_modes: HashMap<Domain, IngressMode>,
+    pub(super) paused_agent_ids: HashSet<String>,
+}
+
+fn parse_ingress_mode(raw: &str) -> IngressMode {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "paused" => IngressMode::Paused,
+        "halted" => IngressMode::Halted,
+        _ => IngressMode::Running,
+    }
+}
+
+pub(super) async fn load_ingress_state(
+    pool: &PgPool,
+    account_id: &str,
+) -> Result<Option<PersistedIngressState>> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            sqlx::types::Json<HashMap<String, String>>,
+            sqlx::types::Json<Vec<String>>,
+        ),
+    >(
+        r#"
+        SELECT ingress_mode, domain_ingress_modes, paused_agent_ids
+        FROM coordinator_ingress_state
+        WHERE account_id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::error::PloyError::Internal(format!("load ingress state: {}", e)))?;
+
+    let Some((raw_mode, sqlx::types::Json(raw_domain_modes), sqlx::types::Json(raw_paused_ids))) =
+        row
+    else {
+        return Ok(None);
+    };
+
+    let ingress_mode = parse_ingress_mode(&raw_mode);
+
+    let mut domain_modes = HashMap::new();
+    for (domain_label, mode_str) in raw_domain_modes {
+        if let Some(domain) = parse_governance_domain(&domain_label) {
+            let mode = parse_ingress_mode(&mode_str);
+            if mode != IngressMode::Running {
+                domain_modes.insert(domain, mode);
+            }
+        }
+    }
+
+    let paused_agent_ids: HashSet<String> = raw_paused_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    Ok(Some(PersistedIngressState {
+        ingress_mode,
+        domain_modes,
+        paused_agent_ids,
     }))
 }
 

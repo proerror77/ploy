@@ -50,25 +50,22 @@ impl PositionAggregator {
 
     /// 平倉
     pub async fn close_position(&self, position_id: &str, exit_price: Decimal) -> Option<Decimal> {
-        let mut positions = self.positions.write().await;
+        let (agent_id, shares, entry_price) = {
+            let mut positions = self.positions.write().await;
+            let position = positions.remove(position_id)?;
+            (position.agent_id.clone(), position.shares, position.entry_price)
+        }; // positions lock dropped here
 
-        if let Some(position) = positions.remove(position_id) {
-            let pnl = (exit_price - position.entry_price) * Decimal::from(position.shares);
+        let pnl = (exit_price - entry_price) * Decimal::from(shares);
+        info!(
+            "Closed position {} for agent {}: {} shares @ {} (PnL: {})",
+            position_id, agent_id, shares, exit_price, pnl
+        );
 
-            let mut realized = self.realized_pnl.write().await;
-            *realized
-                .entry(position.agent_id.clone())
-                .or_insert(Decimal::ZERO) += pnl;
+        let mut realized = self.realized_pnl.write().await;
+        *realized.entry(agent_id).or_insert(Decimal::ZERO) += pnl;
 
-            info!(
-                "Closed position {} for agent {}: {} shares @ {} (PnL: {})",
-                position_id, position.agent_id, position.shares, exit_price, pnl
-            );
-
-            Some(pnl)
-        } else {
-            None
-        }
+        Some(pnl)
     }
 
     /// Reduce shares from an existing position (supports partial close).
