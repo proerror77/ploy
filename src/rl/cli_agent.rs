@@ -15,8 +15,8 @@ use crate::ml::OnnxModel;
 #[cfg(feature = "onnx")]
 use crate::rl::core::TOTAL_FEATURES;
 use crate::rl::core::{
-    CONTINUOUS_ACTION_DIM, ContinuousAction, DefaultStateEncoder, DiscreteAction,
-    NUM_DISCRETE_ACTIONS, PnLRewardFunction, RawObservation, RewardFunction,
+    ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
+    RewardFunction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
 };
 use crate::rl::memory::ReplayBuffer;
 use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
@@ -24,6 +24,7 @@ use crate::{AgentStatus, Domain, OrderIntent};
 
 mod config;
 mod execution_feedback;
+mod execution_outcomes;
 mod intent_mapping;
 mod market_state;
 mod policy;
