@@ -940,6 +940,33 @@ Keep shrinking `nba_comeback` live-path ownership by moving fill settlement, pos
   - `CARGO_TARGET_DIR=/tmp/ploy-nba-config-loader rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-nba-order-update-fast rtk cargo test emits_canonical_submit_order_and_tracks_fill_into_position --lib -- --exact --nocapture`
 
+# Collector Wave 1 (2026-03-11)
+
+## Goal
+Move `sync_collector` database/schema ownership into a dedicated persistence sibling so the root collector file stays focused on runtime orchestration and in-memory alignment.
+
+## File ownership
+
+- `src/collector/sync_collector.rs`
+  - owner: runtime loop, price alignment, broadcast flow
+- `src/collector/sync_collector/persistence.rs`
+  - owner: quote/token target persistence, sync schema bootstrap, sync-record sinks
+
+## Tasks
+
+- [x] Move quote/token target persistence entrypoints behind thin delegators.
+- [x] Move schema bootstrap, derived view DDL, and raw/legacy sink writes into a sibling module.
+- [x] Re-run compile plus focused collector tests after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [persistence.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/collector/sync_collector/persistence.rs) to own `persist_polymarket_quote_tick`, `upsert_token_targets`, schema initialization, derived-view creation, and the raw/legacy database sinks.
+- 2026-03-11: Kept [sync_collector.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/collector/sync_collector.rs) focused on runtime startup, in-memory price history, Polymarket alignment, broadcast, and lag analysis.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-sync-collector-persistence rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sync-collector-persistence-tests rtk cargo test select_pm_price_handles_xrp_and_avoids_empty_prefix_bug --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sync-collector-persistence-tests2 rtk cargo test select_pm_price_returns_none_for_unknown_symbol --lib -- --exact --nocapture`
+
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
 ## Goal
