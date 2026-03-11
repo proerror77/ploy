@@ -993,6 +993,37 @@ Move `relayer` proxy-signing and request-construction ownership into a dedicated
   - `CARGO_TARGET_DIR=/tmp/ploy-relayer-proxy-support rtk cargo check --lib --message-format=short`
 - 2026-03-11: `cargo test --lib -- --list` did not expose any registered relayer-focused unit tests in the current lib harness, so this slice is compile-verified only.
 
+# Claimer Wave 2 (2026-03-11)
+
+## Goal
+Shrink `src/strategy/claimer/relayer.rs` again by moving the SDK path, legacy HTTP submit/poll flow, and relayer-focused tests into sibling modules so the root file owns only gating and path selection.
+
+## File ownership
+
+- `src/strategy/claimer/relayer.rs`
+  - owner: relayer env/config gates and top-level path selection
+- `src/strategy/claimer/relayer/sdk_flow.rs`
+  - owner: builder SDK submit/poll path
+- `src/strategy/claimer/relayer/legacy_flow.rs`
+  - owner: legacy HTTP payload fetch, submit, and poll path
+- `src/strategy/claimer/relayer/tests.rs`
+  - owner: relayer-focused regressions
+
+## Tasks
+
+- [x] Move the builder SDK submit/poll implementation into a sibling module.
+- [x] Move the legacy HTTP submit/poll implementation into a sibling module.
+- [x] Move relayer-focused tests out of the root file.
+- [x] Re-run compile plus focused relayer regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [sdk_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/sdk_flow.rs), [legacy_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/legacy_flow.rs), and [tests.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/tests.rs).
+- 2026-03-11: Reduced [relayer.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer.rs) to relayer env/config helpers plus the top-level `claim_position_via_relayer_proxy(...)` path selector.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-wave2-shared rtk cargo check --lib --message-format=short`
+- 2026-03-11: `cargo test --lib -- --list` still did not expose relayer-focused unit tests in the current lib harness, so this slice is compile-verified only.
+
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
 ## Goal
