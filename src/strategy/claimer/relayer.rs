@@ -1,7 +1,5 @@
-use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest as AlloyTransactionRequest;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 #[cfg(feature = "builder_relayer_sdk")]
 use builder_relayer_client_rust::signer::DummySigner;
 #[cfg(feature = "builder_relayer_sdk")]
@@ -12,16 +10,9 @@ use builder_relayer_client_rust::{
 #[cfg(feature = "builder_relayer_sdk")]
 use builder_signing_sdk_rs::BuilderApiKeyCreds;
 use chrono::Utc;
-use ethers_core::abi::{encode as abi_encode, AbiParser, Token};
-use ethers_core::types::{Address as EthersAddress, H256 as EthersH256, U256 as EthersU256};
-use ethers_core::utils::{
-    get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256,
-};
+use ethers_core::types::{Address as EthersAddress, U256 as EthersU256};
 use ethers_signers::{LocalWallet, Signer as _};
-use hmac::{Hmac, Mac};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -29,8 +20,16 @@ use tracing::{info, warn};
 use crate::error::Result;
 
 use super::{
-    env_flag, env_string_any, env_u64_any, AutoClaimer, RedeemablePosition,
-    CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT, USDC_E_POLYGON,
+    AutoClaimer, CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT,
+    RedeemablePosition, USDC_E_POLYGON, env_flag, env_string_any, env_u64_any,
+};
+
+mod proxy_support;
+
+use proxy_support::{
+    RelayerBuilderCredentials, RelayerPayloadResponse, RelayerSignatureParams,
+    RelayerSubmitRequest, RelayerSubmitResponse, RelayerTransactionStatus, compact_http_body,
+    ensure_0x_prefix, ethers_to_alloy_address, relayer_builder_credentials, relayer_hmac_signature,
 };
 
 const RELAYER_URL_DEFAULT: &str = "https://relayer-v2.polymarket.com";
@@ -58,65 +57,6 @@ const RELAYER_BUILDER_PASSPHRASE_ENV_KEYS: [&str; 4] = [
     "BUILDER_PASS_PHRASE",
     "BUILDER_PASSPHRASE",
 ];
-
-#[derive(Debug, Clone)]
-struct RelayerBuilderCredentials {
-    api_key: String,
-    secret: String,
-    passphrase: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RelayerPayloadResponse {
-    address: String,
-    nonce: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RelayerSignatureParams {
-    #[serde(rename = "gasPrice")]
-    gas_price: String,
-    #[serde(rename = "gasLimit")]
-    gas_limit: String,
-    #[serde(rename = "relayerFee")]
-    relayer_fee: String,
-    #[serde(rename = "relayHub")]
-    relay_hub: String,
-    relay: String,
-}
-
-#[derive(Debug, Serialize)]
-struct RelayerSubmitRequest {
-    #[serde(rename = "type")]
-    tx_type: String,
-    from: String,
-    to: String,
-    #[serde(rename = "proxyWallet")]
-    proxy_wallet: String,
-    data: String,
-    nonce: String,
-    signature: String,
-    #[serde(rename = "signatureParams")]
-    signature_params: RelayerSignatureParams,
-    metadata: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RelayerSubmitResponse {
-    #[serde(rename = "transactionID")]
-    transaction_id: String,
-    state: String,
-    #[serde(rename = "transactionHash")]
-    transaction_hash: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RelayerTransactionStatus {
-    state: String,
-    #[serde(rename = "transactionHash")]
-    transaction_hash: Option<String>,
-}
 
 pub(super) fn relayer_claim_enabled() -> bool {
     env_flag(
@@ -177,209 +117,7 @@ fn first_present_env_key(keys: &[&'static str]) -> Option<&'static str> {
     })
 }
 
-fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials> {
-    let api_key = env_string_any(&RELAYER_BUILDER_API_KEY_ENV_KEYS)?;
-    let secret = env_string_any(&RELAYER_BUILDER_SECRET_ENV_KEYS)?;
-    let passphrase = env_string_any(&RELAYER_BUILDER_PASSPHRASE_ENV_KEYS)?;
-    Some(RelayerBuilderCredentials {
-        api_key,
-        secret,
-        passphrase,
-    })
-}
-
-fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Result<String> {
-    let trimmed = secret_base64.trim();
-    let secret = BASE64
-        .decode(trimmed)
-        .or_else(|_| {
-            let mut normalized = trimmed.replace('-', "+").replace('_', "/");
-            while normalized.len() % 4 != 0 {
-                normalized.push('=');
-            }
-            BASE64.decode(normalized.as_bytes())
-        })
-        .map_err(|e| {
-            crate::error::PloyError::Signature(format!("Invalid builder secret encoding: {}", e))
-        })?;
-    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&secret).map_err(|e| {
-        crate::error::PloyError::Signature(format!("Builder HMAC init failed: {}", e))
-    })?;
-    mac.update(message.as_bytes());
-    let sig = BASE64.encode(mac.finalize().into_bytes());
-    Ok(sig.replace('+', "-").replace('/', "_"))
-}
-
-fn ethers_to_alloy_address(value: EthersAddress) -> Address {
-    Address::from_slice(value.as_bytes())
-}
-
-fn compact_http_body(raw: &str, max_chars: usize) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return "<empty>".to_string();
-    }
-    let mut out = trimmed.to_string();
-    if out.len() > max_chars {
-        out.truncate(max_chars);
-        out.push_str("...");
-    }
-    out
-}
-
-fn ensure_0x_prefix(hex: &str) -> String {
-    if hex.starts_with("0x") || hex.starts_with("0X") {
-        return hex.to_string();
-    }
-    format!("0x{}", hex)
-}
-
 impl AutoClaimer {
-    fn encode_ctf_redeem_calldata(condition_id: [u8; 32]) -> Result<Vec<u8>> {
-        let function = AbiParser::default()
-            .parse_function(
-                "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
-            )
-            .map_err(|e| {
-                crate::error::PloyError::Internal(format!("Failed to parse redeem ABI: {}", e))
-            })?;
-
-        let usdc_addr: EthersAddress = USDC_E_POLYGON.parse().map_err(|e| {
-            crate::error::PloyError::AddressParsing(format!("Invalid USDC.e address: {}", e))
-        })?;
-
-        function
-            .encode_input(&[
-                Token::Address(usdc_addr),
-                Token::FixedBytes(vec![0u8; 32]),
-                Token::FixedBytes(condition_id.to_vec()),
-                Token::Array(vec![
-                    Token::Uint(EthersU256::from(1u8)),
-                    Token::Uint(EthersU256::from(2u8)),
-                ]),
-            ])
-            .map_err(|e| {
-                crate::error::PloyError::Internal(format!(
-                    "Failed to encode redeem calldata: {}",
-                    e
-                ))
-            })
-    }
-
-    fn encode_proxy_transaction_data(
-        call_to: EthersAddress,
-        call_data: Vec<u8>,
-    ) -> Result<Vec<u8>> {
-        let calls = Token::Array(vec![Token::Tuple(vec![
-            Token::Uint(EthersU256::from(1u8)),
-            Token::Address(call_to),
-            Token::Uint(EthersU256::zero()),
-            Token::Bytes(call_data),
-        ])]);
-        let encoded_args = abi_encode(&[calls]);
-        let selector = &keccak256("proxy((uint8,address,uint256,bytes)[])")[0..4];
-        let mut payload = Vec::with_capacity(4 + encoded_args.len());
-        payload.extend_from_slice(selector);
-        payload.extend_from_slice(&encoded_args);
-        Ok(payload)
-    }
-
-    fn derive_proxy_wallet_address(signer: EthersAddress) -> Result<EthersAddress> {
-        let proxy_factory: EthersAddress = RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
-            crate::error::PloyError::AddressParsing(format!("Invalid relayer proxy factory: {}", e))
-        })?;
-        let init_hash: EthersH256 = RELAYER_PROXY_INIT_CODE_HASH.parse().map_err(|e| {
-            crate::error::PloyError::AddressParsing(format!(
-                "Invalid relayer proxy init code hash: {}",
-                e
-            ))
-        })?;
-        let salt = keccak256(signer.as_bytes());
-        Ok(ethers_get_create2_address_from_hash(
-            proxy_factory,
-            salt,
-            init_hash.to_fixed_bytes(),
-        ))
-    }
-
-    fn create_proxy_struct_hash(
-        from: EthersAddress,
-        to: EthersAddress,
-        data: &[u8],
-        tx_fee: EthersU256,
-        gas_price: EthersU256,
-        gas_limit: EthersU256,
-        nonce: EthersU256,
-        relay_hub: EthersAddress,
-        relay: EthersAddress,
-    ) -> EthersH256 {
-        fn append_u256(out: &mut Vec<u8>, value: EthersU256) {
-            let mut buf = [0u8; 32];
-            value.to_big_endian(&mut buf);
-            out.extend_from_slice(&buf);
-        }
-
-        let mut payload = Vec::with_capacity(4 + 20 + 20 + data.len() + 32 * 4 + 20 + 20);
-        payload.extend_from_slice(b"rlx:");
-        payload.extend_from_slice(from.as_bytes());
-        payload.extend_from_slice(to.as_bytes());
-        payload.extend_from_slice(data);
-        append_u256(&mut payload, tx_fee);
-        append_u256(&mut payload, gas_price);
-        append_u256(&mut payload, gas_limit);
-        append_u256(&mut payload, nonce);
-        payload.extend_from_slice(relay_hub.as_bytes());
-        payload.extend_from_slice(relay.as_bytes());
-
-        EthersH256::from(keccak256(payload))
-    }
-
-    fn build_relayer_builder_headers(
-        creds: &RelayerBuilderCredentials,
-        timestamp: i64,
-        body: &str,
-    ) -> Result<HeaderMap> {
-        let message = format!("{}POST/submit{}", timestamp, body);
-        let signature = relayer_hmac_signature(&creds.secret, &message)?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            HeaderName::from_static("poly_builder_api_key"),
-            HeaderValue::from_str(&creds.api_key).map_err(|e| {
-                crate::error::PloyError::Internal(format!("Invalid builder API key header: {}", e))
-            })?,
-        );
-        headers.insert(
-            HeaderName::from_static("poly_builder_passphrase"),
-            HeaderValue::from_str(&creds.passphrase).map_err(|e| {
-                crate::error::PloyError::Internal(format!(
-                    "Invalid builder passphrase header: {}",
-                    e
-                ))
-            })?,
-        );
-        headers.insert(
-            HeaderName::from_static("poly_builder_signature"),
-            HeaderValue::from_str(&signature).map_err(|e| {
-                crate::error::PloyError::Internal(format!(
-                    "Invalid builder signature header: {}",
-                    e
-                ))
-            })?,
-        );
-        headers.insert(
-            HeaderName::from_static("poly_builder_timestamp"),
-            HeaderValue::from_str(&timestamp.to_string()).map_err(|e| {
-                crate::error::PloyError::Internal(format!(
-                    "Invalid builder timestamp header: {}",
-                    e
-                ))
-            })?,
-        );
-        Ok(headers)
-    }
-
     #[cfg(feature = "builder_relayer_sdk")]
     async fn claim_position_via_relayer_proxy_sdk(
         &self,

@@ -967,6 +967,32 @@ Move `sync_collector` database/schema ownership into a dedicated persistence sib
   - `CARGO_TARGET_DIR=/tmp/ploy-sync-collector-persistence-tests rtk cargo test select_pm_price_handles_xrp_and_avoids_empty_prefix_bug --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-sync-collector-persistence-tests2 rtk cargo test select_pm_price_returns_none_for_unknown_symbol --lib -- --exact --nocapture`
 
+# Claimer Wave 1 (2026-03-11)
+
+## Goal
+Move `relayer` proxy-signing and request-construction ownership into a dedicated sibling module so the root file stays focused on claim submission and polling flow.
+
+## File ownership
+
+- `src/strategy/claimer/relayer.rs`
+  - owner: relayer env/config gates, submit flow, polling
+- `src/strategy/claimer/relayer/proxy_support.rs`
+  - owner: builder credentials, HMAC/header construction, calldata/proxy hashing helpers, request payload types
+
+## Tasks
+
+- [x] Move proxy-signing/calldata/header helpers into a sibling module.
+- [x] Keep the relayer submit/poll loop in the root file.
+- [x] Re-run compile safety after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [proxy_support.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer/proxy_support.rs) to own builder credentials, relayer request/response payload types, HMAC/header construction, calldata encoding, proxy wallet derivation, and struct-hash generation.
+- 2026-03-11: Kept [relayer.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/claimer/relayer.rs) focused on feature gating, base-url selection, SDK/legacy submit flow, and polling.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-relayer-proxy-support rtk cargo check --lib --message-format=short`
+- 2026-03-11: `cargo test --lib -- --list` did not expose any registered relayer-focused unit tests in the current lib harness, so this slice is compile-verified only.
+
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
 ## Goal
