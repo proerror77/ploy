@@ -729,7 +729,7 @@ database_url = "postgres://localhost/unused"
             .iter()
             .find_map(|action| match action {
                 StrategyAction::SubmitIntent { intent } => {
-                    let order = crate::strategy::runtime_order::order_request_from_intent(&intent);
+                    let order = crate::domain::order_request_from_strategy_intent(&intent);
                     assert_eq!(order.client_order_id, intent.client_order_id);
                     assert_eq!(
                         order.idempotency_key.as_deref(),

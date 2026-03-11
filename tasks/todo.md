@@ -1,3 +1,30 @@
+# Domain OrderRequest Bridge Cut (2026-03-11)
+
+## Goal
+Move `StrategyOrderIntent -> OrderRequest` conversion out of `src/strategy/runtime_order.rs` so the compatibility bridge lives under `crate::domain` instead of the canonical strategy runtime owner.
+
+## Tasks
+
+- [x] Add a domain-owned `order_request_from_strategy_intent(...)` bridge.
+- [x] Rewire foreground submit, managed runtime order commands, and strategy-side compatibility tests to use the domain bridge.
+- [x] Remove the old `order_request_from_intent(...)` implementation from `src/strategy/runtime_order.rs`.
+- [x] Re-run focused compile and bridge regressions after the move.
+
+## Review
+
+- [x] Confirm `runtime_order.rs` now owns only `StrategyOrderIntent -> OrderIntent` conversion.
+- [x] Confirm the remaining `OrderRequest` bridge is crate-private under `src/domain`.
+
+## Progress notes
+
+- 2026-03-11: Added [order_request_bridge.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/domain/order_request_bridge.rs) and re-exported `order_request_from_strategy_intent` as a crate-private domain helper in [mod.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/domain/mod.rs).
+- 2026-03-11: Rewired [foreground_submit.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/cli/strategy/runtime_ops/foreground_submit.rs), [order_commands.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/coordinator/strategy_runtime/actions/order_commands.rs), [strategy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/event_edge/strategy.rs), [strategy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy.rs), and [tests.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/staggered_arb_live/tests.rs) to use the domain bridge.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-order-bridge rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-order-bridge rtk cargo test order_request_from_strategy_intent_preserves_action_id --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-order-bridge rtk cargo test build_coordinator_payload_requires_deployment_id --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-domain-order-bridge rtk cargo test persist_runtime_order_insert_uses_action_order_id_and_leg --lib -- --exact --nocapture`
+
 # Platform Namespace Retirement (2026-03-11)
 
 ## Goal

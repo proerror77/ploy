@@ -34,7 +34,7 @@ pub(super) async fn handle_submit_intent(
     intent: crate::strategy::traits::StrategyOrderIntent,
 ) {
     let client_order_id = intent.client_order_id.clone();
-    let mut order = crate::strategy::runtime_order::order_request_from_intent(&intent);
+    let mut order = crate::domain::order_request_from_strategy_intent(&intent);
     normalize_runtime_order_request(&client_order_id, &mut order);
 
     if paused.load(Ordering::Relaxed) {

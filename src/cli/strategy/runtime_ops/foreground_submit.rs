@@ -55,7 +55,7 @@ pub(super) async fn handle_submit_intent(
     store: Option<&Arc<PostgresStore>>,
 ) {
     let client_order_id = intent.client_order_id.clone();
-    let mut order = crate::strategy::runtime_order::order_request_from_intent(&intent);
+    let mut order = crate::domain::order_request_from_strategy_intent(&intent);
     if order.client_order_id != client_order_id {
         warn!(
             "Mismatched order IDs in strategy action: action={}, request={}; using action ID",
