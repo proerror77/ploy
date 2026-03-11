@@ -252,7 +252,7 @@ pub(super) async fn handle_strategy_actions(
     executor: Option<Arc<OrderExecutor>>,
     store: Option<Arc<PostgresStore>>,
 ) {
-    let submitter = foreground_submit::ForegroundIntentSubmitter::new(dry_run, executor.clone());
+    let submitter = foreground_submit::ForegroundIntentSubmitter::new(dry_run);
 
     while let Some((strategy_id, action)) = rx.recv().await {
         match action {

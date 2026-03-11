@@ -1,7 +1,6 @@
 use crate::adapters::PostgresStore;
 use crate::domain::OrderStatus;
 use crate::error::{PloyError, Result};
-use crate::strategy::executor::{ExecutionResult, OrderExecutor};
 use crate::strategy::traits::StrategyOrderIntent;
 use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
@@ -12,34 +11,25 @@ use tracing::{error, info, warn};
 
 pub(super) struct ForegroundIntentSubmitter {
     dry_run: bool,
-    executor: Option<Arc<OrderExecutor>>,
 }
 
 impl ForegroundIntentSubmitter {
-    pub(super) fn new(dry_run: bool, executor: Option<Arc<OrderExecutor>>) -> Self {
-        Self { dry_run, executor }
+    pub(super) fn new(dry_run: bool) -> Self {
+        Self { dry_run }
     }
 
     async fn submit(
         &self,
         strategy_id: &str,
         intent: &StrategyOrderIntent,
-        order: &crate::domain::OrderRequest,
     ) -> Result<ForegroundSubmitOutcome> {
         if let Some(payload) = build_coordinator_payload(strategy_id, intent, self.dry_run)? {
             let response = submit_intent_via_coordinator(&payload).await?;
             return Ok(ForegroundSubmitOutcome::CoordinatorAccepted(response));
         }
 
-        if let Some(executor) = &self.executor {
-            return executor
-                .execute(order)
-                .await
-                .map(ForegroundSubmitOutcome::DirectExecuted);
-        }
-
         Ok(ForegroundSubmitOutcome::Skipped {
-            reason: compatibility_fallback_reason(intent).to_string(),
+            reason: coordinator_rejection_reason(intent).to_string(),
         })
     }
 }
@@ -47,7 +37,6 @@ impl ForegroundIntentSubmitter {
 #[derive(Debug)]
 enum ForegroundSubmitOutcome {
     CoordinatorAccepted(CoordinatorIntentResponse),
-    DirectExecuted(ExecutionResult),
     Skipped { reason: String },
 }
 
@@ -87,7 +76,7 @@ pub(super) async fn handle_submit_intent(
 
     persist_pending_order(store, strategy_id, &order, &tracked_order_id).await;
 
-    match submitter.submit(strategy_id, &intent, &order).await {
+    match submitter.submit(strategy_id, &intent).await {
         Ok(ForegroundSubmitOutcome::CoordinatorAccepted(response)) => {
             println!("  \x1b[32m✓ Intent submitted via coordinator\x1b[0m");
             println!("    Intent ID: {}", response.intent_id);
@@ -99,28 +88,8 @@ pub(super) async fn handle_submit_intent(
                 tracked_order_id, response.intent_id
             );
         }
-        Ok(ForegroundSubmitOutcome::DirectExecuted(result)) => {
-            println!("  \x1b[32m✓ Order executed via compatibility fallback!\x1b[0m");
-            println!("    Order ID: {}", result.order_id);
-            println!("    Status: {:?}", result.status);
-            println!("    Filled: {} shares", result.filled_shares);
-            if let Some(avg_price) = result.avg_fill_price {
-                println!(
-                    "    Avg Price: {:.2}¢",
-                    avg_price * rust_decimal::Decimal::from(100)
-                );
-            }
-            println!("    Time: {}ms\n", result.elapsed_ms);
-            info!(
-                "Foreground compatibility fallback executed order {}: {} shares @ {:?}",
-                result.order_id, result.filled_shares, result.avg_fill_price
-            );
-            persist_execution_result(store, &tracked_order_id, &order, &result).await;
-        }
         Ok(ForegroundSubmitOutcome::Skipped { reason }) => {
-            println!(
-                "  \x1b[33m⚠ No coordinator route or executor - order logged but not submitted\x1b[0m"
-            );
+            println!("  \x1b[33m⚠ Coordinator ingress required - order logged but not submitted\x1b[0m");
             println!("    Reason: {}\n", reason);
             warn!("Order {} not submitted: {}", tracked_order_id, reason);
             mark_order_status(store, &tracked_order_id, OrderStatus::Failed, None).await;
@@ -157,60 +126,6 @@ async fn persist_pending_order(
         warn!(
             "Failed to persist strategy order {}: {}",
             tracked_order_id, error
-        );
-    }
-}
-
-async fn persist_execution_result(
-    store: Option<&Arc<PostgresStore>>,
-    tracked_order_id: &str,
-    order: &crate::domain::OrderRequest,
-    result: &ExecutionResult,
-) {
-    let Some(store) = store else {
-        return;
-    };
-
-    if let Err(error) = store
-        .update_order_status(
-            tracked_order_id,
-            crate::domain::OrderStatus::Submitted,
-            Some(&result.order_id),
-        )
-        .await
-    {
-        warn!(
-            "Failed to update order {} to Submitted: {}",
-            tracked_order_id, error
-        );
-    }
-
-    if result.filled_shares > 0 {
-        let fill_price = result.avg_fill_price.unwrap_or(order.limit_price);
-        if let Err(error) = store
-            .update_order_fill(
-                tracked_order_id,
-                result.filled_shares,
-                fill_price,
-                result.status,
-            )
-            .await
-        {
-            warn!(
-                "Failed to update order fill for {}: {}",
-                tracked_order_id, error
-            );
-        }
-        return;
-    }
-
-    if let Err(error) = store
-        .update_order_status(tracked_order_id, result.status, None)
-        .await
-    {
-        warn!(
-            "Failed to update order {} status to {:?}: {}",
-            tracked_order_id, result.status, error
         );
     }
 }
@@ -327,11 +242,11 @@ fn deployment_id_from_metadata(
     })
 }
 
-fn compatibility_fallback_reason(intent: &StrategyOrderIntent) -> &'static str {
+fn coordinator_rejection_reason(intent: &StrategyOrderIntent) -> &'static str {
     if deployment_id_from_metadata(&intent.metadata).is_none() {
         "strategy intent is missing deployment_id metadata required for coordinator ingress"
     } else {
-        "no direct executor configured"
+        "foreground runtime no longer supports direct execution fallback"
     }
 }
 

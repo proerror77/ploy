@@ -1,3 +1,29 @@
+# CLI Foreground Coordinator-Only Submit (2026-03-11)
+
+## Goal
+Retire the foreground runtime's direct execution fallback so strategy submit actions in CLI foreground mode only route through coordinator ingress.
+
+## Tasks
+
+- [x] Remove `OrderExecutor` fallback from `ForegroundIntentSubmitter`.
+- [x] Keep order logging and persistence, but require coordinator ingress for actual submission.
+- [x] Update operator-facing messaging to describe coordinator-only submission.
+- [x] Re-run focused foreground-submit compile/tests after the cut.
+
+## Review
+
+- [x] Confirm `foreground_submit.rs` no longer executes orders directly.
+- [x] Confirm `handle_strategy_actions` still retains executor ownership only for cancel operations.
+
+## Progress notes
+
+- 2026-03-11: Removed the `DirectExecuted` outcome and direct `OrderExecutor::execute` fallback from [foreground_submit.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/cli/strategy/runtime_ops/foreground_submit.rs).
+- 2026-03-11: `ForegroundIntentSubmitter` now only carries `dry_run`; [foreground.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/cli/strategy/runtime_ops/foreground.rs) keeps the executor only for explicit cancel flows.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-foreground-coordinator-only rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-foreground-coordinator-only-tests rtk cargo test build_coordinator_payload_requires_deployment_id --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-foreground-coordinator-only-tests2 rtk cargo test build_coordinator_payload_preserves_strategy_metadata --lib -- --exact --nocapture`
+
 # Strategy OrderRequest Surface Quarantine (2026-03-11)
 
 ## Goal
