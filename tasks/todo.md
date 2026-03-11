@@ -48,6 +48,34 @@ Move reporting/state snapshot ownership out of `src/strategy/staggered_arb_live.
   - `rtk cargo test test_summary_includes_per_symbol_gate_breakdown --lib -- --exact --nocapture`
   - `rtk cargo test test_required_feeds --lib -- --exact --nocapture`
 
+# Staggered Arb State Support Split (2026-03-11)
+
+## Goal
+Move the shared live-state/support spine out of `src/strategy/staggered_arb_live.rs` so entry/leg2/runtime modules depend on a dedicated owner instead of the root file.
+
+## File ownership
+
+- `src/strategy/staggered_arb_live.rs`
+  - owner: adapter config, constructor, trait facade, and high-level flow delegation
+- `src/strategy/staggered_arb_live/state_support.rs`
+  - owner: `LiveWindow`, `QuoteRoute`, balance/sigma helpers, PM quote persistence, and active-cycle helpers
+
+## Tasks
+
+- [x] Extract `LiveWindow` / `QuoteRoute` into a sibling state-support module.
+- [x] Extract shared PM quote, balance, sigma, and cycle helper methods into the same module.
+- [x] Re-run compile plus focused staggered-arb regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [state_support.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/staggered_arb_live/state_support.rs) for shared live-state types and helper methods used across `entry`, `leg2`, `runtime_flow`, and tests.
+- 2026-03-11: Reduced [staggered_arb_live.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/staggered_arb_live.rs) so the root file no longer owns PM quote persistence/synthetic state, balance helpers, or active-cycle checks directly.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test test_record_pm_quote_resets_persistence_after_stale_gap --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_does_not_cap_concurrency_when_max_concurrent_is_zero --lib -- --exact --nocapture`
+  - `rtk cargo test test_live_greeks_can_accelerate_leg2_close_before_merge_target --lib -- --exact --nocapture`
+
 # RL CLI Agent State Split (2026-03-11)
 
 ## Goal
