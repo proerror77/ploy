@@ -6,15 +6,21 @@ use crate::error::{PloyError, Result};
 use polymarket_client_sdk::clob::types::request::OrderBookSummaryRequest;
 use polymarket_client_sdk::clob::types::response::OrderBookSummaryResponse;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::{
     EventByIdRequest, MarketsRequest, SeriesByIdRequest,
 };
 use polymarket_client_sdk::gamma::types::response::{Event as GammaEvent, Market as GammaMarket};
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use tracing::{debug, info, warn};
+
+mod edge_analysis;
+mod pricing_models;
+
+pub use edge_analysis::PolymarketEdgeAnalysis;
+pub use pricing_models::{OrderBookLevel, SportsMarketDetails, SportsOrderBook};
 
 const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
 const CLOB_API_URL: &str = "https://clob.polymarket.com";
@@ -446,76 +452,6 @@ impl PolymarketSportsMarket {
         }
 
         None
-    }
-}
-
-/// Order book level from CLOB
-#[derive(Debug, Clone, Deserialize)]
-pub struct OrderBookLevel {
-    pub price: String,
-    pub size: String,
-}
-
-/// Order book response from CLOB API
-#[derive(Debug, Clone, Deserialize)]
-pub struct SportsOrderBook {
-    pub market: Option<String>,
-    pub asset_id: String,
-    pub bids: Vec<OrderBookLevel>,
-    pub asks: Vec<OrderBookLevel>,
-    pub timestamp: Option<String>,
-}
-
-impl SportsOrderBook {
-    /// Get best bid price
-    pub fn best_bid(&self) -> Option<Decimal> {
-        self.bids.first()?.price.parse().ok()
-    }
-
-    /// Get best ask price
-    pub fn best_ask(&self) -> Option<Decimal> {
-        self.asks.first()?.price.parse().ok()
-    }
-
-    /// Get mid price
-    pub fn mid_price(&self) -> Option<Decimal> {
-        let bid = self.best_bid()?;
-        let ask = self.best_ask()?;
-        Some((bid + ask) / Decimal::from(2))
-    }
-
-    /// Get spread
-    pub fn spread(&self) -> Option<Decimal> {
-        let bid = self.best_bid()?;
-        let ask = self.best_ask()?;
-        Some(ask - bid)
-    }
-
-    /// Calculate implied probability from YES token price
-    pub fn implied_probability(&self) -> Option<Decimal> {
-        self.mid_price()
-    }
-}
-
-/// Sports market with full trading details
-#[derive(Debug, Clone)]
-pub struct SportsMarketDetails {
-    pub market: PolymarketSportsMarket,
-    pub yes_token_id: String,
-    pub no_token_id: String,
-    pub yes_book: Option<SportsOrderBook>,
-    pub no_book: Option<SportsOrderBook>,
-}
-
-impl SportsMarketDetails {
-    /// Get current YES price (implied probability for home/favorite)
-    pub fn yes_price(&self) -> Option<Decimal> {
-        self.yes_book.as_ref()?.mid_price()
-    }
-
-    /// Get current NO price (implied probability against)
-    pub fn no_price(&self) -> Option<Decimal> {
-        self.no_book.as_ref()?.mid_price()
     }
 }
 
@@ -1128,87 +1064,6 @@ impl PolymarketSportsClient {
 
         warn!("No market found for {} vs {}", team1, team2);
         Ok(None)
-    }
-}
-
-/// Edge analysis comparing Polymarket with sportsbook odds
-#[derive(Debug, Clone)]
-pub struct PolymarketEdgeAnalysis {
-    pub market: String,
-    pub polymarket_yes_prob: Decimal,
-    pub polymarket_no_prob: Decimal,
-    pub sportsbook_yes_prob: Decimal,
-    pub sportsbook_no_prob: Decimal,
-    pub yes_edge: Decimal,
-    pub no_edge: Decimal,
-    pub recommended_side: String,
-    pub edge: Decimal,
-    pub yes_token_id: String,
-    pub no_token_id: String,
-}
-
-impl PolymarketEdgeAnalysis {
-    /// Calculate edge between Polymarket and sportsbook
-    pub fn calculate(details: &SportsMarketDetails, sportsbook_yes_prob: Decimal) -> Option<Self> {
-        let poly_yes = details.yes_price()?;
-        let poly_no = details.no_price()?;
-        let sb_no = Decimal::ONE - sportsbook_yes_prob;
-
-        let yes_edge = sportsbook_yes_prob - poly_yes;
-        let no_edge = sb_no - poly_no;
-
-        let (recommended_side, edge) = if yes_edge > no_edge {
-            ("YES".to_string(), yes_edge)
-        } else {
-            ("NO".to_string(), no_edge)
-        };
-
-        Some(Self {
-            market: details.market.question.clone().unwrap_or_default(),
-            polymarket_yes_prob: poly_yes,
-            polymarket_no_prob: poly_no,
-            sportsbook_yes_prob,
-            sportsbook_no_prob: sb_no,
-            yes_edge,
-            no_edge,
-            recommended_side,
-            edge,
-            yes_token_id: details.yes_token_id.clone(),
-            no_token_id: details.no_token_id.clone(),
-        })
-    }
-
-    /// Check if edge is significant (> 5%)
-    pub fn is_significant(&self) -> bool {
-        self.edge > Decimal::from_str_exact("0.05").unwrap_or(Decimal::ZERO)
-    }
-
-    /// Get recommended token ID for betting
-    pub fn recommended_token(&self) -> &str {
-        if self.recommended_side == "YES" {
-            &self.yes_token_id
-        } else {
-            &self.no_token_id
-        }
-    }
-
-    /// Calculate Kelly criterion bet fraction
-    pub fn kelly_fraction(&self) -> Decimal {
-        if self.edge <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let odds = if self.recommended_side == "YES" {
-            Decimal::ONE / self.polymarket_yes_prob - Decimal::ONE
-        } else {
-            Decimal::ONE / self.polymarket_no_prob - Decimal::ONE
-        };
-
-        if odds > Decimal::ZERO {
-            self.edge / odds
-        } else {
-            Decimal::ZERO
-        }
     }
 }
 

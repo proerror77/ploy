@@ -252,6 +252,36 @@ Break `src/persistence/runtime_schema.rs` into domain-focused submodules so mark
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-tests rtk cargo test ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-tests2 rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
 
+# Polymarket Sports Pricing Split (2026-03-11)
+
+## Goal
+Move pricing/order-book and edge-analysis ownership out of `src/ai_clients/polymarket_sports.rs` so the root sports client file keeps API fetch/orchestration logic.
+
+## File ownership
+
+- `src/ai_clients/polymarket_sports.rs`
+  - owner: Polymarket sports client fetch/orchestration flow and shared serde helpers
+- `src/ai_clients/polymarket_sports/pricing_models.rs`
+  - owner: `OrderBookLevel`, `SportsOrderBook`, and `SportsMarketDetails`
+- `src/ai_clients/polymarket_sports/edge_analysis.rs`
+  - owner: `PolymarketEdgeAnalysis`
+
+## Tasks
+
+- [x] Extract pricing/order-book data types into a sibling module.
+- [x] Extract edge analysis into a sibling module.
+- [x] Re-run compile plus focused sports regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [pricing_models.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/ai_clients/polymarket_sports/pricing_models.rs) for sports order-book and market-detail ownership.
+- 2026-03-11: Added [edge_analysis.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/ai_clients/polymarket_sports/edge_analysis.rs) for sportsbook-vs-Polymarket edge calculation.
+- 2026-03-11: Reduced [polymarket_sports.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/ai_clients/polymarket_sports.rs) to client orchestration plus live-game / market metadata models.
+- 2026-03-11: Validation passed after clearing exhausted `/tmp/ploy-*` cargo target dirs:
+  - `CARGO_TARGET_DIR=/tmp/ploy-pm-sports-cut2 rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-pm-sports-cut2 rtk cargo test test_sports_keyword_detection --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-pm-sports-cut2 rtk cargo test test_token_id_parsing --lib -- --exact --nocapture`
+
 # Market Persistence Alerts Wave 1 (2026-03-11)
 
 ## Goal
