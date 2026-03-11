@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOCK_FILE="${PLOY_PLATFORM_WATCHDOG_LOCK_FILE:-/opt/ploy/run/allow-platform-stop.lock}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLOY_PLATFORM_WATCHDOG_ROOT="${PLOY_PLATFORM_WATCHDOG_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+LOCK_FILE="${PLOY_PLATFORM_WATCHDOG_LOCK_FILE:-$PLOY_PLATFORM_WATCHDOG_ROOT/run/allow-platform-stop.lock}"
 MAINTENANCE_UNIT="${PLOY_PLATFORM_WATCHDOG_MAINTENANCE_UNIT:-ploy-maintenance.service}"
 
 log_watchdog() {
