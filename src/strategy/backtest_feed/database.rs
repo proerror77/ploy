@@ -3,6 +3,7 @@ use crate::domain::Side;
 use alloy::primitives::U256;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -305,8 +306,17 @@ fn parse_binance_book_levels(raw: &serde_json::Value, is_bid: bool) -> Vec<Binan
     let mut parsed = levels
         .iter()
         .filter_map(|level| {
-            let price = level.get("price")?.as_str()?.parse::<Decimal>().ok()?;
-            let size = level.get("size")?.as_str()?.parse::<Decimal>().ok()?;
+            let (price_raw, size_raw) = if let Some(obj) = level.as_object() {
+                (obj.get("price")?, obj.get("size")?)
+            } else if let Some(parts) = level.as_array() {
+                let price = parts.first()?;
+                let size = parts.get(1)?;
+                (price, size)
+            } else {
+                return None;
+            };
+            let price = parse_decimal_json(price_raw)?;
+            let size = parse_decimal_json(size_raw)?;
             if price <= Decimal::ZERO || size <= Decimal::ZERO {
                 return None;
             }
@@ -320,6 +330,13 @@ fn parse_binance_book_levels(raw: &serde_json::Value, is_bid: bool) -> Vec<Binan
         parsed.sort_by(|left, right| left.price.cmp(&right.price));
     }
     parsed
+}
+
+fn parse_decimal_json(raw: &serde_json::Value) -> Option<Decimal> {
+    if let Some(s) = raw.as_str() {
+        return s.parse::<Decimal>().ok();
+    }
+    raw.as_f64().and_then(Decimal::from_f64)
 }
 
 fn calculate_obi(
@@ -1439,6 +1456,40 @@ mod tests {
                 assert_eq!(bid_volume_5, dec!(90));
                 assert_eq!(ask_volume_5, dec!(15));
                 assert_eq!(spread_bps, dec!(10));
+            }
+            other => panic!("unexpected update type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_binance_l2_update_accepts_legacy_array_level_shape() {
+        let ts = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bids = json!([
+            ["100.0", "20"], ["99.9", "19"], ["99.8", "18"], ["99.7", "17"], ["99.6", "16"],
+            ["99.5", "15"], ["99.4", "14"], ["99.3", "13"], ["99.2", "12"], ["99.1", "11"],
+            ["99.0", "10"], ["98.9", "9"], ["98.8", "8"], ["98.7", "7"], ["98.6", "6"],
+            ["98.5", "5"], ["98.4", "4"], ["98.3", "3"], ["98.2", "2"], ["98.1", "1"]
+        ]);
+        let asks = json!([
+            ["100.1", "1"], ["100.2", "2"], ["100.3", "3"], ["100.4", "4"], ["100.5", "5"],
+            ["100.6", "6"], ["100.7", "7"], ["100.8", "8"], ["100.9", "9"], ["101.0", "10"],
+            ["101.1", "11"], ["101.2", "12"], ["101.3", "13"], ["101.4", "14"], ["101.5", "15"],
+            ["101.6", "16"], ["101.7", "17"], ["101.8", "18"], ["101.9", "19"], ["102.0", "20"]
+        ]);
+
+        let update = build_binance_l2_update(ts, "BTCUSDT", &bids, &asks).expect("l2 update");
+        match update.update_type {
+            UpdateType::BinanceL2 {
+                obi_5,
+                obi_10,
+                obi_20,
+                ..
+            } => {
+                assert_eq!(obi_5, dec!(75) / dec!(105));
+                assert_eq!(obi_10, dec!(100) / dec!(210));
+                assert_eq!(obi_20, Decimal::ZERO);
             }
             other => panic!("unexpected update type: {other:?}"),
         }
