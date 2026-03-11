@@ -1,7 +1,5 @@
-use super::trades::{
-    TradeAlertConfig, TradeAlertState, collect_trades_for_market, ensure_clob_trade_alerts_table,
-    ensure_clob_trade_ticks_table,
-};
+use super::alerts::{TradeAlertConfig, TradeAlertState, ensure_clob_trade_alerts_table};
+use super::trades::{collect_trades_for_market, ensure_clob_trade_ticks_table};
 use super::{env_i64, env_u64, env_usize};
 use crate::domain::Domain;
 use futures_util::StreamExt;

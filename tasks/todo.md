@@ -116,6 +116,27 @@ Break `src/persistence/runtime_schema.rs` into domain-focused submodules so mark
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-tests rtk cargo test ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-tests2 rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
 
+# Market Persistence Alerts Wave 1 (2026-03-11)
+
+## Goal
+Move trade-alert schema/state/emission ownership out of `src/persistence/market_persistence/trades.rs` so the root trade collector keeps tick persistence and poll-loop wiring.
+
+## Tasks
+
+- [x] Extract trade-alert DDL, config/state, and emission flow into a sibling module.
+- [x] Rewire both trade persistence entrypoints to the new alert owner.
+- [x] Re-run compile plus focused persistence regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [alerts.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/market_persistence/alerts.rs) for `clob_trade_alerts` schema, trade-alert config/state, and alert emission.
+- 2026-03-11: Reduced [trades.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/market_persistence/trades.rs) to trade tick collection, persistence, and runtime spawn wiring.
+- 2026-03-11: Rewired [collector_targets.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/persistence/market_persistence/collector_targets.rs) to consume the new alert owner directly.
+- 2026-03-11: Validation attempt:
+  - `CARGO_TARGET_DIR=/tmp/ploy-market-alerts-check4 rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-market-alerts-test4 rtk cargo test persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
+- 2026-03-11: Both validation commands are currently blocked by pre-existing compile failures in [subscriptions.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/adapters/polymarket_ws/subscriptions.rs); no errors referenced the new `market_persistence` alert split files.
+
 # Domain OrderRequest Bridge Cut (2026-03-11)
 
 ## Goal
