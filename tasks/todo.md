@@ -20,6 +20,34 @@ Move deployment/account gate ownership out of `src/api/handlers/sidecar/ingress.
   - `rtk cargo test api::handlers::sidecar::tests::non_live_deployment_ingress_is_blocked_by_default --lib -- --exact --nocapture`
 - 2026-03-11: The extraction is committed with compile validation cleared, but a sidecar-specific assertion still needs a working RTK test selector.
 
+# Staggered Arb Reporting Split (2026-03-11)
+
+## Goal
+Move reporting/state snapshot ownership out of `src/strategy/staggered_arb_live.rs` so the root live adapter keeps config, market handling, and execution logic.
+
+## File ownership
+
+- `src/strategy/staggered_arb_live.rs`
+  - owner: live adapter config/state, market handling, trait entrypoints
+- `src/strategy/staggered_arb_live/reporting.rs`
+  - owner: summary formatting, strategy state snapshot, position export, shutdown/reset reporting helpers
+
+## Tasks
+
+- [x] Extract summary/state reporting helpers into a sibling module.
+- [x] Keep the `Strategy` impl in the root file but delegate state/reporting methods.
+- [x] Re-run compile plus focused staggered-arb regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [reporting.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/staggered_arb_live/reporting.rs) for summary building, gate-count formatting, state snapshots, position export, and shutdown/reset helpers.
+- 2026-03-11: Reduced [staggered_arb_live.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/staggered_arb_live.rs) so the `Strategy` impl now delegates `state()`, `positions()`, `is_active()`, `shutdown()`, and `reset()`.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test test_summary_empty --lib -- --exact --nocapture`
+  - `rtk cargo test test_summary_includes_per_symbol_gate_breakdown --lib -- --exact --nocapture`
+  - `rtk cargo test test_required_feeds --lib -- --exact --nocapture`
+
 # RL CLI Agent State Split (2026-03-11)
 
 ## Goal

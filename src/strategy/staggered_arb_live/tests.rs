@@ -433,9 +433,9 @@ fn test_try_entry_waits_for_post_open_delay_then_allows() {
         Some(dec!(0.48)),
     );
     assert!(
-            too_early_action.is_none(),
-            "entry should be blocked during the initial observation delay before the post-open entry window begins"
-        );
+        too_early_action.is_none(),
+        "entry should be blocked during the initial observation delay before the post-open entry window begins"
+    );
 
     seed_persistent_pm_quotes(
         &mut adapter,
@@ -509,9 +509,9 @@ fn test_try_entry_allows_high_sum_when_max_initial_sum_is_disabled() {
     );
 
     assert!(
-            action.is_some(),
-            "entry should be allowed to rely on OBI/direction when max_initial_sum is explicitly disabled"
-        );
+        action.is_some(),
+        "entry should be allowed to rely on OBI/direction when max_initial_sum is explicitly disabled"
+    );
 }
 
 #[test]
@@ -1306,9 +1306,9 @@ fn test_try_entry_rejects_far_from_mid_fair_value_for_long_gamma_profile() {
     );
 
     assert!(
-            action.is_none(),
-            "entry should be rejected when fair value is too far from mid and the long-gamma band is enabled"
-        );
+        action.is_none(),
+        "entry should be rejected when fair value is too far from mid and the long-gamma band is enabled"
+    );
 }
 
 #[test]
@@ -1681,9 +1681,11 @@ fn test_final_window_high_confidence_still_forces_leg2() {
     let actions = adapter.check_leg2_opportunities("BTCUSDT", now);
 
     assert!(
-            actions.iter().any(|a| matches!(a, StrategyAction::LogEvent { .. })),
-            "final-window positions should close through leg2 instead of intentionally holding a single leg"
-        );
+        actions
+            .iter()
+            .any(|a| matches!(a, StrategyAction::LogEvent { .. })),
+        "final-window positions should close through leg2 instead of intentionally holding a single leg"
+    );
     assert_eq!(adapter.closed_trades.len(), 1);
     assert_eq!(adapter.closed_trades[0].exit_reason, "forced_final_window");
 }
@@ -1758,9 +1760,11 @@ async fn test_leg1_partially_filled_updates_position_immediately_and_requests_ca
     );
     assert_eq!(adapter.positions[0].leg1_shares, 7);
     assert!(
-            actions.iter().any(|action| matches!(action, StrategyAction::CancelOrder { .. })),
-            "once we accept a partial leg1 as the actual position size, the remaining order should be cancelled promptly"
-        );
+        actions
+            .iter()
+            .any(|action| matches!(action, StrategyAction::CancelOrder { .. })),
+        "once we accept a partial leg1 as the actual position size, the remaining order should be cancelled promptly"
+    );
     assert!(
         adapter.live_orders.contains_key(&client_id),
         "the live order track should remain until the exchange confirms terminal cleanup"
@@ -1910,10 +1914,10 @@ async fn test_leg2_partially_filled_updates_progress_before_terminal_status() {
     let _actions = adapter.on_order_update(&update).await.unwrap();
 
     assert_eq!(
-            adapter.positions[0].leg2_shares,
-            Some(7),
-            "leg2 partial progress should be recorded immediately instead of waiting for cancel/failed terminal callbacks"
-        );
+        adapter.positions[0].leg2_shares,
+        Some(7),
+        "leg2 partial progress should be recorded immediately instead of waiting for cancel/failed terminal callbacks"
+    );
     assert!(
         adapter.live_orders.contains_key(&client_id),
         "leg2 live order should stay tracked while the exchange order is still active"

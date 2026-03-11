@@ -430,10 +430,7 @@ impl StaggeredArbAdapter {
                 if let Some(order_id) = cancel_id {
                     info!(
                         "[STAG-ARB] LEG1 PARTIAL ACCEPT {} {} cumulative={}/{} — cancelling remainder",
-                        track.symbol,
-                        track.event_id,
-                        cumulative_filled,
-                        track.shares,
+                        track.symbol, track.event_id, cumulative_filled, track.shares,
                     );
                     actions.push(StrategyAction::CancelOrder { order_id });
                 }
