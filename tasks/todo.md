@@ -1,3 +1,30 @@
+# Journal Ingress Writes Cut (2026-03-11)
+
+## Goal
+Move ingress/risk/runtime-state journal writes out of `src/coordinator/journal.rs` so the root journal owner becomes a thin shell around restore, module wiring, and shared metadata parsing.
+
+## Tasks
+
+- [x] Add a journal submodule for ingress-side signal/risk/exit-intent writes plus runtime-state persistence.
+- [x] Move `persist_signal_from_intent`, `persist_risk_decision`, `persist_exit_reason_intent`, and `persist_risk_runtime_state` out of `journal.rs`.
+- [x] Reduce `journal.rs` to restore loading, pool wiring, and shared metadata helpers.
+- [x] Re-run compile plus focused ingress/runtime-status regressions after the cut.
+
+## Review
+
+- [x] Confirm coordinator ingress/rejection/runtime-status callers still hit the same journal method surface.
+- [x] Confirm `restore.rs` keeps compiling after parent-module imports no longer leak through `journal.rs`.
+
+## Progress notes
+
+- 2026-03-11: Added [ingress_writes.rs](/Users/proerror/Documents/ploy/src/coordinator/journal/ingress_writes.rs) for signal history, risk decision, exit reason intent, and risk runtime-state persistence.
+- 2026-03-11: Reduced [journal.rs](/Users/proerror/Documents/ploy/src/coordinator/journal.rs) to the journal shell, restore reads, module wiring, and shared `metadata_decimal` parsing.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-ingress-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-ingress-cut-updates rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-ingress-cut-status rtk cargo test refresh_global_state_marks_stale_running_agents --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-journal-ingress-cut-pending rtk cargo test test_drain_and_execute_emits_pending_and_fill_updates --lib -- --exact --nocapture`
+
 # Journal Execution Writes Cut (2026-03-10)
 
 ## Goal
