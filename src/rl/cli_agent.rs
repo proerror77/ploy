@@ -7,16 +7,16 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::agent_runtime::AgentRiskParams;
+use crate::coordinator::OrderPriority;
 use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
-use crate::coordinator::OrderPriority;
 #[cfg(feature = "onnx")]
 use crate::rl::core::TOTAL_FEATURES;
 use crate::rl::core::{
-    ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
-    RewardFunction, CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS,
+    CONTINUOUS_ACTION_DIM, ContinuousAction, DefaultStateEncoder, DiscreteAction,
+    NUM_DISCRETE_ACTIONS, PnLRewardFunction, RawObservation, RewardFunction,
 };
 use crate::rl::memory::ReplayBuffer;
 use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
@@ -26,6 +26,7 @@ mod config;
 mod execution_feedback;
 mod market_state;
 mod policy;
+mod runtime;
 #[cfg(test)]
 mod tests;
 
@@ -145,91 +146,5 @@ impl RLCryptoAgent {
     /// Create with default configuration
     pub fn with_defaults() -> Self {
         Self::new(RLCryptoAgentConfig::default())
-    }
-
-}
-
-use chrono::Datelike;
-use chrono::Timelike;
-
-impl RLCryptoAgent {
-    pub fn id(&self) -> &str {
-        &self.config.id
-    }
-
-    pub fn name(&self) -> &str {
-        &self.config.name
-    }
-
-    pub fn domain(&self) -> Domain {
-        Domain::Crypto
-    }
-
-    pub fn status(&self) -> AgentStatus {
-        self.status
-    }
-
-    pub fn risk_params(&self) -> &AgentRiskParams {
-        &self.config.risk_params
-    }
-
-    pub async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {
-        if !self.status.can_trade() {
-            return Ok(vec![]);
-        }
-
-        match event {
-            DomainEvent::Crypto(crypto_event) => Ok(self.process_crypto_event(&crypto_event)),
-            DomainEvent::Tick(now) => {
-                self.current_obs
-                    .update_time_features(now.hour(), now.weekday().num_days_from_monday());
-                self.update_position_prices();
-                self.update_position_features();
-                Ok(vec![])
-            }
-        }
-    }
-
-    pub async fn on_execution(&mut self, report: ExecutionReport) {
-        self.handle_execution(&report);
-    }
-
-    pub async fn start(&mut self) -> Result<()> {
-        info!("[{}] Starting RL Crypto Agent...", self.config.id);
-        self.status = AgentStatus::Running;
-        Ok(())
-    }
-
-    pub async fn stop(&mut self) -> Result<()> {
-        info!("[{}] Stopping RL Crypto Agent...", self.config.id);
-        self.status = AgentStatus::Stopped;
-        Ok(())
-    }
-
-    pub fn pause(&mut self) {
-        info!("[{}] Pausing...", self.config.id);
-        self.status = AgentStatus::Paused;
-    }
-
-    pub fn resume(&mut self) {
-        info!("[{}] Resuming...", self.config.id);
-        self.consecutive_failures = 0;
-        self.status = AgentStatus::Running;
-    }
-
-    pub fn position_count(&self) -> usize {
-        if self.position.is_some() {
-            1
-        } else {
-            0
-        }
-    }
-
-    pub fn total_exposure(&self) -> Decimal {
-        self.total_exposure
-    }
-
-    pub fn daily_pnl(&self) -> Decimal {
-        self.daily_pnl
     }
 }

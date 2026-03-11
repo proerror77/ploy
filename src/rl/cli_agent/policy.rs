@@ -133,11 +133,7 @@ impl RLCryptoAgent {
                 let values = &output[..CONTINUOUS_ACTION_DIM];
                 let urgency = Self::map_urgency(values[2]);
                 Some(ContinuousAction::new(
-                    values[0],
-                    values[1],
-                    urgency,
-                    values[3],
-                    values[4],
+                    values[0], values[1], urgency, values[3], values[4],
                 ))
             }
             "continuous_mean_logstd" | "mean_logstd" => {
