@@ -1,5 +1,13 @@
+use super::AutoClaimer;
+#[cfg(feature = "builder_relayer_sdk")]
 use super::proxy_support::RelayerBuilderCredentials;
-use super::*;
+#[cfg(feature = "builder_relayer_sdk")]
+use super::{
+    CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT, RedeemablePosition,
+    relayer_base_url, relayer_poll_interval_ms, relayer_poll_max,
+};
+#[cfg(feature = "builder_relayer_sdk")]
+use crate::error::Result;
 
 #[cfg(feature = "builder_relayer_sdk")]
 use builder_relayer_client_rust::signer::DummySigner;
@@ -10,12 +18,15 @@ use builder_relayer_client_rust::{
 };
 #[cfg(feature = "builder_relayer_sdk")]
 use builder_signing_sdk_rs::BuilderApiKeyCreds;
+#[cfg(feature = "builder_relayer_sdk")]
 use std::time::Duration;
+#[cfg(feature = "builder_relayer_sdk")]
 use tokio::time::sleep;
+#[cfg(feature = "builder_relayer_sdk")]
 use tracing::info;
 
+#[cfg(feature = "builder_relayer_sdk")]
 impl AutoClaimer {
-    #[cfg(feature = "builder_relayer_sdk")]
     pub(super) async fn claim_position_via_relayer_proxy_sdk(
         &self,
         pos: &RedeemablePosition,

@@ -1,3 +1,4 @@
+#[cfg(feature = "builder_relayer_sdk")]
 use tracing::warn;
 
 use crate::error::Result;
