@@ -1,4 +1,5 @@
 use super::*;
+use crate::rl::ExecutionStatus;
 
 impl RLCryptoAgent {
     /// Handle execution report.

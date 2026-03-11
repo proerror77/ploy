@@ -1,4 +1,5 @@
 use super::*;
+use rust_decimal_macros::dec;
 
 impl RLCryptoAgent {
     /// Select action using RL policy

@@ -25,6 +25,34 @@ Reduce `src/rl/cli_agent.rs` root-file ownership by extracting market-state upda
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-agent-split rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-agent-split rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
 
+# RL CLI Agent Config/Test Split (2026-03-11)
+
+## Goal
+Move RL CLI config/default ownership and focused regressions out of `src/rl/cli_agent.rs` so the root file only owns the agent runtime state and public lifecycle surface.
+
+## File ownership
+
+- `src/rl/cli_agent.rs`
+  - owner: thin RL agent owner / module wiring
+- `src/rl/cli_agent/config.rs`
+  - owner: `RLCryptoAgentConfig` and defaults
+- `src/rl/cli_agent/tests.rs`
+  - owner: focused RL CLI regressions
+
+## Tasks
+
+- [x] Extract `RLCryptoAgentConfig` and its defaults into a sibling module.
+- [x] Move inline RL CLI tests into a sibling module.
+- [x] Re-run RL-focused compile and behavior regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [config.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/config.rs) and re-exported `RLCryptoAgentConfig` from [cli_agent.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent.rs).
+- 2026-03-11: Added [tests.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/tests.rs) so the root file no longer owns the RL compatibility test suite.
+- 2026-03-11: Validation attempt:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-config-split rtk cargo check --lib --features rl --message-format=short`
+- 2026-03-11: The RL split no longer introduces its own compile errors, but branch-wide compile is still blocked by existing `nba_comeback` errors in [strategy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy.rs) and [state_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy/state_flow.rs).
+
 # Domain OrderRequest Bridge Cut (2026-03-11)
 
 ## Goal
