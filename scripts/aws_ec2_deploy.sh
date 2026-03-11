@@ -10,7 +10,7 @@ USER_NAME="ubuntu"
 SSH_KEY=""
 START_AFTER_DEPLOY="true"
 ENABLE_ON_BOOT="true"
-SERVICES="ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer"
+SERVICES="ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer,ploy-platform-watchdog.timer"
 ALLOW_REMOTE_BUILD="${ALLOW_REMOTE_BUILD:-0}"
 
 usage() {
@@ -25,8 +25,8 @@ Options:
   --start <true|false>     Start services after deploy (default: true)
   --enable <true|false>    Enable services on boot (default: true)
   --services <csv>         Services to enable/start
-                           allowed: ploy,ploy-platform-live,ploy-sports-pm,ploy-crypto-collector,ploy-crypto-dryrun,ploy-crypto-live,ploy-orderbook-history,ploy-maintenance.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
-                           default: ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer
+                           allowed: ploy,ploy-platform-live,ploy-sports-pm,ploy-crypto-collector,ploy-crypto-dryrun,ploy-crypto-live,ploy-orderbook-history,ploy-maintenance.timer,ploy-platform-watchdog.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
+                           default: ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer,ploy-platform-watchdog.timer
   -h, --help               Show help
 
 Examples:
@@ -51,7 +51,7 @@ USAGE
 
 is_allowed_service() {
   case "$1" in
-    ploy|ploy-platform-live|ploy-sports-pm|ploy-crypto-collector|ploy-crypto-dryrun|ploy-crypto-live|ploy-orderbook-history|ploy-maintenance.timer) return 0 ;;
+    ploy|ploy-platform-live|ploy-sports-pm|ploy-crypto-collector|ploy-crypto-dryrun|ploy-crypto-live|ploy-orderbook-history|ploy-maintenance.timer|ploy-platform-watchdog.timer) return 0 ;;
     ploy-strategy-pattern-memory-dryrun|ploy-strategy-momentum-dryrun|ploy-strategy-split-arb-dryrun) return 0 ;;
     *) return 1 ;;
   esac
@@ -67,7 +67,7 @@ normalize_services_csv() {
     [[ -n "$svc" ]] || continue
     if ! is_allowed_service "$svc"; then
       echo "invalid service in --services: $svc" >&2
-      echo "allowed: ploy, ploy-platform-live, ploy-sports-pm, ploy-crypto-collector, ploy-crypto-dryrun, ploy-crypto-live, ploy-orderbook-history, ploy-maintenance.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
+      echo "allowed: ploy, ploy-platform-live, ploy-sports-pm, ploy-crypto-collector, ploy-crypto-dryrun, ploy-crypto-live, ploy-orderbook-history, ploy-maintenance.timer, ploy-platform-watchdog.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
       exit 2
     fi
     out+=("$svc")
@@ -297,7 +297,9 @@ for unit in \
   "$REMOTE_ROOT/deployment/ploy-strategy-split-arb-dryrun.service" \
   "$REMOTE_ROOT/deployment/ploy-orderbook-history.service" \
   "$REMOTE_ROOT/deployment/ploy-maintenance.service" \
-  "$REMOTE_ROOT/deployment/ploy-maintenance.timer"
+  "$REMOTE_ROOT/deployment/ploy-maintenance.timer" \
+  "$REMOTE_ROOT/deployment/ploy-platform-watchdog.service" \
+  "$REMOTE_ROOT/deployment/ploy-platform-watchdog.timer"
 do
   if [[ -f "$unit" ]]; then
     sudo install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"

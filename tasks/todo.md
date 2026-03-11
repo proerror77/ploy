@@ -70,7 +70,7 @@ Explain why `pm_5m_directional` cannot produce a real post-`2026-03-08` out-of-s
 - [x] Quantify the gap by table/day on `tango-1-1`.
 - [x] Check whether the live platform service was down during the missing window.
 - [x] Map repo owners / commands for the affected tables.
-- [ ] Decide whether to ship an operational safeguard (watchdog / deploy guard) in repo.
+- [x] Ship an operational safeguard (watchdog / deploy guard) in repo.
 
 ## Progress notes
 
@@ -78,6 +78,9 @@ Explain why `pm_5m_directional` cannot produce a real post-`2026-03-08` out-of-s
 - 2026-03-11: `pm_market_metadata` / `pm_token_settlements` show the same pattern: healthy on `2026-03-05..07`, partial on `2026-03-08`, zero on `2026-03-09`, small tail recovery on `2026-03-10`.
 - 2026-03-11: Host journal ties the gap to `ploy-platform.service` being cleanly stopped at `2026-03-08 06:51 CST` and not started again until `2026-03-10 16:08 CST`. This is an operational capture outage, not a PM5 backtest logic bug.
 - 2026-03-11: `ploy-platform.service` already has `Restart=always`, `RestartSec=5`, `MemoryHigh=1280M`, `MemoryMax=1536M`, and `OOMPolicy=kill`. Because the stop was clean/manual, restart policy did not resurrect it.
+- 2026-03-11: Added a minimal host-side watchdog: `scripts/ploy_platform_watchdog.sh` plus `deployment/ploy-platform-watchdog.service` and `.timer`. It checks for an explicit lock file, skips during `ploy-maintenance.service`, and starts the discovered platform unit only when it is unexpectedly inactive.
+- 2026-03-11: Wired the watchdog through both `scripts/install-service.sh` and `scripts/aws_ec2_deploy.sh`. `install-service.sh` now uses `systemctl enable --now ploy-platform-watchdog.timer`, so a fresh install does not wait for the next reboot before the safeguard becomes active.
+- 2026-03-11: Shell regression coverage passed via `bash scripts/tests/test_ploy_platform_watchdog.sh`, covering inactive, locked, maintenance-active, and already-active unit states.
 - 2026-03-11: Repo owner map:
   - `binance_price_ticks` / `clob_quote_ticks` / `clob_orderbook_snapshots`: live `PersistencePipeline` from [market_data_runtime.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/coordinator/bootstrap/crypto_runtime_support/market_data_runtime.rs)
   - `binance_lob_ticks`: live `PersistencePipeline` plus optional `SyncCollector`; no historical backfill command exists
