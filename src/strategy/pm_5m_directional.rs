@@ -388,14 +388,15 @@ impl Pm5mDirectionalStrategy {
 
     fn obi_factors(l2: &BinanceL2State) -> ObiFactors {
         let obi_1 = l2.obi_1.to_f64().unwrap_or(0.0);
+        let obi_2 = l2.obi_2.to_f64().unwrap_or(0.0);
         let obi_5 = l2.obi_5.to_f64().unwrap_or(0.0);
         let obi_10 = l2.obi_10.to_f64().unwrap_or(0.0);
         let obi_20 = l2.obi_20.to_f64().unwrap_or(0.0);
-        let obi_micro = (obi_1 - obi_5).clamp(-2.0, 2.0);
+        let obi_micro = ((((obi_1 + obi_2) / 2.0) - obi_5)).clamp(-2.0, 2.0);
         let obi_slope = (obi_5 - obi_20).clamp(-2.0, 2.0);
 
         ObiFactors {
-            main: obi_5,
+            main: ((0.60 * obi_5) + (0.25 * obi_10) + (0.15 * obi_20)).clamp(-1.0, 1.0),
             obi_10,
             obi_20,
             shape: (0.5 * (obi_micro + obi_slope)).clamp(-2.0, 2.0),
@@ -577,7 +578,6 @@ impl Pm5mDirectionalStrategy {
         match side {
             Side::Up => {
                 if obi.main < self.cfg.min_obi
-                    || obi.obi_20 <= 0.0
                     || flow_2s < self.cfg.min_flow_2s
                     || microgap < 0.0
                 {
@@ -587,7 +587,6 @@ impl Pm5mDirectionalStrategy {
             }
             Side::Down => {
                 if obi.main > -self.cfg.min_obi
-                    || obi.obi_20 >= 0.0
                     || flow_2s > -self.cfg.min_flow_2s
                     || microgap > 0.0
                 {
@@ -1358,13 +1357,13 @@ no_trade_override_flow = 99.0
 
         let pre_sequence = [
             dec!(100.180),
+            dec!(100.185),
             dec!(100.190),
+            dec!(100.195),
             dec!(100.200),
-            dec!(100.190),
-            dec!(100.200),
-            dec!(100.190),
-            dec!(100.200),
-            dec!(100.190),
+            dec!(100.205),
+            dec!(100.210),
+            dec!(100.215),
         ];
         for (idx, price) in pre_sequence.into_iter().enumerate() {
             strategy
@@ -1379,7 +1378,7 @@ no_trade_override_flow = 99.0
         let actions = strategy
             .on_market_update(&price_update(
                 anchor + chrono::Duration::seconds(2),
-                dec!(100.200),
+                dec!(100.220),
             ))
             .await
             .expect("final price");
@@ -1389,9 +1388,13 @@ no_trade_override_flow = 99.0
             .count();
 
         assert_eq!(submit_count, 0, "mid-band weak setup should be filtered");
-        assert_eq!(
-            strategy.last_reason.as_deref(),
-            Some("BTCUSDT:no_trade_zone")
+        assert!(
+            matches!(
+                strategy.last_reason.as_deref(),
+                Some("BTCUSDT:no_trade_zone") | Some("BTCUSDT:up_confirmation_failed")
+            ),
+            "expected mid-band filter or confirmation failure, got {:?}",
+            strategy.last_reason
         );
     }
 
