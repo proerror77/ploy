@@ -1,3 +1,30 @@
+# Sports Analyst URL Parsing Split (2026-03-11)
+
+## Goal
+Move the Polymarket event URL parsing and team-name expansion logic out of `src/ai_clients/sports_analyst.rs` so the root analyst keeps orchestration and analysis ownership while a sibling module owns slug/team parsing and its focused tests.
+
+## File ownership
+
+- `src/ai_clients/sports_analyst.rs`
+  - owner: analyst façade, market-odds orchestration, Claude analysis, recommendation logic
+- `src/ai_clients/sports_analyst/url_parsing.rs`
+  - owner: event URL parsing, team-name expansion helpers, and parsing-focused regressions
+
+## Tasks
+
+- [x] Extract event URL/team parsing helpers into a sibling module.
+- [x] Move the parsing-focused tests with the extracted owner.
+- [x] Re-run compile plus focused parsing regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [url_parsing.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_analyst/url_parsing.rs) for slug parsing, long-format matchup parsing, team extraction, and league-specific team-code expansion.
+- 2026-03-11: Reduced [sports_analyst.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_analyst.rs) so the root analyst no longer owns URL/team parsing internals or their tests.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-url rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-url rtk cargo test test_parse_event_url --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-url rtk cargo test test_parse_long_format_url --lib -- --exact --nocapture`
+
 # Sports Analyst Market Odds Split (2026-03-11)
 
 ## Goal
