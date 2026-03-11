@@ -1,3 +1,31 @@
+# Sports Analyst Analysis Outcome Split (2026-03-11)
+
+## Goal
+Move Claude prediction prompting/parsing, recommendation generation, and DraftKings comparison out of `src/ai_clients/sports_analyst.rs` so the root analyst keeps only top-level orchestration while a sibling module owns analysis outcome shaping.
+
+## File ownership
+
+- `src/ai_clients/sports_analyst.rs`
+  - owner: analyst façade and top-level `analyze_event` orchestration
+- `src/ai_clients/sports_analyst/analysis_outcome.rs`
+  - owner: Claude prompt/response handling, recommendation generation, DraftKings comparison, and focused response-parsing tests
+
+## Tasks
+
+- [x] Extract Claude prediction + recommendation helpers into a sibling module.
+- [x] Move `SportsAnalysisWithDK` and its behavior into the same owner.
+- [x] Add focused regressions for extracted response parsing.
+- [x] Re-run compile plus focused response-parsing regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [analysis_outcome.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_analyst/analysis_outcome.rs) for Claude prompt/response handling, recommendation generation, DraftKings comparison, and focused parsing tests.
+- 2026-03-11: Reduced [sports_analyst.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_analyst.rs) so the root analyst no longer owns analysis outcome shaping or the `SportsAnalysisWithDK` behavior surface.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-outcome rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-outcome rtk cargo test test_parse_prediction_response_extracts_json_payload --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-outcome rtk cargo test test_parse_prediction_response_falls_back_to_neutral --lib -- --exact --nocapture`
+
 # Sports Analyst URL Parsing Split (2026-03-11)
 
 ## Goal
