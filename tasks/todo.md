@@ -1,3 +1,30 @@
+# Sports Analyst Market Odds Split (2026-03-11)
+
+## Goal
+Move Polymarket odds lookup, search fallback, and odds parsing out of `src/ai_clients/sports_analyst.rs` so the root analyst keeps orchestration, URL parsing, Claude prompting, and recommendation logic while a sibling module owns market-data retrieval.
+
+## File ownership
+
+- `src/ai_clients/sports_analyst.rs`
+  - owner: analyst façade, URL parsing, Claude analysis, recommendation logic, and root tests
+- `src/ai_clients/sports_analyst/market_odds.rs`
+  - owner: Polymarket odds lookup, search fallback, event hydration, and odds parsing helpers
+
+## Tasks
+
+- [x] Extract the Polymarket odds retrieval/parsing helpers into a sibling module.
+- [x] Add focused regressions for the extracted odds helpers.
+- [x] Re-run compile plus focused sports-analyst regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [market_odds.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_analyst/market_odds.rs) for slug lookup, team-search fallback, market-summary parsing, and odds-building helpers.
+- 2026-03-11: Reduced [sports_analyst.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_analyst.rs) so the root analyst file no longer owns Polymarket lookup and odds parsing internals.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-odds rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-odds rtk cargo test test_parse_yes_price_accepts_string_arrays --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-analyst-odds rtk cargo test test_build_odds_from_yes_price_stays_symmetric --lib -- --exact --nocapture`
+
 # Polymarket Sports Query Ownership Split (2026-03-11)
 
 ## Goal
