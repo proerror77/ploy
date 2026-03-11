@@ -879,6 +879,32 @@ Finish the half-applied `nba_comeback` strategy split by moving config-loading a
   - `CARGO_TARGET_DIR=/tmp/ploy-nba-config-cut-t2 rtk cargo test strategy::nba_comeback::strategy::tests::emits_canonical_submit_order_and_tracks_fill_into_position --lib -- --exact --nocapture`
 - 2026-03-11: The focused test invocations did not complete within the tool window because compiling the branch's full `lib test` target exceeded the session limit; no NBA-specific compile failures surfaced after the module split.
 
+# Strategy And Adapter Wave 12 (2026-03-11)
+
+## Goal
+Keep shrinking `nba_comeback` live-path ownership by moving fill settlement, position updates, and state/reset helpers out of the root strategy file.
+
+## File ownership
+
+- `src/strategy/nba_comeback/strategy.rs`
+  - owner: thin trait entrypoints and scan loop
+- `src/strategy/nba_comeback/strategy/state_flow.rs`
+  - owner: order update flow, position bookkeeping, runtime state helpers
+
+## Tasks
+
+- [x] Move `on_order_update` heavy logic behind a thin strategy delegator.
+- [x] Move state/positions/is_active/shutdown/reset helpers into a sibling module.
+- [x] Re-run compile plus focused NBA fill regression after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [state_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy/state_flow.rs) to own fill settlement, position metadata updates, runtime state snapshots, shutdown, and reset behavior.
+- 2026-03-11: Kept [strategy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy.rs) as the thin trait owner; `on_order_update`, `state`, `positions`, `is_active`, `shutdown`, and `reset` now delegate into `state_flow`.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-nba-config-loader rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-nba-order-update-fast rtk cargo test emits_canonical_submit_order_and_tracks_fill_into_position --lib -- --exact --nocapture`
+
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
 ## Goal
