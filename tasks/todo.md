@@ -60,6 +60,34 @@ Use the restored 20-level replay path to tune `pm_5m_directional` defaults on th
   - `CARGO_TARGET_DIR=/Users/proerror/Documents/ploy-pm5-backtest/target rtk cargo test emits_ioc_entry_when_directional_core_passes --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/Users/proerror/Documents/ploy-pm5-backtest/target rtk cargo test replays_profitable_up_round_to_settlement --lib -- --exact --nocapture`
 
+# PM5 Host Data Gap Investigation (2026-03-11)
+
+## Goal
+Explain why `pm_5m_directional` cannot produce a real post-`2026-03-08` out-of-sample window on `tango-1-1`, and identify which parts are repairable vs. permanently missing.
+
+## Tasks
+
+- [x] Quantify the gap by table/day on `tango-1-1`.
+- [x] Check whether the live platform service was down during the missing window.
+- [x] Map repo owners / commands for the affected tables.
+- [ ] Decide whether to ship an operational safeguard (watchdog / deploy guard) in repo.
+
+## Progress notes
+
+- 2026-03-11: `tango-1-1` daily counts show the same gap shape across both Binance and Polymarket replay inputs. `binance_price_ticks`, `binance_lob_ticks`, `clob_quote_ticks`, and `clob_orderbook_snapshots` all fall off after `2026-03-08`, are fully absent on `2026-03-09`, then partially resume on `2026-03-10`.
+- 2026-03-11: `pm_market_metadata` / `pm_token_settlements` show the same pattern: healthy on `2026-03-05..07`, partial on `2026-03-08`, zero on `2026-03-09`, small tail recovery on `2026-03-10`.
+- 2026-03-11: Host journal ties the gap to `ploy-platform.service` being cleanly stopped at `2026-03-08 06:51 CST` and not started again until `2026-03-10 16:08 CST`. This is an operational capture outage, not a PM5 backtest logic bug.
+- 2026-03-11: `ploy-platform.service` already has `Restart=always`, `RestartSec=5`, `MemoryHigh=1280M`, `MemoryMax=1536M`, and `OOMPolicy=kill`. Because the stop was clean/manual, restart policy did not resurrect it.
+- 2026-03-11: Repo owner map:
+  - `binance_price_ticks` / `clob_quote_ticks` / `clob_orderbook_snapshots`: live `PersistencePipeline` from [market_data_runtime.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/coordinator/bootstrap/crypto_runtime_support/market_data_runtime.rs)
+  - `binance_lob_ticks`: live `PersistencePipeline` plus optional `SyncCollector`; no historical backfill command exists
+  - `pm_market_metadata`: strategy event discovery, settlement backfill, or replay backfill
+  - `pm_token_settlements`: settlement persistence / settlement backfill
+- 2026-03-11: Repair constraints:
+  - `ploy strategy backfill-pm-replay-tables` depends on `sync_records`, but `sync_records` is zero across `2026-03-05..10` on `tango-1-1`
+  - Repo has no native historical backfill path for `binance_price_ticks` or `binance_lob_ticks`
+  - Result: the `2026-03-09` Binance L2 gap is not reconstructible from current host data, so a true OOS PM5 validation must use later captured history
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal
