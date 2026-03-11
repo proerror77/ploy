@@ -1,3 +1,4 @@
+# DEPRECATED: Use release-aliyun.yml. Builds x86_64 without production features.
 name: Release and Deploy Production
 
 on:

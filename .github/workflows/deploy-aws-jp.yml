@@ -85,7 +85,7 @@ jobs:
         echo "$PRIVATE_KEY" > private_key.pem
         chmod 600 private_key.pem
 
-        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$HOST << 'ENDSSH'
+        ssh -o StrictHostKeyChecking=accept-new -i private_key.pem ec2-user@$HOST << 'ENDSSH'
           # Login to ECR
           aws ecr get-login-password --region ap-northeast-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
 
