@@ -256,6 +256,15 @@ impl StrategyOrchestrator {
         for action in actions {
             match action {
                 StrategyAction::SubmitIntent { intent } => {
+                    if !self.executor.is_dry_run() {
+                        warn!(
+                            strategy_id,
+                            client_order_id = %intent.client_order_id,
+                            "legacy strategy orchestrator live submit is disabled; route submits through the coordinator runtime instead"
+                        );
+                        continue;
+                    }
+
                     let client_order_id = intent.client_order_id.clone();
                     let order = super::runtime_order::order_request_from_intent(&intent);
                     // Check risk before submitting

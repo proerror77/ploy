@@ -1,3 +1,26 @@
+# Legacy Orchestrator Live Submit Guard (2026-03-11)
+
+## Goal
+Stop the legacy `StrategyOrchestrator` from acting like a second live execution runtime by disabling non-dry-run order submission while preserving dry-run compatibility behavior.
+
+## Tasks
+
+- [x] Reject `StrategyAction::SubmitIntent` in `StrategyOrchestrator` whenever the executor is not dry-run.
+- [x] Keep dry-run submit behavior intact so legacy tooling still works for observation/simulation paths.
+- [x] Re-run focused compile after the guard lands.
+
+## Review
+
+- [x] Confirm the live guard triggers before risk checks or executor submission.
+- [x] Confirm cancel/modify/log/alert paths remain unchanged.
+
+## Progress notes
+
+- 2026-03-11: Added a live-submit guard to [orchestrator.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/orchestrator.rs) so the legacy orchestrator now warns and skips `SubmitIntent` whenever the underlying executor is not dry-run.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-foreground-submit-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-foreground-submit-cut-req rtk cargo test test_strategy_manager_creation --lib -- --exact --nocapture`
+
 # CLI Foreground Coordinator-Only Submit (2026-03-11)
 
 ## Goal
