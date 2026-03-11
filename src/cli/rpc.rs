@@ -1,25 +1,23 @@
-use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
-use crate::adapters::postgres::PostgresStore;
 use crate::adapters::PolymarketClient;
+use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::error::Result;
 use crate::signing::Wallet;
-use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once};
-use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
-use crate::strategy::multi_outcome::fetch_multi_outcome_event;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
+mod event_methods;
 mod intent_methods;
 mod pm_read_methods;
 mod write_support;
 
+use event_methods::handle_event_method;
 use intent_methods::handle_coordinator_intent_method;
 use pm_read_methods::handle_pm_read_method;
 use write_support::{
-    finalize_write_response, hash_idempotency_params, idempotency_record_path, is_write_method,
-    load_app_config, load_idempotency_record, parse_idempotency_key, parse_str,
-    require_write_enabled, write_enabled, IdempotencyContext,
+    IdempotencyContext, finalize_write_response, hash_idempotency_params, idempotency_record_path,
+    is_write_method, load_app_config, load_idempotency_record, parse_idempotency_key, parse_str,
+    require_write_enabled, write_enabled,
 };
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
 
@@ -225,6 +223,10 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
         handle_coordinator_intent_method(&req.id, req.method.as_str(), &params).await
     {
         resp
+    } else if let Some(resp) =
+        handle_event_method(&req.id, req.method.as_str(), &params, &config, &rest_url).await
+    {
+        resp
     } else {
         match req.method.as_str() {
             "system.ping" => jsonrpc_ok(req.id, json!({"ok": true})),
@@ -296,342 +298,6 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                         req.id,
                         -32001,
                         "pm client init failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                }
-            }
-
-            "event_edge.scan" => {
-                let event_id_opt = params
-                    .get("event_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let title_opt = params
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                let event_id = match (event_id_opt, title_opt) {
-                    (Some(id), _) => id,
-                    (None, Some(t)) => match discover_best_event_id_by_title(&t).await {
-                        Ok(id) => id,
-                        Err(e) => {
-                            println!(
-                                "{}",
-                                jsonrpc_err(
-                                    req.id,
-                                    -32001,
-                                    "event discovery failed",
-                                    Some(json!({"detail": e.to_string()}))
-                                )
-                            );
-                            return Ok(());
-                        }
-                    },
-                    _ => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32602,
-                                "invalid params",
-                                Some(json!({"detail": "event_id or title required"}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-
-                let arena = match fetch_arena_text_snapshot().await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32001,
-                                "arena fetch failed",
-                                Some(json!({"detail": e.to_string()}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-
-                match build_pm_client(&rest_url, true).await {
-                    Ok(c) => match scan_event_edge_once(&c, &event_id, Some(arena)).await {
-                        Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                        Err(e) => jsonrpc_err(
-                            req.id,
-                            -32001,
-                            "event_edge.scan failed",
-                            Some(json!({"detail": e.to_string()})),
-                        ),
-                    },
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm client init failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                }
-            }
-
-            "multi_outcome.analyze" => {
-                let event_id = match parse_str(&params, "event_id") {
-                    Ok(v) => v,
-                    Err(e) => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32602,
-                                "invalid params",
-                                Some(json!({"detail": e.to_string()}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-
-                match build_pm_client(&rest_url, true).await {
-                    Ok(c) => match fetch_multi_outcome_event(&c, &event_id).await {
-                        Ok(monitor) => {
-                            let arbs = monitor.find_all_arbitrage();
-                            let summary = monitor.summary();
-                            jsonrpc_ok(
-                                req.id,
-                                json!({
-                                    "event_id": monitor.event_id,
-                                    "event_title": monitor.event_title,
-                                    "outcomes": summary,
-                                    "arbs": arbs
-                                }),
-                            )
-                        }
-                        Err(e) => jsonrpc_err(
-                            req.id,
-                            -32001,
-                            "multi_outcome.analyze failed",
-                            Some(json!({"detail": e.to_string()})),
-                        ),
-                    },
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm client init failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                }
-            }
-
-            // ==================== Event Registry ====================
-            "events.upsert" => {
-                if let Err(v) = require_write_enabled(req.id.clone()) {
-                    println!("{}", v.to_string());
-                    return Ok(());
-                }
-                let title = match parse_str(&params, "title") {
-                    Ok(v) => v,
-                    Err(e) => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32602,
-                                "invalid params",
-                                Some(json!({"detail": e.to_string()}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-                let source = params
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("manual")
-                    .to_string();
-
-                let req_body = crate::strategy::registry::EventUpsertRequest {
-                    title,
-                    source,
-                    event_id: params
-                        .get("event_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    slug: params
-                        .get("slug")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    domain: params
-                        .get("domain")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("politics")
-                        .to_string(),
-                    strategy_hint: params
-                        .get("strategy_hint")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    status: params
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    confidence: params.get("confidence").and_then(|v| v.as_f64()),
-                    settlement_rule: params
-                        .get("settlement_rule")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    end_time: params
-                        .get("end_time")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|dt| dt.with_timezone(&chrono::Utc)),
-                    market_slug: params
-                        .get("market_slug")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    condition_id: params
-                        .get("condition_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    token_ids: params.get("token_ids").cloned(),
-                    outcome_prices: params.get("outcome_prices").cloned(),
-                    metadata: params.get("metadata").cloned(),
-                };
-
-                match PostgresStore::new(&config.database.url, config.database.max_connections)
-                    .await
-                {
-                    Ok(store) => match store.upsert_event(&req_body).await {
-                        Ok(id) => jsonrpc_ok(req.id, json!({"id": id})),
-                        Err(e) => jsonrpc_err(
-                            req.id,
-                            -32001,
-                            "events.upsert failed",
-                            Some(json!({"detail": e.to_string()})),
-                        ),
-                    },
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "db connect failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                }
-            }
-
-            "events.list" => {
-                let filter = crate::strategy::registry::EventFilter {
-                    status: params
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    domain: params
-                        .get("domain")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    strategy_hint: params
-                        .get("strategy_hint")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    source: params
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    limit: params.get("limit").and_then(|v| v.as_i64()),
-                };
-
-                match PostgresStore::new(&config.database.url, config.database.max_connections)
-                    .await
-                {
-                    Ok(store) => match store.list_events(&filter).await {
-                        Ok(events) => jsonrpc_ok(req.id, serde_json::to_value(events)?),
-                        Err(e) => jsonrpc_err(
-                            req.id,
-                            -32001,
-                            "events.list failed",
-                            Some(json!({"detail": e.to_string()})),
-                        ),
-                    },
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "db connect failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                }
-            }
-
-            "events.update_status" => {
-                if let Err(v) = require_write_enabled(req.id.clone()) {
-                    println!("{}", v.to_string());
-                    return Ok(());
-                }
-                let id = match params.get("id").and_then(|v| v.as_i64()) {
-                    Some(v) => v as i32,
-                    None => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32602,
-                                "invalid params",
-                                Some(json!({"detail": "missing/invalid integer param: id"}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-                let status_str = match parse_str(&params, "status") {
-                    Ok(v) => v,
-                    Err(e) => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32602,
-                                "invalid params",
-                                Some(json!({"detail": e.to_string()}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-                let new_status = match crate::strategy::registry::EventStatus::from_str(&status_str)
-                {
-                    Some(s) => s,
-                    None => {
-                        println!(
-                            "{}",
-                            jsonrpc_err(
-                                req.id,
-                                -32602,
-                                "invalid params",
-                                Some(json!({"detail": format!("unknown status: {status_str}")}))
-                            )
-                        );
-                        return Ok(());
-                    }
-                };
-
-                match PostgresStore::new(&config.database.url, config.database.max_connections)
-                    .await
-                {
-                    Ok(store) => match store.update_event_status(id, new_status).await {
-                        Ok(()) => {
-                            jsonrpc_ok(req.id, json!({"ok": true, "id": id, "status": status_str}))
-                        }
-                        Err(e) => jsonrpc_err(
-                            req.id,
-                            -32001,
-                            "events.update_status failed",
-                            Some(json!({"detail": e.to_string()})),
-                        ),
-                    },
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "db connect failed",
                         Some(json!({"detail": e.to_string()})),
                     ),
                 }

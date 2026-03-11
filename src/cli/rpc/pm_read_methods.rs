@@ -1,4 +1,5 @@
 use super::*;
+use crate::strategy::event_edge::discover_best_event_id_by_title;
 
 fn invalid_params_response(request_id: Option<Value>, detail: impl ToString) -> Value {
     jsonrpc_err(
