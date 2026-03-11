@@ -33,6 +33,33 @@ Upgrade `pm_5m_directional` to consume native 20-level Binance L2 imbalance feat
   - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test replays_profitable_up_round_to_settlement --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/pm5-obi20-final rtk cargo test supported_5m_slug_filter_rejects_other_horizons --lib -- --exact --nocapture`
 
+# PM5 Calibration Sweep (2026-03-11)
+
+## Goal
+Use the restored 20-level replay path to tune `pm_5m_directional` defaults on the same `tango-1-1` host/window, starting with `vol_floor` and `min_edge`.
+
+## Tasks
+
+- [x] Record the restored baseline from `ploy-pm5-fe5a0e8`.
+- [x] Run a focused sweep for `vol_floor` and `min_edge` on the same BTC window.
+- [x] Compare net PnL, Sharpe, trade count, and fee drag.
+- [x] Only change defaults if one setting is clearly better than baseline.
+
+## Review
+
+- [x] Confirm the post-parser-fix baseline is stable on `tango-1-1`.
+- [x] Confirm any promoted default also keeps local tests green.
+
+## Progress notes
+
+- 2026-03-11: Host replay was restored after teaching [database.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/strategy/backtest_feed/database.rs) to parse legacy array-shaped `bids/asks` levels from `binance_lob_ticks`.
+- 2026-03-11: Focused host sweep on `ploy-pm5-fe5a0e8` showed `vol_floor` is the active lever and `min_edge=0.03..0.05` is inert on the current sample. Baseline `0.0005/0.03` produced `121 trades`, `+21.04` net PnL, `3.90` Sharpe, `48.4%` fee drag; candidate `0.0010/0.03` produced `118 trades`, `+66.56` net PnL, `13.46` Sharpe, `20.5%` fee drag.
+- 2026-03-11: The current host history cannot support a real out-of-sample split after `2026-03-08T00:00:00Z`; `--diagnose-db` shows the later window has only tail-end `binance_price_ticks`, `clob_quote_ticks`, and `clob_orderbook_snapshots`, so the holdout segment produces `0` trades for both baseline and candidate.
+- 2026-03-11: `min_edge` wiring is intact, but the current effective-trade sample has `price_edge` roughly `0.19-0.44`, so moving `min_edge` from `0.03` to `0.05` does nothing; pushing it to `0.30` cuts trades from `121` to `116`.
+- 2026-03-11: Local validation after promoting `vol_floor=0.0010` passed:
+  - `CARGO_TARGET_DIR=/Users/proerror/Documents/ploy-pm5-backtest/target rtk cargo test emits_ioc_entry_when_directional_core_passes --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/Users/proerror/Documents/ploy-pm5-backtest/target rtk cargo test replays_profitable_up_round_to_settlement --lib -- --exact --nocapture`
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal

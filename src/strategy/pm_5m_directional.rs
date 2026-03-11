@@ -72,7 +72,7 @@ impl Default for Pm5mDirectionalConfig {
             max_time_remaining_secs: 300,
             final_no_entry_secs: 10,
             vol_lookback_secs: 30,
-            vol_floor: 0.0005,
+            vol_floor: 0.0010,
             p_entry: 0.62,
             min_edge: 0.03,
             min_abs_z: 0.35,
