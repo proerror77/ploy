@@ -53,6 +53,34 @@ Move RL CLI config/default ownership and focused regressions out of `src/rl/cli_
   - `CARGO_TARGET_DIR=/tmp/ploy-rl-config-split rtk cargo check --lib --features rl --message-format=short`
 - 2026-03-11: The RL split no longer introduces its own compile errors, but branch-wide compile is still blocked by existing `nba_comeback` errors in [strategy.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy.rs) and [state_flow.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/strategy/nba_comeback/strategy/state_flow.rs).
 
+# RL CLI Runtime Facade Split (2026-03-11)
+
+## Goal
+Move the public lifecycle, ingress, and read-side facade out of `src/rl/cli_agent.rs` so the root file only owns agent types and constructors/bootstrap.
+
+## File ownership
+
+- `src/rl/cli_agent.rs`
+  - owner: `RLCryptoAgent`, `InternalPosition`, constructors/bootstrap, module wiring
+- `src/rl/cli_agent/runtime.rs`
+  - owner: public lifecycle, ingress, and read-side facade
+
+## Tasks
+
+- [x] Extract the public runtime facade into a sibling module.
+- [x] Re-run RL-focused compile and behavior regressions after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [runtime.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent/runtime.rs) for lifecycle, ingress, and read-side facade methods.
+- 2026-03-11: Reduced [cli_agent.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/rl/cli_agent.rs) to agent type ownership plus `new()` / `with_defaults()`.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo check --lib --features rl --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo test --features rl test_rl_agent_lifecycle --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo test --features rl test_rl_signal_on_good_sum --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo test --features rl test_position_tracking --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rl-cli-runtime-cut rtk cargo test --features rl test_submitted_execution_does_not_pause_agent --lib -- --exact --nocapture`
+
 # Runtime Schema Surface Split (2026-03-11)
 
 ## Goal
@@ -1058,6 +1086,29 @@ Break `src/persistence/runtime_schema/repairs.rs` into domain-focused sibling mo
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-repairs rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-repairs rtk cargo test persistence::tests::persistence_module_reexports_market_data_surface --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-runtime-schema-repairs rtk cargo test coordinator::bootstrap::tests::ensure_pm_market_metadata_table_exists --lib -- --exact --nocapture`
+
+# RPC Event Methods Wave 1 (2026-03-11)
+
+## Goal
+Shrink `src/cli/rpc.rs` by moving event discovery, multi-outcome analysis, and event-registry method handling into a sibling module so the root file keeps JSON-RPC framing, idempotency, and top-level dispatch ownership.
+
+## File ownership
+
+- `src/cli/rpc.rs`
+  - owner: request parsing, config/idempotency bootstrap, top-level method dispatch
+- `src/cli/rpc/event_methods.rs`
+  - owner: `event_edge.scan`, `multi_outcome.analyze`, `events.upsert`, `events.list`, `events.update_status`
+
+## Tasks
+
+- [x] Extract the event/multi-outcome/event-registry method handlers into a sibling module.
+- [x] Re-run compile safety after the split.
+
+## Progress notes
+
+- 2026-03-11: Added [event_methods.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/cli/rpc/event_methods.rs) and rewired [rpc.rs](/Users/proerror/Documents/ploy-order-intent-cut/src/cli/rpc.rs) to delegate event-related methods through `handle_event_method(...)`.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
 
 # Coordinator Order Intent Ownership Cut (2026-03-10)
 
