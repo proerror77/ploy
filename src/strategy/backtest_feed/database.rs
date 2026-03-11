@@ -1019,35 +1019,37 @@ fn build_lob_update(
     let (total_depth, best_ask_size, ask_levels, best_ask_price) = match asks_json {
         Some(arr) if arr.is_array() => {
             let levels = arr.as_array().unwrap();
-            let mut depth = 0.0f64;
-            let mut best_size = 0u64;
-            let mut ask_levels = Vec::new();
-            let mut best = None;
-            for (index, level) in levels.iter().enumerate() {
+            let mut depth = 0u64;
+            let mut parsed_levels = Vec::new();
+            for level in levels.iter() {
                 if let (Some(size_str), Some(price_str)) = (
                     level.get("size").and_then(|v| v.as_str()),
                     level.get("price").and_then(|v| v.as_str()),
                 ) {
-                    if let Ok(size) = size_str.parse::<f64>() {
-                        depth += size;
+                    if let (Ok(size), Ok(price)) =
+                        (size_str.parse::<f64>(), price_str.parse::<Decimal>())
+                    {
                         let size_shares = size.floor() as u64;
-                        if index == 0 {
-                            best_size = size_shares;
-                        }
-                        if ask_levels.len() < MAX_REPLAY_ASK_LEVELS && size_shares > 0 {
-                            if let Ok(price) = price_str.parse::<Decimal>() {
-                                ask_levels.push(BookAskLevel { price, size_shares });
-                            }
-                        }
-                    }
-                    if best.is_none() {
-                        if let Ok(p) = price_str.parse::<Decimal>() {
-                            best = Some(p);
+                        if size_shares > 0 {
+                            depth += size_shares;
+                            parsed_levels.push(BookAskLevel { price, size_shares });
                         }
                     }
                 }
             }
-            (depth as u64, best_size, ask_levels, best)
+            parsed_levels.sort_by(|left, right| left.price.cmp(&right.price));
+            let best = parsed_levels.first().copied();
+            let ask_levels = parsed_levels
+                .iter()
+                .copied()
+                .take(MAX_REPLAY_ASK_LEVELS)
+                .collect::<Vec<_>>();
+            (
+                depth,
+                best.map(|level| level.size_shares).unwrap_or(0),
+                ask_levels,
+                best.map(|level| level.price),
+            )
         }
         _ => return None,
     };
@@ -1239,6 +1241,60 @@ mod tests {
                     ]
                 );
                 assert_eq!(best_ask, Some(Decimal::new(43, 2)));
+            }
+            other => panic!("unexpected update type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_lob_update_sorts_unsorted_asks_before_replay() {
+        let ts = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut mappings = TokenMappings::default();
+        mappings
+            .token_to_slug
+            .insert("token-up".to_string(), "btc-updown-5m-test".to_string());
+        mappings
+            .token_to_symbol
+            .insert("token-up".to_string(), "BTCUSDT".to_string());
+        mappings
+            .token_to_side
+            .insert("token-up".to_string(), Side::Up);
+
+        let asks_json = Some(json!([
+            {"price": "0.44", "size": "10"},
+            {"price": "0.43", "size": "25"},
+            {"price": "0.45", "size": "5"}
+        ]));
+
+        let update = build_lob_update(ts, "token-up", &asks_json, &mappings).expect("lob update");
+        match update.update_type {
+            UpdateType::LobSnapshot {
+                best_ask_size_shares,
+                ask_levels,
+                best_ask,
+                ..
+            } => {
+                assert_eq!(best_ask_size_shares, 25);
+                assert_eq!(best_ask, Some(Decimal::new(43, 2)));
+                assert_eq!(
+                    ask_levels,
+                    vec![
+                        BookAskLevel {
+                            price: Decimal::new(43, 2),
+                            size_shares: 25,
+                        },
+                        BookAskLevel {
+                            price: Decimal::new(44, 2),
+                            size_shares: 10,
+                        },
+                        BookAskLevel {
+                            price: Decimal::new(45, 2),
+                            size_shares: 5,
+                        },
+                    ]
+                );
             }
             other => panic!("unexpected update type: {other:?}"),
         }
