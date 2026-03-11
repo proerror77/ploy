@@ -221,3 +221,8 @@
 
 - Pattern: Parallel agent work can re-dirty the integration worktree with unrelated experiments, which blurs commit boundaries and slows structural refactors.
 - Rule: After every parallel batch, compare the worktree against the current ownership plan and evict unrelated agent edits before validation or staging. Do not let maintenance/perf side experiments bleed into the current atomic refactor slice.
+
+## 2026-03-11
+
+- Pattern: Running `cargo fmt --all` on a branch that already contains many in-flight structural edits explodes the worktree and destroys atomic bugfix boundaries.
+- Rule: For focused bugfix slices on this repo, format only the owned files with `rustfmt --edition 2024 <paths>` unless the branch is confirmed clean and the intent is an explicit repo-wide formatting sweep.

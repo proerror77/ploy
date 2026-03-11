@@ -5121,3 +5121,60 @@ Move the remaining adapter surface/bootstrap owner out of `src/adapters/polymark
   - `rtk cargo test test_build_subscription_list_includes_extra_tokens --lib -- --exact --nocapture`
   - `rtk cargo test characterization_single_book_message --lib -- --exact --nocapture`
   - `rtk cargo test characterization_freshness_recorded_on_book_update --lib -- --exact --nocapture`
+# Coordinator Bugfix Wave (2026-03-11)
+
+## Goal
+Fix the confirmed runtime bugs from the latest review without reopening stale findings: risk streak reset semantics, governance restart persistence, and async lock misuse in coordinator ingress/update paths.
+
+## File ownership
+
+- `src/coordinator/risk.rs`
+  - owner: regression tests for risk transition semantics
+- `src/coordinator/risk/transitions.rs`
+  - owner: `record_loss` / `record_success` transition fixes
+- `src/coordinator/governance.rs`
+  - owner: governance runtime-state snapshotting and DB round-trip
+- `src/persistence/runtime_schema/control_tables.rs`
+  - owner: governance runtime-state schema columns
+- `src/coordinator/coordinator/runtime_status.rs`
+  - owner: persisted governance snapshot writes and status surface
+- `src/coordinator/coordinator/recovery.rs`
+  - owner: governance restart restore path
+- `src/coordinator/coordinator.rs`
+  - owner: async lock ownership for authorized agents / order-update sinks
+- `src/coordinator/coordinator/control_surface.rs`
+  - owner: persisted governance mutations on pause/resume/halt control path
+- `src/coordinator/coordinator/order_updates.rs`
+  - owner: async order-update sink registration and read path
+- `src/coordinator/bootstrap/runtime_spawns.rs`
+  - owner: async registration call-site updates
+- `src/coordinator/bootstrap/runtime_orchestration.rs`
+  - owner: async spawn wiring updates
+- `src/api/handlers/sidecar/ingress/deployment_gate.rs`
+  - owner: async agent authorization gate
+- `src/api/handlers/sidecar/write_side.rs`
+  - owner: sidecar await-call updates
+
+## Tasks
+
+- [x] Re-verify stale findings before touching code (`R-01`, `R-04`).
+- [x] Add focused regressions for confirmed risk/governance issues.
+- [x] Reset consecutive failure streaks on realized-loss path and make success-state normalization single-lock.
+- [x] Persist governance runtime controls (`ingress_mode`, domain overrides, paused agents) and restore them on restart.
+- [x] Replace `std::sync::RwLock` coordinator owners with async locks and update call sites.
+- [x] Re-run compile plus focused regressions after the fixes.
+
+## Progress notes
+
+- 2026-03-11: Re-validated `R-01` and `R-04` against current `session/order-intent-clean`; both reports are stale / overstated on this branch, so no code changes were made for them.
+- 2026-03-11: Fixed risk transition semantics in [risk/transitions.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/risk/transitions.rs) and added regressions in [risk.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/risk.rs) for loss-driven streak reset and halted-state preservation.
+- 2026-03-11: Extended governance persistence in [governance.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/governance.rs) and [control_tables.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/persistence/runtime_schema/control_tables.rs) so restart recovery now restores runtime ingress modes and paused agents, not just policy.
+- 2026-03-11: Replaced coordinator-side `std::sync::RwLock` usage with async `tokio::sync::RwLock` in [coordinator.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/coordinator.rs) and [order_updates.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/coordinator/order_updates.rs), then updated bootstrap/sidecar callers to await the new async registration and authorization surfaces.
+- 2026-03-11: Validation passed:
+  - `rtk cargo check --lib`
+  - `rtk cargo check --lib --features rl`
+  - `CARGO_TARGET_DIR=/tmp/ploy-bugs rtk cargo test test_record_loss_resets_failure_streaks --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-bugs rtk cargo test test_record_success_does_not_clear_halted_state --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-bugs rtk cargo test test_governance_runtime_state_snapshot_roundtrip --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-bugs rtk cargo test test_governance_status_includes_domain_ingress_and_agents --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-bugs rtk cargo test test_governance_policy_persistence_roundtrips_runtime_state --lib -- --exact --nocapture`
