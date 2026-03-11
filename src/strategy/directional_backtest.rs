@@ -1442,6 +1442,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.40)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 
@@ -1520,6 +1522,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.50)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 
@@ -1584,6 +1588,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.30)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 
@@ -1597,6 +1603,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.20)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 
@@ -1609,6 +1617,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.15)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 
@@ -1676,6 +1686,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.40)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 
@@ -1689,6 +1701,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: None,
                 best_ask: Some(dec!(0.10)),
+                bid_size: None,
+                ask_size: None,
             },
         });
 

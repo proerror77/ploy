@@ -43,6 +43,8 @@ pub enum UpdateType {
         side: Side,
         best_bid: Option<Decimal>,
         best_ask: Option<Decimal>,
+        bid_size: Option<Decimal>,
+        ask_size: Option<Decimal>,
     },
     /// Event lifecycle update (metadata, settlement)
     EventState {
@@ -54,10 +56,16 @@ pub enum UpdateType {
     },
     /// Polymarket LOB snapshot (aggregated depth from clob_orderbook_snapshots)
     LobSnapshot {
-        /// Token side: "UP" or "DOWN"
-        side: String,
+        /// Market slug this book belongs to.
+        event_slug: String,
+        /// Token id this book belongs to.
+        token_id: String,
+        /// Token side: UP or DOWN
+        side: Side,
         /// Total ask-side liquidity in shares across all levels
         ask_depth_shares: u64,
+        /// Best ask level size in shares at the top of book.
+        best_ask_size_shares: u64,
         /// Best ask price
         best_ask: Option<Decimal>,
     },
@@ -158,6 +166,8 @@ impl HistoricalFeed {
                     side: Side::Up,
                     best_bid: Some(p.yes_bid),
                     best_ask: Some(p.yes_ask),
+                    bid_size: None,
+                    ask_size: None,
                 },
             });
             updates.push(MarketUpdate {
@@ -176,6 +186,8 @@ impl HistoricalFeed {
                             None
                         }
                     },
+                    bid_size: None,
+                    ask_size: None,
                 },
             });
 
@@ -251,6 +263,8 @@ mod tests {
                     side: Side::Up,
                     best_bid: None,
                     best_ask: Some(dec!(0.35)),
+                    bid_size: None,
+                    ask_size: None,
                 },
             },
         ];

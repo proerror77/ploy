@@ -370,6 +370,42 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# pm_5m_directional Backtest Correctness Fixes (2026-03-11)
+
+## Goal
+Tighten the `pm_5m_directional` historical replay so it stops mixing non-5m markets, preserves token-precise quote/LOB identity, settles at market end semantics, and closes residual positions when the replay window ends.
+
+## Tasks
+
+- [x] Extend replay quote/LOB updates to preserve token identity and quote sizes end-to-end.
+- [x] Filter discovered Polymarket windows down to supported 5m crypto slugs before building replay events.
+- [x] Route LOB snapshots by exact `event_slug + token_id + side` instead of symbol-level heuristics.
+- [x] Use event end time, not `resolved_at`, when turning settlement rows into replay exits.
+- [x] Close open positions at replay end so backtests cannot silently drop residual trades.
+- [x] Re-run compile plus focused `pm_5m_directional`/feed regressions.
+
+## Review
+
+- [x] Confirm `cargo check --lib` still passes after the replay schema changes.
+- [x] Confirm settlement replay uses event end time even when historical settlement rows arrive later.
+- [x] Confirm token-specific LOB updates no longer attach to the wrong active event.
+- [x] Confirm `pm_5m_directional` focused tests still pass after the replay changes.
+
+## Progress notes
+
+- 2026-03-11: Extended [backtest_feed.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/strategy/backtest_feed.rs) so `PmQuote` carries `bid_size/ask_size` and `LobSnapshot` carries `event_slug/token_id/side`, which lets replay preserve token-precise PM state instead of downgrading to symbol-level heuristics.
+- 2026-03-11: Tightened [database.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/strategy/backtest_feed/database.rs) to reject non-5m slugs when building token mappings, quote replay, and event windows; settlement rows are now keyed off opened 5m events and emitted at event end time semantics.
+- 2026-03-11: Updated [pm_5m_directional_backtest.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/strategy/pm_5m_directional_backtest.rs) so quote sizes merge into quote state, LOB snapshots route by exact token identity, settlement uses stored event end time, and residual open trades are marked-to-market and closed at replay end.
+- 2026-03-11: Follow-up tightened backtest realism: LOB replay now preserves top-of-book ask size separately from full depth, and [pm_5m_directional_backtest.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/strategy/pm_5m_directional_backtest.rs) now books Polymarket crypto fees into realized PnL instead of reporting gross settlement gains.
+- 2026-03-11: Added regression coverage for exact-token LOB routing, end-time-based settlement exits, side-aware LOB construction, and 5m slug filtering.
+- 2026-03-11: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-backtest-fixes2 rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/pm5-backtest-fixes2 rtk cargo test settlement_uses_event_end_time_not_resolved_time --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-backtest-fixes2 rtk cargo test lob_snapshot_routes_to_exact_token_not_earliest_event --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-backtest-fixes2 rtk cargo test pm_5m_directional --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-backtest-fixes2 rtk cargo test build_lob_update_uses_token_side_mapping --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-backtest-fixes2 rtk cargo test supported_5m_slug_filter_rejects_other_horizons --lib -- --exact --nocapture`
+
 # pm_5m_directional Zero-Trade Investigation (2026-03-10)
 
 ## Goal

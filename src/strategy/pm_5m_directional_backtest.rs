@@ -13,6 +13,7 @@ use crate::strategy::backtest_recorder::{
     BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, SignalType,
 };
 use crate::strategy::crypto::{horizon_for_series, series_ids_for_symbol};
+use crate::strategy::fee_model::FeeModel;
 use crate::strategy::pm_5m_directional::Pm5mDirectionalStrategy;
 use crate::strategy::runtime_specs::runtime_configs::build_pm_5m_directional_runtime_config;
 use crate::strategy::traits::{
@@ -63,6 +64,7 @@ struct OpenTrade {
     side: Side,
     entry_time: DateTime<Utc>,
     entry_price: Decimal,
+    entry_fee: Decimal,
     shares: u64,
     entry_p_hat: Option<f64>,
     entry_ev_net: Option<f64>,
@@ -80,6 +82,7 @@ pub struct Pm5mDirectionalBacktestEngine {
     latest_spot: HashMap<String, Decimal>,
     open_trades: HashMap<String, OpenTrade>,
     closed_trades: Vec<BacktestTrade>,
+    fee_model: FeeModel,
     total_volume: Decimal,
     realized_pnl: Decimal,
     equity_curve: Vec<(DateTime<Utc>, Decimal)>,
@@ -107,6 +110,7 @@ impl Pm5mDirectionalBacktestEngine {
             latest_spot: HashMap::new(),
             open_trades: HashMap::new(),
             closed_trades: Vec::new(),
+            fee_model: FeeModel::crypto(),
             total_volume: Decimal::ZERO,
             realized_pnl: Decimal::ZERO,
             equity_curve: Vec::new(),
@@ -133,6 +137,10 @@ impl Pm5mDirectionalBacktestEngine {
             start_time.get_or_insert(update.timestamp);
             end_time = Some(update.timestamp);
             self.process_update(update);
+        }
+
+        if let Some(final_ts) = end_time {
+            self.close_remaining_open_trades(final_ts);
         }
 
         let start_time = start_time.unwrap_or_else(Utc::now);
@@ -178,6 +186,8 @@ impl Pm5mDirectionalBacktestEngine {
                 side,
                 best_bid,
                 best_ask,
+                bid_size,
+                ask_size,
             } => {
                 {
                     let state = self
@@ -214,6 +224,12 @@ impl Pm5mDirectionalBacktestEngine {
                         });
                     quote.best_bid = best_bid;
                     quote.best_ask = best_ask;
+                    if bid_size.is_some() {
+                        quote.bid_size = bid_size;
+                    }
+                    if ask_size.is_some() {
+                        quote.ask_size = ask_size;
+                    }
                     quote.timestamp = ts;
                     Quote {
                         side,
@@ -234,46 +250,49 @@ impl Pm5mDirectionalBacktestEngine {
                 });
             }
             UpdateType::LobSnapshot {
+                event_slug,
+                token_id,
                 side,
                 ask_depth_shares,
+                best_ask_size_shares,
                 best_ask,
             } => {
-                if let Some((event_slug, token_id, side)) =
-                    self.resolve_token_for_lob(&update.symbol, &side)
-                {
-                    let merged_quote = {
-                        let quote = self
-                            .quotes
-                            .entry(token_id.clone())
-                            .or_insert(QuoteState {
-                                best_bid: None,
-                                best_ask: None,
-                                bid_size: None,
-                                ask_size: None,
-                                timestamp: ts,
-                            });
-                        quote.ask_size = Some(Decimal::from(ask_depth_shares));
-                        if best_ask.is_some() {
-                            quote.best_ask = best_ask;
-                        }
-                        quote.timestamp = ts;
-                        Quote {
-                            side,
-                            best_bid: quote.best_bid,
-                            best_ask: quote.best_ask,
-                            bid_size: quote.bid_size,
-                            ask_size: quote.ask_size,
+                self.token_to_event
+                    .insert(token_id.clone(), event_slug.clone());
+                let merged_quote = {
+                    let quote = self
+                        .quotes
+                        .entry(token_id.clone())
+                        .or_insert(QuoteState {
+                            best_bid: None,
+                            best_ask: None,
+                            bid_size: None,
+                            ask_size: None,
                             timestamp: ts,
-                        }
-                    };
-                    self.maybe_discover_event(&event_slug);
-                    self.dispatch_market_update(StrategyMarketUpdate::PolymarketQuote {
-                        token_id,
+                        });
+                    let best_level_size =
+                        Decimal::from(best_ask_size_shares.min(ask_depth_shares));
+                    quote.ask_size = Some(best_level_size);
+                    if best_ask.is_some() {
+                        quote.best_ask = best_ask;
+                    }
+                    quote.timestamp = ts;
+                    Quote {
                         side,
-                        quote: merged_quote,
+                        best_bid: quote.best_bid,
+                        best_ask: quote.best_ask,
+                        bid_size: quote.bid_size,
+                        ask_size: quote.ask_size,
                         timestamp: ts,
-                    });
-                }
+                    }
+                };
+                self.maybe_discover_event(&event_slug);
+                self.dispatch_market_update(StrategyMarketUpdate::PolymarketQuote {
+                    token_id,
+                    side,
+                    quote: merged_quote,
+                    timestamp: ts,
+                });
             }
             UpdateType::EventState {
                 event_slug,
@@ -308,7 +327,12 @@ impl Pm5mDirectionalBacktestEngine {
 
                 self.maybe_discover_event(&event_slug);
                 if let Some(outcome) = outcome {
-                    self.settle_event(&event_slug, outcome, ts);
+                    let settle_ts = self
+                        .event_states
+                        .get(&event_slug)
+                        .and_then(|state| state.end_time)
+                        .unwrap_or(ts);
+                    self.settle_event(&event_slug, outcome, settle_ts);
                     self.dispatch_market_update(StrategyMarketUpdate::EventExpired {
                         event_id: event_slug.clone(),
                     });
@@ -360,30 +384,6 @@ impl Pm5mDirectionalBacktestEngine {
             title: Some(title),
             condition_id: None,
         });
-    }
-
-    fn resolve_token_for_lob(
-        &self,
-        symbol: &str,
-        side_raw: &str,
-    ) -> Option<(String, String, Side)> {
-        let side = match side_raw.trim().to_ascii_uppercase().as_str() {
-            "UP" => Side::Up,
-            "DOWN" => Side::Down,
-            _ => return None,
-        };
-        self.event_states
-            .values()
-            .filter(|state| state.symbol == symbol)
-            .filter(|state| state.outcome.is_none())
-            .min_by_key(|state| state.end_time)
-            .and_then(|state| {
-                let token_id = match side {
-                    Side::Up => state.up_token_id.clone(),
-                    Side::Down => state.down_token_id.clone(),
-                }?;
-                Some((state.event_slug.clone(), token_id, side))
-            })
     }
 
     fn handle_actions(&mut self, actions: Vec<StrategyAction>, timestamp: DateTime<Utc>) {
@@ -507,6 +507,7 @@ impl Pm5mDirectionalBacktestEngine {
             return;
         }
 
+        let entry_fee = self.fill_fee(filled_qty, best_ask);
         let event_slug = metadata
             .get("event_id")
             .cloned()
@@ -521,6 +522,7 @@ impl Pm5mDirectionalBacktestEngine {
                 side,
                 entry_time: timestamp,
                 entry_price: best_ask,
+                entry_fee,
                 shares: filled_qty,
                 entry_p_hat: parse_f64(metadata.get("effective_p").or_else(|| metadata.get("p_hat"))),
                 entry_ev_net: parse_f64(metadata.get("edge")),
@@ -589,7 +591,7 @@ impl Pm5mDirectionalBacktestEngine {
             } else {
                 Decimal::ZERO
             };
-            let pnl = (exit_price - trade.entry_price) * Decimal::from(trade.shares);
+            let (pnl, pnl_pct) = self.realized_trade_pnl(&trade, exit_price);
             self.realized_pnl += pnl;
             self.equity_curve.push((
                 timestamp,
@@ -640,11 +642,7 @@ impl Pm5mDirectionalBacktestEngine {
                 exit_price,
                 shares: trade.shares,
                 pnl,
-                pnl_pct: if !trade.entry_price.is_zero() {
-                    (exit_price - trade.entry_price) / trade.entry_price
-                } else {
-                    Decimal::ZERO
-                },
+                pnl_pct,
                 won: trade.side == winning_side,
                 fair_value: Decimal::from_f64(trade.entry_p_hat.unwrap_or(0.0))
                     .unwrap_or(Decimal::ZERO),
@@ -658,6 +656,102 @@ impl Pm5mDirectionalBacktestEngine {
                 implied_volatility: 0.0,
             });
         }
+    }
+
+    fn close_remaining_open_trades(&mut self, timestamp: DateTime<Utc>) {
+        let token_ids: Vec<String> = self.open_trades.keys().cloned().collect();
+        for token_id in token_ids {
+            let Some(trade) = self.open_trades.remove(&token_id) else {
+                continue;
+            };
+            let exit_price = self
+                .quotes
+                .get(&token_id)
+                .and_then(|quote| quote.best_bid.or(quote.best_ask))
+                .unwrap_or(trade.entry_price);
+            let (pnl, pnl_pct) = self.realized_trade_pnl(&trade, exit_price);
+            self.realized_pnl += pnl;
+            self.equity_curve.push((
+                timestamp,
+                self.config.initial_capital + self.realized_pnl,
+            ));
+
+            self.recorder.record_exit(&BacktestSignal {
+                signal_type: SignalType::Exit,
+                symbol: trade.symbol.clone(),
+                direction: trade.side.as_str().to_string(),
+                timestamp,
+                p_hat: trade.entry_p_hat,
+                ev_net: trade.entry_ev_net,
+                sigma: trade.entry_sigma,
+                market_price: Some(exit_price),
+                spot_price: self.latest_spot.get(&trade.symbol).copied(),
+                s0: trade.s0,
+                time_remaining_secs: Some(0.0),
+                filter_reason: None,
+                exit_reason: Some("backtest_end_mark".to_string()),
+                exit_price: Some(exit_price),
+            });
+            self.recorder.record_trade(&PendingTrade {
+                symbol: trade.symbol.clone(),
+                direction: trade.side.as_str().to_string(),
+                entry_time: trade.entry_time,
+                exit_time: timestamp,
+                entry_price: trade.entry_price,
+                exit_price,
+                shares: i32::try_from(trade.shares).unwrap_or(i32::MAX),
+                pnl,
+                won: pnl >= Decimal::ZERO,
+                holding_secs: (timestamp - trade.entry_time).num_seconds(),
+                exit_reason: "backtest_end_mark".to_string(),
+                entry_p_hat: trade.entry_p_hat,
+                entry_ev_net: trade.entry_ev_net,
+                entry_sigma: trade.entry_sigma,
+                s0: trade.s0,
+            });
+
+            self.closed_trades.push(BacktestTrade {
+                entry_time: trade.entry_time,
+                exit_time: timestamp,
+                symbol: trade.symbol.clone(),
+                market_id: trade.event_slug.clone(),
+                direction: trade.side.as_str().to_string(),
+                entry_price: trade.entry_price,
+                exit_price,
+                shares: trade.shares,
+                pnl,
+                pnl_pct,
+                won: pnl >= Decimal::ZERO,
+                fair_value: Decimal::from_f64(trade.entry_p_hat.unwrap_or(0.0))
+                    .unwrap_or(Decimal::ZERO),
+                price_edge: Decimal::from_f64(trade.entry_ev_net.unwrap_or(0.0))
+                    .unwrap_or(Decimal::ZERO),
+                vol_edge_pct: 0.0,
+                confidence: trade.entry_p_hat.unwrap_or(0.0),
+                buffer_pct: Decimal::from_f64(trade.entry_ev_net.unwrap_or(0.0))
+                    .unwrap_or(Decimal::ZERO),
+                our_volatility: trade.entry_sigma.unwrap_or(0.0),
+                implied_volatility: 0.0,
+            });
+        }
+    }
+
+    fn fill_fee(&self, shares: u64, price: Decimal) -> Decimal {
+        self.fee_model.fee_shares(Decimal::from(shares), price)
+    }
+
+    fn realized_trade_pnl(&self, trade: &OpenTrade, exit_price: Decimal) -> (Decimal, Decimal) {
+        let shares = Decimal::from(trade.shares);
+        let exit_fee = self.fill_fee(trade.shares, exit_price);
+        let entry_cost = trade.entry_price * shares + trade.entry_fee;
+        let exit_value = exit_price * shares - exit_fee;
+        let pnl = exit_value - entry_cost;
+        let pnl_pct = if entry_cost > Decimal::ZERO {
+            pnl / entry_cost
+        } else {
+            Decimal::ZERO
+        };
+        (pnl, pnl_pct)
     }
 
     fn build_results(&self, start_time: DateTime<Utc>, end_time: DateTime<Utc>) -> BacktestResults {
@@ -885,6 +979,8 @@ mod tests {
                 side: Side::Up,
                 best_bid: Some(dec!(0.39)),
                 best_ask: Some(dec!(0.40)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
             },
         });
         updates.push(MarketUpdate {
@@ -896,14 +992,19 @@ mod tests {
                 side: Side::Down,
                 best_bid: Some(dec!(0.59)),
                 best_ask: Some(dec!(0.60)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
             },
         });
         updates.push(MarketUpdate {
             timestamp: ts(35),
             symbol: "BTCUSDT".to_string(),
             update_type: UpdateType::LobSnapshot {
-                side: "UP".to_string(),
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
                 ask_depth_shares: 100,
+                best_ask_size_shares: 100,
                 best_ask: Some(dec!(0.40)),
             },
         });
@@ -938,5 +1039,220 @@ mod tests {
         assert_eq!(trades[0].direction, "UP");
         assert_eq!(trades[0].exit_price, Decimal::ONE);
         assert!(trades[0].won);
+        let expected_fee = FeeModel::crypto().fee_shares(Decimal::from(trades[0].shares), dec!(0.40));
+        let expected_pnl =
+            (Decimal::ONE - dec!(0.40)) * Decimal::from(trades[0].shares) - expected_fee;
+        assert_eq!(trades[0].pnl, expected_pnl);
+    }
+
+    #[test]
+    fn settlement_uses_event_end_time_not_resolved_time() {
+        let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
+        let mut engine =
+            Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+
+        let event_slug = "btc-updown-5m-endtime";
+        let end_time = ts(300);
+        let mut updates = vec![MarketUpdate {
+            timestamp: ts(0),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: event_slug.to_string(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        }];
+
+        for i in 1..=35 {
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".to_string(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100) + Decimal::from(i) * dec!(0.05),
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        updates.push(MarketUpdate {
+            timestamp: ts(34),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::BinanceL2 {
+                obi_5: dec!(0.35),
+                obi_10: dec!(0.28),
+                bid_volume_5: dec!(200),
+                ask_volume_5: dec!(100),
+                spread_bps: dec!(1),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
+                best_bid: Some(dec!(0.39)),
+                best_ask: Some(dec!(0.40)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:DOWN"),
+                side: Side::Down,
+                best_bid: Some(dec!(0.59)),
+                best_ask: Some(dec!(0.60)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::LobSnapshot {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
+                ask_depth_shares: 100,
+                best_ask_size_shares: 100,
+                best_ask: Some(dec!(0.40)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(36),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::SpotTrade {
+                price: dec!(101.90),
+                quantity: Some(dec!(1)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(900),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: event_slug.to_string(),
+                end_time: None,
+                price_to_beat: None,
+                outcome: Some(true),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let results = engine.run(&mut feed);
+
+        assert_eq!(results.total_trades, 1);
+        assert_eq!(results.trades[0].exit_time, end_time);
+    }
+
+    #[test]
+    fn lob_snapshot_routes_to_exact_token_not_earliest_event() {
+        let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
+        let mut engine =
+            Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+
+        let early = "btc-updown-5m-early";
+        let late = "btc-updown-5m-late";
+
+        engine.process_update(MarketUpdate {
+            timestamp: ts(0),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: early.to_string(),
+                end_time: Some(ts(300)),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        });
+        engine.process_update(MarketUpdate {
+            timestamp: ts(1),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: early.to_string(),
+                token_id: format!("{early}:UP"),
+                side: Side::Up,
+                best_bid: Some(dec!(0.40)),
+                best_ask: Some(dec!(0.41)),
+                bid_size: Some(dec!(20)),
+                ask_size: Some(dec!(20)),
+            },
+        });
+        engine.process_update(MarketUpdate {
+            timestamp: ts(1),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: early.to_string(),
+                token_id: format!("{early}:DOWN"),
+                side: Side::Down,
+                best_bid: Some(dec!(0.58)),
+                best_ask: Some(dec!(0.59)),
+                bid_size: Some(dec!(20)),
+                ask_size: Some(dec!(20)),
+            },
+        });
+
+        engine.process_update(MarketUpdate {
+            timestamp: ts(60),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: late.to_string(),
+                end_time: Some(ts(600)),
+                price_to_beat: Some(dec!(101)),
+                outcome: None,
+            },
+        });
+        engine.process_update(MarketUpdate {
+            timestamp: ts(61),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: late.to_string(),
+                token_id: format!("{late}:UP"),
+                side: Side::Up,
+                best_bid: Some(dec!(0.44)),
+                best_ask: Some(dec!(0.45)),
+                bid_size: Some(dec!(10)),
+                ask_size: Some(dec!(10)),
+            },
+        });
+        engine.process_update(MarketUpdate {
+            timestamp: ts(61),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: late.to_string(),
+                token_id: format!("{late}:DOWN"),
+                side: Side::Down,
+                best_bid: Some(dec!(0.54)),
+                best_ask: Some(dec!(0.55)),
+                bid_size: Some(dec!(10)),
+                ask_size: Some(dec!(10)),
+            },
+        });
+
+        engine.process_update(MarketUpdate {
+            timestamp: ts(62),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::LobSnapshot {
+                event_slug: late.to_string(),
+                token_id: format!("{late}:UP"),
+                side: Side::Up,
+                ask_depth_shares: 77,
+                best_ask_size_shares: 25,
+                best_ask: Some(dec!(0.45)),
+            },
+        });
+
+        assert_eq!(
+            engine.quotes.get(&format!("{late}:UP")).and_then(|q| q.ask_size),
+            Some(dec!(25))
+        );
+        assert_eq!(
+            engine.quotes.get(&format!("{early}:UP")).and_then(|q| q.ask_size),
+            Some(dec!(20))
+        );
     }
 }

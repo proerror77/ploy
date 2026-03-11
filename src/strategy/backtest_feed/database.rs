@@ -337,6 +337,9 @@ async fn build_token_mappings(
         match sync_map_rows {
             Ok(rows) => {
                 for (slug, sym, yes_token_id, no_token_id) in rows {
+                    if !is_supported_5m_slug(&slug) {
+                        continue;
+                    }
                     if !slug.is_empty() && !sym.is_empty() {
                         mappings.slug_to_symbol.insert(slug.clone(), sym.clone());
                     }
@@ -385,6 +388,9 @@ async fn build_token_mappings(
 
         for (token_id, market_slug, outcome) in settlement_map_rows {
             let Some(slug) = market_slug else { continue };
+            if !is_supported_5m_slug(&slug) {
+                continue;
+            }
             mappings
                 .token_to_slug
                 .entry(token_id.clone())
@@ -445,6 +451,9 @@ async fn build_token_mappings(
             if slug.is_empty() || token_id.is_empty() {
                 continue;
             }
+            if !is_supported_5m_slug(&slug) {
+                continue;
+            }
             let Some(token_id_norm) = normalize_clob_token_id(&token_id) else {
                 continue;
             };
@@ -500,11 +509,13 @@ async fn load_quote_updates(
         String,
         Option<Decimal>,
         Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
     )> = if quote_ticks_exists && !known_token_ids.is_empty() {
         sqlx::query_as(
             r#"
                     SELECT DISTINCT ON (date_trunc('second', received_at), token_id, side)
-                           received_at, token_id, side, best_bid, best_ask
+                           received_at, token_id, side, best_bid, best_ask, bid_size, ask_size
                     FROM clob_quote_ticks
                     WHERE ($1::timestamptz IS NULL OR received_at >= $1)
                       AND ($2::timestamptz IS NULL OR received_at <= $2)
@@ -522,7 +533,7 @@ async fn load_quote_updates(
         Vec::new()
     };
 
-    for (ts, token_id, side, best_bid, best_ask) in &quote_rows {
+    for (ts, token_id, side, best_bid, best_ask, bid_size, ask_size) in &quote_rows {
         let event_slug = match mappings.token_to_slug.get(token_id.as_str()) {
             Some(s) => s.clone(),
             None => continue,
@@ -548,6 +559,8 @@ async fn load_quote_updates(
                 side,
                 best_bid: *best_bid,
                 best_ask: *best_ask,
+                bid_size: *bid_size,
+                ask_size: *ask_size,
             },
         });
     }
@@ -597,6 +610,9 @@ async fn load_quote_updates(
             Ok(rows) => {
                 let row_count = rows.len();
                 for (ts, sym, slug, yes, no, yes_token_id, no_token_id) in rows {
+                    if !is_supported_5m_slug(&slug) {
+                        continue;
+                    }
                     if let Some(ask) = yes {
                         updates.push(MarketUpdate {
                             timestamp: ts,
@@ -607,6 +623,8 @@ async fn load_quote_updates(
                                 side: Side::Up,
                                 best_bid: None,
                                 best_ask: Some(ask),
+                                bid_size: None,
+                                ask_size: None,
                             },
                         });
                     }
@@ -620,6 +638,8 @@ async fn load_quote_updates(
                                 side: Side::Down,
                                 best_bid: None,
                                 best_ask: Some(ask),
+                                bid_size: None,
+                                ask_size: None,
                             },
                         });
                     }
@@ -695,6 +715,9 @@ async fn load_event_updates(
         .unwrap_or_default();
 
         for (slug, raw) in raw_rows {
+            if !is_supported_5m_slug(&slug) {
+                continue;
+            }
             let start_time =
                 parse_market_datetime(&raw, &["eventStartTime", "startDate", "start_date"]);
             let end_time = parse_market_datetime(&raw, &["endDate", "end_date"]);
@@ -732,7 +755,12 @@ async fn load_event_updates(
     }
 
     let mut event_open_count = 0usize;
+    let mut event_end_by_slug: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut event_symbol_by_slug: HashMap<String, String> = HashMap::new();
     for (slug, sym, start_time, end_time, price_to_beat) in &event_rows {
+        if !is_supported_5m_slug(slug) {
+            continue;
+        }
         let (Some(st), Some(end)) = (*start_time, *end_time) else {
             continue;
         };
@@ -762,7 +790,7 @@ async fn load_event_updates(
         }
         updates.push(MarketUpdate {
             timestamp: st,
-            symbol,
+            symbol: symbol.clone(),
             update_type: UpdateType::EventState {
                 event_slug: slug.clone(),
                 end_time: Some(corrected_end),
@@ -770,6 +798,8 @@ async fn load_event_updates(
                 outcome: None,
             },
         });
+        event_end_by_slug.insert(slug.clone(), corrected_end);
+        event_symbol_by_slug.insert(slug.clone(), symbol);
         event_open_count += 1;
     }
     info!(
@@ -803,6 +833,9 @@ async fn load_event_updates(
         match rows {
             Ok(slugs) => {
                 for (slug, sym, st) in slugs {
+                    if !is_supported_5m_slug(&slug) {
+                        continue;
+                    }
                     let Some(duration_secs) = infer_window_duration_secs(&slug) else {
                         continue;
                     };
@@ -818,14 +851,16 @@ async fn load_event_updates(
                     }
                     updates.push(MarketUpdate {
                         timestamp: st,
-                        symbol: sym,
+                        symbol: sym.clone(),
                         update_type: UpdateType::EventState {
-                            event_slug: slug,
+                            event_slug: slug.clone(),
                             end_time: Some(end),
                             price_to_beat: Some(s0),
                             outcome: None,
                         },
                     });
+                    event_end_by_slug.insert(slug.clone(), end);
+                    event_symbol_by_slug.insert(slug, sym);
                     event_open_count += 1;
                 }
                 if event_open_count > 0 {
@@ -841,21 +876,20 @@ async fn load_event_updates(
         }
     }
 
+    let opened_slugs: Vec<String> = event_end_by_slug.keys().cloned().collect();
     let settlement_rows: Vec<(String, String, Decimal, Option<DateTime<Utc>>)> =
-        if pm_token_settlements_exists {
+        if pm_token_settlements_exists && !opened_slugs.is_empty() {
             sqlx::query_as(
                 r#"
-                SELECT market_slug, outcome, settled_price, resolved_at
+                SELECT DISTINCT ON (market_slug) market_slug, outcome, settled_price, resolved_at
                 FROM pm_token_settlements
                 WHERE resolved = true
                   AND LOWER(outcome) = 'up'
-                  AND ($1::timestamptz IS NULL OR resolved_at >= $1)
-                  AND ($2::timestamptz IS NULL OR resolved_at <= $2)
-                ORDER BY resolved_at
+                  AND market_slug = ANY($1)
+                ORDER BY market_slug, COALESCE(resolved_at, fetched_at) DESC
                 "#,
             )
-            .bind(from)
-            .bind(to)
+            .bind(&opened_slugs)
             .fetch_all(pool)
             .await
             .unwrap_or_default()
@@ -864,27 +898,32 @@ async fn load_event_updates(
         };
 
     for (slug, _outcome, settled_price, resolved_at) in &settlement_rows {
-        if let Some(rat) = resolved_at {
-            let symbol = mappings
-                .slug_to_symbol
-                .get(slug.as_str())
-                .cloned()
-                .or_else(|| infer_symbol_from_slug(slug))
-                .unwrap_or_default();
-            if symbol.is_empty() {
-                continue;
-            }
-            updates.push(MarketUpdate {
-                timestamp: *rat,
-                symbol,
-                update_type: UpdateType::EventState {
-                    event_slug: slug.clone(),
-                    end_time: None,
-                    price_to_beat: None,
-                    outcome: Some(*settled_price == Decimal::ONE),
-                },
-            });
+        let Some(timestamp) = event_end_by_slug
+            .get(slug.as_str())
+            .copied()
+            .or(*resolved_at)
+        else {
+            continue;
+        };
+        let symbol = event_symbol_by_slug
+            .get(slug.as_str())
+            .cloned()
+            .or_else(|| mappings.slug_to_symbol.get(slug.as_str()).cloned())
+            .or_else(|| infer_symbol_from_slug(slug))
+            .unwrap_or_default();
+        if symbol.is_empty() {
+            continue;
         }
+        updates.push(MarketUpdate {
+            timestamp,
+            symbol,
+            update_type: UpdateType::EventState {
+                event_slug: slug.clone(),
+                end_time: Some(timestamp),
+                price_to_beat: None,
+                outcome: Some(*settled_price == Decimal::ONE),
+            },
+        });
     }
     info!("Loaded {} settlement records", settlement_rows.len());
 }
@@ -973,20 +1012,24 @@ fn build_lob_update(
     if symbol.is_empty() {
         return None;
     }
-    let side = mappings.token_to_side.get(token_id)?.as_str().to_string();
+    let side = *mappings.token_to_side.get(token_id)?;
 
-    let (total_depth, best_ask_price) = match asks_json {
+    let (total_depth, best_ask_size, best_ask_price) = match asks_json {
         Some(arr) if arr.is_array() => {
             let levels = arr.as_array().unwrap();
             let mut depth = 0.0f64;
+            let mut best_size = 0u64;
             let mut best = None;
-            for level in levels {
+            for (index, level) in levels.iter().enumerate() {
                 if let (Some(size_str), Some(price_str)) = (
                     level.get("size").and_then(|v| v.as_str()),
                     level.get("price").and_then(|v| v.as_str()),
                 ) {
                     if let Ok(size) = size_str.parse::<f64>() {
                         depth += size;
+                        if index == 0 {
+                            best_size = size.floor() as u64;
+                        }
                     }
                     if best.is_none() {
                         if let Ok(p) = price_str.parse::<Decimal>() {
@@ -995,12 +1038,12 @@ fn build_lob_update(
                     }
                 }
             }
-            (depth as u64, best)
+            (depth as u64, best_size, best)
         }
         _ => return None,
     };
 
-    if total_depth == 0 {
+    if total_depth == 0 || best_ask_size == 0 {
         return None;
     }
 
@@ -1008,11 +1051,18 @@ fn build_lob_update(
         timestamp,
         symbol,
         update_type: UpdateType::LobSnapshot {
+            event_slug,
+            token_id: token_id.to_string(),
             side,
             ask_depth_shares: total_depth,
+            best_ask_size_shares: best_ask_size,
             best_ask: best_ask_price,
         },
     })
+}
+
+fn is_supported_5m_slug(slug: &str) -> bool {
+    infer_window_duration_secs(slug) == Some(300)
 }
 
 fn infer_window_duration_secs(slug: &str) -> Option<i64> {
@@ -1152,15 +1202,28 @@ mod tests {
         assert_eq!(update.symbol, "BTCUSDT");
         match update.update_type {
             UpdateType::LobSnapshot {
+                event_slug,
+                token_id,
                 side,
                 ask_depth_shares,
+                best_ask_size_shares,
                 best_ask,
             } => {
-                assert_eq!(side, "UP");
+                assert_eq!(event_slug, "btc-updown-5m-test");
+                assert_eq!(token_id, "token-up");
+                assert_eq!(side, Side::Up);
                 assert_eq!(ask_depth_shares, 35);
+                assert_eq!(best_ask_size_shares, 25);
                 assert_eq!(best_ask, Some(Decimal::new(43, 2)));
             }
             other => panic!("unexpected update type: {other:?}"),
         }
+    }
+
+    #[test]
+    fn supported_5m_slug_filter_rejects_other_horizons() {
+        assert!(is_supported_5m_slug("btc-updown-5m-123"));
+        assert!(!is_supported_5m_slug("btc-updown-15m-123"));
+        assert!(!is_supported_5m_slug("btc-updown-60m-123"));
     }
 }
