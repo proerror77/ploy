@@ -81,6 +81,7 @@ Explain why `pm_5m_directional` cannot produce a real post-`2026-03-08` out-of-s
 - 2026-03-11: Added a minimal host-side watchdog: `scripts/ploy_platform_watchdog.sh` plus `deployment/ploy-platform-watchdog.service` and `.timer`. It checks for an explicit lock file, skips during `ploy-maintenance.service`, and starts the discovered platform unit only when it is unexpectedly inactive.
 - 2026-03-11: Wired the watchdog through both `scripts/install-service.sh` and `scripts/aws_ec2_deploy.sh`. `install-service.sh` now uses `systemctl enable --now ploy-platform-watchdog.timer`, so a fresh install does not wait for the next reboot before the safeguard becomes active.
 - 2026-03-11: Shell regression coverage passed via `bash scripts/tests/test_ploy_platform_watchdog.sh`, covering inactive, locked, maintenance-active, and already-active unit states.
+- 2026-03-11: `tango-1-1` still runs `ploy-platform.service` from `/root/ploy`, while repo deployment units default to `/opt/ploy`. Updated the watchdog to resolve either root so the safeguard matches both the legacy live host and the current deployment layout.
 - 2026-03-11: Repo owner map:
   - `binance_price_ticks` / `clob_quote_ticks` / `clob_orderbook_snapshots`: live `PersistencePipeline` from [market_data_runtime.rs](/Users/proerror/Documents/ploy-pm5-backtest/src/coordinator/bootstrap/crypto_runtime_support/market_data_runtime.rs)
   - `binance_lob_ticks`: live `PersistencePipeline` plus optional `SyncCollector`; no historical backfill command exists
