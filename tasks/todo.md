@@ -1,3 +1,34 @@
+# PM5 Auto-Trim Replay Window (2026-03-12)
+
+## Goal
+Add an opt-in `pm_5m_directional` backtest mode that automatically trims sparse requested ranges down to the longest contiguous common-coverage window, instead of forcing the user to rerun manually after the coverage gate error.
+
+## Tasks
+
+- [x] Add a CLI flag for PM5 replay auto-trim without changing the default strict-reject behavior.
+- [x] Reuse the existing PM5 coverage diagnostics to resolve an effective replay window before loading `HistoricalFeed`.
+- [x] Log the trimmed effective window clearly so replay results are not confused with the original requested range.
+- [x] Add focused tests for strict rejection vs. auto-trim acceptance.
+
+## Review
+
+- [x] Confirm long sparse PM5 windows still fail by default.
+- [x] Confirm the opt-in path trims to the longest contiguous common-coverage run and then backtests successfully.
+
+## Progress notes
+
+- 2026-03-12: Added `--pm5-auto-trim-window` to `ploy strategy backtest` so `pm_5m_directional` can opt into trimming sparse requested ranges down to the longest contiguous common-coverage overlap; default behavior remains strict rejection.
+- 2026-03-12: PM5 saved-run metadata now stores `requested_from/requested_to`, `effective_from/effective_to`, and trim flags under `config_json.replay_window`, and the backtest report prints `Requested` plus `Effective` windows when present.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test evaluate_pm5_requested_window_rejects_sparse_range_by_default --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test evaluate_pm5_requested_window_auto_trims_to_overlap --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test evaluate_pm5_requested_window_keeps_valid_range_unchanged --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test build_run_summary_parses_replay_window_metadata --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test print_report_includes_requested_and_effective_windows --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test pm_5m_directional_backtest --lib -- --nocapture`
+- 2026-03-12: Local end-to-end replay against the `tango-1-1` database confirmed the long sparse request `2026-03-05T03:45:00Z .. 2026-03-10T08:10:00Z` is auto-trimmed to `2026-03-07T04:20:00Z .. 2026-03-07T12:35:00Z`, producing `28` trades, `19/9`, `+19.5609562925` net PnL, `23.80` Sharpe, and `0.2087%` max drawdown.
+
 # PM5 Full 20-Level OBI Factors (2026-03-11)
 
 ## Goal

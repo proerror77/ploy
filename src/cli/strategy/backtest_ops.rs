@@ -5,7 +5,8 @@ mod diagnostics;
 mod reporting;
 
 use diagnostics::{
-    ensure_pm5_replay_coverage, print_backtest_db_diagnostics, verify_backtest_trades_gamma,
+    print_backtest_db_diagnostics, resolve_pm5_replay_window, verify_backtest_trades_gamma,
+    Pm5mReplayWindow,
 };
 
 pub(super) use reporting::{run_backtest_diff, run_backtest_list, run_live_backtest_compare};
@@ -47,6 +48,7 @@ pub(super) async fn run_backtest(
     skip_gamma: bool,
     verify_run: Option<String>,
     diagnose_db: bool,
+    pm5_auto_trim_window: bool,
     database_url: Option<String>,
     lv_profile: Option<LiquidityVacuumProfile>,
     lv_price_move_threshold: Option<f64>,
@@ -154,12 +156,29 @@ pub(super) async fn run_backtest(
         print_backtest_db_diagnostics(store.pool(), &symbol_list, from_dt, to_dt).await?;
         return Ok(());
     }
-    if canonical_name == "pm_5m_directional" {
-        ensure_pm5_replay_coverage(store.pool(), &symbol_list, from_dt, to_dt).await?;
-    }
+    let pm5_replay_window = if canonical_name == "pm_5m_directional" {
+        let resolved = resolve_pm5_replay_window(
+            store.pool(),
+            &symbol_list,
+            from_dt,
+            to_dt,
+            pm5_auto_trim_window,
+        )
+        .await?;
+        if let Some(message) = resolved.auto_trim_message.as_deref() {
+            warn!("{message}");
+        }
+        Some(resolved)
+    } else {
+        None
+    };
+    let (effective_from, effective_to) = pm5_replay_window
+        .as_ref()
+        .map(|window| (window.from, window.to))
+        .unwrap_or((from_dt, to_dt));
     info!("Loading historical data from database");
     let mut feed =
-        HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
+        HistoricalFeed::from_database(store.pool(), &symbol_list, effective_from, effective_to).await?;
 
     let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 
@@ -238,7 +257,13 @@ pub(super) async fn run_backtest(
 
             let mut saved_run_id: Option<uuid::Uuid> = None;
             let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
-                let config_json = serde_json::to_value(&config).unwrap_or_default();
+                let config_json = build_pm5_backtest_config_json(
+                    &config,
+                    from_dt,
+                    to_dt,
+                    pm5_auto_trim_window,
+                    pm5_replay_window.as_ref(),
+                );
                 let pg_recorder = PgBacktestRecorder::new(
                     store.pool().clone(),
                     "pm_5m_directional",
@@ -263,9 +288,11 @@ pub(super) async fn run_backtest(
             if save {
                 let mut recorder = engine.take_recorder();
                 if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
+                    let replay_start = pm5_replay_window.as_ref().and_then(|window| window.from);
+                    let replay_end = pm5_replay_window.as_ref().and_then(|window| window.to);
                     pg.finalize(
-                        Some(results.start_time),
-                        Some(results.end_time),
+                        replay_start.or(Some(results.start_time)),
+                        replay_end.or(Some(results.end_time)),
                         results.total_trades as i32,
                         results.win_rate,
                         results.total_pnl,
@@ -673,6 +700,33 @@ pub(super) async fn run_backtest(
     }
 
     Ok(())
+}
+
+fn build_pm5_backtest_config_json(
+    config: &crate::strategy::pm_5m_directional_backtest::Pm5mDirectionalBacktestConfig,
+    requested_from: Option<chrono::DateTime<chrono::Utc>>,
+    requested_to: Option<chrono::DateTime<chrono::Utc>>,
+    auto_trim_requested: bool,
+    replay_window: Option<&Pm5mReplayWindow>,
+) -> serde_json::Value {
+    let mut config_json = serde_json::to_value(config).unwrap_or_default();
+    if let Some(map) = config_json.as_object_mut() {
+        map.insert(
+            "replay_window".to_string(),
+            serde_json::json!({
+                "requested_from": requested_from.map(|ts| ts.to_rfc3339()),
+                "requested_to": requested_to.map(|ts| ts.to_rfc3339()),
+                "effective_from": replay_window.and_then(|window| window.from).map(|ts| ts.to_rfc3339()),
+                "effective_to": replay_window.and_then(|window| window.to).map(|ts| ts.to_rfc3339()),
+                "auto_trim_requested": auto_trim_requested,
+                "auto_trim_applied": replay_window
+                    .and_then(|window| window.auto_trim_message.as_ref())
+                    .is_some(),
+                "auto_trim_message": replay_window.and_then(|window| window.auto_trim_message.clone()),
+            }),
+        );
+    }
+    config_json
 }
 
 #[cfg(test)]

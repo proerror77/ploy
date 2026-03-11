@@ -16,6 +16,13 @@ struct BucketRun {
     buckets: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Pm5mReplayWindow {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub auto_trim_message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct Pm5mCoverageSnapshot {
     spot_buckets: BTreeSet<DateTime<Utc>>,
@@ -51,20 +58,35 @@ impl Pm5mCoverageSnapshot {
     }
 }
 
-pub(super) async fn ensure_pm5_replay_coverage(
+pub(super) async fn resolve_pm5_replay_window(
     pool: &sqlx::PgPool,
     symbols: &[String],
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
-) -> Result<()> {
+    auto_trim: bool,
+) -> Result<Pm5mReplayWindow> {
     if from.is_none() || to.is_none() {
-        return Ok(());
+        return Ok(Pm5mReplayWindow {
+            from,
+            to,
+            auto_trim_message: None,
+        });
     }
 
     let snapshot = load_pm5_coverage_snapshot(pool, symbols, from, to).await?;
-    let requested_start = bucket_floor_5m(from.expect("checked above"));
-    let requested_end_exclusive =
-        bucket_floor_5m(to.expect("checked above")) + Duration::seconds(PM5_BUCKET_SECS);
+    evaluate_pm5_requested_window(&snapshot, from, to, auto_trim)
+}
+
+fn evaluate_pm5_requested_window(
+    snapshot: &Pm5mCoverageSnapshot,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    auto_trim: bool,
+) -> Result<Pm5mReplayWindow> {
+    let from = from.expect("checked by caller");
+    let to = to.expect("checked by caller");
+    let requested_start = bucket_floor_5m(from);
+    let requested_end_exclusive = bucket_floor_5m(to) + Duration::seconds(PM5_BUCKET_SECS);
     let slack = Duration::seconds(PM5_BUCKET_SECS * PM5_EDGE_SLACK_BUCKETS);
 
     let Some(run) = snapshot.longest_common_run() else {
@@ -73,8 +95,8 @@ pub(super) async fn ensure_pm5_replay_coverage(
 critical 5m feeds have no common buckets across spot/L2/PM quote/PM LOB/event data. \
 Bucket counts: spot={}, l2={}, pm_quote={}, pm_lob={}, event={}. \
 Run `--diagnose-db` and choose a shorter contiguous window.",
-            from.unwrap().to_rfc3339(),
-            to.unwrap().to_rfc3339(),
+            from.to_rfc3339(),
+            to.to_rfc3339(),
             snapshot.spot_buckets.len(),
             snapshot.l2_buckets.len(),
             snapshot.quote_buckets.len(),
@@ -86,7 +108,34 @@ Run `--diagnose-db` and choose a shorter contiguous window.",
     let start_ok = run.start <= requested_start + slack;
     let end_ok = run.end_exclusive >= requested_end_exclusive - slack;
     if start_ok && end_ok {
-        return Ok(());
+        return Ok(Pm5mReplayWindow {
+            from: Some(from),
+            to: Some(to),
+            auto_trim_message: None,
+        });
+    }
+
+    if auto_trim {
+        let effective_from = from.max(run.start);
+        let effective_to = to.min(run.end_exclusive);
+        if effective_from < effective_to {
+            return Ok(Pm5mReplayWindow {
+                from: Some(effective_from),
+                to: Some(effective_to),
+                auto_trim_message: Some(format!(
+                    "Auto-trimming pm_5m_directional replay window {} .. {} to {} .. {} inside \
+the longest contiguous common-coverage range {} .. {} ({} buckets, {:.2} hours).",
+                    from.to_rfc3339(),
+                    to.to_rfc3339(),
+                    effective_from.to_rfc3339(),
+                    effective_to.to_rfc3339(),
+                    run.start.to_rfc3339(),
+                    run.end_exclusive.to_rfc3339(),
+                    run.buckets,
+                    run.buckets as f64 * 5.0 / 60.0,
+                )),
+            });
+        }
     }
 
     anyhow::bail!(
@@ -94,8 +143,8 @@ Run `--diagnose-db` and choose a shorter contiguous window.",
 Longest contiguous common 5m coverage across spot/L2/PM quote/PM LOB/event data is {} .. {} \
 ({} buckets, {:.2} hours). Bucket counts: spot={}, l2={}, pm_quote={}, pm_lob={}, event={}. \
 Use a shorter window inside that range or run `--diagnose-db`.",
-        from.unwrap().to_rfc3339(),
-        to.unwrap().to_rfc3339(),
+        from.to_rfc3339(),
+        to.to_rfc3339(),
         run.start.to_rfc3339(),
         run.end_exclusive.to_rfc3339(),
         run.buckets,
@@ -1130,6 +1179,154 @@ mod tests {
         assert_eq!(run.start, ts("2026-03-07T00:05:00Z"));
         assert_eq!(run.end_exclusive, ts("2026-03-07T00:15:00Z"));
         assert_eq!(run.buckets, 2);
+    }
+
+    #[test]
+    fn evaluate_pm5_requested_window_rejects_sparse_range_by_default() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let error = evaluate_pm5_requested_window(
+            &snapshot,
+            Some(ts("2026-03-07T00:00:00Z")),
+            Some(ts("2026-03-07T00:20:00Z")),
+            false,
+        )
+        .expect_err("strict mode should reject sparse window");
+
+        assert!(error
+            .to_string()
+            .contains("pm_5m_directional replay coverage is incomplete"));
+    }
+
+    #[test]
+    fn evaluate_pm5_requested_window_auto_trims_to_overlap() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let resolved = evaluate_pm5_requested_window(
+            &snapshot,
+            Some(ts("2026-03-07T00:00:00Z")),
+            Some(ts("2026-03-07T00:20:00Z")),
+            true,
+        )
+        .expect("auto-trim should recover overlap");
+
+        assert_eq!(resolved.from, Some(ts("2026-03-07T00:05:00Z")));
+        assert_eq!(resolved.to, Some(ts("2026-03-07T00:15:00Z")));
+        assert!(resolved
+            .auto_trim_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Auto-trimming pm_5m_directional replay window"));
+    }
+
+    #[test]
+    fn evaluate_pm5_requested_window_keeps_valid_range_unchanged() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let resolved = evaluate_pm5_requested_window(
+            &snapshot,
+            Some(ts("2026-03-07T00:05:00Z")),
+            Some(ts("2026-03-07T00:14:59Z")),
+            true,
+        )
+        .expect("valid window should pass unchanged");
+
+        assert_eq!(resolved.from, Some(ts("2026-03-07T00:05:00Z")));
+        assert_eq!(resolved.to, Some(ts("2026-03-07T00:14:59Z")));
+        assert!(resolved.auto_trim_message.is_none());
     }
 
     #[test]

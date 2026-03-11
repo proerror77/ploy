@@ -113,12 +113,24 @@ pub struct RunSummary {
     pub symbols: Vec<String>,
     pub data_start: Option<DateTime<Utc>>,
     pub data_end: Option<DateTime<Utc>>,
+    pub replay_window: Option<ReplayWindowSummary>,
     pub total_trades: i32,
     pub win_rate: f64,
     pub total_pnl: Decimal,
     pub sharpe_ratio: f64,
     pub max_drawdown: Decimal,
     pub profit_factor: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayWindowSummary {
+    pub requested_from: Option<DateTime<Utc>>,
+    pub requested_to: Option<DateTime<Utc>>,
+    pub effective_from: Option<DateTime<Utc>>,
+    pub effective_to: Option<DateTime<Utc>>,
+    pub auto_trim_requested: bool,
+    pub auto_trim_applied: bool,
+    pub auto_trim_message: Option<String>,
 }
 
 // ─── Calibration ─────────────────────────────────────────────
@@ -344,6 +356,7 @@ fn build_run_summary(row: &RunRow) -> RunSummary {
         symbols: row.symbols.clone(),
         data_start: row.data_start,
         data_end: row.data_end,
+        replay_window: parse_replay_window_summary(&row.config_json),
         total_trades: row.total_trades.unwrap_or(0),
         win_rate: row.win_rate.unwrap_or(0.0),
         total_pnl: row.total_pnl.unwrap_or(Decimal::ZERO),
@@ -351,6 +364,34 @@ fn build_run_summary(row: &RunRow) -> RunSummary {
         max_drawdown: row.max_drawdown.unwrap_or(Decimal::ZERO),
         profit_factor: row.profit_factor.unwrap_or(0.0),
     }
+}
+
+fn parse_replay_window_summary(config_json: &serde_json::Value) -> Option<ReplayWindowSummary> {
+    let window = config_json.get("replay_window")?;
+    Some(ReplayWindowSummary {
+        requested_from: parse_optional_datetime(window.get("requested_from")),
+        requested_to: parse_optional_datetime(window.get("requested_to")),
+        effective_from: parse_optional_datetime(window.get("effective_from")),
+        effective_to: parse_optional_datetime(window.get("effective_to")),
+        auto_trim_requested: window
+            .get("auto_trim_requested")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        auto_trim_applied: window
+            .get("auto_trim_applied")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        auto_trim_message: window
+            .get("auto_trim_message")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn parse_optional_datetime(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
+    serde_json::from_value::<Option<DateTime<Utc>>>(value.cloned().unwrap_or(serde_json::Value::Null))
+        .ok()
+        .flatten()
 }
 
 /// Bucket entry_p_hat by 0.05 steps from 0.50 to 1.00, compare predicted vs actual.
@@ -824,7 +865,22 @@ impl BacktestReport {
             self.run.run_id,
             self.run.symbols.join(", ")
         ));
-        if let (Some(start), Some(end)) = (self.run.data_start, self.run.data_end) {
+        if let Some(replay_window) = &self.run.replay_window {
+            if let (Some(start), Some(end)) = (replay_window.requested_from, replay_window.requested_to) {
+                out.push_str(&format!(
+                    "  Requested: {} to {}\n",
+                    start.format("%Y-%m-%d %H:%M"),
+                    end.format("%Y-%m-%d %H:%M")
+                ));
+            }
+            if let (Some(start), Some(end)) = (replay_window.effective_from, replay_window.effective_to) {
+                out.push_str(&format!(
+                    "  Effective: {} to {}\n",
+                    start.format("%Y-%m-%d %H:%M"),
+                    end.format("%Y-%m-%d %H:%M")
+                ));
+            }
+        } else if let (Some(start), Some(end)) = (self.run.data_start, self.run.data_end) {
             out.push_str(&format!(
                 "  Period: {} to {}\n",
                 start.format("%Y-%m-%d %H:%M"),
@@ -1004,5 +1060,112 @@ impl BacktestReport {
     /// Serialize the full report to JSON.
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self).context("failed to serialize report")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    fn ts(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("valid timestamp")
+    }
+
+    #[test]
+    fn build_run_summary_parses_replay_window_metadata() {
+        let run = build_run_summary(&RunRow {
+            run_id: Uuid::nil(),
+            strategy: "pm_5m_directional".to_string(),
+            mode: "replay".to_string(),
+            config_json: json!({
+                "replay_window": {
+                    "requested_from": "2026-03-05T03:45:00Z",
+                    "requested_to": "2026-03-10T08:10:00Z",
+                    "effective_from": "2026-03-07T04:20:00Z",
+                    "effective_to": "2026-03-07T12:35:00Z",
+                    "auto_trim_requested": true,
+                    "auto_trim_applied": true,
+                    "auto_trim_message": "trimmed"
+                }
+            }),
+            symbols: vec!["BTCUSDT".to_string()],
+            data_start: Some(ts(2026, 3, 7, 4, 20)),
+            data_end: Some(ts(2026, 3, 7, 12, 35)),
+            total_trades: Some(28),
+            win_rate: Some(0.67),
+            total_pnl: Some(dec!(19.56)),
+            sharpe_ratio: Some(23.8),
+            max_drawdown: Some(dec!(0.002)),
+            profit_factor: Some(1.35),
+            created_at: ts(2026, 3, 12, 0, 0),
+        });
+
+        let replay = run.replay_window.expect("replay window metadata");
+        assert_eq!(replay.requested_from, Some(ts(2026, 3, 5, 3, 45)));
+        assert_eq!(replay.requested_to, Some(ts(2026, 3, 10, 8, 10)));
+        assert_eq!(replay.effective_from, Some(ts(2026, 3, 7, 4, 20)));
+        assert_eq!(replay.effective_to, Some(ts(2026, 3, 7, 12, 35)));
+        assert!(replay.auto_trim_requested);
+        assert!(replay.auto_trim_applied);
+        assert_eq!(replay.auto_trim_message.as_deref(), Some("trimmed"));
+    }
+
+    #[test]
+    fn print_report_includes_requested_and_effective_windows() {
+        let report = BacktestReport {
+            run: RunSummary {
+                run_id: Uuid::nil(),
+                strategy: "pm_5m_directional".to_string(),
+                mode: "replay".to_string(),
+                symbols: vec!["BTCUSDT".to_string()],
+                data_start: Some(ts(2026, 3, 7, 4, 20)),
+                data_end: Some(ts(2026, 3, 7, 12, 35)),
+                replay_window: Some(ReplayWindowSummary {
+                    requested_from: Some(ts(2026, 3, 5, 3, 45)),
+                    requested_to: Some(ts(2026, 3, 10, 8, 10)),
+                    effective_from: Some(ts(2026, 3, 7, 4, 20)),
+                    effective_to: Some(ts(2026, 3, 7, 12, 35)),
+                    auto_trim_requested: true,
+                    auto_trim_applied: true,
+                    auto_trim_message: Some("trimmed".to_string()),
+                }),
+                total_trades: 28,
+                win_rate: 0.67,
+                total_pnl: dec!(19.56),
+                sharpe_ratio: 23.8,
+                max_drawdown: dec!(0.002),
+                profit_factor: 1.35,
+            },
+            calibration: CalibrationAnalysis {
+                buckets: Vec::new(),
+                overall_bias: 0.0,
+                bias_level: BiasLevel::Ok,
+            },
+            profitability: ProfitabilityBreakdown {
+                by_symbol: Vec::new(),
+                by_direction: Vec::new(),
+                by_time_of_day: Vec::new(),
+                by_ev_bucket: Vec::new(),
+            },
+            missed_opportunities: Vec::new(),
+            fee_impact: FeeImpact {
+                gross_pnl: dec!(20),
+                total_entry_fees: dec!(1),
+                total_exit_fees: dec!(0),
+                total_fees: dec!(1),
+                net_pnl: dec!(19),
+                fee_drag_pct: 5.0,
+            },
+            gamma_verification: None,
+            suggestions: Vec::new(),
+        };
+
+        let printed = report.print_report();
+        assert!(printed.contains("Requested: 2026-03-05 03:45 to 2026-03-10 08:10"));
+        assert!(printed.contains("Effective: 2026-03-07 04:20 to 2026-03-07 12:35"));
     }
 }
