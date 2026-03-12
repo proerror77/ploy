@@ -5240,3 +5240,25 @@ Close the next testing gaps from the review by adding the missing queue/restore 
 ## Notes
 
 - The staggered-arb coverage proof came from existing tests in `src/strategy/staggered_arb_live/tests.rs`, so `R-35` needed no new code.
+
+# Workflow Migration Tracking Wave (2026-03-12)
+
+## Goal
+Close `R-43` by removing ad-hoc raw `psql` migration execution from the deploy workflows and routing both deploy paths through tracked SQLx migrations without building Rust source on-host.
+
+## Outcomes
+
+- [x] Added a workflow guard regression that fails if release workflows revert to raw `psql` migration execution.
+- [x] Updated `release-aliyun.yml` to build and bundle a prebuilt `sqlx` CLI plus the full `migrations/` directory in CI.
+- [x] Updated `release-aliyun.yml` deploy logic to run `sqlx migrate run` on-host from the shipped binary instead of applying a single raw SQL file.
+- [x] Updated `deploy-prebuilt.yml` to upload a prebuilt `sqlx` binary and replace the raw `psql` migration loop with `sqlx migrate run`.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-r43-green rtk cargo test release_workflows_use_sqlx_migrate_instead_of_raw_psql_files --test workflow_migrations -- --exact --nocapture`
+- `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/release-aliyun.yml"); YAML.load_file(".github/workflows/deploy-prebuilt.yml"); puts "yaml ok"'`
+
+## Notes
+
+- The fix keeps raw `psql` only for database/user bootstrap in the deprecated prebuilt path; schema migrations themselves now go through tracked SQLx migration history.
+- The Aliyun path continues to honor the trading-host rule by building `sqlx-cli` in CI and shipping the binary in the release bundle instead of compiling on-host.
