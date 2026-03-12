@@ -3894,8 +3894,31 @@ Restore continuous Polymarket crypto collection on `tango-1-1` without dropping 
 - 2026-03-12: Added bounded Gamma request timeouts in [gamma.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob/gamma.rs), collector refresh heartbeat logging in [market_discovery.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support/market_discovery.rs), and host-architecture deploy/rollback guards in [release-aliyun.yml](/Users/proerror/Documents/ploy/.github/workflows/release-aliyun.yml) / [rollback.yml](/Users/proerror/Documents/ploy/.github/workflows/rollback.yml).
 - 2026-03-12: Added event-window audit output to [diagnostics.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops/diagnostics.rs) so `--diagnose-db` now reports per-window `KEEP_STRICT / KEEP_RESEARCH / DROP` suggestions based on PM quote/LOB, Binance spot/L2, token mapping, and tail freshness, while leaving raw event collection untouched for later replay architectures.
 - 2026-03-12: Host logs narrowed the remaining stall further: after the first post-resubscribe quote burst, `Feed forwarding quote` stops at `05:02:01Z` while the process, settlement loop, and matcher continue. Added Polymarket WebSocket write timeouts in [connection.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/connection.rs) for subscribe/ping/pong so a half-open socket cannot block the health/stale reconnect branch forever.
+- 2026-03-12: Root cause for the remaining post-refresh freeze was a self-deadlock in [subscriptions.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_ws/subscriptions.rs): `reconcile_token_sides()` held the `token_to_side` write lock while awaiting `report_subscription_count()`, and the next WS message then blocked forever in `get_side()`. Dropped the lock before the await and added a timeout-backed regression test.
 - 2026-03-12: Validation passed for the new PM WebSocket guardrails:
   - `CARGO_TARGET_DIR=/tmp/ploy-pm-ws-timeout rtk cargo test ws_write_timeout_returns_internal_error --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-pm-ws-timeout rtk cargo test ws_write_timeout_allows_fast_write --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-pm-ws-timeout rtk cargo test characterization_book_snapshot_produces_quote_update --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-pm-ws-timeout rtk cargo check --lib --message-format=short`
+- 2026-03-12: Validation passed for the refresh deadlock fix:
+  - `CARGO_TARGET_DIR=/tmp/ploy-pm-reconcile-fix rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-pm-reconcile-fix rtk cargo test reconcile_token_sides_does_not_deadlock_while_reporting_subscription_count --lib -- --exact --nocapture`
+# R-40 MarketDiscovery Native Async Trait Cut (2026-03-12)
+
+## Goal
+Replace `async_trait` with native async trait methods for the `MarketDiscovery` branch only, which currently has no `dyn` consumers and can be migrated without changing the repo's object-safe strategy/runtime traits.
+
+## File ownership
+
+- `src/strategy/core/traits.rs`
+  - owner: `MarketDiscovery` trait definition
+- `src/strategy/crypto/discovery.rs`
+  - owner: `CryptoMarketDiscovery` native async trait impl
+- `src/strategy/sports/discovery.rs`
+  - owner: `SportsMarketDiscovery` native async trait impl
+
+## Tasks
+
+- [x] Remove `#[async_trait]` from `MarketDiscovery` and both concrete impls.
+- [x] Keep the migration scoped to the non-`dyn` discovery branch only.
+- [x] Re-run compile plus focused discovery regressions after the cut.

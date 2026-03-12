@@ -3,7 +3,6 @@
 //! These traits define the interface that all market types must implement.
 
 use crate::error::Result;
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -115,7 +114,6 @@ impl BinaryMarket {
 }
 
 /// Trait for discovering tradable markets
-#[async_trait]
 pub trait MarketDiscovery: Send + Sync {
     /// Get the market type this discovery handles
     fn market_type(&self) -> MarketType;
