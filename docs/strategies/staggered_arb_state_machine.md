@@ -17,6 +17,46 @@
 7. `Merged` or `ForcedComplete`
 8. back to `Idle`
 
+## Live order-track lifecycle
+
+The live path has more states than the coarse `Leg1Submit -> Leg1Filled -> Leg2Submit`
+summary above because each submitted order is tracked as a `LiveOrderTrack`.
+
+- On `SubmitIntent`, the strategy creates a local order track keyed by the client
+  order id and marks either the Leg1 event lock or the Leg2 position lock as
+  pending.
+- Early exchange updates attach the exchange order id, order status, and first
+  cumulative fill snapshot to that track.
+- Partial fills stay in the pending set while cumulative shares and average fill
+  price are updated in place.
+- Leg1 partial-fill cancel/remainder flows keep the track alive until the final
+  cancel/fill result decides whether the cycle promotes to `Leg1Filled` or the
+  entry lock is released.
+- Stale live orders are cancelled after roughly 30 seconds if no terminal update
+  arrives.
+- Orphaned tracks are archived after roughly 90 seconds so late exchange updates
+  can still reconcile without blocking new cycles forever.
+- Terminal live updates clear `pending_leg1_events` or `pending_leg2_positions`
+  so the next cycle can start safely.
+
+## Foreground vs managed live path
+
+There are two live execution surfaces, but both now route through coordinator
+ingress rather than direct exchange execution.
+
+- Foreground live: `cli strategy ... --foreground` runs through
+  `src/cli/strategy/runtime_ops/foreground.rs` and
+  `foreground_submit.rs`. It requires a `deployment_id`, converts
+  `StrategyOrderIntent` into coordinator ingress payloads, and submits through
+  the same risk/admission path as other live traffic.
+- Managed live: deployment-driven runtime execution runs through
+  `src/coordinator/strategy_runtime.rs`,
+  `src/coordinator/strategy_runtime/actions/order_commands.rs`,
+  `src/strategy/runtime_order.rs`, and deployment admission in
+  `src/coordinator/admission/deployments.rs`. It persists runtime orders,
+  converts strategy intents into canonical `OrderIntent`s, and submits through
+  the managed runtime control loop.
+
 ## Entry gates (Leg1)
 - Balance pause gate (`balance_pause_until`) when recent balance failures happened.
 - Active cycle lock (`has_active_cycle`).
@@ -56,6 +96,18 @@
 - forced stop-loss (`max_leg1_loss`)
 - forced timeout (`wait_deadline`)
 - forced time safety (`time_remaining < min_time_remaining_secs`)
+
+## Expiry and settlement branch
+
+Live cycles do not only terminate via `Merged` or `ForcedComplete`.
+
+- If the event expires while a live cycle is still open, lifecycle handlers can
+  push the position into a settlement path.
+- That path records a settled/live-settlement outcome and clears in-flight
+  tracking so the strategy does not strand pending state across the expiry
+  boundary.
+- Paper mode collapses this faster because fills are simulated immediately, but
+  live mode depends on order-update reconciliation and expiry-driven cleanup.
 
 ## Runtime observability (new)
 The strategy state metrics now expose gate counters:

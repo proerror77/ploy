@@ -1,3 +1,5 @@
+//! Live Leg2 close/merge decisions, forced-close handling, and paper close flow.
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};

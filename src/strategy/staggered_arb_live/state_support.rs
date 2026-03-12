@@ -1,3 +1,5 @@
+//! Shared live staggered-arb state types and lookup helpers used across split modules.
+
 use super::*;
 
 /// An active event window being monitored for entry signals.

@@ -1,3 +1,5 @@
+//! Shared live/paper position lifecycle state, settlement, and order-track bookkeeping.
+
 use super::{
     Direction, LiveWindow, StaggeredArbAdapter, StrategyAction, StrategyEvent, StrategyEventType,
 };

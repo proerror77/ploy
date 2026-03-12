@@ -1303,6 +1303,36 @@ Close `R-45` by making `tango-2-1` a first-class staging target with a dedicated
   - `CARGO_TARGET_DIR=/tmp/ploy-r45-green rtk cargo test release_staging_workflow_is_first_class_and_artifact_based --test staging_workflow -- --exact --nocapture`
   - `ruby -e 'require "yaml"; YAML.load_file("/Users/proerror/Documents/ploy-order-intent-clean/.github/workflows/release-staging.yml"); puts "yaml ok"'`
 
+# R-37/R-38 Staggered Arb Live Docs Refresh (2026-03-12)
+
+## Goal
+Close the staggered-arb documentation gaps by documenting each split live module and expanding the state-machine doc to cover live order tracking, managed vs foreground execution, and expiry/settlement behavior.
+
+## File ownership
+
+- `src/strategy/staggered_arb_live/entry.rs`
+- `src/strategy/staggered_arb_live/leg2.rs`
+- `src/strategy/staggered_arb_live/lifecycle.rs`
+- `src/strategy/staggered_arb_live/order_updates.rs`
+- `src/strategy/staggered_arb_live/reporting.rs`
+- `src/strategy/staggered_arb_live/runtime_flow.rs`
+- `src/strategy/staggered_arb_live/state_support.rs`
+  - owner: module-level `//!` docs for each split live-path owner
+- `docs/strategies/staggered_arb_state_machine.md`
+  - owner: live-path state machine narrative and execution-surface distinctions
+
+## Tasks
+
+- [x] Add `//!` module docs to each split staggered-arb live submodule.
+- [x] Document the `LiveOrderTrack` lifecycle and pending-lock release rules.
+- [x] Document foreground vs managed live execution surfaces.
+- [x] Document expiry/settlement handling in the live path.
+
+## Progress notes
+
+- 2026-03-12: Added module docs to the split staggered-arb live owners so `entry`, `leg2`, `lifecycle`, `order_updates`, `reporting`, `runtime_flow`, and `state_support` each explain their responsibility at the file boundary.
+- 2026-03-12: Expanded [staggered_arb_state_machine.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/strategies/staggered_arb_state_machine.md) with the live `LiveOrderTrack` lifecycle, foreground-vs-managed live submission paths, and the expiry/settlement branch that clears in-flight state across event expiry.
+
 # Strategy And Adapter Wave 11 (2026-03-11)
 
 ## Goal

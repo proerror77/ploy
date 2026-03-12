@@ -1,3 +1,5 @@
+//! Market-update runtime flow that fans data-plane updates into staggered-arb decisions.
+
 use super::*;
 
 impl StaggeredArbAdapter {

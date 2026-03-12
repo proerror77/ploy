@@ -1,3 +1,5 @@
+//! Live staggered-arb summaries, gate counters, and runtime reporting helpers.
+
 use super::*;
 
 impl StaggeredArbAdapter {

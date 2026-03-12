@@ -1,3 +1,5 @@
+//! Live Leg1 entry gating and opening-window evaluation for staggered arb.
+
 use super::*;
 
 pub(super) fn has_opening_window_candidate(

@@ -1,3 +1,5 @@
+//! Exchange order-update reconciliation for live staggered-arb orders.
+
 use super::{StaggeredArbAdapter, StrategyAction, StrategyEvent, StrategyEventType};
 use crate::domain::OrderStatus;
 use crate::strategy::traits::OrderUpdate;
