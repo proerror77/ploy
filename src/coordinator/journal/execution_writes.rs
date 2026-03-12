@@ -1,10 +1,87 @@
 use rust_decimal::Decimal;
+use std::future::Future;
 
 use crate::coordinator::OrderIntent;
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::strategy::executor::ExecutionResult;
 
 use super::{metadata_decimal, ExecutionJournal};
+
+struct ExecutionAnalysisContext {
+    expected_price: Decimal,
+    executed_price: Option<Decimal>,
+    queue_delay_ms: Option<i64>,
+    execution_latency_ms: Option<i64>,
+    total_latency_ms: Option<i64>,
+    expected_slippage_bps: Option<Decimal>,
+    actual_slippage_bps: Option<Decimal>,
+    status: String,
+}
+
+fn build_execution_analysis_context(
+    intent: &OrderIntent,
+    request: &OrderRequest,
+    execution_result: Option<&ExecutionResult>,
+    queue_delay_ms: Option<i64>,
+) -> ExecutionAnalysisContext {
+    let expected_price = request.limit_price;
+    let executed_price = execution_result.and_then(|r| r.avg_fill_price);
+    let execution_latency_ms = execution_result.map(|r| r.elapsed_ms as i64);
+    let total_latency_ms = match (queue_delay_ms, execution_latency_ms) {
+        (Some(q), Some(e)) => Some(q + e),
+        (Some(q), None) => Some(q),
+        (None, Some(e)) => Some(e),
+        (None, None) => None,
+    };
+
+    let actual_slippage_bps = executed_price.and_then(|fill| {
+        if expected_price.is_zero() {
+            return None;
+        }
+        let signed = if intent.is_buy {
+            (fill - expected_price) / expected_price
+        } else {
+            (expected_price - fill) / expected_price
+        };
+        Some(signed * Decimal::from(10_000))
+    });
+
+    let expected_slippage_bps = metadata_decimal(intent, "expected_slippage_bps")
+        .or_else(|| metadata_decimal(intent, "signal_expected_slippage_bps"));
+    let status = execution_result
+        .map(|r| format!("{:?}", r.status))
+        .unwrap_or_else(|| "Failed".to_string());
+
+    ExecutionAnalysisContext {
+        expected_price,
+        executed_price,
+        queue_delay_ms,
+        execution_latency_ms,
+        total_latency_ms,
+        expected_slippage_bps,
+        actual_slippage_bps,
+        status,
+    }
+}
+
+async fn join_execution_persistence_tasks<F1, F2, F3, F4>(
+    write_execution: F1,
+    write_analysis: F2,
+    write_live_evaluation: F3,
+    write_exit_reason: F4,
+) where
+    F1: Future<Output = ()>,
+    F2: Future<Output = ()>,
+    F3: Future<Output = ()>,
+    F4: Future<Output = ()>,
+{
+    tokio::join!(
+        write_execution,
+        write_analysis,
+        write_live_evaluation,
+        write_exit_reason
+    );
+}
 
 impl ExecutionJournal {
     pub(in crate::coordinator) async fn persist_execution(
@@ -15,6 +92,48 @@ impl ExecutionJournal {
         result: Option<&ExecutionResult>,
         error_message: Option<String>,
         queue_delay_ms: Option<i64>,
+    ) {
+        if self.pool.is_none() {
+            return;
+        }
+
+        let analysis_context =
+            build_execution_analysis_context(intent, request, result, queue_delay_ms);
+        let config_hash = intent.metadata.get("config_hash").cloned();
+
+        join_execution_persistence_tasks(
+            self.persist_agent_order_execution(
+                dry_run,
+                intent,
+                request,
+                result,
+                error_message.clone(),
+            ),
+            self.persist_execution_analysis(dry_run, intent, &analysis_context, config_hash),
+            self.persist_live_strategy_evaluation(
+                dry_run,
+                intent,
+                request,
+                result,
+                &analysis_context,
+            ),
+            async {
+                if !intent.is_buy {
+                    self.persist_exit_reason_execution(intent, result, error_message)
+                        .await;
+                }
+            },
+        )
+        .await;
+    }
+
+    async fn persist_agent_order_execution(
+        &self,
+        dry_run: bool,
+        intent: &OrderIntent,
+        request: &OrderRequest,
+        result: Option<&ExecutionResult>,
+        error_message: Option<String>,
     ) {
         let Some(pool) = self.pool.as_ref() else {
             return;
@@ -30,12 +149,10 @@ impl ExecutionJournal {
             ),
             None => (None, format!("{:?}", OrderStatus::Failed), 0, None, None),
         };
-
         let metadata =
             serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-        let config_hash = intent.metadata.get("config_hash").cloned();
 
-        let query = sqlx::query(
+        let persist_result = sqlx::query(
             r#"
             INSERT INTO agent_order_executions (
                 account_id,
@@ -89,32 +206,19 @@ impl ExecutionJournal {
         .bind(avg_fill_price)
         .bind(elapsed_ms)
         .bind(dry_run)
-        .bind(error_message.clone())
+        .bind(error_message)
         .bind(intent.created_at)
-        .bind(sqlx::types::Json(metadata));
+        .bind(sqlx::types::Json(metadata))
+        .execute(pool)
+        .await;
 
-        if let Err(error) = query.execute(pool).await {
+        if let Err(error) = persist_result {
             tracing::warn!(
                 agent_id = %intent.agent_id,
                 intent_id = %intent.intent_id,
                 error = %error,
                 "failed to persist agent order execution"
             );
-        }
-
-        self.persist_execution_analysis(
-            dry_run,
-            intent,
-            request,
-            result,
-            queue_delay_ms,
-            config_hash,
-        )
-        .await;
-
-        if !intent.is_buy {
-            self.persist_exit_reason_execution(intent, result, error_message)
-                .await;
         }
     }
 
@@ -201,44 +305,15 @@ impl ExecutionJournal {
         &self,
         dry_run: bool,
         intent: &OrderIntent,
-        request: &OrderRequest,
-        execution_result: Option<&ExecutionResult>,
-        queue_delay_ms: Option<i64>,
+        analysis_context: &ExecutionAnalysisContext,
         config_hash: Option<String>,
     ) {
         let Some(pool) = self.pool.as_ref() else {
             return;
         };
 
-        let expected_price = request.limit_price;
-        let executed_price = execution_result.and_then(|r| r.avg_fill_price);
-        let execution_latency_ms = execution_result.map(|r| r.elapsed_ms as i64);
-        let total_latency_ms = match (queue_delay_ms, execution_latency_ms) {
-            (Some(q), Some(e)) => Some(q + e),
-            (Some(q), None) => Some(q),
-            (None, Some(e)) => Some(e),
-            (None, None) => None,
-        };
-
-        let actual_slippage_bps = executed_price.and_then(|fill| {
-            if expected_price.is_zero() {
-                return None;
-            }
-            let signed = if intent.is_buy {
-                (fill - expected_price) / expected_price
-            } else {
-                (expected_price - fill) / expected_price
-            };
-            Some(signed * Decimal::from(10_000))
-        });
-
-        let expected_slippage_bps = metadata_decimal(intent, "expected_slippage_bps")
-            .or_else(|| metadata_decimal(intent, "signal_expected_slippage_bps"));
         let metadata =
             serde_json::to_value(&intent.metadata).unwrap_or_else(|_| serde_json::json!({}));
-        let status = execution_result
-            .map(|r| format!("{:?}", r.status))
-            .unwrap_or_else(|| "Failed".to_string());
 
         let persist_result = sqlx::query(
             r#"
@@ -275,14 +350,14 @@ impl ExecutionJournal {
         .bind(&intent.market_slug)
         .bind(&intent.token_id)
         .bind(intent.is_buy)
-        .bind(expected_price)
-        .bind(executed_price)
-        .bind(expected_slippage_bps)
-        .bind(actual_slippage_bps)
-        .bind(queue_delay_ms)
-        .bind(execution_latency_ms)
-        .bind(total_latency_ms)
-        .bind(status)
+        .bind(analysis_context.expected_price)
+        .bind(analysis_context.executed_price)
+        .bind(analysis_context.expected_slippage_bps)
+        .bind(analysis_context.actual_slippage_bps)
+        .bind(analysis_context.queue_delay_ms)
+        .bind(analysis_context.execution_latency_ms)
+        .bind(analysis_context.total_latency_ms)
+        .bind(&analysis_context.status)
         .bind(dry_run)
         .bind(config_hash)
         .bind(sqlx::types::Json(metadata))
@@ -297,17 +372,6 @@ impl ExecutionJournal {
                 "failed to persist execution analysis"
             );
         }
-
-        self.persist_live_strategy_evaluation(
-            dry_run,
-            intent,
-            request,
-            execution_result,
-            expected_slippage_bps,
-            actual_slippage_bps,
-            total_latency_ms,
-        )
-        .await;
     }
 
     async fn persist_live_strategy_evaluation(
@@ -316,9 +380,7 @@ impl ExecutionJournal {
         intent: &OrderIntent,
         request: &OrderRequest,
         execution_result: Option<&ExecutionResult>,
-        expected_slippage_bps: Option<Decimal>,
-        actual_slippage_bps: Option<Decimal>,
-        total_latency_ms: Option<i64>,
+        analysis_context: &ExecutionAnalysisContext,
     ) {
         let Some(pool) = self.pool.as_ref() else {
             return;
@@ -368,9 +430,9 @@ impl ExecutionJournal {
             "shares": intent.shares,
             "request_limit_price": request.limit_price.to_string(),
             "order_side": request.order_side.to_string(),
-            "expected_slippage_bps": expected_slippage_bps.map(|value| value.to_string()),
-            "actual_slippage_bps": actual_slippage_bps.map(|value| value.to_string()),
-            "total_latency_ms": total_latency_ms,
+            "expected_slippage_bps": analysis_context.expected_slippage_bps.map(|value| value.to_string()),
+            "actual_slippage_bps": analysis_context.actual_slippage_bps.map(|value| value.to_string()),
+            "total_latency_ms": analysis_context.total_latency_ms,
             "dry_run": dry_run,
             "execution": execution_result.map(|result| serde_json::json!({
                 "order_id": result.order_id.clone(),
@@ -430,5 +492,79 @@ impl ExecutionJournal {
                 "failed to persist live strategy evaluation evidence"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_execution_persistence_tasks;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::{
+        sync::Barrier,
+        time::{sleep, Duration},
+    };
+
+    async fn tracked_write(
+        barrier: Arc<Barrier>,
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+        completed: Arc<AtomicUsize>,
+    ) {
+        let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        loop {
+            let observed = max_in_flight.load(Ordering::SeqCst);
+            if current <= observed {
+                break;
+            }
+            if max_in_flight
+                .compare_exchange(observed, current, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        barrier.wait().await;
+        sleep(Duration::from_millis(5)).await;
+
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        completed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn join_execution_persistence_tasks_polls_independent_writes_concurrently() {
+        let barrier = Arc::new(Barrier::new(4));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        join_execution_persistence_tasks(
+            tracked_write(
+                barrier.clone(),
+                in_flight.clone(),
+                max_in_flight.clone(),
+                completed.clone(),
+            ),
+            tracked_write(
+                barrier.clone(),
+                in_flight.clone(),
+                max_in_flight.clone(),
+                completed.clone(),
+            ),
+            tracked_write(
+                barrier.clone(),
+                in_flight.clone(),
+                max_in_flight.clone(),
+                completed.clone(),
+            ),
+            tracked_write(barrier, in_flight, max_in_flight.clone(), completed.clone()),
+        )
+        .await;
+
+        assert_eq!(completed.load(Ordering::SeqCst), 4);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 4);
     }
 }
