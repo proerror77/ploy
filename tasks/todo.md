@@ -5822,3 +5822,30 @@ Stop the API realtime broadcast loop from polling the database when there are no
 - 2026-03-12: Validation passed:
   - `CARGO_TARGET_DIR=/tmp/ploy-realtime-idle rtk cargo check --lib --features api`
   - `CARGO_TARGET_DIR=/tmp/ploy-realtime-idle rtk cargo test test_has_realtime_listeners_reflects_broadcast_subscribers --lib --features api -- --nocapture`
+# Runtime Order Store Native Futures Pilot (2026-03-12)
+
+## Goal
+Reduce `async_trait` usage on the managed-runtime order persistence seam by converting the crate-private `RuntimeOrderStore` trait to explicit boxed futures without changing runtime behavior.
+
+## File ownership
+
+- `src/coordinator/strategy_runtime/order_store.rs`
+  - owner: `RuntimeOrderStore` trait surface, concrete impls, and focused regression tests
+
+## Tasks
+
+- [x] Remove `async_trait` from the crate-private `RuntimeOrderStore` trait.
+- [x] Convert `PostgresStore` and mock test impls to explicit boxed futures.
+- [x] Correct the stale terminal-status regression to match current `persist_runtime_order_result` behavior.
+- [x] Re-run compile plus focused order-store regressions after the cut.
+
+## Progress notes
+
+- 2026-03-12: Updated [order_store.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/strategy_runtime/order_store.rs) so `RuntimeOrderStore` now uses explicit `Pin<Box<dyn Future<...>>>` methods instead of `#[async_trait]`.
+- 2026-03-12: Kept the `dyn RuntimeOrderStore` object-safe call sites unchanged while removing `async_trait` from this internal runtime seam.
+- 2026-03-12: Corrected the stale `persist_runtime_order_result` regression to assert the current terminal status (`Filled`) instead of the incorrect intermediate `Submitted` expectation.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo test persist_runtime_order_insert_uses_action_order_id_and_leg --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo test normalize_runtime_order_request_sets_idempotency_key_from_action_id --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo test persist_runtime_order_result_records_terminal_status_and_fill --lib -- --exact --nocapture`

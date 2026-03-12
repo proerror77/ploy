@@ -1,59 +1,69 @@
-use async_trait::async_trait;
 use rust_decimal::Decimal;
+use std::future::Future;
+use std::pin::Pin;
 use tracing::warn;
 
 use crate::adapters::PostgresStore;
 use crate::domain::{OrderRequest, OrderStatus};
 use crate::error::Result;
 
-#[async_trait]
 pub(crate) trait RuntimeOrderStore: Send + Sync {
-    async fn insert_order(&self, order: &crate::domain::Order) -> Result<()>;
-    async fn update_order_status(
-        &self,
-        client_order_id: &str,
+    fn insert_order<'a>(
+        &'a self,
+        order: &'a crate::domain::Order,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn update_order_status<'a>(
+        &'a self,
+        client_order_id: &'a str,
         status: OrderStatus,
-        exchange_order_id: Option<&str>,
-    ) -> Result<()>;
-    async fn update_order_fill(
-        &self,
-        client_order_id: &str,
+        exchange_order_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn update_order_fill<'a>(
+        &'a self,
+        client_order_id: &'a str,
         filled_shares: u64,
         avg_fill_price: Decimal,
         status: OrderStatus,
-    ) -> Result<()>;
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
-#[async_trait]
 impl RuntimeOrderStore for PostgresStore {
-    async fn insert_order(&self, order: &crate::domain::Order) -> Result<()> {
-        PostgresStore::insert_order(self, order).await.map(|_| ())
+    fn insert_order<'a>(
+        &'a self,
+        order: &'a crate::domain::Order,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move { PostgresStore::insert_order(self, order).await.map(|_| ()) })
     }
 
-    async fn update_order_status(
-        &self,
-        client_order_id: &str,
+    fn update_order_status<'a>(
+        &'a self,
+        client_order_id: &'a str,
         status: OrderStatus,
-        exchange_order_id: Option<&str>,
-    ) -> Result<()> {
-        PostgresStore::update_order_status(self, client_order_id, status, exchange_order_id).await
+        exchange_order_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            PostgresStore::update_order_status(self, client_order_id, status, exchange_order_id)
+                .await
+        })
     }
 
-    async fn update_order_fill(
-        &self,
-        client_order_id: &str,
+    fn update_order_fill<'a>(
+        &'a self,
+        client_order_id: &'a str,
         filled_shares: u64,
         avg_fill_price: Decimal,
         status: OrderStatus,
-    ) -> Result<()> {
-        PostgresStore::update_order_fill(
-            self,
-            client_order_id,
-            filled_shares,
-            avg_fill_price,
-            status,
-        )
-        .await
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            PostgresStore::update_order_fill(
+                self,
+                client_order_id,
+                filled_shares,
+                avg_fill_price,
+                status,
+            )
+            .await
+        })
     }
 }
 
@@ -151,8 +161,9 @@ mod tests {
     };
     use crate::domain::{OrderRequest, OrderStatus, Side};
     use crate::error::Result;
-    use async_trait::async_trait;
     use rust_decimal_macros::dec;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -162,47 +173,55 @@ mod tests {
         fill_updates: Mutex<Vec<(String, u64, rust_decimal::Decimal, OrderStatus)>>,
     }
 
-    #[async_trait]
     impl RuntimeOrderStore for MockRuntimeOrderStore {
-        async fn insert_order(&self, order: &crate::domain::Order) -> Result<()> {
-            self.inserted
-                .lock()
-                .expect("inserted lock")
-                .push(order.clone());
-            Ok(())
+        fn insert_order<'a>(
+            &'a self,
+            order: &'a crate::domain::Order,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.inserted
+                    .lock()
+                    .expect("inserted lock")
+                    .push(order.clone());
+                Ok(())
+            })
         }
 
-        async fn update_order_status(
-            &self,
-            client_order_id: &str,
+        fn update_order_status<'a>(
+            &'a self,
+            client_order_id: &'a str,
             status: OrderStatus,
-            exchange_order_id: Option<&str>,
-        ) -> Result<()> {
-            self.status_updates
-                .lock()
-                .expect("status_updates lock")
-                .push((
-                    client_order_id.to_string(),
-                    status,
-                    exchange_order_id.map(str::to_string),
-                ));
-            Ok(())
+            exchange_order_id: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.status_updates
+                    .lock()
+                    .expect("status_updates lock")
+                    .push((
+                        client_order_id.to_string(),
+                        status,
+                        exchange_order_id.map(str::to_string),
+                    ));
+                Ok(())
+            })
         }
 
-        async fn update_order_fill(
-            &self,
-            client_order_id: &str,
+        fn update_order_fill<'a>(
+            &'a self,
+            client_order_id: &'a str,
             filled_shares: u64,
             avg_fill_price: rust_decimal::Decimal,
             status: OrderStatus,
-        ) -> Result<()> {
-            self.fill_updates.lock().expect("fill_updates lock").push((
-                client_order_id.to_string(),
-                filled_shares,
-                avg_fill_price,
-                status,
-            ));
-            Ok(())
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.fill_updates.lock().expect("fill_updates lock").push((
+                    client_order_id.to_string(),
+                    filled_shares,
+                    avg_fill_price,
+                    status,
+                ));
+                Ok(())
+            })
         }
     }
 
@@ -239,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_runtime_order_result_records_submission_and_fill() {
+    async fn persist_runtime_order_result_records_terminal_status_and_fill() {
         let store = Arc::new(MockRuntimeOrderStore::default());
 
         persist_runtime_order_result(
@@ -260,7 +279,7 @@ mod tests {
             status_updates[0],
             (
                 "stag_leg1_123".to_string(),
-                OrderStatus::Submitted,
+                OrderStatus::Filled,
                 Some("exchange-123".to_string())
             )
         );
