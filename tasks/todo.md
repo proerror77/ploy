@@ -6059,3 +6059,68 @@ Keep shrinking active-core owners by cutting remaining read/query and formatting
   - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib adapters::chainlink_rtds::tests::test_symbol_mapping_roundtrip -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib strategy::reverse_engineered::tests::test_infer_bias_from_positions -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib strategy::trade_logger::tests::test_symbol_stats -- --exact --nocapture`
+
+# Structural Wave 14 (2026-03-13)
+
+## Goal
+Continue shrinking coordinator-owned active-core files by removing the last large non-runtime surfaces from `queue.rs`, so the root queue module keeps only priority-heap behavior while maintenance, stats, and tests live in dedicated owners.
+
+## File ownership
+
+- `src/coordinator/queue.rs`
+  - owner: priority heap, enqueue/dequeue semantics, and queue surface re-exports
+- `src/coordinator/queue/maintenance.rs`
+  - owner: cleanup/removal helpers and pending-buy/pending-sell queue accounting
+- `src/coordinator/queue/stats.rs`
+  - owner: queue stats snapshot construction and `QueueStats` display formatting
+- `src/coordinator/queue/tests.rs`
+  - owner: queue-focused regressions, including concurrent enqueue/dequeue pressure coverage
+
+## Tasks
+
+- [x] Move maintenance helpers out of `queue.rs`.
+- [x] Move stats formatting/types out of `queue.rs`.
+- [x] Move queue-focused regressions out of `queue.rs`.
+- [x] Re-run compile plus focused queue regressions after the cut.
+
+## Progress notes
+
+- 2026-03-13: Reduced [queue.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue.rs) so the root file now keeps priority ordering, enqueue/dequeue, and re-exports only.
+- 2026-03-13: Added [maintenance.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue/maintenance.rs) for cleanup/removal helpers and queue accounting.
+- 2026-03-13: Added [stats.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue/stats.rs) for `QueueStats` ownership and formatting.
+- 2026-03-13: Added [tests.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue/tests.rs) so queue regressions no longer live in the root owner.
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-queue cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-queue cargo test --lib coordinator::queue::tests::test_concurrent_enqueue_dequeue_pressure -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-queue cargo test --lib coordinator::queue::tests::test_stats -- --exact --nocapture`
+
+# Structural Wave 14 Queue Split (2026-03-13)
+
+## Goal
+Finish collapsing `queue` into a thin core owner by moving queue maintenance/query helpers and the full test surface out of the root file, leaving `src/coordinator/queue.rs` focused on heap ordering and enqueue/dequeue behavior.
+
+## File ownership
+
+- `src/coordinator/queue.rs`
+  - owner: priority ordering, queue storage, enqueue/dequeue surface
+- `src/coordinator/queue/maintenance.rs`
+  - owner: expiry cleanup, queue filtering, pending-notional and pending-sell queries
+- `src/coordinator/queue/stats.rs`
+  - owner: queue stats snapshot and display formatting
+- `src/coordinator/queue/tests.rs`
+  - owner: queue regressions and concurrency pressure coverage
+
+## Tasks
+
+- [x] Keep the queue core in the root file and delegate maintenance/stats to sibling owners.
+- [x] Move the inline queue tests to a sibling module.
+- [x] Re-run focused queue regressions after the split.
+
+## Progress notes
+
+- 2026-03-13: Reduced [queue.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue.rs) to the heap/priority core and wired sibling owners via `#[path]` modules.
+- 2026-03-13: Kept maintenance and stats ownership in [maintenance.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue/maintenance.rs) and [stats.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue/stats.rs), preserving the coordinator-facing `QueueStats` surface.
+- 2026-03-13: Moved the full queue regression surface into [tests.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/queue/tests.rs).
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14q1 cargo test --lib coordinator::queue::tests::test_concurrent_enqueue_dequeue_pressure -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14q1 cargo test --lib coordinator::queue::tests::test_pending_buy_notional_excluding_domains -- --exact --nocapture`
