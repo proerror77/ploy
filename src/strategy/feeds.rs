@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -23,6 +24,7 @@ use polymarket_events::{DiscoveredEvent, EventMapping};
 
 const MAX_EVENTS_PER_SERIES: usize = 6;
 const POLYMARKET_REFRESH_SECS: u64 = 30;
+static NEXT_POLYMARKET_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
 fn l2_feed_enabled() -> bool {
     std::env::var("PLOY_BINANCE_L2_FEED_ENABLED")
@@ -56,6 +58,8 @@ pub struct DataFeedManager {
     binance_kline_last_close: Arc<RwLock<HashMap<String, HashMap<String, DateTime<Utc>>>>>,
     /// Polymarket WebSocket (optional)
     polymarket_ws: Option<Arc<PolymarketWebSocket>>,
+    /// Logical owner used when reconciling shared Polymarket subscriptions.
+    polymarket_owner: String,
     /// Polymarket client for event discovery
     pm_client: Option<Arc<PolymarketClient>>,
     /// Token to event mapping for Polymarket
@@ -73,6 +77,13 @@ pub struct DataFeedManager {
 }
 
 impl DataFeedManager {
+    fn next_polymarket_owner() -> String {
+        format!(
+            "strategy:feed:{}",
+            NEXT_POLYMARKET_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
     /// Create a new DataFeedManager
     pub fn new(manager: Arc<StrategyManager>) -> Self {
         let metadata_pool = std::env::var("PLOY_DATABASE__URL")
@@ -95,6 +106,7 @@ impl DataFeedManager {
             binance_kline_backfill_limit: 0,
             binance_kline_last_close: Arc::new(RwLock::new(HashMap::new())),
             polymarket_ws: None,
+            polymarket_owner: Self::next_polymarket_owner(),
             pm_client: None,
             token_events: Arc::new(RwLock::new(HashMap::new())),
             active_feeds: Arc::new(RwLock::new(Vec::new())),
@@ -141,6 +153,7 @@ impl DataFeedManager {
                 .unwrap_or(300),
             binance_kline_last_close: Arc::new(RwLock::new(HashMap::new())),
             polymarket_ws: dp.polymarket_ws(),
+            polymarket_owner: Self::next_polymarket_owner(),
             pm_client: None,
             token_events: Arc::new(RwLock::new(HashMap::new())),
             active_feeds: Arc::new(RwLock::new(Vec::new())),

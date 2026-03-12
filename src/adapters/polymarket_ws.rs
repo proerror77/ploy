@@ -13,6 +13,85 @@ mod messages;
 mod runtime_support;
 mod subscriptions;
 
+const DEFAULT_TOKEN_OWNER: &str = "__default__";
+
+#[derive(Debug, Default)]
+struct TokenSideRegistry {
+    by_owner: HashMap<String, HashMap<String, Side>>,
+    merged: HashMap<String, Side>,
+}
+
+impl TokenSideRegistry {
+    fn register_token(&mut self, owner: &str, token_id: &str, side: Side) {
+        self.by_owner
+            .entry(owner.to_string())
+            .or_default()
+            .insert(token_id.to_string(), side);
+        self.rebuild_merged();
+    }
+
+    fn reconcile_owner(
+        &mut self,
+        owner: &str,
+        desired: &HashMap<String, Side>,
+    ) -> (usize, usize, usize) {
+        let owned = self.by_owner.entry(owner.to_string()).or_default();
+
+        let mut added = 0usize;
+        let mut updated = 0usize;
+        for (token_id, side) in desired {
+            match owned.get(token_id) {
+                None => {
+                    owned.insert(token_id.clone(), *side);
+                    added = added.saturating_add(1);
+                }
+                Some(prev) if prev != side => {
+                    owned.insert(token_id.clone(), *side);
+                    updated = updated.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
+        let mut removed = 0usize;
+        owned.retain(|token_id, _| {
+            let keep = desired.contains_key(token_id);
+            if !keep {
+                removed = removed.saturating_add(1);
+            }
+            keep
+        });
+
+        if owned.is_empty() {
+            self.by_owner.remove(owner);
+        }
+
+        self.rebuild_merged();
+        (added, removed, updated)
+    }
+
+    fn merged_len(&self) -> usize {
+        self.merged.len()
+    }
+
+    fn merged_tokens(&self) -> impl Iterator<Item = &String> {
+        self.merged.keys()
+    }
+
+    fn get_side(&self, token_id: &str) -> Option<Side> {
+        self.merged.get(token_id).copied()
+    }
+
+    fn rebuild_merged(&mut self) {
+        self.merged.clear();
+        for tokens in self.by_owner.values() {
+            for (token_id, side) in tokens {
+                self.merged.entry(token_id.clone()).or_insert(*side);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 use self::messages::extract_book_top;
 pub use self::messages::{
@@ -26,7 +105,7 @@ pub use self::runtime_support::{
 pub struct PolymarketWebSocket {
     ws_url: String,
     quote_cache: QuoteCache,
-    token_to_side: Arc<RwLock<HashMap<String, Side>>>,
+    token_registry: Arc<RwLock<TokenSideRegistry>>,
     /// Token IDs that should be subscribed for full book snapshots, but do not have an `Up/Down`
     /// `Side` mapping (ex: YES/NO sports markets).
     extra_tokens: Arc<RwLock<HashSet<String>>>,
@@ -75,7 +154,7 @@ impl PolymarketWebSocket {
         Self {
             ws_url: ws_url.to_string(),
             quote_cache: QuoteCache::new(),
-            token_to_side: Arc::new(RwLock::new(HashMap::new())),
+            token_registry: Arc::new(RwLock::new(TokenSideRegistry::default())),
             extra_tokens: Arc::new(RwLock::new(HashSet::new())),
             update_tx,
             price_change_tx,

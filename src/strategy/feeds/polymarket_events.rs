@@ -328,6 +328,7 @@ fn build_discovered_event(details: &GammaEventInfo, series_id: &str) -> Option<D
 async fn load_series_discovery_batch(
     client: &PolymarketClient,
     pm_ws: Option<&Arc<PolymarketWebSocket>>,
+    pm_owner: Option<&str>,
     metadata_pool: Option<&PgPool>,
     series_id: &str,
     log_filter_summary: bool,
@@ -365,8 +366,17 @@ async fn load_series_discovery_batch(
         }
 
         if let Some(pm_ws) = pm_ws {
-            pm_ws.register_token(&event.up_token, Side::Up).await;
-            pm_ws.register_token(&event.down_token, Side::Down).await;
+            if let Some(owner) = pm_owner {
+                pm_ws
+                    .register_token_for_owner(owner, &event.up_token, Side::Up)
+                    .await;
+                pm_ws
+                    .register_token_for_owner(owner, &event.down_token, Side::Down)
+                    .await;
+            } else {
+                pm_ws.register_token(&event.up_token, Side::Up).await;
+                pm_ws.register_token(&event.down_token, Side::Down).await;
+            }
         }
 
         discovered.insert(details.id.clone(), event);
@@ -458,6 +468,9 @@ impl DataFeedManager {
         match load_series_discovery_batch(
             client.as_ref(),
             self.polymarket_ws.as_ref(),
+            self.polymarket_ws
+                .as_ref()
+                .map(|_| self.polymarket_owner.as_str()),
             self.metadata_pool.as_deref(),
             series_id,
             true,
@@ -508,7 +521,7 @@ impl DataFeedManager {
         let manager = self.manager.clone();
         let series_events = self.series_events.clone();
         let metadata_pool = self.metadata_pool.clone();
-        let use_data_plane = self.data_plane.is_some();
+        let polymarket_owner = self.polymarket_owner.clone();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(POLYMARKET_REFRESH_SECS));
@@ -520,6 +533,7 @@ impl DataFeedManager {
                     let Ok(batch) = load_series_discovery_batch(
                         pm_client.as_ref(),
                         Some(&pm_ws),
+                        Some(&polymarket_owner),
                         metadata_pool.as_deref(),
                         series_id,
                         false,
@@ -534,27 +548,25 @@ impl DataFeedManager {
                             .await;
                 }
 
-                if use_data_plane {
-                    // Shared crypto collection keeps the broader raw token superset alive; the
-                    // strategy feed may add tokens and request a resubscribe, but must not prune
-                    // collector-owned subscriptions down to the strategy's narrower window set.
-                    if refresh_changed {
-                        debug!(
-                            "Polymarket refresh changed token set; requesting PlatformDataPlane resubscribe"
-                        );
-                        pm_ws.request_resubscribe();
-                    }
-                    continue;
-                }
-
                 let desired = desired_polymarket_token_sides(&series_events).await;
-                let (added, removed, updated, total) = pm_ws.reconcile_token_sides(&desired).await;
+                let (added, removed, updated, total) = pm_ws
+                    .reconcile_token_sides_for_owner(&polymarket_owner, &desired)
+                    .await;
                 if (added + removed + updated) > 0 {
                     info!(
-                        "Polymarket WS token reconcile: added={} removed={} updated={} total={}",
-                        added, removed, updated, total
+                        owner = %polymarket_owner,
+                        added,
+                        removed,
+                        updated,
+                        total,
+                        "Polymarket WS token reconcile"
                     );
                     pm_ws.request_resubscribe();
+                } else if refresh_changed {
+                    debug!(
+                        owner = %polymarket_owner,
+                        "Polymarket refresh changed event set without token diff"
+                    );
                 }
             }
         });

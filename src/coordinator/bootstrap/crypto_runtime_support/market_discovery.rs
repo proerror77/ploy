@@ -1,11 +1,13 @@
 use super::*;
 
+const CRYPTO_COLLECTOR_OWNER: &str = "collector:crypto";
+
 pub(super) async fn initialize_crypto_market_discovery(
     shared_pool: Option<&PgPool>,
     pm_client_ref: &PolymarketClient,
     crypto_cfg: &crate::strategy::CryptoTradingConfig,
     all_coins: &[String],
-    use_data_plane: bool,
+    _use_data_plane: bool,
     pm_ws: Arc<PolymarketWebSocket>,
 ) -> Arc<EventMatcher> {
     let event_matcher = Arc::new(EventMatcher::new(pm_client_ref.clone()));
@@ -54,24 +56,21 @@ pub(super) async fn initialize_crypto_market_discovery(
             );
         }
     }
-    if use_data_plane {
-        for (token, side) in &desired {
-            pm_ws.register_token(token, *side).await;
-        }
+    let (added, removed, updated, total) = pm_ws
+        .reconcile_token_sides_for_owner(CRYPTO_COLLECTOR_OWNER, &desired)
+        .await;
+    if added > 0 || removed > 0 || updated > 0 {
         pm_ws.request_resubscribe();
-        info!(
-            agent = %crypto_cfg.agent_id,
-            token_count = desired.len(),
-            "seeded PM token mappings for crypto data collection"
-        );
-    } else {
-        let (_added, _removed, _updated, total) = pm_ws.reconcile_token_sides(&desired).await;
-        info!(
-            agent = %crypto_cfg.agent_id,
-            token_count = total,
-            "seeded PM token mappings for crypto data collection"
-        );
     }
+    info!(
+        agent = %crypto_cfg.agent_id,
+        owner = CRYPTO_COLLECTOR_OWNER,
+        added,
+        removed,
+        updated,
+        token_count = total,
+        "seeded PM token mappings for crypto data collection"
+    );
 
     if let Some(pool) = shared_pool {
         if let Err(e) = crate::collector::ensure_collector_token_targets_table(pool).await {
@@ -98,17 +97,10 @@ pub(super) async fn initialize_crypto_market_discovery(
     let coins_collector = all_coins.to_vec();
     let agent_id_collector = crypto_cfg.agent_id.clone();
     let pool_collector = shared_pool.cloned();
-    let use_data_plane_collector = use_data_plane;
-    let initial_last_desired = if use_data_plane_collector {
-        desired.clone()
-    } else {
-        HashMap::new()
-    };
     tokio::spawn(async move {
         let refresh_secs = env_u64("PM_COLLECTOR_REFRESH_SECS", PM_COLLECTOR_REFRESH_SECS).max(10);
         let mut tick = tokio::time::interval(Duration::from_secs(refresh_secs));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_desired = initial_last_desired;
 
         loop {
             tick.tick().await;
@@ -165,35 +157,20 @@ pub(super) async fn initialize_crypto_market_discovery(
             let desired_count = desired.len();
             let collector_target_count = collector_targets.len();
 
-            if use_data_plane_collector {
-                if desired != last_desired {
-                    let previous_token_count = last_desired.len();
-                    for (token, side) in &desired {
-                        pm_ws_collector.register_token(token, *side).await;
-                    }
-                    pm_ws_collector.request_resubscribe();
-                    info!(
-                        agent = %agent_id_collector,
-                        previous_token_count,
-                        token_count = desired.len(),
-                        "pm token collector refreshed token set on shared data-plane ws; resubscribe requested"
-                    );
-                    last_desired = desired;
-                }
-            } else {
-                let (added, removed, updated, total) =
-                    pm_ws_collector.reconcile_token_sides(&desired).await;
-                if added > 0 || removed > 0 {
-                    pm_ws_collector.request_resubscribe();
-                    info!(
-                        agent = %agent_id_collector,
-                        added,
-                        removed,
-                        updated,
-                        token_count = total,
-                        "pm token collector reconciled token set; resubscribe requested"
-                    );
-                }
+            let (added, removed, updated, total) = pm_ws_collector
+                .reconcile_token_sides_for_owner(CRYPTO_COLLECTOR_OWNER, &desired)
+                .await;
+            if added > 0 || removed > 0 || updated > 0 {
+                pm_ws_collector.request_resubscribe();
+                info!(
+                    agent = %agent_id_collector,
+                    owner = CRYPTO_COLLECTOR_OWNER,
+                    added,
+                    removed,
+                    updated,
+                    token_count = total,
+                    "pm token collector reconciled token set; resubscribe requested"
+                );
             }
 
             if let Some(pool) = pool_collector.as_ref() {

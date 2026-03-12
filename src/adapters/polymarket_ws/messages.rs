@@ -175,7 +175,7 @@ impl PolymarketWebSocket {
                 extra.contains(&asset_id)
             };
             if !is_extra {
-                let registered_count = self.token_to_side.read().await.len();
+                let registered_count = self.token_registry.read().await.merged_len();
                 debug!(
                     "Unregistered token in book update: {} (registered tokens: {})",
                     &asset_id[..16.min(asset_id.len())],
