@@ -1,8 +1,8 @@
 use super::proxy_support::{ensure_0x_prefix, relayer_hmac_signature};
 use super::*;
 
-use ethers_core::types::{Address as EthersAddress, U256 as EthersU256};
-use ethers_signers::{LocalWallet, Signer as _};
+use alloy::primitives::{Address, U256};
+use alloy::signers::{local::PrivateKeySigner, Signer as _};
 use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -69,7 +69,7 @@ fn test_missing_relayer_builder_credential_groups() {
 
 #[test]
 fn test_derive_proxy_wallet_address_matches_known_vector() {
-    let signer: EthersAddress = "0x9d699747148fd637a7d2514f9b3e3028bf59195c"
+    let signer: Address = "0x9d699747148fd637a7d2514f9b3e3028bf59195c"
         .parse()
         .expect("valid signer");
     let proxy = AutoClaimer::derive_proxy_wallet_address(signer)
@@ -82,7 +82,7 @@ fn test_derive_proxy_wallet_address_matches_known_vector() {
 
 #[test]
 fn test_encode_proxy_transaction_data_accepts_tuple_calls() {
-    let call_to: EthersAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+    let call_to: Address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
         .parse()
         .expect("valid call target");
     let encoded = AutoClaimer::encode_proxy_transaction_data(call_to, vec![0x12, 0x34])
@@ -93,17 +93,17 @@ fn test_encode_proxy_transaction_data_accepts_tuple_calls() {
 #[tokio::test]
 async fn test_proxy_signature_matches_builder_relayer_client_vector() {
     let private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-    let signer_wallet: LocalWallet = private_key.parse().expect("known private key");
+    let signer_wallet: PrivateKeySigner = private_key.parse().expect("known private key");
     let signer_addr = signer_wallet.address();
 
-    let proxy_factory: EthersAddress = RELAYER_PROXY_FACTORY_POLYGON
+    let proxy_factory: Address = RELAYER_PROXY_FACTORY_POLYGON
         .parse()
         .expect("proxy factory");
-    let relay_hub: EthersAddress = RELAYER_RELAY_HUB_POLYGON.parse().expect("relay hub");
-    let relay_addr: EthersAddress = "0xae700edfd9ab986395f3999fe11177b9903a52f1"
+    let relay_hub: Address = RELAYER_RELAY_HUB_POLYGON.parse().expect("relay hub");
+    let relay_addr: Address = "0xae700edfd9ab986395f3999fe11177b9903a52f1"
         .parse()
         .expect("relay address");
-    let usdc: EthersAddress = USDC_E_POLYGON.parse().expect("usdc");
+    let usdc: Address = USDC_E_POLYGON.parse().expect("usdc");
     let approve_calldata = hex::decode(
         "095ea7b30000000000000000000000004d97dcd97ec945f40cf65f87097ace5ea0476045ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     )
@@ -115,17 +115,17 @@ async fn test_proxy_signature_matches_builder_relayer_client_vector() {
         signer_addr,
         proxy_factory,
         &proxy_call_data,
-        EthersU256::zero(),
-        EthersU256::zero(),
-        EthersU256::from(85_338u64),
-        EthersU256::zero(),
+        U256::ZERO,
+        U256::ZERO,
+        U256::from(85_338u64),
+        U256::ZERO,
         relay_hub,
         relay_addr,
     );
     let sig = ensure_0x_prefix(
         &signer_wallet
-            .with_chain_id(POLYGON_CHAIN_ID)
-            .sign_message(struct_hash.as_bytes())
+            .with_chain_id(Some(POLYGON_CHAIN_ID))
+            .sign_message(struct_hash.as_slice())
             .await
             .expect("signature")
             .to_string(),

@@ -56,10 +56,6 @@ async-trait = "0.1"
 # UUID
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Crypto for signing (Polymarket requires EIP-712 signatures)
-ethers-core = { version = "2", default-features = false, optional = true }
-ethers-signers = { version = "2", default-features = false, optional = true }
-
 # Official Polymarket CLOB client SDK
 polymarket-client-sdk = { version = "0.4", features = ["gamma", "data", "clob"] }
 builder-relayer-client-rust = { version = "=0.2.2", optional = true }
@@ -130,7 +126,7 @@ api = ["dep:tower-http"]  # Enable API module with SQLx compile-time checks (req
 api_ws = ["api", "axum/ws"]
 claimer = ["claimer_cli", "claimer_daemon"]
 claimer_cli = ["claimer_daemon"]
-claimer_daemon = ["dep:ethers-core", "dep:ethers-signers"]
+claimer_daemon = []
 analysis_tools = ["analysis_core"]
 analysis_core = []
 rl = ["burn", "burn-ndarray", "bincode"]

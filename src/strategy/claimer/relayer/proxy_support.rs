@@ -1,15 +1,30 @@
 use super::*;
-use alloy::primitives::Address;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use ethers_core::abi::{AbiParser, Token, encode as abi_encode};
-use ethers_core::types::{Address as EthersAddress, H256 as EthersH256, U256 as EthersU256};
-use ethers_core::utils::{
-    get_create2_address_from_hash as ethers_get_create2_address_from_hash, keccak256,
-};
+use alloy::primitives::{keccak256, Address, B256, U256};
+use alloy::sol;
+use alloy::sol_types::SolCall;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use hmac::{Hmac, Mac};
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+
+sol! {
+    struct RelayerProxyCall {
+        uint8 operation;
+        address to;
+        uint256 value;
+        bytes data;
+    }
+
+    function redeemPositions(
+        address collateralToken,
+        bytes32 parentCollectionId,
+        bytes32 conditionId,
+        uint256[] indexSets
+    ) external;
+
+    function proxy(RelayerProxyCall[] calls) external;
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct RelayerBuilderCredentials {
@@ -103,10 +118,6 @@ pub(super) fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Resu
     Ok(sig.replace('+', "-").replace('/', "_"))
 }
 
-pub(super) fn ethers_to_alloy_address(value: EthersAddress) -> Address {
-    Address::from_slice(value.as_bytes())
-}
-
 pub(super) fn compact_http_body(raw: &str, max_chars: usize) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -129,102 +140,76 @@ pub(super) fn ensure_0x_prefix(hex: &str) -> String {
 
 impl AutoClaimer {
     pub(super) fn encode_ctf_redeem_calldata(condition_id: [u8; 32]) -> Result<Vec<u8>> {
-        let function = AbiParser::default()
-            .parse_function(
-                "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
-            )
-            .map_err(|e| {
-                crate::error::PloyError::Internal(format!("Failed to parse redeem ABI: {}", e))
-            })?;
-
-        let usdc_addr: EthersAddress = USDC_E_POLYGON.parse().map_err(|e| {
+        let usdc_addr: Address = USDC_E_POLYGON.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!("Invalid USDC.e address: {}", e))
         })?;
 
-        function
-            .encode_input(&[
-                Token::Address(usdc_addr),
-                Token::FixedBytes(vec![0u8; 32]),
-                Token::FixedBytes(condition_id.to_vec()),
-                Token::Array(vec![
-                    Token::Uint(EthersU256::from(1u8)),
-                    Token::Uint(EthersU256::from(2u8)),
-                ]),
-            ])
-            .map_err(|e| {
-                crate::error::PloyError::Internal(format!(
-                    "Failed to encode redeem calldata: {}",
-                    e
-                ))
-            })
+        Ok(redeemPositionsCall {
+            collateralToken: usdc_addr,
+            parentCollectionId: B256::ZERO,
+            conditionId: B256::from(condition_id),
+            indexSets: vec![U256::from(1u8), U256::from(2u8)],
+        }
+        .abi_encode())
     }
 
     pub(super) fn encode_proxy_transaction_data(
-        call_to: EthersAddress,
+        call_to: Address,
         call_data: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let calls = Token::Array(vec![Token::Tuple(vec![
-            Token::Uint(EthersU256::from(1u8)),
-            Token::Address(call_to),
-            Token::Uint(EthersU256::zero()),
-            Token::Bytes(call_data),
-        ])]);
-        let encoded_args = abi_encode(&[calls]);
-        let selector = &keccak256("proxy((uint8,address,uint256,bytes)[])")[0..4];
-        let mut payload = Vec::with_capacity(4 + encoded_args.len());
-        payload.extend_from_slice(selector);
-        payload.extend_from_slice(&encoded_args);
-        Ok(payload)
+        Ok(proxyCall {
+            calls: vec![RelayerProxyCall {
+                operation: 1u8,
+                to: call_to,
+                value: U256::ZERO,
+                data: call_data.into(),
+            }],
+        }
+        .abi_encode())
     }
 
-    pub(super) fn derive_proxy_wallet_address(signer: EthersAddress) -> Result<EthersAddress> {
-        let proxy_factory: EthersAddress = RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
+    pub(super) fn derive_proxy_wallet_address(signer: Address) -> Result<Address> {
+        let proxy_factory: Address = RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!("Invalid relayer proxy factory: {}", e))
         })?;
-        let init_hash: EthersH256 = RELAYER_PROXY_INIT_CODE_HASH.parse().map_err(|e| {
+        let init_hash: B256 = RELAYER_PROXY_INIT_CODE_HASH.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!(
                 "Invalid relayer proxy init code hash: {}",
                 e
             ))
         })?;
-        let salt = keccak256(signer.as_bytes());
-        Ok(ethers_get_create2_address_from_hash(
-            proxy_factory,
-            salt,
-            init_hash.to_fixed_bytes(),
-        ))
+        let salt = keccak256(signer.as_slice());
+        Ok(proxy_factory.create2(salt, init_hash))
     }
 
     pub(super) fn create_proxy_struct_hash(
-        from: EthersAddress,
-        to: EthersAddress,
+        from: Address,
+        to: Address,
         data: &[u8],
-        tx_fee: EthersU256,
-        gas_price: EthersU256,
-        gas_limit: EthersU256,
-        nonce: EthersU256,
-        relay_hub: EthersAddress,
-        relay: EthersAddress,
-    ) -> EthersH256 {
-        fn append_u256(out: &mut Vec<u8>, value: EthersU256) {
-            let mut buf = [0u8; 32];
-            value.to_big_endian(&mut buf);
-            out.extend_from_slice(&buf);
+        tx_fee: U256,
+        gas_price: U256,
+        gas_limit: U256,
+        nonce: U256,
+        relay_hub: Address,
+        relay: Address,
+    ) -> B256 {
+        fn append_u256(out: &mut Vec<u8>, value: U256) {
+            out.extend_from_slice(&value.to_be_bytes::<32>());
         }
 
         let mut payload = Vec::with_capacity(4 + 20 + 20 + data.len() + 32 * 4 + 20 + 20);
         payload.extend_from_slice(b"rlx:");
-        payload.extend_from_slice(from.as_bytes());
-        payload.extend_from_slice(to.as_bytes());
+        payload.extend_from_slice(from.as_slice());
+        payload.extend_from_slice(to.as_slice());
         payload.extend_from_slice(data);
         append_u256(&mut payload, tx_fee);
         append_u256(&mut payload, gas_price);
         append_u256(&mut payload, gas_limit);
         append_u256(&mut payload, nonce);
-        payload.extend_from_slice(relay_hub.as_bytes());
-        payload.extend_from_slice(relay.as_bytes());
+        payload.extend_from_slice(relay_hub.as_slice());
+        payload.extend_from_slice(relay.as_slice());
 
-        EthersH256::from(keccak256(payload))
+        keccak256(payload)
     }
 
     pub(super) fn build_relayer_builder_headers(

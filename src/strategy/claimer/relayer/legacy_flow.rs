@@ -1,15 +1,14 @@
 use super::proxy_support::{
-    RelayerBuilderCredentials, RelayerPayloadResponse, RelayerSignatureParams,
-    RelayerSubmitRequest, RelayerSubmitResponse, RelayerTransactionStatus, compact_http_body,
-    ensure_0x_prefix, ethers_to_alloy_address,
+    compact_http_body, ensure_0x_prefix, RelayerBuilderCredentials, RelayerPayloadResponse,
+    RelayerSignatureParams, RelayerSubmitRequest, RelayerSubmitResponse, RelayerTransactionStatus,
 };
 use super::*;
 
+use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest as AlloyTransactionRequest;
+use alloy::signers::{local::PrivateKeySigner, Signer as _};
 use chrono::Utc;
-use ethers_core::types::{Address as EthersAddress, U256 as EthersU256};
-use ethers_signers::{LocalWallet, Signer as _};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -22,11 +21,11 @@ impl AutoClaimer {
         private_key: &str,
     ) -> Result<Option<String>> {
         let signer_wallet = private_key
-            .parse::<LocalWallet>()
+            .parse::<PrivateKeySigner>()
             .map_err(|e| {
                 crate::error::PloyError::Wallet(format!("Invalid private key for relayer: {}", e))
             })?
-            .with_chain_id(POLYGON_CHAIN_ID);
+            .with_chain_id(Some(POLYGON_CHAIN_ID));
         let signer_addr = signer_wallet.address();
 
         let condition_hex = pos
@@ -40,20 +39,16 @@ impl AutoClaimer {
             .map_err(|_| crate::error::PloyError::Internal("Condition ID wrong length".into()))?;
 
         let redeem_call_data = Self::encode_ctf_redeem_calldata(condition_bytes)?;
-        let ctf_addr: EthersAddress = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
+        let ctf_addr: Address = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!(
                 "Invalid ConditionalTokens address: {}",
                 e
             ))
         })?;
-        let proxy_factory_addr: EthersAddress =
-            RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
-                crate::error::PloyError::AddressParsing(format!(
-                    "Invalid relayer proxy factory: {}",
-                    e
-                ))
-            })?;
-        let relay_hub_addr: EthersAddress = RELAYER_RELAY_HUB_POLYGON.parse().map_err(|e| {
+        let proxy_factory_addr: Address = RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
+            crate::error::PloyError::AddressParsing(format!("Invalid relayer proxy factory: {}", e))
+        })?;
+        let relay_hub_addr: Address = RELAYER_RELAY_HUB_POLYGON.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!("Invalid relayer hub address: {}", e))
         })?;
         let proxy_wallet = Self::derive_proxy_wallet_address(signer_addr)?;
@@ -69,17 +64,17 @@ impl AutoClaimer {
         let provider = ProviderBuilder::new().connect_http(rpc_url);
 
         let gas_estimate_tx = AlloyTransactionRequest::default()
-            .from(ethers_to_alloy_address(signer_addr))
-            .to(ethers_to_alloy_address(proxy_factory_addr))
+            .from(signer_addr)
+            .to(proxy_factory_addr)
             .input(proxy_call_data.clone().into());
         let gas_limit = match provider.estimate_gas(gas_estimate_tx).await {
-            Ok(v) => EthersU256::from(v),
+            Ok(v) => U256::from(v),
             Err(e) => {
                 warn!(
                     "Relayer redeem gas estimation failed, using default {}: {}",
                     RELAYER_DEFAULT_GAS_LIMIT, e
                 );
-                EthersU256::from(RELAYER_DEFAULT_GAS_LIMIT)
+                U256::from(RELAYER_DEFAULT_GAS_LIMIT)
             }
         };
 
@@ -87,13 +82,13 @@ impl AutoClaimer {
         let http = reqwest::Client::new();
 
         let relay_payload = fetch_relay_payload(&http, &relayer_base, signer_addr).await?;
-        let relay_addr: EthersAddress = relay_payload.address.parse().map_err(|e| {
+        let relay_addr: Address = relay_payload.address.parse().map_err(|e| {
             crate::error::PloyError::AddressParsing(format!(
                 "Invalid relayer payload address {}: {}",
                 relay_payload.address, e
             ))
         })?;
-        let nonce = EthersU256::from_dec_str(relay_payload.nonce.trim()).map_err(|e| {
+        let nonce = U256::from_str_radix(relay_payload.nonce.trim(), 10).map_err(|e| {
             crate::error::PloyError::Internal(format!(
                 "Invalid relayer payload nonce {}: {}",
                 relay_payload.nonce, e
@@ -104,8 +99,8 @@ impl AutoClaimer {
             signer_addr,
             proxy_factory_addr,
             &proxy_call_data,
-            EthersU256::zero(),
-            EthersU256::zero(),
+            U256::ZERO,
+            U256::ZERO,
             gas_limit,
             nonce,
             relay_hub_addr,
@@ -113,7 +108,7 @@ impl AutoClaimer {
         );
         let signature = ensure_0x_prefix(
             &signer_wallet
-                .sign_message(struct_hash.as_bytes())
+                .sign_message(struct_hash.as_slice())
                 .await
                 .map_err(|e| {
                     crate::error::PloyError::Signature(format!(
@@ -161,7 +156,7 @@ impl AutoClaimer {
 async fn fetch_relay_payload(
     http: &reqwest::Client,
     relayer_base: &str,
-    signer_addr: EthersAddress,
+    signer_addr: Address,
 ) -> Result<RelayerPayloadResponse> {
     http.get(format!("{}/relay-payload", relayer_base))
         .query(&[

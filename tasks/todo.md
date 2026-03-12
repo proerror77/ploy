@@ -5667,3 +5667,30 @@ Close `R-57` by upgrading the direct `rand` dependency from `0.8` to the current
 - `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_ppo_trainer_creation --lib --features rl -- --exact --nocapture`
 - `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_replay_buffer_sample --lib --features rl -- --exact --nocapture`
 - `CARGO_TARGET_DIR=/tmp/ploy-rand10-api-tests rtk cargo test build_admin_session_cookie_emits_v2_hmac_value --lib --features "rl api" -- --exact --nocapture`
+
+# Claimer Alloy Relayer Cut (2026-03-12)
+
+## Goal
+Retire the last direct `ethers-core` / `ethers-signers` island by moving the claimer relayer helpers onto the repo's existing `alloy` ABI, signer, and address primitives.
+
+## Outcomes
+
+- [x] Replaced the relayer proxy ABI encoding in [proxy_support.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/claimer/relayer/proxy_support.rs) with `alloy::sol!` call types, `Address::create2(...)`, and `alloy` `U256`/`B256` primitives.
+- [x] Replaced the relayer legacy signing path in [legacy_flow.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/claimer/relayer/legacy_flow.rs) with `PrivateKeySigner`, `alloy` addresses, and native `U256` parsing.
+- [x] Updated [tests.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/claimer/relayer/tests.rs) to keep the existing proxy-address and signature vectors on the new `alloy` types.
+- [x] Removed the direct `ethers-core` / `ethers-signers` dependency wiring from [Cargo.toml](/Users/proerror/Documents/ploy-order-intent-clean/Cargo.toml); `claimer_daemon` no longer pulls them in.
+- [x] Verified the dependency graph no longer contains `ethers-core` or `ethers-signers` under `claimer_daemon`.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-claimer-alloy rtk cargo check --lib --features claimer_daemon`
+- `CARGO_TARGET_DIR=/tmp/ploy-claimer-alloy-sdk rtk cargo check --lib --features "claimer_daemon builder_relayer_sdk"`
+- `CARGO_TARGET_DIR=/tmp/ploy-claimer-alloy-tests rtk cargo test test_derive_proxy_wallet_address_matches_known_vector --lib --features claimer_daemon -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-claimer-alloy-tests rtk cargo test test_encode_proxy_transaction_data_accepts_tuple_calls --lib --features claimer_daemon -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-claimer-alloy-tests rtk cargo test test_proxy_signature_matches_builder_relayer_client_vector --lib --features claimer_daemon -- --exact --nocapture`
+- `cargo tree -e features --features claimer_daemon -i ethers-core`
+- `cargo tree -e features --features claimer_daemon -i ethers-signers`
+
+## Notes
+
+- The `cargo tree -i` checks now fail with `package ID specification ... did not match any packages`, which is the expected confirmation that the direct `ethers-*` packages are gone from the `claimer_daemon` graph.
