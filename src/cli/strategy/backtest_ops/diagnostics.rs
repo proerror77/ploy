@@ -852,7 +852,7 @@ pub(super) async fn build_pm_event_replay_selection(
     minimum_quality: PmReplayQuality,
 ) -> Result<PmEventReplaySelection> {
     let rows = load_event_window_audit_rows(pool, symbols, from, to).await?;
-    Ok(select_pm_event_replay_windows(&rows, minimum_quality))
+    Ok(select_pm_event_replay_windows(&rows, minimum_quality, from, to))
 }
 
 async fn load_event_window_audit_rows(
@@ -1053,6 +1053,8 @@ async fn load_event_window_audit_rows(
 fn select_pm_event_replay_windows(
     rows: &[EventWindowAuditRow],
     minimum_quality: PmReplayQuality,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
 ) -> PmEventReplaySelection {
     let filtered_rows: Vec<&EventWindowAuditRow> =
         rows.iter().filter(|row| row.horizon == "5m").collect();
@@ -1075,6 +1077,12 @@ fn select_pm_event_replay_windows(
             continue;
         }
 
+        let bounded_start = from.map(|from| start_time.max(from)).unwrap_or(start_time);
+        let bounded_end = to.map(|to| end_time.min(to)).unwrap_or(end_time);
+        if bounded_start > bounded_end {
+            continue;
+        }
+
         match row.quality {
             EventWindowQuality::KeepStrict => {
                 kept_strict_windows = kept_strict_windows.saturating_add(1)
@@ -1088,8 +1096,8 @@ fn select_pm_event_replay_windows(
         windows.push(ReplayEventWindow {
             market_slug: row.market_slug.clone(),
             symbol: row.symbol.clone(),
-            start_time,
-            end_time,
+            start_time: bounded_start,
+            end_time: bounded_end,
         });
     }
 
@@ -1452,6 +1460,8 @@ mod tests {
         let strict_selection = select_pm_event_replay_windows(
             &[strict.clone(), research.clone()],
             PmReplayQuality::Strict,
+            None,
+            None,
         );
         assert_eq!(strict_selection.total_windows, 2);
         assert_eq!(strict_selection.kept_windows, 1);
@@ -1463,11 +1473,63 @@ mod tests {
         let research_selection = select_pm_event_replay_windows(
             &[strict.clone(), research.clone()],
             PmReplayQuality::Research,
+            None,
+            None,
         );
         assert_eq!(research_selection.kept_windows, 2);
         assert_eq!(research_selection.kept_strict_windows, 1);
         assert_eq!(research_selection.kept_research_windows, 1);
         assert_eq!(research_selection.dropped_windows, 0);
+    }
+
+    #[test]
+    fn select_pm_event_replay_windows_drops_corrected_window_outside_requested_range() {
+        let from = DateTime::parse_from_rfc3339("2026-03-12T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-03-12T09:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let start_time = DateTime::parse_from_rfc3339("2026-03-12T02:25:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let corrected_end_time = DateTime::parse_from_rfc3339("2026-03-12T02:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mut row = strict_row();
+        row.market_slug = "btc-updown-5m-bad-overlap".to_string();
+        row.start_time = Some(start_time);
+        row.end_time = Some(
+            DateTime::parse_from_rfc3339("2026-03-12T09:45:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        row.corrected_end_time = Some(corrected_end_time);
+        row.quote.first_ts = Some(start_time);
+        row.quote.last_ts = Some(corrected_end_time - chrono::Duration::seconds(5));
+        row.lob.first_ts = Some(start_time);
+        row.lob.last_ts = Some(corrected_end_time - chrono::Duration::seconds(10));
+        row.spot.first_ts = Some(start_time);
+        row.spot.last_ts = Some(corrected_end_time - chrono::Duration::seconds(1));
+        row.l2.first_ts = Some(start_time);
+        row.l2.last_ts = Some(corrected_end_time - chrono::Duration::seconds(2));
+        let (quality, issues) = classify_event_window_audit(&row);
+        row.quality = quality;
+        row.issues = issues;
+        assert_eq!(row.quality, EventWindowQuality::KeepStrict);
+
+        let selection = select_pm_event_replay_windows(
+            &[row],
+            PmReplayQuality::Research,
+            Some(from),
+            Some(to),
+        );
+
+        assert_eq!(selection.kept_windows, 0);
+        assert!(selection.windows.is_empty());
+        assert_eq!(selection.effective_from, None);
+        assert_eq!(selection.effective_to, None);
     }
 
     #[test]
