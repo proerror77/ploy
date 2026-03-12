@@ -1,9 +1,72 @@
 use super::*;
+use alloy::primitives::U256;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde_json::Value;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
+
+const STRICT_SPOT_TAIL_SECS: i64 = 15;
+const STRICT_L2_TAIL_SECS: i64 = 15;
+const STRICT_PM_QUOTE_TAIL_SECS: i64 = 30;
+const STRICT_PM_LOB_TAIL_SECS: i64 = 30;
+const EVENT_AUDIT_PREVIEW_ROWS: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventWindowQuality {
+    KeepStrict,
+    KeepResearch,
+    Drop,
+}
+
+impl EventWindowQuality {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::KeepStrict => "KEEP_STRICT",
+            Self::KeepResearch => "KEEP_RESEARCH",
+            Self::Drop => "DROP",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceCoverage {
+    rows: i64,
+    distinct_tokens: i64,
+    first_ts: Option<DateTime<Utc>>,
+    last_ts: Option<DateTime<Utc>>,
+}
+
+impl SourceCoverage {
+    fn tail_gap_secs(&self, end_time: Option<DateTime<Utc>>) -> Option<i64> {
+        end_time.zip(self.last_ts).map(|(end_time, last_ts)| {
+            if last_ts >= end_time {
+                0
+            } else {
+                (end_time - last_ts).num_seconds()
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EventWindowAuditRow {
+    market_slug: String,
+    symbol: String,
+    horizon: String,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    corrected_end_time: Option<DateTime<Utc>>,
+    price_to_beat: Option<Decimal>,
+    expected_token_count: usize,
+    quote: SourceCoverage,
+    lob: SourceCoverage,
+    spot: SourceCoverage,
+    l2: SourceCoverage,
+    quality: EventWindowQuality,
+    issues: Vec<&'static str>,
+}
 
 pub(super) async fn print_backtest_db_diagnostics(
     pool: &sqlx::PgPool,
@@ -332,6 +395,8 @@ pub(super) async fn print_backtest_db_diagnostics(
             }
         }
     }
+
+    print_event_window_audit(pool, symbols, from, to).await?;
 
     println!("\nHint:");
     println!("- PM 5m backtest needs: clob_quote_ticks + pm_market_metadata (or pm_token_settlements.raw_market) + spot (sync_records or binance_price_ticks/klines).");
@@ -678,4 +743,639 @@ async fn table_exists(pool: &sqlx::PgPool, table: &str) -> Result<bool> {
         .fetch_one(pool)
         .await?;
     Ok(reg.is_some())
+}
+
+async fn print_event_window_audit(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<()> {
+    if !table_exists(pool, "pm_market_metadata").await? {
+        println!("\n[event_window_audit] skipped: pm_market_metadata missing");
+        return Ok(());
+    }
+
+    let rows = load_event_window_audit_rows(pool, symbols, from, to).await?;
+    if rows.is_empty() {
+        println!("\n[event_window_audit] no overlapping 5m/15m windows found");
+        return Ok(());
+    }
+
+    let strict = rows
+        .iter()
+        .filter(|row| row.quality == EventWindowQuality::KeepStrict)
+        .count();
+    let research = rows
+        .iter()
+        .filter(|row| row.quality == EventWindowQuality::KeepResearch)
+        .count();
+    let dropped = rows
+        .iter()
+        .filter(|row| row.quality == EventWindowQuality::Drop)
+        .count();
+    let missing_quote = rows.iter().filter(|row| row.quote.rows == 0).count();
+    let missing_lob = rows.iter().filter(|row| row.lob.rows == 0).count();
+    let missing_l2 = rows.iter().filter(|row| row.l2.rows == 0).count();
+
+    println!("\n[event_window_audit]");
+    println!(
+        "windows: {}, keep_strict: {}, keep_research: {}, drop: {}",
+        rows.len(),
+        strict,
+        research,
+        dropped
+    );
+    println!(
+        "missing sources: pm_quote={}, pm_lob={}, binance_l2={}",
+        missing_quote, missing_lob, missing_l2
+    );
+
+    let suspicious: Vec<&EventWindowAuditRow> = rows
+        .iter()
+        .filter(|row| row.quality != EventWindowQuality::KeepStrict)
+        .take(EVENT_AUDIT_PREVIEW_ROWS)
+        .collect();
+
+    if !suspicious.is_empty() {
+        println!("sample suspicious windows (up to {}):", EVENT_AUDIT_PREVIEW_ROWS);
+        for row in suspicious {
+            println!(
+                "- [{}] {} {} {} .. {} | quote={}/{} lob={}/{} spot={} l2={} | issues={}",
+                row.quality.as_str(),
+                row.symbol,
+                row.horizon,
+                fmt_ts(row.start_time),
+                fmt_ts(row.corrected_end_time.or(row.end_time)),
+                row.quote.rows,
+                row.quote.distinct_tokens,
+                row.lob.rows,
+                row.lob.distinct_tokens,
+                row.spot.rows,
+                row.l2.rows,
+                row.issues.join(",")
+            );
+            println!("  slug: {}", row.market_slug);
+        }
+    }
+
+    Ok(())
+}
+
+async fn load_event_window_audit_rows(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<Vec<EventWindowAuditRow>> {
+    let symbol_list = if symbols.is_empty() {
+        None::<Vec<String>>
+    } else {
+        Some(symbols.to_vec())
+    };
+
+    let event_rows = sqlx::query(
+        r#"
+        SELECT market_slug, symbol, horizon, start_time, end_time, price_to_beat, raw_market
+        FROM pm_market_metadata
+        WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+          AND ($2::timestamptz IS NULL OR end_time >= $2 OR end_time IS NULL)
+          AND ($3::timestamptz IS NULL OR start_time <= $3 OR start_time IS NULL)
+          AND COALESCE(
+                horizon,
+                CASE
+                    WHEN market_slug ILIKE '%-5m-%' THEN '5m'
+                    WHEN market_slug ILIKE '%-15m-%' THEN '15m'
+                    ELSE NULL
+                END
+              ) IN ('5m', '15m')
+        ORDER BY start_time NULLS LAST, market_slug
+        "#,
+    )
+    .bind(symbol_list.clone())
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+
+    if event_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let market_slugs: Vec<String> = event_rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("market_slug").ok())
+        .collect();
+    let settlement_rows: Vec<(String, String)> = if market_slugs.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT market_slug, token_id
+            FROM pm_token_settlements
+            WHERE market_slug = ANY($1)
+            GROUP BY market_slug, token_id
+            "#,
+        )
+        .bind(&market_slugs)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let mut fallback_tokens: HashMap<String, Vec<String>> = HashMap::new();
+    for (market_slug, token_id) in settlement_rows {
+        fallback_tokens
+            .entry(market_slug)
+            .or_default()
+            .push(token_id);
+    }
+    for token_ids in fallback_tokens.values_mut() {
+        token_ids.sort();
+        token_ids.dedup();
+    }
+
+    let quote_exists = table_exists(pool, "clob_quote_ticks").await?;
+    let lob_exists = table_exists(pool, "clob_orderbook_snapshots").await?;
+    let spot_exists = table_exists(pool, "binance_price_ticks").await?;
+    let l2_exists = table_exists(pool, "binance_lob_ticks").await?;
+
+    let mut audits = Vec::with_capacity(event_rows.len());
+    for row in event_rows {
+        let market_slug: String = row.get("market_slug");
+        let symbol = row
+            .try_get::<Option<String>, _>("symbol")
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .or_else(|| infer_symbol_from_slug(&market_slug))
+            .unwrap_or_default();
+        let start_time = row.try_get::<Option<DateTime<Utc>>, _>("start_time").ok().flatten();
+        let end_time = row.try_get::<Option<DateTime<Utc>>, _>("end_time").ok().flatten();
+        let corrected_end_time = start_time.zip(end_time).map(|(start_time, end_time)| {
+            corrected_window_end(&market_slug, start_time, end_time)
+        });
+        let horizon = row
+            .try_get::<Option<String>, _>("horizon")
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .or_else(|| infer_horizon_from_slug(&market_slug).map(ToOwned::to_owned))
+            .unwrap_or_else(|| "unknown".to_string());
+        let price_to_beat = row
+            .try_get::<Option<Decimal>, _>("price_to_beat")
+            .ok()
+            .flatten()
+            .filter(|value| *value > Decimal::ZERO);
+        let raw_market = row.try_get::<Option<Value>, _>("raw_market").ok().flatten();
+
+        let mut token_ids = extract_clob_token_ids(raw_market.as_ref());
+        if token_ids.is_empty() {
+            token_ids = fallback_tokens
+                .get(&market_slug)
+                .cloned()
+                .unwrap_or_default();
+        }
+        token_ids.sort();
+        token_ids.dedup();
+
+        let quote = if quote_exists {
+            fetch_token_coverage(
+                pool,
+                "clob_quote_ticks",
+                "received_at",
+                &token_ids,
+                start_time,
+                corrected_end_time.or(end_time),
+            )
+            .await?
+        } else {
+            SourceCoverage::default()
+        };
+        let lob = if lob_exists {
+            fetch_token_coverage(
+                pool,
+                "clob_orderbook_snapshots",
+                "received_at",
+                &token_ids,
+                start_time,
+                corrected_end_time.or(end_time),
+            )
+            .await?
+        } else {
+            SourceCoverage::default()
+        };
+        let spot = if spot_exists && !symbol.is_empty() {
+            fetch_symbol_coverage(
+                pool,
+                "binance_price_ticks",
+                "trade_time",
+                &symbol,
+                start_time,
+                corrected_end_time.or(end_time),
+            )
+            .await?
+        } else {
+            SourceCoverage::default()
+        };
+        let l2 = if l2_exists && !symbol.is_empty() {
+            fetch_symbol_coverage(
+                pool,
+                "binance_lob_ticks",
+                "event_time",
+                &symbol,
+                start_time,
+                corrected_end_time.or(end_time),
+            )
+            .await?
+        } else {
+            SourceCoverage::default()
+        };
+
+        let mut audit = EventWindowAuditRow {
+            market_slug,
+            symbol,
+            horizon,
+            start_time,
+            end_time,
+            corrected_end_time,
+            price_to_beat,
+            expected_token_count: token_ids.len(),
+            quote,
+            lob,
+            spot,
+            l2,
+            quality: EventWindowQuality::Drop,
+            issues: Vec::new(),
+        };
+        let (quality, issues) = classify_event_window_audit(&audit);
+        audit.quality = quality;
+        audit.issues = issues;
+        audits.push(audit);
+    }
+
+    Ok(audits)
+}
+
+async fn fetch_symbol_coverage(
+    pool: &sqlx::PgPool,
+    table: &str,
+    ts_column: &str,
+    symbol: &str,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+) -> Result<SourceCoverage> {
+    let sql = format!(
+        "SELECT COUNT(*)::bigint, MIN({ts_column}), MAX({ts_column}) \
+         FROM {table} \
+         WHERE symbol = $1 \
+           AND ($2::timestamptz IS NULL OR {ts_column} >= $2) \
+           AND ($3::timestamptz IS NULL OR {ts_column} <= $3)"
+    );
+    let (rows, first_ts, last_ts) =
+        sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(sql.as_str())
+            .bind(symbol)
+            .bind(start_time)
+            .bind(end_time)
+            .fetch_one(pool)
+            .await?;
+    Ok(SourceCoverage {
+        rows,
+        distinct_tokens: 0,
+        first_ts,
+        last_ts,
+    })
+}
+
+async fn fetch_token_coverage(
+    pool: &sqlx::PgPool,
+    table: &str,
+    ts_column: &str,
+    token_ids: &[String],
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+) -> Result<SourceCoverage> {
+    if token_ids.is_empty() {
+        return Ok(SourceCoverage::default());
+    }
+
+    let sql = format!(
+        "SELECT COUNT(*)::bigint, COUNT(DISTINCT token_id)::bigint, MIN({ts_column}), MAX({ts_column}) \
+         FROM {table} \
+         WHERE token_id = ANY($1) \
+           AND ($2::timestamptz IS NULL OR {ts_column} >= $2) \
+           AND ($3::timestamptz IS NULL OR {ts_column} <= $3)"
+    );
+    let (rows, distinct_tokens, first_ts, last_ts) = sqlx::query_as::<
+        _,
+        (i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
+    >(sql.as_str())
+    .bind(token_ids)
+    .bind(start_time)
+    .bind(end_time)
+    .fetch_one(pool)
+    .await?;
+    Ok(SourceCoverage {
+        rows,
+        distinct_tokens,
+        first_ts,
+        last_ts,
+    })
+}
+
+fn classify_event_window_audit(row: &EventWindowAuditRow) -> (EventWindowQuality, Vec<&'static str>) {
+    let mut issues = Vec::new();
+
+    if row.start_time.is_none() || row.corrected_end_time.or(row.end_time).is_none() {
+        issues.push("missing_window_bounds");
+    }
+    if row.price_to_beat.is_none() {
+        issues.push("missing_price_to_beat");
+    }
+    if row.expected_token_count == 0 {
+        issues.push("missing_token_mapping");
+    }
+    if row.quote.rows == 0 {
+        issues.push("missing_pm_quote");
+    }
+    if row.lob.rows == 0 {
+        issues.push("missing_pm_lob");
+    }
+    if row.spot.rows == 0 {
+        issues.push("missing_spot");
+    }
+    if row.l2.rows == 0 {
+        issues.push("missing_binance_l2");
+    }
+    if row.expected_token_count >= 2 && row.quote.distinct_tokens < 2 {
+        issues.push("pm_quote_missing_side");
+    }
+    if row.expected_token_count >= 2 && row.lob.distinct_tokens < 2 {
+        issues.push("pm_lob_missing_side");
+    }
+    if row.quote.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_PM_QUOTE_TAIL_SECS) {
+        issues.push("stale_pm_quote_tail");
+    }
+    if row.lob.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_PM_LOB_TAIL_SECS) {
+        issues.push("stale_pm_lob_tail");
+    }
+    if row.spot.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_SPOT_TAIL_SECS) {
+        issues.push("stale_spot_tail");
+    }
+    if row.l2.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_L2_TAIL_SECS) {
+        issues.push("stale_binance_l2_tail");
+    }
+
+    let research_ready = row.start_time.is_some()
+        && row.corrected_end_time.or(row.end_time).is_some()
+        && row.expected_token_count > 0
+        && row.quote.rows > 0
+        && row.spot.rows > 0;
+    let strict_ready = research_ready
+        && row.price_to_beat.is_some()
+        && row.lob.rows > 0
+        && row.l2.rows > 0
+        && row.expected_token_count >= 2
+        && row.quote.distinct_tokens >= 2
+        && row.lob.distinct_tokens >= 2
+        && row.quote.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+            <= Some(STRICT_PM_QUOTE_TAIL_SECS)
+        && row.lob.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+            <= Some(STRICT_PM_LOB_TAIL_SECS)
+        && row.spot.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+            <= Some(STRICT_SPOT_TAIL_SECS)
+        && row.l2.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+            <= Some(STRICT_L2_TAIL_SECS);
+
+    let quality = if strict_ready {
+        EventWindowQuality::KeepStrict
+    } else if research_ready {
+        EventWindowQuality::KeepResearch
+    } else {
+        EventWindowQuality::Drop
+    };
+    (quality, issues)
+}
+
+fn extract_clob_token_ids(raw_market: Option<&Value>) -> Vec<String> {
+    let Some(raw_market) = raw_market else {
+        return Vec::new();
+    };
+    let Some(raw_ids) = raw_market.get("clobTokenIds") else {
+        return Vec::new();
+    };
+
+    let mut token_ids = Vec::new();
+    match raw_ids {
+        Value::Array(items) => {
+            for item in items {
+                if let Some(token_id) = item.as_str().and_then(normalize_clob_token_id) {
+                    token_ids.push(token_id);
+                }
+            }
+        }
+        Value::String(encoded) => {
+            if let Ok(items) = serde_json::from_str::<Vec<String>>(encoded) {
+                for item in items {
+                    if let Some(token_id) = normalize_clob_token_id(&item) {
+                        token_ids.push(token_id);
+                    }
+                }
+            } else if let Some(token_id) = normalize_clob_token_id(encoded) {
+                token_ids.push(token_id);
+            }
+        }
+        _ => {}
+    }
+
+    token_ids.sort();
+    token_ids.dedup();
+    token_ids
+}
+
+fn normalize_clob_token_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return U256::from_str_radix(hex, 16).ok().map(|value| value.to_string());
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Some(trimmed.to_string());
+    }
+    U256::from_str_radix(trimmed, 16)
+        .ok()
+        .map(|value| value.to_string())
+}
+
+fn infer_symbol_from_slug(slug: &str) -> Option<String> {
+    let normalized = slug.to_ascii_lowercase();
+    if normalized.starts_with("btc-") || normalized.starts_with("bitcoin-") {
+        return Some("BTCUSDT".to_string());
+    }
+    if normalized.starts_with("eth-") || normalized.starts_with("ethereum-") {
+        return Some("ETHUSDT".to_string());
+    }
+    if normalized.starts_with("sol-") || normalized.starts_with("solana-") {
+        return Some("SOLUSDT".to_string());
+    }
+    if normalized.starts_with("xrp-") {
+        return Some("XRPUSDT".to_string());
+    }
+    None
+}
+
+fn infer_horizon_from_slug(slug: &str) -> Option<&'static str> {
+    let normalized = slug.to_ascii_lowercase();
+    if normalized.contains("-15m-") {
+        return Some("15m");
+    }
+    if normalized.contains("-5m-") {
+        return Some("5m");
+    }
+    None
+}
+
+fn corrected_window_end(
+    slug: &str,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let duration = infer_horizon_from_slug(slug).and_then(|horizon| match horizon {
+        "5m" => Some(chrono::Duration::seconds(300)),
+        "15m" => Some(chrono::Duration::seconds(900)),
+        _ => None,
+    });
+
+    if let Some(duration) = duration {
+        let expected_end = start_time + duration;
+        if (end_time - start_time) > duration * 2 {
+            expected_end
+        } else {
+            end_time
+        }
+    } else {
+        end_time
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn strict_row() -> EventWindowAuditRow {
+        let start_time = DateTime::parse_from_rfc3339("2026-03-12T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end_time = DateTime::parse_from_rfc3339("2026-03-12T00:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        EventWindowAuditRow {
+            market_slug: "btc-updown-5m-test".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            horizon: "5m".to_string(),
+            start_time: Some(start_time),
+            end_time: Some(end_time),
+            corrected_end_time: Some(end_time),
+            price_to_beat: Some(dec!(100000)),
+            expected_token_count: 2,
+            quote: SourceCoverage {
+                rows: 40,
+                distinct_tokens: 2,
+                first_ts: Some(start_time),
+                last_ts: Some(end_time - chrono::Duration::seconds(5)),
+            },
+            lob: SourceCoverage {
+                rows: 20,
+                distinct_tokens: 2,
+                first_ts: Some(start_time),
+                last_ts: Some(end_time - chrono::Duration::seconds(10)),
+            },
+            spot: SourceCoverage {
+                rows: 60,
+                distinct_tokens: 0,
+                first_ts: Some(start_time),
+                last_ts: Some(end_time - chrono::Duration::seconds(1)),
+            },
+            l2: SourceCoverage {
+                rows: 30,
+                distinct_tokens: 0,
+                first_ts: Some(start_time),
+                last_ts: Some(end_time - chrono::Duration::seconds(2)),
+            },
+            quality: EventWindowQuality::Drop,
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classify_event_window_audit_marks_strict_window() {
+        let row = strict_row();
+        let (quality, issues) = classify_event_window_audit(&row);
+        assert_eq!(quality, EventWindowQuality::KeepStrict);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn classify_event_window_audit_drops_missing_pm_quotes() {
+        let mut row = strict_row();
+        row.quote = SourceCoverage::default();
+        let (quality, issues) = classify_event_window_audit(&row);
+        assert_eq!(quality, EventWindowQuality::Drop);
+        assert!(issues.contains(&"missing_pm_quote"));
+    }
+
+    #[test]
+    fn classify_event_window_audit_keeps_research_without_l2_or_lob() {
+        let mut row = strict_row();
+        row.lob = SourceCoverage::default();
+        row.l2 = SourceCoverage::default();
+        let (quality, issues) = classify_event_window_audit(&row);
+        assert_eq!(quality, EventWindowQuality::KeepResearch);
+        assert!(issues.contains(&"missing_pm_lob"));
+        assert!(issues.contains(&"missing_binance_l2"));
+    }
+
+    #[test]
+    fn extract_clob_token_ids_accepts_json_array_string() {
+        let raw_market = json!({
+            "clobTokenIds": "[\"0f\", \"16\"]"
+        });
+        assert_eq!(
+            extract_clob_token_ids(Some(&raw_market)),
+            vec![U256::from(15u8).to_string(), "16".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_clob_token_ids_accepts_json_array() {
+        let raw_market = json!({
+            "clobTokenIds": ["0f", "16"]
+        });
+        assert_eq!(
+            extract_clob_token_ids(Some(&raw_market)),
+            vec![U256::from(15u8).to_string(), "16".to_string()]
+        );
+    }
+
+    #[test]
+    fn corrected_window_end_caps_bad_metadata_for_short_windows() {
+        let start_time = DateTime::parse_from_rfc3339("2026-03-12T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bad_end = DateTime::parse_from_rfc3339("2026-03-12T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            corrected_window_end("btc-updown-5m-test", start_time, bad_end),
+            DateTime::parse_from_rfc3339("2026-03-12T00:05:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
 }

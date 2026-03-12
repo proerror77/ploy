@@ -3871,3 +3871,25 @@ Finish the managed-strategy live-path migration by making `StrategyAction::Submi
   - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test order_intent_from_strategy_intent_preserves_runtime_metadata --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test test_build_order_request_uses_stable_idempotency_key_by_window --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave11-check2 rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
+
+# PM Collector Continuity + Event Audit (2026-03-12)
+
+## Goal
+Restore continuous Polymarket crypto collection on `tango-1-1` without dropping raw events at ingest, then add an event-window audit layer so replay/backtests can filter incomplete 5m/15m windows later.
+
+## Tasks
+
+- [x] Bound Gamma refresh calls so the PM token collector loop cannot hang forever after the initial refresh cycle.
+- [x] Add collector refresh heartbeat logging so host-side verification can prove the loop keeps advancing.
+- [x] Add architecture guards to deploy/rollback workflows so x86_64 hosts do not receive ARM artifacts again.
+- [x] Add event-window audit diagnostics that classify 5m/15m windows as `KEEP_STRICT`, `KEEP_RESEARCH`, or `DROP` without mutating raw collected data.
+- [x] Validate targeted compile/tests for the collector + audit slice.
+- [x] Stage only the related files and commit atomically.
+- [ ] Prepare the x86 release/deploy path for `tango-1-1`.
+- [ ] Verify on-host that `collector_token_targets.updated_at`, `clob_quote_ticks`, and `clob_orderbook_snapshots` continue advancing across multiple refresh cycles.
+
+## Progress notes
+
+- 2026-03-12: Root cause confirmed before fixing: `ploy-platform.service` suffered one clean stop gap (`2026-03-08 06:51 CST` to `2026-03-10 16:08 CST`) and one bad deploy gap (`2026-03-12 10:06 CST`, ARM ELF on x86_64 -> `Exec format error`), but the remaining live blocker is a PM token collector refresh loop that only completes its startup cycle and then stops advancing.
+- 2026-03-12: Added bounded Gamma request timeouts in [gamma.rs](/Users/proerror/Documents/ploy/src/adapters/polymarket_clob/gamma.rs), collector refresh heartbeat logging in [market_discovery.rs](/Users/proerror/Documents/ploy/src/coordinator/bootstrap/crypto_runtime_support/market_discovery.rs), and host-architecture deploy/rollback guards in [release-aliyun.yml](/Users/proerror/Documents/ploy/.github/workflows/release-aliyun.yml) / [rollback.yml](/Users/proerror/Documents/ploy/.github/workflows/rollback.yml).
+- 2026-03-12: Added event-window audit output to [diagnostics.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops/diagnostics.rs) so `--diagnose-db` now reports per-window `KEEP_STRICT / KEEP_RESEARCH / DROP` suggestions based on PM quote/LOB, Binance spot/L2, token mapping, and tail freshness, while leaving raw event collection untouched for later replay architectures.
