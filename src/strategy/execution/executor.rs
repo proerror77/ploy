@@ -1,17 +1,18 @@
-use super::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResult};
+use super::idempotency::IdempotencyManager;
 use crate::adapters::{FeishuNotifier, PolymarketClient};
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::ExchangeClient;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{Instant, sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 mod execution_flow;
+mod idempotency_flow;
 
 /// Order executor for managing order lifecycle
 pub struct OrderExecutor {

@@ -3,136 +3,16 @@ use super::*;
 impl OrderExecutor {
     /// Execute an order with retry logic and idempotency protection
     pub async fn execute(&self, request: &OrderRequest) -> Result<ExecutionResult> {
-        if let Some(ref idempotency) = self.idempotency {
-            let idem_key = IdempotencyManager::generate_key(request);
+        let tracking = match self.begin_idempotent_execution(request).await? {
+            super::idempotency_flow::IdempotencyAction::Skip => None,
+            super::idempotency_flow::IdempotencyAction::Track(tracking) => Some(tracking),
+            super::idempotency_flow::IdempotencyAction::Return(result) => return Ok(result),
+        };
 
-            match idempotency.check_or_create(&idem_key, request).await? {
-                IdempotencyResult::Duplicate {
-                    order_id,
-                    status,
-                    response_data,
-                    error_message,
-                } => {
-                    warn!(
-                        "Duplicate order detected (key: {}), status: {}",
-                        idem_key, status
-                    );
-
-                    let mut record = IdempotencyRecord {
-                        order_id,
-                        status,
-                        response_data,
-                        error_message,
-                    };
-
-                    match record.status.to_lowercase().as_str() {
-                        "completed" => {
-                            return Self::cached_result(record, request);
-                        }
-                        "failed" => {
-                            let msg = record
-                                .error_message
-                                .unwrap_or_else(|| "Previous attempt failed".to_string());
-                            return Err(crate::error::PloyError::Internal(format!(
-                                "Order submission failed: {}",
-                                msg
-                            )));
-                        }
-                        _ => {
-                            warn!(
-                                "Previous order attempt still pending, polling idempotency status..."
-                            );
-
-                            let poll_interval =
-                                Duration::from_millis(self.config.poll_interval_ms.max(100));
-                            let timeout_ms = self
-                                .config
-                                .confirm_fill_timeout_ms
-                                .max(poll_interval.as_millis() as u64);
-                            let start = Instant::now();
-
-                            loop {
-                                if start.elapsed() >= Duration::from_millis(timeout_ms) {
-                                    return Err(crate::error::PloyError::OrderSubmission(
-                                        "Order already pending; retry later".to_string(),
-                                    ));
-                                }
-
-                                sleep(poll_interval).await;
-                                record = idempotency.fetch_record(&idem_key).await?;
-
-                                match record.status.to_lowercase().as_str() {
-                                    "completed" => {
-                                        return Self::cached_result(record, request);
-                                    }
-                                    "failed" => {
-                                        let msg = record.error_message.unwrap_or_else(|| {
-                                            "Previous attempt failed".to_string()
-                                        });
-                                        return Err(crate::error::PloyError::Internal(format!(
-                                            "Order submission failed: {}",
-                                            msg
-                                        )));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                IdempotencyResult::New => {
-                    debug!("New order request (key: {})", idem_key);
-                }
-            }
-
-            let result = self.execute_with_retry(request).await;
-
-            match &result {
-                Ok(exec_result) => {
-                    if let Err(e) = idempotency
-                        .mark_completed(&idem_key, &exec_result.order_id, exec_result)
-                        .await
-                    {
-                        warn!("Failed to mark idempotency as completed: {}", e);
-                    }
-                }
-                Err(e) => {
-                    if let Err(err) = idempotency.mark_failed(&idem_key, &e.to_string()).await {
-                        warn!("Failed to mark idempotency as failed: {}", err);
-                    }
-                }
-            }
-
-            result
-        } else {
-            self.execute_with_retry(request).await
-        }
-    }
-
-    pub(super) fn cached_result(
-        record: IdempotencyRecord,
-        request: &OrderRequest,
-    ) -> Result<ExecutionResult> {
-        if let Some(data) = record.response_data {
-            if let Ok(result) = serde_json::from_value::<ExecutionResult>(data) {
-                info!("Returning cached order result: {}", result.order_id);
-                return Ok(result);
-            }
-        }
-
-        if let Some(order_id) = record.order_id {
-            return Ok(ExecutionResult {
-                order_id,
-                status: OrderStatus::Submitted,
-                filled_shares: 0,
-                avg_fill_price: Some(request.limit_price),
-                elapsed_ms: 0,
-            });
-        }
-
-        Err(crate::error::PloyError::Internal(
-            "Idempotency record completed without order_id".to_string(),
-        ))
+        let result = self.execute_with_retry(request).await;
+        self.finish_idempotent_execution(tracking.as_ref(), &result)
+            .await;
+        result
     }
 
     pub(super) fn retryable_order_submission_message(message: &str) -> bool {
@@ -212,7 +92,10 @@ impl OrderExecutor {
     }
 
     /// Execute order with retry logic (internal method)
-    pub(super) async fn execute_with_retry(&self, request: &OrderRequest) -> Result<ExecutionResult> {
+    pub(super) async fn execute_with_retry(
+        &self,
+        request: &OrderRequest,
+    ) -> Result<ExecutionResult> {
         let mut attempts = 0;
 
         loop {
@@ -310,7 +193,12 @@ impl OrderExecutor {
             let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(100));
             let confirm_timeout = Duration::from_millis(self.config.confirm_fill_timeout_ms);
 
-            match timeout(confirm_timeout, self.wait_for_fill(&order_id, poll_interval)).await {
+            match timeout(
+                confirm_timeout,
+                self.wait_for_fill(&order_id, poll_interval),
+            )
+            .await
+            {
                 Ok(Ok(mut result)) => {
                     result.elapsed_ms = start.elapsed().as_millis() as u64;
                     return Ok(result);
