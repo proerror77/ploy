@@ -1,9 +1,9 @@
 use rust_decimal::Decimal;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnapshot};
 use crate::coordinator::OrderIntent;
+use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnapshot};
 
 use super::{
     MarketCapitalAllocator, intent_deployment_scope, intent_market_identity,
@@ -297,25 +297,51 @@ impl MarketCapitalAllocator {
             return fixed_cap;
         }
 
-        let mut active_markets: HashSet<String> = self
+        let mut market_count = self
             .open
             .by_market
-            .iter()
-            .filter(|(_, v)| **v > Decimal::ZERO)
-            .map(|(k, _)| k.clone())
-            .collect();
+            .values()
+            .filter(|value| **value > Decimal::ZERO)
+            .count();
 
-        for (k, v) in &self.pending.by_market {
-            if *v > Decimal::ZERO {
-                active_markets.insert(k.clone());
+        for (pending_market, pending_amount) in &self.pending.by_market {
+            if *pending_amount <= Decimal::ZERO {
+                continue;
+            }
+
+            let has_open_exposure = self
+                .open
+                .by_market
+                .get(pending_market)
+                .copied()
+                .unwrap_or(Decimal::ZERO)
+                > Decimal::ZERO;
+            if !has_open_exposure {
+                market_count += 1;
             }
         }
 
         if !market_key.is_empty() {
-            active_markets.insert(market_key.to_string());
+            let has_existing_exposure = self
+                .open
+                .by_market
+                .get(market_key)
+                .copied()
+                .unwrap_or(Decimal::ZERO)
+                > Decimal::ZERO
+                || self
+                    .pending
+                    .by_market
+                    .get(market_key)
+                    .copied()
+                    .unwrap_or(Decimal::ZERO)
+                    > Decimal::ZERO;
+            if !has_existing_exposure {
+                market_count += 1;
+            }
         }
 
-        let market_count = active_markets.len().max(1) as u64;
+        let market_count = market_count.max(1) as u64;
         let dynamic_cap = self.total_cap / Decimal::from(market_count);
         dynamic_cap.min(fixed_cap)
     }

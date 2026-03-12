@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use crate::coordinator::config::CoordinatorConfig;
 use crate::coordinator::OrderIntent;
+use crate::coordinator::config::CoordinatorConfig;
 use crate::domain::Domain;
 
 #[path = "market/accounting.rs"]
@@ -279,6 +279,27 @@ mod tests {
         assert!(allocator.reserve_buy(&game1_buy).is_ok());
         assert!(allocator.reserve_buy(&game2_buy).is_ok());
         assert!(allocator.reserve_buy(&game1_extra).is_err());
+    }
+
+    #[test]
+    fn test_sports_allocator_auto_split_deduplicates_current_pending_market() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(36));
+        cfg.sports_market_cap_pct = dec!(1.0);
+        cfg.sports_auto_split_by_active_markets = true;
+
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let game1_open = make_sports_intent("nba-game-1", true, 100, dec!(0.10));
+        assert!(allocator.reserve_buy(&game1_open).is_ok());
+        allocator.settle_buy_execution(&game1_open, 100, dec!(0.10));
+
+        let game2_pending = make_sports_intent("nba-game-2", true, 100, dec!(0.10));
+        assert!(allocator.reserve_buy(&game2_pending).is_ok());
+
+        let game2_extra = make_sports_intent("nba-game-2", true, 50, dec!(0.10));
+        assert!(allocator.reserve_buy(&game2_extra).is_ok());
     }
 
     #[test]
