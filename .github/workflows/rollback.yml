@@ -61,7 +61,43 @@ jobs:
               SUDO="sudo"
             fi
 
-            $SUDO systemctl stop ploy || true
+            unit_exists() {
+              local unit="$1"
+              local unit_name="${unit}.service"
+              $SUDO systemctl list-unit-files --type=service --no-legend "$unit_name" 2>/dev/null \
+                | awk '{print $1}' \
+                | grep -qx "$unit_name"
+            }
+
+            host_arch_info() {
+              case "$(uname -m)" in
+                x86_64|amd64)
+                  printf '%s\t%s\n' "x86_64-unknown-linux-gnu" 'x86-64|x86_64'
+                  ;;
+                aarch64|arm64)
+                  printf '%s\t%s\n' "aarch64-unknown-linux-gnu" 'ARM aarch64|ARM64|aarch64'
+                  ;;
+                *)
+                  echo "Unsupported host architecture: $(uname -m)" >&2
+                  exit 1
+                  ;;
+              esac
+            }
+
+            IFS=$'\t' read -r HOST_RUST_TARGET HOST_FILE_REGEX <<EOF
+            $(host_arch_info)
+            EOF
+
+            units=()
+            for candidate in ploy ploy-platform ploy-platform-live; do
+              if unit_exists "$candidate"; then
+                units+=("$candidate")
+              fi
+            done
+
+            for unit in "${units[@]}"; do
+              $SUDO systemctl stop "$unit" || true
+            done
 
             if [ "$MODE" = "specific-tag" ]; then
               target="${DEPLOY_ROOT}/releases/${RELEASE_TAG}/ploy"
@@ -84,21 +120,46 @@ jobs:
             fi
 
             $SUDO chmod +x "${DEPLOY_ROOT}/bin/ploy"
-            $SUDO systemctl start ploy
+            file "${DEPLOY_ROOT}/bin/ploy" | tee /tmp/ploy-rollback.file.txt
+            grep -q "ELF 64-bit LSB" /tmp/ploy-rollback.file.txt
+            grep -Eq "${HOST_FILE_REGEX}" /tmp/ploy-rollback.file.txt
+            if [ "$MODE" = "specific-tag" ]; then
+              grep -q "Target: ${HOST_RUST_TARGET}" "${DEPLOY_ROOT}/releases/${RELEASE_TAG}/RELEASE.txt" || true
+            fi
 
-            # Health check: 20 attempts, 2s delay (matches release-aliyun.yml)
-            for i in $(seq 1 20); do
-              if $SUDO systemctl is-active --quiet ploy; then
-                echo "ploy.service is active after ${i} checks."
-                exit 0
+            if [ "${#units[@]}" -eq 0 ]; then
+              echo "No ploy service units found; restored binary only."
+              exit 0
+            fi
+
+            unit_diagnostics() {
+              local unit="$1"
+              echo "---- ${unit}.service status ----"
+              $SUDO systemctl status "$unit" --no-pager -l || true
+              echo "---- ${unit}.service journal ----"
+              $SUDO journalctl -u "$unit" -n 80 --no-pager -l || true
+            }
+
+            wait_for_unit_active() {
+              local unit="$1"
+              local i
+              for i in $(seq 1 20); do
+                if $SUDO systemctl is-active --quiet "$unit"; then
+                  return 0
+                fi
+                sleep 2
+              done
+              unit_diagnostics "$unit"
+              return 1
+            }
+
+            for unit in "${units[@]}"; do
+              $SUDO systemctl start "$unit"
+              if ! wait_for_unit_active "$unit"; then
+                echo "${unit}.service failed to become active after rollback."
+                exit 1
               fi
-              sleep 2
             done
-
-            echo "ploy.service failed to become active after 40s."
-            $SUDO systemctl status ploy --no-pager -l || true
-            $SUDO journalctl -u ploy -n 80 --no-pager -l || true
-            exit 1
 
       - name: Rollback summary
         run: |

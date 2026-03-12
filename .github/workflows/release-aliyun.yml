@@ -29,7 +29,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
-  PLOY_RELEASE_TARGET: aarch64-unknown-linux-gnu
+  PLOY_RELEASE_TARGET: x86_64-unknown-linux-gnu
+  PLOY_RELEASE_FILE_REGEX: x86-64|x86_64
   DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
   PLOY_SYSTEMD_MEMORY_HIGH: ${{ vars.PLOY_SYSTEMD_MEMORY_HIGH || '1280M' }}
   PLOY_SYSTEMD_MEMORY_MAX: ${{ vars.PLOY_SYSTEMD_MEMORY_MAX || '1536M' }}
@@ -37,8 +38,8 @@ env:
 
 jobs:
   build:
-    name: Build Linux ARM64 Release Artifact
-    runs-on: ubuntu-24.04-arm
+    name: Build Linux x86_64 Release Artifact
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     outputs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
@@ -115,7 +116,7 @@ jobs:
         run: |
           file "target/${PLOY_RELEASE_TARGET}/release/ploy" | tee dist-file.txt
           grep -q "ELF 64-bit LSB" dist-file.txt
-          grep -Eq "ARM aarch64|ARM64|aarch64" dist-file.txt
+          grep -Eq "${PLOY_RELEASE_FILE_REGEX}" dist-file.txt
 
       - name: Create release bundle
         run: |
@@ -317,6 +318,30 @@ jobs:
             mkdir -p "${WORKDIR}"
             tar xzf "${BUNDLE}" -C "${WORKDIR}"
 
+            host_arch_info() {
+              case "$(uname -m)" in
+                x86_64|amd64)
+                  printf '%s\t%s\n' "x86_64-unknown-linux-gnu" 'x86-64|x86_64'
+                  ;;
+                aarch64|arm64)
+                  printf '%s\t%s\n' "aarch64-unknown-linux-gnu" 'ARM aarch64|ARM64|aarch64'
+                  ;;
+                *)
+                  echo "Unsupported host architecture: $(uname -m)" >&2
+                  exit 1
+                  ;;
+              esac
+            }
+
+            IFS=$'\t' read -r HOST_RUST_TARGET HOST_FILE_REGEX <<EOF
+            $(host_arch_info)
+            EOF
+
+            file "${WORKDIR}/ploy" | tee "${WORKDIR}/ploy.file.txt"
+            grep -q "ELF 64-bit LSB" "${WORKDIR}/ploy.file.txt"
+            grep -Eq "${HOST_FILE_REGEX}" "${WORKDIR}/ploy.file.txt"
+            grep -q "Target: ${HOST_RUST_TARGET}" "${WORKDIR}/RELEASE.txt"
+
             $SUDO mkdir -p \
               "${RELEASE_DIR}" \
               "${DEPLOY_ROOT}/bin" \
@@ -336,6 +361,7 @@ jobs:
             $SUDO install -m 644 "${WORKDIR}/022_order_strategy_tracking.sql" "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
 
             file "${DEPLOY_ROOT}/bin/ploy" | grep -q "ELF 64-bit LSB"
+            file "${DEPLOY_ROOT}/bin/ploy" | grep -Eq "${HOST_FILE_REGEX}"
             echo "${RELEASE_TAG}" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_release" >/dev/null
 
             if [ -f "${DEPLOY_ROOT}/.env" ]; then

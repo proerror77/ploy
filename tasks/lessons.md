@@ -221,3 +221,8 @@
 
 - Pattern: Parallel agent work can re-dirty the integration worktree with unrelated experiments, which blurs commit boundaries and slows structural refactors.
 - Rule: After every parallel batch, compare the worktree against the current ownership plan and evict unrelated agent edits before validation or staging. Do not let maintenance/perf side experiments bleed into the current atomic refactor slice.
+
+## 2026-03-12
+
+- Pattern: `release-aliyun.yml` can silently brick `tango-1-1` if its hardcoded Rust target does not match the host `uname -m`; the symptom is `Exec format error`, `ploy-platform.service` restart loops, and immediate gaps in PM collection tables.
+- Rule: Production deploy and rollback paths must validate both the artifact file type and the remote host architecture before swapping `/root/ploy/bin/ploy`. For `tango-1-1`, default the release target to `x86_64-unknown-linux-gnu` and reject any artifact whose `file` output does not match the host architecture.
