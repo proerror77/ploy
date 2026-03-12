@@ -1370,6 +1370,33 @@ Reduce `try_entry_for_window` complexity in `staggered_arb_live/entry.rs` by sep
   - `rtk cargo test test_try_entry_rejects_far_from_mid_fair_value_for_long_gamma_profile --lib -- --exact --nocapture`
   - `rtk cargo test test_balance_pause_blocks_until_expired_then_resumes_live_entry --lib -- --exact --nocapture`
 
+# R-47 Ingress Preflight Unification (2026-03-12)
+
+## Goal
+Remove the duplicated ingress preflight sequence shared by `CoordinatorHandle::validate_submit_order_intent` and `Coordinator::validate_runtime_order_intent` without hiding the explicit rejection call sites.
+
+## File ownership
+
+- `src/coordinator/coordinator/ingress_preflight.rs`
+  - owner: shared ingress preflight rejection descriptor and handle/runtime mapping
+
+## Tasks
+
+- [x] Introduce a shared preflight helper for the allowlist / deployment / reduce-only / ingress-mode sequence.
+- [x] Keep `reject_order_intent(...).await; return;` explicit in the ingress pipeline.
+- [x] Preserve handle-facing validation messages and runtime-facing log messages.
+- [x] Re-run focused coordinator regressions after the refactor.
+
+## Progress notes
+
+- 2026-03-12: Added `IngressPreflightRejection` and `shared_ingress_preflight` in [ingress_preflight.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/coordinator/ingress_preflight.rs), so handle/runtime validation now share the same gate order and map the result into their own output shape.
+- 2026-03-12: Kept `Coordinator::handle_order_intent` linear and explicit; this cut only removes duplicated preflight logic and does not hide the actual rejection side effects behind macros or opaque control flow.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r47-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r47-tests rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r47-tests rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r47-tests rtk cargo test test_drain_and_execute_records_single_success_for_buy_fill --lib -- --exact --nocapture`
+
 # Strategy And Adapter Wave 11 (2026-03-11)
 
 ## Goal

@@ -15,6 +15,12 @@ use super::super::admission::{
 };
 use super::{Coordinator, CoordinatorHandle};
 
+struct IngressPreflightRejection {
+    handle_reason: String,
+    runtime_reason: String,
+    runtime_log_message: &'static str,
+}
+
 fn runtime_domain_allowlist_reason(
     allowed_domains: &HashSet<Domain>,
     intent: &OrderIntent,
@@ -106,25 +112,67 @@ fn runtime_buy_ingress_block_reason(
     None
 }
 
+async fn shared_ingress_preflight(
+    allowed_domains: &HashSet<Domain>,
+    positions: &Arc<PositionAggregator>,
+    order_queue: &Arc<RwLock<OrderQueue>>,
+    intent: &OrderIntent,
+    governance_snapshot: Option<&GovernanceIntentSnapshot>,
+) -> Option<IngressPreflightRejection> {
+    if let Some(reason) = runtime_domain_allowlist_reason(allowed_domains, intent) {
+        return Some(IngressPreflightRejection {
+            handle_reason: reason.clone(),
+            runtime_reason: reason,
+            runtime_log_message: "order blocked by runtime domain allowlist",
+        });
+    }
+
+    if let Some(reason) = buy_intent_missing_deployment_reason(intent) {
+        return Some(IngressPreflightRejection {
+            handle_reason: reason.clone(),
+            runtime_reason: reason,
+            runtime_log_message: "order blocked due to missing deployment identity",
+        });
+    }
+
+    if let Some(reason) = reduce_only_violation(positions, order_queue, intent).await {
+        return Some(IngressPreflightRejection {
+            handle_reason: reason.clone(),
+            runtime_reason: reason,
+            runtime_log_message: "order blocked by reduce-only sell guard",
+        });
+    }
+
+    if let Some(snapshot) = governance_snapshot {
+        if let Some((runtime_reason, runtime_log_message)) =
+            runtime_buy_ingress_block_reason(snapshot, intent)
+        {
+            let handle_reason =
+                handle_buy_ingress_block_reason(snapshot, intent).unwrap_or_else(|| runtime_reason.clone());
+            return Some(IngressPreflightRejection {
+                handle_reason,
+                runtime_reason,
+                runtime_log_message,
+            });
+        }
+    }
+
+    None
+}
+
 impl CoordinatorHandle {
     pub(super) async fn validate_submit_order_intent(&self, intent: &OrderIntent) -> Result<()> {
-        if let Some(reason) = runtime_domain_allowlist_reason(&self.allowed_domains, intent) {
-            return Err(PloyError::Validation(reason));
-        }
-
-        if let Some(reason) = buy_intent_missing_deployment_reason(intent) {
-            return Err(PloyError::Validation(reason));
-        }
-
-        if let Some(reason) =
-            reduce_only_violation(&self.positions, &self.order_queue, intent).await
-        {
-            return Err(PloyError::Validation(reason));
-        }
-
         let governance_snapshot = self.governance.intent_snapshot(intent).await;
-        if let Some(reason) = handle_buy_ingress_block_reason(&governance_snapshot, intent) {
-            return Err(PloyError::Validation(reason));
+        if let Some(rejection) = shared_ingress_preflight(
+            &self.allowed_domains,
+            &self.positions,
+            &self.order_queue,
+            intent,
+            Some(&governance_snapshot),
+        )
+        .await
+        {
+            return Err(PloyError::Validation(rejection.handle_reason));
         }
 
         Ok(())
@@ -137,20 +185,14 @@ impl Coordinator {
         intent: &OrderIntent,
         governance_snapshot: Option<&GovernanceIntentSnapshot>,
     ) -> Option<(String, &'static str)> {
-        if let Some(reason) = runtime_domain_allowlist_reason(&self.allowed_domains, intent) {
-            return Some((reason, "order blocked by runtime domain allowlist"));
-        }
-
-        if let Some(reason) = buy_intent_missing_deployment_reason(intent) {
-            return Some((reason, "order blocked due to missing deployment identity"));
-        }
-
-        if let Some(reason) =
-            reduce_only_violation(&self.positions, &self.order_queue, intent).await
-        {
-            return Some((reason, "order blocked by reduce-only sell guard"));
-        }
-
-        governance_snapshot.and_then(|snapshot| runtime_buy_ingress_block_reason(snapshot, intent))
+        shared_ingress_preflight(
+            &self.allowed_domains,
+            &self.positions,
+            &self.order_queue,
+            intent,
+            governance_snapshot,
+        )
+        .await
+        .map(|rejection| (rejection.runtime_reason, rejection.runtime_log_message))
     }
 }
