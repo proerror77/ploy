@@ -226,7 +226,33 @@ async fn load_execution_log_fills(
     })?;
 
     let mut fills = Vec::new();
-    for (
+    for row in rows {
+        if let Some(fill) = persisted_execution_fill_from_parts(account_id, row) {
+            fills.push(fill);
+        }
+    }
+
+    Ok(fills)
+}
+
+type PersistedExecutionLogFillRow = (
+    uuid::Uuid,
+    String,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    i64,
+    Option<Decimal>,
+    Decimal,
+    DateTime<Utc>,
+    Option<sqlx::types::Json<serde_json::Value>>,
+);
+
+fn persisted_execution_fill_from_parts(
+    account_id: &str,
+    (
         intent_id,
         agent_id,
         domain_raw,
@@ -239,65 +265,67 @@ async fn load_execution_log_fills(
         limit_price,
         executed_at,
         metadata_raw,
-    ) in rows
-    {
-        let Some(domain) = parse_persisted_domain(&domain_raw) else {
-            tracing::warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                domain = %domain_raw,
-                "skipping execution-log row with unknown domain during restore"
-            );
-            continue;
-        };
-        let Some(side) = parse_persisted_side(&side_raw) else {
-            tracing::warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                side = %side_raw,
-                "skipping execution-log row with unknown side during restore"
-            );
-            continue;
-        };
-        let Ok(filled_shares) = u64::try_from(filled_shares_raw) else {
-            tracing::warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                filled_shares = filled_shares_raw,
-                "skipping execution-log row with invalid filled_shares during restore"
-            );
-            continue;
-        };
-        if filled_shares == 0 {
-            continue;
-        }
-        let fill_price = avg_fill_price.unwrap_or(limit_price);
-        if fill_price <= Decimal::ZERO {
-            tracing::warn!(
-                account_id = %account_id,
-                intent_id = %intent_id,
-                fill_price = %fill_price,
-                "skipping execution-log row with non-positive fill price during restore"
-            );
-            continue;
-        }
-
-        fills.push(PersistedExecutionFill {
-            intent_id,
-            agent_id,
-            domain,
-            market_slug,
-            token_id,
-            side,
-            is_buy,
-            filled_shares,
-            fill_price,
-            executed_at,
-            metadata: string_metadata_from_json(metadata_raw),
-        });
+    ): PersistedExecutionLogFillRow,
+) -> Option<PersistedExecutionFill> {
+    let Some(domain) = parse_persisted_domain(&domain_raw) else {
+        tracing::warn!(
+            account_id = %account_id,
+            intent_id = %intent_id,
+            domain = %domain_raw,
+            "skipping execution-log row with unknown domain during restore"
+        );
+        return None;
+    };
+    let Some(side) = parse_persisted_side(&side_raw) else {
+        tracing::warn!(
+            account_id = %account_id,
+            intent_id = %intent_id,
+            side = %side_raw,
+            "skipping execution-log row with unknown side during restore"
+        );
+        return None;
+    };
+    let Ok(filled_shares) = u64::try_from(filled_shares_raw) else {
+        tracing::warn!(
+            account_id = %account_id,
+            intent_id = %intent_id,
+            filled_shares = filled_shares_raw,
+            "skipping execution-log row with invalid filled_shares during restore"
+        );
+        return None;
+    };
+    if filled_shares == 0 {
+        tracing::warn!(
+            account_id = %account_id,
+            intent_id = %intent_id,
+            "skipping execution-log row with zero filled_shares during restore"
+        );
+        return None;
+    }
+    let fill_price = avg_fill_price.unwrap_or(limit_price);
+    if fill_price <= Decimal::ZERO {
+        tracing::warn!(
+            account_id = %account_id,
+            intent_id = %intent_id,
+            fill_price = %fill_price,
+            "skipping execution-log row with non-positive fill price during restore"
+        );
+        return None;
     }
 
-    Ok(fills)
+    Some(PersistedExecutionFill {
+        intent_id,
+        agent_id,
+        domain,
+        market_slug,
+        token_id,
+        side,
+        is_buy,
+        filled_shares,
+        fill_price,
+        executed_at,
+        metadata: string_metadata_from_json(metadata_raw),
+    })
 }
 
 async fn load_execution_log_outcomes(
@@ -345,9 +373,11 @@ async fn load_execution_log_outcomes(
 mod tests {
     use super::{
         execution_error_is_failure, parse_persisted_domain, parse_persisted_side,
-        string_metadata_from_json,
+        persisted_execution_fill_from_parts, string_metadata_from_json,
     };
     use crate::platform::Domain;
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_execution_error_is_failure_treats_blank_as_success() {
@@ -393,5 +423,71 @@ mod tests {
         );
         assert_eq!(metadata.get("flag").map(String::as_str), Some("true"));
         assert!(!metadata.contains_key("skip"));
+    }
+
+    #[test]
+    fn test_persisted_execution_fill_skips_unknown_domain() {
+        let fill = persisted_execution_fill_from_parts(
+            "acct-1",
+            (
+                uuid::Uuid::nil(),
+                "agent-1".to_string(),
+                "mystery".to_string(),
+                "market".to_string(),
+                "token".to_string(),
+                "UP".to_string(),
+                true,
+                10,
+                Some(dec!(0.45)),
+                dec!(0.45),
+                Utc::now(),
+                None,
+            ),
+        );
+        assert!(fill.is_none());
+    }
+
+    #[test]
+    fn test_persisted_execution_fill_skips_zero_shares() {
+        let fill = persisted_execution_fill_from_parts(
+            "acct-1",
+            (
+                uuid::Uuid::nil(),
+                "agent-1".to_string(),
+                "crypto".to_string(),
+                "market".to_string(),
+                "token".to_string(),
+                "UP".to_string(),
+                true,
+                0,
+                Some(dec!(0.45)),
+                dec!(0.45),
+                Utc::now(),
+                None,
+            ),
+        );
+        assert!(fill.is_none());
+    }
+
+    #[test]
+    fn test_persisted_execution_fill_skips_non_positive_price() {
+        let fill = persisted_execution_fill_from_parts(
+            "acct-1",
+            (
+                uuid::Uuid::nil(),
+                "agent-1".to_string(),
+                "crypto".to_string(),
+                "market".to_string(),
+                "token".to_string(),
+                "UP".to_string(),
+                true,
+                10,
+                Some(dec!(0)),
+                dec!(0),
+                Utc::now(),
+                None,
+            ),
+        );
+        assert!(fill.is_none());
     }
 }
