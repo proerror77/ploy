@@ -170,8 +170,8 @@ pub(crate) async fn run_live_backtest_compare(
 ) -> Result<()> {
     use crate::adapters::PostgresStore;
     use crate::strategy::backtest_report;
-    use rust_decimal::prelude::ToPrimitive;
     use rust_decimal::Decimal;
+    use rust_decimal::prelude::ToPrimitive;
     use sqlx::Row;
     use std::collections::HashSet;
 

@@ -5,7 +5,8 @@ mod diagnostics;
 mod reporting;
 
 use diagnostics::{
-    build_pm_event_replay_selection, print_backtest_db_diagnostics, verify_backtest_trades_gamma,
+    PmEventReplaySummary, build_pm_event_replay_selection, build_pm_event_replay_summary,
+    print_backtest_db_diagnostics, verify_backtest_trades_gamma,
 };
 
 pub(super) use reporting::{run_backtest_diff, run_backtest_list, run_live_backtest_compare};
@@ -31,6 +32,52 @@ fn normalize_backtest_strategy_name(name: &str) -> Result<&'static str> {
 fn fmt_ts(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
     ts.map(|value| value.to_rfc3339())
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn print_pm_event_replay_summary(summary: &PmEventReplaySummary) {
+    println!("\n[pm_5m_directional event quality summary]");
+    println!(
+        "minimum_quality: {} | windows: total={} kept={} (strict={}, research={}) dropped={}",
+        summary.minimum_quality,
+        summary.total_windows,
+        summary.kept_windows,
+        summary.kept_strict_windows,
+        summary.kept_research_windows,
+        summary.dropped_windows
+    );
+    println!(
+        "effective_window: {} .. {} | feed_updates: {} -> {}",
+        fmt_ts(summary.effective_from),
+        fmt_ts(summary.effective_to),
+        summary.updates_before,
+        summary.updates_after
+    );
+    println!(
+        "quality  | windows | replayed | trades | win%   | avg pnl | total pnl | common issues"
+    );
+    for bucket in &summary.quality_breakdown {
+        let win_rate = if bucket.trade_count > 0 {
+            format!("{:.1}%", bucket.win_rate * 100.0)
+        } else {
+            "-".to_string()
+        };
+        let issues = if bucket.common_issues.is_empty() {
+            "-".to_string()
+        } else {
+            bucket.common_issues.join(",")
+        };
+        println!(
+            "{:<8} | {:>7} | {:>8} | {:>6} | {:>6} | {:>7.2} | {:>9.2} | {}",
+            bucket.quality,
+            bucket.window_count,
+            bucket.replayed_window_count,
+            bucket.trade_count,
+            win_rate,
+            bucket.avg_pnl_per_trade,
+            bucket.total_pnl,
+            issues
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -163,6 +210,7 @@ pub(super) async fn run_backtest(
     info!("Loading historical data from database");
     let mut feed =
         HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
+    let mut pm_event_replay_summary: Option<PmEventReplaySummary> = None;
 
     let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
 
@@ -331,6 +379,12 @@ pub(super) async fn run_backtest(
 
             let mut engine = Pm5mDirectionalBacktestEngine::new(config, recorder)?;
             let results = engine.run(&mut feed);
+            let event_replay_summary = build_pm_event_replay_summary(
+                &replay_selection,
+                &replay_filter_stats,
+                engine.closed_trades(),
+            );
+            pm_event_replay_summary = Some(event_replay_summary.clone());
 
             if save {
                 let mut recorder = engine.take_recorder();
@@ -351,9 +405,16 @@ pub(super) async fn run_backtest(
                 let run_id = saved_run_id.expect("run_id should be set when --save is used");
                 let report = backtest_report::load_report(store.pool(), run_id).await?;
                 if json_output {
-                    println!("{}", report.to_json()?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "report": report,
+                            "pm_event_replay": event_replay_summary,
+                        }))?
+                    );
                 } else {
                     println!("{}", report.print_report());
+                    print_pm_event_replay_summary(&event_replay_summary);
                 }
             }
 
@@ -738,10 +799,22 @@ pub(super) async fn run_backtest(
     };
 
     if json_output && !save {
-        // Only print raw JSON if we didn't already print a report above
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        if let Some(summary) = &pm_event_replay_summary {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "results": results,
+                    "pm_event_replay": summary,
+                }))?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        }
     } else if !json_output && !save {
         println!("{}", results);
+        if let Some(summary) = &pm_event_replay_summary {
+            print_pm_event_replay_summary(summary);
+        }
     }
 
     Ok(())
