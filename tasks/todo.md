@@ -3913,8 +3913,8 @@ Restore continuous Polymarket crypto collection on `tango-1-1` without dropping 
 - [x] Add event-window audit diagnostics that classify 5m/15m windows as `KEEP_STRICT`, `KEEP_RESEARCH`, or `DROP` without mutating raw collected data.
 - [x] Validate targeted compile/tests for the collector + audit slice.
 - [x] Stage only the related files and commit atomically.
-- [ ] Prepare the x86 release/deploy path for `tango-1-1`.
-- [ ] Verify on-host that `collector_token_targets.updated_at`, `clob_quote_ticks`, and `clob_orderbook_snapshots` continue advancing across multiple refresh cycles.
+- [x] Prepare the x86 release/deploy path for `tango-1-1`.
+- [x] Verify on-host that `collector_token_targets.updated_at`, `clob_quote_ticks`, and `clob_orderbook_snapshots` continue advancing across multiple refresh cycles.
 
 ## Progress notes
 
