@@ -55,7 +55,7 @@ pub struct PersistenceConfig {
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
-            channel_capacity: 10_000,
+            channel_capacity: 50_000,
             clob_quote_min_interval_secs: 2,
             binance_price_min_interval_secs: 1,
             binance_lob_snapshot_interval_ms: 1_000,
@@ -63,8 +63,8 @@ impl Default for PersistenceConfig {
             clob_orderbook_snapshot_interval_ms: 2_000,
             clob_orderbook_max_levels: 50,
             clob_orderbook_require_hash_change: true,
-            flush_interval_ms: 100,
-            max_batch_size: 500,
+            flush_interval_ms: 25,
+            max_batch_size: 2_000,
         }
     }
 }
@@ -209,7 +209,7 @@ impl PersistencePipelineHandle {
                         let Some(event) = map_event(msg) else {
                             continue;
                         };
-                        if pipeline.try_ingest(event).is_err() {
+                        if pipeline.ingest(event).await.is_err() {
                             warn!(bridge = %bridge_name, "persistence bridge dropped event");
                             if let Some(ref f) = freshness {
                                 f.record_broadcast_drop(1);
