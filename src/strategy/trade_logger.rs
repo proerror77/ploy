@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+mod summary;
+
 /// Trade record for logging with full market context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
@@ -653,93 +655,7 @@ impl TradeLogger {
     /// Format statistics for display
     pub async fn format_stats(&self) -> String {
         let stats = self.get_stats().await;
-        let mut output = String::new();
-
-        output.push_str("\n╔══════════════════════════════════════════════════════════════╗\n");
-        output.push_str("║                    TRADING STATISTICS                        ║\n");
-        output.push_str("╚══════════════════════════════════════════════════════════════╝\n\n");
-
-        output.push_str(&format!("  Total Trades:  {}\n", stats.total_trades));
-        output.push_str(&format!(
-            "  Wins:          {} ({:.1}%)\n",
-            stats.wins,
-            stats.win_rate() * dec!(100)
-        ));
-        output.push_str(&format!("  Losses:        {}\n", stats.losses));
-        output.push_str(&format!("  Open:          {}\n", stats.open));
-        output.push_str(&format!("  Total Cost:    ${:.2}\n", stats.total_cost));
-        output.push_str(&format!("  Total Payout:  ${:.2}\n", stats.total_payout));
-        output.push_str(&format!("  Total PnL:     ${:.2}\n", stats.total_pnl));
-        output.push_str(&format!(
-            "  ROI:           {:.1}%\n",
-            stats.roi() * dec!(100)
-        ));
-
-        // Per-symbol breakdown
-        output.push_str("\n  ── Per Symbol ──────────────────────────────────────────────\n\n");
-        output.push_str("  Symbol     Trades  Win%    PnL       ROI\n");
-        output.push_str("  ────────   ──────  ──────  ────────  ────────\n");
-
-        let mut symbols: Vec<_> = stats.by_symbol.values().collect();
-        symbols.sort_by(|a, b| b.total_pnl.cmp(&a.total_pnl));
-
-        for s in symbols {
-            output.push_str(&format!(
-                "  {:<10} {:>4}    {:>5.1}%  ${:>7.2}  {:>6.1}%\n",
-                s.symbol,
-                s.total_trades,
-                s.win_rate() * dec!(100),
-                s.total_pnl,
-                s.roi() * dec!(100)
-            ));
-        }
-
-        // Time bucket analysis
-        if !stats.by_time_bucket.is_empty() {
-            output.push_str("\n  ── By Entry Time (minutes elapsed) ─────────────────────────\n\n");
-            output.push_str("  Bucket   Trades  Win%    PnL       EV/trade  ROI\n");
-            output.push_str("  ───────  ──────  ──────  ────────  ────────  ────────\n");
-
-            // Sort buckets in chronological order
-            let bucket_order = ["0-2", "2-5", "5-10", "10-15"];
-            for bucket in bucket_order.iter() {
-                if let Some(b) = stats.by_time_bucket.get(*bucket) {
-                    output.push_str(&format!(
-                        "  {:<7}  {:>4}    {:>5.1}%  ${:>7.2}  ${:>6.2}   {:>6.1}%\n",
-                        bucket,
-                        b.trades,
-                        b.win_rate() * dec!(100),
-                        b.pnl,
-                        b.ev_per_trade(),
-                        b.roi() * dec!(100)
-                    ));
-                }
-            }
-        }
-
-        // Strategy mode analysis
-        if !stats.by_strategy_mode.is_empty() {
-            output.push_str("\n  ── By Strategy Mode ────────────────────────────────────────\n\n");
-            output.push_str("  Mode              Trades  Win%    PnL       EV/trade  ROI\n");
-            output.push_str("  ───────────────── ──────  ──────  ────────  ────────  ────────\n");
-
-            let mode_order = ["early_mispricing", "late_reversal"];
-            for mode in mode_order.iter() {
-                if let Some(m) = stats.by_strategy_mode.get(*mode) {
-                    output.push_str(&format!(
-                        "  {:<17} {:>4}    {:>5.1}%  ${:>7.2}  ${:>6.2}   {:>6.1}%\n",
-                        mode,
-                        m.trades,
-                        m.win_rate() * dec!(100),
-                        m.pnl,
-                        m.ev_per_trade(),
-                        m.roi() * dec!(100)
-                    ));
-                }
-            }
-        }
-
-        output
+        summary::format_stats(&stats)
     }
 }
 

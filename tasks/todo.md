@@ -6010,3 +6010,52 @@ Keep shrinking active-core owners by cutting governance persistence and three re
   - `cargo test --lib strategy::deribit_probability_arb::tests::interpolate_iv_linear_blends_variance_by_maturity -- --exact --nocapture`
   - `cargo test --lib strategy::volatility_arb::tests::test_implied_volatility -- --exact --nocapture`
   - `cargo test --lib strategy::dump_hedge::tests::test_signal_strength -- --exact --nocapture`
+
+# Structural Wave 13 (2026-03-13)
+
+## Goal
+Keep shrinking active-core owners by cutting remaining read/query and formatting seams out of coordinator/adapter/strategy roots in parallel:
+- position query/aggregation ownership
+- Chainlink RTDS proxy and websocket connection flow
+- reverse-engineered profile payload extraction/parsing
+- trade logger summary/report formatting
+
+## File ownership
+
+- `src/coordinator/position.rs`
+  - owner: position state, transitions, and tests
+- `src/coordinator/position/queries.rs`
+  - owner: query helpers, aggregation views, and agent/domain exposure lookups
+- `src/adapters/chainlink_rtds.rs`
+  - owner: RTDS adapter surface, cache, message handling, and tests
+- `src/adapters/chainlink_rtds_connection.rs`
+  - owner: proxy detection, CONNECT tunneling, and websocket connection setup
+- `src/strategy/reverse_engineered.rs`
+  - owner: reverse-engineered strategy surface, types, inference, and dry-run orchestration
+- `src/strategy/reverse_engineered/profile_payload.rs`
+  - owner: payload fetch, embedded JSON extraction, page flattening, and profile snapshot parsing
+- `src/strategy/trade_logger.rs`
+  - owner: trade logging surface, statistics accumulation, and persistence-facing APIs
+- `src/strategy/trade_logger/summary.rs`
+  - owner: statistics report formatting for overview, symbol, bucket, and mode summaries
+
+## Tasks
+
+- [x] Extract position query and aggregation helpers into a sibling module.
+- [x] Extract Chainlink RTDS proxy/websocket connection flow into a sibling module.
+- [x] Extract reverse-engineered profile payload parsing into a sibling module.
+- [x] Extract trade logger summary formatting into a sibling module.
+- [x] Re-run compile plus focused regressions for the integrated wave.
+
+## Progress notes
+
+- 2026-03-13: Added [queries.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/position/queries.rs) and reduced [position.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/position.rs) so the root file no longer owns query/aggregate helpers.
+- 2026-03-13: Added [chainlink_rtds_connection.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/chainlink_rtds_connection.rs) and reduced [chainlink_rtds.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/chainlink_rtds.rs) to adapter/cache/message-handling ownership.
+- 2026-03-13: Added [profile_payload.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/reverse_engineered/profile_payload.rs) and reduced [reverse_engineered.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/reverse_engineered.rs) to strategy inference and dry-run orchestration.
+- 2026-03-13: Added [summary.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/trade_logger/summary.rs) and reduced [trade_logger.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/trade_logger.rs) to logging/statistics ownership.
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave13-next5 cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib coordinator::position::tests::test_agent_index_tracks_position_lifecycle -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib adapters::chainlink_rtds::tests::test_symbol_mapping_roundtrip -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib strategy::reverse_engineered::tests::test_infer_bias_from_positions -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave13-tests cargo test --lib strategy::trade_logger::tests::test_symbol_stats -- --exact --nocapture`
