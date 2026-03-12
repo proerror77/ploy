@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use tracing::{debug, warn};
 
-use crate::coordinator::{OrderIntent, OrderPriority};
+use crate::coordinator::OrderIntent;
 use crate::domain::Domain;
 use crate::domain::Side;
 
@@ -358,6 +358,7 @@ impl std::fmt::Display for QueueStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinator::OrderPriority;
     use crate::domain::Side;
     use rust_decimal::Decimal;
     use std::collections::HashSet;

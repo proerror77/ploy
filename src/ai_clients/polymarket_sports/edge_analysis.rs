@@ -1,5 +1,4 @@
 use rust_decimal::Decimal;
-use std::str::FromStr;
 
 use super::SportsMarketDetails;
 

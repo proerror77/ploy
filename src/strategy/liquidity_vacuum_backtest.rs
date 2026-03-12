@@ -1087,7 +1087,7 @@ impl LiquidityVacuumBacktestEngine {
     }
 
     fn check_exits(&mut self, symbol: &str, ts: DateTime<Utc>) {
-        let (spot, depth, deviation_zscore) = match self.symbol_state.get(symbol) {
+        let (_spot, depth, deviation_zscore) = match self.symbol_state.get(symbol) {
             Some(s) => (
                 s.spot.price,
                 s.latest_lob_depth.unwrap_or(10_000),
