@@ -318,7 +318,11 @@ impl PolymarketWebSocket {
         };
 
         let msg_json = serde_json::to_string(&subscribe_msg)?;
-        await_ws_write("subscribe write", write.send(Message::Text(msg_json.into()))).await?;
+        await_ws_write(
+            "subscribe write",
+            write.send(Message::Text(msg_json.into())),
+        )
+        .await?;
         info!("Subscribed to {} tokens", token_ids.len());
 
         // Set up ping interval
@@ -391,14 +395,10 @@ mod tests {
 
     #[tokio::test]
     async fn ws_write_timeout_returns_internal_error() {
-        let err = await_ws_write_with_timeout(
-            "test write",
-            Duration::from_millis(5),
-            async {
-                sleep(Duration::from_millis(50)).await;
-                Ok::<(), Error>(())
-            },
-        )
+        let err = await_ws_write_with_timeout("test write", Duration::from_millis(5), async {
+            sleep(Duration::from_millis(50)).await;
+            Ok::<(), Error>(())
+        })
         .await
         .expect_err("timed-out write should return an error");
 
@@ -411,11 +411,9 @@ mod tests {
 
     #[tokio::test]
     async fn ws_write_timeout_allows_fast_write() {
-        await_ws_write_with_timeout(
-            "test write",
-            Duration::from_millis(50),
-            async { Ok::<(), Error>(()) },
-        )
+        await_ws_write_with_timeout("test write", Duration::from_millis(50), async {
+            Ok::<(), Error>(())
+        })
         .await
         .expect("fast write should succeed");
     }

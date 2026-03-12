@@ -1,4 +1,5 @@
 use super::*;
+use crate::platform::persistence_schema::ensure_clob_price_change_ticks_table;
 use chrono::Utc;
 
 pub(super) async fn initialize_crypto_market_data_runtime(
@@ -93,6 +94,17 @@ async fn initialize_crypto_persistence_pipeline(
             false
         }
     };
+    let price_change_table_ready = match ensure_clob_price_change_ticks_table(pool).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                agent = crypto_cfg.agent_id,
+                error = %e,
+                "failed to ensure clob_price_change_ticks table; PM price-change persistence bridge disabled"
+            );
+            false
+        }
+    };
     let orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(pool).await {
         Ok(()) => true,
         Err(e) => {
@@ -105,7 +117,11 @@ async fn initialize_crypto_persistence_pipeline(
         }
     };
 
-    let pipeline_handle = if quote_table_ready || price_table_ready || orderbook_table_ready {
+    let pipeline_handle = if quote_table_ready
+        || price_change_table_ready
+        || price_table_ready
+        || orderbook_table_ready
+    {
         let pipeline_config = crate::platform::PersistenceConfig {
             clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
             binance_price_min_interval_secs: BINANCE_PERSIST_MIN_INTERVAL_SECS,
@@ -149,6 +165,34 @@ async fn initialize_crypto_persistence_pipeline(
                 );
             } else {
                 warn!("persistence quote bridge unavailable: no quote receiver");
+            }
+        }
+
+        if price_change_table_ready {
+            let price_change_rx = if use_data_plane {
+                data_plane.and_then(|dp| dp.subscribe_price_changes())
+            } else {
+                Some(pm_ws.subscribe_price_changes())
+            };
+            if let Some(price_change_rx) = price_change_rx {
+                pipeline_handle.spawn_bridge(
+                    price_change_rx,
+                    format!("{}.price_change", crypto_cfg.agent_id),
+                    |update| {
+                        Some(crate::platform::PersistenceEvent::ClobPriceChange(
+                            crate::platform::ClobPriceChangeTick {
+                                token_id: update.token_id.clone(),
+                                market: update.market.clone(),
+                                side: update.side.map(|side| side.as_str().to_string()),
+                                price: update.price,
+                                domain: Domain::Crypto,
+                                received_at: Utc::now(),
+                            },
+                        ))
+                    },
+                );
+            } else {
+                warn!("persistence price-change bridge unavailable: no price-change receiver");
             }
         }
 

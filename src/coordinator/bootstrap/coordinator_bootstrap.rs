@@ -161,9 +161,7 @@ pub(super) async fn initialize_coordinator_runtime(
                     "failed to restore coordinator ingress state from DB"
                 );
             }
-            coordinator
-                .set_ingress_persist_pool(pool.clone())
-                .await;
+            coordinator.set_ingress_persist_pool(pool.clone()).await;
         }
         if let Err(e) = ensure_agent_order_executions_table(pool).await {
             if require_startup_schema {

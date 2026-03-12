@@ -1,5 +1,6 @@
 use super::*;
 
+use sqlx::{Postgres, QueryBuilder};
 use tokio::time::{self, Duration};
 use tracing::info;
 
@@ -43,6 +44,7 @@ struct DedupState {
 #[derive(Debug, Default)]
 struct PendingBuffers {
     quotes: Vec<ClobQuoteTick>,
+    price_changes: Vec<ClobPriceChangeTick>,
     prices: Vec<BinancePriceTick>,
     lobs: Vec<BinanceLobTick>,
     chainlink_prices: Vec<ChainlinkPriceTick>,
@@ -52,6 +54,7 @@ struct PendingBuffers {
 impl PendingBuffers {
     fn len(&self) -> usize {
         self.quotes.len()
+            + self.price_changes.len()
             + self.prices.len()
             + self.lobs.len()
             + self.chainlink_prices.len()
@@ -60,6 +63,7 @@ impl PendingBuffers {
 
     fn is_empty(&self) -> bool {
         self.quotes.is_empty()
+            && self.price_changes.is_empty()
             && self.prices.is_empty()
             && self.lobs.is_empty()
             && self.chainlink_prices.is_empty()
@@ -112,6 +116,7 @@ impl PersistencePipeline {
                 debug!(
                     quotes = stats.clob_quotes_persisted,
                     quotes_dedup = stats.clob_quotes_deduped,
+                    price_changes = stats.clob_price_changes_persisted,
                     prices = stats.binance_prices_persisted,
                     lobs = stats.binance_lobs_persisted,
                     chainlink = stats.chainlink_prices_persisted,
@@ -143,6 +148,9 @@ impl PersistencePipeline {
                 } else {
                     stats.clob_quotes_deduped += 1;
                 }
+            }
+            PersistenceEvent::ClobPriceChange(tick) => {
+                buffers.price_changes.push(tick);
             }
             PersistenceEvent::BinancePrice(tick) => {
                 if Self::should_persist_price(&tick, dedup, config) {
@@ -177,47 +185,73 @@ impl PersistencePipeline {
         buffers: &mut PendingBuffers,
         stats: &mut PipelineStats,
     ) {
-        for tick in buffers.quotes.drain(..) {
-            if let Err(e) = Self::write_clob_quote(pool, &tick).await {
-                warn!(error = %e, token = %tick.token_id, "clob quote persist failed");
+        if !buffers.quotes.is_empty() {
+            let ticks = std::mem::take(&mut buffers.quotes);
+            if let Err(e) = Self::write_clob_quotes(pool, &ticks).await {
+                warn!(error = %e, count = ticks.len(), "clob quote batch persist failed");
             } else {
-                stats.clob_quotes_persisted += 1;
+                stats.clob_quotes_persisted += ticks.len() as u64;
             }
         }
 
-        for tick in buffers.prices.drain(..) {
-            if let Err(e) = Self::write_binance_price(pool, &tick).await {
-                warn!(error = %e, symbol = %tick.symbol, "binance price persist failed");
+        if !buffers.price_changes.is_empty() {
+            let ticks = std::mem::take(&mut buffers.price_changes);
+            if let Err(e) = Self::write_clob_price_changes(pool, &ticks).await {
+                warn!(
+                    error = %e,
+                    count = ticks.len(),
+                    "clob price-change batch persist failed"
+                );
             } else {
-                stats.binance_prices_persisted += 1;
+                stats.clob_price_changes_persisted += ticks.len() as u64;
             }
         }
 
-        for tick in buffers.lobs.drain(..) {
+        if !buffers.prices.is_empty() {
+            let ticks = std::mem::take(&mut buffers.prices);
+            if let Err(e) = Self::write_binance_prices(pool, &ticks).await {
+                warn!(error = %e, count = ticks.len(), "binance price batch persist failed");
+            } else {
+                stats.binance_prices_persisted += ticks.len() as u64;
+            }
+        }
+
+        if !buffers.lobs.is_empty() {
+            let ticks = std::mem::take(&mut buffers.lobs);
             if let Err(e) =
-                Self::write_binance_lob(pool, &tick, config.binance_lob_max_levels).await
+                Self::write_binance_lobs(pool, &ticks, config.binance_lob_max_levels).await
             {
-                warn!(error = %e, symbol = %tick.symbol, "binance lob persist failed");
+                warn!(error = %e, count = ticks.len(), "binance lob batch persist failed");
             } else {
-                stats.binance_lobs_persisted += 1;
+                stats.binance_lobs_persisted += ticks.len() as u64;
             }
         }
 
-        for tick in buffers.chainlink_prices.drain(..) {
-            if let Err(e) = Self::write_chainlink_price(pool, &tick).await {
-                warn!(error = %e, symbol = %tick.symbol, "chainlink price persist failed");
+        if !buffers.chainlink_prices.is_empty() {
+            let ticks = std::mem::take(&mut buffers.chainlink_prices);
+            if let Err(e) = Self::write_chainlink_prices(pool, &ticks).await {
+                warn!(
+                    error = %e,
+                    count = ticks.len(),
+                    "chainlink price batch persist failed"
+                );
             } else {
-                stats.chainlink_prices_persisted += 1;
+                stats.chainlink_prices_persisted += ticks.len() as u64;
             }
         }
 
-        for snap in buffers.orderbooks.drain(..) {
+        if !buffers.orderbooks.is_empty() {
+            let snaps = std::mem::take(&mut buffers.orderbooks);
             if let Err(e) =
-                Self::write_clob_orderbook(pool, &snap, config.clob_orderbook_max_levels).await
+                Self::write_clob_orderbooks(pool, &snaps, config.clob_orderbook_max_levels).await
             {
-                warn!(error = %e, token = %snap.token_id, "clob orderbook persist failed");
+                warn!(
+                    error = %e,
+                    count = snaps.len(),
+                    "clob orderbook batch persist failed"
+                );
             } else {
-                stats.clob_orderbooks_persisted += 1;
+                stats.clob_orderbooks_persisted += snaps.len() as u64;
             }
         }
     }
@@ -332,114 +366,148 @@ impl PersistencePipeline {
         true
     }
 
-    async fn write_clob_quote(pool: &PgPool, tick: &ClobQuoteTick) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"INSERT INTO clob_quote_ticks
-               (token_id, side, best_bid, best_ask, bid_size, ask_size, source, domain)
-               VALUES ($1, $2, $3, $4, $5, $6, 'polymarket_ws', $7)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&tick.token_id)
-        .bind(&tick.side)
-        .bind(tick.best_bid)
-        .bind(tick.best_ask)
-        .bind(tick.bid_size)
-        .bind(tick.ask_size)
-        .bind(tick.domain.to_string())
-        .execute(pool)
-        .await?;
+    async fn write_clob_quotes(pool: &PgPool, ticks: &[ClobQuoteTick]) -> Result<(), sqlx::Error> {
+        for chunk in ticks.chunks(500) {
+            let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO clob_quote_ticks \
+                 (token_id, side, best_bid, best_ask, bid_size, ask_size, source, domain) ",
+            );
+            builder.push_values(chunk, |mut row, tick| {
+                row.push_bind(&tick.token_id)
+                    .push_bind(&tick.side)
+                    .push_bind(tick.best_bid)
+                    .push_bind(tick.best_ask)
+                    .push_bind(tick.bid_size)
+                    .push_bind(tick.ask_size)
+                    .push_bind("polymarket_ws")
+                    .push_bind(tick.domain.to_string());
+            });
+            builder.push(" ON CONFLICT DO NOTHING");
+            builder.build().execute(pool).await?;
+        }
         Ok(())
     }
 
-    async fn write_binance_price(
+    async fn write_binance_prices(
         pool: &PgPool,
-        tick: &BinancePriceTick,
+        ticks: &[BinancePriceTick],
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"INSERT INTO binance_price_ticks
-               (symbol, price, quantity, trade_time)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&tick.symbol)
-        .bind(tick.price)
-        .bind(tick.quantity)
-        .bind(tick.trade_time)
-        .execute(pool)
-        .await?;
+        for chunk in ticks.chunks(1_000) {
+            let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO binance_price_ticks \
+                 (symbol, price, quantity, trade_time) ",
+            );
+            builder.push_values(chunk, |mut row, tick| {
+                row.push_bind(&tick.symbol)
+                    .push_bind(tick.price)
+                    .push_bind(tick.quantity)
+                    .push_bind(tick.trade_time);
+            });
+            builder.push(" ON CONFLICT DO NOTHING");
+            builder.build().execute(pool).await?;
+        }
         Ok(())
     }
 
-    async fn write_binance_lob(
+    async fn write_clob_price_changes(
         pool: &PgPool,
-        tick: &BinanceLobTick,
+        ticks: &[ClobPriceChangeTick],
+    ) -> Result<(), sqlx::Error> {
+        for chunk in ticks.chunks(1_000) {
+            let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO clob_price_change_ticks \
+                 (token_id, market, side, price, domain, received_at) ",
+            );
+            builder.push_values(chunk, |mut row, tick| {
+                row.push_bind(&tick.token_id)
+                    .push_bind(&tick.market)
+                    .push_bind(&tick.side)
+                    .push_bind(tick.price)
+                    .push_bind(tick.domain.to_string())
+                    .push_bind(tick.received_at);
+            });
+            builder.push(" ON CONFLICT DO NOTHING");
+            builder.build().execute(pool).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_binance_lobs(
+        pool: &PgPool,
+        ticks: &[BinanceLobTick],
         _max_levels: usize,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"INSERT INTO binance_lob_ticks
-               (symbol, update_id, best_bid, best_ask, mid_price, spread_bps,
-                obi_5, obi_10, bid_volume_5, ask_volume_5, bids, asks, event_time)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&tick.symbol)
-        .bind(tick.update_id)
-        .bind(tick.best_bid)
-        .bind(tick.best_ask)
-        .bind(tick.mid_price)
-        .bind(tick.spread_bps)
-        .bind(tick.obi_5)
-        .bind(tick.obi_10)
-        .bind(tick.bid_volume_5)
-        .bind(tick.ask_volume_5)
-        .bind(&tick.bids)
-        .bind(&tick.asks)
-        .bind(tick.event_time)
-        .execute(pool)
-        .await?;
+        for chunk in ticks.chunks(500) {
+            let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO binance_lob_ticks \
+                 (symbol, update_id, best_bid, best_ask, mid_price, spread_bps, \
+                  obi_5, obi_10, bid_volume_5, ask_volume_5, bids, asks, event_time) ",
+            );
+            builder.push_values(chunk, |mut row, tick| {
+                row.push_bind(&tick.symbol)
+                    .push_bind(tick.update_id)
+                    .push_bind(tick.best_bid)
+                    .push_bind(tick.best_ask)
+                    .push_bind(tick.mid_price)
+                    .push_bind(tick.spread_bps)
+                    .push_bind(tick.obi_5)
+                    .push_bind(tick.obi_10)
+                    .push_bind(tick.bid_volume_5)
+                    .push_bind(tick.ask_volume_5)
+                    .push_bind(&tick.bids)
+                    .push_bind(&tick.asks)
+                    .push_bind(tick.event_time);
+            });
+            builder.push(" ON CONFLICT DO NOTHING");
+            builder.build().execute(pool).await?;
+        }
         Ok(())
     }
 
-    async fn write_chainlink_price(
+    async fn write_chainlink_prices(
         pool: &PgPool,
-        tick: &ChainlinkPriceTick,
+        ticks: &[ChainlinkPriceTick],
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"INSERT INTO chainlink_price_ticks
-               (symbol, price, source_timestamp)
-               VALUES ($1, $2, $3)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&tick.symbol)
-        .bind(tick.price)
-        .bind(tick.source_timestamp)
-        .execute(pool)
-        .await?;
+        for chunk in ticks.chunks(1_000) {
+            let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO chainlink_price_ticks \
+                 (symbol, price, source_timestamp) ",
+            );
+            builder.push_values(chunk, |mut row, tick| {
+                row.push_bind(&tick.symbol)
+                    .push_bind(tick.price)
+                    .push_bind(tick.source_timestamp);
+            });
+            builder.push(" ON CONFLICT DO NOTHING");
+            builder.build().execute(pool).await?;
+        }
         Ok(())
     }
 
-    async fn write_clob_orderbook(
+    async fn write_clob_orderbooks(
         pool: &PgPool,
-        snap: &ClobOrderbookSnapshot,
+        snaps: &[ClobOrderbookSnapshot],
         _max_levels: usize,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"INSERT INTO clob_orderbook_snapshots
-               (domain, token_id, market, bids, asks, book_timestamp, hash, source, context)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(snap.domain.to_string())
-        .bind(&snap.token_id)
-        .bind(&snap.market)
-        .bind(&snap.bids)
-        .bind(&snap.asks)
-        .bind(snap.book_timestamp)
-        .bind(&snap.hash)
-        .bind(&snap.source)
-        .bind(&snap.context)
-        .execute(pool)
-        .await?;
+        for chunk in snaps.chunks(250) {
+            let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
+                "INSERT INTO clob_orderbook_snapshots \
+                 (domain, token_id, market, bids, asks, book_timestamp, hash, source, context) ",
+            );
+            builder.push_values(chunk, |mut row, snap| {
+                row.push_bind(snap.domain.to_string())
+                    .push_bind(&snap.token_id)
+                    .push_bind(&snap.market)
+                    .push_bind(&snap.bids)
+                    .push_bind(&snap.asks)
+                    .push_bind(snap.book_timestamp)
+                    .push_bind(&snap.hash)
+                    .push_bind(&snap.source)
+                    .push_bind(&snap.context);
+            });
+            builder.push(" ON CONFLICT DO NOTHING");
+            builder.build().execute(pool).await?;
+        }
         Ok(())
     }
 }

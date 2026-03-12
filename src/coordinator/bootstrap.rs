@@ -82,9 +82,9 @@ use self::schema::{
 pub(crate) use self::schema::{
     ensure_agent_order_executions_table, ensure_clob_orderbook_snapshots_table,
     ensure_coordinator_governance_policies_table,
-    ensure_coordinator_governance_policy_history_table, ensure_pm_market_metadata_table,
-    ensure_pm_token_settlements_table, ensure_risk_runtime_state_table,
-    ensure_strategy_observability_tables,
+    ensure_coordinator_governance_policy_history_table, ensure_coordinator_ingress_state_table,
+    ensure_pm_market_metadata_table, ensure_pm_token_settlements_table,
+    ensure_risk_runtime_state_table, ensure_strategy_observability_tables,
 };
 use self::sports_runtime_support::prepare_sports_runtime_support;
 use self::startup_context::initialize_startup_context;

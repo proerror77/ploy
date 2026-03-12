@@ -370,6 +370,34 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# PM5 Event Quality Summary (2026-03-12)
+
+## Goal
+Expose per-event-window quality summaries for `pm_5m_directional` backtests so `strict / research / drop` windows can be analyzed separately without changing raw collection behavior.
+
+## Tasks
+
+- [x] Add failing tests for event-quality replay summaries and per-quality trade aggregation.
+- [x] Extend PM event replay diagnostics with serializable window-quality summary data.
+- [x] Wire `pm_5m_directional` backtest JSON/text output to include the event-quality summary block.
+- [x] Re-run focused PM5 compile/tests after the summary path lands.
+
+## Review
+
+- [x] Confirm `strict`, `research`, and `drop` window counts and issues are surfaced from one backtest run.
+- [x] Confirm realized trades are attributed back to the correct event-quality bucket.
+
+## Progress notes
+
+- 2026-03-12: Added per-window audit summaries plus per-quality trade/PnL aggregation in [diagnostics.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops/diagnostics.rs).
+- 2026-03-12: Wired [backtest_ops.rs](/Users/proerror/Documents/ploy/src/cli/strategy/backtest_ops.rs) to print a dedicated PM5 event-quality table in text mode and emit full `pm_event_replay` JSON alongside raw results/report output.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/pm5-event-summary-check rtk cargo test build_pm_event_replay_summary_breaks_down_quality_and_trade_results --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-event-summary-check rtk cargo test build_pm_event_replay_summary_keeps_research_windows_non_replayed_in_strict_mode --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-event-summary-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/pm5-event-summary-check rtk cargo test pm_5m_directional_backtest --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/pm5-event-summary-check rtk cargo test pm_5m_directional --lib -- --nocapture`
+
 # PM 5m Directional Deployment And Backtest Integration (2026-03-10)
 
 ## Goal

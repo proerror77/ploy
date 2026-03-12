@@ -10,7 +10,10 @@ use crate::strategy::{executor::ExecutionResult, OrderUpdate};
 use super::Coordinator;
 
 impl Coordinator {
-    pub async fn register_order_updates(&mut self, agent_id: String) -> mpsc::Receiver<OrderUpdate> {
+    pub async fn register_order_updates(
+        &mut self,
+        agent_id: String,
+    ) -> mpsc::Receiver<OrderUpdate> {
         let (tx, rx) = mpsc::channel(128);
         self.order_update_sinks.write().await.insert(agent_id, tx);
         rx

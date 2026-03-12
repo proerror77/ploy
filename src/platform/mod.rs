@@ -9,7 +9,7 @@ mod market_persistence;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
 pub mod subscription_planner;
-pub mod types;
+mod types;
 
 pub use data_plane::{
     BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, DataPlaneHealth,
@@ -22,20 +22,10 @@ pub(crate) use market_persistence::{
 };
 pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot,
-    ClobQuoteTick, PersistenceConfig, PersistenceEvent,
-    PersistencePipeline, PersistencePipelineHandle, PipelineStats,
+    ClobPriceChangeTick, ClobQuoteTick, PersistenceConfig, PersistenceEvent, PersistencePipeline,
+    PersistencePipelineHandle, PipelineStats,
 };
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
-pub use types::{Domain, IntentPurpose, OrderIntent, OrderPriority};
-
-// Re-exports for backward-compat: types that moved to other modules but are
-// still referenced as `crate::platform::*` throughout the codebase.
-pub use crate::agent_runtime::{AgentRiskParams, AgentStatus};
-pub use crate::control_plane::{
-    DeploymentExecutionMode, MarketSelector, StrategyDeployment, StrategyLifecycleStage,
-    StrategyProductType,
-};
-pub use crate::coordinator::{BlockReason, PlatformRiskState, RiskCheckResult, RiskConfig, RiskGate};
-pub use crate::plugins::DeploymentState;
+pub use types::{Domain, OrderIntent, OrderPriority};
