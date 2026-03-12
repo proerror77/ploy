@@ -4,7 +4,9 @@ use super::*;
 mod diagnostics;
 mod reporting;
 
-use diagnostics::{print_backtest_db_diagnostics, verify_backtest_trades_gamma};
+use diagnostics::{
+    build_pm_event_replay_selection, print_backtest_db_diagnostics, verify_backtest_trades_gamma,
+};
 
 pub(super) use reporting::{run_backtest_diff, run_backtest_list, run_live_backtest_compare};
 
@@ -24,6 +26,11 @@ fn normalize_backtest_strategy_name(name: &str) -> Result<&'static str> {
             other
         ),
     }
+}
+
+fn fmt_ts(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    ts.map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,6 +67,7 @@ pub(super) async fn run_backtest(
     lv_zscore_lookback_samples: Option<usize>,
     lv_max_holding_secs: Option<u64>,
     sa_entry_after_start_max_secs: Option<u64>,
+    pm5_event_quality: PmReplayQuality,
 ) -> Result<()> {
     use chrono::DateTime;
     use rust_decimal::prelude::*;
@@ -231,9 +239,78 @@ pub(super) async fn run_backtest(
             let mut config = Pm5mDirectionalBacktestConfig::with_symbols(symbol_list.clone());
             config.initial_capital = initial_capital;
 
+            let replay_selection = build_pm_event_replay_selection(
+                store.pool(),
+                &symbol_list,
+                from_dt,
+                to_dt,
+                pm5_event_quality,
+            )
+            .await?;
+            if replay_selection.windows.is_empty() {
+                anyhow::bail!(
+                    "No pm_5m_directional windows satisfied {:?} replay quality; rerun with --pm5-event-quality research or --diagnose-db",
+                    pm5_event_quality
+                );
+            }
+
+            let replay_filter_stats = feed.retain_pm_event_windows(&replay_selection.windows);
+            info!(
+                minimum_quality = ?replay_selection.minimum_quality,
+                total_windows = replay_selection.total_windows,
+                kept_windows = replay_selection.kept_windows,
+                kept_strict_windows = replay_selection.kept_strict_windows,
+                kept_research_windows = replay_selection.kept_research_windows,
+                dropped_windows = replay_selection.dropped_windows,
+                updates_before = replay_filter_stats.total_updates_before,
+                updates_after = replay_filter_stats.total_updates_after,
+                "Applied pm_5m_directional event-window replay filter"
+            );
+            if !json_output {
+                println!("\n[pm_5m_directional event replay]");
+                println!(
+                    "minimum_quality: {:?}, windows: total={} kept={} (strict={}, research={}) dropped={}",
+                    replay_selection.minimum_quality,
+                    replay_selection.total_windows,
+                    replay_selection.kept_windows,
+                    replay_selection.kept_strict_windows,
+                    replay_selection.kept_research_windows,
+                    replay_selection.dropped_windows
+                );
+                println!(
+                    "effective_window: {} .. {}",
+                    fmt_ts(replay_selection.effective_from),
+                    fmt_ts(replay_selection.effective_to)
+                );
+                println!(
+                    "feed_updates: {} -> {}",
+                    replay_filter_stats.total_updates_before,
+                    replay_filter_stats.total_updates_after
+                );
+            }
+
             let mut saved_run_id: Option<uuid::Uuid> = None;
             let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
-                let config_json = serde_json::to_value(&config).unwrap_or_default();
+                let mut config_json = serde_json::to_value(&config).unwrap_or_default();
+                if let Some(obj) = config_json.as_object_mut() {
+                    obj.insert(
+                        "pm_event_replay".to_string(),
+                        serde_json::json!({
+                            "minimum_quality": format!("{:?}", replay_selection.minimum_quality).to_ascii_lowercase(),
+                            "total_windows": replay_selection.total_windows,
+                            "kept_windows": replay_selection.kept_windows,
+                            "kept_strict_windows": replay_selection.kept_strict_windows,
+                            "kept_research_windows": replay_selection.kept_research_windows,
+                            "dropped_windows": replay_selection.dropped_windows,
+                            "effective_from": replay_selection.effective_from,
+                            "effective_to": replay_selection.effective_to,
+                            "replay_first_update": replay_filter_stats.effective_from,
+                            "replay_last_update": replay_filter_stats.effective_to,
+                            "updates_before": replay_filter_stats.total_updates_before,
+                            "updates_after": replay_filter_stats.total_updates_after,
+                        }),
+                    );
+                }
                 let pg_recorder = PgBacktestRecorder::new(
                     store.pool().clone(),
                     "pm_5m_directional",

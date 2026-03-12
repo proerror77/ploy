@@ -118,6 +118,7 @@ impl DirectionalSignalBacktestArgs {
             None,
             None,
             None,
+            PmReplayQuality::Strict,
         )
         .await
     }
@@ -310,6 +311,10 @@ pub struct BacktestArgs {
     /// Override staggered-arb entry window (seconds after event start; 0 disables)
     #[arg(long)]
     sa_entry_after_start_max_secs: Option<u64>,
+
+    /// Minimum PM event-window quality for pm_5m_directional replay.
+    #[arg(long, value_enum, default_value_t = PmReplayQuality::Strict)]
+    pm5_event_quality: PmReplayQuality,
 }
 
 impl BacktestArgs {
@@ -347,6 +352,7 @@ impl BacktestArgs {
             self.lv_zscore_lookback_samples,
             self.lv_max_holding_secs,
             self.sa_entry_after_start_max_secs,
+            self.pm5_event_quality,
         )
         .await
     }
