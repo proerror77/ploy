@@ -7,6 +7,8 @@ use serde_json::Value;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
+use crate::strategy::backtest_feed::ReplayEventWindow;
+
 const STRICT_SPOT_TAIL_SECS: i64 = 15;
 const STRICT_L2_TAIL_SECS: i64 = 15;
 const STRICT_PM_QUOTE_TAIL_SECS: i64 = 30;
@@ -26,6 +28,13 @@ impl EventWindowQuality {
             Self::KeepStrict => "KEEP_STRICT",
             Self::KeepResearch => "KEEP_RESEARCH",
             Self::Drop => "DROP",
+        }
+    }
+
+    fn meets_minimum(self, minimum: PmReplayQuality) -> bool {
+        match minimum {
+            PmReplayQuality::Strict => self == Self::KeepStrict,
+            PmReplayQuality::Research => matches!(self, Self::KeepStrict | Self::KeepResearch),
         }
     }
 }
@@ -66,6 +75,19 @@ struct EventWindowAuditRow {
     l2: SourceCoverage,
     quality: EventWindowQuality,
     issues: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PmEventReplaySelection {
+    pub(super) minimum_quality: PmReplayQuality,
+    pub(super) total_windows: usize,
+    pub(super) kept_windows: usize,
+    pub(super) kept_strict_windows: usize,
+    pub(super) kept_research_windows: usize,
+    pub(super) dropped_windows: usize,
+    pub(super) effective_from: Option<DateTime<Utc>>,
+    pub(super) effective_to: Option<DateTime<Utc>>,
+    pub(super) windows: Vec<ReplayEventWindow>,
 }
 
 pub(super) async fn print_backtest_db_diagnostics(
@@ -822,6 +844,17 @@ async fn print_event_window_audit(
     Ok(())
 }
 
+pub(super) async fn build_pm_event_replay_selection(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    minimum_quality: PmReplayQuality,
+) -> Result<PmEventReplaySelection> {
+    let rows = load_event_window_audit_rows(pool, symbols, from, to).await?;
+    Ok(select_pm_event_replay_windows(&rows, minimum_quality))
+}
+
 async fn load_event_window_audit_rows(
     pool: &sqlx::PgPool,
     symbols: &[String],
@@ -1015,6 +1048,67 @@ async fn load_event_window_audit_rows(
     }
 
     Ok(audits)
+}
+
+fn select_pm_event_replay_windows(
+    rows: &[EventWindowAuditRow],
+    minimum_quality: PmReplayQuality,
+) -> PmEventReplaySelection {
+    let filtered_rows: Vec<&EventWindowAuditRow> =
+        rows.iter().filter(|row| row.horizon == "5m").collect();
+
+    let mut windows = Vec::new();
+    let mut kept_strict_windows = 0usize;
+    let mut kept_research_windows = 0usize;
+
+    for row in &filtered_rows {
+        if !row.quality.meets_minimum(minimum_quality) {
+            continue;
+        }
+        let Some(start_time) = row.start_time else {
+            continue;
+        };
+        let Some(end_time) = row.corrected_end_time.or(row.end_time) else {
+            continue;
+        };
+        if row.symbol.is_empty() {
+            continue;
+        }
+
+        match row.quality {
+            EventWindowQuality::KeepStrict => {
+                kept_strict_windows = kept_strict_windows.saturating_add(1)
+            }
+            EventWindowQuality::KeepResearch => {
+                kept_research_windows = kept_research_windows.saturating_add(1)
+            }
+            EventWindowQuality::Drop => {}
+        }
+
+        windows.push(ReplayEventWindow {
+            market_slug: row.market_slug.clone(),
+            symbol: row.symbol.clone(),
+            start_time,
+            end_time,
+        });
+    }
+
+    let effective_from = windows.iter().map(|window| window.start_time).min();
+    let effective_to = windows.iter().map(|window| window.end_time).max();
+    let kept_windows = windows.len();
+    let total_windows = filtered_rows.len();
+
+    PmEventReplaySelection {
+        minimum_quality,
+        total_windows,
+        kept_windows,
+        kept_strict_windows,
+        kept_research_windows,
+        dropped_windows: total_windows.saturating_sub(kept_windows),
+        effective_from,
+        effective_to,
+        windows,
+    }
 }
 
 async fn fetch_symbol_coverage(
@@ -1339,6 +1433,41 @@ mod tests {
         assert_eq!(quality, EventWindowQuality::KeepResearch);
         assert!(issues.contains(&"missing_pm_lob"));
         assert!(issues.contains(&"missing_binance_l2"));
+    }
+
+    #[test]
+    fn select_pm_event_replay_windows_respects_minimum_quality() {
+        let mut strict = strict_row();
+        let (quality, issues) = classify_event_window_audit(&strict);
+        strict.quality = quality;
+        strict.issues = issues;
+        let mut research = strict_row();
+        research.market_slug = "btc-updown-5m-research".to_string();
+        research.lob = SourceCoverage::default();
+        research.l2 = SourceCoverage::default();
+        let (quality, issues) = classify_event_window_audit(&research);
+        research.quality = quality;
+        research.issues = issues;
+
+        let strict_selection = select_pm_event_replay_windows(
+            &[strict.clone(), research.clone()],
+            PmReplayQuality::Strict,
+        );
+        assert_eq!(strict_selection.total_windows, 2);
+        assert_eq!(strict_selection.kept_windows, 1);
+        assert_eq!(strict_selection.kept_strict_windows, 1);
+        assert_eq!(strict_selection.kept_research_windows, 0);
+        assert_eq!(strict_selection.dropped_windows, 1);
+        assert_eq!(strict_selection.windows[0].market_slug, strict.market_slug);
+
+        let research_selection = select_pm_event_replay_windows(
+            &[strict.clone(), research.clone()],
+            PmReplayQuality::Research,
+        );
+        assert_eq!(research_selection.kept_windows, 2);
+        assert_eq!(research_selection.kept_strict_windows, 1);
+        assert_eq!(research_selection.kept_research_windows, 1);
+        assert_eq!(research_selection.dropped_windows, 0);
     }
 
     #[test]

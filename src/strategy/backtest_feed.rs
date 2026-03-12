@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use anyhow::Result;
@@ -89,6 +89,23 @@ pub struct HistoricalFeed {
     pub(crate) updates: VecDeque<MarketUpdate>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayEventWindow {
+    pub market_slug: String,
+    pub symbol: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayEventWindowFilterStats {
+    pub total_updates_before: usize,
+    pub total_updates_after: usize,
+    pub dropped_updates: usize,
+    pub effective_from: Option<DateTime<Utc>>,
+    pub effective_to: Option<DateTime<Utc>>,
+}
+
 impl HistoricalFeed {
     /// Create a new HistoricalFeed from a vector of market updates.
     /// Updates will be sorted by timestamp for deterministic replay.
@@ -106,6 +123,79 @@ impl HistoricalFeed {
 
     pub fn is_empty(&self) -> bool {
         self.updates.is_empty()
+    }
+
+    /// Retain only updates that belong to the supplied event windows.
+    ///
+    /// Event-scoped PM updates are filtered by market slug, while shared market-state updates
+    /// (spot, Binance L2, LOB) are filtered by `(symbol, timestamp)` membership in the union of
+    /// kept event windows. This lets PM replay stay segmented by event quality without mutating
+    /// the raw collected data model.
+    pub fn retain_pm_event_windows(
+        &mut self,
+        windows: &[ReplayEventWindow],
+    ) -> ReplayEventWindowFilterStats {
+        let total_updates_before = self.updates.len();
+        if windows.is_empty() {
+            self.updates.clear();
+            return ReplayEventWindowFilterStats {
+                total_updates_before,
+                total_updates_after: 0,
+                dropped_updates: total_updates_before,
+                effective_from: None,
+                effective_to: None,
+            };
+        }
+
+        let kept_slugs: HashSet<&str> = windows
+            .iter()
+            .map(|window| window.market_slug.as_str())
+            .collect();
+        let mut windows_by_symbol: HashMap<&str, Vec<(DateTime<Utc>, DateTime<Utc>)>> =
+            HashMap::new();
+        for window in windows {
+            windows_by_symbol
+                .entry(window.symbol.as_str())
+                .or_default()
+                .push((window.start_time, window.end_time));
+        }
+
+        let mut retained = VecDeque::with_capacity(total_updates_before);
+        for update in self.updates.drain(..) {
+            let keep = match &update.update_type {
+                UpdateType::PmQuote { event_slug, .. }
+                | UpdateType::EventState { event_slug, .. } => {
+                    kept_slugs.contains(event_slug.as_str())
+                }
+                UpdateType::SpotTrade { .. }
+                | UpdateType::BinanceL2 { .. }
+                | UpdateType::LobSnapshot { .. } => windows_by_symbol
+                    .get(update.symbol.as_str())
+                    .map(|ranges| {
+                        ranges.iter().any(|(start_time, end_time)| {
+                            update.timestamp >= *start_time && update.timestamp <= *end_time
+                        })
+                    })
+                    .unwrap_or(false),
+            };
+
+            if keep {
+                retained.push_back(update);
+            }
+        }
+
+        let total_updates_after = retained.len();
+        let effective_from = retained.front().map(|update| update.timestamp);
+        let effective_to = retained.back().map(|update| update.timestamp);
+        self.updates = retained;
+
+        ReplayEventWindowFilterStats {
+            total_updates_before,
+            total_updates_after,
+            dropped_updates: total_updates_before.saturating_sub(total_updates_after),
+            effective_from,
+            effective_to,
+        }
     }
 
     /// Load historical data from database tables:
@@ -270,5 +360,111 @@ mod tests {
             );
             prev_ts = update.timestamp;
         }
+    }
+
+    #[test]
+    fn retain_pm_event_windows_keeps_only_selected_segments() {
+        let start_a = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end_a = DateTime::parse_from_rfc3339("2025-01-01T00:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let start_b = DateTime::parse_from_rfc3339("2025-01-01T00:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end_b = DateTime::parse_from_rfc3339("2025-01-01T00:15:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mut feed = HistoricalFeed::new(vec![
+            MarketUpdate {
+                timestamp: start_a,
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100000),
+                    quantity: None,
+                },
+            },
+            MarketUpdate {
+                timestamp: start_a + chrono::Duration::seconds(10),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::PmQuote {
+                    event_slug: "btc-keep".into(),
+                    token_id: "tok-keep-up".into(),
+                    side: Side::Up,
+                    best_bid: Some(dec!(0.40)),
+                    best_ask: Some(dec!(0.41)),
+                },
+            },
+            MarketUpdate {
+                timestamp: start_b,
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100100),
+                    quantity: None,
+                },
+            },
+            MarketUpdate {
+                timestamp: start_b + chrono::Duration::seconds(10),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::PmQuote {
+                    event_slug: "btc-drop".into(),
+                    token_id: "tok-drop-up".into(),
+                    side: Side::Up,
+                    best_bid: Some(dec!(0.52)),
+                    best_ask: Some(dec!(0.53)),
+                },
+            },
+            MarketUpdate {
+                timestamp: end_b + chrono::Duration::seconds(45),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::EventState {
+                    event_slug: "btc-drop".into(),
+                    end_time: None,
+                    price_to_beat: None,
+                    outcome: Some(true),
+                },
+            },
+            MarketUpdate {
+                timestamp: end_a + chrono::Duration::seconds(45),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::EventState {
+                    event_slug: "btc-keep".into(),
+                    end_time: None,
+                    price_to_beat: None,
+                    outcome: Some(true),
+                },
+            },
+        ]);
+
+        let stats = feed.retain_pm_event_windows(&[ReplayEventWindow {
+            market_slug: "btc-keep".into(),
+            symbol: "BTCUSDT".into(),
+            start_time: start_a,
+            end_time: end_a,
+        }]);
+
+        assert_eq!(stats.total_updates_before, 6);
+        assert_eq!(stats.total_updates_after, 3);
+        assert_eq!(stats.dropped_updates, 3);
+        assert_eq!(stats.effective_from, Some(start_a));
+        assert_eq!(
+            stats.effective_to,
+            Some(end_a + chrono::Duration::seconds(45))
+        );
+
+        let kept: Vec<String> = feed
+            .updates
+            .iter()
+            .map(|update| match &update.update_type {
+                UpdateType::PmQuote { event_slug, .. }
+                | UpdateType::EventState { event_slug, .. } => event_slug.clone(),
+                UpdateType::SpotTrade { .. } => "spot".to_string(),
+                UpdateType::BinanceL2 { .. } => "l2".to_string(),
+                UpdateType::LobSnapshot { .. } => "lob".to_string(),
+            })
+            .collect();
+        assert_eq!(kept, vec!["spot", "btc-keep", "btc-keep"]);
     }
 }

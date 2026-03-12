@@ -61,6 +61,12 @@ pub enum LiquidityVacuumProfile {
     ResearchV2,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmReplayQuality {
+    Strict,
+    Research,
+}
+
 impl Default for CryptoLobDatasetFormat {
     fn default() -> Self {
         #[cfg(feature = "analysis")]
