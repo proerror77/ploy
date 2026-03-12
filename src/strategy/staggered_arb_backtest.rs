@@ -2962,6 +2962,8 @@ mod tests {
                     side: Side::Up,
                     best_bid: None,
                     best_ask: Some(up),
+                    bid_size: None,
+                    ask_size: None,
                 },
             },
             MarketUpdate {
@@ -2973,6 +2975,8 @@ mod tests {
                     side: Side::Down,
                     best_bid: None,
                     best_ask: Some(down),
+                    bid_size: None,
+                    ask_size: None,
                 },
             },
         ]

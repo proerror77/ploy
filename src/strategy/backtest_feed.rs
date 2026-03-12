@@ -18,6 +18,12 @@ use crate::strategy::backtest::{load_klines_from_csv, load_pm_prices_from_csv};
 
 mod database;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BookAskLevel {
+    pub price: Decimal,
+    pub size_shares: u64,
+}
+
 /// A single market data update event, timestamped for replay ordering.
 #[derive(Debug, Clone)]
 pub struct MarketUpdate {
@@ -43,6 +49,8 @@ pub enum UpdateType {
         side: Side,
         best_bid: Option<Decimal>,
         best_ask: Option<Decimal>,
+        bid_size: Option<Decimal>,
+        ask_size: Option<Decimal>,
     },
     /// Event lifecycle update (metadata, settlement)
     EventState {
@@ -54,10 +62,18 @@ pub enum UpdateType {
     },
     /// Polymarket LOB snapshot (aggregated depth from clob_orderbook_snapshots)
     LobSnapshot {
-        /// Token side: "UP" or "DOWN"
-        side: String,
+        /// Market slug this book belongs to.
+        event_slug: String,
+        /// Token id this book belongs to.
+        token_id: String,
+        /// Token side: UP or DOWN
+        side: Side,
         /// Total ask-side liquidity in shares across all levels
         ask_depth_shares: u64,
+        /// Best ask level size in shares at the top of book.
+        best_ask_size_shares: u64,
+        /// Best few ask levels preserved for replay-side slippage simulation.
+        ask_levels: Vec<BookAskLevel>,
         /// Best ask price
         best_ask: Option<Decimal>,
     },
@@ -164,12 +180,13 @@ impl HistoricalFeed {
         for update in self.updates.drain(..) {
             let keep = match &update.update_type {
                 UpdateType::PmQuote { event_slug, .. }
-                | UpdateType::EventState { event_slug, .. } => {
+                | UpdateType::EventState { event_slug, .. }
+                | UpdateType::LobSnapshot { event_slug, .. } => {
                     kept_slugs.contains(event_slug.as_str())
                 }
                 UpdateType::SpotTrade { .. }
                 | UpdateType::BinanceL2 { .. }
-                | UpdateType::LobSnapshot { .. } => windows_by_symbol
+                => windows_by_symbol
                     .get(update.symbol.as_str())
                     .map(|ranges| {
                         ranges.iter().any(|(start_time, end_time)| {
@@ -248,6 +265,8 @@ impl HistoricalFeed {
                     side: Side::Up,
                     best_bid: Some(p.yes_bid),
                     best_ask: Some(p.yes_ask),
+                    bid_size: None,
+                    ask_size: None,
                 },
             });
             updates.push(MarketUpdate {
@@ -266,6 +285,8 @@ impl HistoricalFeed {
                             None
                         }
                     },
+                    bid_size: None,
+                    ask_size: None,
                 },
             });
 
@@ -341,6 +362,8 @@ mod tests {
                     side: Side::Up,
                     best_bid: None,
                     best_ask: Some(dec!(0.35)),
+                    bid_size: None,
+                    ask_size: None,
                 },
             },
         ];
@@ -395,6 +418,8 @@ mod tests {
                     side: Side::Up,
                     best_bid: Some(dec!(0.40)),
                     best_ask: Some(dec!(0.41)),
+                    bid_size: Some(dec!(80)),
+                    ask_size: Some(dec!(90)),
                 },
             },
             MarketUpdate {
@@ -413,6 +438,40 @@ mod tests {
                     token_id: "tok-drop-up".into(),
                     side: Side::Up,
                     best_bid: Some(dec!(0.52)),
+                    best_ask: Some(dec!(0.53)),
+                    bid_size: Some(dec!(70)),
+                    ask_size: Some(dec!(60)),
+                },
+            },
+            MarketUpdate {
+                timestamp: start_a + chrono::Duration::seconds(20),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::LobSnapshot {
+                    event_slug: "btc-keep".into(),
+                    token_id: "tok-keep-up".into(),
+                    side: Side::Up,
+                    ask_depth_shares: 120,
+                    best_ask_size_shares: 40,
+                    ask_levels: vec![BookAskLevel {
+                        price: dec!(0.41),
+                        size_shares: 40,
+                    }],
+                    best_ask: Some(dec!(0.41)),
+                },
+            },
+            MarketUpdate {
+                timestamp: start_b + chrono::Duration::seconds(20),
+                symbol: "BTCUSDT".into(),
+                update_type: UpdateType::LobSnapshot {
+                    event_slug: "btc-drop".into(),
+                    token_id: "tok-drop-up".into(),
+                    side: Side::Up,
+                    ask_depth_shares: 140,
+                    best_ask_size_shares: 35,
+                    ask_levels: vec![BookAskLevel {
+                        price: dec!(0.53),
+                        size_shares: 35,
+                    }],
                     best_ask: Some(dec!(0.53)),
                 },
             },
@@ -445,9 +504,9 @@ mod tests {
             end_time: end_a,
         }]);
 
-        assert_eq!(stats.total_updates_before, 6);
-        assert_eq!(stats.total_updates_after, 3);
-        assert_eq!(stats.dropped_updates, 3);
+        assert_eq!(stats.total_updates_before, 8);
+        assert_eq!(stats.total_updates_after, 4);
+        assert_eq!(stats.dropped_updates, 4);
         assert_eq!(stats.effective_from, Some(start_a));
         assert_eq!(
             stats.effective_to,
@@ -462,9 +521,9 @@ mod tests {
                 | UpdateType::EventState { event_slug, .. } => event_slug.clone(),
                 UpdateType::SpotTrade { .. } => "spot".to_string(),
                 UpdateType::BinanceL2 { .. } => "l2".to_string(),
-                UpdateType::LobSnapshot { .. } => "lob".to_string(),
+                UpdateType::LobSnapshot { event_slug, .. } => format!("lob:{event_slug}"),
             })
             .collect();
-        assert_eq!(kept, vec!["spot", "btc-keep", "btc-keep"]);
+        assert_eq!(kept, vec!["spot", "btc-keep", "lob:btc-keep", "btc-keep"]);
     }
 }
