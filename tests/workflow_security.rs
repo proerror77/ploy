@@ -17,8 +17,11 @@ fn ci_runs_dependency_vulnerability_audit() {
         offenders.push("test.yml: missing cargo-audit installer step".to_string());
     }
 
-    if !content.contains("cargo audit") {
-        offenders.push("test.yml: missing cargo audit execution step".to_string());
+    if !content.contains("cargo audit --ignore RUSTSEC-2023-0071") {
+        offenders.push(
+            "test.yml: missing cargo audit execution with the documented sqlx/rsa exception"
+                .to_string(),
+        );
     }
 
     assert!(

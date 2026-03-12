@@ -5607,3 +5607,8 @@ Close the remaining high-priority workflow security findings by adding dependenc
 - `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test ssh_workflows_require_host_key_verification --test workflow_security -- --exact --nocapture`
 - `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test release_workflows_enforce_systemd_guardrails --test workflow_security -- --exact --nocapture`
 - `ruby -e 'require "yaml"; %w[test.yml deploy-aws-jp.yml get-logs.yml stop-trading.yml].each { |f| YAML.load_file(File.join(\".github/workflows\", f)) }; puts \"yaml ok\"'`
+
+## Notes
+
+- `cargo audit` is now enforced in CI, but it carries a temporary `RUSTSEC-2023-0071` ignore because `sqlx 0.8.6` still drags an unused MySQL `rsa` chain into `Cargo.lock`.
+- The actionable high-severity audit failure was `quinn-proto 0.11.13`; the lockfile was updated to `0.11.14` so the CI audit command can pass with only the documented SQLx exception.
