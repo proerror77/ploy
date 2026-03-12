@@ -28,6 +28,10 @@ Add an opt-in `pm_5m_directional` backtest mode that automatically trims sparse 
   - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test print_report_includes_requested_and_effective_windows --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/pm5-auto-trim2 rtk cargo test pm_5m_directional_backtest --lib -- --nocapture`
 - 2026-03-12: Local end-to-end replay against the `tango-1-1` database confirmed the long sparse request `2026-03-05T03:45:00Z .. 2026-03-10T08:10:00Z` is auto-trimmed to `2026-03-07T04:20:00Z .. 2026-03-07T12:35:00Z`, producing `28` trades, `19/9`, `+19.5609562925` net PnL, `23.80` Sharpe, and `0.2087%` max drawdown.
+- 2026-03-12: CI release `v0.0.0-pm5trimac6a95f` built from commit `ac6a95f` was deployed to `tango-1-1` as isolated binary `/root/ploy/bin/backtests/ploy-pm5-ac6a95f`. Host verification confirmed:
+  - default long-window replay still rejects sparse coverage and prints the longest contiguous common range
+  - `--pm5-auto-trim-window` trims the same request to `2026-03-07T04:20:00Z .. 2026-03-07T12:35:00Z` and replays successfully
+  - `--save` persists `config_json.replay_window` and the terminal report prints `Requested` plus `Effective` window lines
 
 # PM5 Full 20-Level OBI Factors (2026-03-11)
 
