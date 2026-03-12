@@ -56,17 +56,17 @@ pub(in crate::api::handlers::sidecar) async fn table_has_account_scope(
     pool: &sqlx::PgPool,
     table_name: &str,
 ) -> bool {
-    sqlx::query_scalar::<_, i64>(
+    sqlx::query_scalar!(
         r#"
-        SELECT 1
+        SELECT 1::BIGINT
         FROM information_schema.columns
         WHERE table_schema = 'public'
           AND table_name = $1
           AND column_name = 'account_id'
         LIMIT 1
         "#,
+        table_name,
     )
-    .bind(table_name)
     .fetch_optional(pool)
     .await
     .ok()
@@ -409,5 +409,36 @@ pub(in crate::api::handlers::sidecar) fn deployment_default_priority(
         p if p >= 70 => OrderPriority::High,
         p if p <= 20 => OrderPriority::Low,
         _ => OrderPriority::Normal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::table_has_account_scope;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn integration_db_url() -> Option<String> {
+        std::env::var("PLOY_TEST_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+    }
+
+    #[tokio::test]
+    async fn table_has_account_scope_reports_positions_true_and_cycles_false() {
+        let Some(db_url) = integration_db_url() else {
+            return;
+        };
+
+        let pool = match PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+
+        assert!(table_has_account_scope(&pool, "positions").await);
+        assert!(!table_has_account_scope(&pool, "cycles").await);
     }
 }

@@ -5849,3 +5849,28 @@ Reduce `async_trait` usage on the managed-runtime order persistence seam by conv
   - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo test persist_runtime_order_insert_uses_action_order_id_and_leg --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo test normalize_runtime_order_request_sets_idempotency_key_from_action_id --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-order-store-native rtk cargo test persist_runtime_order_result_records_terminal_status_and_fill --lib -- --exact --nocapture`
+# SQLx Compile-Time Pilot (2026-03-12)
+
+## Goal
+Use the `tango-1-1` production schema as the source of truth for the first `sqlx::query_scalar!` migration so one fixed `api` query gains compile-time checking without dragging the whole repo into a bulk `sqlx` rewrite.
+
+## File ownership
+
+- `src/api/handlers/sidecar/ingress/deployment_gate.rs`
+  - owner: `table_has_account_scope()` compile-time SQL pilot and integration coverage
+
+## Tasks
+
+- [x] Add a characterization test for `table_has_account_scope()` against a real database schema.
+- [x] Verify the characterization test against the `tango-1-1` schema via SSH-forwarded `DATABASE_URL`.
+- [x] Convert `table_has_account_scope()` from runtime `sqlx::query_scalar::<_, i64>` to compile-time `sqlx::query_scalar!`.
+- [x] Re-run `api` feature compile plus the focused integration regression against the forwarded `tango-1-1` database.
+
+## Progress notes
+
+- 2026-03-12: Added a focused integration regression in [deployment_gate.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/handlers/sidecar/ingress/deployment_gate.rs) that verifies the real schema behavior `positions=true` and `cycles=false` for account-scoped tables.
+- 2026-03-12: Verified the characterization test against the `tango-1-1` `ploy` database by reusing an SSH local forward on `127.0.0.1:55432` and rewriting the remote `DATABASE_URL` from `/root/ploy/.env` to the local tunnel endpoint.
+- 2026-03-12: Converted `table_has_account_scope()` to `sqlx::query_scalar!`, keeping the behavior unchanged while adding compile-time SQL checking for this fixed scalar query.
+- 2026-03-12: Validation passed:
+  - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-query-pilot rtk cargo check --lib --features api`
+  - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-query-pilot rtk cargo test table_has_account_scope_reports_positions_true_and_cycles_false --lib --features api -- --nocapture`
