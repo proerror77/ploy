@@ -1,4 +1,5 @@
 use super::*;
+use crate::control_plane::deployment_files::{deployment_file_candidates, deployments_state_path};
 
 pub(super) fn lob_levels_json(
     state: &crate::collector::OrderBookState,
@@ -78,29 +79,6 @@ pub(super) fn env_decimal_opt(name: &str) -> Option<rust_decimal::Decimal> {
         .and_then(|v| v.parse::<rust_decimal::Decimal>().ok())
 }
 
-pub(super) fn deployments_state_path() -> PathBuf {
-    if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
-        return PathBuf::from(path);
-    }
-    let container_data_root = Path::new("/opt/ploy/data");
-    if container_data_root.exists() {
-        return container_data_root.join("state/deployments.json");
-    }
-    let repo_state_deployment = Path::new("data/state/deployments.json");
-    if repo_state_deployment.exists() {
-        return repo_state_deployment.to_path_buf();
-    }
-    let repo_root_deployment = Path::new("deployment/deployments.json");
-    if repo_root_deployment.exists() {
-        return repo_root_deployment.to_path_buf();
-    }
-    let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
-    if container_deployment.exists() {
-        return container_deployment.to_path_buf();
-    }
-    PathBuf::from("data/state/deployments.json")
-}
-
 pub(super) fn parse_strategy_deployments(raw: &str) -> Vec<StrategyDeployment> {
     let mut out = Vec::new();
     match serde_json::from_str::<Vec<StrategyDeployment>>(raw) {
@@ -128,17 +106,7 @@ pub(super) fn load_strategy_deployments() -> Vec<StrategyDeployment> {
         return parse_strategy_deployments(&raw);
     }
 
-    let repo_state_path = Path::new("data/state/deployments.json");
-    let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
-    let deployment_file_candidates = [
-        deployments_state_path(),
-        repo_state_path.to_path_buf(),
-        container_data_path.to_path_buf(),
-        Path::new("deployment/deployments.json").to_path_buf(),
-        Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
-    ];
-
-    for path in deployment_file_candidates {
+    for path in deployment_file_candidates(&deployments_state_path()) {
         if let Ok(contents) = std::fs::read_to_string(&path) {
             let items = parse_strategy_deployments(&contents);
             if !items.is_empty() {

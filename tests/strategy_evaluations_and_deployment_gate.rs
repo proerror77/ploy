@@ -188,6 +188,7 @@ impl TestContext {
                 Uuid::new_v4().simple()
             ),
         );
+        env_override.set("PLOY_ALLOW_UNSAFE_DEPLOYMENTS_FILE", "true");
         env_override.set("PLOY_STRATEGY_DEPLOYMENTS_JSON", "[]");
 
         for (key, value) in extra_env {

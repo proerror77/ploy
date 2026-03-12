@@ -31,7 +31,6 @@ use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
 use crate::strategy::DataFeed;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::strategy_runtime::run_managed_strategy_runtime;

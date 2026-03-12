@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
+use crate::control_plane::deployment_files::{deployment_file_candidates, deployments_state_path};
 use crate::control_plane::{MarketSelector, StrategyDeployment};
 use crate::coordinator::capital::CryptoHorizon;
 use crate::coordinator::OrderIntent;
@@ -39,15 +39,7 @@ pub(super) fn load_strategy_deployments() -> HashMap<String, StrategyDeployment>
         return parse_strategy_deployments(&raw);
     }
 
-    let repo_state_path = Path::new("data/state/deployments.json");
-    let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
-    let candidates = [
-        deployments_state_path(),
-        repo_state_path.to_path_buf(),
-        container_data_path.to_path_buf(),
-        Path::new("deployment/deployments.json").to_path_buf(),
-        Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
-    ];
+    let candidates = deployment_file_candidates(&deployments_state_path());
 
     for path in candidates {
         if let Ok(contents) = std::fs::read_to_string(path) {
@@ -186,34 +178,6 @@ pub(super) fn infer_time_bucket_seconds(intent: &OrderIntent) -> i64 {
     }
 
     5 * 60
-}
-
-fn deployments_state_path() -> PathBuf {
-    if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
-        return PathBuf::from(path);
-    }
-
-    let container_data_root = Path::new("/opt/ploy/data");
-    if container_data_root.exists() {
-        return container_data_root.join("state/deployments.json");
-    }
-
-    let repo_state_deployment = Path::new("data/state/deployments.json");
-    if repo_state_deployment.exists() {
-        return repo_state_deployment.to_path_buf();
-    }
-
-    let repo_root_deployment = Path::new("deployment/deployments.json");
-    if repo_root_deployment.exists() {
-        return repo_root_deployment.to_path_buf();
-    }
-
-    let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
-    if container_deployment.exists() {
-        return container_deployment.to_path_buf();
-    }
-
-    PathBuf::from("data/state/deployments.json")
 }
 
 fn parse_strategy_deployments(raw: &str) -> HashMap<String, StrategyDeployment> {

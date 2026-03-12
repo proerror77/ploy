@@ -1433,6 +1433,42 @@ Reuse one shared prompt-input sanitizer across live LLM prompt builders so attac
   - `CARGO_TARGET_DIR=/tmp/ploy-r50-nba cargo test --lib strategy::nba_comeback::grok_decision::tests -- --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-r50-helper cargo test --lib ai_clients::prompt_sanitization::tests -- --nocapture`
 
+# R-49 Deployments File Path Hardening (2026-03-12)
+
+## Goal
+Replace the three duplicated `PLOY_DEPLOYMENTS_FILE` readers with one shared resolver that constrains deployments state files to supported roots, while keeping an explicit unsafe escape hatch for tests and exceptional operators.
+
+## File ownership
+
+- `src/control_plane/deployment_files.rs`
+  - owner: shared deployments-file resolver, candidate list, and focused path-hardening regressions
+- `src/coordinator/admission/deployments.rs`
+  - owner: coordinator deployment-gate loading wired to the shared resolver
+- `src/coordinator/bootstrap/support.rs`
+  - owner: bootstrap deployment loading wired to the shared resolver
+- `src/api/state.rs`
+  - owner: API deployment loading/persistence wired to the shared resolver
+- `tests/strategy_evaluations_and_deployment_gate.rs`
+  - owner: integration harness escape hatch for temp deployment state files
+
+## Tasks
+
+- [x] Extract one shared deployments-file resolver/candidate owner.
+- [x] Rewire coordinator/bootstrap/api deployment readers to the shared owner.
+- [x] Reject parent traversal, wrong basenames, and unsupported roots by default.
+- [x] Keep an explicit unsafe override escape hatch for temp-path integration tests.
+- [x] Re-run compile plus focused resolver regressions after the cut.
+
+## Progress notes
+
+- 2026-03-12: Added [deployment_files.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/control_plane/deployment_files.rs) so `PLOY_DEPLOYMENTS_FILE` no longer resolves independently in three different modules.
+- 2026-03-12: Rewired [deployments.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/admission/deployments.rs), [support.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/bootstrap/support.rs), and [state.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/state.rs) to consume the shared deployments-file owner.
+- 2026-03-12: Added an explicit `PLOY_ALLOW_UNSAFE_DEPLOYMENTS_FILE=true` escape hatch in [strategy_evaluations_and_deployment_gate.rs](/Users/proerror/Documents/ploy-order-intent-clean/tests/strategy_evaluations_and_deployment_gate.rs) so temp-path integration tests keep working without reopening arbitrary file reads by default.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r49-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r49-unit cargo test --lib control_plane::deployment_files::tests -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r49-int cargo test --test strategy_evaluations_and_deployment_gate -- --nocapture`
+
 # R-40 MarketDiscovery Native Async Trait Cut (2026-03-12)
 
 ## Goal

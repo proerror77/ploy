@@ -1,6 +1,7 @@
 use crate::adapters::PostgresStore;
 use crate::ai_clients::grok::GrokClient;
 use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
+use crate::control_plane::deployment_files::{deployment_file_candidates, deployments_state_path};
 use crate::control_plane::{StrategyDeployment, StrategyEvaluationEvidence};
 use crate::coordinator::CoordinatorHandle;
 use crate::domain::Domain;
@@ -170,29 +171,6 @@ impl AppState {
         out
     }
 
-    fn deployments_state_path() -> PathBuf {
-        if let Ok(path) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
-            return PathBuf::from(path);
-        }
-        let container_data_root = Path::new("/opt/ploy/data");
-        if container_data_root.exists() {
-            return container_data_root.join("state/deployments.json");
-        }
-        let repo_state_deployment = Path::new("data/state/deployments.json");
-        if repo_state_deployment.exists() {
-            return repo_state_deployment.to_path_buf();
-        }
-        let repo_root_deployment = Path::new("deployment/deployments.json");
-        if repo_root_deployment.exists() {
-            return repo_root_deployment.to_path_buf();
-        }
-        let container_deployment = Path::new("/opt/ploy/deployment/deployments.json");
-        if container_deployment.exists() {
-            return container_deployment.to_path_buf();
-        }
-        PathBuf::from("data/state/deployments.json")
-    }
-
     fn strategy_evaluations_state_path() -> PathBuf {
         if let Ok(path) = std::env::var("PLOY_STRATEGY_EVALUATIONS_FILE") {
             return PathBuf::from(path);
@@ -212,17 +190,7 @@ impl AppState {
             return Self::parse_deployments(&raw);
         }
 
-        let repo_state_path = Path::new("data/state/deployments.json");
-        let container_data_path = Path::new("/opt/ploy/data/state/deployments.json");
-        let deployment_file_candidates = [
-            path.to_path_buf(),
-            repo_state_path.to_path_buf(),
-            container_data_path.to_path_buf(),
-            Path::new("deployment/deployments.json").to_path_buf(),
-            Path::new("/opt/ploy/deployment/deployments.json").to_path_buf(),
-        ];
-
-        for candidate in deployment_file_candidates {
+        for candidate in deployment_file_candidates(path) {
             if let Ok(contents) = std::fs::read_to_string(&candidate) {
                 let items = Self::parse_deployments(&contents);
                 if !items.is_empty() {
@@ -299,7 +267,7 @@ impl AppState {
 
     pub fn new(store: Arc<PostgresStore>, config: StrategyConfigState) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
-        let deployments_path = Arc::new(Self::deployments_state_path());
+        let deployments_path = Arc::new(deployments_state_path());
         let deployments = Arc::new(RwLock::new(Self::load_deployments(
             deployments_path.as_ref(),
         )));
@@ -344,7 +312,7 @@ impl AppState {
         dry_run: bool,
     ) -> Self {
         let (ws_tx, _) = broadcast::channel(1000);
-        let deployments_path = Arc::new(Self::deployments_state_path());
+        let deployments_path = Arc::new(deployments_state_path());
         let (deployments, allowed_domains) = if let Some(coordinator_ref) = coordinator.as_ref() {
             (
                 coordinator_ref.shared_deployments(),
