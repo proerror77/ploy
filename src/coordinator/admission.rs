@@ -15,7 +15,7 @@ mod duplicate_guard;
 
 use super::capital::{intent_deployment_scope, intent_market_identity, CapitalPolicy};
 use super::config::{CoordinatorConfig, DuplicateGuardScope};
-use duplicate_guard::IntentDuplicateGuard;
+pub(in crate::coordinator) use duplicate_guard::IntentDuplicateGuard;
 
 pub(super) struct AdmissionController {
     config: CoordinatorConfig,

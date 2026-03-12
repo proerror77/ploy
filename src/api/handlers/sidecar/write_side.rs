@@ -1,4 +1,15 @@
 use super::*;
+use super::ingress::{
+    apply_deployment_metadata, broadcast_sidecar_activity, clamp_external_priority,
+    deployment_default_priority, ensure_agent_authorized, ensure_deployment_accepts_live_ingress,
+    ensure_domain_allowed, map_coordinator_submit_error, parse_binary_side, parse_is_buy,
+    parse_order_priority, parse_sidecar_domain, resolve_intent_deployment,
+    resolve_request_account_scope, sidecar_orders_live_enabled, validate_account_scope,
+    validate_deployment_binding,
+};
+use super::types::{
+    SidecarIntentRequest, SidecarIntentResponse, SidecarOrderRequest, SidecarOrderResponse,
+};
 
 /// POST /api/sidecar/orders
 ///

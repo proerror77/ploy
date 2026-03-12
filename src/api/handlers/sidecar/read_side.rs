@@ -17,10 +17,9 @@ use crate::api::{
 use crate::config::AppConfig;
 use crate::domain::market::Side;
 
-use super::{
-    table_has_account_scope, SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition,
-    SidecarRiskState,
-};
+use super::ingress::table_has_account_scope;
+use super::types::{SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition,
+    SidecarRiskState};
 
 /// GET /api/sidecar/positions
 ///

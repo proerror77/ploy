@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::agents::governance_context::GovernanceContext;
-use crate::agents::traits::GovernanceAgent;
+use crate::agents::governance_agent::GovernanceAgent;
 use crate::coordinator::CoordinatorCommand;
+use crate::coordinator::bootstrap::OpenClawConfig;
 use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
@@ -47,11 +48,6 @@ impl GovernanceAgent for OpenClawAgent {
     fn name(&self) -> &str {
         "OpenClaw Meta-Agent"
     }
-
-    fn domain(&self) -> Domain {
-        Domain::Custom(0)
-    }
-
 
     async fn run(self, mut ctx: GovernanceContext) -> crate::error::Result<()> {
         info!(

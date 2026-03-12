@@ -4,7 +4,7 @@ use tracing::{info, warn};
 
 use crate::config::AppConfig;
 use crate::strategy::CryptoTradingConfig;
-use crate::{AgentRiskParams, Domain};
+use crate::platform::{AgentRiskParams, Domain};
 
 use super::deployment_matrix::{
     coin_symbol_for, crypto_series_id_for, symbol_for_crypto_series_id,

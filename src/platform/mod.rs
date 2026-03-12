@@ -1,29 +1,16 @@
 //! Order Platform - legacy execution surface
 //!
-//! 提供領域無關的訂單執行、風控和倉位管理。
-//! Canonical live strategies now flow through coordinator-managed runtime paths.
-//! This module keeps shared order-plane contracts, data-plane utilities, and
-//! risk primitives used by the coordinator and command helpers.
+//! 提供舊版 queue/risk/execution 元件給 RL CLI 等兼容層使用。
+//! 正式 live trading runtime 已由 coordinator 接管。
 
-mod contracts;
 pub mod data_plane;
 pub mod freshness;
 mod market_persistence;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
-mod position;
-mod queue;
-mod risk;
 pub mod subscription_planner;
-pub mod traits;
-mod types;
+pub mod types;
 
-pub use crate::plugins::DeploymentState;
-pub use contracts::{
-    DeploymentExecutionMode, MarketSelector, OrderCommand, OrderExecutionReport, RiskDecision,
-    RiskDecisionStatus, StrategyDeployment, StrategyEvaluationEvidence, StrategyEvaluationMetrics,
-    StrategyEvaluationStage, StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
-};
 pub use data_plane::{
     BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig, DataPlaneHealth,
     PlatformDataPlane, SourceHealth,
@@ -34,21 +21,21 @@ pub(crate) use market_persistence::{
     spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
 };
 pub use persistence_pipeline::{
-    BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,
-    PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,
-    PipelineStats,
-};
-pub use position::{AgentPositionStats, AggregatedPosition, Position, PositionAggregator};
-pub use queue::{OrderQueue, QueueStats};
-pub use risk::{
-    BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
-    RiskConfig, RiskGate,
+    BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot,
+    ClobQuoteTick, PersistenceConfig, PersistenceEvent,
+    PersistencePipeline, PersistencePipelineHandle, PipelineStats,
 };
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
-pub use traits::{AgentRiskParams, AgentStatus};
-pub use types::{
-    CryptoEvent, Domain, DomainEvent, ExecutionReport, ExecutionStatus, IntentPurpose, OrderIntent,
-    OrderPriority, OrderUpdateEvent, PoliticsEvent, QuoteData, QuoteUpdateEvent, SportsEvent,
+pub use types::{Domain, IntentPurpose, OrderIntent, OrderPriority};
+
+// Re-exports for backward-compat: types that moved to other modules but are
+// still referenced as `crate::platform::*` throughout the codebase.
+pub use crate::agent_runtime::{AgentRiskParams, AgentStatus};
+pub use crate::control_plane::{
+    DeploymentExecutionMode, MarketSelector, StrategyDeployment, StrategyLifecycleStage,
+    StrategyProductType,
 };
+pub use crate::coordinator::{BlockReason, PlatformRiskState, RiskCheckResult, RiskConfig, RiskGate};
+pub use crate::plugins::DeploymentState;

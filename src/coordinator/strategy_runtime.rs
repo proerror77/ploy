@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::adapters::{PolymarketClient, PolymarketWebSocket};
 use crate::domain::OrderStatus;
 use crate::error::Result;
-use crate::platform::{AgentStatus, Domain, IntentPurpose, OrderCommand, PlatformDataPlane};
+use crate::platform::{AgentStatus, Domain, IntentPurpose, PlatformDataPlane};
+use crate::control_plane::OrderCommand;
 use crate::strategy::{
     DataFeed, DataFeedManager, OrderExecutor, OrderPurpose, StrategyAction, StrategyFactory,
     StrategyManager,

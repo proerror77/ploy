@@ -395,5 +395,4 @@ mod tests {
         assert_eq!(intent.order_type, OrderType::Limit);
         assert_eq!(intent.time_in_force, TimeInForce::GTC);
     }
-    }
 }

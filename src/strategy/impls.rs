@@ -12,7 +12,7 @@ pub use super::core::{
     SplitArbConfig as CoreSplitArbConfig, SplitArbEngine as CoreSplitArbEngine,
 };
 pub use super::crypto::{run_crypto_split_arb, CryptoMarketDiscovery, CryptoSplitArbConfig};
-pub use super::sports::{run_sports_split_arb, SportsLeague, SportsMarketDiscovery, SportsSplitArbConfig};
+pub use super::sports::{SportsLeague, SportsMarketDiscovery};
 
 pub use super::backtest::{
     calculate_kline_volatility, load_klines_from_csv, load_pm_prices_from_csv, BacktestEngine,
@@ -36,14 +36,13 @@ pub use super::dump_hedge::{
     PendingHedge, ProgressiveHedgeSignal, StopLossReason, StopLossSignal,
 };
 pub use super::event_edge::core::{EventEdgeCore, EventEdgeState, TradeDecision};
-pub use super::event_edge::{run_event_edge, EventEdgeConfig};
+pub use super::event_edge::{scan_event_edge_once, EdgeRow, EventEdgeScan};
 pub use super::execution_sim::{ExecutionResult, ExecutionSimConfig, ExecutionSimulator};
 pub use super::fee_model::{AllInCost, FeeModel, FeeRateCache};
 pub use super::momentum::{
     Direction, EventInfo, EventMatcher, ExitConfig, ExitManager, ExitReason, MomentumConfig,
     MomentumDetector, MomentumEngine, MomentumSignal, Position,
 };
-pub use super::multi_event::{ArbitrageOpportunity, EventSummary, EventTracker, MultiEventMonitor};
 pub use super::multi_outcome::{
     analyze_market_making_opportunity,
     analyze_near_settlement,
@@ -88,10 +87,6 @@ pub use super::position_manager::{
     PositionSummary,
 };
 pub use super::probability::{estimate_probability, full_estimate, Features, ProbabilityEstimate};
-pub use super::reconciliation::{
-    DiscrepancySeverity, PositionDiscrepancy, ReconciliationConfig, ReconciliationResult,
-    ReconciliationService,
-};
 pub use super::reverse_engineered::{
     extract_profile_snapshot, infer_strategy_params, run_reverse_engineered_profile_paper,
     ProfileSnapshot as ReverseProfileSnapshot, ReverseDryRunResult, ReverseEngineeredConfig,

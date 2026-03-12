@@ -10,6 +10,6 @@ pub use super::manager::{StrategyFactory, StrategyInfo, StrategyManager, Strateg
 pub use super::runtime_order::order_request_from_intent;
 pub use super::staggered_arb_live::StaggeredArbAdapter;
 pub use super::traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    AlertLevel, DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, PositionInfo, RiskLevel,
+    Strategy, StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
 };

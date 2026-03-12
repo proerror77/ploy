@@ -1,6 +1,7 @@
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::Path;
 
 use crate::platform::AgentRiskParams;

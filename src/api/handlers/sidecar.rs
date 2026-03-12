@@ -29,6 +29,16 @@ use crate::platform::{Domain, OrderIntent, OrderPriority};
 mod grok_decision;
 mod ingress;
 mod read_side;
+mod types;
+mod write_side;
+
+pub(crate) use ingress::table_has_account_scope;
+pub(super) use types::{SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition, SidecarRiskState};
+
+// Re-export handler functions for routes
+pub use grok_decision::sidecar_grok_decision;
+pub use read_side::{sidecar_get_positions, sidecar_get_risk};
+pub use write_side::{sidecar_submit_intent, sidecar_submit_order};
 #[cfg(test)]
 mod tests {
     use super::*;

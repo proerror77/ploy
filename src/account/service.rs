@@ -1,5 +1,5 @@
 use crate::config::AccountConfig;
-use crate::platform::StrategyDeployment;
+use crate::control_plane::StrategyDeployment;
 
 use super::budget::AccountBudgetSnapshot;
 use super::claimer::AccountClaimerHandle;

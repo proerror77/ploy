@@ -31,7 +31,7 @@ use super::traits::{
     StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use crate::adapters::SpotPrice;
-use crate::domain::{OrderType, Side, TimeInForce};
+use crate::domain::{OrderRequest, OrderStatus, OrderType, Side, TimeInForce};
 use crate::error::Result;
 use crate::platform::Domain;
 use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
@@ -557,7 +557,92 @@ impl StaggeredArbAdapter {
             .filter(|(_, pos)| {
                 pos.event_id == window.event_id && pos.state == PaperPositionState::Leg1Filled
             })
-            .unwrap_or(bc.vol_floor)
+            .map(|(idx, _)| idx)
+            .collect();
+        to_settle.sort_by(|a, b| b.cmp(a));
+
+        for idx in to_settle {
+            self.settle_single_leg_position(idx, up_won, settle_spot, ts, actions);
+        }
+    }
+
+    fn settle_single_leg_position(
+        &mut self,
+        idx: usize,
+        up_won: bool,
+        settle_spot: Decimal,
+        ts: DateTime<Utc>,
+        actions: &mut Vec<StrategyAction>,
+    ) {
+        if idx >= self.positions.len() {
+            return;
+        }
+
+        let (symbol, event_id, direction, leg1_price, leg1_shares, leg1_fee, leg1_time, won) = {
+            let pos = &self.positions[idx];
+            let won = matches!(pos.leg1_direction, Direction::Up) == up_won;
+            (
+                pos.symbol.clone(),
+                pos.event_id.clone(),
+                pos.leg1_direction.clone(),
+                pos.leg1_price,
+                pos.leg1_shares,
+                pos.leg1_fee,
+                pos.leg1_time,
+                won,
+            )
+        };
+
+        let payout = if won {
+            Decimal::from(leg1_shares)
+        } else {
+            Decimal::ZERO
+        };
+        let total_cost = Decimal::from(leg1_shares) * leg1_price + leg1_fee;
+        let pnl = payout - total_cost;
+        let duration_secs = (ts - leg1_time).num_seconds();
+
+        let pos = &mut self.positions[idx];
+        pos.state = PaperPositionState::Settled;
+        pos.leg2_time = Some(ts);
+
+        self.closed_trades.push(PaperTrade {
+            symbol: symbol.clone(),
+            event_id,
+            direction,
+            leg1_price,
+            leg2_price: Decimal::ZERO,
+            total_cost,
+            payout,
+            pnl,
+            exit_reason: "live_settlement".to_string(),
+            duration_secs,
+            opened_at: leg1_time,
+            closed_at: ts,
+        });
+
+        info!(
+            "[STAG-ARB] SETTLED {} spot={} payout=${:.4} pnl={}{:.4} wait={}s",
+            symbol,
+            settle_spot,
+            payout,
+            if pnl >= Decimal::ZERO { "+" } else { "" },
+            pnl,
+            duration_secs,
+        );
+        actions.push(StrategyAction::LogEvent {
+            event: StrategyEvent::new(
+                StrategyEventType::CycleCompleted,
+                format!(
+                    "[STAG-ARB] SETTLED {} payout=${:.4} pnl={}{:.4} wait={}s",
+                    symbol,
+                    payout,
+                    if pnl >= Decimal::ZERO { "+" } else { "" },
+                    pnl,
+                    duration_secs
+                ),
+            ),
+        });
     }
 
     fn record_pm_quote(

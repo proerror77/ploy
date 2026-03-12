@@ -11,9 +11,8 @@ use uuid::Uuid;
 
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::plugins::DeploymentState;
+use crate::platform::{Domain, IntentPurpose, OrderIntent, OrderPriority};
 use crate::strategy::OrderPurpose;
-
-use super::types::{Domain, IntentPurpose, OrderIntent, OrderPriority};
 
 /// Timeframe for deployment / intent routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

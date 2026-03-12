@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug)]
-pub(super) struct IntentDuplicateGuard {
+pub(in crate::coordinator) struct IntentDuplicateGuard {
     enabled: bool,
     window: ChronoDuration,
     scope: DuplicateGuardScope,

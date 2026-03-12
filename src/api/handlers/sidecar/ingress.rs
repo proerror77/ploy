@@ -36,7 +36,7 @@ fn request_metadata_account(metadata: &HashMap<String, String>) -> Option<String
         .map(ToString::to_string)
 }
 
-pub(super) async fn table_has_account_scope(pool: &sqlx::PgPool, table_name: &str) -> bool {
+pub(crate) async fn table_has_account_scope(pool: &sqlx::PgPool, table_name: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1
@@ -55,7 +55,7 @@ pub(super) async fn table_has_account_scope(pool: &sqlx::PgPool, table_name: &st
     .is_some()
 }
 
-pub(super) fn resolve_request_account_scope(
+pub(crate) fn resolve_request_account_scope(
     explicit: Option<&str>,
     metadata: Option<&HashMap<String, String>>,
 ) -> std::result::Result<Option<String>, (StatusCode, String)> {
@@ -77,7 +77,7 @@ pub(super) fn resolve_request_account_scope(
     Ok(explicit.or(metadata))
 }
 
-pub(super) fn validate_account_scope(
+pub(crate) fn validate_account_scope(
     state: &AppState,
     requested_account: Option<&str>,
 ) -> std::result::Result<(), (StatusCode, String)> {
@@ -119,7 +119,7 @@ fn deployment_gate_required() -> bool {
     }
 }
 
-pub(super) fn ensure_domain_allowed(
+pub(crate) fn ensure_domain_allowed(
     state: &AppState,
     domain: Domain,
     reason: &str,
@@ -141,7 +141,7 @@ fn allow_non_live_deployment_ingress() -> bool {
     env_bool(&["PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS"])
 }
 
-pub(super) fn ensure_deployment_accepts_live_ingress(
+pub(crate) fn ensure_deployment_accepts_live_ingress(
     deployment: &StrategyDeployment,
 ) -> std::result::Result<(), (StatusCode, String)> {
     if allow_non_live_deployment_ingress() {
@@ -161,7 +161,7 @@ pub(super) fn ensure_deployment_accepts_live_ingress(
     ))
 }
 
-pub(super) async fn ensure_agent_authorized(
+pub(crate) async fn ensure_agent_authorized(
     state: &AppState,
     agent_id: &str,
 ) -> std::result::Result<(), (StatusCode, String)> {
@@ -180,7 +180,7 @@ pub(super) async fn ensure_agent_authorized(
     ))
 }
 
-pub(super) async fn resolve_intent_deployment(
+pub(crate) async fn resolve_intent_deployment(
     state: &AppState,
     deployment_id: &str,
 ) -> std::result::Result<Option<StrategyDeployment>, (StatusCode, String)> {
@@ -241,7 +241,7 @@ pub(super) async fn resolve_intent_deployment(
     Ok(Some(dep.clone()))
 }
 
-pub(super) fn sidecar_orders_live_enabled() -> bool {
+pub(crate) fn sidecar_orders_live_enabled() -> bool {
     env_bool(&["PLOY_SIDECAR_ORDERS_LIVE_ENABLED"])
 }
 
@@ -257,7 +257,7 @@ fn normalize_meta<'a>(metadata: &'a HashMap<String, String>, keys: &[&str]) -> O
         .filter(|v| !v.is_empty())
 }
 
-pub(super) fn validate_deployment_binding(
+pub(crate) fn validate_deployment_binding(
     deployment: &StrategyDeployment,
     domain: Domain,
     market_slug: &str,
@@ -351,7 +351,7 @@ pub(super) fn validate_deployment_binding(
     Ok(())
 }
 
-pub(super) fn apply_deployment_metadata(
+pub(crate) fn apply_deployment_metadata(
     metadata: &mut HashMap<String, String>,
     deployment: &StrategyDeployment,
 ) {
@@ -421,7 +421,7 @@ pub(super) fn apply_deployment_metadata(
     }
 }
 
-pub(super) fn deployment_default_priority(deployment: &StrategyDeployment) -> OrderPriority {
+pub(crate) fn deployment_default_priority(deployment: &StrategyDeployment) -> OrderPriority {
     match deployment.priority {
         p if p >= 90 => OrderPriority::Critical,
         p if p >= 70 => OrderPriority::High,
@@ -434,7 +434,7 @@ fn external_critical_priority_allowed() -> bool {
     env_bool(&["PLOY_ALLOW_EXTERNAL_CRITICAL_PRIORITY"])
 }
 
-pub(super) fn clamp_external_priority(priority: OrderPriority) -> OrderPriority {
+pub(crate) fn clamp_external_priority(priority: OrderPriority) -> OrderPriority {
     if priority == OrderPriority::Critical && !external_critical_priority_allowed() {
         return OrderPriority::High;
     }
@@ -448,7 +448,7 @@ fn side_to_label(side: Side) -> String {
     }
 }
 
-pub(super) fn broadcast_sidecar_activity(
+pub(crate) fn broadcast_sidecar_activity(
     state: &AppState,
     intent_id: &str,
     market_slug: &str,
@@ -500,14 +500,14 @@ pub(super) fn broadcast_sidecar_activity(
     }));
 }
 
-pub(super) fn parse_sidecar_domain(
+pub(crate) fn parse_sidecar_domain(
     raw: Option<&str>,
     default_domain: Domain,
 ) -> std::result::Result<Domain, (StatusCode, String)> {
     Domain::parse_optional(raw, default_domain).map_err(|msg| (StatusCode::BAD_REQUEST, msg))
 }
 
-pub(super) fn parse_binary_side(
+pub(crate) fn parse_binary_side(
     raw: Option<&str>,
 ) -> std::result::Result<Side, (StatusCode, String)> {
     let Some(raw) = raw else {
@@ -523,7 +523,7 @@ pub(super) fn parse_binary_side(
     }
 }
 
-pub(super) fn parse_is_buy(
+pub(crate) fn parse_is_buy(
     order_side: Option<&str>,
     is_buy: Option<bool>,
 ) -> std::result::Result<bool, (StatusCode, String)> {
@@ -556,7 +556,7 @@ pub(super) fn parse_is_buy(
     Ok(parsed_order_side.unwrap_or(true))
 }
 
-pub(super) fn parse_order_priority(
+pub(crate) fn parse_order_priority(
     raw: Option<&str>,
 ) -> std::result::Result<OrderPriority, (StatusCode, String)> {
     match raw.unwrap_or("normal").trim().to_ascii_lowercase().as_str() {
@@ -575,7 +575,7 @@ pub(super) fn parse_order_priority(
     }
 }
 
-pub(super) fn map_coordinator_submit_error(prefix: &str, err: PloyError) -> (StatusCode, String) {
+pub(crate) fn map_coordinator_submit_error(prefix: &str, err: PloyError) -> (StatusCode, String) {
     match err {
         PloyError::Validation(msg) => (StatusCode::CONFLICT, format!("{}: {}", prefix, msg)),
         other => (

@@ -4,9 +4,10 @@
 //! associative memory over recent kline return patterns.
 
 use super::engine::{PatternMemory, Posterior};
-use crate::domain::{OrderType, Side, TimeInForce};
+use crate::domain::{OrderRequest, OrderType, Quote, Side, TimeInForce};
 use crate::error::{PloyError, Result};
 use crate::platform::Domain;
+use crate::strategy::multi_outcome::{ExpectedValue, POLYMARKET_FEE_RATE};
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,

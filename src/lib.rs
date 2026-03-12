@@ -21,6 +21,7 @@ pub mod persistence;
 pub mod platform;
 pub mod plugins;
 pub mod safety;
+pub mod services;
 pub mod signing;
 pub mod strategy;
 pub mod tui;
@@ -49,11 +50,6 @@ pub use error::{PloyError, Result};
 pub use persistence::{
     CheckpointConfig, CheckpointService, Checkpointable, DLQHandler, DLQProcessor,
     DLQProcessorConfig, EventMetadata, EventStore, StoredEvent,
-};
-pub use platform::{
-    AgentStatus, DeploymentState, Domain, ExecutionReport, IntentPurpose, MarketSelector,
-    OrderCommand, OrderExecutionReport, OrderIntent, RiskDecision, RiskDecisionStatus, RiskGate,
-    StrategyDeployment, Timeframe, TradeIntent,
 };
 pub use signing::Wallet;
 // RL exports (when feature enabled)

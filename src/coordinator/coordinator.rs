@@ -8,12 +8,13 @@
 //!   - Periodically drain the queue and execute orders
 //!   - Periodically refresh GlobalState from aggregators
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use sqlx::PgPool;
@@ -22,23 +23,28 @@ use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
     AgentRiskParams, DeploymentState, Domain, MarketSelector, OrderIntent, OrderPriority,
-    OrderQueue, PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
+    StrategyDeployment,
 };
 use crate::strategy::execution::executor::OrderExecutor;
 
 use super::admission::{
     buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason, AdmissionController,
+    IntentDuplicateGuard,
 };
 use super::capital::CapitalPolicy;
-use super::command::{CoordinatorCommand, CoordinatorControlCommand};
-use super::config::CoordinatorConfig;
+use super::command::{
+    CoordinatorCommand, CoordinatorControlCommand, DomainIngressSnapshot, GovernanceAgentSnapshot,
+    GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
+    GovernanceStatusSnapshot,
+};
+use super::capital::CryptoHorizon;
+use super::config::{CoordinatorConfig, DuplicateGuardScope};
 use super::governance::{governance_block_reason, GovernanceController, IngressMode};
 use super::journal::ExecutionJournal;
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;
 use super::risk::{RiskCheckResult, RiskGate};
-use super::state::{AgentSnapshot, GlobalState};
-use crate::platform::{Domain, OrderIntent};
+use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 
 mod control_surface;
 mod execution;
@@ -478,22 +484,6 @@ fn intent_deployment_scope(intent: &OrderIntent) -> String {
     )
 }
 
-fn buy_intent_missing_deployment_reason(intent: &OrderIntent) -> Option<String> {
-    if !intent.is_buy {
-        return None;
-    }
-
-    let has_deployment_id = intent
-        .deployment_id()
-        .and_then(normalized_identity_component)
-        .is_some();
-
-    if has_deployment_id {
-        None
-    } else {
-        Some("BUY intent missing required metadata field 'deployment_id'".to_string())
-    }
-}
 
 fn deployment_state_label(state: DeploymentState) -> &'static str {
     match state {
@@ -520,49 +510,6 @@ fn deployment_lifecycle_violation_reason(
     ))
 }
 
-fn sell_reduce_only_violation_reason(
-    intent: &OrderIntent,
-    tracked_open_shares: u64,
-    pending_sell_shares: u64,
-) -> Option<String> {
-    if intent.is_buy {
-        return None;
-    }
-
-    if tracked_open_shares == 0 {
-        return Some(format!(
-            "SELL intent reduce-only violation: no tracked open shares for token_id={} side={} in domain={}",
-            intent.token_id,
-            intent.side.as_str(),
-            intent.domain
-        ));
-    }
-
-    let available_shares = tracked_open_shares.saturating_sub(pending_sell_shares);
-    if available_shares == 0 {
-        return Some(format!(
-            "SELL intent reduce-only violation: tracked open shares {} are fully reserved by pending SELL intents {} for token_id={} side={}",
-            tracked_open_shares,
-            pending_sell_shares,
-            intent.token_id,
-            intent.side.as_str()
-        ));
-    }
-
-    if intent.shares > available_shares {
-        return Some(format!(
-            "SELL intent reduce-only violation: requested shares {} exceeds available reduce-only shares {} (tracked={}, pending_sell={}) for token_id={} side={}",
-            intent.shares,
-            available_shares,
-            tracked_open_shares,
-            pending_sell_shares,
-            intent.token_id,
-            intent.side.as_str()
-        ));
-    }
-
-    None
-}
 
 /// Resolve the notional reference price for sell-side exposure release.
 ///
@@ -591,52 +538,6 @@ fn sell_release_reference_price(
     (intent.limit_price > Decimal::ZERO).then_some((intent.limit_price, false))
 }
 
-fn governance_block_reason(
-    policy: &GovernancePolicy,
-    intent: &OrderIntent,
-    current_account_notional: Decimal,
-) -> Option<String> {
-    // Binary-options runtime: sell intents are treated as risk-reducing closes.
-    // Governance "new intent" gates must not block exits/de-risking.
-    if !intent.is_buy {
-        return None;
-    }
-
-    if policy.block_new_intents {
-        return Some("global governance policy blocks new intents".to_string());
-    }
-
-    if policy.blocked_domains.contains(&intent.domain) {
-        return Some(format!(
-            "domain '{}' is blocked by global governance policy",
-            governance_domain_label(intent.domain)
-        ));
-    }
-
-    let intent_notional = intent.notional_value();
-    if let Some(max_intent) = policy.max_intent_notional_usd {
-        if intent_notional > max_intent {
-            return Some(format!(
-                "intent notional {} exceeds governance max_intent_notional_usd {}",
-                intent_notional, max_intent
-            ));
-        }
-    }
-
-    if intent.is_buy {
-        if let Some(max_total) = policy.max_total_notional_usd {
-            let projected = current_account_notional + intent_notional;
-            if projected > max_total {
-                return Some(format!(
-                    "projected account notional {} exceeds governance max_total_notional_usd {}",
-                    projected, max_total
-                ));
-            }
-        }
-    }
-
-    None
-}
 
 async fn persist_governance_policy(
     pool: &PgPool,

@@ -8,18 +8,22 @@ use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::domain::{OrderStatus, Quote, Side};
+use uuid::Uuid;
+
+use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
 use crate::error::Result;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
     StrategyEventType, StrategyStateInfo,
 };
+use crate::strategy::volatility_arb::calculate_implied_volatility;
 
 use super::config::GammaScalpingConfig;
-use super::rebalancer::{Rebalancer, Straddle};
+use super::greeks::{binary_greeks, realized_vol_from_closes};
+use super::rebalancer::{RebalanceAction, Rebalancer, Straddle};
 
 mod decision_flow;
 

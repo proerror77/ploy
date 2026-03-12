@@ -590,7 +590,6 @@ symbols = ["BTCUSDT"]
             DataFeed::PolymarketEvents { series_ids } if series_ids == &vec!["10684".to_string()]
         )));
     }
-    }
 
     #[tokio::test]
     async fn test_market_update_routed_to_running_strategy() {
