@@ -73,3 +73,62 @@ fn ssh_workflows_require_host_key_verification() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn release_workflows_enforce_systemd_guardrails() {
+    let workflows = [
+        (
+            ".github/workflows/release-aliyun.yml",
+            vec![
+                "StartLimitIntervalSec=300",
+                "StartLimitBurst=5",
+                "Restart=always",
+                "RestartSec=${PLOY_SYSTEMD_RESTART_SEC}",
+                "MemoryHigh=${PLOY_SYSTEMD_MEMORY_HIGH}",
+                "MemoryMax=${PLOY_SYSTEMD_MEMORY_MAX}",
+                "OOMPolicy=kill",
+            ],
+        ),
+        (
+            ".github/workflows/deploy-prebuilt.yml",
+            vec![
+                "StartLimitIntervalSec=300",
+                "StartLimitBurst=5",
+                "Restart=always",
+                "RestartSec=5",
+                "MemoryHigh=1280M",
+                "MemoryMax=1536M",
+                "OOMPolicy=kill",
+            ],
+        ),
+        (
+            ".github/workflows/deploy-tango21.yml",
+            vec![
+                "StartLimitIntervalSec=300",
+                "StartLimitBurst=5",
+                "Restart=always",
+                "RestartSec=5",
+                "MemoryHigh=1280M",
+                "MemoryMax=1536M",
+                "OOMPolicy=kill",
+            ],
+        ),
+    ];
+    let mut offenders = Vec::new();
+
+    for (workflow, needles) in workflows {
+        let content = workflow_contents(workflow);
+
+        for needle in needles {
+            if !content.contains(needle) {
+                offenders.push(format!("{workflow}: missing systemd guardrail `{needle}`"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "workflow systemd guardrail check failed:\n{}",
+        offenders.join("\n")
+    );
+}

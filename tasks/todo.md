@@ -5555,6 +5555,40 @@ Close the remaining `deploy-prebuilt` bootstrap gap under `R-43` and add the mis
 - `CARGO_TARGET_DIR=/tmp/ploy-r52 rtk cargo test test_set_global_mode_clears_domain_overrides --lib -- --exact --nocapture`
 - `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/deploy-prebuilt.yml"); puts "yaml ok"'`
 
+# Dependency Audit Green Wave (2026-03-12)
+
+## Goal
+Make the existing `cargo audit` workflow step actionable on this branch by upgrading the real vulnerable lockfile entries we can safely patch now and documenting the one remaining temporary exception.
+
+## Outcomes
+
+- [x] Upgraded `bytes` to `1.11.1` and `time` to `0.3.47` in `Cargo.lock`, including the required `num-conv`, `time-core`, and `time-macros` bumps.
+- [x] Left `RUSTSEC-2023-0071` as a temporary `cargo audit` exception with inline rationale because the current `sqlx 0.8.6` lockfile still carries an unused mysql/rsa chain.
+- [x] Added a workflow guard regression that keeps both the audit exception and the strict SSH host-key checks from regressing.
+
+## Validation
+
+- `cargo audit --db /tmp/ploy-advisory-db-2 --no-fetch --stale --ignore RUSTSEC-2023-0071`
+- `CARGO_TARGET_DIR=/tmp/ploy-audit-green rtk cargo check --lib --message-format=short`
+- `CARGO_TARGET_DIR=/tmp/ploy-audit-green-tests rtk cargo test ci_security_workflows_keep_audit_and_strict_host_key_checks --test workflow_migrations -- --exact --nocapture`
+
+# CLI Infra SSH Hardening Wave (2026-03-12)
+
+## Goal
+Carry the workflow SSH hardening pattern into the operator CLI so local `ploy infra` commands stop bypassing host-key verification and stop relying on unexpanded `~/.ssh/...` identity paths.
+
+## Outcomes
+
+- [x] Replaced `StrictHostKeyChecking=no` in `src/cli/infra.rs` with host-key prefetch via `ssh-keyscan` plus `StrictHostKeyChecking=yes`.
+- [x] Normalized CLI SSH identity paths by expanding `~/...` before passing them to `ssh`.
+- [x] Added unit coverage for home-path expansion and strict SSH argument construction.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-cli-infra rtk cargo test cli::infra::tests::expand_home_path_rewrites_tilde_prefix --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-cli-infra rtk cargo test cli::infra::tests::ssh_identity_path_uses_expanded_key_path --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-cli-infra rtk cargo test cli::infra::tests::ssh_base_args_for_target_enforces_host_key_verification --lib -- --exact --nocapture`
+
 # Workflow Security Hardening Wave (2026-03-12)
 
 ## Goal
@@ -5565,9 +5599,11 @@ Close the remaining high-priority workflow security findings by adding dependenc
 - [x] Added `cargo audit` installation and execution to `.github/workflows/test.yml`.
 - [x] Replaced the AWS helper workflows' `StrictHostKeyChecking=no`/TOFU SSH setup with pinned `AWS_EC2_KNOWN_HOSTS` trust plus explicit host-entry validation.
 - [x] Added workflow guard tests so CI fails if dependency audit or host key verification regresses.
+- [x] Brought the legacy deploy workflows back under the trading-host systemd guardrail policy (`StartLimit*`, `RestartSec=5`, memory caps, `OOMPolicy=kill`).
 
 ## Validation
 
 - `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test ci_runs_dependency_vulnerability_audit --test workflow_security -- --exact --nocapture`
 - `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test ssh_workflows_require_host_key_verification --test workflow_security -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test release_workflows_enforce_systemd_guardrails --test workflow_security -- --exact --nocapture`
 - `ruby -e 'require "yaml"; %w[test.yml deploy-aws-jp.yml get-logs.yml stop-trading.yml].each { |f| YAML.load_file(File.join(\".github/workflows\", f)) }; puts \"yaml ok\"'`

@@ -384,6 +384,9 @@ jobs:
               local dropin_dir="/etc/systemd/system/${unit}.service.d"
               $SUDO mkdir -p "$dropin_dir"
               printf '%s\n' \
+                '[Unit]' \
+                'StartLimitIntervalSec=300' \
+                'StartLimitBurst=5' \
                 '[Service]' \
                 'Restart=always' \
                 "RestartSec=${PLOY_SYSTEMD_RESTART_SEC}" \

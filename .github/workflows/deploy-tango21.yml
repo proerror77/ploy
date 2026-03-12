@@ -164,6 +164,8 @@ jobs:
         [Unit]
         Description=Ploy Trading Backend
         After=network.target
+        StartLimitIntervalSec=300
+        StartLimitBurst=5
 
         [Service]
         Type=simple
@@ -171,7 +173,10 @@ jobs:
         WorkingDirectory=/home/ubuntu/ploy/backend
         ExecStart=/home/ubuntu/ploy/backend/target/release/ploy
         Restart=always
-        RestartSec=10
+        RestartSec=5
+        MemoryHigh=1280M
+        MemoryMax=1536M
+        OOMPolicy=kill
         Environment="RUST_LOG=info"
 
         [Install]

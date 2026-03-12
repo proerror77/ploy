@@ -231,6 +231,8 @@ jobs:
         [Unit]
         Description=Ploy Trading Backend
         After=network.target postgresql.service
+        StartLimitIntervalSec=300
+        StartLimitBurst=5
 
         [Service]
         Type=simple
@@ -238,7 +240,10 @@ jobs:
         WorkingDirectory=/home/ubuntu/ploy
         ExecStart=/home/ubuntu/ploy/bin/ploy
         Restart=always
-        RestartSec=10
+        RestartSec=5
+        MemoryHigh=1280M
+        MemoryMax=1536M
+        OOMPolicy=kill
         Environment="RUST_LOG=info,ploy=debug"
         Environment="DATABASE_URL=postgresql://ploy:ploy@localhost:5432/ploy"
         Environment="POLYMARKET_PRIVATE_KEY=${{ secrets.POLYMARKET_PRIVATE_KEY }}"
