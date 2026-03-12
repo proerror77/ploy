@@ -5774,3 +5774,27 @@ Stop managed split-arb runtimes from spawning duplicate order poll tasks for the
   - `CARGO_TARGET_DIR=/tmp/ploy-split-poll-guard rtk cargo check --lib`
   - `CARGO_TARGET_DIR=/tmp/ploy-split-poll-guard rtk cargo test test_split_arb_poll_registry_deduplicates_active_order --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-split-poll-guard rtk cargo test test_split_arb_poll_registry_rejects_dead_runtime --lib -- --exact --nocapture`
+# WebSocket Admin Auth Hardening (2026-03-12)
+
+## Goal
+Move WebSocket admin authentication onto the same cookie/header surface as the rest of the API so admin tokens stop leaking through URL query strings, while preserving `?token=` only as a compatibility fallback.
+
+## File ownership
+
+- `src/api/websocket.rs`
+  - owner: WebSocket admin auth surface and focused auth regressions
+
+## Tasks
+
+- [x] Accept the normal admin auth surface for WebSocket upgrades (`cookie` / `Authorization` / `x-ploy-admin-token`).
+- [x] Keep query-token auth only as a compatibility fallback.
+- [x] Add focused regression coverage for header/cookie/query auth behavior.
+- [x] Re-run `api_ws` feature compile plus focused auth regression after the cut.
+
+## Progress notes
+
+- 2026-03-12: Updated [websocket.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/websocket.rs) so WebSocket upgrades now reuse the normal admin auth surface through `ensure_admin_authorized(...)`, with `?token=` retained only as a compatibility fallback.
+- 2026-03-12: Added focused coverage for bearer header auth, signed admin cookie auth, legacy cookie compatibility, valid query fallback, and invalid query rejection.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-websocket-auth-ws rtk cargo check --lib --features api_ws`
+  - `CARGO_TARGET_DIR=/tmp/ploy-websocket-auth-ws rtk cargo test websocket_admin_authorized_accepts_header_cookie_and_query_fallback --lib --features api_ws -- --nocapture`
