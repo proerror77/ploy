@@ -5262,3 +5262,24 @@ Close `R-43` by removing ad-hoc raw `psql` migration execution from the deploy w
 
 - The fix keeps raw `psql` only for database/user bootstrap in the deprecated prebuilt path; schema migrations themselves now go through tracked SQLx migration history.
 - The Aliyun path continues to honor the trading-host rule by building `sqlx-cli` in CI and shipping the binary in the release bundle instead of compiling on-host.
+
+# Governance Native Async Trait Wave (2026-03-12)
+
+## Goal
+Take the smallest safe `R-40` slice by retiring `#[async_trait]` from the governance-only agent contract without touching dyn-heavy strategy, exchange, or runtime storage traits.
+
+## Outcomes
+
+- [x] Replaced `GovernanceAgent`'s `#[async_trait]` contract with a native future-returning trait method.
+- [x] Updated `OpenClawAgent` to implement the contract via `async move` RPITIT-style return.
+- [x] Left dyn-heavy async traits (`Strategy`, `ExchangeClient`, `EngineStore`, `RuntimeOrderStore`, `EventDataSource`) untouched.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-r40 rtk cargo check --lib`
+- `CARGO_TARGET_DIR=/tmp/ploy-r40-tests rtk cargo test regime_policy --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r40-tests2 rtk cargo test regime_display --lib -- --exact --nocapture`
+
+## Notes
+
+- This slice intentionally avoids `pub trait async fn` syntax to sidestep the public-trait warning and avoids any trait-object redesign because `GovernanceAgent` has no dyn consumers on this branch.
