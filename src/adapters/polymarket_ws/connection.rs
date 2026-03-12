@@ -3,6 +3,7 @@ use crate::error::{PloyError, Result};
 use crate::services::HealthState;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,8 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, error, info, warn};
 use url::Url;
+
+const WS_WRITE_TIMEOUT_SECS: u64 = 10;
 
 /// Get proxy URL from environment variables
 fn get_proxy_url() -> Option<String> {
@@ -141,6 +144,38 @@ async fn connect_websocket_with_proxy(
         .map_err(PloyError::WebSocket)?;
 
     Ok(ws_stream)
+}
+
+async fn await_ws_write_with_timeout<F>(
+    operation: &'static str,
+    timeout_duration: Duration,
+    write_future: F,
+) -> Result<()>
+where
+    F: Future<Output = std::result::Result<(), tokio_tungstenite::tungstenite::Error>>,
+{
+    timeout(timeout_duration, write_future)
+        .await
+        .map_err(|_| {
+            PloyError::Internal(format!(
+                "Polymarket WebSocket {} timed out after {:?}",
+                operation, timeout_duration
+            ))
+        })?
+        .map_err(PloyError::WebSocket)?;
+    Ok(())
+}
+
+async fn await_ws_write<F>(operation: &'static str, write_future: F) -> Result<()>
+where
+    F: Future<Output = std::result::Result<(), tokio_tungstenite::tungstenite::Error>>,
+{
+    await_ws_write_with_timeout(
+        operation,
+        Duration::from_secs(WS_WRITE_TIMEOUT_SECS),
+        write_future,
+    )
+    .await
 }
 
 /// Initial subscription request
@@ -283,7 +318,7 @@ impl PolymarketWebSocket {
         };
 
         let msg_json = serde_json::to_string(&subscribe_msg)?;
-        write.send(Message::Text(msg_json.into())).await?;
+        await_ws_write("subscribe write", write.send(Message::Text(msg_json.into()))).await?;
         info!("Subscribed to {} tokens", token_ids.len());
 
         // Set up ping interval
@@ -306,7 +341,7 @@ impl PolymarketWebSocket {
                             }
                         }
                         Some(Ok(Message::Ping(data))) => {
-                            write.send(Message::Pong(data)).await?;
+                            await_ws_write("pong write", write.send(Message::Pong(data))).await?;
                         }
                         Some(Ok(Message::Close(_))) => {
                             info!("Received close frame");
@@ -323,7 +358,7 @@ impl PolymarketWebSocket {
                 }
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    write.send(Message::Ping(vec![].into())).await?;
+                    await_ws_write("ping write", write.send(Message::Ping(vec![].into()))).await?;
                     debug!("Sent ping");
                 }
                 // Connection health / resubscribe checks
@@ -344,5 +379,44 @@ impl PolymarketWebSocket {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::await_ws_write_with_timeout;
+    use std::time::Duration;
+    use tokio::time::sleep;
+    use tokio_tungstenite::tungstenite::Error;
+
+    #[tokio::test]
+    async fn ws_write_timeout_returns_internal_error() {
+        let err = await_ws_write_with_timeout(
+            "test write",
+            Duration::from_millis(5),
+            async {
+                sleep(Duration::from_millis(50)).await;
+                Ok::<(), Error>(())
+            },
+        )
+        .await
+        .expect_err("timed-out write should return an error");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("test write timed out"),
+            "unexpected error: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_write_timeout_allows_fast_write() {
+        await_ws_write_with_timeout(
+            "test write",
+            Duration::from_millis(50),
+            async { Ok::<(), Error>(()) },
+        )
+        .await
+        .expect("fast write should succeed");
     }
 }
