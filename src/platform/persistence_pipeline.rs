@@ -78,6 +78,8 @@ impl Default for PersistenceConfig {
 pub enum PersistenceEvent {
     /// CLOB quote tick (from Polymarket WS).
     ClobQuote(ClobQuoteTick),
+    /// Raw CLOB price-change tick (from Polymarket WS).
+    ClobPriceChange(ClobPriceChangeTick),
     /// Binance spot price tick.
     BinancePrice(BinancePriceTick),
     /// Binance LOB snapshot.
@@ -96,6 +98,16 @@ pub struct ClobQuoteTick {
     pub best_ask: Option<Decimal>,
     pub bid_size: Option<Decimal>,
     pub ask_size: Option<Decimal>,
+    pub domain: Domain,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClobPriceChangeTick {
+    pub token_id: String,
+    pub market: String,
+    pub side: Option<String>,
+    pub price: Decimal,
     pub domain: Domain,
     pub received_at: DateTime<Utc>,
 }
@@ -227,6 +239,7 @@ impl PersistencePipelineHandle {
 pub struct PipelineStats {
     pub clob_quotes_persisted: u64,
     pub clob_quotes_deduped: u64,
+    pub clob_price_changes_persisted: u64,
     pub binance_prices_persisted: u64,
     pub binance_prices_deduped: u64,
     pub binance_lobs_persisted: u64,

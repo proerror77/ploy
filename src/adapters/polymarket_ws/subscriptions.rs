@@ -7,6 +7,11 @@ impl PolymarketWebSocket {
         self.update_tx.subscribe()
     }
 
+    /// Get a receiver for raw price-change updates.
+    pub fn subscribe_price_changes(&self) -> broadcast::Receiver<PriceChangeUpdate> {
+        self.price_change_tx.subscribe()
+    }
+
     /// Get a receiver for order book snapshot updates (full bid/ask ladders).
     pub fn subscribe_books(&self) -> broadcast::Receiver<Arc<BookMessage>> {
         self.book_tx.subscribe()

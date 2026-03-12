@@ -31,6 +31,7 @@ pub struct PolymarketWebSocket {
     /// `Side` mapping (ex: YES/NO sports markets).
     extra_tokens: Arc<RwLock<HashSet<String>>>,
     update_tx: broadcast::Sender<QuoteUpdate>,
+    price_change_tx: broadcast::Sender<PriceChangeUpdate>,
     book_tx: broadcast::Sender<Arc<BookMessage>>,
     reconnect_delay: Duration,
     max_reconnect_attempts: u32,
@@ -50,6 +51,14 @@ pub struct QuoteUpdate {
     pub quote: Quote,
 }
 
+#[derive(Debug, Clone)]
+pub struct PriceChangeUpdate {
+    pub market: String,
+    pub token_id: String,
+    pub side: Option<Side>,
+    pub price: rust_decimal::Decimal,
+}
+
 impl PolymarketWebSocket {
     /// Create a new WebSocket client
     pub fn new(ws_url: &str) -> Self {
@@ -59,6 +68,7 @@ impl PolymarketWebSocket {
     /// Create a new WebSocket client with custom circuit breaker config
     pub fn with_circuit_breaker(ws_url: &str, cb_config: CircuitBreakerConfig) -> Self {
         let (update_tx, _) = broadcast::channel(1000);
+        let (price_change_tx, _) = broadcast::channel(2000);
         // Book snapshots can be significantly larger than quotes; keep a smaller buffer.
         let (book_tx, _) = broadcast::channel(256);
 
@@ -68,6 +78,7 @@ impl PolymarketWebSocket {
             token_to_side: Arc::new(RwLock::new(HashMap::new())),
             extra_tokens: Arc::new(RwLock::new(HashSet::new())),
             update_tx,
+            price_change_tx,
             book_tx,
             reconnect_delay: Duration::from_secs(1),
             max_reconnect_attempts: 10,
@@ -330,6 +341,60 @@ mod tests {
         assert!(
             staleness.is_some(),
             "freshness should be recorded after book update"
+        );
+        assert!(
+            staleness.unwrap() < 1.0,
+            "staleness should be very low (just recorded)"
+        );
+    }
+
+    #[tokio::test]
+    async fn characterization_price_changes_emit_raw_updates() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("0xprice", Side::Up).await;
+
+        let mut rx = ws.subscribe_price_changes();
+
+        let json = r#"{
+            "market": "0xmarket-price",
+            "price_changes": [
+                {"asset_id": "0xprice", "price": "0.61"}
+            ]
+        }"#;
+
+        let handled = ws.handle_message(json).await;
+        assert!(handled, "price_changes payload should be handled");
+
+        let update = rx.try_recv().expect("should receive PriceChangeUpdate");
+        assert_eq!(update.market, "0xmarket-price");
+        assert_eq!(update.token_id, "0xprice");
+        assert_eq!(update.side, Some(Side::Up));
+        assert_eq!(update.price, dec!(0.61));
+    }
+
+    #[tokio::test]
+    async fn characterization_price_changes_record_freshness() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        ws.register_token("0xpricefresh", Side::Up).await;
+
+        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        ws.set_freshness(freshness.clone());
+
+        let json = r#"{
+            "market": "0xmarket-price",
+            "price_changes": [
+                {"asset_id": "0xpricefresh", "price": "0.61"}
+            ]
+        }"#;
+
+        let handled = ws.handle_message(json).await;
+        assert!(handled, "price_changes payload should be handled");
+
+        let staleness =
+            freshness.staleness(crate::platform::DataSource::PolymarketWs, "0xpricefresh");
+        assert!(
+            staleness.is_some(),
+            "freshness should be recorded after price change"
         );
         assert!(
             staleness.unwrap() < 1.0,

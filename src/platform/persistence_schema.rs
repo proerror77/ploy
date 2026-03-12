@@ -51,6 +51,44 @@ pub async fn ensure_clob_quote_ticks_table(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+pub async fn ensure_clob_price_change_ticks_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS clob_price_change_ticks (
+            id BIGSERIAL PRIMARY KEY,
+            token_id TEXT NOT NULL,
+            market TEXT NOT NULL,
+            side TEXT,
+            price NUMERIC(10,6) NOT NULL,
+            domain TEXT,
+            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clob_price_change_ticks_token_time ON clob_price_change_ticks(token_id, received_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clob_price_change_ticks_market_time ON clob_price_change_ticks(market, received_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clob_price_change_ticks_domain_time ON clob_price_change_ticks(domain, received_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn ensure_binance_price_ticks_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"

@@ -10,7 +10,7 @@ use super::freshness::{DataPlaneFreshness, DataSource};
 use crate::adapters::polymarket_ws::BookMessage;
 use crate::adapters::{
     BinanceKlineWebSocket, BinanceWebSocket, ChainlinkRtds, ChainlinkUpdate, KlineUpdate,
-    PolymarketWebSocket, PriceUpdate, QuoteUpdate,
+    PolymarketWebSocket, PriceChangeUpdate, PriceUpdate, QuoteUpdate,
 };
 use crate::error::{PloyError, Result};
 
@@ -83,6 +83,10 @@ impl CryptoDataPlaneHandle {
 
     pub fn subscribe_quotes(&self) -> broadcast::Receiver<QuoteUpdate> {
         self.polymarket_ws.subscribe_updates()
+    }
+
+    pub fn subscribe_price_changes(&self) -> broadcast::Receiver<PriceChangeUpdate> {
+        self.polymarket_ws.subscribe_price_changes()
     }
 
     pub fn price_cache(&self) -> crate::adapters::PriceCache {
@@ -240,6 +244,12 @@ impl PlatformDataPlane {
 
     pub fn subscribe_quotes(&self) -> Option<broadcast::Receiver<QuoteUpdate>> {
         self.polymarket_ws.as_ref().map(|ws| ws.subscribe_updates())
+    }
+
+    pub fn subscribe_price_changes(&self) -> Option<broadcast::Receiver<PriceChangeUpdate>> {
+        self.polymarket_ws
+            .as_ref()
+            .map(|ws| ws.subscribe_price_changes())
     }
 
     pub fn subscribe_prices(&self) -> Option<broadcast::Receiver<PriceUpdate>> {

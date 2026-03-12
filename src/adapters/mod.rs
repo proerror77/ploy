@@ -27,7 +27,7 @@ pub use polymarket_clob::{
 };
 pub use polymarket_ws::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerState, DisplayQuote, PolymarketWebSocket,
-    QuoteCache, QuoteUpdate,
+    PriceChangeUpdate, QuoteCache, QuoteUpdate,
 };
 pub use postgres::{
     DailyMetrics, IncompleteCycle, OrphanedOrder, PersistedState, PostgresStore, RecoverySummary,

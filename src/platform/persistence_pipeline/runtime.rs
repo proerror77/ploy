@@ -43,6 +43,7 @@ struct DedupState {
 #[derive(Debug, Default)]
 struct PendingBuffers {
     quotes: Vec<ClobQuoteTick>,
+    price_changes: Vec<ClobPriceChangeTick>,
     prices: Vec<BinancePriceTick>,
     lobs: Vec<BinanceLobTick>,
     chainlink_prices: Vec<ChainlinkPriceTick>,
@@ -52,6 +53,7 @@ struct PendingBuffers {
 impl PendingBuffers {
     fn len(&self) -> usize {
         self.quotes.len()
+            + self.price_changes.len()
             + self.prices.len()
             + self.lobs.len()
             + self.chainlink_prices.len()
@@ -60,6 +62,7 @@ impl PendingBuffers {
 
     fn is_empty(&self) -> bool {
         self.quotes.is_empty()
+            && self.price_changes.is_empty()
             && self.prices.is_empty()
             && self.lobs.is_empty()
             && self.chainlink_prices.is_empty()
@@ -112,6 +115,7 @@ impl PersistencePipeline {
                 debug!(
                     quotes = stats.clob_quotes_persisted,
                     quotes_dedup = stats.clob_quotes_deduped,
+                    price_changes = stats.clob_price_changes_persisted,
                     prices = stats.binance_prices_persisted,
                     lobs = stats.binance_lobs_persisted,
                     chainlink = stats.chainlink_prices_persisted,
@@ -143,6 +147,9 @@ impl PersistencePipeline {
                 } else {
                     stats.clob_quotes_deduped += 1;
                 }
+            }
+            PersistenceEvent::ClobPriceChange(tick) => {
+                buffers.price_changes.push(tick);
             }
             PersistenceEvent::BinancePrice(tick) => {
                 if Self::should_persist_price(&tick, dedup, config) {
@@ -182,6 +189,14 @@ impl PersistencePipeline {
                 warn!(error = %e, token = %tick.token_id, "clob quote persist failed");
             } else {
                 stats.clob_quotes_persisted += 1;
+            }
+        }
+
+        for tick in buffers.price_changes.drain(..) {
+            if let Err(e) = Self::write_clob_price_change(pool, &tick).await {
+                warn!(error = %e, token = %tick.token_id, "clob price-change persist failed");
+            } else {
+                stats.clob_price_changes_persisted += 1;
             }
         }
 
@@ -365,6 +380,27 @@ impl PersistencePipeline {
         .bind(tick.price)
         .bind(tick.quantity)
         .bind(tick.trade_time)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn write_clob_price_change(
+        pool: &PgPool,
+        tick: &ClobPriceChangeTick,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"INSERT INTO clob_price_change_ticks
+               (token_id, market, side, price, domain, received_at)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(&tick.token_id)
+        .bind(&tick.market)
+        .bind(&tick.side)
+        .bind(tick.price)
+        .bind(tick.domain.to_string())
+        .bind(tick.received_at)
         .execute(pool)
         .await?;
         Ok(())

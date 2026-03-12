@@ -1,4 +1,4 @@
-use super::{PolymarketWebSocket, QuoteUpdate};
+use super::{PolymarketWebSocket, PriceChangeUpdate, QuoteUpdate};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -190,10 +190,24 @@ impl PolymarketWebSocket {
     /// Process price changes message
     pub(super) async fn process_price_changes(&self, msg: PriceChangesMessage) {
         for change in msg.price_changes {
-            if let (Some(side), Ok(price)) = (
-                self.get_side(&change.asset_id).await,
-                change.price.parse::<Decimal>(),
-            ) {
+            let Ok(price) = change.price.parse::<Decimal>() else {
+                continue;
+            };
+            let side = self.get_side(&change.asset_id).await;
+
+            if let Some(f) = self.freshness.get() {
+                f.record_update(crate::platform::DataSource::PolymarketWs, &change.asset_id);
+            }
+
+            let raw_update = PriceChangeUpdate {
+                market: msg.market.clone(),
+                token_id: change.asset_id.clone(),
+                side,
+                price,
+            };
+            let _ = self.price_change_tx.send(raw_update);
+
+            if let Some(side) = side {
                 debug!("Price change {}: {}", side, price);
                 self.quote_cache
                     .update(&change.asset_id, side, None, None, None, None);
