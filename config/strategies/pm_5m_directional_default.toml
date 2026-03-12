@@ -50,3 +50,5 @@ max_daily_trades = 0
 use_kelly_sizing = true
 kelly_fraction_scale = 0.15
 kelly_fraction_cap = 0.25
+initial_nav_usd = 10000
+max_nav_fraction_per_trade = 0.01

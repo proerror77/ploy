@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
@@ -61,6 +61,8 @@ struct Pm5mDirectionalConfig {
     use_kelly_sizing: bool,
     kelly_fraction_scale: f64,
     kelly_fraction_cap: f64,
+    initial_nav_usd: Decimal,
+    max_nav_fraction_per_trade: f64,
 }
 
 impl Default for Pm5mDirectionalConfig {
@@ -97,6 +99,8 @@ impl Default for Pm5mDirectionalConfig {
             use_kelly_sizing: true,
             kelly_fraction_scale: 0.15,
             kelly_fraction_cap: 0.25,
+            initial_nav_usd: dec!(10000),
+            max_nav_fraction_per_trade: 0.01,
         }
     }
 }
@@ -137,6 +141,10 @@ impl Pm5mDirectionalConfig {
         self.shares_per_trade = self.shares_per_trade.max(self.min_shares);
         self.kelly_fraction_scale = self.kelly_fraction_scale.max(0.0);
         self.kelly_fraction_cap = self.kelly_fraction_cap.clamp(0.01, 1.0);
+        if self.initial_nav_usd <= Decimal::ZERO {
+            self.initial_nav_usd = dec!(10000);
+        }
+        self.max_nav_fraction_per_trade = self.max_nav_fraction_per_trade.clamp(0.0, 1.0);
     }
 
     fn configured_symbols(&self) -> Vec<String> {
@@ -216,6 +224,8 @@ struct PendingOrder {
     side: Side,
     shares: u64,
     event_id: String,
+    limit_price: Decimal,
+    filled_qty: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +258,8 @@ pub struct Pm5mDirectionalStrategy {
     positions: HashMap<String, DirectionalPosition>,
     last_trade_at: HashMap<String, DateTime<Utc>>,
     daily_trades: u32,
+    nav_usd: Decimal,
+    realized_pnl_today: Decimal,
     last_reset: DateTime<Utc>,
     last_reason: Option<String>,
 }
@@ -265,6 +277,7 @@ impl Pm5mDirectionalStrategy {
 
         let mut cfg = parsed.pm_5m_directional;
         cfg.normalize();
+        let initial_nav_usd = cfg.initial_nav_usd;
         let symbols = cfg.configured_symbols();
         let series_ids = cfg.configured_series_ids();
         if series_ids.is_empty() {
@@ -290,6 +303,8 @@ impl Pm5mDirectionalStrategy {
             positions: HashMap::new(),
             last_trade_at: HashMap::new(),
             daily_trades: 0,
+            nav_usd: initial_nav_usd,
+            realized_pnl_today: Decimal::ZERO,
             last_reset: Utc::now(),
             last_reason: None,
         })
@@ -447,16 +462,73 @@ impl Pm5mDirectionalStrategy {
         }
     }
 
-    fn kelly_scaled_shares(&self, base_shares: u64, effective_p: f64, effective_cost: f64) -> u64 {
+    fn reserved_position_capital(&self) -> Decimal {
+        self.positions
+            .values()
+            .map(|position| position.entry_price * Decimal::from(position.shares))
+            .sum()
+    }
+
+    fn reserved_pending_capital(&self) -> Decimal {
+        self.pending_orders
+            .values()
+            .map(|pending| {
+                let remaining = pending.shares.saturating_sub(pending.filled_qty);
+                pending.limit_price * Decimal::from(remaining)
+            })
+            .sum()
+    }
+
+    fn available_nav_usd(&self) -> Decimal {
+        let available = self.nav_usd - self.reserved_position_capital() - self.reserved_pending_capital();
+        if available > Decimal::ZERO {
+            available
+        } else {
+            Decimal::ZERO
+        }
+    }
+
+    fn nav_capped_fallback_shares(&self, base_shares: u64, ask_price: Decimal) -> u64 {
+        if ask_price <= Decimal::ZERO {
+            return 0;
+        }
+        let available_nav = self.available_nav_usd();
+        if available_nav <= Decimal::ZERO {
+            return 0;
+        }
+        let Some(max_fraction) = Decimal::from_f64(self.cfg.max_nav_fraction_per_trade) else {
+            return 0;
+        };
+        let hard_cap_usd = (available_nav * max_fraction).min(available_nav);
+        let fallback_usd = ask_price * Decimal::from(base_shares);
+        let budget_usd = fallback_usd.min(hard_cap_usd);
+        (budget_usd / ask_price).floor().to_u64().unwrap_or(0)
+    }
+
+    fn kelly_scaled_shares(&self, base_shares: u64, ask_price: Decimal, effective_p: f64, effective_cost: f64) -> u64 {
+        if ask_price <= Decimal::ZERO {
+            return 0;
+        }
+
+        let fallback_shares = self.nav_capped_fallback_shares(base_shares, ask_price);
         if !self.cfg.use_kelly_sizing || effective_p <= effective_cost || effective_cost >= 1.0 {
-            return base_shares.max(self.cfg.min_shares);
+            return fallback_shares;
+        }
+
+        let available_nav = self.available_nav_usd();
+        if available_nav <= Decimal::ZERO {
+            return 0;
         }
 
         let full_kelly = ((effective_p - effective_cost) / (1.0 - effective_cost)).max(0.0);
-        let fractional = full_kelly * self.cfg.kelly_fraction_scale;
-        let multiplier = (fractional / self.cfg.kelly_fraction_cap).clamp(0.0, 1.0);
-        let scaled = (base_shares as f64 * multiplier).floor() as u64;
-        scaled.max(self.cfg.min_shares)
+        let capped_fraction = (full_kelly * self.cfg.kelly_fraction_scale)
+            .min(self.cfg.kelly_fraction_cap)
+            .min(self.cfg.max_nav_fraction_per_trade);
+        let Some(target_fraction) = Decimal::from_f64(capped_fraction) else {
+            return fallback_shares;
+        };
+        let target_usd = (available_nav * target_fraction).min(available_nav);
+        (target_usd / ask_price).floor().to_u64().unwrap_or(0)
     }
 
     fn build_submit_intent(
@@ -623,8 +695,11 @@ impl Pm5mDirectionalStrategy {
             return None;
         }
 
+        let estimated_shares = self
+            .nav_capped_fallback_shares(self.cfg.shares_per_trade, ask)
+            .max(1);
         let depth_ratio = if ask_size > Decimal::ZERO {
-            Decimal::from(self.cfg.shares_per_trade) / ask_size
+            Decimal::from(estimated_shares) / ask_size
         } else {
             Decimal::ONE
         };
@@ -637,7 +712,7 @@ impl Pm5mDirectionalStrategy {
         }
 
         let shares =
-            self.kelly_scaled_shares(self.cfg.shares_per_trade, effective_p, effective_cost);
+            self.kelly_scaled_shares(self.cfg.shares_per_trade, ask, effective_p, effective_cost);
         if shares < self.cfg.min_shares {
             self.last_reason = Some(format!("{symbol}:shares_below_min"));
             return None;
@@ -662,6 +737,8 @@ impl Pm5mDirectionalStrategy {
                 side,
                 shares,
                 event_id: event.event_id.clone(),
+                limit_price: ask,
+                filled_qty: 0,
             },
         );
         self.last_reason = Some(format!("{symbol}:submit"));
@@ -706,6 +783,11 @@ impl Pm5mDirectionalStrategy {
         metadata.insert("flow_2s".to_string(), format!("{flow_2s:.6}"));
         metadata.insert("microgap_proxy".to_string(), format!("{microgap:.6}"));
         metadata.insert("edge".to_string(), format!("{edge:.6}"));
+        metadata.insert("nav_usd".to_string(), self.nav_usd.to_string());
+        metadata.insert(
+            "available_nav_usd".to_string(),
+            self.available_nav_usd().to_string(),
+        );
         metadata.insert("dry_run".to_string(), self.dry_run.to_string());
 
         Some(vec![
@@ -879,8 +961,23 @@ impl Strategy for Pm5mDirectionalStrategy {
                 self.active_events.remove(event_id);
                 self.pending_orders
                     .retain(|_, pending| pending.event_id != *event_id);
-                self.positions
-                    .retain(|_, position| position.event_id != *event_id);
+                let mut realized = Decimal::ZERO;
+                self.positions.retain(|token_id, position| {
+                    if position.event_id != *event_id {
+                        return true;
+                    }
+                    let final_mark = position.current_price.or_else(|| {
+                        self.quotes
+                            .get(token_id)
+                            .and_then(|quote| quote.best_bid.or(quote.best_ask))
+                    });
+                    realized +=
+                        (final_mark.unwrap_or(position.entry_price) - position.entry_price)
+                            * Decimal::from(position.shares);
+                    false
+                });
+                self.nav_usd += realized;
+                self.realized_pnl_today += realized;
             }
             MarketUpdate::BinanceKline { .. } => {}
         }
@@ -895,8 +992,17 @@ impl Strategy for Pm5mDirectionalStrategy {
             .clone()
             .unwrap_or_else(|| update.order_id.clone());
 
-        if let Some(pending) = self.pending_orders.get(&order_key).cloned() {
-            match update.status {
+        let Some(pending) = ({
+            let pending = self.pending_orders.get_mut(&order_key);
+            pending.map(|pending| {
+                pending.filled_qty = update.filled_qty.min(pending.shares);
+                pending.clone()
+            })
+        }) else {
+            return Ok(actions);
+        };
+
+        match update.status {
                 OrderStatus::PartiallyFilled => {
                     let cumulative_filled = update.filled_qty.min(pending.shares);
                     let is_new_position = self.materialize_position(
@@ -984,7 +1090,6 @@ impl Strategy for Pm5mDirectionalStrategy {
                     });
                 }
                 _ => {}
-            }
         }
 
         Ok(actions)
@@ -1021,6 +1126,11 @@ impl Strategy for Pm5mDirectionalStrategy {
             "pending_orders".to_string(),
             self.pending_orders.len().to_string(),
         );
+        metrics.insert("nav_usd".to_string(), self.nav_usd.to_string());
+        metrics.insert(
+            "available_nav_usd".to_string(),
+            self.available_nav_usd().to_string(),
+        );
         if let Some(reason) = &self.last_reason {
             metrics.insert("last_reason".to_string(), reason.clone());
         }
@@ -1034,7 +1144,7 @@ impl Strategy for Pm5mDirectionalStrategy {
             pending_order_count: self.pending_orders.len(),
             total_exposure,
             unrealized_pnl,
-            realized_pnl_today: Decimal::ZERO,
+            realized_pnl_today: self.realized_pnl_today,
             last_update: Utc::now(),
             metrics,
         }
@@ -1088,6 +1198,8 @@ impl Strategy for Pm5mDirectionalStrategy {
         self.positions.clear();
         self.last_trade_at.clear();
         self.daily_trades = 0;
+        self.nav_usd = self.cfg.initial_nav_usd;
+        self.realized_pnl_today = Decimal::ZERO;
         self.last_reset = Utc::now();
         self.last_reason = None;
     }
@@ -1138,6 +1250,25 @@ min_time_remaining_secs = 15
 max_time_remaining_secs = 300
 no_trade_override_z = 99.0
 no_trade_override_flow = 99.0
+"#
+    }
+
+    fn nav_kelly_toml() -> &'static str {
+        r#"
+[strategy]
+name = "pm_5m_directional"
+enabled = true
+
+[pm_5m_directional]
+symbols = ["BTCUSDT"]
+shares_per_trade = 500
+min_shares = 1
+min_time_remaining_secs = 15
+max_time_remaining_secs = 300
+kelly_fraction_scale = 1.0
+kelly_fraction_cap = 0.25
+initial_nav_usd = 1000
+max_nav_fraction_per_trade = 0.01
 "#
     }
 
@@ -1322,6 +1453,71 @@ no_trade_override_flow = 99.0
     }
 
     #[tokio::test]
+    async fn nav_based_kelly_sizing_uses_current_nav_cap() {
+        let mut strategy =
+            Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), nav_kelly_toml(), true)
+                .expect("strategy");
+        let start = Utc::now();
+
+        for second in 0..30 {
+            let ts = start + chrono::Duration::seconds(second);
+            let price = dec!(100.05) + Decimal::new(second as i64, 3);
+            strategy
+                .on_market_update(&price_update(ts, price))
+                .await
+                .expect("history price");
+        }
+
+        let anchor = start + chrono::Duration::seconds(31);
+        strategy
+            .on_market_update(&event_update(anchor))
+            .await
+            .expect("event");
+        strategy
+            .on_market_update(&up_quote(anchor, dec!(0.20), dec!(0.19)))
+            .await
+            .expect("up quote");
+        strategy
+            .on_market_update(&down_quote(anchor, dec!(0.82), dec!(0.81)))
+            .await
+            .expect("down quote");
+        strategy
+            .on_market_update(&l2_update_full(
+                anchor,
+                dec!(0.30),
+                dec!(0.29),
+                dec!(0.25),
+                dec!(0.24),
+                dec!(0.22),
+                dec!(0.18),
+                dec!(1.0),
+            ))
+            .await
+            .expect("l2");
+
+        let mut submitted_shares = None;
+        for step in 0..8 {
+            let ts = anchor + chrono::Duration::milliseconds((step as i64) * 250);
+            let price = dec!(100.220) + Decimal::new(step as i64, 3);
+            let actions = strategy
+                .on_market_update(&price_update(ts, price))
+                .await
+                .expect("price");
+            for action in actions {
+                if let StrategyAction::SubmitIntent { intent } = action {
+                    submitted_shares = Some(intent.shares);
+                    break;
+                }
+            }
+            if submitted_shares.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(submitted_shares, Some(50));
+    }
+
+    #[tokio::test]
     async fn no_trade_zone_blocks_weak_mid_price_entry() {
         let mut strategy =
             Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), no_trade_toml(), true)
@@ -1481,6 +1677,8 @@ no_trade_override_flow = 99.0
                 side: Side::Up,
                 shares: 25,
                 event_id: "evt-btc-5m".to_string(),
+                limit_price: dec!(0.41),
+                filled_qty: 0,
             },
         );
 
@@ -1527,6 +1725,8 @@ no_trade_override_flow = 99.0
                 side: Side::Up,
                 shares: 25,
                 event_id: "evt-btc-5m".to_string(),
+                limit_price: dec!(0.41),
+                filled_qty: 0,
             },
         );
 
@@ -1611,5 +1811,50 @@ no_trade_override_flow = 99.0
         assert_eq!(state.unrealized_pnl, dec!(0.50));
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].unrealized_pnl, dec!(0.50));
+    }
+
+    #[tokio::test]
+    async fn event_expiry_realizes_marked_pnl_into_strategy_state() {
+        let mut strategy =
+            Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), nav_kelly_toml(), true)
+                .expect("strategy");
+        let start = Utc::now();
+
+        strategy.positions.insert(
+            "up-token".to_string(),
+            DirectionalPosition {
+                event_id: "evt-btc-5m".to_string(),
+                token_id: "up-token".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                side: Side::Up,
+                shares: 10,
+                entry_price: dec!(0.40),
+                current_price: Some(dec!(0.75)),
+                opened_at: start,
+                end_time: start + chrono::Duration::seconds(180),
+            },
+        );
+        strategy.active_events.insert(
+            "evt-btc-5m".to_string(),
+            TrackedEvent {
+                event_id: "evt-btc-5m".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                up_token_id: "up-token".to_string(),
+                down_token_id: "down-token".to_string(),
+                end_time: start + chrono::Duration::seconds(180),
+                price_to_beat: dec!(100),
+            },
+        );
+
+        strategy
+            .on_market_update(&MarketUpdate::EventExpired {
+                event_id: "evt-btc-5m".to_string(),
+            })
+            .await
+            .expect("event expired");
+
+        let state = strategy.state();
+        assert_eq!(state.realized_pnl_today, dec!(3.50));
+        assert!(strategy.positions.is_empty());
     }
 }

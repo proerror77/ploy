@@ -103,6 +103,20 @@ impl Pm5mDirectionalBacktestEngine {
         recorder: Box<dyn BacktestRecorder>,
     ) -> anyhow::Result<Self> {
         let strategy_config_toml = build_pm_5m_directional_runtime_config(&config.symbols)?;
+        let mut config_value: toml::Value = toml::from_str(&strategy_config_toml)?;
+        let root = config_value
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("pm_5m_directional runtime config must be a table"))?;
+        let strategy_cfg = root
+            .entry("pm_5m_directional")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("[pm_5m_directional] must be a table"))?;
+        strategy_cfg.insert(
+            "initial_nav_usd".to_string(),
+            toml::Value::Float(config.initial_capital.to_f64().unwrap_or(10_000.0)),
+        );
+        let strategy_config_toml = toml::to_string(&config_value)?;
         let strategy = Pm5mDirectionalStrategy::from_toml(
             "pm_5m_directional_backtest".to_string(),
             &strategy_config_toml,
@@ -357,10 +371,11 @@ impl Pm5mDirectionalBacktestEngine {
                         .get(&event_slug)
                         .and_then(|state| state.end_time)
                         .unwrap_or(ts);
-                    self.settle_event(&event_slug, outcome, settle_ts);
+                    self.publish_settlement_quotes(&event_slug, outcome, settle_ts);
                     self.dispatch_market_update(StrategyMarketUpdate::EventExpired {
                         event_id: event_slug.clone(),
                     });
+                    self.settle_event(&event_slug, outcome, settle_ts);
                     self.event_states.remove(&event_slug);
                 }
             }
@@ -373,6 +388,43 @@ impl Pm5mDirectionalBacktestEngine {
     fn dispatch_market_update(&mut self, update: StrategyMarketUpdate) {
         if let Ok(actions) = block_on(self.strategy.on_market_update(&update)) {
             self.handle_actions(actions, update.timestamp());
+        }
+    }
+
+    fn publish_settlement_quotes(
+        &mut self,
+        event_slug: &str,
+        outcome_up: bool,
+        timestamp: DateTime<Utc>,
+    ) {
+        let Some(state) = self.event_states.get(event_slug).cloned() else {
+            return;
+        };
+        let payouts = [
+            (state.up_token_id, Side::Up, if outcome_up { Decimal::ONE } else { Decimal::ZERO }),
+            (
+                state.down_token_id,
+                Side::Down,
+                if outcome_up { Decimal::ZERO } else { Decimal::ONE },
+            ),
+        ];
+        for (token_id, side, payout) in payouts {
+            let Some(token_id) = token_id else {
+                continue;
+            };
+            self.dispatch_market_update(StrategyMarketUpdate::PolymarketQuote {
+                token_id,
+                side,
+                quote: Quote {
+                    side,
+                    best_bid: Some(payout),
+                    best_ask: Some(payout),
+                    bid_size: Some(Decimal::ONE),
+                    ask_size: Some(Decimal::ONE),
+                    timestamp,
+                },
+                timestamp,
+            });
         }
     }
 
@@ -1215,6 +1267,120 @@ mod tests {
         let expected_pnl =
             (Decimal::ONE - dec!(0.40)) * Decimal::from(trades[0].shares) - expected_fee;
         assert_eq!(trades[0].pnl, expected_pnl);
+    }
+
+    #[test]
+    fn low_initial_capital_blocks_trades_below_min_shares() {
+        let mut config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
+        config.initial_capital = dec!(100);
+        let mut engine =
+            Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+
+        let event_slug = "btc-updown-5m-low-capital";
+        let end_time = ts(300);
+        let mut updates = vec![MarketUpdate {
+            timestamp: ts(0),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: event_slug.to_string(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        }];
+
+        for i in 1..=35 {
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".to_string(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100) + Decimal::from(i) * dec!(0.05),
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        updates.push(MarketUpdate {
+            timestamp: ts(34),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::BinanceL2 {
+                obi_1: dec!(0.38),
+                obi_2: dec!(0.36),
+                obi_3: dec!(0.35),
+                obi_5: dec!(0.35),
+                obi_10: dec!(0.28),
+                obi_20: dec!(0.22),
+                bid_volume_5: dec!(200),
+                ask_volume_5: dec!(100),
+                spread_bps: dec!(1),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
+                best_bid: Some(dec!(0.39)),
+                best_ask: Some(dec!(0.40)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:DOWN"),
+                side: Side::Down,
+                best_bid: Some(dec!(0.59)),
+                best_ask: Some(dec!(0.60)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::LobSnapshot {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
+                ask_depth_shares: 100,
+                best_ask_size_shares: 100,
+                ask_levels: vec![BookAskLevel {
+                    price: dec!(0.40),
+                    size_shares: 100,
+                }],
+                best_ask: Some(dec!(0.40)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(36),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::SpotTrade {
+                price: dec!(101.90),
+                quantity: Some(dec!(1)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: end_time,
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: event_slug.to_string(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: Some(true),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let results = engine.run(&mut feed);
+
+        assert_eq!(results.total_trades, 0);
+        assert!(engine.closed_trades().is_empty());
     }
 
     #[test]
