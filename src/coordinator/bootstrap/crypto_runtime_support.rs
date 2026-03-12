@@ -15,6 +15,7 @@ use self::preflight::{initialize_crypto_runtime_preflight, CryptoRuntimePrefligh
 pub(super) struct CryptoRuntimeSupport {
     pub(super) managed_runtime_data_plane: Option<Arc<PlatformDataPlane>>,
     pub(super) shared_crypto_data_plane: Option<Arc<PlatformDataPlane>>,
+    pub(super) polymarket_ws: Option<Arc<PolymarketWebSocket>>,
 }
 
 pub(super) async fn initialize_crypto_runtime_support(
@@ -70,5 +71,6 @@ pub(super) async fn initialize_crypto_runtime_support(
     Ok(CryptoRuntimeSupport {
         managed_runtime_data_plane: data_plane.clone(),
         shared_crypto_data_plane: data_plane,
+        polymarket_ws: Some(pm_ws),
     })
 }

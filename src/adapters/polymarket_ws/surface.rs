@@ -83,6 +83,11 @@ impl PolymarketWebSocket {
         Arc::clone(&self.circuit_breaker)
     }
 
+    #[cfg(test)]
+    pub fn health_state(&self) -> Option<Arc<HealthState>> {
+        self.health_state.get().cloned()
+    }
+
     /// Get the quote cache
     pub fn quote_cache(&self) -> &QuoteCache {
         &self.quote_cache

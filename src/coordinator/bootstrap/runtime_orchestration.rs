@@ -1,5 +1,32 @@
 use super::*;
 
+fn build_runtime_health_state(
+    app_config: &AppConfig,
+    freshness: &Arc<crate::data_plane::DataPlaneFreshness>,
+    db_connected: bool,
+    polymarket_ws: Option<&Arc<PolymarketWebSocket>>,
+) -> Option<Arc<crate::services::HealthState>> {
+    let _port = app_config.health_port?;
+    let state = Arc::new(
+        crate::services::HealthState::new()
+            .with_metrics(Arc::new(crate::services::Metrics::new()))
+            .with_freshness(Arc::clone(freshness)),
+    );
+    state.set_db_connected(db_connected);
+    if let Some(ws) = polymarket_ws {
+        ws.set_health_state(Arc::clone(&state));
+    }
+    Some(state)
+}
+
+fn spawn_runtime_health_server(port: u16, state: Arc<crate::services::HealthState>) {
+    tokio::spawn(async move {
+        if let Err(error) = crate::services::HealthServer::new(state, port).run().await {
+            warn!(port, error = %error, "runtime health server exited");
+        }
+    });
+}
+
 pub(super) async fn run_platform_runtime(
     config: &PlatformBootstrapConfig,
     app_config: &AppConfig,
@@ -43,6 +70,7 @@ pub(super) async fn run_platform_runtime(
     let freshness = Arc::new(crate::data_plane::DataPlaneFreshness::new());
     let mut managed_runtime_data_plane: Option<Arc<PlatformDataPlane>> = None;
     let mut shared_crypto_data_plane: Option<Arc<PlatformDataPlane>> = None;
+    let mut runtime_polymarket_ws: Option<Arc<PolymarketWebSocket>> = None;
 
     if config.enable_crypto {
         let runtime_support = initialize_crypto_runtime_support(
@@ -56,6 +84,18 @@ pub(super) async fn run_platform_runtime(
         .await?;
         managed_runtime_data_plane = runtime_support.managed_runtime_data_plane;
         shared_crypto_data_plane = runtime_support.shared_crypto_data_plane;
+        runtime_polymarket_ws = runtime_support.polymarket_ws;
+    }
+
+    if let Some(state) = build_runtime_health_state(
+        app_config,
+        &freshness,
+        shared_pool.is_some(),
+        runtime_polymarket_ws.as_ref(),
+    ) {
+        if let Some(port) = app_config.health_port {
+            spawn_runtime_health_server(port, state);
+        }
     }
 
     if config.enable_sports {
@@ -167,4 +207,47 @@ pub(super) async fn run_platform_runtime(
 
     info!("platform shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn build_runtime_health_state_attaches_freshness_and_ws() {
+        let app_config = AppConfig::default_config(true, "test-market");
+        let freshness = Arc::new(crate::data_plane::DataPlaneFreshness::new());
+        let pm_ws = Arc::new(PolymarketWebSocket::new("wss://example.invalid"));
+
+        let state = build_runtime_health_state(&app_config, &freshness, true, Some(&pm_ws))
+            .expect("health state should be enabled when health_port is set");
+
+        assert!(state.freshness.is_some(), "freshness tracker should be attached");
+        assert!(state.metrics.is_some(), "metrics collector should be attached");
+        assert!(
+            state.db_connected.load(Ordering::SeqCst),
+            "shared db should mark db connectivity"
+        );
+        assert!(
+            pm_ws.health_state().is_some(),
+            "polymarket ws should be wired to health state"
+        );
+    }
+
+    #[test]
+    fn build_runtime_health_state_respects_disabled_port() {
+        let mut app_config = AppConfig::default_config(true, "test-market");
+        app_config.health_port = None;
+        let freshness = Arc::new(crate::data_plane::DataPlaneFreshness::new());
+        let pm_ws = Arc::new(PolymarketWebSocket::new("wss://example.invalid"));
+
+        let state = build_runtime_health_state(&app_config, &freshness, false, Some(&pm_ws));
+
+        assert!(state.is_none(), "health state should be disabled without a port");
+        assert!(
+            pm_ws.health_state().is_none(),
+            "ws should not receive health wiring when health server is disabled"
+        );
+    }
 }
