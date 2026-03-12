@@ -836,6 +836,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_global_mode_clears_domain_overrides() {
+        let controller = GovernanceController::new(&CoordinatorConfig::default());
+        controller
+            .set_domain_mode(Domain::Sports, IngressMode::Halted)
+            .await;
+        controller
+            .set_domain_mode(Domain::Politics, IngressMode::Paused)
+            .await;
+
+        controller.set_global_mode(IngressMode::Paused).await;
+
+        let snapshot = controller.runtime_state_snapshot().await;
+        assert_eq!(snapshot.ingress_mode, IngressMode::Paused);
+        assert!(
+            snapshot.domain_ingress_modes.is_empty(),
+            "global mode changes should clear per-domain overrides"
+        );
+    }
+
+    #[tokio::test]
     async fn test_governance_intent_snapshot_reads_runtime_controls_in_one_view() {
         let controller = GovernanceController::new(&CoordinatorConfig::default());
         controller.set_global_mode(IngressMode::Paused).await;
