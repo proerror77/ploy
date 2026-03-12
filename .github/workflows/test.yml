@@ -18,6 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SQLX_CLI_VERSION: 0.8.6
 
 jobs:
   test:
@@ -91,8 +92,22 @@ jobs:
             ${{ runner.os }}-sccache-test-
             ${{ runner.os }}-sccache-
 
+      - name: Install SQLx CLI
+        run: |
+          cargo install sqlx-cli \
+            --locked \
+            --version "${SQLX_CLI_VERSION}" \
+            --no-default-features \
+            --features rustls,postgres
+
+      - name: Prepare database schema for compile-time SQLx checks
+        env:
+          DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test
+        run: sqlx migrate run
+
       - name: Build
         env:
+          DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test
           RUSTC_WRAPPER: sccache
           SCCACHE_CACHE_SIZE: 10G
         run: cargo build --locked --features rl

@@ -43,3 +43,25 @@ fn release_workflows_use_sqlx_migrate_instead_of_raw_psql_files() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn ci_build_prepares_database_for_sqlx_compile_checks() {
+    let content = workflow_contents(".github/workflows/test.yml");
+    let mut offenders = Vec::new();
+
+    if !content.contains("sqlx migrate run") {
+        offenders.push("test.yml: missing sqlx migrate run before cargo build".to_string());
+    }
+
+    let build_step_has_database_url =
+        content.contains("- name: Build") && content.contains("DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test");
+    if !build_step_has_database_url {
+        offenders.push("test.yml: Build step missing DATABASE_URL for sqlx::query! compile checks".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "workflow sqlx compile guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
