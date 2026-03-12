@@ -5629,3 +5629,20 @@ Close the remaining workflow SSH trust gap by pinning host fingerprints on every
 
 - `CARGO_TARGET_DIR=/tmp/ploy-appleboy-fingerprint rtk cargo test appleboy_workflows_pin_host_fingerprints --test workflow_security -- --exact --nocapture`
 - `ruby -e 'require "yaml"; %w[deploy.yml release.yml release-staging.yml release-aliyun.yml rollback.yml].each { |f| YAML.load_file(File.join(".github/workflows", f)) }; puts "yaml ok"'`
+
+# Ingress Rejection Cleanup Wave (2026-03-12)
+
+## Goal
+Close the remaining `R-47` ingress cleanup debt by collapsing the repeated blocked/fail rejection path into canonical coordinator helpers, so each gate only supplies the reason and not the full rejection plumbing.
+
+## Outcomes
+
+- [x] Added `block_order_intent(...)` in [ingress_rejections.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/coordinator/ingress_rejections.rs) so blocked ingress paths no longer repeat `Rejected/BLOCKED` boilerplate at every gate.
+- [x] Added `fail_order_intent(...)` in [ingress_rejections.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/coordinator/ingress_rejections.rs) so queue-drop failures reuse the same emit/log shape instead of open-coding it in the pipeline.
+- [x] Rewired [ingress_pipeline.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/coordinator/ingress_pipeline.rs) to route runtime-validation, governance, deployment, duplicate-intent, Kelly, venue-minimum, domain-allocation, and risk-gate rejections through those helpers.
+
+## Validation
+
+- `rtk cargo check --lib`
+- `CARGO_TARGET_DIR=/tmp/ploy-r47 rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r47 rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
