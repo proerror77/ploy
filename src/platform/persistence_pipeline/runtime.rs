@@ -366,7 +366,7 @@ impl PersistencePipeline {
     }
 
     async fn write_clob_quotes(pool: &PgPool, ticks: &[ClobQuoteTick]) -> Result<(), sqlx::Error> {
-        Self::write_chunked(ticks, 500, |chunk| {
+        for chunk in ticks.chunks(500) {
             let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO clob_quote_ticks \
                  (token_id, side, best_bid, best_ask, bid_size, ask_size, source, domain) ",
@@ -382,16 +382,16 @@ impl PersistencePipeline {
                     .push_bind(tick.domain.to_string());
             });
             builder.push(" ON CONFLICT DO NOTHING");
-            builder.build().execute(pool)
-        })
-        .await
+            builder.build().execute(pool).await?;
+        }
+        Ok(())
     }
 
     async fn write_binance_prices(
         pool: &PgPool,
         ticks: &[BinancePriceTick],
     ) -> Result<(), sqlx::Error> {
-        Self::write_chunked(ticks, 1_000, |chunk| {
+        for chunk in ticks.chunks(1_000) {
             let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO binance_price_ticks \
                  (symbol, price, quantity, trade_time) ",
@@ -403,16 +403,16 @@ impl PersistencePipeline {
                     .push_bind(tick.trade_time);
             });
             builder.push(" ON CONFLICT DO NOTHING");
-            builder.build().execute(pool)
-        })
-        .await
+            builder.build().execute(pool).await?;
+        }
+        Ok(())
     }
 
     async fn write_clob_price_changes(
         pool: &PgPool,
         ticks: &[ClobPriceChangeTick],
     ) -> Result<(), sqlx::Error> {
-        Self::write_chunked(ticks, 1_000, |chunk| {
+        for chunk in ticks.chunks(1_000) {
             let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO clob_price_change_ticks \
                  (token_id, market, side, price, domain, received_at) ",
@@ -426,9 +426,9 @@ impl PersistencePipeline {
                     .push_bind(tick.received_at);
             });
             builder.push(" ON CONFLICT DO NOTHING");
-            builder.build().execute(pool)
-        })
-        .await
+            builder.build().execute(pool).await?;
+        }
+        Ok(())
     }
 
     async fn write_binance_lobs(
@@ -436,7 +436,7 @@ impl PersistencePipeline {
         ticks: &[BinanceLobTick],
         _max_levels: usize,
     ) -> Result<(), sqlx::Error> {
-        Self::write_chunked(ticks, 500, |chunk| {
+        for chunk in ticks.chunks(500) {
             let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO binance_lob_ticks \
                  (symbol, update_id, best_bid, best_ask, mid_price, spread_bps, \
@@ -458,16 +458,16 @@ impl PersistencePipeline {
                     .push_bind(tick.event_time);
             });
             builder.push(" ON CONFLICT DO NOTHING");
-            builder.build().execute(pool)
-        })
-        .await
+            builder.build().execute(pool).await?;
+        }
+        Ok(())
     }
 
     async fn write_chainlink_prices(
         pool: &PgPool,
         ticks: &[ChainlinkPriceTick],
     ) -> Result<(), sqlx::Error> {
-        Self::write_chunked(ticks, 1_000, |chunk| {
+        for chunk in ticks.chunks(1_000) {
             let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO chainlink_price_ticks \
                  (symbol, price, source_timestamp) ",
@@ -478,9 +478,9 @@ impl PersistencePipeline {
                     .push_bind(tick.source_timestamp);
             });
             builder.push(" ON CONFLICT DO NOTHING");
-            builder.build().execute(pool)
-        })
-        .await
+            builder.build().execute(pool).await?;
+        }
+        Ok(())
     }
 
     async fn write_clob_orderbooks(
@@ -488,7 +488,7 @@ impl PersistencePipeline {
         snaps: &[ClobOrderbookSnapshot],
         _max_levels: usize,
     ) -> Result<(), sqlx::Error> {
-        Self::write_chunked(snaps, 250, |chunk| {
+        for chunk in snaps.chunks(250) {
             let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 "INSERT INTO clob_orderbook_snapshots \
                  (domain, token_id, market, bids, asks, book_timestamp, hash, source, context) ",
@@ -505,22 +505,7 @@ impl PersistencePipeline {
                     .push_bind(&snap.context);
             });
             builder.push(" ON CONFLICT DO NOTHING");
-            builder.build().execute(pool)
-        })
-        .await
-    }
-
-    async fn write_chunked<T, F, Fut>(
-        items: &[T],
-        chunk_size: usize,
-        mut write_chunk: F,
-    ) -> Result<(), sqlx::Error>
-    where
-        F: FnMut(&[T]) -> Fut,
-        Fut: std::future::Future<Output = Result<sqlx::postgres::PgQueryResult, sqlx::Error>>,
-    {
-        for chunk in items.chunks(chunk_size.max(1)) {
-            write_chunk(chunk).await?;
+            builder.build().execute(pool).await?;
         }
         Ok(())
     }
