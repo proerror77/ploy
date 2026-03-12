@@ -359,6 +359,10 @@ mod tests {
     use super::*;
     use crate::domain::Side;
     use rust_decimal::Decimal;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::{Barrier, Mutex};
+    use tokio::time::{Duration, timeout};
 
     fn make_intent(agent: &str, priority: OrderPriority) -> OrderIntent {
         OrderIntent::new(
@@ -628,5 +632,75 @@ mod tests {
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].agent_id, "agent1");
         assert_eq!(queue.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_enqueue_dequeue_pressure() {
+        let producer_count = 4usize;
+        let intents_per_producer = 25usize;
+        let total_intents = producer_count * intents_per_producer;
+        let queue = Arc::new(Mutex::new(OrderQueue::new(total_intents + 8)));
+        let start = Arc::new(Barrier::new(producer_count + 1));
+
+        let mut producers = Vec::with_capacity(producer_count);
+        for producer_idx in 0..producer_count {
+            let queue = queue.clone();
+            let start = start.clone();
+            producers.push(tokio::spawn(async move {
+                start.wait().await;
+                for intent_idx in 0..intents_per_producer {
+                    let agent_id = format!("p{}-{}", producer_idx, intent_idx);
+                    let priority = match intent_idx % 4 {
+                        0 => OrderPriority::Critical,
+                        1 => OrderPriority::High,
+                        2 => OrderPriority::Normal,
+                        _ => OrderPriority::Low,
+                    };
+                    queue
+                        .lock()
+                        .await
+                        .enqueue(make_intent(&agent_id, priority))
+                        .expect("enqueue under concurrent pressure");
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        let consumer_queue = queue.clone();
+        let consumer_start = start.clone();
+        let consumer = tokio::spawn(async move {
+            consumer_start.wait().await;
+            let mut seen = HashSet::with_capacity(total_intents);
+
+            while seen.len() < total_intents {
+                let maybe_intent = { consumer_queue.lock().await.dequeue() };
+                if let Some(intent) = maybe_intent {
+                    assert!(
+                        seen.insert(intent.agent_id.clone()),
+                        "duplicate dequeue for {}",
+                        intent.agent_id
+                    );
+                } else {
+                    tokio::task::yield_now().await;
+                }
+            }
+
+            seen
+        });
+
+        for producer in producers {
+            producer.await.expect("producer task should finish");
+        }
+
+        let seen = timeout(Duration::from_secs(5), consumer)
+            .await
+            .expect("consumer should drain queue under concurrent pressure")
+            .expect("consumer task should finish");
+
+        assert_eq!(seen.len(), total_intents);
+        assert!(
+            queue.lock().await.is_empty(),
+            "queue should drain completely"
+        );
     }
 }
