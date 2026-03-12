@@ -41,10 +41,10 @@ impl PositionAggregator {
             position_id, agent_id, domain, market_slug, shares, entry_price
         );
 
-        self.positions
-            .write()
-            .await
-            .insert(position_id.clone(), position);
+        let mut positions = self.positions.write().await;
+        positions.insert(position_id.clone(), position);
+        let mut positions_by_agent = self.positions_by_agent.write().await;
+        Self::index_agent_position(&mut positions_by_agent, agent_id, &position_id);
         position_id
     }
 
@@ -53,6 +53,11 @@ impl PositionAggregator {
         let mut positions = self.positions.write().await;
 
         if let Some(position) = positions.remove(position_id) {
+            let mut positions_by_agent = self.positions_by_agent.write().await;
+            Self::deindex_agent_position(&mut positions_by_agent, &position.agent_id, position_id);
+            drop(positions_by_agent);
+            drop(positions);
+
             let pnl = (exit_price - position.entry_price) * Decimal::from(position.shares);
 
             let mut realized = self.realized_pnl.write().await;
@@ -105,6 +110,8 @@ impl PositionAggregator {
 
         if remove_entry {
             positions.remove(position_id);
+            let mut positions_by_agent = self.positions_by_agent.write().await;
+            Self::deindex_agent_position(&mut positions_by_agent, &agent_id, position_id);
         }
 
         drop(positions);
@@ -146,17 +153,29 @@ impl PositionAggregator {
 
     /// 清理所有數據
     pub async fn clear(&self) {
-        self.positions.write().await.clear();
+        let mut positions = self.positions.write().await;
+        positions.clear();
+        let mut positions_by_agent = self.positions_by_agent.write().await;
+        positions_by_agent.clear();
+        drop(positions_by_agent);
+        drop(positions);
         self.realized_pnl.write().await.clear();
         *self.position_counter.write().await = 0;
     }
 
     /// 清理 Agent 數據
     pub async fn clear_agent(&self, agent_id: &str) {
-        self.positions
-            .write()
-            .await
-            .retain(|_, p| p.agent_id != agent_id);
+        let mut positions = self.positions.write().await;
+        let mut positions_by_agent = self.positions_by_agent.write().await;
+
+        if let Some(position_ids) = positions_by_agent.remove(agent_id) {
+            for position_id in position_ids {
+                positions.remove(&position_id);
+            }
+        }
+
+        drop(positions_by_agent);
+        drop(positions);
         self.realized_pnl.write().await.remove(agent_id);
     }
 
@@ -165,15 +184,25 @@ impl PositionAggregator {
         let now = Utc::now();
         let mut positions = self.positions.write().await;
         let before = positions.len();
+        let mut expired_positions = Vec::new();
 
-        positions.retain(|_, p| {
+        positions.retain(|position_id, p| {
             if let Some(expires_str) = p.metadata.get("expires_at") {
                 if let Ok(expires) = expires_str.parse::<DateTime<Utc>>() {
-                    return now < expires;
+                    let keep_position = now < expires;
+                    if !keep_position {
+                        expired_positions.push((p.agent_id.clone(), position_id.clone()));
+                    }
+                    return keep_position;
                 }
             }
             true
         });
+
+        let mut positions_by_agent = self.positions_by_agent.write().await;
+        for (agent_id, position_id) in expired_positions {
+            Self::deindex_agent_position(&mut positions_by_agent, &agent_id, &position_id);
+        }
 
         before - positions.len()
     }
