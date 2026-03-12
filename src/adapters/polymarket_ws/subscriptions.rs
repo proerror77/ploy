@@ -84,6 +84,7 @@ impl PolymarketWebSocket {
         });
 
         let total = mapping.len();
+        drop(mapping);
         self.report_subscription_count().await;
         (added, removed, updated, total)
     }
@@ -162,5 +163,37 @@ impl PolymarketWebSocket {
     pub(super) async fn get_side(&self, token_id: &str) -> Option<Side> {
         let mapping = self.token_to_side.read().await;
         mapping.get(token_id).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{DataPlaneFreshness, DataSource};
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn reconcile_token_sides_does_not_deadlock_while_reporting_subscription_count() {
+        let ws = PolymarketWebSocket::new("wss://example.invalid");
+        let freshness = Arc::new(DataPlaneFreshness::new());
+        ws.set_freshness(Arc::clone(&freshness));
+
+        let mut desired = HashMap::new();
+        desired.insert("tok-up".to_string(), Side::Up);
+        desired.insert("tok-down".to_string(), Side::Down);
+
+        let (added, removed, updated, total) =
+            timeout(Duration::from_millis(250), ws.reconcile_token_sides(&desired))
+                .await
+                .expect("reconcile_token_sides should not deadlock");
+
+        assert_eq!((added, removed, updated, total), (2, 0, 0, 2));
+
+        let metrics = freshness.prometheus_metrics();
+        assert!(
+            metrics.contains("ploy_source_subscriptions_total{source=\"polymarket_ws\"} 2"),
+            "expected freshness subscription count to be updated, got:\n{metrics}"
+        );
+        assert_eq!(freshness.source_message_count(DataSource::PolymarketWs), 0);
     }
 }
