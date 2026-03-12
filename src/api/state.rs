@@ -104,6 +104,10 @@ pub struct StrategyConfigState {
 }
 
 impl AppState {
+    fn has_realtime_listeners(ws_tx: &broadcast::Sender<WsMessage>) -> bool {
+        ws_tx.receiver_count() > 0
+    }
+
     fn default_allowed_domains() -> HashSet<Domain> {
         let mut domains = HashSet::new();
         domains.insert(Domain::Crypto);
@@ -395,6 +399,13 @@ impl AppState {
             loop {
                 tick.tick().await;
 
+                if !Self::has_realtime_listeners(&state.ws_tx) {
+                    last_trade_key = None;
+                    last_positions_sig.clear();
+                    last_market_key = None;
+                    continue;
+                }
+
                 // Latest trade from cycles.
                 if let Ok(Some(row)) = sqlx::query(
                     r#"
@@ -573,5 +584,22 @@ impl AppState {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_has_realtime_listeners_reflects_broadcast_subscribers() {
+        let (ws_tx, _) = broadcast::channel::<WsMessage>(8);
+        assert!(!AppState::has_realtime_listeners(&ws_tx));
+
+        let rx = ws_tx.subscribe();
+        assert!(AppState::has_realtime_listeners(&ws_tx));
+
+        drop(rx);
+        assert!(!AppState::has_realtime_listeners(&ws_tx));
     }
 }

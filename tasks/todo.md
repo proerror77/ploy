@@ -5798,3 +5798,27 @@ Move WebSocket admin authentication onto the same cookie/header surface as the r
 - 2026-03-12: Validation passed:
   - `CARGO_TARGET_DIR=/tmp/ploy-websocket-auth-ws rtk cargo check --lib --features api_ws`
   - `CARGO_TARGET_DIR=/tmp/ploy-websocket-auth-ws rtk cargo test websocket_admin_authorized_accepts_header_cookie_and_query_fallback --lib --features api_ws -- --nocapture`
+# API Realtime Idle Gate (2026-03-12)
+
+## Goal
+Stop the API realtime broadcast loop from polling the database when there are no WebSocket subscribers, and reset its cursors so newly connected clients receive the current snapshot on the next tick.
+
+## File ownership
+
+- `src/api/state.rs`
+  - owner: realtime broadcast loop gating and focused listener test
+
+## Tasks
+
+- [x] Add a listener gate for the realtime broadcast loop.
+- [x] Reset trade/position/market cursors while the loop is idle.
+- [x] Add focused regression coverage for listener detection.
+- [x] Re-run `api` feature compile plus focused listener regression after the cut.
+
+## Progress notes
+
+- 2026-03-12: Updated [state.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/state.rs) so the realtime broadcast loop now skips all DB polling while there are no active WebSocket subscribers.
+- 2026-03-12: Idle periods now clear cached trade/position/market cursors so the first subscriber after an idle window receives the latest snapshot again.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-realtime-idle rtk cargo check --lib --features api`
+  - `CARGO_TARGET_DIR=/tmp/ploy-realtime-idle rtk cargo test test_has_realtime_listeners_reflects_broadcast_subscribers --lib --features api -- --nocapture`
