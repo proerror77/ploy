@@ -80,7 +80,7 @@ hex = "0.4"
 base64 = "0.22"
 
 # Random number generation
-rand = "0.8"
+rand = "0.10"
 
 # Ordered floats for BTreeMap keys
 ordered-float = "4"

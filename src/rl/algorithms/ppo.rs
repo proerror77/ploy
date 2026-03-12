@@ -7,7 +7,7 @@
 //! the specific burn version being used.
 
 use crate::rl::config::PPOConfig;
-use rand::Rng;
+use rand::RngExt;
 
 // ---------------------------------------------------------------------------
 // 42-dim state vector indices (must match `src/rl/core/state.rs` TOTAL_FEATURES)
@@ -152,13 +152,13 @@ impl PPOTrainer {
     /// Returns (action, log_prob) pair.
     /// Uses random exploration with decaying epsilon.
     pub fn get_action(&self, state: &[f32]) -> (Vec<f32>, f32) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let action_dim = 4; // Hold, BuyUp, BuyDown, Sell
 
         // Epsilon-greedy exploration
-        if rng.gen::<f32>() < self.exploration_rate {
+        if rng.random::<f32>() < self.exploration_rate {
             // Random action
-            let action_idx = rng.gen_range(0..action_dim);
+            let action_idx = rng.random_range(0..action_dim);
             let mut action = vec![0.0f32; action_dim];
             action[action_idx] = 1.0;
 

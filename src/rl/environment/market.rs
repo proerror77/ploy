@@ -2,7 +2,7 @@
 //!
 //! Generates realistic market data for training RL agents.
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Market simulation configuration
 #[derive(Debug, Clone)]
@@ -111,7 +111,7 @@ impl SimulatedMarket {
         let mut market = Self {
             config,
             state,
-            rng: rand::thread_rng(),
+            rng: rand::rng(),
         };
 
         market.update_sum_of_asks();
@@ -120,8 +120,8 @@ impl SimulatedMarket {
 
     /// Generate a sample from standard normal distribution (Box-Muller transform)
     fn sample_normal(&mut self) -> f64 {
-        let u1: f64 = self.rng.gen_range(0.0001..1.0);
-        let u2: f64 = self.rng.gen();
+        let u1: f64 = self.rng.random_range(0.0001..1.0);
+        let u2: f64 = self.rng.random();
         (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
     }
 
@@ -179,13 +179,13 @@ impl SimulatedMarket {
     /// Update quotes based on current spot price
     fn update_quotes(&mut self) {
         let half_spread = self.config.spread_pct / 2.0;
-        let noise: f64 = self.rng.gen_range(-0.005..0.005);
+        let noise: f64 = self.rng.random_range(-0.005..0.005);
 
         let up_mid = self.state.spot_price + noise;
         let down_mid = 1.0 - self.state.spot_price + noise;
 
         // Add some randomness to spreads
-        let spread_noise: f64 = self.rng.gen_range(0.8..1.2);
+        let spread_noise: f64 = self.rng.random_range(0.8..1.2);
         let adjusted_spread = half_spread * spread_noise;
 
         self.state.up_bid = (up_mid * (1.0 - adjusted_spread)).clamp(0.01, 0.99);

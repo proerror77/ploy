@@ -5646,3 +5646,24 @@ Close the remaining `R-47` ingress cleanup debt by collapsing the repeated block
 - `rtk cargo check --lib`
 - `CARGO_TARGET_DIR=/tmp/ploy-r47 rtk cargo test test_handle_order_intent_emits_rejected_update_for_missing_deployment --lib -- --exact --nocapture`
 - `CARGO_TARGET_DIR=/tmp/ploy-r47 rtk cargo test test_handle_force_close_domain_blocks_new_buy_immediately --lib -- --exact --nocapture`
+
+# Rand 0.10 Upgrade Wave (2026-03-12)
+
+## Goal
+Close `R-57` by upgrading the direct `rand` dependency from `0.8` to the current `0.10` line and updating the repo's direct callsites to the new RNG API surface.
+
+## Outcomes
+
+- [x] Upgraded the direct `rand` dependency in [Cargo.toml](/Users/proerror/Documents/ploy-order-intent-clean/Cargo.toml) from `0.8` to `0.10`, which pulled a new direct `rand 0.10.0` entry plus `chacha20`, `rand_core 0.10.0`, and `cpufeatures 0.3.0` into [Cargo.lock](/Users/proerror/Documents/ploy-order-intent-clean/Cargo.lock) without disturbing `burn-ndarray`'s transitive `rand 0.8.5`.
+- [x] Replaced deprecated direct RNG usage with the `rand 0.10` API in [order.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/signing/order.rs), [backtest.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/rl/environment/backtest.rs), [market.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/rl/environment/market.rs), [ppo.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/rl/algorithms/ppo.rs), and [replay_buffer.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/rl/memory/replay_buffer.rs) by moving `thread_rng/gen/gen_range` to `rng/random/random_range`.
+- [x] Updated [auth.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/auth.rs) to use `rand 0.10`'s `SysRng` + `TryRng` for admin-cookie entropy generation.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-verify rtk cargo check --lib --features rl`
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_order_data_buy --lib --features rl -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_market_creation --lib --features rl -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_sample_data_generation --lib --features rl -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_ppo_trainer_creation --lib --features rl -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-tests rtk cargo test test_replay_buffer_sample --lib --features rl -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-rand10-api-tests rtk cargo test build_admin_session_cookie_emits_v2_hmac_value --lib --features "rl api" -- --exact --nocapture`

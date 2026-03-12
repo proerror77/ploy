@@ -3,7 +3,6 @@
 //! Experience replay buffer for off-policy learning and PPO rollouts.
 
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -119,7 +118,7 @@ impl ReplayBuffer {
 
     /// Sample a random batch of transitions
     pub fn sample(&self, batch_size: usize) -> Vec<Transition> {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         let mut indices: Vec<usize> = (0..self.buffer.len()).collect();
         indices.shuffle(&mut rng);
 
@@ -302,7 +301,8 @@ impl RolloutBuffer {
     /// Sample mini-batches for training
     pub fn sample_minibatches(&self, batch_size: usize) -> Vec<Vec<(Transition, f32, f32)>> {
         let mut indices: Vec<usize> = (0..self.transitions.len()).collect();
-        indices.shuffle(&mut thread_rng());
+        let mut rng = rand::rng();
+        indices.shuffle(&mut rng);
 
         indices
             .chunks(batch_size)

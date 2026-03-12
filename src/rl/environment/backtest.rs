@@ -510,9 +510,9 @@ impl BacktestEnvironment {
 
 /// Generate sample historical data for testing (simulates realistic market)
 pub fn generate_sample_data(duration_mins: u64, volatility: f64) -> HistoricalData {
-    use rand::Rng;
+    use rand::RngExt;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut up_ticks = Vec::new();
     let mut down_ticks = Vec::new();
 
@@ -525,13 +525,15 @@ pub fn generate_sample_data(duration_mins: u64, volatility: f64) -> HistoricalDa
         let ts = start_ts + (i as i64 * 1000);
 
         // Random walk with mean reversion
-        let up_change = rng.gen_range(-volatility..volatility) + 0.001 * (0.5 - up_price);
+        let up_change =
+            rng.random_range(-volatility..volatility) + 0.001 * (0.5 - up_price);
         up_price = (up_price + up_change).clamp(0.10, 0.90);
 
         // DOWN should roughly mirror UP
-        let down_price = (1.0 - up_price + rng.gen_range(-0.02..0.02)).clamp(0.10, 0.90);
+        let down_price =
+            (1.0 - up_price + rng.random_range(-0.02..0.02)).clamp(0.10, 0.90);
 
-        let spread = 0.01 + rng.gen_range(0.0..0.02);
+        let spread = 0.01 + rng.random_range(0.0..0.02);
 
         up_ticks.push(TickData {
             timestamp_ms: ts,

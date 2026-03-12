@@ -1,6 +1,6 @@
 use axum::http::{header::AUTHORIZATION, header::COOKIE, HeaderMap, StatusCode};
 use hmac::{Hmac, Mac};
-use rand::{rngs::OsRng, RngCore};
+use rand::{TryRng, rngs::SysRng};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
@@ -102,7 +102,9 @@ fn expected_admin_cookie_secret() -> Option<String> {
 fn generated_admin_cookie_secret() -> &'static str {
     GENERATED_ADMIN_COOKIE_SECRET.get_or_init(|| {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        SysRng
+            .try_fill_bytes(&mut bytes)
+            .expect("SysRng should provide admin cookie entropy");
         hex::encode(bytes)
     })
 }
