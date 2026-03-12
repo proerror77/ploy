@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ploy::adapters::PostgresStore;
 use ploy::config::AppConfig;
 use ploy::error::{PloyError, Result};
@@ -20,6 +20,85 @@ const CRYPTO_SERIES_IDS: &[&str] = &[
 const PM_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const PM_REST_URL: &str = "https://clob.polymarket.com";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshnessState {
+    Fresh,
+    Stale,
+    Missing,
+}
+
+#[derive(Debug, Clone)]
+struct DataQualityTableReport {
+    table_name: &'static str,
+    latest_timestamp: Option<DateTime<Utc>>,
+    recent_rows: i64,
+    distinct_rows: i64,
+}
+
+impl DataQualityTableReport {
+    fn new(
+        table_name: &'static str,
+        latest_timestamp: Option<DateTime<Utc>>,
+        recent_rows: i64,
+        distinct_rows: i64,
+    ) -> Self {
+        Self {
+            table_name,
+            latest_timestamp,
+            recent_rows,
+            distinct_rows,
+        }
+    }
+
+    fn duplicate_rows(&self) -> i64 {
+        (self.recent_rows - self.distinct_rows).max(0)
+    }
+
+    fn duplicate_ratio_pct(&self) -> f64 {
+        if self.recent_rows <= 0 {
+            0.0
+        } else {
+            (self.duplicate_rows() as f64 / self.recent_rows as f64) * 100.0
+        }
+    }
+
+    fn freshness_state(&self, now: DateTime<Utc>, freshness_warn_secs: u64) -> FreshnessState {
+        let Some(latest_timestamp) = self.latest_timestamp else {
+            return FreshnessState::Missing;
+        };
+
+        let age_secs = now
+            .signed_duration_since(latest_timestamp)
+            .num_seconds()
+            .max(0) as u64;
+        if age_secs > freshness_warn_secs {
+            FreshnessState::Stale
+        } else {
+            FreshnessState::Fresh
+        }
+    }
+
+    fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.latest_timestamp
+            .map(|latest| now.signed_duration_since(latest).num_seconds().max(0))
+    }
+}
+
+fn infer_symbol_from_slug(slug: &str) -> Option<&'static str> {
+    let lower = slug.to_ascii_lowercase();
+    if lower.contains("bitcoin") || lower.contains("btc") {
+        Some("BTCUSDT")
+    } else if lower.contains("ethereum") || lower.contains("eth") {
+        Some("ETHUSDT")
+    } else if lower.contains("solana") || lower.contains("sol") {
+        Some("SOLUSDT")
+    } else if lower.contains("ripple") || lower.contains("xrp") {
+        Some("XRPUSDT")
+    } else {
+        None
+    }
+}
+
 pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u64) -> Result<()> {
     use ploy::collector::{SyncCollector, SyncCollectorConfig};
 
@@ -38,6 +117,7 @@ pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u6
 
     info!("Binance symbols: {:?}", binance_symbols);
     info!("Polymarket markets: {:?}", polymarket_slugs);
+    info!("Collector sink: database tables (raw canonical). CSV sink is disabled in main collector path.");
 
     // Load config for database URL
     let config = AppConfig::load()?;
@@ -125,11 +205,199 @@ pub async fn run_collect_mode(symbols: &str, markets: Option<&str>, duration: u6
     Ok(())
 }
 
+pub async fn run_collect_quality_check(
+    config_path: &str,
+    lookback_minutes: u64,
+    freshness_warn_secs: u64,
+) -> Result<()> {
+    let cfg = AppConfig::load_from(config_path).or_else(|_| AppConfig::load())?;
+    let store = PostgresStore::new(&cfg.database.url, 5).await?;
+    let pool = store.pool();
+
+    let now = Utc::now();
+    let reports = vec![
+        fetch_table_quality_report(
+            pool,
+            "clob_quote_ticks",
+            "SELECT MAX(received_at) FROM clob_quote_ticks",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    token_id,
+                    side,
+                    COALESCE(best_bid::text, '') AS best_bid_txt,
+                    COALESCE(best_ask::text, '') AS best_ask_txt,
+                    COALESCE(bid_size::text, '') AS bid_size_txt,
+                    COALESCE(ask_size::text, '') AS ask_size_txt,
+                    source
+                FROM clob_quote_ticks
+                WHERE received_at >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (token_id, side, best_bid_txt, best_ask_txt, bid_size_txt, ask_size_txt, source))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+        fetch_table_quality_report(
+            pool,
+            "binance_lob_ticks",
+            "SELECT MAX(event_time) FROM binance_lob_ticks",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    symbol,
+                    COALESCE(update_id, -1) AS update_id_norm,
+                    event_time,
+                    source
+                FROM binance_lob_ticks
+                WHERE event_time >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (symbol, update_id_norm, event_time, source))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+        fetch_table_quality_report(
+            pool,
+            "clob_orderbook_snapshots",
+            "SELECT MAX(COALESCE(book_timestamp, received_at)) FROM clob_orderbook_snapshots",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    token_id,
+                    COALESCE(book_timestamp, received_at) AS snapshot_ts,
+                    COALESCE(hash, '') AS hash_norm,
+                    source
+                FROM clob_orderbook_snapshots
+                WHERE COALESCE(book_timestamp, received_at) >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (token_id, snapshot_ts, hash_norm, source))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+        fetch_table_quality_report(
+            pool,
+            "sync_records_derived",
+            "SELECT MAX(timestamp) FROM sync_records_derived",
+            r#"
+            WITH windowed AS (
+                SELECT
+                    symbol,
+                    timestamp,
+                    COALESCE(pm_market_slug, '') AS market_slug_norm,
+                    COALESCE(pm_yes_token_id, '') AS yes_token_norm,
+                    COALESCE(pm_no_token_id, '') AS no_token_norm
+                FROM sync_records_derived
+                WHERE timestamp >= NOW() - make_interval(mins => $1::int)
+            )
+            SELECT
+                COUNT(*)::bigint,
+                COUNT(DISTINCT (symbol, timestamp, market_slug_norm, yes_token_norm, no_token_norm))::bigint
+            FROM windowed
+            "#,
+            lookback_minutes,
+        )
+        .await?,
+    ];
+
+    print_collect_quality_report(&reports, now, lookback_minutes, freshness_warn_secs);
+    Ok(())
+}
+
+async fn fetch_table_quality_report(
+    pool: &sqlx::PgPool,
+    table_name: &'static str,
+    freshness_sql: &str,
+    duplicate_sql: &str,
+    lookback_minutes: u64,
+) -> Result<DataQualityTableReport> {
+    if !relation_exists(pool, &format!("public.{table_name}")).await? {
+        return Ok(DataQualityTableReport::new(table_name, None, 0, 0));
+    }
+
+    let latest_timestamp = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(freshness_sql)
+        .fetch_one(pool)
+        .await?;
+    let lookback_minutes = i32::try_from(lookback_minutes).map_err(|_| {
+        PloyError::Validation(format!(
+            "lookback_minutes too large for collector data-quality check: {lookback_minutes}"
+        ))
+    })?;
+    let (recent_rows, distinct_rows) = sqlx::query_as::<_, (i64, i64)>(duplicate_sql)
+        .bind(lookback_minutes)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(DataQualityTableReport::new(
+        table_name,
+        latest_timestamp,
+        recent_rows,
+        distinct_rows,
+    ))
+}
+
+async fn relation_exists(pool: &sqlx::PgPool, relation_name: &str) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+        .bind(relation_name)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists.is_some())
+}
+
+fn print_collect_quality_report(
+    reports: &[DataQualityTableReport],
+    now: DateTime<Utc>,
+    lookback_minutes: u64,
+    freshness_warn_secs: u64,
+) {
+    println!("\nCollector Data Quality");
+    println!(
+        "lookback={}m freshness_warn={}s generated_at={}",
+        lookback_minutes,
+        freshness_warn_secs,
+        now.to_rfc3339()
+    );
+
+    for report in reports {
+        let freshness = match report.freshness_state(now, freshness_warn_secs) {
+            FreshnessState::Fresh => "fresh",
+            FreshnessState::Stale => "stale",
+            FreshnessState::Missing => "missing",
+        };
+        let latest = report
+            .latest_timestamp
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string());
+        let age = report
+            .age_secs(now)
+            .map(|secs| format!("{secs}s"))
+            .unwrap_or_else(|| "-".to_string());
+
+        println!(
+            "- {table}: freshness={freshness} latest={latest} age={age} recent_rows={recent_rows} duplicate_rows={duplicate_rows} duplicate_ratio={duplicate_ratio:.2}%",
+            table = report.table_name,
+            recent_rows = report.recent_rows,
+            duplicate_rows = report.duplicate_rows(),
+            duplicate_ratio = report.duplicate_ratio_pct(),
+        );
+    }
+}
+
 /// Discover active PM tokens for crypto series and spawn a WebSocket bridge
 /// that feeds real-time PM prices into the collector.
 async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
     use ploy::adapters::{PolymarketClient, PolymarketWebSocket};
-    use ploy::collector::PolymarketPrice;
+    use ploy::collector::{CollectorTokenTarget, PolymarketPrice};
     use ploy::domain::market::Side;
 
     // Create read-only PM client for event discovery
@@ -144,38 +412,130 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
         }
     };
 
-    // Discover active tokens from crypto series
-    // token_id -> (slug, side) for mapping quotes back to markets
+    // Discover active tokens from crypto series.
+    // token_id -> (slug, side) for mapping quotes back to markets.
     let mut token_to_market: HashMap<String, (String, Side)> = HashMap::new();
+    let mut target_rows: Vec<CollectorTokenTarget> = Vec::new();
+    // slug -> (yes_token_id, no_token_id) to persist event token ids with each sync record.
+    let mut slug_token_map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     let mut all_token_ids: Vec<String> = Vec::new();
 
     for series_id in CRYPTO_SERIES_IDS {
         match pm_client.get_all_active_events(series_id).await {
             Ok(events) => {
-                // Take events with end_date in the next hour (active windows)
-                for event in events.iter().take(4) {
+                let now = Utc::now();
+                let soon_cutoff = now + chrono::Duration::hours(1);
+
+                let mut candidates: Vec<_> = events.iter().collect();
+                candidates.sort_by_key(|e| {
+                    e.end_date
+                        .as_deref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or(chrono::DateTime::<Utc>::MAX_UTC)
+                });
+
+                // Prefer windows ending soon; fall back to first few if parsing fails.
+                let mut selected: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|e| {
+                        e.end_date
+                            .as_deref()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .is_some_and(|end| {
+                                end <= soon_cutoff && end >= now - chrono::Duration::minutes(15)
+                            })
+                    })
+                    .take(4)
+                    .collect();
+
+                if selected.is_empty() {
+                    selected = events.iter().take(4).collect();
+                }
+
+                let mut discovered_this_series = 0usize;
+                for event in selected {
                     let slug = event.slug.clone().unwrap_or_default();
-                    for market in &event.markets {
-                        if let Some(tokens) = &market.tokens {
-                            for token in tokens {
-                                let side = if token.outcome.to_lowercase().contains("up")
-                                    || token.outcome.to_lowercase() == "yes"
-                                {
-                                    Side::Up
-                                } else {
-                                    Side::Down
-                                };
-                                token_to_market
-                                    .insert(token.token_id.clone(), (slug.clone(), side));
-                                all_token_ids.push(token.token_id.clone());
-                            }
+                    if slug.is_empty() {
+                        continue;
+                    }
+
+                    // The series endpoint omits nested market token IDs; fetch details and map to CLOB tokens.
+                    let event_details = match pm_client.get_event_details(&event.id).await {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!("Failed to get event details for {}: {}", event.id, e);
+                            continue;
                         }
+                    };
+
+                    for gamma_market in &event_details.markets {
+                        let Some(condition_id) = gamma_market.condition_id.as_ref() else {
+                            continue;
+                        };
+
+                        let mut clob_market = match pm_client.get_market(condition_id).await {
+                            Ok(m) => m,
+                            Err(e) => {
+                                warn!("Failed to get CLOB market {}: {}", condition_id, e);
+                                continue;
+                            }
+                        };
+
+                        if clob_market.tokens.len() < 2 {
+                            continue;
+                        }
+
+                        let is_first_up = {
+                            let outcome = clob_market.tokens[0].outcome.to_lowercase();
+                            outcome.contains("up") || outcome == "yes"
+                        };
+                        let mut tokens = clob_market.tokens.drain(..2);
+                        let first = tokens.next().unwrap();
+                        let second = tokens.next().unwrap();
+                        let (up_token, down_token) = if is_first_up {
+                            (first.token_id, second.token_id)
+                        } else {
+                            (second.token_id, first.token_id)
+                        };
+
+                        token_to_market.insert(up_token.clone(), (slug.clone(), Side::Up));
+                        token_to_market.insert(down_token.clone(), (slug.clone(), Side::Down));
+
+                        if let Some(symbol) = infer_symbol_from_slug(&slug) {
+                            target_rows.push(
+                                CollectorTokenTarget::new(up_token.clone(), "CRYPTO")
+                                    .with_metadata(serde_json::json!({
+                                        "symbol": symbol,
+                                        "side": "UP",
+                                        "slug": slug,
+                                    })),
+                            );
+                            target_rows.push(
+                                CollectorTokenTarget::new(down_token.clone(), "CRYPTO")
+                                    .with_metadata(serde_json::json!({
+                                        "symbol": symbol,
+                                        "side": "DOWN",
+                                        "slug": slug,
+                                    })),
+                            );
+                        }
+
+                        let side_tokens =
+                            slug_token_map.entry(slug.clone()).or_insert((None, None));
+                        side_tokens.0 = Some(up_token.clone());
+                        side_tokens.1 = Some(down_token.clone());
+
+                        all_token_ids.push(up_token);
+                        all_token_ids.push(down_token);
+                        discovered_this_series += 2;
                     }
                 }
                 debug!(
                     "Series {}: discovered {} tokens from {} events",
                     series_id,
-                    all_token_ids.len(),
+                    discovered_this_series,
                     events.len()
                 );
             }
@@ -183,6 +543,10 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
                 warn!("Failed to discover events for series {}: {}", series_id, e);
             }
         }
+    }
+
+    if let Err(e) = collector.upsert_token_targets(&target_rows).await {
+        debug!("collector target upsert failed: {}", e);
     }
 
     if all_token_ids.is_empty() {
@@ -216,6 +580,7 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
 
     // Spawn quote bridge: QuoteUpdate -> PolymarketPrice -> collector
     // Maintains latest (yes, no) per slug and pushes full updates
+    let slug_token_map_for_bridge = slug_token_map.clone();
     tokio::spawn(async move {
         // slug -> (yes_price, no_price)
         let mut pm_state: HashMap<String, (Decimal, Decimal)> = HashMap::new();
@@ -224,6 +589,25 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
             match quote_rx.recv().await {
                 Ok(update) => {
                     if let Some((slug, side)) = token_to_market.get(&update.token_id) {
+                        let side_text = match side {
+                            Side::Up => "UP",
+                            Side::Down => "DOWN",
+                        };
+                        if let Err(e) = collector
+                            .persist_polymarket_quote_tick(
+                                &update.token_id,
+                                side_text,
+                                update.quote.best_bid,
+                                update.quote.best_ask,
+                                update.quote.bid_size,
+                                update.quote.ask_size,
+                                update.quote.timestamp,
+                            )
+                            .await
+                        {
+                            debug!("failed to persist polymarket quote tick: {}", e);
+                        }
+
                         let entry = pm_state
                             .entry(slug.clone())
                             .or_insert((Decimal::ZERO, Decimal::ZERO));
@@ -241,12 +625,18 @@ async fn spawn_pm_price_bridge(collector: Arc<ploy::collector::SyncCollector>) {
                         }
 
                         // Push full update to collector
+                        let (yes_token_id, no_token_id) = slug_token_map_for_bridge
+                            .get(slug)
+                            .cloned()
+                            .unwrap_or((None, None));
                         collector
                             .update_polymarket_price(PolymarketPrice {
                                 timestamp: update.quote.timestamp,
                                 market_slug: slug.clone(),
                                 yes_price: entry.0,
                                 no_price: entry.1,
+                                yes_token_id,
+                                no_token_id,
                             })
                             .await;
                     }
@@ -367,4 +757,33 @@ pub async fn run_orderbook_history_mode(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DataQualityTableReport, FreshnessState};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn data_quality_report_marks_stale_and_computes_duplicate_ratio() {
+        let now = Utc::now();
+        let report = DataQualityTableReport::new(
+            "clob_quote_ticks",
+            Some(now - Duration::seconds(181)),
+            100,
+            80,
+        );
+
+        assert_eq!(report.duplicate_ratio_pct(), 20.0);
+        assert_eq!(report.freshness_state(now, 180), FreshnessState::Stale);
+    }
+
+    #[test]
+    fn data_quality_report_marks_missing_when_no_timestamp_exists() {
+        let now = Utc::now();
+        let report = DataQualityTableReport::new("sync_records_derived", None, 0, 0);
+
+        assert_eq!(report.duplicate_ratio_pct(), 0.0);
+        assert_eq!(report.freshness_state(now, 180), FreshnessState::Missing);
+    }
 }

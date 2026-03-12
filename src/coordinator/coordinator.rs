@@ -24,8 +24,8 @@ use sqlx::{PgPool, Row};
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
 use crate::platform::{
-    AgentRiskParams, Domain, MarketSelector, OrderIntent, OrderPriority, OrderQueue,
-    PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
+    AgentRiskParams, DeploymentState, Domain, MarketSelector, OrderIntent, OrderPriority,
+    OrderQueue, PositionAggregator, RiskCheckResult, RiskGate, StrategyDeployment,
 };
 use crate::strategy::execution::executor::OrderExecutor;
 
@@ -500,6 +500,31 @@ fn buy_intent_missing_deployment_reason(intent: &OrderIntent) -> Option<String> 
     }
 }
 
+fn deployment_state_label(state: DeploymentState) -> &'static str {
+    match state {
+        DeploymentState::Enabled => "enabled",
+        DeploymentState::Draining => "draining",
+        DeploymentState::Disabled => "disabled",
+        DeploymentState::Archived => "archived",
+    }
+}
+
+fn deployment_lifecycle_violation_reason(
+    intent: &OrderIntent,
+    deployment: &StrategyDeployment,
+) -> Option<String> {
+    if deployment.allows_intent_purpose(intent.purpose) {
+        return None;
+    }
+
+    Some(format!(
+        "deployment {} is {}; purpose {:?} is not allowed",
+        deployment.id,
+        deployment_state_label(deployment.effective_state()),
+        intent.purpose
+    ))
+}
+
 fn sell_reduce_only_violation_reason(
     intent: &OrderIntent,
     tracked_open_shares: u64,
@@ -896,6 +921,13 @@ pub struct CoordinatorHandle {
 }
 
 impl CoordinatorHandle {
+    async fn deployment_lifecycle_violation(&self, intent: &OrderIntent) -> Option<String> {
+        let deployment_id = intent.deployment_id()?.to_string();
+        let deployments = self.deployments.read().await;
+        let deployment = deployments.get(deployment_id.as_str())?;
+        deployment_lifecycle_violation_reason(intent, deployment)
+    }
+
     /// Submit an order intent to the coordinator for risk checking and execution
     pub async fn submit_order(&self, intent: OrderIntent) -> Result<()> {
         if !self.allowed_domains.contains(&intent.domain) {
@@ -905,6 +937,9 @@ impl CoordinatorHandle {
             )));
         }
         if let Some(reason) = buy_intent_missing_deployment_reason(&intent) {
+            return Err(crate::error::PloyError::Validation(reason));
+        }
+        if let Some(reason) = self.deployment_lifecycle_violation(&intent).await {
             return Err(crate::error::PloyError::Validation(reason));
         }
 
@@ -3164,6 +3199,20 @@ impl Coordinator {
             );
             return;
         }
+        if let Some(deployment_id) = intent.deployment_id().map(ToString::to_string) {
+            let deployments = self.deployments.read().await;
+            if let Some(deployment) = deployments.get(deployment_id.as_str()) {
+                if let Some(reason) = deployment_lifecycle_violation_reason(&intent, deployment) {
+                    self.persist_risk_decision(&intent, "BLOCKED", Some(reason.clone()), None)
+                        .await;
+                    warn!(
+                        %agent_id, %intent_id, reason = %reason,
+                        "order blocked by deployment lifecycle state"
+                    );
+                    return;
+                }
+            }
+        }
 
         if !intent.is_buy {
             let tracked_open_shares = self
@@ -3687,6 +3736,9 @@ impl Coordinator {
                     deployment.id
                 ));
             }
+            if let Some(reason) = deployment_lifecycle_violation_reason(intent, deployment) {
+                return Err(reason);
+            }
             Self::apply_deployment_metadata(intent, deployment);
             return Ok(());
         }
@@ -3699,6 +3751,7 @@ impl Coordinator {
             .filter(|deployment| {
                 Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent)
                     && Self::strategy_matches(strategy, deployment.strategy.as_str())
+                    && deployment.allows_intent_purpose(intent.purpose)
             })
             .collect();
 
@@ -3707,6 +3760,7 @@ impl Coordinator {
                 .values()
                 .filter(|deployment| {
                     Self::deployment_runtime_eligible(deployment, account_id, dry_run, intent)
+                        && deployment.allows_intent_purpose(intent.purpose)
                 })
                 .collect();
             domain_candidates.sort_by(|a, b| a.id.cmp(&b.id));
@@ -5244,8 +5298,9 @@ mod tests {
     use crate::adapters::PolymarketClient;
     use crate::config::ExecutionConfig;
     use crate::platform::{
-        AgentStatus, DeploymentExecutionMode, Domain, MarketSelector, OrderPriority, QueueStats,
-        StrategyDeployment, StrategyLifecycleStage, StrategyProductType, Timeframe,
+        AgentStatus, DeploymentExecutionMode, DeploymentState, Domain, IntentPurpose,
+        MarketSelector, OrderPriority, QueueStats, StrategyDeployment, StrategyLifecycleStage,
+        StrategyProductType, Timeframe,
     };
     use crate::strategy::execution::executor::OrderExecutor;
     use rust_decimal_macros::dec;
@@ -5281,6 +5336,67 @@ mod tests {
         );
         let handle = coordinator.handle();
         (handle, coordinator)
+    }
+
+    #[tokio::test]
+    async fn test_handle_pause_and_resume_agent_enqueue_control_commands() {
+        let (handle, mut coordinator) = make_test_handle();
+
+        handle
+            .pause_agent("openclaw")
+            .await
+            .expect("pause agent command accepted");
+        assert!(matches!(
+            coordinator.control_rx.try_recv(),
+            Ok(CoordinatorControlCommand::PauseAgent(agent_id)) if agent_id == "openclaw"
+        ));
+
+        handle
+            .resume_agent("openclaw")
+            .await
+            .expect("resume agent command accepted");
+        assert!(matches!(
+            coordinator.control_rx.try_recv(),
+            Ok(CoordinatorControlCommand::ResumeAgent(agent_id)) if agent_id == "openclaw"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handle_read_state_and_governance_policy_round_trip() {
+        let (handle, _coordinator) = make_test_handle();
+
+        let state = handle.read_state().await;
+        assert_eq!(state.active_agent_count(), 0);
+
+        let snapshot = handle
+            .update_governance_policy(GovernancePolicyUpdate {
+                block_new_intents: true,
+                blocked_domains: vec!["sports".to_string()],
+                max_intent_notional_usd: Some(dec!(5)),
+                max_total_notional_usd: Some(dec!(25)),
+                updated_by: "openclaw".to_string(),
+                reason: Some("risk_off".to_string()),
+                metadata: HashMap::from([("mode".to_string(), "risk_off".to_string())]),
+            })
+            .await
+            .expect("update governance policy");
+
+        assert!(snapshot.block_new_intents);
+        assert_eq!(snapshot.updated_by, "openclaw");
+        assert_eq!(snapshot.blocked_domains, vec!["sports".to_string()]);
+        assert_eq!(snapshot.max_intent_notional_usd, Some(dec!(5)));
+        assert_eq!(
+            snapshot.metadata.get("mode").map(String::as_str),
+            Some("risk_off")
+        );
+
+        let readback = handle.governance_policy().await;
+        assert!(readback.block_new_intents);
+        assert_eq!(readback.max_total_notional_usd, Some(dec!(25)));
+        assert_eq!(
+            readback.metadata.get("mode").map(String::as_str),
+            Some("risk_off")
+        );
     }
 
     #[test]
@@ -5342,6 +5458,7 @@ mod tests {
         domain: Domain,
         timeframe: Timeframe,
         execution_mode: DeploymentExecutionMode,
+        state: DeploymentState,
     ) -> StrategyDeployment {
         StrategyDeployment {
             id: id.to_string(),
@@ -5358,6 +5475,7 @@ mod tests {
             },
             timeframe,
             enabled: true,
+            state,
             allocator_profile: "default".to_string(),
             risk_profile: "default".to_string(),
             priority: 50,
@@ -5369,6 +5487,88 @@ mod tests {
             last_evaluated_at: None,
             last_evaluation_score: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_submit_order_accepts_entry_for_enabled_deployment() {
+        let (handle, _coordinator) = make_test_handle();
+        let deployment = make_deployment(
+            "deploy.crypto.enabled",
+            "momentum",
+            Domain::Crypto,
+            Timeframe::M5,
+            DeploymentExecutionMode::Any,
+            DeploymentState::Enabled,
+        );
+        handle
+            .shared_deployments()
+            .write()
+            .await
+            .insert(deployment.id.clone(), deployment.clone());
+
+        let intent = make_intent(true, OrderPriority::Normal)
+            .with_deployment_id(deployment.id.clone())
+            .with_purpose(IntentPurpose::Entry);
+
+        handle
+            .submit_order(intent)
+            .await
+            .expect("enabled entry accepted");
+    }
+
+    #[tokio::test]
+    async fn test_submit_order_rejects_entry_for_draining_deployment() {
+        let (handle, _coordinator) = make_test_handle();
+        let deployment = make_deployment(
+            "deploy.crypto.draining",
+            "momentum",
+            Domain::Crypto,
+            Timeframe::M5,
+            DeploymentExecutionMode::Any,
+            DeploymentState::Draining,
+        );
+        handle
+            .shared_deployments()
+            .write()
+            .await
+            .insert(deployment.id.clone(), deployment.clone());
+
+        let intent = make_intent(true, OrderPriority::Normal)
+            .with_deployment_id(deployment.id.clone())
+            .with_purpose(IntentPurpose::Entry);
+
+        let err = handle
+            .submit_order(intent)
+            .await
+            .expect_err("draining deployment blocks entry");
+        assert!(err.to_string().contains("draining"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_order_allows_cancel_for_draining_deployment() {
+        let (handle, _coordinator) = make_test_handle();
+        let deployment = make_deployment(
+            "deploy.crypto.draining.cancel",
+            "momentum",
+            Domain::Crypto,
+            Timeframe::M5,
+            DeploymentExecutionMode::Any,
+            DeploymentState::Draining,
+        );
+        handle
+            .shared_deployments()
+            .write()
+            .await
+            .insert(deployment.id.clone(), deployment.clone());
+
+        let intent = make_intent(true, OrderPriority::Normal)
+            .with_deployment_id(deployment.id.clone())
+            .with_purpose(IntentPurpose::Cancel);
+
+        handle
+            .submit_order(intent)
+            .await
+            .expect("draining deployment allows cancel-purpose intent");
     }
 
     #[test]
@@ -5571,6 +5771,7 @@ mod tests {
                 Domain::Crypto,
                 Timeframe::M15,
                 DeploymentExecutionMode::LiveOnly,
+                DeploymentState::Enabled,
             ),
         );
 
@@ -5599,6 +5800,7 @@ mod tests {
                 Domain::Crypto,
                 Timeframe::M15,
                 DeploymentExecutionMode::LiveOnly,
+                DeploymentState::Enabled,
             ),
         );
 
@@ -5636,6 +5838,7 @@ mod tests {
                 Domain::Crypto,
                 Timeframe::Other("other".to_string()),
                 DeploymentExecutionMode::Any,
+                DeploymentState::Enabled,
             ),
         );
         deployments.insert(
@@ -5646,6 +5849,7 @@ mod tests {
                 Domain::Crypto,
                 Timeframe::Other("other".to_string()),
                 DeploymentExecutionMode::Any,
+                DeploymentState::Enabled,
             ),
         );
 
@@ -5674,6 +5878,7 @@ mod tests {
             Domain::Crypto,
             Timeframe::M15,
             DeploymentExecutionMode::DryRunOnly,
+            DeploymentState::Enabled,
         );
         deployment.account_ids = vec!["acct-b".to_string()];
 
@@ -5707,6 +5912,7 @@ mod tests {
                 Domain::Crypto,
                 Timeframe::M5,
                 DeploymentExecutionMode::Any,
+                DeploymentState::Enabled,
             ),
         );
         deployments.insert(
@@ -5717,6 +5923,7 @@ mod tests {
                 Domain::Crypto,
                 Timeframe::M15,
                 DeploymentExecutionMode::Any,
+                DeploymentState::Enabled,
             ),
         );
 

@@ -1,6 +1,6 @@
 //! OpenClaw meta-agent — Layer 3 orchestrator
 //!
-//! Implements `TradingAgent` but never trades directly. Instead, it:
+//! Implements `GovernanceAgent` and never trades directly. Instead, it:
 //! 1. Detects market regime from BinanceWebSocket volatility data
 //! 2. Tracks per-agent performance (Sharpe, win rate, drawdown)
 //! 3. Dynamically adjusts capital allocation via governance policy metadata
@@ -12,10 +12,10 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::agents::context::AgentContext;
-use crate::agents::traits::TradingAgent;
+use crate::agents::governance_context::GovernanceContext;
+use crate::agents::traits::GovernanceAgent;
 use crate::coordinator::CoordinatorCommand;
-use crate::platform::{AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, Domain};
+use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
 use super::config::OpenClawConfig;
@@ -40,7 +40,7 @@ impl OpenClawAgent {
 }
 
 #[async_trait]
-impl TradingAgent for OpenClawAgent {
+impl GovernanceAgent for OpenClawAgent {
     fn id(&self) -> &str {
         &self.config.agent_id
     }
@@ -53,19 +53,7 @@ impl TradingAgent for OpenClawAgent {
         Domain::Custom(0)
     }
 
-    fn risk_params(&self) -> AgentRiskParams {
-        // Meta-agent never trades — zero risk params
-        AgentRiskParams {
-            max_order_value: Decimal::ZERO,
-            max_total_exposure: Decimal::ZERO,
-            max_unhedged_positions: 0,
-            max_daily_loss: Decimal::ZERO,
-            allow_overnight: false,
-            allowed_markets: vec![],
-        }
-    }
-
-    async fn run(self, mut ctx: AgentContext) -> crate::error::Result<()> {
+    async fn run(self, mut ctx: GovernanceContext) -> crate::error::Result<()> {
         info!(
             agent_id = %self.config.agent_id,
             regime_tick = self.config.regime_tick_secs,

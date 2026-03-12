@@ -1,24 +1,8 @@
-//! Trading Agents — pull-based agent implementations
+//! Governance agents and coordinator-facing agent helpers.
 //!
-//! Each agent implements `TradingAgent` and owns its main loop.
-//! Agents communicate with the Coordinator via `AgentContext`.
+//! Live trading now runs through the canonical `Strategy` runtime. The
+//! remaining `agents/*` surface is governance-oriented.
 
-pub mod context;
-pub mod crypto;
-pub mod crypto_lob_ml;
-pub mod crypto_rl_policy;
+pub mod governance_context;
 pub mod openclaw;
-pub mod politics;
-pub mod sports;
 pub mod traits;
-
-pub use context::AgentContext;
-pub use crypto::{CryptoTradingAgent, CryptoTradingConfig};
-pub use crypto_lob_ml::{
-    CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy, CryptoLobMlExitMode,
-};
-pub use crypto_rl_policy::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
-pub use openclaw::{OpenClawAgent, OpenClawConfig};
-pub use politics::{PoliticsTradingAgent, PoliticsTradingConfig};
-pub use sports::{SportsTradingAgent, SportsTradingConfig};
-pub use traits::{AgentConfig, TradingAgent};

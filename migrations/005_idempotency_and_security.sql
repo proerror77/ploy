@@ -103,9 +103,10 @@ CREATE TABLE IF NOT EXISTS quote_freshness (
     bid_size DECIMAL(18,8),
     ask_size DECIMAL(18,8),
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    is_stale BOOLEAN GENERATED ALWAYS AS (
-        EXTRACT(EPOCH FROM (NOW() - received_at)) > 30
-    ) STORED
+    -- Generated columns require immutable expressions in Postgres.
+    -- `NOW()` is volatile, so keep this as a normal column and refresh it
+    -- from `received_at` (see repair/update blocks below).
+    is_stale BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Legacy/drift-safe repair: older DBs may have quote_freshness without `is_stale`.
@@ -122,13 +123,7 @@ BEGIN
           AND table_name = 'quote_freshness'
           AND column_name = 'is_stale'
     ) THEN
-        BEGIN
-            -- Keep the generated-column intent when supported.
-            EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN GENERATED ALWAYS AS ((EXTRACT(EPOCH FROM (NOW() - received_at)) > 30)) STORED';
-        EXCEPTION WHEN feature_not_supported OR invalid_object_definition THEN
-            -- Fallback for drifted schemas where generated expressions are unavailable.
-            EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT FALSE';
-        END;
+        EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT FALSE';
     END IF;
 
     -- If `is_stale` is a normal column, refresh values from `received_at`.
@@ -272,23 +267,57 @@ END $$;
 -- 7. MIGRATION METADATA
 -- ============================================================================
 
-INSERT INTO system_events (event_type, severity, message, metadata)
-VALUES (
-    'migration_applied',
-    'INFO',
-    'Applied migration 005: Security and Idempotency Enhancement',
-    jsonb_build_object(
-        'migration_version', '005',
-        'features', jsonb_build_array(
-            'order_idempotency',
-            'optimistic_locking',
-            'quote_freshness',
-            'nonce_management',
-            'security_audit_log'
-        ),
-        'applied_at', NOW()
-    )
-);
+DO $$
+BEGIN
+    IF to_regclass('public.system_events') IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'system_events'
+          AND column_name = 'component'
+    ) THEN
+        INSERT INTO system_events (event_type, component, severity, message, metadata)
+        VALUES (
+            'migration_applied',
+            'migration',
+            'INFO',
+            'Applied migration 005: Security and Idempotency Enhancement',
+            jsonb_build_object(
+                'migration_version', '005',
+                'features', jsonb_build_array(
+                    'order_idempotency',
+                    'optimistic_locking',
+                    'quote_freshness',
+                    'nonce_management',
+                    'security_audit_log'
+                ),
+                'applied_at', NOW()
+            )
+        );
+    ELSE
+        INSERT INTO system_events (event_type, severity, message, metadata)
+        VALUES (
+            'migration_applied',
+            'INFO',
+            'Applied migration 005: Security and Idempotency Enhancement',
+            jsonb_build_object(
+                'migration_version', '005',
+                'features', jsonb_build_array(
+                    'order_idempotency',
+                    'optimistic_locking',
+                    'quote_freshness',
+                    'nonce_management',
+                    'security_audit_log'
+                ),
+                'applied_at', NOW()
+            )
+        );
+    END IF;
+END $$;
 
 -- ============================================================================
 -- VERIFICATION QUERIES (for testing)

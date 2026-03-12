@@ -15,6 +15,8 @@ use crate::platform::{
     StrategyProductType,
 };
 
+use super::deployment_gate::ensure_required_strategy_evidence;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyControlEntry {
     pub deployment_id: String,
@@ -114,6 +116,58 @@ fn selector_mode(selector: &MarketSelector) -> &'static str {
     match selector {
         MarketSelector::Static { .. } => "static",
         MarketSelector::Dynamic { .. } => "dynamic",
+    }
+}
+
+fn apply_control_patch(
+    dep: &mut StrategyDeployment,
+    req: &UpdateStrategyControlRequest,
+    now: DateTime<Utc>,
+) {
+    if let Some(enabled) = req.enabled {
+        dep.enabled = enabled;
+    }
+    if let Some(priority) = req.priority {
+        dep.priority = priority;
+    }
+    if let Some(cooldown_secs) = req.cooldown_secs {
+        dep.cooldown_secs = cooldown_secs;
+    }
+    if let Some(allocator_profile) = req
+        .allocator_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        dep.allocator_profile = allocator_profile.to_string();
+    }
+    if let Some(risk_profile) = req
+        .risk_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        dep.risk_profile = risk_profile.to_string();
+    }
+    if let Some(strategy_version) = req
+        .strategy_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        dep.strategy_version = strategy_version.to_string();
+        dep.last_evaluated_at = Some(now);
+    }
+    if let Some(lifecycle_stage) = req.lifecycle_stage {
+        dep.lifecycle_stage = lifecycle_stage;
+        dep.last_evaluated_at = Some(now);
+    }
+    if let Some(product_type) = req.product_type {
+        dep.product_type = product_type;
+    }
+    if let Some(last_evaluation_score) = req.last_evaluation_score {
+        dep.last_evaluation_score = Some(last_evaluation_score);
+        dep.last_evaluated_at = Some(now);
     }
 }
 
@@ -359,57 +413,27 @@ pub async fn update_strategy_control(
         }
     }
 
+    let now = Utc::now();
+
+    if matches!(req.enabled, Some(true)) {
+        let dep_candidate = {
+            let deployments = state.deployments.read().await;
+            let Some(dep) = deployments.get(key).cloned() else {
+                return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
+            };
+            let mut dep_candidate = dep;
+            apply_control_patch(&mut dep_candidate, &req, now);
+            dep_candidate
+        };
+        ensure_required_strategy_evidence(&state, &dep_candidate).await?;
+    }
+
     let dep_snapshot = {
         let mut deployments = state.deployments.write().await;
         let Some(dep) = deployments.get_mut(key) else {
             return Err((StatusCode::NOT_FOUND, "deployment not found".to_string()));
         };
-
-        if let Some(enabled) = req.enabled {
-            dep.enabled = enabled;
-        }
-        if let Some(priority) = req.priority {
-            dep.priority = priority;
-        }
-        if let Some(cooldown_secs) = req.cooldown_secs {
-            dep.cooldown_secs = cooldown_secs;
-        }
-        if let Some(allocator_profile) = req
-            .allocator_profile
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            dep.allocator_profile = allocator_profile.to_string();
-        }
-        if let Some(risk_profile) = req
-            .risk_profile
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            dep.risk_profile = risk_profile.to_string();
-        }
-        if let Some(strategy_version) = req
-            .strategy_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            dep.strategy_version = strategy_version.to_string();
-            dep.last_evaluated_at = Some(Utc::now());
-        }
-        if let Some(lifecycle_stage) = req.lifecycle_stage {
-            dep.lifecycle_stage = lifecycle_stage;
-            dep.last_evaluated_at = Some(Utc::now());
-        }
-        if let Some(product_type) = req.product_type {
-            dep.product_type = product_type;
-        }
-        if let Some(last_evaluation_score) = req.last_evaluation_score {
-            dep.last_evaluation_score = Some(last_evaluation_score);
-            dep.last_evaluated_at = Some(Utc::now());
-        }
+        apply_control_patch(dep, &req, now);
         dep.clone()
     };
     let latest_eval = {

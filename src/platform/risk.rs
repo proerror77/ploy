@@ -371,14 +371,17 @@ impl RiskGate {
         }
     }
 
-    /// 註冊 Agent 的風控參數
+    /// 註冊外部綁定的 Agent 風控參數。
+    ///
+    /// `AgentRiskParams` 的 canonical owner 是 bootstrap / deployment /
+    /// governance projection，而不是 runtime trait 本身。
     pub async fn register_agent(&self, agent_id: &str, params: AgentRiskParams) {
         let mut params_map = self.agent_params.write().await;
         params_map.insert(agent_id.to_string(), params);
         debug!("Registered risk params for agent {}", agent_id);
     }
 
-    /// 註冊 Agent 的風控參數 (含 domain)
+    /// 註冊外部綁定的 Agent 風控參數 (含 domain)
     pub async fn register_agent_with_domain(
         &self,
         agent_id: &str,
@@ -1138,6 +1141,38 @@ mod tests {
         let intent = make_intent("agent1", 100, Decimal::from_str_exact("0.50").unwrap());
         let result = gate.check_order(&intent).await;
         assert!(result.is_passed());
+    }
+
+    #[tokio::test]
+    async fn test_external_risk_binding_applies_market_allow_list() {
+        let gate = RiskGate::new(RiskConfig::default());
+        let mut params = AgentRiskParams::default();
+        params.allowed_markets = vec!["btc-15m".to_string()];
+
+        gate.register_agent_with_domain("agent1", Domain::Crypto, params)
+            .await;
+
+        let allowed = make_intent("agent1", 10, Decimal::from_str_exact("0.50").unwrap());
+        assert!(gate.check_order(&allowed).await.is_passed());
+
+        let blocked = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "eth-15m",
+            "token-eth",
+            Side::Up,
+            true,
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+
+        match gate.check_order(&blocked).await {
+            RiskCheckResult::Blocked(BlockReason::MarketNotAllowed { market, agent }) => {
+                assert_eq!(market, "eth-15m");
+                assert_eq!(agent, "agent1");
+            }
+            other => panic!("expected MarketNotAllowed, got {:?}", other),
+        }
     }
 
     #[tokio::test]

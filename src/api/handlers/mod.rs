@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod capabilities;
+pub mod deployment_gate;
 pub mod deployments;
 pub mod evaluations;
 pub mod governance;

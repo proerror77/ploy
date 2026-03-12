@@ -6,6 +6,7 @@
 
 pub mod core;
 pub mod data_source;
+pub mod strategy;
 
 use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::adapters::PolymarketClient;

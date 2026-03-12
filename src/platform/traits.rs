@@ -1,11 +1,7 @@
-//! Core traits for the Order Platform
+//! Core status and risk types for the order plane.
 
-use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-
-use super::types::{Domain, DomainEvent, ExecutionReport, OrderIntent};
-use crate::error::Result;
 
 /// Agent 狀態
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +47,9 @@ impl std::fmt::Display for AgentStatus {
 }
 
 /// Agent 風險參數
+///
+/// 由 bootstrap / deployment / governance 註冊到風控層，不再由
+/// runtime trait 本身作為 canonical owner。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRiskParams {
     /// 單筆最大下單金額 (USD)
@@ -81,6 +80,17 @@ impl Default for AgentRiskParams {
 }
 
 impl AgentRiskParams {
+    pub fn governance_only() -> Self {
+        Self {
+            max_order_value: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
+            max_unhedged_positions: 0,
+            max_daily_loss: Decimal::ZERO,
+            allow_overnight: false,
+            allowed_markets: vec![],
+        }
+    }
+
     pub fn conservative() -> Self {
         Self {
             max_order_value: Decimal::from(25),
@@ -109,101 +119,6 @@ impl AgentRiskParams {
     }
 }
 
-/// 領域策略 Agent trait
-///
-/// 所有策略 Agent 必須實作這個 trait 才能接入下單平台。
-/// 每個 Agent 負責：
-/// - 接收並處理領域事件
-/// - 產生下單意圖
-/// - 處理執行結果回調
-#[async_trait]
-pub trait DomainAgent: Send + Sync {
-    /// Agent 唯一 ID
-    fn id(&self) -> &str;
-
-    /// Agent 名稱
-    fn name(&self) -> &str;
-
-    /// 所屬領域
-    fn domain(&self) -> Domain;
-
-    /// 當前狀態
-    fn status(&self) -> AgentStatus;
-
-    /// 風險參數
-    fn risk_params(&self) -> &AgentRiskParams;
-
-    /// 處理領域事件
-    ///
-    /// 當有新的市場數據或事件時調用。
-    /// Agent 分析事件並決定是否下單。
-    ///
-    /// # Arguments
-    /// * `event` - 領域事件
-    ///
-    /// # Returns
-    /// 下單意圖列表 (可為空)
-    async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>>;
-
-    /// 處理執行報告
-    ///
-    /// 當訂單執行完成 (成功或失敗) 時調用。
-    /// Agent 更新內部狀態。
-    async fn on_execution(&mut self, report: ExecutionReport);
-
-    /// 啟動 Agent
-    async fn start(&mut self) -> Result<()>;
-
-    /// 停止 Agent
-    async fn stop(&mut self) -> Result<()>;
-
-    /// 暫停交易 (保持監控)
-    fn pause(&mut self);
-
-    /// 恢復交易
-    fn resume(&mut self);
-
-    /// 獲取當前倉位數量
-    fn position_count(&self) -> usize;
-
-    /// 獲取當前總暴露
-    fn total_exposure(&self) -> Decimal;
-
-    /// 獲取今日 PnL
-    fn daily_pnl(&self) -> Decimal;
-
-    /// 健康檢查
-    fn health_check(&self) -> AgentHealthStatus {
-        AgentHealthStatus {
-            agent_id: self.id().to_string(),
-            status: self.status(),
-            position_count: self.position_count(),
-            total_exposure: self.total_exposure(),
-            daily_pnl: self.daily_pnl(),
-            is_healthy: self.status().is_active(),
-        }
-    }
-}
-
-/// Agent 健康狀態
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentHealthStatus {
-    pub agent_id: String,
-    pub status: AgentStatus,
-    pub position_count: usize,
-    pub total_exposure: Decimal,
-    pub daily_pnl: Decimal,
-    pub is_healthy: bool,
-}
-
-/// 簡化的 Agent 實作輔助 trait
-///
-/// 提供一些默認實作，減少樣板代碼
-pub trait SimpleAgent: DomainAgent {
-    /// 更新狀態
-    fn set_status(&mut self, status: AgentStatus);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +140,17 @@ mod tests {
         restricted.allowed_markets = vec!["btc-15m".to_string()];
         assert!(restricted.is_market_allowed("btc-15m"));
         assert!(!restricted.is_market_allowed("eth-15m"));
+    }
+
+    #[test]
+    fn test_governance_only_risk_params() {
+        let params = AgentRiskParams::governance_only();
+
+        assert_eq!(params.max_order_value, Decimal::ZERO);
+        assert_eq!(params.max_total_exposure, Decimal::ZERO);
+        assert_eq!(params.max_unhedged_positions, 0);
+        assert_eq!(params.max_daily_loss, Decimal::ZERO);
+        assert!(!params.allow_overnight);
+        assert!(params.allowed_markets.is_empty());
     }
 }

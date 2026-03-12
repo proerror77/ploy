@@ -1,7 +1,9 @@
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+use crate::platform::AgentRiskParams;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Deserialize)]
@@ -34,9 +36,6 @@ pub struct AppConfig {
     /// Optional NBA Q3→Q4 comeback trading agent
     #[serde(default)]
     pub nba_comeback: Option<NbaComebackConfig>,
-    /// Optional event registry discovery service
-    #[serde(default)]
-    pub event_registry: Option<DiscoveryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,17 +100,178 @@ fn default_agent_framework_hard_disable() -> bool {
     false
 }
 
+/// Entry mode for crypto-managed runtime configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoEntryMode {
+    /// Original arbitrage-only mode: require sum_of_asks < threshold.
+    ArbOnly,
+    /// Directional mode: trade based on momentum edge alone, no sum constraint.
+    Directional,
+    /// Volatility straddle: buy both UP and DOWN when sum < straddle_threshold.
+    VolStraddle,
+}
+
+fn default_crypto_entry_mode() -> CryptoEntryMode {
+    CryptoEntryMode::Directional
+}
+
+fn default_crypto_exit_edge_floor() -> Decimal {
+    Decimal::new(2, 2)
+}
+
+fn default_crypto_exit_price_band() -> Decimal {
+    Decimal::new(5, 2)
+}
+
+fn default_crypto_oracle_lag_buffer_secs() -> u64 {
+    3
+}
+
+fn default_crypto_max_spread_pct() -> Decimal {
+    Decimal::new(10, 2)
+}
+
+fn default_crypto_straddle_threshold() -> Decimal {
+    Decimal::new(99, 2)
+}
+
+fn default_crypto_straddle_min_vol() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_crypto_min_signal_score() -> Decimal {
+    Decimal::new(40, 2)
+}
+
+/// Neutral config owner for the canonical crypto runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoTradingConfig {
+    pub agent_id: String,
+    pub name: String,
+    pub coins: Vec<String>,
+    pub sum_threshold: Decimal,
+    pub min_momentum_1s: f64,
+    #[serde(default)]
+    pub min_window_move_pct: Decimal,
+    #[serde(default = "default_crypto_exit_edge_floor")]
+    pub min_edge: Decimal,
+    pub event_refresh_secs: u64,
+    pub min_time_remaining_secs: u64,
+    pub max_time_remaining_secs: u64,
+    pub prefer_close_to_end: bool,
+    #[serde(default)]
+    pub entry_cooldown_secs: u64,
+    #[serde(default)]
+    pub require_mtf_agreement: bool,
+    pub default_shares: u64,
+    #[serde(default = "default_crypto_exit_edge_floor")]
+    pub exit_edge_floor: Decimal,
+    #[serde(default = "default_crypto_exit_price_band")]
+    pub exit_price_band: Decimal,
+    pub enable_price_exits: bool,
+    pub min_hold_secs: u64,
+    pub risk_params: AgentRiskParams,
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_crypto_entry_mode")]
+    pub entry_mode: CryptoEntryMode,
+    #[serde(default = "default_crypto_oracle_lag_buffer_secs")]
+    pub oracle_lag_buffer_secs: u64,
+    #[serde(default = "default_crypto_max_spread_pct")]
+    pub max_spread_pct: Decimal,
+    #[serde(default = "default_crypto_straddle_threshold")]
+    pub straddle_threshold: Decimal,
+    #[serde(default = "default_crypto_straddle_min_vol")]
+    pub straddle_min_vol: Decimal,
+    #[serde(default = "default_crypto_min_signal_score")]
+    pub min_signal_score: Decimal,
+}
+
+impl Default for CryptoTradingConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: "crypto".into(),
+            name: "Crypto Momentum".into(),
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            sum_threshold: Decimal::new(96, 2),
+            min_momentum_1s: 0.001,
+            min_window_move_pct: Decimal::new(1, 4),
+            min_edge: Decimal::new(2, 2),
+            event_refresh_secs: 30,
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 300,
+            prefer_close_to_end: true,
+            entry_cooldown_secs: 0,
+            require_mtf_agreement: true,
+            default_shares: 100,
+            exit_edge_floor: default_crypto_exit_edge_floor(),
+            exit_price_band: default_crypto_exit_price_band(),
+            enable_price_exits: false,
+            min_hold_secs: 20,
+            risk_params: AgentRiskParams::conservative(),
+            heartbeat_interval_secs: 5,
+            entry_mode: default_crypto_entry_mode(),
+            oracle_lag_buffer_secs: default_crypto_oracle_lag_buffer_secs(),
+            max_spread_pct: default_crypto_max_spread_pct(),
+            straddle_threshold: default_crypto_straddle_threshold(),
+            straddle_min_vol: default_crypto_straddle_min_vol(),
+            min_signal_score: default_crypto_min_signal_score(),
+        }
+    }
+}
+
+/// Neutral config owner for the registered politics/event-edge runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticsTradingConfig {
+    pub agent_id: String,
+    pub name: String,
+    pub poll_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
+    pub risk_params: AgentRiskParams,
+}
+
+impl Default for PoliticsTradingConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: "politics".into(),
+            name: "Event Edge".into(),
+            poll_interval_secs: 300,
+            heartbeat_interval_secs: 5,
+            risk_params: AgentRiskParams::conservative(),
+        }
+    }
+}
+
+/// Neutral config owner for the registered sports runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SportsTradingConfig {
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    pub agent_id: String,
+    pub name: String,
+    pub poll_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
+    pub risk_params: AgentRiskParams,
+}
+
+impl Default for SportsTradingConfig {
+    fn default() -> Self {
+        Self {
+            account_id: default_account_id(),
+            agent_id: "sports".into(),
+            name: "NBA Comeback".into(),
+            poll_interval_secs: 30,
+            heartbeat_interval_secs: 5,
+            risk_params: AgentRiskParams::conservative(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventEdgeAgentConfig {
     /// Enable the agent inside `ploy run`
     #[serde(default)]
     pub enabled: bool,
-    /// Agent framework to use:
-    /// - "deterministic" (default): internal loop with fixed rules
-    /// - "event_driven": event-driven + persisted-state loop (Arena `last_updated` gating)
-    /// - "claude_agent_sdk": tool-using agent via `claude-agent-sdk-rs` (Claude Code CLI)
-    #[serde(default = "default_event_edge_framework")]
-    pub framework: String,
     /// Polymarket event IDs to monitor (preferred)
     #[serde(default)]
     pub event_ids: Vec<String>,
@@ -139,13 +299,6 @@ pub struct EventEdgeAgentConfig {
     /// Maximum notional spend per UTC day (simple safety guard)
     #[serde(default = "default_event_edge_max_daily_spend_usd")]
     pub max_daily_spend_usd: Decimal,
-
-    /// Claude model override for framework mode (optional)
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Maximum Claude turns per cycle (framework mode)
-    #[serde(default = "default_event_edge_claude_max_turns")]
-    pub claude_max_turns: u32,
 }
 
 impl EventEdgeAgentConfig {
@@ -170,13 +323,6 @@ impl EventEdgeAgentConfig {
                 self.max_daily_spend_usd
             ));
         }
-        let valid_frameworks = ["deterministic", "event_driven", "claude_agent_sdk"];
-        if !valid_frameworks.contains(&self.framework.as_str()) {
-            errors.push(format!(
-                "framework must be one of {:?}, got \"{}\"",
-                valid_frameworks, self.framework
-            ));
-        }
         errors
     }
 }
@@ -185,7 +331,6 @@ impl Default for EventEdgeAgentConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            framework: default_event_edge_framework(),
             event_ids: Vec::new(),
             titles: Vec::new(),
             interval_secs: default_event_edge_interval_secs(),
@@ -195,14 +340,8 @@ impl Default for EventEdgeAgentConfig {
             trade: false,
             cooldown_secs: default_event_edge_cooldown_secs(),
             max_daily_spend_usd: default_event_edge_max_daily_spend_usd(),
-            model: None,
-            claude_max_turns: default_event_edge_claude_max_turns(),
         }
     }
-}
-
-fn default_event_edge_framework() -> String {
-    "deterministic".to_string()
 }
 
 fn default_event_edge_interval_secs() -> u64 {
@@ -227,10 +366,6 @@ fn default_event_edge_cooldown_secs() -> u64 {
 
 fn default_event_edge_max_daily_spend_usd() -> Decimal {
     Decimal::new(50, 0) // $50
-}
-
-fn default_event_edge_claude_max_turns() -> u32 {
-    20
 }
 
 /// NBA Q3→Q4 comeback trading agent configuration
@@ -479,31 +614,6 @@ fn default_early_exit_take_profit_pct() -> f64 {
 
 fn default_early_exit_stop_loss_pct() -> f64 {
     20.0
-}
-
-/// Event registry discovery service configuration
-#[derive(Debug, Clone, Deserialize)]
-pub struct DiscoveryConfig {
-    /// Enable the background discovery scanner
-    #[serde(default)]
-    pub enabled: bool,
-    /// Scan interval in seconds (default: 300 = 5 minutes)
-    #[serde(default = "default_discovery_scan_interval")]
-    pub scan_interval_secs: u64,
-    /// Sports keywords to scan (e.g. ["NBA", "NFL"])
-    #[serde(default = "default_discovery_sports_keywords")]
-    pub sports_keywords: Vec<String>,
-    /// General keywords to scan
-    #[serde(default)]
-    pub general_keywords: Vec<String>,
-}
-
-fn default_discovery_scan_interval() -> u64 {
-    300
-}
-
-fn default_discovery_sports_keywords() -> Vec<String> {
-    vec!["NBA".to_string(), "NFL".to_string()]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -819,7 +929,6 @@ impl AppConfig {
             api_port: Some(8081),
             event_edge_agent: None,
             nba_comeback: None,
-            event_registry: None,
         }
     }
 

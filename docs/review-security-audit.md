@@ -377,9 +377,9 @@ While `trigger()` uses `Ordering::SeqCst` to set the flag, the read side uses `R
 ## 7. LLM Agent Security
 
 **Files reviewed:**
-- `/Users/proerror/Documents/ploy/src/agent/autonomous.rs`
-- `/Users/proerror/Documents/ploy/src/agent/grok.rs`
-- `/Users/proerror/Documents/ploy/src/agent/client.rs`
+- `/Users/proerror/Documents/ploy/src/ai_clients/autonomous.rs`
+- `/Users/proerror/Documents/ploy/src/ai_clients/grok.rs`
+- `/Users/proerror/Documents/ploy/src/ai_clients/client.rs`
 
 ### 7.1 Prompt Injection Sanitization (Good Practice)
 
@@ -413,7 +413,7 @@ The agent defaults to `AdvisoryOnly` mode with trading disabled. The `validate_a
 | Attribute | Value |
 |-----------|-------|
 | **Severity** | Medium |
-| **File** | `src/agent/grok.rs:18-28` |
+| **File** | `src/ai_clients/grok.rs:18-28` |
 | **Status** | Open |
 
 The `GrokConfig` struct stores the API key as a plain `String` with no zeroization or redaction:
@@ -438,7 +438,7 @@ The struct does derive `Debug`, which means the API key could appear in logs if 
 | Attribute | Value |
 |-----------|-------|
 | **Severity** | Medium |
-| **File** | `src/agent/autonomous.rs:466-477` |
+| **File** | `src/ai_clients/autonomous.rs:565` |
 | **Status** | Open |
 
 The `execute_action` method for `EnterPosition` updates an in-memory exposure counter but does not actually submit orders to the exchange (marked with `// TODO: Integrate with actual order executor`):
@@ -522,7 +522,6 @@ The `CheckpointService::start` method spawns a background task with `tokio::spaw
 
 **Files reviewed:**
 - `/Users/proerror/Documents/ploy/src/strategy/fund_manager.rs`
-- `/Users/proerror/Documents/ploy/src/strategy/reconciliation.rs`
 
 ### 9.1 Fund Manager Balance Caching (Good Practice)
 
@@ -539,11 +538,7 @@ The `can_open_position` method enforces multiple safety checks in sequence:
 6. Maximum single exposure limit
 7. Minimum order size (5 shares, $1 value)
 
-### 9.3 Reconciliation Service (Good Practice)
-
-The `ReconciliationService` runs every 30 seconds, comparing local database positions against exchange balances. It classifies discrepancies by severity (Info < 5%, Warning 5-20%, Critical > 20%) and auto-corrects only minor (Info-level) differences. Critical discrepancies are logged at error level and persisted to the database for manual review.
-
-### Finding SEC-16: Reconciliation Relies on Unimplemented get_positions()
+### Finding SEC-16: Legacy Reconciliation Path Relied on Unimplemented get_positions()
 
 | Attribute | Value |
 |-----------|-------|
@@ -551,7 +546,7 @@ The `ReconciliationService` runs every 30 seconds, comparing local database posi
 | **File** | `src/adapters/polymarket_clob.rs:1271-1280` |
 | **Status** | Open |
 
-The `ReconciliationService` calls `self.client.get_positions()` to fetch exchange balances. However, the `PolymarketClient::get_positions()` method is a stub that always returns an empty vector:
+The retired reconciliation path called `self.client.get_positions()` to fetch exchange balances. However, the `PolymarketClient::get_positions()` method is a stub that always returns an empty vector:
 
 ```rust
 pub async fn get_positions(&self) -> Result<Vec<PositionResponse>> {
@@ -586,8 +581,8 @@ This means the reconciliation service will always see zero exchange positions, c
 | SEC-08 | Medium | Idempotency hash does not include time component | `src/strategy/idempotency.rs:75` |
 | SEC-09 | Medium | Best-effort DB persistence could lose order records | `src/strategy/engine.rs:576` |
 | SEC-10 | Medium | confirm_fills guard only at engine construction | `src/strategy/engine.rs:79` |
-| SEC-12 | Medium | Grok API key stored in plaintext config struct | `src/agent/grok.rs:18` |
-| SEC-13 | Medium | Autonomous agent exposure tracking not synchronized | `src/agent/autonomous.rs:466` |
+| SEC-12 | Medium | Grok API key stored in plaintext config struct | `src/ai_clients/grok.rs:18` |
+| SEC-13 | Medium | Autonomous agent exposure tracking not synchronized | `src/ai_clients/autonomous.rs:565` |
 | SEC-16 | Medium | Reconciliation relies on unimplemented get_positions() | `src/adapters/polymarket_clob.rs:1271` |
 | SEC-03 | Low | Deprecated private_key_hex() returns empty string | `src/signing/wallet.rs:88` |
 | SEC-06 | Low | No timestamp validation on HMAC signatures | `src/signing/hmac.rs:61` |

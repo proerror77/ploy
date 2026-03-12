@@ -10,8 +10,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domain::{OrderRequest, OrderStatus, Side};
+use crate::plugins::DeploymentState;
+use crate::strategy::OrderPurpose;
 
-use super::types::{Domain, OrderIntent, OrderPriority};
+use super::types::{Domain, IntentPurpose, OrderIntent, OrderPriority};
 
 /// Timeframe for deployment / intent routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +140,8 @@ pub struct StrategyDeployment {
     pub market_selector: MarketSelector,
     pub timeframe: Timeframe,
     pub enabled: bool,
+    #[serde(default)]
+    pub state: DeploymentState,
     pub allocator_profile: String,
     pub risk_profile: String,
     pub priority: i32,
@@ -160,6 +164,14 @@ pub struct StrategyDeployment {
 }
 
 impl StrategyDeployment {
+    pub fn effective_state(&self) -> DeploymentState {
+        if !self.enabled {
+            DeploymentState::Disabled
+        } else {
+            self.state
+        }
+    }
+
     pub fn normalize_account_ids_in_place(&mut self) {
         let mut normalized: Vec<String> = self
             .account_ids
@@ -192,7 +204,30 @@ impl StrategyDeployment {
     }
 
     pub fn is_enabled_for_runtime(&self, account_id: &str, dry_run: bool) -> bool {
-        self.enabled && self.matches_account(account_id) && self.matches_execution_mode(dry_run)
+        !matches!(
+            self.effective_state(),
+            DeploymentState::Disabled | DeploymentState::Archived
+        ) && self.matches_account(account_id)
+            && self.matches_execution_mode(dry_run)
+    }
+
+    pub fn allows_intent_purpose(&self, purpose: IntentPurpose) -> bool {
+        match self.effective_state() {
+            DeploymentState::Enabled => true,
+            DeploymentState::Draining => !matches!(purpose, IntentPurpose::Entry),
+            DeploymentState::Disabled | DeploymentState::Archived => false,
+        }
+    }
+}
+
+impl From<OrderPurpose> for IntentPurpose {
+    fn from(value: OrderPurpose) -> Self {
+        match value {
+            OrderPurpose::Entry => IntentPurpose::Entry,
+            OrderPurpose::Exit => IntentPurpose::Exit,
+            OrderPurpose::Reduce => IntentPurpose::Reduce,
+            OrderPurpose::Hedge => IntentPurpose::Hedge,
+        }
     }
 }
 
@@ -383,6 +418,7 @@ pub enum RiskDecisionStatus {
 pub struct OrderCommand {
     pub intent_id: Uuid,
     pub deployment_id: String,
+    pub purpose: IntentPurpose,
     pub idempotency_key: String,
     pub request: OrderRequest,
 }
@@ -453,6 +489,7 @@ mod tests {
             },
             timeframe: Timeframe::M5,
             enabled: true,
+            state: DeploymentState::Enabled,
             allocator_profile: "default".to_string(),
             risk_profile: "default".to_string(),
             priority: 10,
@@ -501,5 +538,42 @@ mod tests {
 
         let mapped = intent.into_order_intent();
         assert_eq!(mapped.deployment_id(), Some("deploy.crypto.15m"));
+    }
+
+    #[test]
+    fn deployment_state_draining_blocks_entry_but_allows_non_entry_purposes() {
+        let deployment = StrategyDeployment {
+            id: "dep.crypto.15m".to_string(),
+            strategy: "momentum".to_string(),
+            strategy_version: "v1".to_string(),
+            domain: Domain::Crypto,
+            market_selector: MarketSelector::Dynamic {
+                domain: Domain::Crypto,
+                query: None,
+                min_liquidity_usd: None,
+                max_spread_bps: None,
+                min_time_remaining_secs: None,
+                max_time_remaining_secs: None,
+            },
+            timeframe: Timeframe::M15,
+            enabled: true,
+            state: DeploymentState::Draining,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 5,
+            cooldown_secs: 30,
+            account_ids: Vec::new(),
+            execution_mode: DeploymentExecutionMode::Any,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        };
+
+        assert!(!deployment.allows_intent_purpose(IntentPurpose::Entry));
+        assert!(deployment.allows_intent_purpose(IntentPurpose::Exit));
+        assert!(deployment.allows_intent_purpose(IntentPurpose::Reduce));
+        assert!(deployment.allows_intent_purpose(IntentPurpose::Hedge));
+        assert!(deployment.allows_intent_purpose(IntentPurpose::Cancel));
     }
 }

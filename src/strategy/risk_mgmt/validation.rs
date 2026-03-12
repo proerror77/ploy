@@ -163,7 +163,7 @@ impl Validator for TimeRemainingValidator {
             details: None,
         })?;
 
-        let remaining = round.seconds_remaining() as u64;
+        let remaining = u64::try_from(round.seconds_remaining()).unwrap_or(0);
         if remaining < self.min_seconds {
             return Err(ValidationError {
                 validator: self.name().to_string(),

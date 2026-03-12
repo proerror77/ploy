@@ -1,6 +1,7 @@
 #[cfg(feature = "claimer_cli")]
 mod claimer_mode;
 mod collector_modes;
+mod deribit_iv_backfill_mode;
 mod history_mode;
 mod paper_mode;
 mod platform_mode;
@@ -8,7 +9,10 @@ mod watch_modes;
 
 #[cfg(feature = "claimer_cli")]
 pub use claimer_mode::run_claimer;
-pub use collector_modes::{run_collect_mode, run_orderbook_history_mode};
+pub use collector_modes::{
+    run_collect_mode, run_collect_quality_check, run_orderbook_history_mode,
+};
+pub use deribit_iv_backfill_mode::run_deribit_iv_backfill_mode;
 pub use history_mode::run_history;
 pub use paper_mode::run_paper_trading;
 pub use platform_mode::run_platform_mode;

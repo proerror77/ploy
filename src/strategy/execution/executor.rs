@@ -341,6 +341,23 @@ impl OrderExecutor {
             }
         }
 
+        // Use immediate submit response status/fill when available.
+        // This avoids emitting Submitted for already matched orders.
+        let mut immediate_status = self.client.infer_order_status(&order_resp);
+        let (immediate_filled, immediate_price) = self.client.calculate_fill(&order_resp);
+        if immediate_status == OrderStatus::Submitted && immediate_filled > 0 {
+            immediate_status = OrderStatus::PartiallyFilled;
+        }
+        if immediate_status != OrderStatus::Submitted {
+            return Ok(ExecutionResult {
+                order_id,
+                status: immediate_status,
+                filled_shares: immediate_filled,
+                avg_fill_price: immediate_price.or(Some(request.limit_price)),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+
         // Default: return immediately after submission (order is live on the book).
         info!(
             "Order {} submitted to market, status: {}",

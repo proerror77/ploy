@@ -17,6 +17,9 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+const MIN_BINARY_PRICE: Decimal = dec!(0.01);
+const MAX_BINARY_PRICE: Decimal = dec!(0.99);
+
 /// Execution simulation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionSimConfig {
@@ -83,6 +86,16 @@ pub struct ExecutionSimulator {
 }
 
 impl ExecutionSimulator {
+    fn clamp_binary_price(price: Decimal) -> Decimal {
+        if price < MIN_BINARY_PRICE {
+            MIN_BINARY_PRICE
+        } else if price > MAX_BINARY_PRICE {
+            MAX_BINARY_PRICE
+        } else {
+            price
+        }
+    }
+
     /// Create a new simulator with default config
     pub fn new() -> Self {
         Self {
@@ -112,13 +125,15 @@ impl ExecutionSimulator {
         shares: u64,
         market_depth_shares: u64,
     ) -> ExecutionResult {
+        let signal_price = Self::clamp_binary_price(signal_price);
+
         // Calculate ask price (buy side)
         let half_spread = if self.config.use_spread {
             signal_price * self.config.spread_pct / dec!(2)
         } else {
             Decimal::ZERO
         };
-        let ask_price = signal_price + half_spread;
+        let ask_price = Self::clamp_binary_price(signal_price + half_spread);
 
         // Determine fill quantity
         let (filled_shares, is_partial) = if self.config.enable_partial_fills {
@@ -136,8 +151,8 @@ impl ExecutionSimulator {
         };
 
         // Final fill price includes spread and market impact
-        // Cap at $0.99 for binary options (can't pay more than payout)
-        let fill_price = (ask_price + market_impact).min(dec!(0.99));
+        // Clamp to [0.01, 0.99] for binary options.
+        let fill_price = Self::clamp_binary_price(ask_price + market_impact);
 
         // Calculate fill time
         let fill_time = if self.config.enable_fill_delay {
@@ -183,13 +198,15 @@ impl ExecutionSimulator {
         shares: u64,
         market_depth_shares: u64,
     ) -> ExecutionResult {
+        let signal_price = Self::clamp_binary_price(signal_price);
+
         // Calculate bid price (sell side)
         let half_spread = if self.config.use_spread {
             signal_price * self.config.spread_pct / dec!(2)
         } else {
             Decimal::ZERO
         };
-        let bid_price = signal_price - half_spread;
+        let bid_price = Self::clamp_binary_price(signal_price - half_spread);
 
         // Determine fill quantity
         let (filled_shares, is_partial) = if self.config.enable_partial_fills {
@@ -207,7 +224,7 @@ impl ExecutionSimulator {
         };
 
         // Final fill price includes spread and market impact
-        let fill_price = bid_price - market_impact;
+        let fill_price = Self::clamp_binary_price(bid_price - market_impact);
 
         // Calculate fill time
         let fill_time = if self.config.enable_fill_delay {

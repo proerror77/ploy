@@ -9,6 +9,7 @@ pub mod core;
 pub mod espn;
 pub mod grok_decision;
 pub mod grok_intel;
+pub mod strategy;
 
 // Infrastructure modules (moved from strategy/ root)
 pub mod nba_data_collector;

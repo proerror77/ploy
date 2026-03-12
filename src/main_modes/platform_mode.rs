@@ -27,32 +27,24 @@ fn build_platform_config_for_runtime(
         if !crypto {
             platform_cfg.enable_crypto = false;
             platform_cfg.enable_crypto_momentum = false;
-            platform_cfg.enable_crypto_lob_ml = false;
             platform_cfg.enable_crypto_pattern_memory = false;
             platform_cfg.enable_crypto_split_arb = false;
-            #[cfg(feature = "rl")]
-            {
-                platform_cfg.enable_crypto_rl_policy = false;
-            }
         }
         if !sports {
             platform_cfg.enable_sports = false;
         }
     }
 
-    // Runtime scope is intentionally limited to crypto + sports agents.
+    // CLI platform-mode filters currently expose only crypto + sports runtime
+    // scope. Politics canonical runtime is still controlled outside this
+    // selector surface.
     platform_cfg.enable_politics = false;
 
     if app_config.openclaw_runtime_lockdown() {
         platform_cfg.enable_crypto = false;
         platform_cfg.enable_crypto_momentum = false;
-        platform_cfg.enable_crypto_lob_ml = false;
         platform_cfg.enable_crypto_pattern_memory = false;
         platform_cfg.enable_crypto_split_arb = false;
-        #[cfg(feature = "rl")]
-        {
-            platform_cfg.enable_crypto_rl_policy = false;
-        }
         platform_cfg.enable_sports = false;
         platform_cfg.enable_politics = false;
         warn!("platform started in openclaw lockdown mode; built-in agents forced off");
@@ -253,10 +245,7 @@ mod tests {
 
         assert!(cfg.enable_crypto);
         assert!(cfg.enable_crypto_pattern_memory);
-        assert!(
-            !cfg.enable_crypto_lob_ml,
-            "pattern_memory deployment should not auto-route to crypto_lob_ml"
-        );
+        assert!(!cfg.enable_crypto_momentum);
     }
 
     #[test]
@@ -321,7 +310,7 @@ mod tests {
 
         assert!(
             !cfg.enable_politics,
-            "platform runtime should keep politics disabled in crypto+sports-only scope"
+            "platform-mode selector surface should keep politics disabled until an explicit politics runtime flag exists"
         );
     }
 }

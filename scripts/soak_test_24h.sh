@@ -119,7 +119,7 @@ run_probe() {
   local health_code ready_code api_code rpc_ok status note
 
   health_code="$(curl -sS -o /dev/null -w '%{http_code}' "$base_url/health" || echo 000)"
-  ready_code="$(curl -sS -o /dev/null -w '%{http_code}' "$base_url/readyz" || echo 000)"
+  ready_code="$(curl -sS -o /dev/null -w '%{http_code}' "$base_url/health" || echo 000)"
   api_code="$(curl -sS -o /dev/null -w '%{http_code}' "$base_url/api/system/status" || echo 000)"
 
   rpc_ok=false

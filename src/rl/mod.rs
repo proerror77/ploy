@@ -39,7 +39,7 @@ pub use core::{
 pub use memory::ReplayBuffer;
 
 // Integration exports
-pub use integration::RLStrategy;
+pub use integration::{RLCryptoRuntime, RLCryptoRuntimeConfig, RLStrategy};
 
 // Environment exports
 pub use environment::{

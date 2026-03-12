@@ -27,19 +27,25 @@ pub async fn run(
     args: &GlobalPmArgs,
 ) -> anyhow::Result<()> {
     use polymarket_client_sdk::clob::types::request::*;
-    use polymarket_client_sdk::clob::types::AssetType;
+    use polymarket_client_sdk::clob::types::{AssetType, SignatureType};
     use polymarket_client_sdk::clob::Client as ClobClient;
 
     let signer = auth.require_signer()?;
     let config = super::config_file::PmConfig::load().unwrap_or_default();
 
-    let client = ClobClient::new(
+    let mut auth_builder = ClobClient::new(
         config.clob_base_url(),
         polymarket_client_sdk::clob::Config::default(),
     )?
-    .authentication_builder(signer)
-    .authenticate()
-    .await?;
+    .authentication_builder(signer);
+
+    if let Some(funder) = auth.funder {
+        auth_builder = auth_builder
+            .funder(funder)
+            .signature_type(SignatureType::Proxy);
+    }
+
+    let client = auth_builder.authenticate().await?;
 
     let asset_type = match &cmd {
         ApproveCommands::Check { token_type } | ApproveCommands::Set { token_type } => {

@@ -751,6 +751,7 @@ impl PatternMemoryStrategy {
 
         actions.push(StrategyAction::SubmitOrder {
             client_order_id,
+            purpose: crate::strategy::OrderPurpose::from_order_request(&order),
             order,
             priority: 7,
         });
@@ -887,6 +888,7 @@ impl Strategy for PatternMemoryStrategy {
 
             // pattern_memory doesn't need trade ticks / spot prices.
             MarketUpdate::BinancePrice { .. } => {}
+            MarketUpdate::BinanceL2 { .. } => {}
         }
 
         Ok(actions)

@@ -133,6 +133,20 @@ When using a skill:
 - Include clear context, impact, reproduction steps, and proposed next action.
 - Link follow-up work to the issue so later corrections can be executed cleanly.
 
+## Trading Host Deployment Policy (Required)
+
+- For trading hosts (for example `tango-1-1`), do not build Rust source on-host.
+- Build in CI/GitHub Actions and deploy release artifacts only.
+- Preferred production path: `.github/workflows/release-aliyun.yml`.
+- Keep host Rust on latest stable via rustup, and ensure default `rustc`/`cargo` resolve to rustup-managed binaries.
+- Enforce systemd guardrails on live ploy services:
+  - `Restart=always`
+  - `RestartSec=5`
+  - `MemoryHigh=1280M`
+  - `MemoryMax=1536M`
+  - `OOMPolicy=kill`
+- After deploy, verify with `systemctl show <service> -p MemoryMax -p Restart -p OOMPolicy` and ensure no active `cargo`/`rustc` build process remains.
+
 ## Core Principles
 
 - **Agent Team First**: Prefer Agent team/subagents for parallelizable or non-trivial tasks.

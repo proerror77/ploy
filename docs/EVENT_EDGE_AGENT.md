@@ -15,7 +15,6 @@
 ```toml
 [event_edge_agent]
 enabled = true
-framework = "deterministic" # 或 "claude_agent_sdk"
 trade = true
 interval_secs = 30
 min_edge = 0.08
@@ -23,8 +22,6 @@ max_entry = 0.75
 shares = 100
 cooldown_secs = 120
 max_daily_spend_usd = 50
-model = ""          # 可選：指定 Claude model
-claude_max_turns = 20
 titles = ["Which company has the best AI model end of February?"]
 event_ids = []
 ```
@@ -32,10 +29,6 @@ event_ids = []
 說明：
 - `titles` 會用 Gamma `title_contains` 自動找最匹配的 event（適合 event 會換 id 的情況）
 - 若你已知 `event_id`，用 `event_ids` 會更穩
-- `framework`：
-  - `deterministic`：不用 LLM，固定規則掃描與下單（速度快、可預測）
-  - `event_driven`：事件驅動 + 狀態持久化（Arena `last_updated` 不變就不交易，重啟不會失憶）
-  - `claude_agent_sdk`：使用 `claude-agent-sdk-rs` 走「工具調用」的 agent（LLM 決策 + MCP tools；需要本機已安裝並登入 Claude Code CLI）
 - `cooldown_secs` 是每個 token 的下單冷卻（避免反覆追同一邊）
 - `max_daily_spend_usd` 是簡單安全閥（以 `shares * ask` 粗估）
 

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 
 use crate::adapters::SpotPrice;
+use crate::domain::Side;
 use crate::strategy::backtest::BacktestResults;
 use crate::strategy::backtest_feed::{MarketFeed, UpdateType};
 use crate::strategy::backtest_recorder::{
@@ -29,6 +30,7 @@ use crate::strategy::backtest_recorder::{
 };
 use crate::strategy::execution_sim::ExecutionSimulator;
 use crate::strategy::fee_model::FeeModel;
+use crate::strategy::gamma_scalping::greeks::{binary_greeks, BinaryGreeks};
 use crate::strategy::momentum::Direction;
 use crate::strategy::probability::estimate_probability;
 
@@ -50,13 +52,25 @@ pub struct StaggeredArbBacktestConfig {
     // ── Signal thresholds ──
     /// Minimum |p_hat - 0.5| to trigger entry
     pub direction_threshold: f64,
-    /// Maximum up_ask + down_ask to consider entry
+    /// Reverse the direction signal: if true, buy the OPPOSITE of what the model predicts.
+    /// Useful when the model is consistently wrong (accuracy < 50%).
+    pub reverse_signal: bool,
+    /// Maximum up_ask + down_ask to consider entry (legacy; prefer max_leg1_price)
     pub max_initial_sum: Decimal,
+    /// Maximum Leg1 ask price — don't buy if the predicted side is too expensive
+    /// (leaves no room for the other side to drop enough for profit)
+    pub max_leg1_price: Decimal,
+    /// Target merge sum: leg1 + leg2 < this value to trigger merge (e.g., $0.95)
+    pub merge_target_sum: Decimal,
     /// Minimum profit target per share after both legs
     pub min_profit_target: Decimal,
     // ── Time control ──
     /// Maximum seconds to wait for Leg2 after Leg1 fill
     pub max_wait_secs: u64,
+    /// Prefer entering soon after event start. 0 disables this gate.
+    pub entry_after_start_max_secs: u64,
+    /// In the final N seconds, do not place hedge/exit trades. 0 disables this gate.
+    pub no_trade_last_secs: u64,
     /// Maximum fraction of window duration to wait for Leg2
     pub max_wait_pct: f64,
     /// Minimum time remaining in window to enter
@@ -90,6 +104,15 @@ pub struct StaggeredArbBacktestConfig {
     pub vol_floor: f64,
     /// Cooldown between entries on same symbol (seconds)
     pub cooldown_secs: u64,
+    // ── Greeks integration ──
+    /// Enable Greeks-based entry/exit refinement
+    pub use_greeks: bool,
+    /// Minimum gamma to enter (filters out deep ITM/OTM with no convexity)
+    pub min_gamma: f64,
+    /// Maximum theta decay cost (per share, per second) to hold position
+    pub max_theta_cost: f64,
+    /// Delta-weighted sizing: scale shares by |delta| relative to ATM delta
+    pub delta_weighted_sizing: bool,
 }
 
 impl Default for StaggeredArbBacktestConfig {
@@ -97,26 +120,35 @@ impl Default for StaggeredArbBacktestConfig {
         Self {
             symbols: vec!["BTCUSDT".to_string()],
             initial_capital: dec!(10000),
-            shares_per_trade: 20,
+            shares_per_trade: 50,
             max_concurrent_positions: 5,
-            direction_threshold: 0.03,
+            direction_threshold: 0.04,
+            reverse_signal: false,
             max_initial_sum: dec!(1.10),
-            min_profit_target: dec!(0.005),
-            max_wait_secs: 180,
-            max_wait_pct: 0.40,
-            min_time_remaining_secs: 60,
-            max_leg1_loss: dec!(0), // 0 = disabled, hold to settlement
-            force_complete_threshold: dec!(1.00),
-            min_ask_price: dec!(0.05), // ignore asks below $0.05 (no real liquidity)
-            min_entry_sum: dec!(0.70), // reject if up+down sum < $0.70 (illiquid extremes)
-            allowed_window_durations: vec![300, 900], // 5m + 15m
+            max_leg1_price: dec!(0.65),
+            merge_target_sum: dec!(0.95),
+            min_profit_target: dec!(0.02),
+            max_wait_secs: 120,
+            entry_after_start_max_secs: 30,
+            no_trade_last_secs: 30,
+            max_wait_pct: 0.30,
+            min_time_remaining_secs: 45,
+            max_leg1_loss: dec!(0),
+            force_complete_threshold: dec!(0.00),
+            min_ask_price: dec!(0.05),
+            min_entry_sum: dec!(0.70),
+            allowed_window_durations: vec![300, 900],
             window_duration_tolerance: 30,
             min_leg2_delay_secs: 3,
-            max_trades_per_event: 2,
+            max_trades_per_event: 3,
             mu: 0.0,
-            vol_lookback_secs: 300,
-            vol_floor: 0.005,
+            vol_lookback_secs: 600,
+            vol_floor: 0.003,
             cooldown_secs: 5,
+            use_greeks: true,
+            min_gamma: 0.0,
+            max_theta_cost: 0.0,
+            delta_weighted_sizing: false,
         }
     }
 }
@@ -180,6 +212,9 @@ struct StaggeredArbPosition {
     best_sum_seen: Decimal,
     /// Initial sum at entry (up_ask + down_ask)
     initial_sum: Decimal,
+    // ── Greeks at entry ──
+    /// Binary option greeks computed at Leg1 entry
+    entry_greeks: Option<BinaryGreeks>,
     /// Current state
     state: ArbPositionState,
     // ── Leg2 (filled after monitoring) ──
@@ -215,6 +250,11 @@ pub struct StaggeredArbClosedTrade {
     pub s0: Decimal,
     /// Window duration in seconds (300 = 5m, 900 = 15m)
     pub window_duration_secs: i64,
+    /// Greeks at entry (delta, gamma, theta, vega, fair_value)
+    pub entry_delta: Option<f64>,
+    pub entry_gamma: Option<f64>,
+    pub entry_theta: Option<f64>,
+    pub entry_fair_value: Option<f64>,
 }
 // ─────────────────────────────────────────────────────────────
 
@@ -238,7 +278,7 @@ pub struct StaggeredArbBacktestEngine {
     recorder: Box<dyn BacktestRecorder>,
     // Market state
     spot_prices: HashMap<String, SpotPrice>,
-    pm_asks: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    pm_asks_by_event: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
     // Active events: symbol -> concurrent windows
     active_events: HashMap<String, Vec<ActiveWindowInfo>>,
     // Positions & trades
@@ -268,7 +308,7 @@ impl StaggeredArbBacktestEngine {
             execution_sim: ExecutionSimulator::new(),
             recorder,
             spot_prices: HashMap::new(),
-            pm_asks: HashMap::new(),
+            pm_asks_by_event: HashMap::new(),
             active_events: HashMap::new(),
             positions: Vec::new(),
             closed_trades: Vec::new(),
@@ -319,8 +359,19 @@ impl StaggeredArbBacktestEngine {
                 UpdateType::SpotTrade { price, quantity } => {
                     self.handle_spot_trade(&update.symbol, *price, *quantity, update.timestamp);
                 }
-                UpdateType::PmQuote { up_ask, down_ask } => {
-                    self.handle_pm_quote(&update.symbol, *up_ask, *down_ask, update.timestamp);
+                UpdateType::PmQuote {
+                    event_slug,
+                    side,
+                    best_ask,
+                    ..
+                } => {
+                    self.handle_pm_quote(
+                        &update.symbol,
+                        event_slug,
+                        *side,
+                        *best_ask,
+                        update.timestamp,
+                    );
                 }
                 UpdateType::EventState {
                     event_slug,
@@ -333,6 +384,7 @@ impl StaggeredArbBacktestEngine {
                         if let Some(events) = self.active_events.get_mut(&update.symbol) {
                             events.retain(|e| e.event_slug != *event_slug);
                         }
+                        self.pm_asks_by_event.remove(event_slug);
                     }
 
                     if outcome.is_none() {
@@ -380,6 +432,16 @@ impl StaggeredArbBacktestEngine {
         }
 
         self.close_remaining_positions();
+
+        // Diagnostic summary
+        let total_events: usize = self.active_events.values().map(|v| v.len()).sum();
+        let total_quotes = self.pm_asks_by_event.len();
+        let total_spots = self.spot_prices.len();
+        debug!(
+            "Engine summary: {} active events, {} quote slugs, {} spot symbols, {} positions, {} closed trades",
+            total_events, total_quotes, total_spots, self.positions.len(), self.closed_trades.len()
+        );
+
         let _ = self.recorder.flush();
         self.build_results()
     }
@@ -402,20 +464,27 @@ impl StaggeredArbBacktestEngine {
     fn handle_pm_quote(
         &mut self,
         symbol: &str,
-        up_ask: Option<Decimal>,
-        down_ask: Option<Decimal>,
+        event_slug: &str,
+        quote_side: Side,
+        best_ask: Option<Decimal>,
         ts: DateTime<Utc>,
     ) {
-        // Update latest asks
+        // Update latest asks (per event_slug)
         let entry = self
-            .pm_asks
-            .entry(symbol.to_string())
+            .pm_asks_by_event
+            .entry(event_slug.to_string())
             .or_insert((None, None));
-        if up_ask.is_some() {
-            entry.0 = up_ask;
-        }
-        if down_ask.is_some() {
-            entry.1 = down_ask;
+        match quote_side {
+            Side::Up => {
+                if best_ask.is_some() {
+                    entry.0 = best_ask;
+                }
+            }
+            Side::Down => {
+                if best_ask.is_some() {
+                    entry.1 = best_ask;
+                }
+            }
         }
 
         // 1. Check Leg2 opportunities for existing positions
@@ -452,12 +521,21 @@ impl StaggeredArbBacktestEngine {
             }
             None => return,
         };
-        let (up_ask, down_ask) = match self.pm_asks.get(symbol) {
-            Some(asks) => *asks,
-            None => return,
-        };
 
         for window in windows {
+            let (up_ask, down_ask) = self
+                .pm_asks_by_event
+                .get(&window.event_slug)
+                .copied()
+                .unwrap_or((None, None));
+            if up_ask.is_none() || down_ask.is_none() {
+                trace!(
+                    "try_entry: {} missing quotes (up={:?} down={:?})",
+                    window.event_slug,
+                    up_ask,
+                    down_ask
+                );
+            }
             self.try_entry_for_window(
                 symbol,
                 ts,
@@ -485,6 +563,19 @@ impl StaggeredArbBacktestEngine {
         if time_remaining <= 0.0 || time_remaining < self.config.min_time_remaining_secs as f64 {
             return;
         }
+        // Entry timing gate: prefer opening soon after the event starts.
+        // start = end - window_duration
+        let window_start =
+            window.end_time - chrono::Duration::seconds(window.window_duration_secs as i64);
+        let elapsed_since_start = (ts - window_start).num_seconds();
+        if elapsed_since_start < 0 {
+            return;
+        }
+        if self.config.entry_after_start_max_secs > 0
+            && elapsed_since_start > self.config.entry_after_start_max_secs as i64
+        {
+            return;
+        }
 
         // 2. Need both asks to compute sum
         let (ua, da) = match (up_ask, down_ask) {
@@ -502,7 +593,7 @@ impl StaggeredArbBacktestEngine {
             return;
         }
 
-        // 3. Sum check: up_ask + down_ask <= max_initial_sum
+        // 3. Current sum — only enter when sum shows a discount (market inefficiency)
         let current_sum = ua + da;
         if current_sum > self.config.max_initial_sum {
             return;
@@ -524,6 +615,42 @@ impl StaggeredArbBacktestEngine {
         // 5. Estimate probability
         let p_hat = estimate_probability(window.s0, st, sigma, time_remaining, self.config.mu);
 
+        // 5b. Compute binary option Greeks
+        let greeks = if self.config.use_greeks {
+            binary_greeks(
+                st.to_f64().unwrap_or(0.0),
+                window.s0.to_f64().unwrap_or(0.0),
+                sigma,
+                time_remaining,
+                window.window_duration_secs as f64,
+            )
+        } else {
+            None
+        };
+
+        // 5c. Greeks-based filters
+        if let Some(ref g) = greeks {
+            // Skip if gamma is too low (deep ITM/OTM — no convexity to exploit)
+            if self.config.min_gamma > 0.0 && g.gamma.abs() < self.config.min_gamma {
+                trace!(
+                    "Skipping: gamma {:.6} < min_gamma {:.6}",
+                    g.gamma.abs(),
+                    self.config.min_gamma
+                );
+                return;
+            }
+
+            // Skip if theta decay is too expensive
+            if self.config.max_theta_cost > 0.0 && g.theta.abs() > self.config.max_theta_cost {
+                trace!(
+                    "Skipping: theta {:.6} > max_theta_cost {:.6}",
+                    g.theta.abs(),
+                    self.config.max_theta_cost
+                );
+                return;
+            }
+        }
+
         // 6. Direction threshold: |p_hat - 0.5| >= direction_threshold
         let direction_strength = (p_hat - 0.5).abs();
         if direction_strength < self.config.direction_threshold {
@@ -531,14 +658,26 @@ impl StaggeredArbBacktestEngine {
         }
 
         // 7. Direction: p_hat > 0.5 → buy UP first (it's about to get expensive)
-        let (leg1_dir, leg1_ask) = if p_hat > 0.5 {
+        //    If reverse_signal is true, flip: buy the opposite of what the model says
+        let predicted_up = if self.config.reverse_signal {
+            p_hat < 0.5
+        } else {
+            p_hat > 0.5
+        };
+        let (leg1_dir, leg1_ask) = if predicted_up {
             (Direction::Up, ua)
         } else {
             (Direction::Down, da)
         };
 
-        // 8. Target Leg2 price: need leg1 + leg2 < 1.0 - min_profit_target
-        let target_leg2 = Decimal::ONE - leg1_ask - self.config.min_profit_target;
+        // 7b. Leg1 price cap: don't buy if predicted side is too expensive
+        //     (leaves no room for the other side to drop enough for profit)
+        if leg1_ask > self.config.max_leg1_price {
+            return;
+        }
+
+        // 8. Target Leg2 price: need leg1 + leg2 < merge_target_sum
+        let target_leg2 = self.config.merge_target_sum - leg1_ask;
         if target_leg2 <= Decimal::ZERO {
             return;
         }
@@ -582,10 +721,23 @@ impl StaggeredArbBacktestEngine {
         }
 
         // 12. Simulate Leg1 buy (use real LOB depth)
+        //     Delta-weighted sizing: scale shares by conviction from Greeks
+        let shares = if self.config.delta_weighted_sizing {
+            if let Some(ref g) = greeks {
+                // Scale by |delta| / ATM_delta. ATM delta is highest, so this
+                // reduces size for weak signals and increases for strong ones.
+                // Clamp to [0.5, 2.0] to avoid extreme sizing.
+                let delta_scale = (g.delta.abs() * 2.0).clamp(0.5, 2.0);
+                ((self.config.shares_per_trade as f64 * delta_scale) as u64).max(1)
+            } else {
+                self.config.shares_per_trade
+            }
+        } else {
+            self.config.shares_per_trade
+        };
+
         let depth = self.market_depth(symbol);
-        let sim_result =
-            self.execution_sim
-                .simulate_buy(leg1_ask, ts, self.config.shares_per_trade, depth);
+        let sim_result = self.execution_sim.simulate_buy(leg1_ask, ts, shares, depth);
 
         let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
         let entry_fee = self.fee_model.fee_shares(
@@ -631,6 +783,7 @@ impl StaggeredArbBacktestEngine {
             entry_sigma: sigma,
             best_sum_seen: current_sum,
             initial_sum: current_sum,
+            entry_greeks: greeks,
             state: ArbPositionState::Leg1Filled,
             leg2_direction: None,
             leg2_price: None,
@@ -673,18 +826,19 @@ impl StaggeredArbBacktestEngine {
     // ─── Leg2 monitoring ──────────────────────────────────────
 
     fn check_leg2_opportunities(&mut self, symbol: &str, ts: DateTime<Utc>) {
-        let pm_asks = match self.pm_asks.get(symbol) {
-            Some(a) => *a,
-            None => return,
-        };
-
         // Collect actions to take (can't mutate positions while iterating)
         let mut actions: Vec<(usize, Leg2Action)> = Vec::new();
+        let force_threshold = self.config.force_complete_threshold;
 
         for (i, pos) in self.positions.iter_mut().enumerate() {
             if pos.symbol != symbol || pos.state != ArbPositionState::Leg1Filled {
                 continue;
             }
+
+            let pm_asks = match self.pm_asks_by_event.get(&pos.event_slug).copied() {
+                Some(a) => a,
+                None => continue,
+            };
 
             // Get the opposite side's ask
             let other_ask = match pos.leg1_direction {
@@ -710,16 +864,84 @@ impl StaggeredArbBacktestEngine {
             }
 
             let time_remaining = (pos.event_end_time - ts).num_seconds() as f64;
+            if self.config.no_trade_last_secs > 0
+                && time_remaining <= self.config.no_trade_last_secs as f64
+            {
+                continue;
+            }
             let min_time = self.config.min_time_remaining_secs as f64;
+
+            // Compute current Greeks for this position (if enabled)
+            let current_greeks = if self.config.use_greeks {
+                let spot = self
+                    .spot_prices
+                    .get(&pos.symbol)
+                    .map(|sp| sp.price.to_f64().unwrap_or(0.0))
+                    .unwrap_or(0.0);
+                let strike = pos.s0.to_f64().unwrap_or(0.0);
+                if spot > 0.0 && strike > 0.0 && time_remaining > 0.0 {
+                    binary_greeks(
+                        spot,
+                        strike,
+                        pos.entry_sigma,
+                        time_remaining,
+                        pos.window_duration_secs as f64,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             // Check minimum delay since Leg1 fill (execution realism)
             let secs_since_leg1 = (ts - pos.leg1_time).num_seconds();
             let leg2_ready = secs_since_leg1 >= self.config.min_leg2_delay_secs as i64;
 
-            // A. Profitable merge: sum < 1.0 - min_profit_target
-            if current_sum < Decimal::ONE - self.config.min_profit_target && leg2_ready {
+            // A. Profitable merge: sum < merge_target_sum
+            if current_sum < self.config.merge_target_sum && leg2_ready {
                 actions.push((i, Leg2Action::Fill(other_ask)));
                 continue;
+            }
+
+            // A2. Greeks-enhanced merge: if gamma is high (near ATM, high convexity),
+            //     the opposite token price is volatile — merge sooner to lock profit.
+            //     Accept a tighter profit margin when gamma is elevated.
+            if let Some(ref g) = current_greeks {
+                if leg2_ready && current_sum < Decimal::ONE {
+                    // High gamma → price can swing either way fast → lock it in
+                    let gamma_urgency = g.gamma.abs().min(1.0);
+                    let adjusted_target = self.config.min_profit_target
+                        * Decimal::from_f64(1.0 - gamma_urgency * 0.8).unwrap_or(Decimal::ONE);
+                    if current_sum < self.config.merge_target_sum + adjusted_target {
+                        trace!(
+                            "Greeks merge: gamma={:.4} adjusted_target={:.4} sum={:.4}",
+                            g.gamma,
+                            adjusted_target,
+                            current_sum
+                        );
+                        actions.push((i, Leg2Action::Fill(other_ask)));
+                        continue;
+                    }
+                }
+
+                // A3. Theta-driven urgency: if theta decay is accelerating
+                //     (approaching expiry), merge even at breakeven to avoid decay.
+                if leg2_ready && self.config.max_theta_cost > 0.0 {
+                    let theta_cost_remaining = g.theta.abs() * time_remaining;
+                    if theta_cost_remaining > self.config.max_theta_cost
+                        && current_sum <= Decimal::ONE
+                    {
+                        trace!(
+                            "Theta urgency: theta={:.6} cost_remaining={:.4} sum={:.4}",
+                            g.theta,
+                            theta_cost_remaining,
+                            current_sum
+                        );
+                        actions.push((i, Leg2Action::Fill(other_ask)));
+                        continue;
+                    }
+                }
             }
 
             // B. Lock profit: sum < 1.0 (any profit is good)
@@ -732,7 +954,9 @@ impl StaggeredArbBacktestEngine {
             //    Even if sum > 1.0, the loss is bounded: (sum - 1.0) × shares
             //    Much better than risking full Leg1 cost at settlement
             if ts >= pos.wait_deadline && leg2_ready {
-                actions.push((i, Leg2Action::Fill(other_ask)));
+                if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
+                    actions.push((i, Leg2Action::Fill(other_ask)));
+                }
                 continue;
             }
 
@@ -746,14 +970,18 @@ impl StaggeredArbBacktestEngine {
                 let leg1_loss = pos.leg1_price - leg1_current_value;
                 if leg1_loss > self.config.max_leg1_loss && leg2_ready {
                     // Force buy Leg2 to lock in bounded loss instead of aborting
-                    actions.push((i, Leg2Action::Fill(other_ask)));
+                    if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
+                        actions.push((i, Leg2Action::Fill(other_ask)));
+                    }
                     continue;
                 }
             }
 
             // E. Time safety: not enough time left — force-complete the arb
             if time_remaining < min_time && leg2_ready {
-                actions.push((i, Leg2Action::Fill(other_ask)));
+                if force_threshold <= Decimal::ZERO || current_sum <= force_threshold {
+                    actions.push((i, Leg2Action::Fill(other_ask)));
+                }
             }
         }
 
@@ -846,6 +1074,10 @@ impl StaggeredArbBacktestEngine {
             best_sum_seen: pos.best_sum_seen,
             s0: pos.s0,
             window_duration_secs: pos.window_duration_secs,
+            entry_delta: pos.entry_greeks.map(|g| g.delta),
+            entry_gamma: pos.entry_greeks.map(|g| g.gamma),
+            entry_theta: pos.entry_greeks.map(|g| g.theta),
+            entry_fair_value: pos.entry_greeks.map(|g| g.fair_value),
         });
 
         self.recorder.record_exit(&BacktestSignal {
@@ -893,8 +1125,8 @@ impl StaggeredArbBacktestEngine {
     fn abort_position(&mut self, idx: usize, reason: &str, ts: DateTime<Utc>) {
         let pos = &self.positions[idx];
         let current_price = match pos.leg1_direction {
-            Direction::Up => self.pm_asks.get(&pos.symbol).and_then(|a| a.0),
-            Direction::Down => self.pm_asks.get(&pos.symbol).and_then(|a| a.1),
+            Direction::Up => self.pm_asks_by_event.get(&pos.event_slug).and_then(|a| a.0),
+            Direction::Down => self.pm_asks_by_event.get(&pos.event_slug).and_then(|a| a.1),
         }
         .unwrap_or(pos.leg1_price);
 
@@ -943,6 +1175,10 @@ impl StaggeredArbBacktestEngine {
             best_sum_seen: pos.best_sum_seen,
             s0: pos.s0,
             window_duration_secs: pos.window_duration_secs,
+            entry_delta: pos.entry_greeks.map(|g| g.delta),
+            entry_gamma: pos.entry_greeks.map(|g| g.gamma),
+            entry_theta: pos.entry_greeks.map(|g| g.theta),
+            entry_fair_value: pos.entry_greeks.map(|g| g.fair_value),
         });
 
         self.recorder.record_exit(&BacktestSignal {
@@ -1010,7 +1246,7 @@ impl StaggeredArbBacktestEngine {
         for idx in to_fill {
             let pos = &self.positions[idx];
             // Get the opposite side's ask for forced Leg2
-            let pm_asks = self.pm_asks.get(&pos.symbol).copied();
+            let pm_asks = self.pm_asks_by_event.get(&pos.event_slug).copied();
             let other_ask = pm_asks.and_then(|a| match pos.leg1_direction {
                 Direction::Up => a.1,   // need DOWN ask
                 Direction::Down => a.0, // need UP ask
@@ -1065,6 +1301,10 @@ impl StaggeredArbBacktestEngine {
             best_sum_seen: pos.best_sum_seen,
             s0: pos.s0,
             window_duration_secs: pos.window_duration_secs,
+            entry_delta: pos.entry_greeks.map(|g| g.delta),
+            entry_gamma: pos.entry_greeks.map(|g| g.gamma),
+            entry_theta: pos.entry_greeks.map(|g| g.theta),
+            entry_fair_value: pos.entry_greeks.map(|g| g.fair_value),
         });
 
         self.recorder.record_trade(&PendingTrade {
@@ -1099,7 +1339,7 @@ impl StaggeredArbBacktestEngine {
             .collect();
         for idx in indices {
             let pos = &self.positions[idx];
-            let pm_asks = self.pm_asks.get(&pos.symbol).copied();
+            let pm_asks = self.pm_asks_by_event.get(&pos.event_slug).copied();
             let other_ask = pm_asks.and_then(|a| match pos.leg1_direction {
                 Direction::Up => a.1,
                 Direction::Down => a.0,
@@ -1257,9 +1497,9 @@ impl StaggeredArbBacktestEngine {
     }
 
     /// Print staggered-arb-specific summary stats.
-    pub fn print_staggered_summary(&self) {
+    pub fn print_summary(&self, title: &str) {
         if self.closed_trades.is_empty() {
-            println!("\n=== Staggered Arb Summary ===");
+            println!("\n=== {title} Summary ===");
             println!("No trades executed.");
             return;
         }
@@ -1340,7 +1580,7 @@ impl StaggeredArbBacktestEngine {
             0.0
         };
 
-        println!("\n=== Staggered Arb Summary ===");
+        println!("\n=== {title} Summary ===");
         println!("Total attempts:     {}", total);
         println!(
             "Leg2 fill rate:     {:.1}% ({}/{})",
@@ -1448,6 +1688,77 @@ impl StaggeredArbBacktestEngine {
                 label, t, w, wr, m, p
             );
         }
+
+        // Greeks summary (if available)
+        let trades_with_greeks: Vec<&StaggeredArbClosedTrade> = self
+            .closed_trades
+            .iter()
+            .filter(|t| t.entry_delta.is_some())
+            .collect();
+        if !trades_with_greeks.is_empty() {
+            let n = trades_with_greeks.len() as f64;
+            let avg_delta = trades_with_greeks
+                .iter()
+                .filter_map(|t| t.entry_delta)
+                .sum::<f64>()
+                / n;
+            let avg_gamma = trades_with_greeks
+                .iter()
+                .filter_map(|t| t.entry_gamma)
+                .sum::<f64>()
+                / n;
+            let avg_theta = trades_with_greeks
+                .iter()
+                .filter_map(|t| t.entry_theta)
+                .sum::<f64>()
+                / n;
+            let avg_fv = trades_with_greeks
+                .iter()
+                .filter_map(|t| t.entry_fair_value)
+                .sum::<f64>()
+                / n;
+
+            // Greeks vs outcome correlation
+            let winning_greeks: Vec<&StaggeredArbClosedTrade> = trades_with_greeks
+                .iter()
+                .filter(|t| t.won)
+                .copied()
+                .collect();
+            let losing_greeks: Vec<&StaggeredArbClosedTrade> = trades_with_greeks
+                .iter()
+                .filter(|t| !t.won)
+                .copied()
+                .collect();
+
+            println!("\nGreeks at entry (avg):");
+            println!("  Delta:      {:.6}", avg_delta);
+            println!("  Gamma:      {:.6}", avg_gamma);
+            println!("  Theta:      {:.6}/s", avg_theta);
+            println!("  Fair Value: {:.4}", avg_fv);
+
+            if !winning_greeks.is_empty() && !losing_greeks.is_empty() {
+                let win_gamma = winning_greeks
+                    .iter()
+                    .filter_map(|t| t.entry_gamma)
+                    .map(|g| g.abs())
+                    .sum::<f64>()
+                    / winning_greeks.len() as f64;
+                let lose_gamma = losing_greeks
+                    .iter()
+                    .filter_map(|t| t.entry_gamma)
+                    .map(|g| g.abs())
+                    .sum::<f64>()
+                    / losing_greeks.len() as f64;
+                println!(
+                    "  Win |gamma|:  {:.6}  vs  Lose |gamma|: {:.6}",
+                    win_gamma, lose_gamma
+                );
+            }
+        }
+    }
+
+    pub fn print_staggered_summary(&self) {
+        self.print_summary("Staggered Arb");
     }
 }
 // ─────────────────────────────────────────────────────────────
@@ -1483,17 +1794,41 @@ mod tests {
         }
     }
 
-    fn make_quote(ts: &str, symbol: &str, up: Decimal, down: Decimal) -> MarketUpdate {
-        MarketUpdate {
-            timestamp: DateTime::parse_from_rfc3339(ts)
-                .unwrap()
-                .with_timezone(&Utc),
-            symbol: symbol.to_string(),
-            update_type: UpdateType::PmQuote {
-                up_ask: Some(up),
-                down_ask: Some(down),
+    fn make_quotes(
+        ts: &str,
+        symbol: &str,
+        slug: &str,
+        up: Decimal,
+        down: Decimal,
+    ) -> Vec<MarketUpdate> {
+        let timestamp = DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&Utc);
+
+        vec![
+            MarketUpdate {
+                timestamp,
+                symbol: symbol.to_string(),
+                update_type: UpdateType::PmQuote {
+                    event_slug: slug.to_string(),
+                    token_id: format!("{}:UP", slug),
+                    side: Side::Up,
+                    best_bid: None,
+                    best_ask: Some(up),
+                },
             },
-        }
+            MarketUpdate {
+                timestamp,
+                symbol: symbol.to_string(),
+                update_type: UpdateType::PmQuote {
+                    event_slug: slug.to_string(),
+                    token_id: format!("{}:DOWN", slug),
+                    side: Side::Down,
+                    best_bid: None,
+                    best_ask: Some(down),
+                },
+            },
+        ]
     }
 
     fn make_event_open(
@@ -1539,12 +1874,15 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = StaggeredArbBacktestConfig::default();
-        assert_eq!(config.direction_threshold, 0.03);
+        assert_eq!(config.direction_threshold, 0.04);
         assert_eq!(config.max_initial_sum, dec!(1.10));
-        assert_eq!(config.min_profit_target, dec!(0.005));
-        assert_eq!(config.max_wait_secs, 180);
+        assert_eq!(config.max_leg1_price, dec!(0.65));
+        assert_eq!(config.merge_target_sum, dec!(0.95));
+        assert_eq!(config.min_profit_target, dec!(0.02));
+        assert_eq!(config.max_wait_secs, 120);
+        assert_eq!(config.entry_after_start_max_secs, 30);
         assert_eq!(config.min_leg2_delay_secs, 3);
-        assert_eq!(config.max_trades_per_event, 2);
+        assert_eq!(config.max_trades_per_event, 3);
         assert_eq!(config.cooldown_secs, 5);
         assert_eq!(config.min_ask_price, dec!(0.05));
         assert_eq!(config.min_entry_sum, dec!(0.70));
@@ -1594,17 +1932,19 @@ mod tests {
         }
 
         // Initial quotes: sum = 1.05 (spread)
-        updates.push(make_quote(
+        updates.extend(make_quotes(
             "2026-01-01T00:01:00Z",
             "BTCUSDT",
+            "test-event",
             dec!(0.55),
             dec!(0.50),
         ));
 
         // After some time, DOWN ask drops → sum becomes < 1.0
-        updates.push(make_quote(
+        updates.extend(make_quotes(
             "2026-01-01T00:02:00Z",
             "BTCUSDT",
+            "test-event",
             dec!(0.60),
             dec!(0.38),
         ));
@@ -1656,15 +1996,17 @@ mod tests {
         }
 
         // Quotes with sum > 1 throughout (no Leg2 opportunity)
-        updates.push(make_quote(
+        updates.extend(make_quotes(
             "2026-01-01T00:01:00Z",
             "BTCUSDT",
+            "test-event",
             dec!(0.55),
             dec!(0.55),
         ));
-        updates.push(make_quote(
+        updates.extend(make_quotes(
             "2026-01-01T00:03:00Z",
             "BTCUSDT",
+            "test-event",
             dec!(0.60),
             dec!(0.55),
         ));
@@ -1691,6 +2033,51 @@ mod tests {
             }
         }
         let _ = results; // use results to avoid warning
+    }
+
+    #[test]
+    fn test_force_complete_threshold_blocks_backtest_timeout_above_cap() {
+        let mut config = StaggeredArbBacktestConfig::default();
+        config.force_complete_threshold = Decimal::ONE;
+        config.use_greeks = false;
+        config.min_leg2_delay_secs = 0;
+
+        let mut engine = StaggeredArbBacktestEngine::new_without_recorder(config);
+        let now = Utc::now();
+        engine
+            .pm_asks_by_event
+            .insert("test-event".into(), (Some(dec!(0.75)), Some(dec!(0.27))));
+        engine.positions.push(StaggeredArbPosition {
+            symbol: "BTCUSDT".into(),
+            event_slug: "test-event".into(),
+            leg1_direction: Direction::Up,
+            leg1_price: dec!(0.75),
+            leg1_shares: 10,
+            leg1_time: now - chrono::Duration::seconds(30),
+            leg1_fee: dec!(0.1125),
+            wait_deadline: now - chrono::Duration::seconds(1),
+            s0: dec!(100000),
+            event_end_time: now + chrono::Duration::seconds(300),
+            window_duration_secs: 300,
+            entry_p_hat: 0.7,
+            entry_sigma: 0.01,
+            best_sum_seen: dec!(1.02),
+            initial_sum: dec!(1.02),
+            entry_greeks: None,
+            state: ArbPositionState::Leg1Filled,
+            leg2_direction: None,
+            leg2_price: None,
+            leg2_shares: None,
+            leg2_time: None,
+            leg2_fee: None,
+            exit_reason: None,
+            pnl: None,
+        });
+
+        engine.check_leg2_opportunities("BTCUSDT", now);
+
+        assert_eq!(engine.closed_trades.len(), 0);
+        assert_eq!(engine.positions[0].state, ArbPositionState::Leg1Filled);
     }
 
     #[test]
@@ -1723,17 +2110,19 @@ mod tests {
         }
 
         // Entry quote
-        updates.push(make_quote(
+        updates.extend(make_quotes(
             "2026-01-01T00:01:00Z",
             "BTCUSDT",
+            "test-event",
             dec!(0.55),
             dec!(0.50),
         ));
 
         // UP ask drops significantly → stop loss triggers
-        updates.push(make_quote(
+        updates.extend(make_quotes(
             "2026-01-01T00:01:30Z",
             "BTCUSDT",
+            "test-event",
             dec!(0.40),
             dec!(0.65),
         ));

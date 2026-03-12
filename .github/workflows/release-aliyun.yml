@@ -30,6 +30,9 @@ env:
   RUST_BACKTRACE: 1
   PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
   DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
+  PLOY_SYSTEMD_MEMORY_HIGH: ${{ vars.PLOY_SYSTEMD_MEMORY_HIGH || '1280M' }}
+  PLOY_SYSTEMD_MEMORY_MAX: ${{ vars.PLOY_SYSTEMD_MEMORY_MAX || '1536M' }}
+  PLOY_SYSTEMD_RESTART_SEC: ${{ vars.PLOY_SYSTEMD_RESTART_SEC || '5' }}
 
 jobs:
   build:
@@ -113,6 +116,7 @@ jobs:
           mkdir -p dist
           cp target/release/ploy dist/ploy
           cp config/strategies/momentum.toml dist/momentum.toml
+          cp config/strategies/staggered_arb.toml dist/staggered_arb.toml
           cp migrations/022_order_strategy_tracking.sql dist/022_order_strategy_tracking.sql
           sha256sum dist/ploy > dist/ploy.sha256
           cat > dist/RELEASE.txt <<EOF
@@ -122,7 +126,7 @@ jobs:
           Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
           EOF
           tar czf "dist/ploy-release-${{ steps.meta.outputs.release_tag }}.tar.gz" -C dist \
-            ploy ploy.sha256 RELEASE.txt momentum.toml 022_order_strategy_tracking.sql
+            ploy ploy.sha256 RELEASE.txt momentum.toml staggered_arb.toml 022_order_strategy_tracking.sql
 
       - name: Upload release bundle
         uses: actions/upload-artifact@v4
@@ -253,9 +257,9 @@ jobs:
           username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
-          script_stop: true
-          envs: DEPLOY_ROOT
+          envs: DEPLOY_ROOT,PLOY_SYSTEMD_MEMORY_HIGH,PLOY_SYSTEMD_MEMORY_MAX,PLOY_SYSTEMD_RESTART_SEC
           script: |
+            bash <<'PLOY_DEPLOY'
             set -euo pipefail
 
             RELEASE_TAG="${{ needs.build.outputs.release_tag }}"
@@ -268,6 +272,38 @@ jobs:
             if [ "$(id -u)" -ne 0 ]; then
               SUDO="sudo"
             fi
+
+            if ! command -v curl >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                $SUDO apt-get update -qq
+                $SUDO apt-get install -y -qq curl
+              elif command -v dnf >/dev/null 2>&1; then
+                $SUDO dnf install -y curl
+              elif command -v yum >/dev/null 2>&1; then
+                $SUDO yum install -y curl
+              else
+                echo "curl missing and no supported package manager found."
+                exit 1
+              fi
+            fi
+
+            if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            fi
+
+            "$HOME/.cargo/bin/rustup" toolchain install stable --profile minimal >/dev/null
+            "$HOME/.cargo/bin/rustup" default stable >/dev/null
+            $SUDO ln -sf "$HOME/.cargo/bin/rustc" /usr/local/bin/rustc
+            $SUDO ln -sf "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo
+            $SUDO ln -sf "$HOME/.cargo/bin/rustdoc" /usr/local/bin/rustdoc
+            $SUDO ln -sf "$HOME/.cargo/bin/rustfmt" /usr/local/bin/rustfmt
+
+            rustc --version
+            cargo --version
+
+            # Never keep heavy Rust builds on a trading host.
+            pkill -x cargo || true
+            pkill -x rustc || true
 
             [ -f "${BUNDLE}" ]
             rm -rf "${WORKDIR}"
@@ -289,6 +325,7 @@ jobs:
             $SUDO install -m 755 "${WORKDIR}/ploy" "${RELEASE_DIR}/ploy"
             $SUDO install -m 755 "${WORKDIR}/ploy" "${DEPLOY_ROOT}/bin/ploy"
             $SUDO install -m 600 "${WORKDIR}/momentum.toml" "${DEPLOY_ROOT}/config/strategies/momentum.toml"
+            $SUDO install -m 600 "${WORKDIR}/staggered_arb.toml" "${DEPLOY_ROOT}/config/strategies/staggered_arb.toml"
             $SUDO install -m 644 "${WORKDIR}/022_order_strategy_tracking.sql" "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
 
             file "${DEPLOY_ROOT}/bin/ploy" | grep -q "ELF 64-bit LSB"
@@ -307,15 +344,126 @@ jobs:
               echo "DATABASE_URL not set; skip migration."
             fi
 
-            if systemctl list-unit-files | grep -q '^ploy\.service'; then
-              $SUDO systemctl restart ploy
-              sleep 3
-              $SUDO systemctl is-active --quiet ploy
-            else
-              echo "ploy.service not found; skip restart."
+            unit_exists() {
+              local unit="$1"
+              local unit_name="${unit}.service"
+              $SUDO systemctl list-unit-files --type=service --no-legend "$unit_name" 2>/dev/null \
+                | awk '{print $1}' \
+                | grep -qx "$unit_name"
+            }
+
+            write_guardrail_dropin() {
+              local unit="$1"
+              local dropin_dir="/etc/systemd/system/${unit}.service.d"
+              $SUDO mkdir -p "$dropin_dir"
+              printf '%s\n' \
+                '[Service]' \
+                'Restart=always' \
+                "RestartSec=${PLOY_SYSTEMD_RESTART_SEC}" \
+                "MemoryHigh=${PLOY_SYSTEMD_MEMORY_HIGH}" \
+                "MemoryMax=${PLOY_SYSTEMD_MEMORY_MAX}" \
+                'OOMPolicy=kill' \
+                | $SUDO tee "${dropin_dir}/10-memory-restart.conf" >/dev/null
+            }
+
+            unit_diagnostics() {
+              local unit="$1"
+              echo "---- ${unit}.service status ----"
+              $SUDO systemctl status "$unit" --no-pager -l || true
+              echo "---- ${unit}.service journal ----"
+              $SUDO journalctl -u "$unit" -n 80 --no-pager -l || true
+            }
+
+            wait_for_unit_active() {
+              local unit="$1"
+              local attempts="${2:-20}"
+              local delay_secs="${3:-2}"
+              local i
+              for i in $(seq 1 "$attempts"); do
+                if $SUDO systemctl is-active --quiet "$unit"; then
+                  return 0
+                fi
+                sleep "$delay_secs"
+              done
+              unit_diagnostics "$unit"
+              return 1
+            }
+
+            deribit_collector_units() {
+              $SUDO systemctl list-unit-files --type=service --no-legend \
+                | awk '{print $1}' \
+                | grep -E '^ploy-deribit-.*-collector\.service$' \
+                | sed 's/\.service$//' \
+                || true
+            }
+
+            restart_or_start_unit() {
+              local unit="$1"
+              local action
+              $SUDO systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+              if $SUDO systemctl is-active --quiet "$unit"; then
+                action="restart"
+              else
+                action="start"
+              fi
+              echo "Attempting to ${action} ${unit}.service"
+              if ! $SUDO systemctl "$action" "$unit"; then
+                unit_diagnostics "$unit"
+                return 1
+              fi
+              wait_for_unit_active "$unit" 20 2
+              $SUDO systemctl show "$unit" -p Restart -p RestartUSec -p MemoryHigh -p MemoryMax -p OOMPolicy
+              echo "${unit}.service ${action}ed successfully."
+            }
+
+            core_units_file="$(mktemp)"
+            deribit_units_file="$(mktemp)"
+            cleanup_unit_files() {
+              rm -f "$core_units_file" "$deribit_units_file"
+            }
+            trap cleanup_unit_files EXIT
+
+            for unit in ploy ploy-platform ploy-platform-live; do
+              if unit_exists "$unit"; then
+                printf '%s\n' "$unit" >> "$core_units_file"
+              fi
+            done
+
+            deribit_collector_units > "$deribit_units_file"
+
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
+              write_guardrail_dropin "$unit"
+            done < "$core_units_file"
+
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
+              write_guardrail_dropin "$unit"
+            done < "$deribit_units_file"
+
+            $SUDO systemctl daemon-reload
+
+            restarted_any=0
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
+              restart_or_start_unit "$unit"
+              restarted_any=1
+            done < "$core_units_file"
+
+            while IFS= read -r unit; do
+              [ -n "$unit" ] || continue
+              restart_or_start_unit "$unit"
+              restarted_any=1
+            done < "$deribit_units_file"
+
+            if [ "$restarted_any" -eq 0 ]; then
+              echo "No active ploy service required restart."
             fi
 
+            cleanup_unit_files
+            trap - EXIT
             rm -rf "${WORKDIR}" "${BUNDLE}"
+            PLOY_DEPLOY
 
       - name: Deployment summary
         run: |
