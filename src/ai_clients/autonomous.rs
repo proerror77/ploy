@@ -6,6 +6,7 @@
 use crate::adapters::PolymarketClient;
 use crate::ai_clients::client::ClaudeAgentClient;
 use crate::ai_clients::grok::{GrokClient, SearchResult};
+use crate::ai_clients::prompt_sanitization::sanitize_for_llm_prompt;
 use crate::ai_clients::protocol::{AgentAction, AgentContext, AgentResponse, PositionInfo};
 use crate::domain::{RiskState, Side};
 use crate::error::{PloyError, Result};
@@ -297,17 +298,6 @@ impl AutonomousAgent {
         Ok(valid_actions)
     }
 
-    /// Sanitize external input before embedding in LLM prompts.
-    /// Strips control characters (except newline) and truncates to 500 chars
-    /// to mitigate prompt injection from attacker-controlled market data.
-    fn sanitize_for_prompt(input: &str) -> String {
-        input
-            .chars()
-            .filter(|c| !c.is_control() || *c == '\n')
-            .take(500)
-            .collect()
-    }
-
     /// Build analysis prompt based on current state
     fn build_analysis_prompt(
         &self,
@@ -317,7 +307,7 @@ impl AutonomousAgent {
         let strategies = self.config.allowed_strategies.join(", ");
 
         let realtime_info = if let Some(search) = grok_context {
-            let sentiment = Self::sanitize_for_prompt(
+            let sentiment = sanitize_for_llm_prompt(
                 &search
                     .sentiment
                     .map(|s| s.to_string())
@@ -330,7 +320,7 @@ impl AutonomousAgent {
                     .key_points
                     .iter()
                     .take(5)
-                    .map(|p| format!("  - {}", Self::sanitize_for_prompt(p)))
+                    .map(|p| format!("  - {}", sanitize_for_llm_prompt(p)))
                     .collect::<Vec<_>>()
                     .join("\n")
             };

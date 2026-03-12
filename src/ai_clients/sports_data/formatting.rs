@@ -1,5 +1,7 @@
 use std::fmt::Write;
 
+use crate::ai_clients::prompt_sanitization::sanitize_for_llm_prompt;
+
 use super::{PlayerStatus, StructuredGameData};
 
 /// Format structured data for Claude analysis
@@ -9,9 +11,14 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
     let _ = writeln!(
         output,
         "## Game: {} vs {}",
-        data.game_info.team1, data.game_info.team2
+        sanitize_for_llm_prompt(&data.game_info.team1),
+        sanitize_for_llm_prompt(&data.game_info.team2)
     );
-    let _ = writeln!(output, "League: {}\n", data.game_info.league);
+    let _ = writeln!(
+        output,
+        "League: {}\n",
+        sanitize_for_llm_prompt(&data.game_info.league)
+    );
 
     append_player_section(&mut output, &data.game_info.team1, &data.team1_players);
     append_player_section(&mut output, &data.game_info.team2, &data.team2_players);
@@ -20,7 +27,8 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
     let _ = writeln!(
         output,
         "- Spread: {} {}",
-        data.betting_lines.spread_team, data.betting_lines.spread
+        sanitize_for_llm_prompt(&data.betting_lines.spread_team),
+        data.betting_lines.spread
     );
     let _ = writeln!(
         output,
@@ -34,14 +42,14 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
         data.betting_lines.implied_probability * 100.0
     );
     if let Some(ref movement) = data.betting_lines.line_movement {
-        let _ = writeln!(output, "- Line Movement: {}", movement);
+        let _ = writeln!(output, "- Line Movement: {}", sanitize_for_llm_prompt(movement));
     }
 
     output.push_str("\n## Market Sentiment\n");
     let _ = writeln!(
         output,
         "- Expert Pick: {} ({:.0}% confidence)",
-        data.sentiment.expert_pick,
+        sanitize_for_llm_prompt(&data.sentiment.expert_pick),
         data.sentiment.expert_confidence * 100.0
     );
     let _ = writeln!(
@@ -49,13 +57,21 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
         "- Public: {:.0}% on favorite",
         data.sentiment.public_bet_percentage
     );
-    let _ = writeln!(output, "- Sharp Money: {}", data.sentiment.sharp_money_side);
-    let _ = writeln!(output, "- Social: {}", data.sentiment.social_sentiment);
+    let _ = writeln!(
+        output,
+        "- Sharp Money: {}",
+        sanitize_for_llm_prompt(&data.sentiment.sharp_money_side)
+    );
+    let _ = writeln!(
+        output,
+        "- Social: {}",
+        sanitize_for_llm_prompt(&data.sentiment.social_sentiment)
+    );
 
     if !data.sentiment.key_narratives.is_empty() {
         output.push_str("\nKey Narratives:\n");
         for narrative in &data.sentiment.key_narratives {
-            let _ = writeln!(output, "- {}", narrative);
+            let _ = writeln!(output, "- {}", sanitize_for_llm_prompt(narrative));
         }
     }
 
@@ -63,7 +79,11 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
 }
 
 fn append_player_section(output: &mut String, team_name: &str, players: &[PlayerStatus]) {
-    let _ = writeln!(output, "## {} Key Players", team_name);
+    let _ = writeln!(
+        output,
+        "## {} Key Players",
+        sanitize_for_llm_prompt(team_name)
+    );
     for player in players {
         let ppg = player.last_5_games_ppg.unwrap_or(0.0);
         let rpg = player.last_5_games_rpg.unwrap_or(0.0);
@@ -71,10 +91,14 @@ fn append_player_section(output: &mut String, team_name: &str, players: &[Player
         let _ = write!(
             output,
             "- {} | Status: {:?} | Last 5: {:.1}/{:.1}/{:.1}",
-            player.name, player.status, ppg, rpg, apg
+            sanitize_for_llm_prompt(&player.name),
+            player.status,
+            ppg,
+            rpg,
+            apg
         );
         if let Some(ref injury) = player.injury {
-            let _ = write!(output, " ({})", injury);
+            let _ = write!(output, " ({})", sanitize_for_llm_prompt(injury));
         }
         output.push('\n');
     }

@@ -15,6 +15,7 @@ pub mod grok;
 pub mod odds_provider;
 pub mod polymarket_politics;
 pub mod polymarket_sports;
+pub(crate) mod prompt_sanitization;
 pub mod protocol;
 pub mod sports_analyst;
 pub mod sports_data;

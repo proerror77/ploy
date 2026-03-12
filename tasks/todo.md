@@ -1398,6 +1398,41 @@ Replace the admin session cookie's unsalted SHA-256 value with a versioned HMAC-
   - `CARGO_TARGET_DIR=/tmp/ploy-r51-api cargo check --lib --features api`
   - `CARGO_TARGET_DIR=/tmp/ploy-r51-api cargo test --lib --features api api::auth::tests -- --nocapture`
 
+# R-50 Prompt Sanitization Hardening (2026-03-12)
+
+## Goal
+Reuse one shared prompt-input sanitizer across live LLM prompt builders so attacker-controlled sports/news/injury text no longer flows raw into Grok/Claude prompts.
+
+## File ownership
+
+- `src/ai_clients/prompt_sanitization.rs`
+  - owner: shared prompt-input sanitization contract and focused regressions
+- `src/ai_clients/autonomous.rs`
+  - owner: reuse the shared sanitizer for autonomous Grok prompt context
+- `src/ai_clients/sports_data/formatting.rs`
+  - owner: sanitize formatted sports-data prompt text before Claude consumption
+- `src/strategy/nba_comeback/grok_decision.rs`
+  - owner: sanitize free-text ESPN/Grok fields before unified Grok decision prompts
+
+## Tasks
+
+- [x] Extract one shared prompt-input sanitizer under `src/ai_clients/`.
+- [x] Rewire autonomous prompt building to use the shared helper instead of a file-local copy.
+- [x] Sanitize untrusted free-text fields in sports-data prompt formatting.
+- [x] Sanitize untrusted free-text fields in NBA comeback Grok decision prompts.
+- [x] Re-run compile plus focused sanitizer/prompt regressions after the cut.
+
+## Progress notes
+
+- 2026-03-12: Added [prompt_sanitization.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/prompt_sanitization.rs) so prompt hardening stops living only inside [autonomous.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/autonomous.rs).
+- 2026-03-12: Rewired [autonomous.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/autonomous.rs), [formatting.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_data/formatting.rs), and [grok_decision.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/nba_comeback/grok_decision.rs) to sanitize attacker-controlled prompt fields before interpolation.
+- 2026-03-12: Added adversarial-path regressions in [sports_data/tests.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/ai_clients/sports_data/tests.rs) and [grok_decision.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/nba_comeback/grok_decision.rs).
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r50-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r50-sports cargo test --lib ai_clients::sports_data::tests -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r50-nba cargo test --lib strategy::nba_comeback::grok_decision::tests -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r50-helper cargo test --lib ai_clients::prompt_sanitization::tests -- --nocapture`
+
 # R-40 MarketDiscovery Native Async Trait Cut (2026-03-12)
 
 ## Goal
